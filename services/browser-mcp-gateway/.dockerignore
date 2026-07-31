@@ -1,0 +1,35 @@
+# Dependencies
+node_modules
+npm-debug.log
+
+# Build outputs
+dist
+coverage
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Test
+__tests__
+*.test.ts
+jest.config.js
+
+# Docs
+*.md
+!README.md
+
+# Dev
+.env
+.env.local
+.env.*.local
