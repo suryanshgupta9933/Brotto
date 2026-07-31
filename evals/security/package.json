@@ -1,0 +1,20 @@
+{
+  "name": "@fara-platform/evals-security",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Security test suite for Fara1.5 platform",
+  "type": "module",
+  "scripts": {
+    "test": "NODE_OPTIONS='--experimental-vm-modules' jest",
+    "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
+    "test:prompt-injection": "jest --testPathPattern=prompt-injection",
+    "test:ssrf": "jest --testPathPattern=ssrf",
+    "test:token": "jest --testPathPattern=token"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "typescript": "^5.4.0"
+  }
+}

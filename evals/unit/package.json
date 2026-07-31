@@ -1,0 +1,28 @@
+{
+  "name": "@fara-platform/evals-unit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Unit test suite for Fara1.5 core packages",
+  "type": "module",
+  "scripts": {
+    "test": "NODE_OPTIONS='--experimental-vm-modules' jest",
+    "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
+    "test:coverage": "NODE_OPTIONS='--experimental-vm-modules' jest --coverage",
+    "test:coordinate-transform": "cd ../packages/coordinate-transform && npm test",
+    "test:fara-action-schema": "cd ../packages/fara-action-schema && npm test",
+    "test:policy-engine": "cd ../packages/policy-engine && npm test",
+    "test:relay-protocol": "cd ../packages/relay-protocol && npm test"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@fara-platform/coordinate-transform": "workspace:*",
+    "@fara-platform/fara-action-schema": "workspace:*",
+    "policy-engine": "workspace:*",
+    "@fara/platform/relay-protocol": "workspace:*"
+  }
+}
