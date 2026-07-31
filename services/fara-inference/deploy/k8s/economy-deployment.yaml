@@ -1,0 +1,127 @@
+---
+# Fara Inference Service - Economy Profile (Fara1.5-4B)
+# Lower resource requirements for development and self-hosted
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fara-inference-economy
+  namespace: fara
+  labels:
+    app: fara-inference
+    profile: economy
+    model: fara1.5-4b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fara-inference
+      profile: economy
+  template:
+    metadata:
+      labels:
+        app: fara-inference
+        profile: economy
+        model: fara1.5-4b
+    spec:
+      serviceAccountName: fara-inference
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: inference
+          image: fara-inference:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          env:
+            - name: VLLM_MODEL_ID
+              value: "fara1.5-4b"
+            - name: VLLM_MODEL_REPO
+              value: "inventic/fara1.5-4b"
+            - name: VLLM_MAX_MODEL_LEN
+              value: "32768"
+            - name: VLLM_GPU_MEMORY_UTILIZATION
+              value: "0.85"
+            - name: VLLM_MAX_NUM_SEQS
+              value: "128"
+            - name: VLLM_TENSOR_PARALLEL_SIZE
+              value: "1"
+            - name: VLLM_PORT
+              value: "8000"
+            - name: SERVICE_PORT
+              value: "8080"
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+              nvidia.com/gpu: 1
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+              nvidia.com/gpu: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      nodeSelector:
+        gpu: "true"
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+---
+# Service for Economy inference
+apiVersion: v1
+kind: Service
+metadata:
+  name: fara-inference-economy
+  namespace: fara
+  labels:
+    app: fara-inference
+    profile: economy
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: fara-inference
+    profile: economy
+---
+# Horizontal Pod Autoscaler for economy inference
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fara-inference-economy-hpa
+  namespace: fara
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fara-inference-economy
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

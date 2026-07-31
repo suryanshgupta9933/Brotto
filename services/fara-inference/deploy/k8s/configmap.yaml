@@ -1,0 +1,105 @@
+---
+# ConfigMap for vLLM arguments
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fara-inference-config
+  namespace: fara
+data:
+  # Standard profile (Fara1.5-9B)
+  vllm-args-standard: |
+    --model=inventic/fara1.5-9b
+    --tokenizer=inventic/fara1.5-9b
+    --trust-remote-code
+    --dtype=half
+    --max-model-len=32768
+    --gpu-memory-utilization=0.90
+    --max-num-seqs=256
+    --max-num-concurrent-limit=256
+    --enable-chunked-prefill
+    --enable-prefix-caching
+    --num-beams=1
+    --schedule-policy=guaranteed_proportional
+
+  # Economy profile (Fara1.5-4B)
+  vllm-args-economy: |
+    --model=inventic/fara1.5-4b
+    --tokenizer=inventic/fara1.5-4b
+    --trust-remote-code
+    --dtype=half
+    --max-model-len=32768
+    --gpu-memory-utilization=0.85
+    --max-num-seqs=128
+    --max-num-concurrent-limit=128
+    --enable-chunked-prefill
+    --enable-prefix-caching
+    --num-beams=1
+    --schedule-policy=guaranteed_proportional
+
+  # Quality profile (Fara1.5-27B)
+  vllm-args-quality: |
+    --model=inventic/fara1.5-27b
+    --tokenizer=inventic/fara1.5-27b
+    --trust-remote-code
+    --dtype=half
+    --max-model-len=32768
+    --gpu-memory-utilization=0.90
+    --max-num-seqs=64
+    --max-num-concurrent-limit=64
+    --enable-chunked-prefill
+    --enable-prefix-caching
+    --num-beams=1
+    --tensor-parallel-size=2
+    --schedule-policy=guaranteed_proportional
+---
+# PVC for model cache
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fara-model-cache
+  namespace: fara
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: standard
+---
+# NetworkPolicy for inference service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fara-inference-network-policy
+  namespace: fara
+spec:
+  podSelector:
+    matchLabels:
+      app: fara-inference
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: fara
+        - podSelector:
+            matchLabels:
+              app: fara-orchestrator
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: fara-inference
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
