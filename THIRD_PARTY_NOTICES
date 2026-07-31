@@ -1,0 +1,65 @@
+# Third Party Notices
+
+This file includes attribution and licensing information for third-party dependencies used in the Fara1.5 Browser Automation Platform.
+
+## Direct Dependencies
+
+### Runtime Dependencies
+
+| Package | Version | License | Purpose |
+|---------|---------|---------|---------|
+| @playwright/mcp | ^1.0.0 | Apache-2.0 | Browser automation via CDP |
+| vllm | ^0.4.0 | Apache-2.0 | Model inference |
+| zod | ^3.22.0 | MIT | Schema validation |
+| zod-to-json-schema | ^3.22.0 | MIT | Schema generation |
+| ws | ^8.16.0 | MIT | WebSocket client/server |
+| ioredis | ^5.3.0 | MIT | Redis client |
+| pg | ^8.11.0 | MIT | PostgreSQL client |
+| jose | ^5.2.0 | MIT | JWT handling |
+| openid-client | ^5.6.0 | MIT | OIDC authentication |
+
+### Build and Development Dependencies
+
+| Package | Version | License | Purpose |
+|---------|---------|---------|---------|
+| typescript | ^5.4.0 | Apache-2.0 | Type checking |
+| turbo | ^2.0.0 | MIT | Build orchestration |
+| vitest | ^1.3.0 | MIT | Testing |
+| eslint | ^8.57.0 | MIT | Linting |
+| prettier | ^3.2.0 | MIT | Code formatting |
+
+## Fara1.5 Model
+
+The Fara1.5 model family (Fara1.5-4B, Fara1.5-9B, Fara1.5-27B) is licensed under **MIT** and is NOT included in this repository. Model weights are fetched separately during deployment from the official model repository.
+
+## Open Source Licenses
+
+This project uses the following open source licenses:
+
+- **Apache-2.0**: Apache License 2.0 - see LICENSE file
+- **MIT**: MIT License - see individual package licenses
+
+## License Compatibility
+
+The Apache-2.0 license is used for this project because:
+- Playwright MCP is Apache-2.0
+- Apache-2.0 contains an explicit patent grant
+- Compatible with MIT-licensed model weights
+
+## Dependency Management
+
+All third-party dependencies are tracked in:
+- Root `package.json` for workspace management
+- Individual `package.json` files per workspace
+- Lock files committed to ensure reproducible builds
+
+## Security Scanning
+
+Dependencies are scanned for vulnerabilities using:
+- npm audit
+- Snyk or equivalent (when configured)
+- License compliance checks in CI
+
+## Contribution Notice
+
+When contributing to this project, ensure any new dependencies have compatible licenses (Apache-2.0, MIT, BSD-2, BSD-3 preferred).
