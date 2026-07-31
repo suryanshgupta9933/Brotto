@@ -1,0 +1,33 @@
+{
+  "name": "@fara/agent-orchestrator",
+  "version": "0.1.0",
+  "description": "Agent Orchestrator - Core agent harness for Fara browser automation",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "test": "NODE_OPTIONS='--experimental-vm-modules' jest",
+    "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
+    "lint": "eslint src/**/*.ts"
+  },
+  "dependencies": {
+    "@fara/fara-action-schema": "workspace:*",
+    "@fara/policy-engine": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
