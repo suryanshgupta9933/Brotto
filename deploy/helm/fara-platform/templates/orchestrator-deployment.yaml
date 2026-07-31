@@ -1,0 +1,115 @@
+{{- if .Values.orchestrator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fara-platform.fullname" . }}-orchestrator
+  labels:
+    {{- include "fara-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+spec:
+  replicas: {{ .Values.orchestrator.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: orchestrator
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+      labels:
+        {{- include "fara-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: orchestrator
+    spec:
+      serviceAccountName: {{ include "fara-platform.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: orchestrator
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.orchestrator.image.repository }}:{{ .Values.imageTag }}"
+          imagePullPolicy: {{ .Values.orchestrator.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: {{ .Values.orchestrator.env.NODE_ENV | quote }}
+            - name: PORT
+              value: {{ .Values.orchestrator.env.PORT | quote }}
+            - name: HOST
+              value: {{ .Values.orchestrator.env.HOST | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fara-platform.fullname" . }}-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fara-platform.fullname" . }}-secrets
+                  key: redis-url
+            - name: CONTROL_PLANE_URL
+              value: "http://{{ include "fara-platform.fullname" . }}-control-plane:3000"
+            - name: FARA_INFERENCE_URL
+              value: "http://{{ include "fara-platform.fullname" . }}-fara-inference:8080"
+            - name: BROWSER_MCP_GATEWAY_URL
+              value: "http://{{ include "fara-platform.fullname" . }}-playwright-mcp-gateway:8080"
+            - name: CDP_RELAY_URL
+              value: "ws://{{ include "fara-platform.fullname" . }}-cdp-relay:8080"
+            - name: LOG_LEVEL
+              value: {{ .Values.orchestrator.env.LOG_LEVEL | quote }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.opentelemetry.exporterEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: "orchestrator"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.orchestrator.resources | nindent 12 }}
+      {{- with .Values.orchestrator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.orchestrator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.orchestrator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fara-platform.fullname" . }}-orchestrator
+  labels:
+    {{- include "fara-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+spec:
+  type: {{ .Values.orchestrator.service.type }}
+  ports:
+    - port: {{ .Values.orchestrator.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "fara-platform.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+{{- end }}

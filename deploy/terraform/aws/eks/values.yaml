@@ -1,0 +1,107 @@
+# AWS EKS Values for Fara Platform
+
+# Replica counts
+controlPlane:
+  replicaCount: 3
+
+orchestrator:
+  replicaCount: 2
+
+faraInference:
+  replicaCount: 1
+
+playwrightMcpGateway:
+  replicaCount: 3
+
+cdpRelay:
+  replicaCount: 2
+
+artifactService:
+  replicaCount: 2
+
+auditService:
+  replicaCount: 2
+
+# Resources
+controlPlane:
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+orchestrator:
+  resources:
+    limits:
+      cpu: 4000m
+      memory: 4Gi
+    requests:
+      cpu: 1000m
+      memory: 1Gi
+
+faraInference:
+  resources:
+    limits:
+      cpu: 16
+      memory: 64Gi
+      nvidia.com/gpu: 1
+    requests:
+      cpu: 8
+      memory: 32Gi
+      nvidia.com/gpu: 1
+
+# Autoscaling
+controlPlane:
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+
+orchestrator:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 30
+
+playwrightMcpGateway:
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 30
+
+cdpRelay:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 30
+
+# PostgreSQL
+postgresql:
+  enabled: true
+  primary:
+    persistence:
+      enabled: true
+      size: 50Gi
+  readReplicas:
+    replicaCount: 2
+
+# Redis
+redis:
+  enabled: true
+  master:
+    persistence:
+      enabled: true
+      size: 10Gi
+  replica:
+    replicaCount: 2
+
+# Network Policies
+networkPolicies:
+  enabled: true
+
+# Ingress
+ingress:
+  enabled: true
+  className: nginx

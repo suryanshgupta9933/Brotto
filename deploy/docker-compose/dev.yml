@@ -1,0 +1,321 @@
+# Fara1.5 Platform - Development Docker Compose
+# Local development with hot reload and debugging enabled
+
+version: '3.8'
+
+services:
+  # Control Plane (API Gateway + Web UI)
+  control-plane:
+    build:
+      context: ../services/api-gateway
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/fara15_control_plane
+      - REDIS_URL=redis://redis:6379
+      - OIDC_ISSUER=${OIDC_ISSUER:-http://localhost:8080}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-api-gateway}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-dev-secret}
+      - OIDC_AUDIENCE=api://fara15
+      - PORT=3000
+      - HOST=0.0.0.0
+      - CORS_ORIGIN=http://localhost:3001
+      - SESSION_LEASE_TTL=300
+      - APPROVAL_REQUEST_TTL=600
+      - LOG_LEVEL=debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../services/api-gateway/src:/app/src:ro
+      - ../services/api-gateway/migrations:/app/migrations:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: "no"
+    profiles:
+      - core
+
+  # Agent Orchestrator
+  orchestrator:
+    build:
+      context: ../services/agent-orchestrator
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "3002:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - HOST=0.0.0.0
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/fara15_control_plane
+      - REDIS_URL=redis://redis:6379
+      - CONTROL_PLANE_URL=http://control-plane:3000
+      - FARA_INFERENCE_URL=http://fara-inference:8080
+      - BROWSER_MCP_GATEWAY_URL=http://browser-mcp-gateway:8080
+      - CDP_RELAY_URL=ws://cdp-relay:8080
+      - LOG_LEVEL=debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      control-plane:
+        condition: service_started
+    volumes:
+      - ../services/agent-orchestrator/src:/app/src:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: "no"
+    profiles:
+      - core
+
+  # Fara Inference Service (vLLM)
+  fara-inference:
+    build:
+      context: ../services/fara-inference
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+    environment:
+      - VLLM_PORT=8000
+      - SERVICE_PORT=8080
+      - VLLM_MODEL_REPO=${VLLM_MODEL_REPO:-inventic/fara1.5-9b}
+      - VLLM_MODEL_ID=${VLLM_MODEL_ID:-fara1.5-9b}
+      - VLLM_API_KEY=${VLLM_API_KEY:-}
+      - VLLM_MAX_MODEL_LEN=32768
+      - VLLM_GPU_MEMORY_UTILIZATION=0.90
+      - VLLM_MAX_NUM_SEQS=256
+      - VLLM_MAX_NUM_CONCURRENT_LIMIT=256
+    volumes:
+      - fara-model-cache:/root/.cache/vllm
+      - fara-model-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    restart: "no"
+    profiles:
+      - inference
+    profiles:
+      - inference
+
+  # Playwright MCP Gateway
+  playwright-mcp-gateway:
+    build:
+      context: ../services/browser-mcp-gateway
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=development
+      - PORT=8080
+      - HOST=0.0.0.0
+      - CDP_RELAY_URL=ws://cdp-relay:8080
+      - LOG_LEVEL=debug
+      - PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    depends_on:
+      cdp-relay:
+        condition: service_healthy
+    volumes:
+      - ../services/browser-mcp-gateway/src:/app/src:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: "no"
+    profiles:
+      - browser
+
+  # CDP Relay Broker
+  cdp-relay:
+    build:
+      context: ../services/cdp-relay
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8080"
+    environment:
+      - ADDRESS=0.0.0.0:8080
+      - LOG_LEVEL=debug
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: "no"
+    profiles:
+      - core
+
+  # Artifact Service
+  artifact-service:
+    build:
+      context: ../services/artifact-service
+      dockerfile: Dockerfile
+    ports:
+      - "3003:3001"
+    environment:
+      - NODE_ENV=development
+      - ARTIFACT_SERVICE_PORT=3001
+      - ARTIFACT_SERVICE_HOST=0.0.0.0
+      - STORAGE_PATH=/var/artifact-service/storage
+      - MAX_FILE_SIZE=104857600
+      - ALLOWED_EXTENSIONS=.txt,.pdf,.png,.jpg,.jpeg,.gif,.zip,.tar,.gz,.json,.xml,.csv
+      - LOG_LEVEL=debug
+    volumes:
+      - artifact-storage:/var/artifact-service/storage
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: "no"
+    profiles:
+      - core
+
+  # Audit Service
+  audit-service:
+    build:
+      context: ../services/audit-service
+      dockerfile: Dockerfile
+    ports:
+      - "3004:3001"
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - HOST=0.0.0.0
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/fara15_control_plane
+      - LOG_LEVEL=debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: "no"
+    profiles:
+      - core
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=fara15_control_plane
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../services/api-gateway/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: "no"
+    profiles:
+      - core
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: "no"
+    profiles:
+      - core
+
+  # Jaeger Tracing (OpenTelemetry)
+  jaeger:
+    image: jaegertracing/all-in-one:1.52
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - SPAN_STORAGE_TYPE=memory
+    restart: "no"
+    profiles:
+      - observability
+
+  # Prometheus Metrics
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    restart: "no"
+    profiles:
+      - observability
+
+  # Grafana Dashboards
+  grafana:
+    image: grafana/grafana:10.1.0
+    ports:
+      - "3005:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./otel/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./otel/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    restart: "no"
+    profiles:
+      - observability
+
+volumes:
+  postgres_data:
+  redis_data:
+  artifact-storage:
+  fara-model-cache:
+  prometheus_data:
+  grafana_data:

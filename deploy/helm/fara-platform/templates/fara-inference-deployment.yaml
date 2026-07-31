@@ -1,0 +1,147 @@
+{{- if .Values.faraInference.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fara-platform.fullname" . }}-fara-inference
+  labels:
+    {{- include "fara-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fara-inference
+spec:
+  replicas: {{ .Values.faraInference.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: fara-inference
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+      labels:
+        {{- include "fara-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: fara-inference
+    spec:
+      serviceAccountName: {{ include "fara-platform.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: fara-inference
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.faraInference.image.repository }}:{{ .Values.imageTag }}"
+          imagePullPolicy: {{ .Values.faraInference.image.pullPolicy }}
+          ports:
+            - name: vllm
+              containerPort: 8000
+              protocol: TCP
+            - name: api
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: VLLM_PORT
+              value: {{ .Values.faraInference.env.VLLM_PORT | quote }}
+            - name: SERVICE_PORT
+              value: {{ .Values.faraInference.env.SERVICE_PORT | quote }}
+            - name: VLLM_MODEL_REPO
+              value: {{ .Values.faraInference.env.VLLM_MODEL_REPO | quote }}
+            - name: VLLM_MODEL_ID
+              value: {{ .Values.faraInference.env.VLLM_MODEL_ID | quote }}
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fara-platform.fullname" . }}-secrets
+                  key: vllm-api-key
+            - name: VLLM_MAX_MODEL_LEN
+              value: {{ .Values.faraInference.env.VLLM_MAX_MODEL_LEN | quote }}
+            - name: VLLM_GPU_MEMORY_UTILIZATION
+              value: {{ .Values.faraInference.env.VLLM_GPU_MEMORY_UTILIZATION | quote }}
+            - name: VLLM_MAX_NUM_SEQS
+              value: {{ .Values.faraInference.env.VLLM_MAX_NUM_SEQS | quote }}
+            - name: VLLM_MAX_NUM_CONCURRENT_LIMIT
+              value: {{ .Values.faraInference.env.VLLM_MAX_NUM_CONCURRENT_LIMIT | quote }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.opentelemetry.exporterEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: "fara-inference"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.faraInference.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.faraInference.persistence.modelCache.enabled }}
+            - name: model-cache
+              mountPath: /root/.cache/vllm
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+            {{- end }}
+      volumes:
+        {{- if .Values.faraInference.persistence.modelCache.enabled }}
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: {{ include "fara-platform.fullname" . }}-fara-inference-model-cache
+        {{- end }}
+      {{- with .Values.faraInference.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.faraInference.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.faraInference.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fara-platform.fullname" . }}-fara-inference
+  labels:
+    {{- include "fara-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fara-inference
+spec:
+  type: {{ .Values.faraInference.service.type }}
+  ports:
+    - name: vllm
+      port: 8000
+      targetPort: vllm
+      protocol: TCP
+    - name: api
+      port: 8080
+      targetPort: api
+      protocol: TCP
+  selector:
+    {{- include "fara-platform.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: fara-inference
+{{- if .Values.faraInference.persistence.modelCache.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fara-platform.fullname" . }}-fara-inference-model-cache
+  labels:
+    {{- include "fara-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fara-inference
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: {{ .Values.faraInference.persistence.modelCache.size }}
+  storageClassName: {{ .Values.faraInference.persistence.storageClass }}
+{{- end }}
+{{- end }}

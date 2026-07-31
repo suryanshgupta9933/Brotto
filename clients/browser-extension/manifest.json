@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Fara1.5 Browser Automation",
+  "version": "1.0.0",
+  "description": "Connect selected browser tabs to the Fara1.5 automation platform using chrome.debugger",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    },
+    "default_title": "Fara1.5 Browser Automation"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "debugger",
+    "activeTab",
+    "tabs",
+    "tabGroups",
+    "storage",
+    "notifications"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "options_page": "src/options.html",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "fara15-browser-extension@inventic.ch"
+    }
+  }
+}

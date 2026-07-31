@@ -1,0 +1,403 @@
+# Fara1.5 Platform - Production Docker Compose
+# Production-like setup with resource limits and security hardening
+
+version: '3.8'
+
+services:
+  # Control Plane (API Gateway + Web UI)
+  control-plane:
+    image: ghcr.io/inventic/fara15/control-plane:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://${REDIS_PASSWORD}@redis:6379
+      - OIDC_ISSUER=${OIDC_ISSUER}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      - OIDC_AUDIENCE=api://fara15
+      - PORT=3000
+      - HOST=0.0.0.0
+      - CORS_ORIGIN=${CORS_ORIGIN}
+      - SESSION_LEASE_TTL=300
+      - APPROVAL_REQUEST_TTL=600
+      - LOG_LEVEL=info
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=control-plane
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    profiles:
+      - core
+
+  # Agent Orchestrator
+  orchestrator:
+    image: ghcr.io/inventic/fara15/orchestrator:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/agent-orchestrator
+      dockerfile: Dockerfile
+    ports:
+      - "3002:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://${REDIS_PASSWORD}@redis:6379
+      - CONTROL_PLANE_URL=http://control-plane:3000
+      - FARA_INFERENCE_URL=http://fara-inference:8080
+      - BROWSER_MCP_GATEWAY_URL=http://browser-mcp-gateway:8080
+      - CDP_RELAY_URL=ws://cdp-relay:8080
+      - LOG_LEVEL=info
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=orchestrator
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      control-plane:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 1G
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    profiles:
+      - core
+
+  # Fara Inference Service (vLLM) - GPU Required
+  fara-inference:
+    image: ghcr.io/inventic/fara15/fara-inference:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/fara-inference
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+    environment:
+      - VLLM_PORT=8000
+      - SERVICE_PORT=8080
+      - VLLM_MODEL_REPO=${VLLM_MODEL_REPO}
+      - VLLM_MODEL_ID=${VLLM_MODEL_ID}
+      - VLLM_API_KEY=${VLLM_API_KEY}
+      - VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-32768}
+      - VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION:-0.90}
+      - VLLM_MAX_NUM_SEQS=256
+      - VLLM_MAX_NUM_CONCURRENT_LIMIT=256
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=fara-inference
+    volumes:
+      - fara-model-cache:/root/.cache/vllm
+      - fara-model-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    restart: unless-stopped
+    profiles:
+      - inference
+    runtime: nvidia
+
+  # Playwright MCP Gateway
+  playwright-mcp-gateway:
+    image: ghcr.io/inventic/fara15/playwright-mcp-gateway:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/browser-mcp-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - HOST=0.0.0.0
+      - CDP_RELAY_URL=ws://cdp-relay:8080
+      - LOG_LEVEL=info
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=playwright-mcp-gateway
+    depends_on:
+      cdp-relay:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    profiles:
+      - browser
+
+  # CDP Relay Broker
+  cdp-relay:
+    image: ghcr.io/inventic/fara15/cdp-relay:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/cdp-relay
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8080"
+    environment:
+      - ADDRESS=0.0.0.0:8080
+      - LOG_LEVEL=info
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=cdp-relay
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    profiles:
+      - core
+
+  # Artifact Service
+  artifact-service:
+    image: ghcr.io/inventic/fara15/artifact-service:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/artifact-service
+      dockerfile: Dockerfile
+    ports:
+      - "3003:3001"
+    environment:
+      - NODE_ENV=production
+      - ARTIFACT_SERVICE_PORT=3001
+      - ARTIFACT_SERVICE_HOST=0.0.0.0
+      - STORAGE_PATH=/var/artifact-service/storage
+      - MAX_FILE_SIZE=${ARTIFACT_MAX_FILE_SIZE:-104857600}
+      - ALLOWED_EXTENSIONS=.txt,.pdf,.png,.jpg,.jpeg,.gif,.zip,.tar,.gz,.json,.xml,.csv
+      - LOG_LEVEL=info
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=artifact-service
+    volumes:
+      - artifact-storage:/var/artifact-service/storage
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    profiles:
+      - core
+
+  # Audit Service
+  audit-service:
+    image: ghcr.io/inventic/fara15/audit-service:${IMAGE_TAG:-latest}
+    build:
+      context: ../services/audit-service
+      dockerfile: Dockerfile
+    ports:
+      - "3004:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - HOST=0.0.0.0
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - LOG_LEVEL=info
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=audit-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    profiles:
+      - core
+
+  # PostgreSQL Database (External in production)
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    profiles:
+      - postgres
+
+  # Redis (External in production)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    profiles:
+      - redis
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  artifact-storage:
+    driver: local
+  fara-model-cache:
+    driver: local
+
+networks:
+  default:
+    name: fara15-network
+    driver: bridge

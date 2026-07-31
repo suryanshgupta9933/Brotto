@@ -1,0 +1,42 @@
+# Patterns to ignore when building packages.
+# This is a shell glob
+*.mdtmp
+
+# Technical files
+.git
+.gitignore
+.helmignore
+
+# Build artifacts
+*.tgz
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+*.local
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.drone.yml
+
+# Testing
+tests/
+*.test.js
+*.spec.js
+coverage/
+
+# Documentation
+README.md
+CHANGELOG.md
+LICENSE
