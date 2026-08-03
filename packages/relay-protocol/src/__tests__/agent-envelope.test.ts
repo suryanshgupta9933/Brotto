@@ -1,5 +1,6 @@
 import {
   AgentEnvelopeV1Schema,
+  AgentMessageV1Schema,
   canonicalEnvelopeBytes,
   createEnvelope,
   signEnvelope,
@@ -101,5 +102,36 @@ describe('canonical agent envelope', () => {
         },
       },
     })).toThrow();
+  });
+
+  it('allows task.failed only for a canonical failed completion proposal', () => {
+    const failed = {
+      kind: 'completion',
+      observationId: '88888888-8888-4888-8888-888888888888',
+      type: 'terminate',
+      status: 'failed',
+      summary: 'The task could not finish.',
+      findings: [],
+      unmetCriteria: ['The page stayed unavailable.'],
+      confidence: 0.1,
+    };
+
+    expect(AgentMessageV1Schema.parse({ type: 'task.failed', completion: failed }).type).toBe('task.failed');
+    expect(() => AgentMessageV1Schema.parse({
+      type: 'task.failed', completion: { ...failed, status: 'partial' },
+    })).toThrow();
+  });
+
+  it('requires task cancellation identity, timing, reason, and observation linkage', () => {
+    const cancelled = {
+      type: 'task.cancelled',
+      taskId: '99999999-9999-4999-8999-999999999999',
+      occurredAt: '2026-08-03T12:00:00.000Z',
+      reason: 'The user cancelled the task.',
+      observationId: '88888888-8888-4888-8888-888888888888',
+    };
+
+    expect(AgentMessageV1Schema.parse(cancelled).type).toBe('task.cancelled');
+    expect(() => AgentMessageV1Schema.parse({ ...cancelled, observationId: undefined })).toThrow();
   });
 });

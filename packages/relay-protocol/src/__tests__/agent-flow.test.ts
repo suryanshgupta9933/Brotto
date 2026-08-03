@@ -1,4 +1,4 @@
-import { AgentFlowGuard, createEnvelope } from '../index.js';
+import { SecureAgentIngress, createEnvelope, signEnvelope } from '../index.js';
 
 const RECIPIENT_ID = '99999999-9999-4999-8999-999999999999';
 const IDS = {
@@ -84,38 +84,104 @@ function envelope(sequence: number, messageId: string, payload: unknown) {
   });
 }
 
-describe('agent flow guard', () => {
-  it('accepts an action completion linked to the accepted approval trajectory', () => {
-    const guard = new AgentFlowGuard();
+const checksum = (bytes: Uint8Array) => [...bytes].reduce((total, value) => total + value, 0);
+const signer = {
+  sign: async (bytes: Uint8Array) => String(checksum(bytes)),
+  verify: async (bytes: Uint8Array, signature: string) => signature === String(checksum(bytes)),
+};
 
-    expect(guard.accept(envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation })).status).toBe('accepted');
-    expect(guard.accept(envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', approvalRequiredCommandMessage)).status).toBe('accepted');
-    expect(guard.accept(envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', { type: 'approval.resolved', resolution: approvalResolution })).status).toBe('accepted');
-    expect(guard.accept(envelope(3, '13131313-1313-4313-8313-131313131313', { type: 'action.completed', result })).status).toBe('accepted');
+function ingress(maxBytes = 1_000_000) {
+  return new SecureAgentIngress({
+    now: () => Date.parse('2026-08-03T10:00:30.000Z'),
+    maxBytes,
+    expectedRecipientId: RECIPIENT_ID,
+    verifier: signer,
+  });
+}
+
+async function send(secureIngress: SecureAgentIngress, value: ReturnType<typeof envelope>) {
+  return secureIngress.accept(JSON.stringify(await signEnvelope(value, signer)));
+}
+
+describe('secure agent ingress flow', () => {
+  it('accepts a valid signed action completion linked to the approval trajectory', async () => {
+    const secureIngress = ingress();
+
+    expect((await send(secureIngress, envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }))).status).toBe('accepted');
+    expect((await send(secureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', approvalRequiredCommandMessage))).status).toBe('accepted');
+    expect((await send(secureIngress, envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', { type: 'approval.resolved', resolution: approvalResolution }))).status).toBe('accepted');
+    expect(await send(secureIngress, envelope(3, '13131313-1313-4313-8313-131313131313', { type: 'action.completed', result })))
+      .toMatchObject({ status: 'accepted', message: { type: 'action.completed' } });
   });
 
-  it('rejects action completion without an accepted predecessor trajectory', () => {
-    const guard = new AgentFlowGuard();
+  it('rejects a signed action completion without an accepted predecessor trajectory', async () => {
+    const secureIngress = ingress();
 
-    expect(guard.accept(envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', { type: 'action.completed', result }))).toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
+    expect(await send(secureIngress, envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', { type: 'action.completed', result })))
+      .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
   });
 
-  it('rejects a completion that does not match its accepted action command', () => {
-    const guard = new AgentFlowGuard();
-    guard.accept(envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }));
-    guard.accept(envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage));
+  it('rejects a completion that does not match its accepted action command', async () => {
+    const secureIngress = ingress();
+    await send(secureIngress, envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }));
+    await send(secureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage));
 
-    expect(guard.accept(envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', {
+    expect(await send(secureIngress, envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', {
       type: 'action.completed', result: { ...result, actionId: '12121212-1212-4212-8212-121212121212' },
     }))).toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
   });
 
-  it('rejects an approval-required completion without a matching prior resolution', () => {
-    const guard = new AgentFlowGuard();
-    guard.accept(envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }));
-    guard.accept(envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', approvalRequiredCommandMessage));
+  it('rejects an approval-required completion without a matching prior resolution', async () => {
+    const secureIngress = ingress();
+    await send(secureIngress, envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }));
+    await send(secureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', approvalRequiredCommandMessage));
 
-    expect(guard.accept(envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', { type: 'action.completed', result })))
+    expect(await send(secureIngress, envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', { type: 'action.completed', result })))
+      .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
+  });
+
+  it('rejects unsigned observations without recording them in the flow', async () => {
+    const secureIngress = ingress();
+    const unsignedObservation = JSON.stringify(envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }));
+
+    expect(await secureIngress.accept(unsignedObservation)).toMatchObject({ status: 'rejected', code: 'SIGNATURE_REQUIRED' });
+    expect(await send(secureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
+      .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
+  });
+
+  it('rejects malformed wire and invalid signatures without recording flow state', async () => {
+    const malformedIngress = ingress();
+    expect(await malformedIngress.accept('{not json')).toMatchObject({ status: 'rejected', code: 'INVALID_WIRE' });
+    expect(await send(malformedIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
+      .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
+
+    const invalidSignatureIngress = ingress();
+    const signedObservation = await signEnvelope(
+      envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }), signer,
+    );
+    expect(await invalidSignatureIngress.accept(JSON.stringify({ ...signedObservation, signature: 'invalid' })))
+      .toMatchObject({ status: 'rejected', code: 'SIGNATURE_INVALID' });
+    expect(await send(invalidSignatureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
+      .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
+  });
+
+  it('rejects replayed and padded raw wire before it reaches the flow', async () => {
+    const secureIngress = ingress();
+    const signedObservation = JSON.stringify(await signEnvelope(
+      envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }), signer,
+    ));
+
+    expect(await secureIngress.accept(new TextEncoder().encode(signedObservation))).toMatchObject({ status: 'accepted' });
+    expect(await secureIngress.accept(signedObservation)).toMatchObject({ status: 'duplicate' });
+
+    const signedCommand = JSON.stringify(await signEnvelope(
+      envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage), signer,
+    ));
+    const maxBytes = new TextEncoder().encode(signedCommand).byteLength;
+    const paddedIngress = ingress(maxBytes);
+    const padding = ' '.repeat(maxBytes - new TextEncoder().encode(signedObservation).byteLength + 1);
+    expect(await paddedIngress.accept(`${padding}${signedObservation}`)).toMatchObject({ status: 'rejected', code: 'MESSAGE_TOO_LARGE' });
+    expect(await paddedIngress.accept(signedCommand))
       .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
   });
 });

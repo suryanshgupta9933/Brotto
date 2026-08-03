@@ -27,3 +27,4 @@ export {
 } from './envelope.js';
 export { ProtocolGuard, type ProtocolGuardOptions, type ProtocolGuardResult } from './guard.js';
 export { AgentFlowGuard, type AgentFlowGuardResult } from './flow-guard.js';
+export { SecureAgentIngress, type SecureAgentIngressOptions, type SecureAgentIngressResult } from './secure-ingress.js';

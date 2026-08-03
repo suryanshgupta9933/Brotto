@@ -11,7 +11,7 @@ export interface ProtocolGuardOptions {
   expectedRecipientId: string;
 }
 
-/** Validates a received envelope before its payload reaches application dispatch. */
+/** Internal admission component. Use SecureAgentIngress for raw inbound wire data. */
 export class ProtocolGuard {
   private readonly receivedMessageIds = new Set<string>();
   private readonly lastSequences = new Map<string, number>();

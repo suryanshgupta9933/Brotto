@@ -13,7 +13,7 @@ export type AgentFlowGuardResult =
   | { status: 'accepted'; envelope: AgentEnvelopeV1 }
   | { status: 'rejected'; code: 'INVALID_ENVELOPE' | 'ACTION_FLOW_INVALID' };
 
-/** Enforces the Task 1 observation → proposal → policy → command → result trajectory. */
+/** Internal stateful flow component. Use SecureAgentIngress for raw inbound wire data. */
 export class AgentFlowGuard {
   private readonly observationsBySession = new Map<string, Map<string, unknown>>();
   private readonly actionsBySession = new Map<string, Map<string, FlowRecord>>();

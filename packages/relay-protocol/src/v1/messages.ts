@@ -13,6 +13,7 @@ import {
   PolicyDecisionV1Schema,
   SequenceSchema,
   StepIdSchema,
+  TaskIdSchema,
   CompletionProposalV1Schema,
 } from '@fara-platform/fara-action-schema';
 
@@ -81,9 +82,9 @@ const SucceededCompletionProposalV1Schema = CompletionProposalV1Schema.superRefi
   }
 });
 
-const UnsuccessfulCompletionProposalV1Schema = CompletionProposalV1Schema.superRefine((completion, context) => {
-  if (completion.status === 'succeeded') {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: 'task.failed cannot carry a succeeded completion proposal' });
+const FailedCompletionProposalV1Schema = CompletionProposalV1Schema.superRefine((completion, context) => {
+  if (completion.status !== 'failed') {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'task.failed requires a failed completion proposal' });
   }
 });
 
@@ -94,12 +95,17 @@ const TaskCompletedSchema = z.object({
 
 const TaskFailedSchema = z.object({
   type: z.literal('task.failed'),
-  completion: UnsuccessfulCompletionProposalV1Schema,
+  completion: FailedCompletionProposalV1Schema,
 }).strict();
 
 const TaskCancelledSchema = z.object({
   type: z.literal('task.cancelled'),
-  reason: z.string().min(1).max(2_000).optional(),
+  taskId: TaskIdSchema,
+  occurredAt: TimestampSchema,
+  reason: z.string().min(1).max(2_000),
+  observationId: ObservationIdSchema,
+  actionId: ActionIdSchema.optional(),
+  stepId: StepIdSchema.optional(),
 }).strict();
 
 export const TaskTerminalSchema = z.discriminatedUnion('type', [
