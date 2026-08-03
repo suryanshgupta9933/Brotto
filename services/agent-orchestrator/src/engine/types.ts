@@ -70,6 +70,7 @@ export interface PolicyInput {
   sessionId: SessionId;
   taskId: TaskId;
   actionId: ActionId;
+  policyDecisionId: PolicyDecisionV1['policyDecisionId'];
   proposal: ActionProposalV1;
 }
 
@@ -96,8 +97,16 @@ export interface StoredOutcome {
   revision: number;
   state: CanonicalSessionState;
   pendingActionIds: ActionId[];
+  requiresFreshObservation?: boolean;
   terminalReason?: TerminalReason;
   error?: { code: EngineErrorCode; message: string };
+}
+
+export interface CommandDelivery {
+  status: 'pending' | 'sent';
+  attempts: number;
+  lastAttemptAt: string | null;
+  lastError: string | null;
 }
 
 export interface ActiveAction {
@@ -107,6 +116,16 @@ export interface ActiveAction {
   proposal: ActionProposalV1;
   policyDecision: PolicyDecisionV1;
   command: ActionCommandV1;
+  delivery: CommandDelivery;
+}
+
+export interface PendingPolicy {
+  causationMessageId: MessageId;
+  actionId: ActionId;
+  stepId: StepId;
+  observationId: ObservationV1['observationId'];
+  policyDecisionId: PolicyDecisionV1['policyDecisionId'];
+  proposal: ActionProposalV1;
 }
 
 export interface PendingApproval {
@@ -125,15 +144,17 @@ export interface CanonicalSession {
   state: CanonicalSessionState;
   revision: number;
   nextSequence: number;
+  eventSequence: number;
   startedAt: string;
   updatedAt: string;
   lastObservation: ObservationV1 | null;
   activeInferenceId: string | null;
   activeAction: ActiveAction | null;
+  pendingPolicy: PendingPolicy | null;
   pendingApproval: PendingApproval | null;
   recentResults: ActionResultV1[];
   processedMessages: Record<string, StoredOutcome>;
-  completedActions: Record<string, StoredOutcome>;
+  completedActions: Record<string, { result: ActionResultV1; outcome: StoredOutcome }>;
   actionSignatures: string[];
   observationSignatures: string[];
   consecutiveActionFailures: number;
@@ -145,6 +166,11 @@ export interface CanonicalSession {
 
 export interface SessionStore {
   load(sessionId: SessionId): Promise<CanonicalSession | null>;
+  transition(
+    session: CanonicalSession,
+    expectedRevision: number,
+    outcome?: StoredOutcome,
+  ): Promise<void>;
   compareAndSwap(session: CanonicalSession, expectedRevision: number): Promise<void>;
   getProcessed(messageId: MessageId): Promise<StoredOutcome | null>;
 }
@@ -188,6 +214,8 @@ export type EngineErrorCode =
   | 'SESSION_NOT_FOUND'
   | 'SESSION_ALREADY_EXISTS'
   | 'SESSION_TERMINAL'
+  | 'STALE_PROPOSAL'
+  | 'STALE_POLICY_DECISION'
   | 'STALE_ACTION_RESULT'
   | 'STALE_APPROVAL_RESOLUTION'
   | 'STORE_CONFLICT';

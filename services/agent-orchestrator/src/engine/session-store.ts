@@ -6,11 +6,29 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-function assertSerializable(value: CanonicalSession): void {
-  try {
-    JSON.stringify(value);
-  } catch (error) {
-    throw new TypeError(`Canonical session must be serializable: ${String(error)}`);
+function assertJsonValue(value: unknown, path = '$', ancestors = new Set<object>()): void {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number' && Number.isFinite(value)) return;
+  if (typeof value !== 'object') {
+    throw new TypeError(`Canonical session must contain only JSON values: ${path}`);
+  }
+  if (ancestors.has(value)) {
+    throw new TypeError(`Canonical session must contain only JSON values: cycle at ${path}`);
+  }
+  const nextAncestors = new Set(ancestors).add(value);
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertJsonValue(item, `${path}[${index}]`, nextAncestors));
+    return;
+  }
+  const prototype = Object.getPrototypeOf(value) as { constructor?: { name?: string } } | null;
+  if (
+    Object.prototype.toString.call(value) !== '[object Object]' ||
+    (prototype !== null && prototype.constructor?.name !== 'Object')
+  ) {
+    throw new TypeError(`Canonical session must contain only JSON values: ${path}`);
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    assertJsonValue(nested, `${path}.${key}`, nextAncestors);
   }
 }
 
@@ -24,7 +42,25 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   async compareAndSwap(session: CanonicalSession, expectedRevision: number): Promise<void> {
-    assertSerializable(session);
+    await this.transition(session, expectedRevision);
+  }
+
+  async transition(
+    session: CanonicalSession,
+    expectedRevision: number,
+    outcome?: StoredOutcome,
+  ): Promise<void> {
+    assertJsonValue(session);
+    if (outcome !== undefined) {
+      assertJsonValue(outcome);
+      if (
+        outcome.sessionId !== session.sessionId ||
+        outcome.revision !== session.revision ||
+        outcome.state !== session.state
+      ) {
+        throw new TypeError('Atomic outcome must match the canonical session revision');
+      }
+    }
     const current = this.sessions.get(session.sessionId);
     const currentRevision = current?.revision ?? 0;
     if (currentRevision !== expectedRevision || session.revision !== expectedRevision + 1) {
@@ -39,6 +75,7 @@ export class InMemorySessionStore implements SessionStore {
     for (const [messageId, outcome] of Object.entries(stored.processedMessages)) {
       this.processed.set(messageId, clone(outcome));
     }
+    if (outcome !== undefined) this.processed.set(outcome.messageId, clone(outcome));
   }
 
   async getProcessed(messageId: MessageId): Promise<StoredOutcome | null> {

@@ -19,6 +19,8 @@ import type {
   InferencePort,
   PolicyPort,
   TrajectorySink,
+  StoredOutcome,
+  CanonicalSession,
 } from '../engine/types.js';
 
 const ids = {
@@ -136,6 +138,46 @@ class RecordingCommands implements CommandSink {
   }
 }
 
+class FailOnceCommands extends RecordingCommands {
+  attempts = 0;
+
+  override async send(command: ActionCommandV1): Promise<void> {
+    this.attempts += 1;
+    if (this.attempts === 1) throw new Error('simulated send failure');
+    await super.send(command);
+  }
+}
+
+class PausingApprovalStore extends InMemorySessionStore {
+  private releaseTransition!: () => void;
+  private markPaused!: () => void;
+  readonly paused = new Promise<void>((resolve) => { this.markPaused = resolve; });
+  private readonly released = new Promise<void>((resolve) => { this.releaseTransition = resolve; });
+  private didPause = false;
+
+  release(): void {
+    this.releaseTransition();
+  }
+
+  override async transition(
+    session: CanonicalSession,
+    expectedRevision: number,
+    outcome?: StoredOutcome,
+  ): Promise<void> {
+    if (
+      !this.didPause &&
+      session.state === 'EXECUTING' &&
+      (outcome?.messageId === '10000000-0000-4000-8000-000000000031' ||
+        session.processedMessages['10000000-0000-4000-8000-000000000031'] !== undefined)
+    ) {
+      this.didPause = true;
+      this.markPaused();
+      await this.released;
+    }
+    await super.transition(session, expectedRevision, outcome);
+  }
+}
+
 class RecordingTrajectory implements TrajectorySink {
   readonly events: TrajectoryEventV1[] = [];
 
@@ -164,7 +206,7 @@ function createEngine(options: {
     trajectorySink,
     now: () => '2026-08-03T10:00:03.000Z',
     idGenerator: (() => {
-      const generated = [ids.action, ids.step];
+      const generated = [ids.action, ids.step, ids.policy];
       return () => generated.shift() ?? '00000000-0000-4000-8000-000000000099';
     })(),
     budgets: options.budgets,
@@ -322,10 +364,10 @@ describe('SessionEngine', () => {
 
   it('persists an executable action before external dispatch', async () => {
     const store = new InMemorySessionStore();
-    let persistedState: string | undefined;
+    let persisted: CanonicalSession | null = null;
     const commandSink: RecordingCommands = new class extends RecordingCommands {
       override async send(command: ActionCommandV1): Promise<void> {
-        persistedState = (await store.load(ids.session as never))?.state;
+        persisted = await store.load(ids.session as never);
         await super.send(command);
       }
     }();
@@ -340,7 +382,39 @@ describe('SessionEngine', () => {
       occurredAt: '2026-08-03T10:00:00.000Z',
     });
 
-    expect(persistedState).toBe('EXECUTING');
+    expect(persisted).toMatchObject({
+      state: 'EXECUTING',
+      activeAction: {
+        command: commandSink.commands[0],
+        delivery: { status: 'pending' },
+      },
+    });
+  });
+
+  it('persists the proposal and generated policy request before awaiting policy', async () => {
+    const policy = new DeferredPolicy();
+    const { engine, store } = createEngine({ policy });
+    await open(engine);
+    const planning = engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000028',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+    await policy.firstStarted;
+
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'POLICY_CHECK',
+      pendingPolicy: {
+        actionId: ids.action,
+        stepId: ids.step,
+        policyDecisionId: ids.policy,
+        proposal: { observationId: ids.observation1 },
+      },
+    });
+    policy.release();
+    await planning;
   });
 
   it('waits for a matching approval before dispatch', async () => {
@@ -378,6 +452,122 @@ describe('SessionEngine', () => {
       approved: true,
       approvalId: ids.approval,
     });
+  });
+
+  it('atomically commits approval processing with the pending command', async () => {
+    const store = new PausingApprovalStore();
+    const { engine, commandSink } = createEngine({
+      store,
+      policy: new FakePolicy('approval_required'),
+    });
+    await open(engine);
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000029',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+    const approval = engine.handle({
+      type: 'approval.resolved',
+      messageId: '10000000-0000-4000-8000-000000000031',
+      sessionId: ids.session,
+      occurredAt: '2026-08-03T10:00:03.000Z',
+      resolution: {
+        approvalId: ids.approval,
+        policyDecisionId: ids.policy,
+        actionId: ids.action,
+        status: 'approved',
+        resolvedAt: '2026-08-03T10:00:03.000Z',
+      },
+    });
+    await store.paused;
+    await engine.handle({
+      type: 'task.cancelled',
+      messageId: '10000000-0000-4000-8000-000000000032',
+      sessionId: ids.session,
+      reason: 'cancel won approval race',
+      occurredAt: '2026-08-03T10:00:03.500Z',
+    });
+    store.release();
+
+    await expect(approval).rejects.toMatchObject({ code: 'STALE_APPROVAL_RESOLUTION' });
+    expect(commandSink.commands).toHaveLength(0);
+    expect(await store.getProcessed('10000000-0000-4000-8000-000000000031' as never)).toMatchObject({
+      kind: 'error',
+    });
+    expect((await store.load(ids.session as never))?.state).toBe('CANCELLED');
+  });
+
+  it('retries an atomically persisted approved command after a send crash', async () => {
+    const commandSink = new FailOnceCommands();
+    const { engine, store } = createEngine({
+      commandSink,
+      policy: new FakePolicy('approval_required'),
+    });
+    await open(engine);
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000033',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+    const approvalEvent = {
+      type: 'approval.resolved' as const,
+      messageId: '10000000-0000-4000-8000-000000000034',
+      sessionId: ids.session,
+      occurredAt: '2026-08-03T10:00:03.000Z',
+      resolution: {
+        approvalId: ids.approval,
+        policyDecisionId: ids.policy,
+        actionId: ids.action,
+        status: 'approved' as const,
+        resolvedAt: '2026-08-03T10:00:03.000Z',
+      },
+    };
+
+    await expect(engine.handle(approvalEvent)).rejects.toThrow('simulated send failure');
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'EXECUTING',
+      activeAction: { delivery: { status: 'pending', attempts: 1 } },
+    });
+
+    const retry = await engine.handle(approvalEvent);
+    expect(retry.kind).toBe('accepted');
+    expect(commandSink.attempts).toBe(2);
+    expect(commandSink.commands).toHaveLength(1);
+    expect((await store.load(ids.session as never))?.activeAction).toMatchObject({
+      delivery: { status: 'sent', attempts: 2 },
+    });
+  });
+
+  it('replays an undelivered command after process loss and reconnect', async () => {
+    const commandSink = new FailOnceCommands();
+    const store = new InMemorySessionStore();
+    const first = createEngine({ store, commandSink });
+    await open(first.engine);
+    await expect(first.engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000035',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    })).rejects.toThrow('simulated send failure');
+
+    const restarted = createEngine({ store, commandSink });
+    const outcome = await restarted.engine.handle({
+      type: 'reconcile.request',
+      messageId: '10000000-0000-4000-8000-000000000036',
+      sessionId: ids.session,
+      lastReceivedSequence: 0,
+      pendingActionIds: [],
+      occurredAt: '2026-08-03T10:00:05.000Z',
+    });
+
+    expect(outcome).toMatchObject({ kind: 'reconciled', pendingActionIds: [ids.action] });
+    expect(commandSink.attempts).toBe(2);
+    expect(commandSink.commands).toHaveLength(1);
   });
 
   it('accepts one matching terminal result and plans from its post-observation', async () => {
@@ -437,7 +627,91 @@ describe('SessionEngine', () => {
 
     expect(duplicate).toEqual(first);
     expect(inference.calls).toHaveLength(2);
-    expect((await store.load(ids.session as never))?.state).toBe('COMPLETED');
+    const saved = await store.load(ids.session as never);
+    expect(saved?.state).toBe('COMPLETED');
+    expect(saved?.observationSignatures).toHaveLength(2);
+  });
+
+  it('rejects a completed-action duplicate whose full result tuple changed', async () => {
+    const completion: AgentProposalV1 = {
+      kind: 'completion',
+      observationId: ids.observation2,
+      type: 'terminate',
+      status: 'succeeded',
+      summary: 'Done',
+      findings: [],
+      unmetCriteria: [],
+      confidence: 1,
+    } as AgentProposalV1;
+    const inference = new FakeInference([]);
+    const { engine, commandSink } = createEngine({ inference });
+    await open(engine);
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000042',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+    inference.enqueue(completion);
+    const command = commandSink.commands[0]!;
+    const result = {
+      actionId: command.actionId,
+      stepId: command.stepId,
+      observationId: command.observationId,
+      sequence: command.sequence + 1,
+      status: 'succeeded',
+      startedAt: '2026-08-03T10:00:04.000Z',
+      completedAt: '2026-08-03T10:00:05.000Z',
+      durationMs: 1000,
+      postObservation: {
+        ...observation(ids.observation2),
+        capturedAt: '2026-08-03T10:00:06.000Z',
+        screenshot: { ...observation(ids.observation2).screenshot, sha256: 'b'.repeat(64) },
+      },
+    } as ActionResultV1;
+    await engine.handle({
+      type: 'action.completed',
+      messageId: '10000000-0000-4000-8000-000000000043',
+      sessionId: ids.session,
+      result,
+      occurredAt: result.completedAt,
+    });
+
+    await expect(engine.handle({
+      type: 'action.completed',
+      messageId: '10000000-0000-4000-8000-000000000044',
+      sessionId: ids.session,
+      result: { ...result, durationMs: 999 },
+      occurredAt: result.completedAt,
+    })).rejects.toMatchObject({ code: 'STALE_ACTION_RESULT' });
+  });
+
+  it('emits monotonic trajectory sequences with explicit action lineage', async () => {
+    const { engine, trajectorySink } = createEngine();
+    await open(engine);
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000045',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+
+    expect(trajectorySink.events.map((event) => event.sequence)).toEqual(
+      trajectorySink.events.map((_, index) => index),
+    );
+    for (const event of trajectorySink.events.filter((candidate) => [
+      'action_proposed',
+      'policy_decided',
+      'action_acknowledged',
+    ].includes(candidate.kind))) {
+      expect(event).toMatchObject({
+        stepId: ids.step,
+        actionId: ids.action,
+        observationId: ids.observation1,
+      });
+    }
   });
 
   it('returns the authoritative pending action during reconnect', async () => {
@@ -464,6 +738,101 @@ describe('SessionEngine', () => {
       kind: 'reconciled',
       pendingActionIds: [commandSink.commands[0]?.actionId],
     });
+  });
+
+  it('requires a fresh observation for unknown client pending actions', async () => {
+    const { engine } = createEngine();
+    await open(engine);
+
+    const outcome = await engine.handle({
+      type: 'reconcile.request',
+      messageId: '10000000-0000-4000-8000-000000000037',
+      sessionId: ids.session,
+      lastReceivedSequence: 0,
+      pendingActionIds: [ids.staleAction],
+      occurredAt: '2026-08-03T10:00:05.000Z',
+    });
+
+    expect(outcome).toMatchObject({
+      kind: 'reconciled',
+      pendingActionIds: [],
+      requiresFreshObservation: true,
+    });
+  });
+
+  it('rejects a proposal correlated to a different planning observation', async () => {
+    const inference = new FakeInference([{
+      kind: 'action',
+      observationId: ids.observation2,
+      proposedAt: '2026-08-03T10:00:01.000Z',
+      action: { type: 'left_click', x: 10, y: 20 },
+    } as AgentProposalV1]);
+    const { engine, commandSink } = createEngine({ inference });
+    await open(engine);
+
+    await expect(engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000038',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    })).rejects.toMatchObject({ code: 'STALE_PROPOSAL' });
+    expect(commandSink.commands).toHaveLength(0);
+  });
+
+  it('rejects a policy decision that does not match its persisted request tuple', async () => {
+    const policy: PolicyPort = {
+      evaluate: async () => ({
+        policyDecisionId: ids.policy,
+        actionId: ids.staleAction,
+        observationId: ids.observation2,
+        decision: 'allowed',
+        decidedAt: '2026-08-03T10:00:02.000Z',
+      } as PolicyDecisionV1),
+    };
+    const { engine, commandSink } = createEngine({ policy });
+    await open(engine);
+
+    await expect(engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000039',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    })).rejects.toMatchObject({ code: 'STALE_POLICY_DECISION' });
+    expect(commandSink.commands).toHaveLength(0);
+  });
+
+  it('rejects a reordered action result sequence', async () => {
+    const { engine, commandSink } = createEngine();
+    await open(engine);
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000040',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+    const command = commandSink.commands[0]!;
+    const result = {
+      actionId: command.actionId,
+      stepId: command.stepId,
+      observationId: command.observationId,
+      sequence: command.sequence,
+      status: 'rejected_stale',
+      startedAt: '2026-08-03T10:00:04.000Z',
+      completedAt: '2026-08-03T10:00:05.000Z',
+      durationMs: 1000,
+      rejection: { code: 'ORDER', message: 'reordered', retryable: false },
+    } as ActionResultV1;
+
+    await expect(engine.handle({
+      type: 'action.completed',
+      messageId: '10000000-0000-4000-8000-000000000041',
+      sessionId: ids.session,
+      result,
+      occurredAt: result.completedAt,
+    })).rejects.toMatchObject({ code: 'STALE_ACTION_RESULT' });
   });
 
   it('cancels once, clears active work, and emits one terminal event', async () => {
