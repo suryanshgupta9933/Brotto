@@ -130,3 +130,19 @@ export {
   type OrchestratorConfig,
   type OrchestratorEvents,
 } from './server';
+
+export { createOrchestratorApp, type OrchestratorAppOptions } from './app.js';
+export {
+  ConnectionAuthError,
+  JoseConnectionTokenVerifier,
+  createConnectionAuthenticator,
+  type ConnectionClaims,
+  type ConnectionTokenVerifier,
+} from './transport/auth.js';
+export {
+  TransportError,
+  TransportSession,
+  registerAgentWebSocket,
+  type TransportEngine,
+  type TransportResult,
+} from './transport/ws-server.js';

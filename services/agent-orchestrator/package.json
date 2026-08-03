@@ -17,6 +17,9 @@
   "dependencies": {
     "@fara-platform/fara-action-schema": "workspace:*",
     "@fara-platform/relay-protocol": "workspace:*",
+    "@fastify/websocket": "10.0.1",
+    "fastify": "4.26.2",
+    "jose": "5.2.3",
     "policy-engine": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "ipaddr.js": "1.9.1",
