@@ -19,6 +19,6 @@
   },
   "dependencies": {
     "@fara-platform/fara-action-schema": "workspace:*",
-    "@fara/platform/relay-protocol": "workspace:*"
+    "@fara-platform/relay-protocol": "workspace:*"
   }
 }

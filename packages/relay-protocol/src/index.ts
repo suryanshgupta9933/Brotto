@@ -5,6 +5,10 @@
  * Used by clients (desktop connector, browser extension) and server (cdp-relay).
  */
 
+// Canonical application-level agent loop protocol (V1). Legacy CDP relay types
+// remain below for existing runtime compatibility while migration is in progress.
+export * from './v1/index.js';
+
 // Types from types.js
 export {
   // Core types

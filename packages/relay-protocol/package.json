@@ -1,5 +1,5 @@
 {
-  "name": "@fara/platform/relay-protocol",
+  "name": "@fara-platform/relay-protocol",
   "version": "0.1.0",
   "description": "CDP Relay wire protocol for Fara1.5 Browser Automation Platform",
   "license": "Apache-2.0",
@@ -9,6 +9,7 @@
   "exports": {
     ".": {
       "import": "./dist/index.js",
+      "default": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },
@@ -22,7 +23,10 @@
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@fara-platform/fara-action-schema": "workspace:*",
+    "zod": "^3.22.4"
+  },
   "devDependencies": {
     "@types/jest": "^29.5.0",
     "jest": "^29.7.0",
