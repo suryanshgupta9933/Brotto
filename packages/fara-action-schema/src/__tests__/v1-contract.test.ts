@@ -42,12 +42,17 @@ const validObservation = {
       targetId: '44444444-4444-4444-8444-444444444444',
       tag: 'button',
       role: 'button',
-      accessibleName: 'Search',
+      accessibleName: { source: 'aria-label', text: 'Search' },
       attributes: { 'aria-label': 'Search' },
+      control: { kind: 'non_input' },
       boundingBox: { x: 12, y: 24, width: 80, height: 32 },
       visible: true,
       framePath: [],
-      locatorCandidates: ['button[aria-label="Search"]'],
+      locatorCandidates: [{
+        kind: 'role_name',
+        role: 'button',
+        name: { source: 'aria-label', text: 'Search' },
+      }],
     },
   ],
 };
@@ -93,12 +98,20 @@ const validPolicyDecision = {
   decidedAt: '2026-08-03T10:00:00.250Z',
 };
 
+const validApprovalResolution = {
+  approvalId: 'abababab-abab-4bab-8bab-abababababab',
+  policyDecisionId,
+  actionId: validActionCommand.actionId,
+  status: 'approved',
+  resolvedAt: '2026-08-03T10:00:00.400Z',
+};
+
 describe('canonical v1 contracts', () => {
   it('accepts a sanitized HTTP(S) observation with bounded semantic targets', () => {
     const observation = ObservationV1Schema.parse(validObservation);
 
     expect(observation.observationId).toBe(observationId);
-    expect(observation.semanticTargets[0].accessibleName).toBe('Search');
+    expect(observation.semanticTargets[0].accessibleName?.text).toBe('Search');
   });
 
   it('rejects an observation URL outside HTTP(S)', () => {
@@ -204,6 +217,7 @@ describe('canonical v1 contracts', () => {
         },
       },
       policyDecision: { ...validPolicyDecision, decision: 'approval_required' },
+      approvalResolution: validApprovalResolution,
     }).result.status).toBe('succeeded');
   });
 
@@ -240,6 +254,104 @@ describe('canonical v1 contracts', () => {
       command: { ...validActionCommand, dispatchedAt: '2026-08-03T10:00:00.050Z' },
       policyDecision: validPolicyDecision,
       result: validResult,
+    })).toThrow(z.ZodError);
+  });
+
+  it('rejects an executed failure that reuses the source observation as post-state', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: validActionCommand,
+      policyDecision: validPolicyDecision,
+      result: {
+        ...validResult,
+        status: 'failed_terminal',
+        error: { code: 'EXECUTION_FAILED', message: 'Click failed', retryable: false },
+        postObservation: validObservation,
+      },
+    })).toThrow(z.ZodError);
+  });
+
+  it('rejects approval-required execution without a matching approved resolution', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: {
+        ...validActionCommand,
+        policyContext: {
+          ...validActionCommand.policyContext,
+          approved: true,
+          approvalId: 'abababab-abab-4bab-8bab-abababababab',
+        },
+      },
+      policyDecision: { ...validPolicyDecision, decision: 'approval_required' },
+      result: validResult,
+    })).toThrow(z.ZodError);
+  });
+
+  it('rejects mismatched or denied approval resolutions', () => {
+    const approvedTrajectory = {
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action' as const,
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: {
+        ...validActionCommand,
+        policyContext: {
+          ...validActionCommand.policyContext,
+          approved: true,
+          approvalId: validApprovalResolution.approvalId,
+        },
+      },
+      policyDecision: { ...validPolicyDecision, decision: 'approval_required' as const },
+      result: validResult,
+      approvalResolution: validApprovalResolution,
+    };
+
+    expect(TrajectoryLinkageV1Schema.parse(approvedTrajectory).result.status).toBe('succeeded');
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      ...approvedTrajectory,
+      approvalResolution: { ...validApprovalResolution, actionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' },
+    })).toThrow(z.ZodError);
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      ...approvedTrajectory,
+      approvalResolution: { ...validApprovalResolution, status: 'denied' },
+    })).toThrow(z.ZodError);
+  });
+
+  it('rejects an executed failure whose post-observation predates completion', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: validActionCommand,
+      policyDecision: validPolicyDecision,
+      result: {
+        ...validResult,
+        status: 'failed_terminal',
+        error: { code: 'EXECUTION_FAILED', message: 'Click failed', retryable: false },
+        postObservation: {
+          ...validResult.postObservation,
+          capturedAt: '2026-08-03T10:00:01.500Z',
+        },
+      },
     })).toThrow(z.ZodError);
   });
 

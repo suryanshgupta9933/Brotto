@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   ActionIdSchema,
+  ApprovalIdSchema,
   IdempotencyKeySchema,
   ObservationIdSchema,
   PolicyDecisionIdSchema,
@@ -88,7 +89,7 @@ export const PolicyContextV1Schema = z.object({
   policyDecisionId: PolicyDecisionIdSchema,
   policyVersion: z.string().min(1).max(128),
   approved: z.boolean(),
-  approvalId: z.string().uuid().optional(),
+  approvalId: ApprovalIdSchema.optional(),
 }).strict();
 
 export const PolicyDecisionV1Schema = guardedStrictObject(z.object({
@@ -97,6 +98,14 @@ export const PolicyDecisionV1Schema = guardedStrictObject(z.object({
   observationId: ObservationIdSchema,
   decision: z.enum(['allowed', 'denied', 'approval_required']),
   decidedAt: z.string().datetime(),
+}).strict());
+
+export const ApprovalResolutionV1Schema = guardedStrictObject(z.object({
+  approvalId: ApprovalIdSchema,
+  policyDecisionId: PolicyDecisionIdSchema,
+  actionId: ActionIdSchema,
+  status: z.enum(['approved', 'denied']),
+  resolvedAt: z.string().datetime(),
 }).strict());
 
 export const ActionCommandV1Schema = guardedStrictObject(z.object({
@@ -118,4 +127,5 @@ export type CompletionProposalV1 = z.infer<typeof CompletionProposalV1Schema>;
 export type AgentProposalV1 = z.infer<typeof AgentProposalV1Schema>;
 export type PolicyContextV1 = z.infer<typeof PolicyContextV1Schema>;
 export type PolicyDecisionV1 = z.infer<typeof PolicyDecisionV1Schema>;
+export type ApprovalResolutionV1 = z.infer<typeof ApprovalResolutionV1Schema>;
 export type ActionCommandV1 = z.infer<typeof ActionCommandV1Schema>;

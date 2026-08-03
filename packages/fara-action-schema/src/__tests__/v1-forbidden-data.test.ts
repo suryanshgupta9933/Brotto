@@ -85,28 +85,29 @@ describe('v1 forbidden browser-data defense', () => {
       targetId: '44444444-4444-4444-8444-444444444444',
       tag: 'button',
       role: 'button',
-      accessibleName: 'Search results',
+      accessibleName: { source: 'visible_text', text: 'Search results' },
       attributes: { 'aria-label': 'Search' },
+      control: { kind: 'non_input' },
       boundingBox: { x: 12, y: 24, width: 80, height: 32 },
       visible: true,
-      framePath: ['iframe'],
-      shadowPath: ['fara-card'],
-      locatorCandidates: ['button[aria-label="Search"]'],
+      framePath: ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'],
+      shadowPath: ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'],
+      locatorCandidates: [{ kind: 'role_name', role: 'button', name: { source: 'aria-label', text: 'Search' } }],
     };
 
     expect(ObservationV1Schema.parse({ ...validObservation, semanticTargets: [safeTarget] }))
       .toEqual(expect.objectContaining({ semanticTargets: [expect.any(Object)] }));
     expect(() => ObservationV1Schema.parse({
       ...validObservation,
-      semanticTargets: [{ ...safeTarget, accessibleName: 'Password: hunter2' }],
+      semanticTargets: [{ ...safeTarget, accessibleName: { source: 'visible_text', text: 'Password: hunter2' } }],
     })).toThrow();
     expect(() => ObservationV1Schema.parse({
       ...validObservation,
-      semanticTargets: [{ ...safeTarget, framePath: ['iframe', 'input[value="hunter2"]'] }],
+      semanticTargets: [{ ...safeTarget, framePath: ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'input[value="hunter2"]'] }],
     })).toThrow();
     expect(() => ObservationV1Schema.parse({
       ...validObservation,
-      semanticTargets: [{ ...safeTarget, shadowPath: ['fara-card', '#secret-account'] }],
+      semanticTargets: [{ ...safeTarget, shadowPath: ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '#secret-account'] }],
     })).toThrow();
   });
 
@@ -116,13 +117,47 @@ describe('v1 forbidden browser-data defense', () => {
       semanticTargets: [{
         targetId: '44444444-4444-4444-8444-444444444444',
         tag: 'button',
-        accessibleName: 'Tokenize search results',
+        accessibleName: { source: 'visible_text', text: 'Tokenize search results' },
+        control: { kind: 'non_input' },
         boundingBox: { x: 12, y: 24, width: 80, height: 32 },
         visible: true,
         framePath: [],
-        locatorCandidates: ['button'],
+        locatorCandidates: [{ kind: 'role_name', role: 'button', name: { source: 'visible_text', text: 'Tokenize search results' } }],
       }],
     })).not.toThrow();
+  });
+
+  it('rejects raw accessible text and CSS-shaped path or locator escape routes', () => {
+    const target = {
+      targetId: '44444444-4444-4444-8444-444444444444',
+      tag: 'button',
+      accessibleName: 'hunter2',
+      boundingBox: { x: 12, y: 24, width: 80, height: 32 },
+      visible: true,
+      framePath: ['iframe[aria-label="hunter2"]'],
+      shadowPath: ['fara-card'],
+      locatorCandidates: ['button[aria-label="hunter2"]'],
+    };
+
+    expect(() => ObservationV1Schema.parse({
+      ...validObservation,
+      semanticTargets: [target],
+    })).toThrow();
+  });
+
+  it('rejects password input metadata before semantic details can be serialized', () => {
+    expect(() => ObservationV1Schema.parse({
+      ...validObservation,
+      semanticTargets: [{
+        targetId: '44444444-4444-4444-8444-444444444444',
+        tag: 'input',
+        control: { kind: 'input', inputType: 'password' },
+        boundingBox: { x: 12, y: 24, width: 80, height: 32 },
+        visible: true,
+        framePath: [],
+        locatorCandidates: [],
+      }],
+    })).toThrow();
   });
 
   it('accepts sanitized serialized data', () => {

@@ -8,7 +8,7 @@ import {
   StepIdSchema,
   TaskIdSchema,
 } from './ids';
-import { ActionCommandV1Schema, ActionProposalV1Schema, PolicyDecisionV1Schema } from './actions';
+import { ActionCommandV1Schema, ActionProposalV1Schema, ApprovalResolutionV1Schema, PolicyDecisionV1Schema } from './actions';
 import { assertNoForbiddenBrowserData, ForbiddenBrowserDataError, ObservationV1Schema } from './observation';
 import { ActionResultV1Schema } from './results';
 
@@ -58,9 +58,10 @@ export const TrajectoryLinkageV1Schema = z.object({
   proposal: ActionProposalV1Schema,
   command: ActionCommandV1Schema,
   policyDecision: PolicyDecisionV1Schema,
+  approvalResolution: ApprovalResolutionV1Schema.optional(),
   result: ActionResultV1Schema,
 }).strict().superRefine((value, context) => {
-  const { command, policyDecision, proposal, result, sourceObservation } = value;
+  const { approvalResolution, command, policyDecision, proposal, result, sourceObservation } = value;
 
   if (sourceObservation.observationId !== proposal.observationId || proposal.observationId !== command.observationId) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['command', 'observationId'], message: 'Command must reference the proposal observation' });
@@ -87,6 +88,17 @@ export const TrajectoryLinkageV1Schema = z.object({
   if (policyDecision.decision === 'approval_required' && hasApprovalProof && ['rejected_policy', 'approval_required'].includes(result.status)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'status'], message: 'Approved decisions cannot produce policy rejection or approval-required results' });
   }
+  if (policyDecision.decision === 'approval_required' && hasApprovalProof) {
+    if (
+      approvalResolution === undefined ||
+      approvalResolution.status !== 'approved' ||
+      approvalResolution.approvalId !== command.policyContext.approvalId ||
+      approvalResolution.policyDecisionId !== policyDecision.policyDecisionId ||
+      approvalResolution.actionId !== command.actionId
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['approvalResolution'], message: 'Approval-required execution needs a matching approved resolution' });
+    }
+  }
   if (
     result.actionId !== command.actionId ||
     result.stepId !== command.stepId ||
@@ -101,6 +113,7 @@ export const TrajectoryLinkageV1Schema = z.object({
   const dispatchedAt = Date.parse(command.dispatchedAt);
   const startedAt = Date.parse(result.startedAt);
   const completedAt = Date.parse(result.completedAt);
+  const resolvedAt = approvalResolution === undefined ? undefined : Date.parse(approvalResolution.resolvedAt);
   if (!(
     sourceCapturedAt <= proposedAt &&
     proposedAt <= decidedAt &&
@@ -112,11 +125,16 @@ export const TrajectoryLinkageV1Schema = z.object({
   )) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'startedAt'], message: 'Observation, proposal, policy, dispatch, and execution timestamps must be chronological' });
   }
-  if (result.status === 'succeeded' && result.postObservation.observationId === command.observationId) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'postObservation', 'observationId'], message: 'Successful action requires a newer post-observation' });
+  if (hasApprovalProof && (resolvedAt === undefined || !(decidedAt <= resolvedAt && resolvedAt <= dispatchedAt))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['approvalResolution', 'resolvedAt'], message: 'Approval resolution must occur after policy decision and before dispatch' });
   }
-  if (result.status === 'succeeded' && Date.parse(result.postObservation.capturedAt) <= completedAt) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'postObservation', 'capturedAt'], message: 'Successful action post-observation must be captured after completion' });
+  if (result.status === 'succeeded' || result.status === 'failed_recoverable' || result.status === 'failed_terminal') {
+    if (result.postObservation.observationId === command.observationId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'postObservation', 'observationId'], message: 'Executed action requires a distinct post-observation' });
+    }
+    if (Date.parse(result.postObservation.capturedAt) <= completedAt) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'postObservation', 'capturedAt'], message: 'Executed action post-observation must be captured after completion' });
+    }
   }
 });
 

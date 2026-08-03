@@ -2,8 +2,10 @@ import { z } from 'zod';
 import {
   ArtifactIdSchema,
   FrameIdSchema,
+  FramePathSegmentIdSchema,
   ObservationIdSchema,
   SemanticTargetIdSchema,
+  ShadowPathSegmentIdSchema,
   TabIdSchema,
 } from './ids';
 
@@ -86,44 +88,14 @@ function withForbiddenBrowserDataGuard<T extends z.ZodTypeAny>(schema: T) {
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/i);
 const sensitiveSemanticContent = /\b(?:authorization|cookie|credentials?|localstorage|password|passcode|profile|proxy|secret|sessionstorage|token)\b/i;
-const valueBearingSelector = /\[\s*value(?:\s*[~|^$*]?=|\s*\])/i;
-const selectorAttributeName = /\[\s*([a-z][a-z0-9-]*)\b/gi;
-const safeSelectorAttributes = new Set([
-  'aria-label',
-  'aria-describedby',
-  'aria-controls',
-  'aria-expanded',
-  'aria-haspopup',
-  'aria-current',
-  'aria-pressed',
-  'aria-selected',
-  'id',
-  'name',
-  'role',
-]);
-const restrictedSelectorGrammar = /^[a-z0-9_#.[\]="'():>+~\-\s,]+$/i;
 
 function isSafeSemanticContent(value: string): boolean {
   return !sensitiveSemanticContent.test(value);
 }
 
-function isSafeSelectorPath(value: string): boolean {
-  if (!restrictedSelectorGrammar.test(value) || !isSafeSemanticContent(value) || valueBearingSelector.test(value)) {
-    return false;
-  }
-
-  return [...value.matchAll(selectorAttributeName)]
-    .every((match) => safeSelectorAttributes.has(match[1].toLowerCase()));
-}
-
 const SafeSemanticTextSchema = z.string().min(1).max(512).refine(
   isSafeSemanticContent,
   'Semantic content may not include sensitive browser data',
-);
-
-const SafeSelectorPathSchema = z.string().min(1).max(512).refine(
-  isSafeSelectorPath,
-  'Selector paths may only contain safe, redacted locator syntax',
 );
 
 const SafeSemanticAttributesSchema = z.object({
@@ -136,6 +108,40 @@ const SafeSemanticAttributesSchema = z.object({
   'aria-pressed': z.enum(['true', 'false', 'mixed']).optional(),
   'aria-selected': z.enum(['true', 'false']).optional(),
 }).strict();
+
+export const SanitizedAccessibleNameSchema = z.object({
+  source: z.enum(['aria-label', 'aria-labelledby', 'visible_text']),
+  text: SafeSemanticTextSchema,
+}).strict();
+
+export const LocatorCandidateV1Schema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('role_name'),
+    role: SafeSemanticTextSchema,
+    name: SanitizedAccessibleNameSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal('label'),
+    label: SanitizedAccessibleNameSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal('test_id'),
+    testId: SafeSemanticTextSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal('safe_attribute'),
+    attribute: z.enum(['aria-label', 'aria-describedby', 'aria-controls', 'aria-current']),
+    value: SafeSemanticTextSchema,
+  }).strict(),
+]);
+
+export const ControlMetadataSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('non_input') }).strict(),
+  z.object({
+    kind: z.literal('input'),
+    inputType: z.enum(['text', 'search', 'email', 'tel', 'url', 'number', 'date', 'checkbox', 'radio']),
+  }).strict(),
+]);
 
 export const ScreenshotSchema = withForbiddenBrowserDataGuard(z.discriminatedUnion('kind', [
   z.object({
@@ -183,14 +189,19 @@ export const SemanticTargetSchema = withForbiddenBrowserDataGuard(z.object({
   targetId: SemanticTargetIdSchema,
   tag: z.string().min(1).max(64),
   role: z.string().min(1).max(128).optional(),
-  accessibleName: SafeSemanticTextSchema.optional(),
+  accessibleName: SanitizedAccessibleNameSchema.optional(),
   attributes: SafeSemanticAttributesSchema.optional(),
+  control: ControlMetadataSchema,
   boundingBox: BoundingBoxSchema,
   visible: z.boolean(),
-  framePath: z.array(SafeSelectorPathSchema).max(20),
-  shadowPath: z.array(SafeSelectorPathSchema).max(20).optional(),
-  locatorCandidates: z.array(SafeSelectorPathSchema).max(10),
-}).strict());
+  framePath: z.array(FramePathSegmentIdSchema).max(20),
+  shadowPath: z.array(ShadowPathSegmentIdSchema).max(20).optional(),
+  locatorCandidates: z.array(LocatorCandidateV1Schema).max(10),
+}).strict()).superRefine((target, context) => {
+  if (target.tag.toLowerCase() === 'input' && target.control.kind !== 'input') {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['control'], message: 'Input targets require input control metadata' });
+  }
+});
 
 export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({
   observationId: ObservationIdSchema,
@@ -208,4 +219,7 @@ export type Viewport = z.infer<typeof ViewportSchema>;
 export type PageState = z.infer<typeof PageStateSchema>;
 export type BoundingBox = z.infer<typeof BoundingBoxSchema>;
 export type SemanticTarget = z.infer<typeof SemanticTargetSchema>;
+export type SanitizedAccessibleName = z.infer<typeof SanitizedAccessibleNameSchema>;
+export type LocatorCandidateV1 = z.infer<typeof LocatorCandidateV1Schema>;
+export type ControlMetadata = z.infer<typeof ControlMetadataSchema>;
 export type ObservationV1 = z.infer<typeof ObservationV1Schema>;
