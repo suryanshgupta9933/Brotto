@@ -53,6 +53,33 @@ describe('v1 forbidden browser-data defense', () => {
     })).toThrow(ForbiddenBrowserDataError);
   });
 
+  it('rejects password-field attributes and sensitive locator content', () => {
+    const sensitiveTarget = {
+      targetId: '44444444-4444-4444-8444-444444444444',
+      tag: 'input',
+      role: 'textbox',
+      attributes: { type: 'password', value: 'secret' },
+      boundingBox: { x: 12, y: 24, width: 80, height: 32 },
+      visible: true,
+      framePath: [],
+      locatorCandidates: ['input[type="password"][value="secret"]'],
+    };
+
+    expect(() => ObservationV1Schema.parse({
+      ...validObservation,
+      semanticTargets: [sensitiveTarget],
+    })).toThrow();
+
+    expect(() => ObservationV1Schema.parse({
+      ...validObservation,
+      semanticTargets: [{
+        ...sensitiveTarget,
+        attributes: { 'aria-label': 'Sign in' },
+        locatorCandidates: ['input[data-token="secret"]'],
+      }],
+    })).toThrow();
+  });
+
   it('accepts sanitized serialized data', () => {
     expect(() => assertNoForbiddenBrowserData(validResult)).not.toThrow();
   });

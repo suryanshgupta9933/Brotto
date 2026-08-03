@@ -28,21 +28,46 @@ const DialogEffectV1Schema = z.object({
   present: z.boolean(),
 }).strict();
 
-export const ActionResultV1Schema = z.object({
+const ActionResultBaseV1Schema = z.object({
   actionId: ActionIdSchema,
   stepId: StepIdSchema,
   observationId: ObservationIdSchema,
   sequence: SequenceSchema,
-  status: ActionResultStatusV1Schema,
   startedAt: z.string().datetime(),
   completedAt: z.string().datetime(),
   durationMs: z.number().int().nonnegative(),
   target: SemanticTargetSchema.optional(),
   navigation: NavigationEffectV1Schema.optional(),
   dialog: DialogEffectV1Schema.optional(),
-  error: ActionErrorV1Schema.optional(),
-  postObservation: ObservationV1Schema.optional(),
-}).strict().superRefine((value, context) => {
+});
+
+const SucceededActionResultV1Schema = ActionResultBaseV1Schema.extend({
+  status: z.literal('succeeded'),
+  postObservation: ObservationV1Schema,
+}).strict();
+
+const FailedActionResultV1Schema = ActionResultBaseV1Schema.extend({
+  status: z.enum(['failed_recoverable', 'failed_terminal']),
+  error: ActionErrorV1Schema,
+  postObservation: ObservationV1Schema,
+}).strict();
+
+const RejectedActionResultV1Schema = ActionResultBaseV1Schema.extend({
+  status: z.enum(['rejected_stale', 'rejected_policy', 'approval_required']),
+  rejection: ActionErrorV1Schema,
+}).strict();
+
+const CancelledActionResultV1Schema = ActionResultBaseV1Schema.extend({
+  status: z.literal('cancelled'),
+  cancellation: z.object({ reason: z.string().min(1).max(2_000).optional() }).strict(),
+}).strict();
+
+export const ActionResultV1Schema = z.union([
+  SucceededActionResultV1Schema,
+  FailedActionResultV1Schema,
+  RejectedActionResultV1Schema,
+  CancelledActionResultV1Schema,
+]).superRefine((value, context) => {
   try {
     assertNoForbiddenBrowserData(value);
   } catch (error) {
@@ -54,7 +79,16 @@ export const ActionResultV1Schema = z.object({
   }
 });
 
-export { ActionResultStatusV1Schema, ActionErrorV1Schema, DialogEffectV1Schema, NavigationEffectV1Schema };
+export {
+  ActionResultStatusV1Schema,
+  ActionErrorV1Schema,
+  CancelledActionResultV1Schema,
+  DialogEffectV1Schema,
+  FailedActionResultV1Schema,
+  NavigationEffectV1Schema,
+  RejectedActionResultV1Schema,
+  SucceededActionResultV1Schema,
+};
 export type ActionResultStatusV1 = z.infer<typeof ActionResultStatusV1Schema>;
 export type ActionErrorV1 = z.infer<typeof ActionErrorV1Schema>;
 export type NavigationEffectV1 = z.infer<typeof NavigationEffectV1Schema>;

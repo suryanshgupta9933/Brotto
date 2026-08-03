@@ -85,6 +85,27 @@ function withForbiddenBrowserDataGuard<T extends z.ZodTypeAny>(schema: T) {
 }
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/i);
+const sensitiveSemanticContent = /(?:authorization|cookie|credential|localstorage|password|passcode|profile|proxy|secret|sessionstorage|token|value\s*=)/i;
+
+function isSafeSemanticContent(value: string): boolean {
+  return !sensitiveSemanticContent.test(value);
+}
+
+const SafeSemanticTextSchema = z.string().min(1).max(512).refine(
+  isSafeSemanticContent,
+  'Semantic content may not include sensitive browser data',
+);
+
+const SafeSemanticAttributesSchema = z.object({
+  'aria-label': SafeSemanticTextSchema.optional(),
+  'aria-describedby': SafeSemanticTextSchema.optional(),
+  'aria-controls': SafeSemanticTextSchema.optional(),
+  'aria-expanded': z.enum(['true', 'false']).optional(),
+  'aria-haspopup': z.enum(['true', 'false', 'menu', 'listbox', 'tree', 'grid', 'dialog']).optional(),
+  'aria-current': z.enum(['true', 'false', 'page', 'step', 'location', 'date', 'time']).optional(),
+  'aria-pressed': z.enum(['true', 'false', 'mixed']).optional(),
+  'aria-selected': z.enum(['true', 'false']).optional(),
+}).strict();
 
 export const ScreenshotSchema = withForbiddenBrowserDataGuard(z.discriminatedUnion('kind', [
   z.object({
@@ -133,12 +154,12 @@ export const SemanticTargetSchema = withForbiddenBrowserDataGuard(z.object({
   tag: z.string().min(1).max(64),
   role: z.string().min(1).max(128).optional(),
   accessibleName: z.string().max(512).optional(),
-  attributes: z.record(z.string().max(128)).optional(),
+  attributes: SafeSemanticAttributesSchema.optional(),
   boundingBox: BoundingBoxSchema,
   visible: z.boolean(),
   framePath: z.array(z.string().max(128)).max(20),
   shadowPath: z.array(z.string().max(128)).max(20).optional(),
-  locatorCandidates: z.array(z.string().min(1).max(512)).max(10),
+  locatorCandidates: z.array(SafeSemanticTextSchema).max(10),
 }).strict());
 
 export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({

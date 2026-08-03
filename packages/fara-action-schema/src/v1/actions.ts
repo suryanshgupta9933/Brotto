@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { ActionIdSchema, IdempotencyKeySchema, ObservationIdSchema, SequenceSchema, StepIdSchema } from './ids';
+import {
+  ActionIdSchema,
+  IdempotencyKeySchema,
+  ObservationIdSchema,
+  PolicyDecisionIdSchema,
+  SemanticTargetIdSchema,
+  SequenceSchema,
+  StepIdSchema,
+} from './ids';
 import { assertNoForbiddenBrowserData, ForbiddenBrowserDataError, isHttpUrl } from './observation';
 
 function guardedStrictObject<T extends z.AnyZodObject>(schema: T) {
@@ -25,14 +33,14 @@ const KeyModifiersSchema = z.object({
 }).strict();
 
 export const ExecutableActionV1Schema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('left_click'), x: CoordinateSchema, y: CoordinateSchema, targetId: z.string().uuid().optional() }).strict(),
-  z.object({ type: z.literal('double_click'), x: CoordinateSchema, y: CoordinateSchema, targetId: z.string().uuid().optional() }).strict(),
-  z.object({ type: z.literal('right_click'), x: CoordinateSchema, y: CoordinateSchema, targetId: z.string().uuid().optional() }).strict(),
+  z.object({ type: z.literal('left_click'), x: CoordinateSchema, y: CoordinateSchema, targetId: SemanticTargetIdSchema.optional() }).strict(),
+  z.object({ type: z.literal('double_click'), x: CoordinateSchema, y: CoordinateSchema, targetId: SemanticTargetIdSchema.optional() }).strict(),
+  z.object({ type: z.literal('right_click'), x: CoordinateSchema, y: CoordinateSchema, targetId: SemanticTargetIdSchema.optional() }).strict(),
   z.object({ type: z.literal('drag'), startX: CoordinateSchema, startY: CoordinateSchema, endX: CoordinateSchema, endY: CoordinateSchema }).strict(),
   z.object({ type: z.literal('mouse_move'), x: CoordinateSchema, y: CoordinateSchema }).strict(),
   z.object({ type: z.literal('scroll'), deltaX: z.number().int(), deltaY: z.number().int() }).strict(),
   z.object({ type: z.literal('key'), key: z.string().min(1).max(128), modifiers: KeyModifiersSchema.optional() }).strict(),
-  z.object({ type: z.literal('insert_text'), text: z.string().min(1).max(10_000), targetId: z.string().uuid().optional() }).strict(),
+  z.object({ type: z.literal('insert_text'), text: z.string().min(1).max(10_000), targetId: SemanticTargetIdSchema.optional() }).strict(),
   z.object({ type: z.literal('visit_url'), url: z.string().url().refine(isHttpUrl, 'Only HTTP(S) navigation URLs are allowed') }).strict(),
   z.object({ type: z.literal('history_back'), steps: z.number().int().positive().max(20).default(1) }).strict(),
   z.object({ type: z.literal('wait'), durationMs: z.number().int().positive().max(60_000) }).strict(),
@@ -60,7 +68,15 @@ export const CompletionProposalV1Schema = guardedStrictObject(z.object({
   findings: z.array(CompletionFindingV1Schema).max(100),
   unmetCriteria: z.array(z.string().min(1).max(1_000)).max(100),
   confidence: z.number().min(0).max(1),
-}).strict());
+}).strict()).superRefine((value, context) => {
+  if (value.status === 'succeeded' && value.findings.length === 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['findings'],
+      message: 'Successful completion requires findings with observation evidence',
+    });
+  }
+});
 
 export const AgentProposalV1Schema = z.union([
   ActionProposalV1Schema,
@@ -68,10 +84,18 @@ export const AgentProposalV1Schema = z.union([
 ]);
 
 export const PolicyContextV1Schema = z.object({
+  policyDecisionId: PolicyDecisionIdSchema,
   policyVersion: z.string().min(1).max(128),
   approved: z.boolean(),
   approvalId: z.string().uuid().optional(),
 }).strict();
+
+export const PolicyDecisionV1Schema = guardedStrictObject(z.object({
+  policyDecisionId: PolicyDecisionIdSchema,
+  actionId: ActionIdSchema,
+  observationId: ObservationIdSchema,
+  decision: z.enum(['allowed', 'denied', 'approval_required']),
+}).strict());
 
 export const ActionCommandV1Schema = guardedStrictObject(z.object({
   actionId: ActionIdSchema,
@@ -90,4 +114,5 @@ export type CompletionFindingV1 = z.infer<typeof CompletionFindingV1Schema>;
 export type CompletionProposalV1 = z.infer<typeof CompletionProposalV1Schema>;
 export type AgentProposalV1 = z.infer<typeof AgentProposalV1Schema>;
 export type PolicyContextV1 = z.infer<typeof PolicyContextV1Schema>;
+export type PolicyDecisionV1 = z.infer<typeof PolicyDecisionV1Schema>;
 export type ActionCommandV1 = z.infer<typeof ActionCommandV1Schema>;

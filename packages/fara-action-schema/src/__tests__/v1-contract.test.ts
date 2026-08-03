@@ -4,9 +4,11 @@ import {
   ActionResultV1Schema,
   AgentProposalV1Schema,
   ObservationV1Schema,
+  TrajectoryLinkageV1Schema,
 } from '../v1';
 
 const observationId = '11111111-1111-4111-8111-111111111111';
+const policyDecisionId = '99999999-9999-4999-8999-999999999999';
 
 const validObservation = {
   observationId,
@@ -55,8 +57,13 @@ const validActionCommand = {
   stepId: '66666666-6666-4666-8666-666666666666',
   observationId,
   sequence: 1,
-  action: { type: 'left_click', x: 52, y: 40 },
-  policyContext: { policyVersion: 'v1', approved: false },
+  action: {
+    type: 'left_click',
+    x: 52,
+    y: 40,
+    targetId: '44444444-4444-4444-8444-444444444444',
+  },
+  policyContext: { policyDecisionId, policyVersion: 'v1', approved: false },
   expiresAt: '2026-08-03T10:01:00.000Z',
   idempotencyKey: 'click-search-once',
 };
@@ -70,7 +77,18 @@ const validResult = {
   startedAt: '2026-08-03T10:00:01.000Z',
   completedAt: '2026-08-03T10:00:02.000Z',
   durationMs: 1000,
-  postObservation: validObservation,
+  postObservation: {
+    ...validObservation,
+    observationId: '88888888-8888-4888-8888-888888888888',
+    capturedAt: '2026-08-03T10:00:02.000Z',
+  },
+};
+
+const validPolicyDecision = {
+  policyDecisionId,
+  actionId: validActionCommand.actionId,
+  observationId,
+  decision: 'allowed',
 };
 
 describe('canonical v1 contracts', () => {
@@ -99,10 +117,63 @@ describe('canonical v1 contracts', () => {
     })).toThrow(z.ZodError);
   });
 
-  it('requires an action to reference its exact source observation', () => {
-    const command = ActionCommandV1Schema.parse(validActionCommand);
+  it('rejects a successful action result without a settled post-observation', () => {
+    expect(() => ActionResultV1Schema.parse({
+      ...validResult,
+      postObservation: undefined,
+    })).toThrow(z.ZodError);
+  });
 
-    expect(command.observationId).toBe(validObservation.observationId);
+  it('requires findings with observation evidence for successful completion', () => {
+    expect(() => AgentProposalV1Schema.parse({
+      kind: 'completion',
+      observationId,
+      type: 'terminate',
+      status: 'succeeded',
+      summary: 'The task is complete.',
+      findings: [],
+      unmetCriteria: [],
+      confidence: 0.9,
+    })).toThrow(z.ZodError);
+  });
+
+  it('rejects a trajectory with a command sourced from a different observation', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      proposal: {
+        kind: 'action',
+        observationId,
+        action: validActionCommand.action,
+      },
+      command: {
+        ...validActionCommand,
+        observationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        policyContext: {
+          ...validActionCommand.policyContext,
+          policyDecisionId: validPolicyDecision.policyDecisionId,
+        },
+      },
+      policyDecision: validPolicyDecision,
+      result: validResult,
+    })).toThrow(z.ZodError);
+  });
+
+  it('requires policy outcome and action result status to agree', () => {
+    const trajectory = {
+      proposal: {
+        kind: 'action' as const,
+        observationId,
+        action: validActionCommand.action,
+      },
+      command: validActionCommand,
+      policyDecision: validPolicyDecision,
+      result: validResult,
+    };
+
+    expect(TrajectoryLinkageV1Schema.parse(trajectory).result.status).toBe('succeeded');
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      ...trajectory,
+      policyDecision: { ...validPolicyDecision, decision: 'denied' },
+    })).toThrow(z.ZodError);
   });
 
   it('does not make terminate an executable browser command', () => {
