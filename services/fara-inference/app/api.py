@@ -5,15 +5,35 @@ Implements the OpenAI Chat Completions API format using vLLM as the backend.
 """
 
 from typing import Any, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .client import VLLMClient, InferenceRequest, InferenceResponse, VLLMClientError, VLLMInferenceError
 from .models import ModelManifest, MODEL_REGISTRY, get_model_manifest, get_default_model_manifest
 from .prompts import get_prompt_manager, PromptVersion
+from .contracts import PlanningRequest, PlanningResponse
+from .fara_adapter import FaraAdapter
 
 
 router = APIRouter()
+
+
+def get_fara_adapter() -> FaraAdapter:
+    """Provide a fresh stateless adapter for each planning request."""
+    import os
+
+    from .client import VLLMClient
+
+    return FaraAdapter(VLLMClient(base_url=os.environ.get("VLLM_URL", "http://localhost:8000")))
+
+
+@router.post("/v1/plan", response_model=PlanningResponse)
+async def plan(
+    request: PlanningRequest,
+    adapter: FaraAdapter = Depends(get_fara_adapter),
+) -> PlanningResponse:
+    """Return a strictly validated action, completion, question, or contract-error proposal."""
+    return await adapter.plan(request)
 
 
 class Message(BaseModel):

@@ -6,11 +6,11 @@ Each manifest contains repository, revision, checksum, and license information.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 
 class ModelSize(Enum):
     """Model size variants."""
+
     SIZE_4B = "4b"
     SIZE_9B = "9b"
     SIZE_27B = "27b"
@@ -18,9 +18,10 @@ class ModelSize(Enum):
 
 class ModelProfile(Enum):
     """Deployment profile types."""
-    ECONOMY = "economy"      # Fara1.5-4B - development, self-hosted
-    STANDARD = "standard"    # Fara1.5-9B - production default
-    QUALITY = "quality"      # Fara1.5-27B - difficult tasks, optional escalation
+
+    ECONOMY = "economy"  # Fara1.5-4B - development, self-hosted
+    STANDARD = "standard"  # Fara1.5-9B - production default
+    QUALITY = "quality"  # Fara1.5-27B - difficult tasks, optional escalation
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class ModelManifest:
         max_context_length: Maximum context length in tokens
         description: Human-readable description
     """
+
     model_id: str
     profile: ModelProfile
     size: ModelSize
@@ -50,6 +52,7 @@ class ModelManifest:
     recommended_vram_gb: int
     max_context_length: int
     description: str
+    supports_json_schema: bool = True
 
     @property
     def hf_repo(self) -> str:
@@ -58,15 +61,17 @@ class ModelManifest:
 
     def validate(self) -> bool:
         """Validate the manifest has all required fields."""
-        return all([
-            self.model_id,
-            self.repository,
-            self.revision,
-            self.checksum,
-            self.license,
-            self.recommended_vram_gb > 0,
-            self.max_context_length > 0,
-        ])
+        return all(
+            [
+                self.model_id,
+                self.repository,
+                self.revision,
+                self.checksum,
+                self.license,
+                self.recommended_vram_gb > 0,
+                self.max_context_length > 0,
+            ]
+        )
 
 
 # Model manifests for Fara1.5 family
@@ -122,7 +127,7 @@ MODEL_REGISTRY: dict[str, ModelManifest] = {
 DEFAULT_MODEL_ID = FARA_9B_MANIFEST.model_id
 
 
-def get_model_manifest(model_id: str) -> Optional[ModelManifest]:
+def get_model_manifest(model_id: str) -> ModelManifest | None:
     """Get model manifest by ID, returns None if not found."""
     return MODEL_REGISTRY.get(model_id)
 

@@ -7,7 +7,7 @@ Provides client wrapper for vLLM's OpenAI-compatible API endpoints.
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional, cast
 import httpx
 import json
 
@@ -16,12 +16,13 @@ import json
 class InferenceRequest:
     """Request for model inference."""
     model: str
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]
     temperature: float = 0.7
     max_tokens: int = 2048
     top_p: float = 0.9
     stop: Optional[list[str]] = None
     stream: bool = False
+    response_format: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to vLLM API format."""
@@ -35,6 +36,8 @@ class InferenceRequest:
         }
         if self.stop:
             data["stop"] = self.stop
+        if self.response_format is not None:
+            data["response_format"] = self.response_format
         return data
 
 
@@ -287,7 +290,7 @@ class VLLMClient:
                     f"Failed to get model info: {response.status_code}",
                     status_code=response.status_code,
                 )
-            return response.json()
+            return cast(dict[str, Any], response.json())
         except httpx.ConnectError as e:
             raise VLLMConnectionError(f"Failed to connect to vLLM server: {e}")
         finally:
