@@ -85,15 +85,45 @@ function withForbiddenBrowserDataGuard<T extends z.ZodTypeAny>(schema: T) {
 }
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/i);
-const sensitiveSemanticContent = /(?:authorization|cookie|credential|localstorage|password|passcode|profile|proxy|secret|sessionstorage|token|value\s*=)/i;
+const sensitiveSemanticContent = /\b(?:authorization|cookie|credentials?|localstorage|password|passcode|profile|proxy|secret|sessionstorage|token)\b/i;
+const valueBearingSelector = /\[\s*value(?:\s*[~|^$*]?=|\s*\])/i;
+const selectorAttributeName = /\[\s*([a-z][a-z0-9-]*)\b/gi;
+const safeSelectorAttributes = new Set([
+  'aria-label',
+  'aria-describedby',
+  'aria-controls',
+  'aria-expanded',
+  'aria-haspopup',
+  'aria-current',
+  'aria-pressed',
+  'aria-selected',
+  'id',
+  'name',
+  'role',
+]);
+const restrictedSelectorGrammar = /^[a-z0-9_#.[\]="'():>+~\-\s,]+$/i;
 
 function isSafeSemanticContent(value: string): boolean {
   return !sensitiveSemanticContent.test(value);
 }
 
+function isSafeSelectorPath(value: string): boolean {
+  if (!restrictedSelectorGrammar.test(value) || !isSafeSemanticContent(value) || valueBearingSelector.test(value)) {
+    return false;
+  }
+
+  return [...value.matchAll(selectorAttributeName)]
+    .every((match) => safeSelectorAttributes.has(match[1].toLowerCase()));
+}
+
 const SafeSemanticTextSchema = z.string().min(1).max(512).refine(
   isSafeSemanticContent,
   'Semantic content may not include sensitive browser data',
+);
+
+const SafeSelectorPathSchema = z.string().min(1).max(512).refine(
+  isSafeSelectorPath,
+  'Selector paths may only contain safe, redacted locator syntax',
 );
 
 const SafeSemanticAttributesSchema = z.object({
@@ -153,13 +183,13 @@ export const SemanticTargetSchema = withForbiddenBrowserDataGuard(z.object({
   targetId: SemanticTargetIdSchema,
   tag: z.string().min(1).max(64),
   role: z.string().min(1).max(128).optional(),
-  accessibleName: z.string().max(512).optional(),
+  accessibleName: SafeSemanticTextSchema.optional(),
   attributes: SafeSemanticAttributesSchema.optional(),
   boundingBox: BoundingBoxSchema,
   visible: z.boolean(),
-  framePath: z.array(z.string().max(128)).max(20),
-  shadowPath: z.array(z.string().max(128)).max(20).optional(),
-  locatorCandidates: z.array(SafeSemanticTextSchema).max(10),
+  framePath: z.array(SafeSelectorPathSchema).max(20),
+  shadowPath: z.array(SafeSelectorPathSchema).max(20).optional(),
+  locatorCandidates: z.array(SafeSelectorPathSchema).max(10),
 }).strict());
 
 export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({

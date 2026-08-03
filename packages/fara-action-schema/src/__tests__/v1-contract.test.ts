@@ -64,6 +64,7 @@ const validActionCommand = {
     targetId: '44444444-4444-4444-8444-444444444444',
   },
   policyContext: { policyDecisionId, policyVersion: 'v1', approved: false },
+  dispatchedAt: '2026-08-03T10:00:00.500Z',
   expiresAt: '2026-08-03T10:01:00.000Z',
   idempotencyKey: 'click-search-once',
 };
@@ -80,7 +81,7 @@ const validResult = {
   postObservation: {
     ...validObservation,
     observationId: '88888888-8888-4888-8888-888888888888',
-    capturedAt: '2026-08-03T10:00:02.000Z',
+    capturedAt: '2026-08-03T10:00:02.001Z',
   },
 };
 
@@ -89,6 +90,7 @@ const validPolicyDecision = {
   actionId: validActionCommand.actionId,
   observationId,
   decision: 'allowed',
+  decidedAt: '2026-08-03T10:00:00.250Z',
 };
 
 describe('canonical v1 contracts', () => {
@@ -142,8 +144,10 @@ describe('canonical v1 contracts', () => {
       proposal: {
         kind: 'action',
         observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
         action: validActionCommand.action,
       },
+      sourceObservation: validObservation,
       command: {
         ...validActionCommand,
         observationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -159,9 +163,11 @@ describe('canonical v1 contracts', () => {
 
   it('requires policy outcome and action result status to agree', () => {
     const trajectory = {
+      sourceObservation: validObservation,
       proposal: {
         kind: 'action' as const,
         observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
         action: validActionCommand.action,
       },
       command: validActionCommand,
@@ -173,6 +179,67 @@ describe('canonical v1 contracts', () => {
     expect(() => TrajectoryLinkageV1Schema.parse({
       ...trajectory,
       policyDecision: { ...validPolicyDecision, decision: 'denied' },
+    })).toThrow(z.ZodError);
+    const { postObservation: _postObservation, ...rejectedResultBase } = validResult;
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      ...trajectory,
+      result: {
+        ...rejectedResultBase,
+        status: 'rejected_policy',
+        rejection: { code: 'POLICY_DENIED', message: 'Denied by policy', retryable: false },
+      },
+    })).toThrow(z.ZodError);
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      ...trajectory,
+      policyDecision: { ...validPolicyDecision, decision: 'approval_required' },
+    })).toThrow(z.ZodError);
+    expect(TrajectoryLinkageV1Schema.parse({
+      ...trajectory,
+      command: {
+        ...validActionCommand,
+        policyContext: {
+          ...validActionCommand.policyContext,
+          approved: true,
+          approvalId: 'abababab-abab-4bab-8bab-abababababab',
+        },
+      },
+      policyDecision: { ...validPolicyDecision, decision: 'approval_required' },
+    }).result.status).toBe('succeeded');
+  });
+
+  it('rejects a post-observation captured before the action completed', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: validActionCommand,
+      policyDecision: validPolicyDecision,
+      result: {
+        ...validResult,
+        postObservation: {
+          ...validResult.postObservation,
+          capturedAt: '2026-08-03T10:00:01.500Z',
+        },
+      },
+    })).toThrow(z.ZodError);
+  });
+
+  it('rejects dispatch before the source observation has been proposed and policy-decided', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: { ...validActionCommand, dispatchedAt: '2026-08-03T10:00:00.050Z' },
+      policyDecision: validPolicyDecision,
+      result: validResult,
     })).toThrow(z.ZodError);
   });
 

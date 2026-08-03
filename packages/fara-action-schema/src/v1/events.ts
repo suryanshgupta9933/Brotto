@@ -9,7 +9,7 @@ import {
   TaskIdSchema,
 } from './ids';
 import { ActionCommandV1Schema, ActionProposalV1Schema, PolicyDecisionV1Schema } from './actions';
-import { assertNoForbiddenBrowserData, ForbiddenBrowserDataError } from './observation';
+import { assertNoForbiddenBrowserData, ForbiddenBrowserDataError, ObservationV1Schema } from './observation';
 import { ActionResultV1Schema } from './results';
 
 export const TrajectoryEventKindV1Schema = z.enum([
@@ -54,14 +54,15 @@ export const TrajectoryEventV1Schema = z.object({
 });
 
 export const TrajectoryLinkageV1Schema = z.object({
+  sourceObservation: ObservationV1Schema,
   proposal: ActionProposalV1Schema,
   command: ActionCommandV1Schema,
   policyDecision: PolicyDecisionV1Schema,
   result: ActionResultV1Schema,
 }).strict().superRefine((value, context) => {
-  const { command, policyDecision, proposal, result } = value;
+  const { command, policyDecision, proposal, result, sourceObservation } = value;
 
-  if (proposal.observationId !== command.observationId) {
+  if (sourceObservation.observationId !== proposal.observationId || proposal.observationId !== command.observationId) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['command', 'observationId'], message: 'Command must reference the proposal observation' });
   }
   if (JSON.stringify(proposal.action) !== JSON.stringify(command.action)) {
@@ -73,11 +74,18 @@ export const TrajectoryLinkageV1Schema = z.object({
   if (policyDecision.actionId !== command.actionId || policyDecision.observationId !== command.observationId) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['policyDecision'], message: 'Policy decision must reference the command action and observation' });
   }
+  const hasApprovalProof = command.policyContext.approved && command.policyContext.approvalId !== undefined;
+  if (policyDecision.decision === 'allowed' && ['rejected_policy', 'approval_required'].includes(result.status)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'status'], message: 'Allowed policy decisions cannot produce policy rejection or approval-required results' });
+  }
   if (policyDecision.decision === 'denied' && result.status !== 'rejected_policy') {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'status'], message: 'Denied policy decisions require a rejected_policy result' });
   }
-  if (policyDecision.decision === 'approval_required' && result.status !== 'approval_required') {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'status'], message: 'Approval-required policy decisions require an approval_required result' });
+  if (policyDecision.decision === 'approval_required' && !hasApprovalProof && result.status !== 'approval_required') {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'status'], message: 'Unproven approval-required decisions require an approval_required result' });
+  }
+  if (policyDecision.decision === 'approval_required' && hasApprovalProof && ['rejected_policy', 'approval_required'].includes(result.status)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'status'], message: 'Approved decisions cannot produce policy rejection or approval-required results' });
   }
   if (
     result.actionId !== command.actionId ||
@@ -87,8 +95,28 @@ export const TrajectoryLinkageV1Schema = z.object({
   ) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['result'], message: 'Result must follow the command and preserve its identifiers' });
   }
+  const sourceCapturedAt = Date.parse(sourceObservation.capturedAt);
+  const proposedAt = Date.parse(proposal.proposedAt);
+  const decidedAt = Date.parse(policyDecision.decidedAt);
+  const dispatchedAt = Date.parse(command.dispatchedAt);
+  const startedAt = Date.parse(result.startedAt);
+  const completedAt = Date.parse(result.completedAt);
+  if (!(
+    sourceCapturedAt <= proposedAt &&
+    proposedAt <= decidedAt &&
+    decidedAt <= dispatchedAt &&
+    dispatchedAt <= startedAt &&
+    startedAt <= completedAt &&
+    sourceCapturedAt < dispatchedAt &&
+    proposedAt < dispatchedAt
+  )) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'startedAt'], message: 'Observation, proposal, policy, dispatch, and execution timestamps must be chronological' });
+  }
   if (result.status === 'succeeded' && result.postObservation.observationId === command.observationId) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'postObservation', 'observationId'], message: 'Successful action requires a newer post-observation' });
+  }
+  if (result.status === 'succeeded' && Date.parse(result.postObservation.capturedAt) <= completedAt) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'postObservation', 'capturedAt'], message: 'Successful action post-observation must be captured after completion' });
   }
 });
 

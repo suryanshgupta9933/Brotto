@@ -51,6 +51,7 @@ export const ExecutableActionV1Schema = z.discriminatedUnion('type', [
 export const ActionProposalV1Schema = guardedStrictObject(z.object({
   kind: z.literal('action'),
   observationId: ObservationIdSchema,
+  proposedAt: z.string().datetime(),
   action: ExecutableActionV1Schema,
 }).strict());
 
@@ -95,6 +96,7 @@ export const PolicyDecisionV1Schema = guardedStrictObject(z.object({
   actionId: ActionIdSchema,
   observationId: ObservationIdSchema,
   decision: z.enum(['allowed', 'denied', 'approval_required']),
+  decidedAt: z.string().datetime(),
 }).strict());
 
 export const ActionCommandV1Schema = guardedStrictObject(z.object({
@@ -104,6 +106,7 @@ export const ActionCommandV1Schema = guardedStrictObject(z.object({
   sequence: SequenceSchema,
   action: ExecutableActionV1Schema,
   policyContext: PolicyContextV1Schema,
+  dispatchedAt: z.string().datetime(),
   expiresAt: z.string().datetime(),
   idempotencyKey: IdempotencyKeySchema,
 }).strict());

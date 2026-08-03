@@ -80,6 +80,51 @@ describe('v1 forbidden browser-data defense', () => {
     })).toThrow();
   });
 
+  it('rejects secret-bearing accessible names and nested frame or shadow paths', () => {
+    const safeTarget = {
+      targetId: '44444444-4444-4444-8444-444444444444',
+      tag: 'button',
+      role: 'button',
+      accessibleName: 'Search results',
+      attributes: { 'aria-label': 'Search' },
+      boundingBox: { x: 12, y: 24, width: 80, height: 32 },
+      visible: true,
+      framePath: ['iframe'],
+      shadowPath: ['fara-card'],
+      locatorCandidates: ['button[aria-label="Search"]'],
+    };
+
+    expect(ObservationV1Schema.parse({ ...validObservation, semanticTargets: [safeTarget] }))
+      .toEqual(expect.objectContaining({ semanticTargets: [expect.any(Object)] }));
+    expect(() => ObservationV1Schema.parse({
+      ...validObservation,
+      semanticTargets: [{ ...safeTarget, accessibleName: 'Password: hunter2' }],
+    })).toThrow();
+    expect(() => ObservationV1Schema.parse({
+      ...validObservation,
+      semanticTargets: [{ ...safeTarget, framePath: ['iframe', 'input[value="hunter2"]'] }],
+    })).toThrow();
+    expect(() => ObservationV1Schema.parse({
+      ...validObservation,
+      semanticTargets: [{ ...safeTarget, shadowPath: ['fara-card', '#secret-account'] }],
+    })).toThrow();
+  });
+
+  it('allows ordinary UI text at conservative keyword boundaries', () => {
+    expect(() => ObservationV1Schema.parse({
+      ...validObservation,
+      semanticTargets: [{
+        targetId: '44444444-4444-4444-8444-444444444444',
+        tag: 'button',
+        accessibleName: 'Tokenize search results',
+        boundingBox: { x: 12, y: 24, width: 80, height: 32 },
+        visible: true,
+        framePath: [],
+        locatorCandidates: ['button'],
+      }],
+    })).not.toThrow();
+  });
+
   it('accepts sanitized serialized data', () => {
     expect(() => assertNoForbiddenBrowserData(validResult)).not.toThrow();
   });
