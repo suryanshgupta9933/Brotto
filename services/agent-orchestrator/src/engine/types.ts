@@ -5,6 +5,7 @@ import type {
   ActionResultV1,
   AgentProposalV1,
   ApprovalResolutionV1,
+  CompletionProposalV1,
   MessageId,
   ObservationV1,
   PolicyDecisionV1,
@@ -65,6 +66,7 @@ export interface PlanningInput {
   completionCriteria: string[];
   observation: ObservationV1;
   recentResults: ActionResultV1[];
+  trajectory: TrajectoryEventV1[];
 }
 
 export interface PolicyInput {
@@ -74,14 +76,49 @@ export interface PolicyInput {
   actionId: ActionId;
   policyDecisionId: PolicyDecisionV1['policyDecisionId'];
   proposal: ActionProposalV1;
+  observation: ObservationV1;
 }
 
 export interface InferencePort {
-  plan(input: PlanningInput): Promise<AgentProposalV1>;
+  plan(input: PlanningInput, signal: AbortSignal): Promise<AgentProposalV1>;
 }
 
 export interface PolicyPort {
-  evaluate(input: PolicyInput): Promise<PolicyDecisionV1>;
+  evaluate(input: PolicyInput, signal: AbortSignal): Promise<PolicyDecisionV1>;
+}
+
+export type CompletionVerificationCode =
+  | 'VERIFIED_COMPLETION'
+  | 'INSUFFICIENT_EVIDENCE'
+  | 'STALE_EVIDENCE'
+  | 'UNMET_CRITERIA'
+  | 'SPECULATIVE_EVIDENCE'
+  | 'MODEL_REPORTED_FAILURE';
+
+export interface CompletionVerificationDecision {
+  outcome: 'accepted' | 'continue' | 'failed';
+  accepted: boolean;
+  code: CompletionVerificationCode;
+  reason: string;
+}
+
+export interface CompletionVerificationPort {
+  verify(
+    proposal: CompletionProposalV1,
+    trajectory: TrajectoryEventV1[],
+  ): CompletionVerificationDecision;
+}
+
+export class InferenceContractError extends Error {
+  readonly code = 'INFERENCE_CONTRACT_ERROR';
+
+  constructor(
+    message: string,
+    public readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = 'InferenceContractError';
+  }
 }
 
 export interface CommandSink {
@@ -262,6 +299,7 @@ export interface SessionEngineOptions {
   policy: PolicyPort;
   commandSink: CommandSink;
   trajectorySink: TrajectorySink;
+  completionVerifier?: CompletionVerificationPort;
   budgets?: Partial<EngineBudgets>;
   now?: () => string;
   idGenerator?: () => string;

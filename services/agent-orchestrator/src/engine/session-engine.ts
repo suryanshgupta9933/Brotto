@@ -18,7 +18,8 @@ import type {
   StoredOutcome,
   WorkClaim,
 } from './types.js';
-import { SessionEngineError } from './types.js';
+import { InferenceContractError, SessionEngineError } from './types.js';
+import { CompletionVerifier } from './completion-verifier.js';
 import {
   actionSignature,
   DEFAULT_ENGINE_BUDGETS,
@@ -46,8 +47,13 @@ export class SessionEngine {
   private readonly budgets;
   private readonly claimantId: string;
   private readonly workClaimTtlMs: number;
+  private readonly completionVerifier;
   private readonly recoveringSessions = new Set<string>();
   private readonly requestedRecovery = new Map<string, boolean>();
+  private readonly workControllers = new Map<string, {
+    sessionId: CanonicalSession['sessionId'];
+    controller: AbortController;
+  }>();
 
   constructor(private readonly options: SessionEngineOptions) {
     this.now = options.now ?? (() => new Date().toISOString());
@@ -55,6 +61,7 @@ export class SessionEngine {
     this.budgets = { ...DEFAULT_ENGINE_BUDGETS, ...options.budgets };
     this.claimantId = options.claimantId ?? randomUUID();
     this.workClaimTtlMs = options.workClaimTtlMs ?? 30_000;
+    this.completionVerifier = options.completionVerifier ?? new CompletionVerifier();
   }
 
   async handle(event: SessionEngineEvent): Promise<StoredOutcome> {
@@ -285,17 +292,77 @@ export class SessionEngine {
     const observation = session.lastObservation;
     if (inferenceId === null || observation === null) return false;
     if (!await this.claimWork(session, 'inference', inferenceId)) return false;
-    const proposal = await this.options.inference.plan({
-      workId: inferenceId,
-      sessionId: session.sessionId,
-      taskId: session.taskId,
-      goal: session.goal,
-      completionCriteria: session.completionCriteria,
-      observation,
-      recentResults: session.recentResults,
-    });
-    await this.applyProposal(session.sessionId, inferenceId, proposal);
-    return true;
+    const controller = this.beginWorkController(session.sessionId, inferenceId);
+    try {
+      const proposal = await this.options.inference.plan({
+        workId: inferenceId,
+        sessionId: session.sessionId,
+        taskId: session.taskId,
+        goal: session.goal,
+        completionCriteria: session.completionCriteria,
+        observation,
+        recentResults: session.recentResults,
+        trajectory: session.trajectoryOutbox.map((entry) => entry.event).slice(-100),
+      }, controller.signal);
+      await this.applyProposal(session.sessionId, inferenceId, proposal);
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted) return false;
+      if (error instanceof InferenceContractError) {
+        await this.applyInferenceContractFailure(session.sessionId, inferenceId, error);
+        return true;
+      }
+      throw error;
+    } finally {
+      this.endWorkController(inferenceId, controller);
+    }
+  }
+
+  private async applyInferenceContractFailure(
+    sessionId: CanonicalSession['sessionId'],
+    inferenceId: string,
+    error: InferenceContractError,
+  ): Promise<void> {
+    const session = await this.requireSession(sessionId);
+    if (
+      session.activeInferenceId !== inferenceId ||
+      session.state !== 'PLANNING' ||
+      !this.ownsWorkClaim(session, 'inference', inferenceId)
+    ) return;
+    const expectedRevision = session.revision;
+    const causationMessageId = inferenceId.slice('inference:'.length) as MessageId;
+    session.workClaim = null;
+    session.inferenceRepairAttempts += 1;
+    if (!error.retryable) {
+      session.inferenceRepairAttempts = Math.max(
+        session.inferenceRepairAttempts,
+        this.budgets.maxInferenceRepairAttempts,
+      );
+    }
+    const terminalReason = detectTerminalReason(session, this.budgets, this.now());
+    if (terminalReason !== null) {
+      session.state = 'FAILED';
+      session.activeInferenceId = null;
+      session.terminalReason = terminalReason;
+      this.abortSessionWork(sessionId, terminalReason.message);
+    }
+    session.updatedAt = this.now();
+    this.queueTrajectory(session, [
+      {
+        kind: 'model_parse_failure',
+        correlationId: causationMessageId,
+        summary: error.message,
+        observationId: session.lastObservation?.observationId,
+      },
+      ...(terminalReason === null ? [] : [{
+        kind: 'task_terminal_outcome' as const,
+        correlationId: causationMessageId,
+        summary: terminalReason.message,
+        observationId: session.lastObservation?.observationId,
+      }]),
+    ]);
+    session.revision = expectedRevision + 1;
+    await this.options.store.transition(session, expectedRevision);
   }
 
   private async applyProposal(
@@ -322,9 +389,16 @@ export class SessionEngine {
     const expectedRevision = session.revision;
     session.activeInferenceId = null;
     session.workClaim = null;
+    session.inferenceRepairAttempts = 0;
     if (proposal.kind === 'completion') {
-      session.state = proposal.status === 'succeeded' ? 'COMPLETED' : 'FAILED';
-      session.terminalReason = {
+      const verification = this.completionVerifier.verify(
+        proposal,
+        session.trajectoryOutbox.map((entry) => entry.event),
+      );
+      session.state = verification.outcome === 'accepted'
+        ? 'COMPLETED'
+        : verification.outcome === 'failed' ? 'FAILED' : 'OBSERVING';
+      session.terminalReason = verification.outcome === 'continue' ? null : {
         code: 'MODEL_COMPLETION',
         message: proposal.summary,
         detectedAt: this.now(),
@@ -338,12 +412,19 @@ export class SessionEngine {
           observationId: proposal.observationId,
         },
         {
-          kind: 'task_terminal_outcome',
+          kind: 'verification_result',
+          correlationId: causationMessageId,
+          summary: `${verification.code}: ${verification.reason}`,
+          observationId: proposal.observationId,
+        },
+        ...(verification.outcome === 'continue' ? [] : [{
+          kind: 'task_terminal_outcome' as const,
           correlationId: causationMessageId,
           summary: proposal.summary,
           observationId: proposal.observationId,
-        },
+        }]),
       ]);
+      if (verification.outcome !== 'continue') this.abortSessionWork(sessionId, verification.reason);
       session.revision = expectedRevision + 1;
       await this.options.store.transition(session, expectedRevision);
       return;
@@ -386,16 +467,25 @@ export class SessionEngine {
     const pending = session.pendingPolicy;
     if (pending === null) return false;
     if (!await this.claimWork(session, 'policy', pending.policyDecisionId)) return false;
-    const decision = await this.options.policy.evaluate({
-      workId: pending.policyDecisionId,
-      sessionId: session.sessionId,
-      taskId: session.taskId,
-      actionId: pending.actionId,
-      policyDecisionId: pending.policyDecisionId,
-      proposal: pending.proposal,
-    });
-    await this.applyPolicyDecision(session.sessionId, pending, decision);
-    return true;
+    const controller = this.beginWorkController(session.sessionId, pending.policyDecisionId);
+    try {
+      const decision = await this.options.policy.evaluate({
+        workId: pending.policyDecisionId,
+        sessionId: session.sessionId,
+        taskId: session.taskId,
+        actionId: pending.actionId,
+        policyDecisionId: pending.policyDecisionId,
+        proposal: pending.proposal,
+        observation: session.lastObservation!,
+      }, controller.signal);
+      await this.applyPolicyDecision(session.sessionId, pending, decision);
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted) return false;
+      throw error;
+    } finally {
+      this.endWorkController(pending.policyDecisionId, controller);
+    }
   }
 
   private async applyPolicyDecision(
@@ -436,6 +526,7 @@ export class SessionEngine {
       session.pendingPolicy = null;
       session.terminalReason = reason;
       session.updatedAt = reason.detectedAt;
+      this.abortSessionWork(sessionId, reason.message);
       this.queueTrajectory(session, [
         {
           kind: 'policy_decided',
@@ -803,6 +894,7 @@ export class SessionEngine {
   ): Promise<StoredOutcome> {
     const session = await this.requireSession(event.sessionId);
     if (this.isTerminal(session)) return this.persistOutcome(session, event.messageId, 'ignored');
+    this.abortSessionWork(event.sessionId, event.reason);
     const references = session.activeAction === null
       ? session.pendingApproval === null
         ? session.pendingPolicy === null ? {} : this.pendingReferences(session.pendingPolicy)
@@ -1013,6 +1105,7 @@ export class SessionEngine {
     session.revision = expectedRevision + 1;
     try {
       await this.options.store.compareAndSwap(session, expectedRevision);
+      this.abortSupersededLocalWork(session.sessionId, workId);
       return true;
     } catch (error) {
       if (error instanceof SessionEngineError && error.code === 'STORE_CONFLICT') return false;
@@ -1028,6 +1121,45 @@ export class SessionEngine {
     return session.workClaim?.kind === kind &&
       session.workClaim.workId === workId &&
       session.workClaim.claimantId === this.claimantId;
+  }
+
+  private beginWorkController(
+    sessionId: CanonicalSession['sessionId'],
+    workId: string,
+  ): AbortController {
+    this.abortSupersededLocalWork(sessionId, workId);
+    const existing = this.workControllers.get(workId);
+    existing?.controller.abort(new DOMException('Work claim superseded', 'AbortError'));
+    const controller = new AbortController();
+    this.workControllers.set(workId, { sessionId, controller });
+    return controller;
+  }
+
+  private endWorkController(workId: string, controller: AbortController): void {
+    if (this.workControllers.get(workId)?.controller === controller) {
+      this.workControllers.delete(workId);
+    }
+  }
+
+  private abortSupersededLocalWork(
+    sessionId: CanonicalSession['sessionId'],
+    currentWorkId: string,
+  ): void {
+    for (const [workId, active] of this.workControllers) {
+      if (active.sessionId === sessionId && workId !== currentWorkId) {
+        active.controller.abort(new DOMException('Work claim superseded', 'AbortError'));
+        this.workControllers.delete(workId);
+      }
+    }
+  }
+
+  private abortSessionWork(sessionId: CanonicalSession['sessionId'], reason: string): void {
+    for (const [workId, active] of this.workControllers) {
+      if (active.sessionId === sessionId) {
+        active.controller.abort(new DOMException(reason, 'AbortError'));
+        this.workControllers.delete(workId);
+      }
+    }
   }
 
   private canObserve(session: CanonicalSession): boolean {

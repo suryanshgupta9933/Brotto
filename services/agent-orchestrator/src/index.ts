@@ -40,6 +40,16 @@ export {
   isInferenceError,
 } from './inference';
 
+// Canonical stateless planner adapter
+export {
+  FaraPlanner,
+  FaraPlannerError,
+  FaraPlannerRequestError,
+  type FaraPlannerConfig,
+  type FaraPlannerDiagnostic,
+  type FaraPlannerUsage,
+} from './adapters/fara-planner';
+
 // Tool call parser
 export {
   ToolCallParser,
@@ -57,6 +67,15 @@ export {
   type PolicyConfig,
   type PolicyEvaluationOrchestratorResult,
 } from './policy';
+
+// Canonical code-enforced policy adapter
+export {
+  PolicyAdapter,
+  type PolicyAdapterConfig,
+  type PolicyAdministratorOverrides,
+  type PolicyCategory,
+  type PolicyEvaluationDiagnostic,
+} from './adapters/policy-adapter';
 
 // MCP action executor
 export {
@@ -78,6 +97,9 @@ export {
   FailureType,
   type AccessibilitySnapshotResult,
 } from './completion';
+
+// Canonical deterministic completion verifier
+export { CompletionVerifier } from './engine/completion-verifier';
 
 // Budget tracking
 export {

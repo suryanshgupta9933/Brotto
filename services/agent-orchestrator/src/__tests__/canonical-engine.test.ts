@@ -8,7 +8,7 @@ import type {
 } from '@fara-platform/fara-action-schema';
 import { InMemorySessionStore } from '../engine/session-store.js';
 import { SessionEngine } from '../engine/session-engine.js';
-import { SessionEngineError } from '../engine/types.js';
+import { InferenceContractError, SessionEngineError } from '../engine/types.js';
 import {
   actionSignature,
   detectTerminalReason,
@@ -92,6 +92,7 @@ class FakeInference implements InferencePort {
 
 class DeferredInference implements InferencePort {
   readonly calls: Parameters<InferencePort['plan']>[0][] = [];
+  readonly signals: AbortSignal[] = [];
   private releaseFirst!: () => void;
   private markFirstStarted!: () => void;
   readonly firstStarted = new Promise<void>((resolve) => { this.markFirstStarted = resolve; });
@@ -101,8 +102,12 @@ class DeferredInference implements InferencePort {
     this.releaseFirst();
   }
 
-  async plan(input: Parameters<InferencePort['plan']>[0]): Promise<AgentProposalV1> {
+  async plan(
+    input: Parameters<InferencePort['plan']>[0],
+    signal: AbortSignal,
+  ): Promise<AgentProposalV1> {
     this.calls.push(input);
+    this.signals.push(signal);
     if (this.calls.length === 1) {
       this.markFirstStarted();
       await this.firstReleased;
@@ -133,6 +138,7 @@ class FakePolicy implements PolicyPort {
 class DeferredPolicy implements PolicyPort {
   calls = 0;
   readonly inputs: Parameters<PolicyPort['evaluate']>[0][] = [];
+  readonly signals: AbortSignal[] = [];
   private releaseFirst!: () => void;
   private markFirstStarted!: () => void;
   readonly firstStarted = new Promise<void>((resolve) => { this.markFirstStarted = resolve; });
@@ -142,9 +148,13 @@ class DeferredPolicy implements PolicyPort {
     this.releaseFirst();
   }
 
-  async evaluate(input: Parameters<PolicyPort['evaluate']>[0]): Promise<PolicyDecisionV1> {
+  async evaluate(
+    input: Parameters<PolicyPort['evaluate']>[0],
+    signal: AbortSignal,
+  ): Promise<PolicyDecisionV1> {
     this.calls += 1;
     this.inputs.push(input);
+    this.signals.push(signal);
     if (this.calls === 1) {
       this.markFirstStarted();
       await this.firstReleased;
@@ -395,11 +405,116 @@ describe('SessionEngine', () => {
       reason: 'User cancelled during policy evaluation',
       occurredAt: '2026-08-03T10:00:03.000Z',
     });
+    expect(policy.signals[0]?.aborted).toBe(true);
     policy.release();
     await planning;
 
     expect(commandSink.commands).toHaveLength(0);
     expect((await store.load(ids.session as never))?.state).toBe('CANCELLED');
+  });
+
+  it('does not replan around a policy denial', async () => {
+    const { engine, inference, commandSink, store } = createEngine({
+      policy: new FakePolicy('denied'),
+    });
+    await open(engine);
+
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000059',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+
+    expect(inference.calls).toHaveLength(1);
+    expect(commandSink.commands).toHaveLength(0);
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'FAILED',
+      terminalReason: { code: 'POLICY_DENIED' },
+    });
+  });
+
+  it('maps an exhausted inference contract error to a terminal repair outcome', async () => {
+    const inference: InferencePort = {
+      plan: async () => {
+        throw new InferenceContractError('Model output remained invalid after repairs', false);
+      },
+    };
+    const { engine, commandSink, store, trajectorySink } = createEngine({ inference });
+    await open(engine);
+
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000060',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+
+    expect(commandSink.commands).toHaveLength(0);
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'FAILED',
+      inferenceRepairAttempts: 2,
+      terminalReason: { code: 'INFERENCE_REPAIR_EXHAUSTED' },
+    });
+    expect(trajectorySink.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'model_parse_failure' }),
+    ]));
+  });
+
+  it('aborts the local inference adapter when the session is cancelled', async () => {
+    const inference = new DeferredInference();
+    const { engine, store } = createEngine({ inference });
+    await open(engine);
+    const planning = engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000062',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+    await inference.firstStarted;
+
+    await engine.handle({
+      type: 'task.cancelled',
+      messageId: '10000000-0000-4000-8000-000000000063',
+      sessionId: ids.session,
+      reason: 'User cancelled during inference',
+      occurredAt: '2026-08-03T10:00:03.000Z',
+    });
+
+    expect(inference.signals[0]?.aborted).toBe(true);
+    inference.release();
+    await planning;
+    expect((await store.load(ids.session as never))?.state).toBe('CANCELLED');
+  });
+
+  it('continues from a fresh observation after rejecting speculative completion', async () => {
+    const inference = new FakeInference([{
+      kind: 'completion',
+      observationId: ids.observation1,
+      type: 'terminate',
+      status: 'succeeded',
+      summary: 'The task probably succeeded.',
+      findings: [{ fact: 'It seems likely to be complete', observationIds: [ids.observation1] }],
+      unmetCriteria: [],
+      confidence: 0.9,
+    } as AgentProposalV1]);
+    const { engine, commandSink, store } = createEngine({ inference });
+    await open(engine);
+
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000061',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+
+    expect(inference.calls).toHaveLength(1);
+    expect(commandSink.commands).toHaveLength(0);
+    expect(await store.load(ids.session as never)).toMatchObject({ state: 'OBSERVING', terminalReason: null });
   });
 
   it('lets only one engine call inference while a persisted claim is active', async () => {
@@ -532,6 +647,7 @@ describe('SessionEngine', () => {
       occurredAt: '2026-08-03T10:00:04.000Z',
     });
     expect(await store.load(ids.session as never)).toMatchObject({ state: 'CANCELLED', workClaim: null });
+    expect(inference.signals[0]?.aborted).toBe(false);
 
     inference.release();
     await planning;
