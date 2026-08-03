@@ -29,7 +29,7 @@ import {
   type FaraAction,
   type ObservationId,
   createObservationId,
-} from '@fara/fara-action-schema';
+} from '@fara-platform/fara-action-schema';
 
 /**
  * Orchestrator server configuration
@@ -87,6 +87,7 @@ export class AgentOrchestrator {
   private listeners: Map<string, Set<OrchestratorEventListener>>;
   private isRunning = false;
   private shouldStop = false;
+  private observationSequence = 0;
 
   constructor(config: OrchestratorConfig) {
     this.config = config;
@@ -270,8 +271,8 @@ export class AgentOrchestrator {
     const context = this.session.getContext();
 
     // Update parser with current observation ID
-    const observationId = createObservationId();
-    this.parser.setCurrentObservationId(observationId);
+    const observationId = createObservationId(this.observationSequence++);
+    this.parser.setCurrentObservationId(observationId.value);
 
     // In real implementation, this would take a screenshot via executor
     // For now, we just transition to planning
@@ -381,7 +382,7 @@ export class AgentOrchestrator {
    */
   private async execute(): Promise<void> {
     const context = this.session.getContext();
-    const observationId = context.lastObservationId ?? createObservationId();
+    const observationId = context.lastObservationId ?? createObservationId(this.observationSequence++);
 
     // In real implementation, we would get the action from the parsed actions
     // For this skeleton, we just verify and complete
@@ -465,14 +466,14 @@ export class AgentOrchestrator {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, new Set());
     }
-    this.listeners.get(event)!.add(listener as OrchestratorEventListener);
+    this.listeners.get(event)!.add(listener as unknown as OrchestratorEventListener);
   }
 
   /**
    * Remove event listener
    */
   off<K extends keyof OrchestratorEvents>(event: K, listener: OrchestratorEvents[K]): void {
-    this.listeners.get(event)?.delete(listener as OrchestratorEventListener);
+    this.listeners.get(event)?.delete(listener as unknown as OrchestratorEventListener);
   }
 
   /**

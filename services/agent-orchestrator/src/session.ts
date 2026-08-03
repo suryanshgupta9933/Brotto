@@ -10,7 +10,7 @@
  */
 
 import { EventEmitter } from 'events';
-import type { ObservationId } from '@fara/fara-action-schema';
+import type { ObservationId } from '@fara-platform/fara-action-schema';
 
 /**
  * Session states as defined in ARCHITECTURE.md section 3.2
@@ -152,7 +152,6 @@ export class SessionStateMachine extends EventEmitter {
   private state: SessionState;
   private context: SessionContext;
   private history: SessionHistoryEntry[] = [];
-  private listeners: Partial<SessionEvents> = {};
 
   constructor(config: SessionConfig) {
     super();
@@ -303,9 +302,7 @@ export class SessionStateMachine extends EventEmitter {
    * Transition to PLANNING state (requesting inference)
    */
   startPlanning(): void {
-    if (this.state === SessionState.OBSERVING) {
-      this.transition(SessionState.PLANNING);
-    }
+    this.transition(SessionState.PLANNING);
   }
 
   /**
@@ -412,17 +409,15 @@ export class SessionStateMachine extends EventEmitter {
   /**
    * Register event listeners
    */
-  on<K extends keyof SessionEvents>(event: K, listener: SessionEvents[K]): void {
-    this.listeners[event] = listener;
-    super.on(event, listener as (...args: unknown[]) => void);
+  override on(event: string | symbol, listener: (...args: any[]) => void): this {
+    return super.on(event, listener);
   }
 
   /**
    * Remove event listeners
    */
-  off<K extends keyof SessionEvents>(event: K, listener: SessionEvents[K]): void {
-    delete this.listeners[event];
-    super.off(event, listener as (...args: unknown[]) => void);
+  override off(event: string | symbol, listener: (...args: any[]) => void): this {
+    return super.off(event, listener);
   }
 }
 

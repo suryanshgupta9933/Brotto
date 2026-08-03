@@ -17,10 +17,7 @@ import {
   validateActionArgs,
   tryValidateActionArgs,
   validateCoordinatesInBounds,
-  isViewportAction,
-  isNavigationAction,
-  createObservationId,
-} from '@fara/fara-action-schema';
+} from '@fara-platform/fara-action-schema';
 import type { FaraToolCall } from './inference.js';
 
 /**
@@ -110,6 +107,10 @@ export enum ParseErrorCode {
   INVALID_URL = 'INVALID_URL',
   MISSING_REQUIRED_FIELD = 'MISSING_REQUIRED_FIELD',
   STALE_OBSERVATION = 'STALE_OBSERVATION',
+}
+
+function isParseError(value: FaraActionArgs | ParseError): value is ParseError {
+  return 'toolCall' in value && 'error' in value && 'code' in value;
 }
 
 /**
@@ -208,8 +209,16 @@ export class ToolCallParser {
 
     // Build action arguments
     const actionArgs = this.buildActionArgs(actionType, args, toolCall);
-    if (actionArgs instanceof ParseError) {
+    if (isParseError(actionArgs)) {
       return { error: actionArgs };
+    }
+
+    // Validate URL if required
+    if (actionArgs.type === ActionType.VISIT_URL) {
+      const urlValidation = this.validateUrl(actionArgs.url, toolCall);
+      if (urlValidation.error) {
+        return { error: urlValidation.error };
+      }
     }
 
     // Validate arguments against schema
@@ -231,7 +240,7 @@ export class ToolCallParser {
     // Validate coordinates if required
     const warnings: string[] = [];
     if (COORDINATE_REQUIRING_ACTIONS.has(actionType) && this.coordinateBounds) {
-      const coordValidation = this.validateCoordinates(actionType, actionArgs, toolCall);
+      const coordValidation = this.validateCoordinates(actionArgs, toolCall);
       if (coordValidation.error) {
         return { error: coordValidation.error };
       }
@@ -240,16 +249,8 @@ export class ToolCallParser {
       }
     }
 
-    // Validate URL if required
-    if (actionType === ActionType.VISIT_URL) {
-      const urlValidation = this.validateUrl(actionArgs.url, toolCall);
-      if (urlValidation.error) {
-        return { error: urlValidation.error };
-      }
-    }
-
     // Create the Fara action object
-    const action = this.createFaraAction(actionType, actionArgs);
+    const action = this.createFaraAction(actionArgs);
 
     return {
       action: {
@@ -435,7 +436,6 @@ export class ToolCallParser {
    * Validate coordinates are within bounds
    */
   private validateCoordinates(
-    actionType: ActionType,
     args: FaraActionArgs,
     toolCall: FaraToolCall
   ): { error?: ParseError; warning?: string } {
@@ -445,7 +445,7 @@ export class ToolCallParser {
 
     const { width, height } = this.coordinateBounds;
 
-    switch (actionType) {
+    switch (args.type) {
       case ActionType.LEFT_CLICK:
       case ActionType.DOUBLE_CLICK:
       case ActionType.RIGHT_CLICK:
@@ -524,7 +524,7 @@ export class ToolCallParser {
   /**
    * Create Fara action from validated args
    */
-  private createFaraAction(type: ActionType, args: FaraActionArgs): FaraAction {
+  private createFaraAction(args: FaraActionArgs): FaraAction {
     // This is a simplified version - in practice we'd use the schema to create proper typed objects
     return args as unknown as FaraAction;
   }

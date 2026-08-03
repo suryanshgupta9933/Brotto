@@ -17,9 +17,11 @@ import {
   getMcpToolName,
   getActionExecutionType,
   ActionExecutionType,
+  ActionErrorCode,
+  type ActionSuccessData,
   createActionSuccess,
   createActionFailure,
-} from '@fara/fara-action-schema';
+} from '@fara-platform/fara-action-schema';
 
 /**
  * MCP tool call result
@@ -107,17 +109,17 @@ export class ActionExecutor {
   async execute(action: FaraAction, observationId: ObservationId): Promise<ActionResult> {
     if (this.isExecuting) {
       return createActionFailure(
-        action.id,
-        'Executor busy with another action',
-        'busy'
+        action.type,
+        ActionErrorCode.UNKNOWN,
+        'Executor busy with another action'
       );
     }
 
     if (!this.mcpGateway.isConnected()) {
       return createActionFailure(
-        action.id,
-        'MCP Gateway not connected',
-        'connection_error'
+        action.type,
+        ActionErrorCode.UNKNOWN,
+        'MCP Gateway not connected'
       );
     }
 
@@ -134,16 +136,16 @@ export class ActionExecutor {
 
         case ActionExecutionType.CONTROL_PLANE_APPROVAL:
           return createActionFailure(
-            action.id,
-            'ask_user_question requires control plane approval - should not reach executor',
-            'invalid_action'
+            action.type,
+            ActionErrorCode.PERMISSION_DENIED,
+            'ask_user_question requires control plane approval - should not reach executor'
           );
 
         case ActionExecutionType.SESSION_COMPLETION:
-          return createActionSuccess(action.id, { terminate: true });
+          return createActionSuccess(action.type);
 
         case ActionExecutionType.SESSION_MEMORY:
-          return createActionSuccess(action.id, { memorized: true });
+          return createActionSuccess(action.type);
 
         case ActionExecutionType.MCP_TOOL:
         default:
@@ -166,18 +168,18 @@ export class ActionExecutor {
 
     if (!toolName) {
       return createActionFailure(
-        action.id,
-        `No MCP tool mapping for action type: ${action.type}`,
-        'invalid_action'
+        action.type,
+        ActionErrorCode.NOT_SUPPORTED,
+        `No MCP tool mapping for action type: ${action.type}`
       );
     }
 
     const params = mapActionToMcpParams(action);
     if (!params) {
       return createActionFailure(
-        action.id,
-        `Failed to map action to MCP parameters: ${action.type}`,
-        'invalid_action'
+        action.type,
+        ActionErrorCode.UNKNOWN,
+        `Failed to map action to MCP parameters: ${action.type}`
       );
     }
 
@@ -190,16 +192,15 @@ export class ActionExecutor {
     const duration = Date.now() - startTime;
 
     if (result.success) {
-      return createActionSuccess(action.id, {
-        ...result.result,
-        durationMs: duration,
-        observationId,
-      });
+      const data = result.result !== null && typeof result.result === 'object'
+        ? result.result as ActionSuccessData
+        : undefined;
+      return createActionSuccess(action.type, data);
     } else {
       return createActionFailure(
-        action.id,
+        action.type,
+        ActionErrorCode.UNKNOWN,
         result.error || 'Unknown MCP error',
-        'mcp_error',
         { durationMs: duration }
       );
     }
@@ -211,7 +212,7 @@ export class ActionExecutor {
   private executeWait(action: FaraAction): Promise<ActionResult> {
     if (action.type !== ActionType.WAIT) {
       return Promise.resolve(
-        createActionFailure(action.id, 'Not a wait action', 'invalid_action')
+        createActionFailure(action.type, ActionErrorCode.NOT_SUPPORTED, 'Not a wait action')
       );
     }
 
@@ -219,9 +220,7 @@ export class ActionExecutor {
       setTimeout(
         () => {
           resolve(
-            createActionSuccess(action.id, {
-              waitedMs: action.duration,
-            })
+            createActionSuccess(action.type)
           );
         },
         Math.min(action.duration, this.maxExecutionTimeMs) // Cap at max execution time

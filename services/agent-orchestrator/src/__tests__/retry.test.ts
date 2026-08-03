@@ -9,7 +9,9 @@ import {
   RetryHandler,
   ResilientExecutor,
   RetryableError,
+  createResilientExecutor,
 } from '../retry';
+import { jest } from '@jest/globals';
 
 describe('CircuitBreaker', () => {
   let circuitBreaker: CircuitBreaker;
@@ -103,9 +105,7 @@ describe('CircuitBreaker', () => {
       await new Promise((resolve) => setTimeout(resolve, 1100));
 
       // Should transition to half-open on next call
-      try {
-        await failingFn();
-      } catch {}
+      await circuitBreaker.execute(async () => 'probe');
 
       // Actually, the transition happens on execute
       expect(circuitBreaker.getState()).toBe(CircuitState.HALF_OPEN);
@@ -117,7 +117,7 @@ describe('CircuitBreaker', () => {
       // Open the circuit
       for (let i = 0; i < 3; i++) {
         try {
-          throw new Error('fail');
+          throw new Error('timeout');
         } catch {
           // Manually record failure
         }
@@ -241,7 +241,7 @@ describe('RetryHandler', () => {
       const fn = async () => {
         attempts++;
         if (attempts < 3) {
-          throw new Error('fail');
+          throw new Error('timeout');
         }
         return 'success';
       };
@@ -256,7 +256,7 @@ describe('RetryHandler', () => {
       const fn = async () => {
         attempts++;
         if (attempts < 2) {
-          throw new Error('fail');
+          throw new Error('timeout');
         }
         return 'success';
       };
@@ -287,7 +287,7 @@ describe('ResilientExecutor', () => {
       const fn = async () => {
         attempts++;
         if (attempts < 2) {
-          throw new Error('transient');
+          throw new Error('timeout');
         }
         return 'success';
       };

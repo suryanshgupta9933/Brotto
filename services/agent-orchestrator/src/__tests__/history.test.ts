@@ -3,7 +3,7 @@
  */
 
 import { HistoryManager } from '../history';
-import { ActionType, createActionSuccess, createActionFailure } from '@fara/fara-action-schema';
+import { ActionType, createActionSuccess, createActionFailure } from '@fara-platform/fara-action-schema';
 
 describe('HistoryManager', () => {
   let history: HistoryManager;
@@ -218,7 +218,7 @@ describe('HistoryManager', () => {
           timestamp: Date.now(),
           url: 'https://example.com',
         },
-        result: createActionFailure('act-1', 'Navigation failed', 'navigation_error'),
+        result: createActionFailure(ActionType.VISIT_URL, 'navigation_failed' as never, 'Navigation failed'),
         observationIdAtExecution: 1,
         executedAt: new Date(),
         durationMs: 100,

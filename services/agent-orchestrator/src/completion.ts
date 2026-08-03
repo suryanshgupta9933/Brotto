@@ -16,7 +16,7 @@ import type {
   FaraAction,
   ActionResult,
   ObservationId,
-} from '@fara/fara-action-schema';
+} from '@fara-platform/fara-action-schema';
 
 /**
  * Completion detection result
@@ -221,8 +221,8 @@ export class CompletionDetector {
       };
     }
 
-    const error = result.error?.toLowerCase() || '';
-    const errorCode = result.errorCode;
+    const error = result.error.message.toLowerCase();
+    const errorCode: string = result.error.code;
 
     // Categorize the failure
     if (error.includes('navigation') || error.includes('url') || error.includes('timeout')) {
@@ -252,7 +252,7 @@ export class CompletionDetector {
         isFailure: true,
         isRecoverable: true,
         failureType: FailureType.NAVIGATION_ERROR,
-        reason: `Navigation failed: ${result.error}`,
+        reason: `Navigation failed: ${result.error.message}`,
         suggestion: 'Retry navigation or try an alternative approach',
       };
     }
@@ -302,7 +302,7 @@ export class CompletionDetector {
       isFailure: true,
       isRecoverable: true,
       failureType: FailureType.ACTION_ERROR,
-      reason: result.error || 'Action failed',
+      reason: result.error.message || 'Action failed',
       suggestion: 'Retry the action or try an alternative approach',
     };
   }

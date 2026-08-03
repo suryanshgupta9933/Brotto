@@ -7,6 +7,7 @@ import {
   SessionState,
   InvalidStateTransitionError,
 } from '../session';
+import { jest } from '@jest/globals';
 
 describe('SessionStateMachine', () => {
   let session: SessionStateMachine;

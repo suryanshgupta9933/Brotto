@@ -9,7 +9,6 @@
  * - Stop agent when repeatedly attempts same action without state change
  */
 
-import type { ActionResult } from '@fara/fara-action-schema';
 
 /**
  * Circuit breaker states
@@ -74,6 +73,13 @@ const DEFAULT_RETRY_CONFIG: RetryConfig = {
   initialDelayMs: 1000,
   maxDelayMs: 30000,
   backoffMultiplier: 2,
+  retryableErrors: [
+    'timeout',
+    'network_error',
+    'service_unavailable',
+    'rate_limit',
+    'mcp_error',
+  ] as RetryableError[],
 };
 
 /**
@@ -420,7 +426,7 @@ export class RetryHandler {
    */
   isRetrying(operationId: string): boolean {
     const state = this.retryState.get(operationId);
-    return state !== undefined && state.attempts > 0;
+    return state !== undefined;
   }
 
   /**

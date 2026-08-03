@@ -3,7 +3,7 @@
  */
 
 import { ToolCallParser, ParseErrorCode } from '../parser';
-import { ActionType } from '@fara/fara-action-schema';
+import { ActionType } from '@fara-platform/fara-action-schema';
 
 describe('ToolCallParser', () => {
   let parser: ToolCallParser;

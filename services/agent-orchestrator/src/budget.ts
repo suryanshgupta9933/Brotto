@@ -21,7 +21,7 @@ import {
   createBudgetTracker,
   PRESET_BUDGETS,
   type BudgetUsage,
-} from '@fara/policy-engine';
+} from 'policy-engine';
 
 /**
  * Budget event types

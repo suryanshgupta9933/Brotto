@@ -23,8 +23,8 @@ import {
   getDefaultPolicyEngine,
   type BudgetTracker,
   type BudgetCheckResult,
-} from '@fara/policy-engine';
-import type { FaraAction, ActionType } from '@fara/fara-action-schema';
+} from 'policy-engine';
+import { ActionType, type FaraAction } from '@fara-platform/fara-action-schema';
 
 /**
  * Action type mapping from Fara action types to critical action types
@@ -294,7 +294,7 @@ export class PolicyIntegrator {
       case ActionType.PAUSE_AND_MEMORIZE_FACT:
         return `Memorize: ${action.fact}`;
       default:
-        return `Action: ${action.type}`;
+        return 'Unknown action';
     }
   }
 

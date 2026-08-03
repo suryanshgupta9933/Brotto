@@ -12,7 +12,7 @@ import type {
   FaraAction,
   ActionResult,
   ObservationId,
-} from '@fara/fara-action-schema';
+} from '@fara-platform/fara-action-schema';
 
 /**
  * Action history entry
@@ -207,11 +207,14 @@ export class HistoryManager {
     const memories = options.includeMemories ? this.getAllMemories() : [];
 
     // Build recent actions summary
+    const errorMessage = (result: ActionResult): string | undefined => (
+      result.success ? undefined : result.error.message
+    );
     const recentActionsSummary = actions.map((entry) => ({
       actionType: entry.action.type,
       actionId: entry.action.id,
       success: entry.result.success,
-      error: entry.result.error,
+      error: errorMessage(entry.result),
       timestamp: entry.executedAt.toISOString(),
     }));
 
@@ -220,8 +223,8 @@ export class HistoryManager {
 
     // Build failure message if last action failed
     let failureMessage: string | undefined;
-    if (lastResult && !lastResult.success && lastResult.error) {
-      failureMessage = `Last action failed: ${lastResult.error}`;
+    if (lastResult && !lastResult.success) {
+      failureMessage = `Last action failed: ${lastResult.error.message}`;
     }
 
     return {
@@ -230,7 +233,7 @@ export class HistoryManager {
       lastActionResult: lastResult
         ? {
             success: lastResult.success,
-            error: lastResult.error,
+            error: errorMessage(lastResult),
           }
         : null,
       failureMessage,
