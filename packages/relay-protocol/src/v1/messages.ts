@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   ActionCommandV1Schema,
   ActionIdSchema,
+  ActionProposalV1Schema,
   ActionResultV1Schema,
   ApprovalIdSchema,
   ApprovalResolutionV1Schema,
@@ -9,9 +10,10 @@ import {
   ObservationIdSchema,
   ObservationV1Schema,
   PolicyDecisionIdSchema,
+  PolicyDecisionV1Schema,
   SequenceSchema,
   StepIdSchema,
-  TaskIdSchema,
+  CompletionProposalV1Schema,
 } from '@fara-platform/fara-action-schema';
 
 const TimestampSchema = z.string().datetime();
@@ -40,6 +42,8 @@ export const ObservationSubmittedSchema = z.object({
 
 export const ActionCommandMessageSchema = z.object({
   type: z.literal('action.command'),
+  proposal: ActionProposalV1Schema,
+  policyDecision: PolicyDecisionV1Schema,
   command: ActionCommandV1Schema,
 }).strict();
 
@@ -71,31 +75,31 @@ export const ApprovalResolvedSchema = z.object({
   resolution: ApprovalResolutionV1Schema,
 }).strict();
 
-const TaskTerminalPayloadSchema = z.object({
-  taskId: TaskIdSchema,
-  occurredAt: TimestampSchema,
-  summary: z.string().min(1).max(4_000),
-  findings: z.array(z.object({
-    fact: z.string().min(1).max(2_000),
-    observationIds: z.array(ObservationIdSchema).min(1).max(20),
-  }).strict()).max(100).optional(),
-  unmetCriteria: z.array(z.string().min(1).max(1_000)).max(100).optional(),
-  reason: z.string().min(1).max(2_000).optional(),
-}).strict();
+const SucceededCompletionProposalV1Schema = CompletionProposalV1Schema.superRefine((completion, context) => {
+  if (completion.status !== 'succeeded') {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'task.completed requires a succeeded completion proposal' });
+  }
+});
+
+const UnsuccessfulCompletionProposalV1Schema = CompletionProposalV1Schema.superRefine((completion, context) => {
+  if (completion.status === 'succeeded') {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'task.failed cannot carry a succeeded completion proposal' });
+  }
+});
 
 const TaskCompletedSchema = z.object({
   type: z.literal('task.completed'),
-  payload: TaskTerminalPayloadSchema.extend({ status: z.enum(['succeeded', 'partial']) }),
+  completion: SucceededCompletionProposalV1Schema,
 }).strict();
 
 const TaskFailedSchema = z.object({
   type: z.literal('task.failed'),
-  payload: TaskTerminalPayloadSchema.extend({ status: z.literal('failed'), reason: z.string().min(1).max(2_000) }),
+  completion: UnsuccessfulCompletionProposalV1Schema,
 }).strict();
 
 const TaskCancelledSchema = z.object({
   type: z.literal('task.cancelled'),
-  payload: TaskTerminalPayloadSchema.extend({ status: z.literal('cancelled'), reason: z.string().min(1).max(2_000) }),
+  reason: z.string().min(1).max(2_000).optional(),
 }).strict();
 
 export const TaskTerminalSchema = z.discriminatedUnion('type', [

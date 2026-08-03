@@ -26,3 +26,4 @@ export {
   type EnvelopeSigner,
 } from './envelope.js';
 export { ProtocolGuard, type ProtocolGuardOptions, type ProtocolGuardResult } from './guard.js';
+export { AgentFlowGuard, type AgentFlowGuardResult } from './flow-guard.js';

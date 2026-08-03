@@ -16,12 +16,16 @@ export const AgentEnvelopeV1Schema = z.object({
   sessionId: SessionIdSchema,
   correlationId: UuidSchema,
   causationId: UuidSchema,
+  recipientId: UuidSchema,
   sequence: SequenceSchema,
   createdAt: z.string().datetime(),
   expiresAt: ExpirySchema,
   payload: AgentMessageV1Schema,
   signature: z.string().min(1).max(16_384).optional(),
 }).strict().superRefine((envelope, context) => {
+  if (envelope.expiresAt <= Date.parse(envelope.createdAt)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['expiresAt'], message: 'expiresAt must be after createdAt' });
+  }
   try {
     assertNoForbiddenBrowserData(envelope);
   } catch (error) {
@@ -40,6 +44,7 @@ export interface CreateEnvelopeInput {
   sessionId: string;
   correlationId: string;
   causationId: string;
+  recipientId: string;
   sequence: number;
   createdAt: string;
   expiresAt: number;
