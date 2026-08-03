@@ -4,16 +4,23 @@ OpenAI-compatible API endpoints for Fara inference service.
 Implements the OpenAI Chat Completions API format using vLLM as the backend.
 """
 
-from typing import Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+import json
+from typing import Any
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
-from .client import VLLMClient, InferenceRequest, InferenceResponse, VLLMClientError, VLLMInferenceError
-from .models import ModelManifest, MODEL_REGISTRY, get_model_manifest, get_default_model_manifest
-from .prompts import get_prompt_manager, PromptVersion
+from .client import (
+    InferenceRequest,
+    VLLMClient,
+    VLLMClientError,
+    VLLMInferenceError,
+)
 from .contracts import PlanningRequest, PlanningResponse
 from .fara_adapter import FaraAdapter
-
+from .models import MODEL_REGISTRY, get_default_model_manifest, get_model_manifest
+from .prompts import PromptVersion, get_prompt_manager
 
 router = APIRouter()
 
@@ -30,10 +37,23 @@ def get_fara_adapter() -> FaraAdapter:
 @router.post("/v1/plan", response_model=PlanningResponse)
 async def plan(
     request: PlanningRequest,
-    adapter: FaraAdapter = Depends(get_fara_adapter),
+    response: Response,
+    request_id: str | None = Header(default=None, alias="X-Request-ID"),
+    adapter: FaraAdapter = Depends(get_fara_adapter),  # noqa: B008
 ) -> PlanningResponse:
     """Return a strictly validated action, completion, question, or contract-error proposal."""
-    return await adapter.plan(request)
+    proposal = await adapter.plan(request)
+    response.headers["X-Request-ID"] = request_id or str(uuid4())
+    metadata = getattr(adapter, "last_inference_metadata", None)
+    if metadata is not None:
+        response.headers["X-Fara-Model"] = metadata.model
+        response.headers["X-Fara-Finish-Reason"] = metadata.finish_reason
+        response.headers["X-Fara-Usage"] = json.dumps(
+            metadata.usage,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return proposal
 
 
 class Message(BaseModel):
@@ -49,7 +69,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=2048, ge=1, le=32768)
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
-    stop: Optional[list[str]] = None
+    stop: list[str] | None = None
     stream: bool = Field(default=False)
 
 
@@ -94,7 +114,7 @@ class Model(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str
-    model: Optional[str] = None
+    model: str | None = None
     version: str = "1.0.0"
 
 
@@ -130,7 +150,7 @@ def _create_response(
 async def chat_completions(
     request: ChatCompletionRequest,
     vllm_url: str = Query(default="http://localhost:8000", description="vLLM server URL"),
-    api_key: Optional[str] = Query(default=None, description="API key for vLLM"),
+    api_key: str | None = Query(default=None, description="API key for vLLM"),
 ) -> ChatCompletionResponse:
     """
     OpenAI-compatible chat completions endpoint.
@@ -166,12 +186,12 @@ async def chat_completions(
         raise HTTPException(
             status_code=500,
             detail=f"Inference error: {e.error_detail or str(e)}",
-        )
+        ) from e
     except VLLMClientError as e:
         raise HTTPException(
             status_code=503,
             detail=f"vLLM service unavailable: {str(e)}",
-        )
+        ) from e
 
     # Build response
     return _create_response(
@@ -190,7 +210,7 @@ async def list_models() -> ModelList:
     Returns all registered Fara model manifests.
     """
     models = []
-    for model_id, manifest in MODEL_REGISTRY.items():
+    for manifest in MODEL_REGISTRY.values():
         models.append({
             "id": manifest.model_id,
             "object": "model",
@@ -246,8 +266,8 @@ async def render_prompt(
     recent_actions: list[dict[str, Any]],
     approved_user_answers: list[str],
     previous_action_result: dict[str, Any],
-    failure_message: Optional[str] = None,
-    prompt_version: Optional[str] = None,
+    failure_message: str | None = None,
+    prompt_version: str | None = None,
 ) -> dict[str, Any]:
     """
     Render a prompt using the prompt template manager.
@@ -260,11 +280,14 @@ async def render_prompt(
         try:
             version = PromptVersion(prompt_version)
             manager.set_active_version(version)
-        except ValueError:
+        except ValueError as error:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid prompt version: {prompt_version}. Valid versions: {[v.value for v in manager.list_versions()]}",
-            )
+                detail=(
+                    f"Invalid prompt version: {prompt_version}. "
+                    f"Valid versions: {[v.value for v in manager.list_versions()]}"
+                ),
+            ) from error
 
     system_prompt, user_prompt = manager.render_prompt(
         goal=goal,

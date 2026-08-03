@@ -53,13 +53,58 @@ describe('CompletionVerifier', () => {
   it('does not accept speculative completion', () => {
     const decision = verifier.verify(proposal({
       summary: 'The order probably succeeded.',
-      findings: [{ fact: 'It seems likely that the order succeeded', observationIds: [ids.observation2] }],
+      findings: [{ fact: 'Order confirmation number is visible', observationIds: [ids.observation2] }],
     }), verifiedTrajectory);
 
     expect(decision).toEqual(expect.objectContaining({
       outcome: 'continue',
       accepted: false,
       code: 'SPECULATIVE_EVIDENCE',
+    }));
+  });
+
+  it('accepts already-satisfied observational completion without a prior action', () => {
+    const currentTrajectory = [
+      event(1, 'observation_captured', '2026-08-03T10:00:00.000Z', ids.observation2),
+    ];
+
+    expect(verifier.verify(proposal(), currentTrajectory)).toEqual(expect.objectContaining({
+      outcome: 'accepted',
+      accepted: true,
+      code: 'VERIFIED_COMPLETION',
+    }));
+  });
+
+  it('does not treat a verification event as the current observation when no action exists', () => {
+    const decision = verifier.verify(proposal(), [
+      event(1, 'verification_result', '2026-08-03T10:00:00.000Z', ids.observation2),
+    ]);
+
+    expect(decision).toEqual(expect.objectContaining({
+      outcome: 'continue',
+      accepted: false,
+      code: 'STALE_EVIDENCE',
+    }));
+  });
+
+  it('requires the concrete finding itself to reference current browser evidence', () => {
+    const decision = verifier.verify(proposal({
+      findings: [
+        {
+          fact: 'Order confirmation number is visible',
+          observationIds: ['99999999-9999-4999-8999-999999999999'],
+        },
+        {
+          fact: 'The page probably updated',
+          observationIds: [ids.observation2],
+        },
+      ],
+    }), [event(1, 'observation_captured', '2026-08-03T10:00:00.000Z', ids.observation2)]);
+
+    expect(decision).toEqual(expect.objectContaining({
+      outcome: 'continue',
+      accepted: false,
+      code: 'INSUFFICIENT_EVIDENCE',
     }));
   });
 

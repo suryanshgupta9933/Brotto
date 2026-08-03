@@ -517,6 +517,128 @@ describe('SessionEngine', () => {
     expect(await store.load(ids.session as never)).toMatchObject({ state: 'OBSERVING', terminalReason: null });
   });
 
+  it('fails after repeated speculative completion exhausts the verifier budget', async () => {
+    const inference = new FakeInference([
+      {
+        kind: 'completion',
+        observationId: ids.observation1,
+        type: 'terminate',
+        status: 'succeeded',
+        summary: 'The task probably succeeded.',
+        findings: [{ fact: 'The current page is visible', observationIds: [ids.observation1] }],
+        unmetCriteria: [],
+        confidence: 0.9,
+      } as AgentProposalV1,
+      {
+        kind: 'completion',
+        observationId: ids.observation2,
+        type: 'terminate',
+        status: 'succeeded',
+        summary: 'The task probably succeeded.',
+        findings: [{ fact: 'The refreshed page is visible', observationIds: [ids.observation2] }],
+        unmetCriteria: [],
+        confidence: 0.9,
+      } as AgentProposalV1,
+    ]);
+    const store = new InMemorySessionStore();
+    const trajectorySink = new RecordingTrajectory();
+    const first = createEngine({
+      store,
+      trajectorySink,
+      inference,
+      budgets: { maxVerifierFailures: 2 },
+    });
+    await open(first.engine);
+    await first.engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000064',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'OBSERVING',
+      verifierFailureCount: 1,
+      maxVerifierFailures: 2,
+    });
+
+    const restarted = createEngine({
+      store,
+      trajectorySink,
+      inference,
+      budgets: { maxVerifierFailures: 99 },
+    });
+    await restarted.engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000065',
+      sessionId: ids.session,
+      observation: {
+        ...observation(ids.observation2),
+        capturedAt: '2026-08-03T10:00:04.000Z',
+        screenshot: { ...observation(ids.observation2).screenshot, sha256: 'b'.repeat(64) },
+      },
+      occurredAt: '2026-08-03T10:00:04.000Z',
+    });
+
+    expect(inference.calls).toHaveLength(2);
+    expect(first.commandSink.commands).toHaveLength(0);
+    expect(restarted.commandSink.commands).toHaveLength(0);
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'FAILED',
+      verifierFailureCount: 2,
+      maxVerifierFailures: 2,
+      terminalReason: { code: 'VERIFIER_FAILURE_LIMIT_REACHED' },
+    });
+    expect(trajectorySink.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'verification_result',
+        summary: expect.stringContaining('SPECULATIVE_EVIDENCE'),
+      }),
+      expect.objectContaining({
+        kind: 'task_terminal_outcome',
+        summary: expect.stringContaining('verification'),
+      }),
+    ]));
+  });
+
+  it('persists a valid model question without consuming repair budget or dispatching', async () => {
+    const inference: InferencePort = {
+      plan: async (input) => ({
+        kind: 'question',
+        observationId: input.observation.observationId,
+        question: 'Which account should I use?',
+        choices: ['Personal', 'Work'],
+      } as never),
+    };
+    const { engine, commandSink, store, trajectorySink } = createEngine({ inference });
+    await open(engine);
+
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000066',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+
+    expect(commandSink.commands).toHaveLength(0);
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'WAITING_FOR_USER',
+      activeInferenceId: null,
+      workClaim: null,
+      inferenceRepairAttempts: 0,
+      pendingUserQuestion: {
+        observationId: ids.observation1,
+        question: 'Which account should I use?',
+        choices: ['Personal', 'Work'],
+      },
+    });
+    expect(trajectorySink.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'approval_requested', summary: expect.stringContaining('Which account') }),
+    ]));
+  });
+
   it('lets only one engine call inference while a persisted claim is active', async () => {
     const store = new InMemorySessionStore();
     const inference = new DeferredInference();
@@ -1422,6 +1544,7 @@ describe('canonical progress and budget detection', () => {
     maxNoVerifiedEffect: 2,
     maxConsecutiveActionFailures: 2,
     maxInferenceRepairAttempts: 2,
+    maxVerifierFailures: 2,
   };
 
   it('hashes normalized action parameters and observation URL/screenshot state', () => {
@@ -1461,6 +1584,7 @@ describe('canonical progress and budget detection', () => {
     ['NO_VERIFIED_EFFECT', { consecutiveNoVerifiedEffect: 2 }],
     ['CONSECUTIVE_ACTION_FAILURES', { consecutiveActionFailures: 2 }],
     ['INFERENCE_REPAIR_EXHAUSTED', { inferenceRepairAttempts: 2 }],
+    ['VERIFIER_FAILURE_LIMIT_REACHED', { verifierFailureCount: 2 }],
   ] as const)('returns typed terminal reason %s', (code, override) => {
     const reason = detectTerminalReason({
       startedAt: '2026-08-03T10:00:00.000Z',
@@ -1470,6 +1594,8 @@ describe('canonical progress and budget detection', () => {
       consecutiveNoVerifiedEffect: 0,
       consecutiveActionFailures: 0,
       inferenceRepairAttempts: 0,
+      verifierFailureCount: 0,
+      maxVerifierFailures: 2,
       ...override,
     }, budgets, '2026-08-03T10:01:00.000Z');
 

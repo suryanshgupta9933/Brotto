@@ -25,6 +25,7 @@ function session(revision: number, outcome?: StoredOutcome): CanonicalSession {
     pendingPostObservation: null,
     pendingPolicy: null,
     pendingApproval: null,
+    pendingUserQuestion: null,
     recentResults: [],
     processedMessages: outcome === undefined ? {} : { [messageId]: outcome },
     completedActions: {},
@@ -33,6 +34,8 @@ function session(revision: number, outcome?: StoredOutcome): CanonicalSession {
     consecutiveActionFailures: 0,
     consecutiveNoVerifiedEffect: 0,
     inferenceRepairAttempts: 0,
+    verifierFailureCount: 0,
+    maxVerifierFailures: 3,
     stepCount: 0,
     terminalReason: null,
   } as CanonicalSession;

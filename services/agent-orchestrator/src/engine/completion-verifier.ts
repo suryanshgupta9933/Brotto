@@ -16,6 +16,9 @@ export class CompletionVerifier implements CompletionVerificationPort {
     if (proposal.status === 'failed') {
       return this.decision('failed', 'MODEL_REPORTED_FAILURE', proposal.summary);
     }
+    if (speculativeLanguage.test(proposal.summary)) {
+      return this.decision('continue', 'SPECULATIVE_EVIDENCE', 'The completion summary is speculative');
+    }
     if (proposal.status === 'partial' || proposal.unmetCriteria.length > 0) {
       return this.decision(
         'continue',
@@ -28,7 +31,10 @@ export class CompletionVerifier implements CompletionVerificationPort {
     if (proposal.findings.length === 0) {
       return this.decision('continue', 'INSUFFICIENT_EVIDENCE', 'Completion has no structured findings');
     }
-    if (proposal.findings.every((finding: CompletionFindingV1) => speculativeLanguage.test(finding.fact))) {
+    const concreteFindings = proposal.findings.filter(
+      (finding: CompletionFindingV1) => !speculativeLanguage.test(finding.fact),
+    );
+    if (concreteFindings.length === 0) {
       return this.decision('continue', 'SPECULATIVE_EVIDENCE', 'All completion findings are speculative');
     }
 
@@ -37,7 +43,12 @@ export class CompletionVerifier implements CompletionVerificationPort {
         .filter((event) => event.kind === 'observation_captured' || event.kind === 'verification_result')
         .flatMap((event) => event.observationId === undefined ? [] : [event.observationId]),
     );
-    const hasReferencedEvidence = proposal.findings.some((finding: CompletionFindingV1) => (
+    const captured = new Set(
+      trajectory
+        .filter((event) => event.kind === 'observation_captured')
+        .flatMap((event) => event.observationId === undefined ? [] : [event.observationId]),
+    );
+    const hasReferencedEvidence = concreteFindings.some((finding: CompletionFindingV1) => (
       finding.observationIds.some((observationId: ObservationV1Id) => observed.has(observationId))
     ));
     if (!hasReferencedEvidence) {
@@ -51,12 +62,16 @@ export class CompletionVerifier implements CompletionVerificationPort {
     const lastAction = trajectory
       .filter((event) => event.kind === 'action_completed')
       .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt))[0];
-    const hasFreshPostActionObservation = lastAction !== undefined && trajectory.some((event) => (
-      event.kind === 'observation_captured' &&
-      event.observationId !== undefined &&
-      Date.parse(event.occurredAt) > Date.parse(lastAction.occurredAt) &&
-      proposal.findings.some((finding: CompletionFindingV1) => finding.observationIds.includes(event.observationId!))
-    ));
+    const hasFreshPostActionObservation = lastAction === undefined
+      ? captured.has(proposal.observationId) && concreteFindings.some(
+        (finding: CompletionFindingV1) => finding.observationIds.includes(proposal.observationId),
+      )
+      : trajectory.some((event) => (
+        event.kind === 'observation_captured' &&
+        event.observationId !== undefined &&
+        Date.parse(event.occurredAt) > Date.parse(lastAction.occurredAt) &&
+        concreteFindings.some((finding: CompletionFindingV1) => finding.observationIds.includes(event.observationId!))
+      ));
     if (!hasFreshPostActionObservation) {
       return this.decision(
         'continue',

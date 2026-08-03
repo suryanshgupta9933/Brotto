@@ -19,6 +19,7 @@
     "@fara-platform/relay-protocol": "workspace:*",
     "policy-engine": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "ipaddr.js": "1.9.1",
     "zod": "^3.22.0"
   },
   "devDependencies": {

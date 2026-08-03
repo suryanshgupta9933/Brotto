@@ -1,5 +1,18 @@
-import { AgentProposalV1Schema, type AgentProposalV1 } from '@fara-platform/fara-action-schema';
-import { InferenceContractError, type InferencePort, type PlanningInput } from '../engine/types.js';
+import { AgentProposalV1Schema } from '@fara-platform/fara-action-schema';
+import { z } from 'zod';
+import {
+  InferenceContractError,
+  type InferencePort,
+  type PlanningInput,
+  type PlanningOutcome,
+} from '../engine/types.js';
+
+const QuestionProposalSchema = z.object({
+  kind: z.literal('question'),
+  observationId: z.string().uuid(),
+  question: z.string().min(1).max(2_000),
+  choices: z.array(z.string().min(1).max(256)).max(20).optional(),
+}).strict();
 
 export interface FaraPlannerUsage {
   promptTokens: number;
@@ -9,7 +22,7 @@ export interface FaraPlannerUsage {
 
 export interface FaraPlannerDiagnostic {
   workId: string;
-  requestId: string;
+  requestId?: string;
   model?: string;
   usage?: FaraPlannerUsage;
   finishReason?: string;
@@ -20,6 +33,7 @@ export interface FaraPlannerConfig {
   transport?: typeof fetch;
   maxTokens?: number;
   maxRepairAttempts?: number;
+  maxDiagnosticEntries?: number;
   headers?: Record<string, string>;
 }
 
@@ -48,12 +62,17 @@ export class FaraPlannerRequestError extends Error {
 export class FaraPlanner implements InferencePort {
   private readonly transport: typeof fetch;
   private readonly diagnostics = new Map<string, FaraPlannerDiagnostic>();
+  private readonly maxDiagnosticEntries: number;
 
   constructor(private readonly config: FaraPlannerConfig) {
     this.transport = config.transport ?? fetch;
+    this.maxDiagnosticEntries = Number.isSafeInteger(config.maxDiagnosticEntries) &&
+      (config.maxDiagnosticEntries ?? 0) > 0
+      ? config.maxDiagnosticEntries as number
+      : 1_000;
   }
 
-  async plan(input: PlanningInput, signal: AbortSignal): Promise<AgentProposalV1> {
+  async plan(input: PlanningInput, signal: AbortSignal): Promise<PlanningOutcome> {
     const response = await this.transport(this.config.endpoint, {
       method: 'POST',
       headers: {
@@ -75,7 +94,7 @@ export class FaraPlanner implements InferencePort {
     });
 
     const diagnostic = this.readDiagnostic(response, input.workId);
-    this.diagnostics.set(input.workId, diagnostic);
+    this.rememberDiagnostic(input.workId, diagnostic);
     if (!response.ok) {
       throw new FaraPlannerRequestError(
         `Planning endpoint returned HTTP ${response.status}`,
@@ -94,9 +113,8 @@ export class FaraPlanner implements InferencePort {
     if (this.isContractError(decoded)) {
       throw new FaraPlannerError(decoded.message, decoded.retryable);
     }
-    if (this.isQuestion(decoded)) {
-      throw new FaraPlannerError('Planning requires user input before it can continue', false);
-    }
+    const question = QuestionProposalSchema.safeParse(decoded);
+    if (question.success) return question.data as PlanningOutcome;
 
     const proposal = AgentProposalV1Schema.safeParse(decoded);
     if (!proposal.success) {
@@ -110,23 +128,35 @@ export class FaraPlanner implements InferencePort {
 
   getDiagnostic(workId: string): FaraPlannerDiagnostic | undefined {
     const diagnostic = this.diagnostics.get(workId);
-    return diagnostic === undefined ? undefined : structuredClone(diagnostic);
+    if (diagnostic === undefined) return undefined;
+    this.diagnostics.delete(workId);
+    this.diagnostics.set(workId, diagnostic);
+    return structuredClone(diagnostic);
   }
 
   private readDiagnostic(response: Response, workId: string): FaraPlannerDiagnostic {
-    const requestId = response.headers.get('x-request-id') ?? workId;
-    const model = response.headers.get('x-fara-model') ?? response.headers.get('x-model') ?? undefined;
-    const finishReason = response.headers.get('x-fara-finish-reason') ??
-      response.headers.get('x-finish-reason') ?? undefined;
-    const rawUsage = response.headers.get('x-fara-usage') ?? response.headers.get('x-usage');
+    const requestId = response.headers.get('x-request-id') ?? undefined;
+    const model = response.headers.get('x-fara-model') ?? undefined;
+    const finishReason = response.headers.get('x-fara-finish-reason') ?? undefined;
+    const rawUsage = response.headers.get('x-fara-usage');
     const usage = rawUsage === null ? undefined : this.parseUsage(rawUsage);
     return {
       workId,
-      requestId,
+      ...(requestId === undefined ? {} : { requestId }),
       ...(model === undefined ? {} : { model }),
       ...(usage === undefined ? {} : { usage }),
       ...(finishReason === undefined ? {} : { finishReason }),
     };
+  }
+
+  private rememberDiagnostic(workId: string, diagnostic: FaraPlannerDiagnostic): void {
+    this.diagnostics.delete(workId);
+    this.diagnostics.set(workId, diagnostic);
+    while (this.diagnostics.size > this.maxDiagnosticEntries) {
+      const oldestWorkId = this.diagnostics.keys().next().value as string | undefined;
+      if (oldestWorkId === undefined) return;
+      this.diagnostics.delete(oldestWorkId);
+    }
   }
 
   private parseUsage(raw: string): FaraPlannerUsage | undefined {
@@ -162,8 +192,4 @@ export class FaraPlanner implements InferencePort {
       typeof candidate.retryable === 'boolean';
   }
 
-  private isQuestion(value: unknown): value is { kind: 'question' } {
-    return value !== null && typeof value === 'object' &&
-      (value as Record<string, unknown>).kind === 'question';
-  }
 }

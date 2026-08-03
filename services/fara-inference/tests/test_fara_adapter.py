@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -96,6 +97,55 @@ def test_planning_request_accepts_screenshot_and_sanitized_targets():
 
     assert response.status_code == 200
     assert response.json()["kind"] == "contract_error"
+    assert str(UUID(response.headers["x-request-id"])) == response.headers["x-request-id"]
+
+
+def test_plan_emits_model_response_provenance_in_stable_headers():
+    class ProvenanceClient:
+        async def complete(self, request):
+            return type(
+                "Response",
+                (),
+                {
+                    "content": json.dumps(
+                        {
+                            "kind": "action",
+                            "observationId": "11111111-1111-4111-8111-111111111111",
+                            "proposedAt": "2026-08-03T10:00:01Z",
+                            "action": {"type": "wait", "durationMs": 100},
+                        }
+                    ),
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 4,
+                        "total_tokens": 14,
+                    },
+                    "model": "fara-test",
+                },
+            )()
+
+    app = create_app()
+    app.dependency_overrides[get_fara_adapter] = lambda: FaraAdapter(
+        client=ProvenanceClient(),
+        model="fara-requested",
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/plan",
+            json=valid_request_body(),
+            headers={"x-request-id": "request-123"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["x-request-id"] == "request-123"
+    assert response.headers["x-fara-model"] == "fara-test"
+    assert response.headers["x-fara-finish-reason"] == "stop"
+    assert json.loads(response.headers["x-fara-usage"]) == {
+        "prompt_tokens": 10,
+        "completion_tokens": 4,
+        "total_tokens": 14,
+    }
 
 
 @pytest.mark.asyncio

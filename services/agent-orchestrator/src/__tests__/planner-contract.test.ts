@@ -54,6 +54,10 @@ function planningInput(): PlanningInput {
   };
 }
 
+function planningInputWithWorkId(workId: string): PlanningInput {
+  return { ...planningInput(), workId };
+}
+
 describe('FaraPlanner', () => {
   it('sends only the v1 planning contract and retains response provenance', async () => {
     let request: { input: string; init?: RequestInit } | undefined;
@@ -129,6 +133,79 @@ describe('FaraPlanner', () => {
         retryable: true,
       }),
     );
+  });
+
+  it('returns a valid question proposal as a typed planning outcome', async () => {
+    const planner = new FaraPlanner({
+      endpoint: 'https://inference.example/v1/plan',
+      transport: async () => new Response(JSON.stringify({
+        kind: 'question',
+        observationId: observation.observationId,
+        question: 'Which account should I use?',
+        choices: ['Personal', 'Work'],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    });
+
+    await expect(planner.plan(planningInput(), new AbortController().signal)).resolves.toEqual({
+      kind: 'question',
+      observationId: observation.observationId,
+      question: 'Which account should I use?',
+      choices: ['Personal', 'Work'],
+    });
+  });
+
+  it('bounds diagnostics with access-ordered LRU eviction', async () => {
+    const transport = jest.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { observation: ObservationV1 };
+      return new Response(JSON.stringify({
+        kind: 'action',
+        observationId: request.observation.observationId,
+        proposedAt: '2026-08-03T10:00:01.000Z',
+        action: { type: 'wait', durationMs: 100 },
+      }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'x-request-id': String((init?.headers as Record<string, string>)['x-request-id']),
+        },
+      });
+    });
+    const planner = new FaraPlanner({
+      endpoint: 'https://inference.example/v1/plan',
+      transport,
+      maxDiagnosticEntries: 2,
+    });
+    const signal = new AbortController().signal;
+
+    await planner.plan(planningInputWithWorkId('work-1'), signal);
+    await planner.plan(planningInputWithWorkId('work-2'), signal);
+    expect(planner.getDiagnostic('work-1')).toBeDefined();
+    await planner.plan(planningInputWithWorkId('work-3'), signal);
+
+    expect(planner.getDiagnostic('work-1')).toBeDefined();
+    expect(planner.getDiagnostic('work-2')).toBeUndefined();
+    expect(planner.getDiagnostic('work-3')).toBeDefined();
+  });
+
+  it('does not invent provenance from legacy or absent response headers', async () => {
+    const planner = new FaraPlanner({
+      endpoint: 'https://inference.example/v1/plan',
+      transport: async () => new Response(JSON.stringify({
+        kind: 'action',
+        observationId: observation.observationId,
+        proposedAt: '2026-08-03T10:00:01.000Z',
+        action: { type: 'wait', durationMs: 100 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'x-model': 'legacy-fallback' },
+      }),
+    });
+
+    await planner.plan(planningInput(), new AbortController().signal);
+
+    expect(planner.getDiagnostic(planningInput().workId)).toEqual({
+      workId: planningInput().workId,
+    });
   });
 
   it('passes cancellation to the planning request', async () => {

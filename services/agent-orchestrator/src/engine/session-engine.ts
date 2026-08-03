@@ -139,6 +139,7 @@ export class SessionEngine {
       pendingPostObservation: null,
       pendingPolicy: null,
       pendingApproval: null,
+      pendingUserQuestion: null,
       recentResults: [],
       processedMessages: {},
       completedActions: {},
@@ -147,6 +148,8 @@ export class SessionEngine {
       consecutiveActionFailures: 0,
       consecutiveNoVerifiedEffect: 0,
       inferenceRepairAttempts: 0,
+      verifierFailureCount: 0,
+      maxVerifierFailures: this.budgets.maxVerifierFailures,
       stepCount: 0,
       terminalReason: null,
     };
@@ -390,19 +393,52 @@ export class SessionEngine {
     session.activeInferenceId = null;
     session.workClaim = null;
     session.inferenceRepairAttempts = 0;
-    if (proposal.kind === 'completion') {
+    if ('question' in proposal) {
+      session.state = 'WAITING_FOR_USER';
+      session.pendingUserQuestion = {
+        observationId: proposal.observationId,
+        question: proposal.question,
+        ...(proposal.choices === undefined ? {} : { choices: [...proposal.choices] }),
+      };
+      session.updatedAt = this.now();
+      this.queueTrajectory(session, [
+        {
+          kind: 'model_response',
+          correlationId: causationMessageId,
+          summary: 'Model requested user input',
+          observationId: proposal.observationId,
+        },
+        {
+          kind: 'approval_requested',
+          correlationId: causationMessageId,
+          summary: `User input required: ${proposal.question}`,
+          observationId: proposal.observationId,
+        },
+      ]);
+      session.revision = expectedRevision + 1;
+      await this.options.store.transition(session, expectedRevision);
+      return;
+    }
+    if ('summary' in proposal) {
       const verification = this.completionVerifier.verify(
         proposal,
         session.trajectoryOutbox.map((entry) => entry.event),
       );
-      session.state = verification.outcome === 'accepted'
-        ? 'COMPLETED'
-        : verification.outcome === 'failed' ? 'FAILED' : 'OBSERVING';
-      session.terminalReason = verification.outcome === 'continue' ? null : {
-        code: 'MODEL_COMPLETION',
-        message: proposal.summary,
-        detectedAt: this.now(),
-      };
+      if (verification.outcome === 'continue') session.verifierFailureCount += 1;
+      if (verification.outcome === 'accepted') session.verifierFailureCount = 0;
+      const verifierTerminalReason = verification.outcome === 'continue'
+        ? detectTerminalReason(session, this.budgets, this.now())
+        : null;
+      session.state = verifierTerminalReason !== null
+        ? 'FAILED'
+        : verification.outcome === 'accepted'
+          ? 'COMPLETED'
+          : verification.outcome === 'failed' ? 'FAILED' : 'OBSERVING';
+      session.terminalReason = verifierTerminalReason ?? (verification.outcome === 'continue' ? null : {
+          code: 'MODEL_COMPLETION' as const,
+          message: proposal.summary,
+          detectedAt: this.now(),
+        });
       session.updatedAt = this.now();
       this.queueTrajectory(session, [
         {
@@ -417,14 +453,14 @@ export class SessionEngine {
           summary: `${verification.code}: ${verification.reason}`,
           observationId: proposal.observationId,
         },
-        ...(verification.outcome === 'continue' ? [] : [{
+        ...(session.terminalReason === null ? [] : [{
           kind: 'task_terminal_outcome' as const,
           correlationId: causationMessageId,
-          summary: proposal.summary,
+          summary: session.terminalReason.message,
           observationId: proposal.observationId,
         }]),
       ]);
-      if (verification.outcome !== 'continue') this.abortSessionWork(sessionId, verification.reason);
+      if (session.terminalReason !== null) this.abortSessionWork(sessionId, session.terminalReason.message);
       session.revision = expectedRevision + 1;
       await this.options.store.transition(session, expectedRevision);
       return;
@@ -657,6 +693,7 @@ export class SessionEngine {
     };
     session.pendingPolicy = null;
     session.pendingApproval = null;
+    session.pendingUserQuestion = null;
     session.updatedAt = now;
     this.queueTrajectory(session, [
       ...precedingEvents,
@@ -808,9 +845,9 @@ export class SessionEngine {
     session.recentResults = [...session.recentResults.slice(-19), event.result];
     const failed = event.result.status !== 'succeeded';
     session.consecutiveActionFailures = failed ? session.consecutiveActionFailures + 1 : 0;
-    session.consecutiveNoVerifiedEffect = hasVerifiedEffect(session.lastObservation!, event.result)
-      ? 0
-      : session.consecutiveNoVerifiedEffect + 1;
+    const verifiedEffect = hasVerifiedEffect(session.lastObservation!, event.result);
+    session.consecutiveNoVerifiedEffect = verifiedEffect ? 0 : session.consecutiveNoVerifiedEffect + 1;
+    if (verifiedEffect) session.verifierFailureCount = 0;
     session.updatedAt = event.occurredAt;
     const terminalReason = event.result.status === 'failed_terminal'
       ? {
@@ -908,6 +945,7 @@ export class SessionEngine {
     session.pendingPostObservation = null;
     session.pendingPolicy = null;
     session.pendingApproval = null;
+    session.pendingUserQuestion = null;
     session.terminalReason = {
       code: 'SESSION_CANCELLED',
       message: event.reason,

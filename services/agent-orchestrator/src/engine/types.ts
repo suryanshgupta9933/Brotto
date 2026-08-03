@@ -3,7 +3,6 @@ import type {
   ActionId,
   ActionProposalV1,
   ActionResultV1,
-  AgentProposalV1,
   ApprovalResolutionV1,
   CompletionProposalV1,
   MessageId,
@@ -22,6 +21,7 @@ export type CanonicalSessionState =
   | 'VALIDATING'
   | 'POLICY_CHECK'
   | 'WAITING_FOR_APPROVAL'
+  | 'WAITING_FOR_USER'
   | 'DISPATCHING'
   | 'EXECUTING'
   | 'VERIFYING'
@@ -40,7 +40,8 @@ export type TerminalReasonCode =
   | 'REPEATED_OBSERVATION'
   | 'NO_VERIFIED_EFFECT'
   | 'CONSECUTIVE_ACTION_FAILURES'
-  | 'INFERENCE_REPAIR_EXHAUSTED';
+  | 'INFERENCE_REPAIR_EXHAUSTED'
+  | 'VERIFIER_FAILURE_LIMIT_REACHED';
 
 export interface TerminalReason {
   code: TerminalReasonCode;
@@ -56,6 +57,7 @@ export interface EngineBudgets {
   maxNoVerifiedEffect: number;
   maxConsecutiveActionFailures: number;
   maxInferenceRepairAttempts: number;
+  maxVerifierFailures: number;
 }
 
 export interface PlanningInput {
@@ -80,8 +82,17 @@ export interface PolicyInput {
 }
 
 export interface InferencePort {
-  plan(input: PlanningInput, signal: AbortSignal): Promise<AgentProposalV1>;
+  plan(input: PlanningInput, signal: AbortSignal): Promise<PlanningOutcome>;
 }
+
+export interface QuestionProposal {
+  kind: 'question';
+  observationId: ObservationV1['observationId'];
+  question: string;
+  choices?: string[];
+}
+
+export type PlanningOutcome = ActionProposalV1 | CompletionProposalV1 | QuestionProposal;
 
 export interface PolicyPort {
   evaluate(input: PolicyInput, signal: AbortSignal): Promise<PolicyDecisionV1>;
@@ -189,6 +200,8 @@ export interface PendingApproval {
   policyDecision: PolicyDecisionV1;
 }
 
+export type PendingUserQuestion = Omit<QuestionProposal, 'kind'>;
+
 export interface WorkClaim {
   kind: 'inference' | 'policy';
   workId: string;
@@ -215,6 +228,7 @@ export interface CanonicalSession {
   pendingPostObservation: PendingPostObservation | null;
   pendingPolicy: PendingPolicy | null;
   pendingApproval: PendingApproval | null;
+  pendingUserQuestion: PendingUserQuestion | null;
   recentResults: ActionResultV1[];
   processedMessages: Record<string, StoredOutcome>;
   completedActions: Record<string, { result: ActionResultV1; outcome: StoredOutcome }>;
@@ -223,6 +237,8 @@ export interface CanonicalSession {
   consecutiveActionFailures: number;
   consecutiveNoVerifiedEffect: number;
   inferenceRepairAttempts: number;
+  verifierFailureCount: number;
+  maxVerifierFailures: number;
   stepCount: number;
   terminalReason: TerminalReason | null;
 }

@@ -14,6 +14,8 @@ export interface ProgressSnapshot {
   consecutiveNoVerifiedEffect: number;
   consecutiveActionFailures: number;
   inferenceRepairAttempts: number;
+  verifierFailureCount: number;
+  maxVerifierFailures: number;
 }
 
 export const DEFAULT_ENGINE_BUDGETS: EngineBudgets = {
@@ -24,6 +26,7 @@ export const DEFAULT_ENGINE_BUDGETS: EngineBudgets = {
   maxNoVerifiedEffect: 3,
   maxConsecutiveActionFailures: 3,
   maxInferenceRepairAttempts: 2,
+  maxVerifierFailures: 3,
 };
 
 function normalize(value: unknown): unknown {
@@ -92,6 +95,7 @@ const messages: Record<TerminalReasonCode, string> = {
   NO_VERIFIED_EFFECT: 'Actions repeatedly produced no verified browser effect',
   CONSECUTIVE_ACTION_FAILURES: 'The consecutive action-failure budget was exhausted',
   INFERENCE_REPAIR_EXHAUSTED: 'The inference contract repair budget was exhausted',
+  VERIFIER_FAILURE_LIMIT_REACHED: 'Repeated completion verification failures exhausted the verification budget',
 };
 
 export function detectTerminalReason(
@@ -107,6 +111,7 @@ export function detectTerminalReason(
   else if (progress.consecutiveNoVerifiedEffect >= budgets.maxNoVerifiedEffect) code = 'NO_VERIFIED_EFFECT';
   else if (progress.consecutiveActionFailures >= budgets.maxConsecutiveActionFailures) code = 'CONSECUTIVE_ACTION_FAILURES';
   else if (progress.inferenceRepairAttempts >= budgets.maxInferenceRepairAttempts) code = 'INFERENCE_REPAIR_EXHAUSTED';
+  else if (progress.verifierFailureCount >= progress.maxVerifierFailures) code = 'VERIFIER_FAILURE_LIMIT_REACHED';
 
   return code === null ? null : { code, message: messages[code], detectedAt: now };
 }
