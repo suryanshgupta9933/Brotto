@@ -71,7 +71,7 @@ function observation(observationId = ids.observation1): ObservationV1 {
 }
 
 class FakeInference implements InferencePort {
-  readonly calls: unknown[] = [];
+  readonly calls: Parameters<InferencePort['plan']>[0][] = [];
 
   constructor(private readonly proposals: AgentProposalV1[] = []) {}
 
@@ -82,6 +82,32 @@ class FakeInference implements InferencePort {
   async plan(input: Parameters<InferencePort['plan']>[0]): Promise<AgentProposalV1> {
     this.calls.push(input);
     return this.proposals.shift() ?? {
+      kind: 'action',
+      observationId: input.observation.observationId,
+      proposedAt: '2026-08-03T10:00:01.000Z',
+      action: { type: 'left_click', x: 10, y: 20 },
+    };
+  }
+}
+
+class DeferredInference implements InferencePort {
+  readonly calls: Parameters<InferencePort['plan']>[0][] = [];
+  private releaseFirst!: () => void;
+  private markFirstStarted!: () => void;
+  readonly firstStarted = new Promise<void>((resolve) => { this.markFirstStarted = resolve; });
+  private readonly firstReleased = new Promise<void>((resolve) => { this.releaseFirst = resolve; });
+
+  release(): void {
+    this.releaseFirst();
+  }
+
+  async plan(input: Parameters<InferencePort['plan']>[0]): Promise<AgentProposalV1> {
+    this.calls.push(input);
+    if (this.calls.length === 1) {
+      this.markFirstStarted();
+      await this.firstReleased;
+    }
+    return {
       kind: 'action',
       observationId: input.observation.observationId,
       proposedAt: '2026-08-03T10:00:01.000Z',
@@ -106,6 +132,7 @@ class FakePolicy implements PolicyPort {
 
 class DeferredPolicy implements PolicyPort {
   calls = 0;
+  readonly inputs: Parameters<PolicyPort['evaluate']>[0][] = [];
   private releaseFirst!: () => void;
   private markFirstStarted!: () => void;
   readonly firstStarted = new Promise<void>((resolve) => { this.markFirstStarted = resolve; });
@@ -117,6 +144,7 @@ class DeferredPolicy implements PolicyPort {
 
   async evaluate(input: Parameters<PolicyPort['evaluate']>[0]): Promise<PolicyDecisionV1> {
     this.calls += 1;
+    this.inputs.push(input);
     if (this.calls === 1) {
       this.markFirstStarted();
       await this.firstReleased;
@@ -225,17 +253,20 @@ class ConflictAfterTrajectoryAppendStore extends InMemorySessionStore {
   }
 }
 
-function createEngine(options: {
-  inference?: FakeInference;
+function createEngine<TInference extends InferencePort = FakeInference>(options: {
+  inference?: TInference;
   policy?: PolicyPort;
   store?: InMemorySessionStore;
   trajectorySink?: RecordingTrajectory;
   commandSink?: RecordingCommands;
   budgets?: ConstructorParameters<typeof SessionEngine>[0]['budgets'];
+  now?: () => string;
+  workClaimTtlMs?: number;
+  claimantId?: string;
 } = {}) {
   const commandSink = options.commandSink ?? new RecordingCommands();
   const store = options.store ?? new InMemorySessionStore();
-  const inference = options.inference ?? new FakeInference();
+  const inference = (options.inference ?? new FakeInference()) as TInference;
   const trajectorySink = options.trajectorySink ?? new RecordingTrajectory();
   const engine = new SessionEngine({
     store,
@@ -243,12 +274,14 @@ function createEngine(options: {
     policy: options.policy ?? new FakePolicy(),
     commandSink,
     trajectorySink,
-    now: () => '2026-08-03T10:00:03.000Z',
+    now: options.now ?? (() => '2026-08-03T10:00:03.000Z'),
     idGenerator: (() => {
       const generated = [ids.action, ids.step, ids.policy];
       return () => generated.shift() ?? '00000000-0000-4000-8000-000000000099';
     })(),
     budgets: options.budgets,
+    workClaimTtlMs: options.workClaimTtlMs,
+    claimantId: options.claimantId,
   });
 
   return { engine, commandSink, inference, store, trajectorySink };
@@ -369,6 +402,142 @@ describe('SessionEngine', () => {
     expect((await store.load(ids.session as never))?.state).toBe('CANCELLED');
   });
 
+  it('lets only one engine call inference while a persisted claim is active', async () => {
+    const store = new InMemorySessionStore();
+    const inference = new DeferredInference();
+    const first = createEngine({ store, inference, claimantId: 'engine-a' });
+    const second = createEngine({ store, inference, claimantId: 'engine-b' });
+    await open(first.engine);
+    const event = {
+      type: 'observation.submitted' as const,
+      messageId: '10000000-0000-4000-8000-000000000054',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    };
+
+    const planning = first.engine.handle(event);
+    await inference.firstStarted;
+    await second.engine.handle(event);
+
+    expect(inference.calls).toHaveLength(1);
+    expect(inference.calls[0]).toMatchObject({ workId: `inference:${event.messageId}` });
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'PLANNING',
+      workClaim: { kind: 'inference', workId: `inference:${event.messageId}`, claimantId: 'engine-a' },
+    });
+    inference.release();
+    await planning;
+  });
+
+  it('lets only one engine call policy while a persisted claim is active', async () => {
+    const store = new InMemorySessionStore();
+    const policy = new DeferredPolicy();
+    const first = createEngine({ store, policy, claimantId: 'engine-a' });
+    const second = createEngine({ store, policy, claimantId: 'engine-b' });
+    await open(first.engine);
+    const event = {
+      type: 'observation.submitted' as const,
+      messageId: '10000000-0000-4000-8000-000000000055',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    };
+
+    const evaluating = first.engine.handle(event);
+    await policy.firstStarted;
+    await second.engine.handle(event);
+
+    expect(policy.calls).toBe(1);
+    expect(policy.inputs[0]).toMatchObject({ workId: ids.policy });
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'POLICY_CHECK',
+      workClaim: { kind: 'policy', workId: ids.policy, claimantId: 'engine-a' },
+    });
+    policy.release();
+    await evaluating;
+  });
+
+  it('reclaims an expired inference lease with the same work ID and ignores the stale owner result', async () => {
+    let currentTime = '2026-08-03T10:00:03.000Z';
+    const now = () => currentTime;
+    const store = new InMemorySessionStore();
+    const inference = new DeferredInference();
+    const commandSink = new RecordingCommands();
+    const first = createEngine({
+      store,
+      inference,
+      commandSink,
+      now,
+      workClaimTtlMs: 30_000,
+      claimantId: 'engine-a',
+    });
+    const second = createEngine({
+      store,
+      inference,
+      commandSink,
+      now,
+      workClaimTtlMs: 30_000,
+      claimantId: 'engine-b',
+    });
+    await open(first.engine);
+    const event = {
+      type: 'observation.submitted' as const,
+      messageId: '10000000-0000-4000-8000-000000000056',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    };
+
+    const stalePlanning = first.engine.handle(event);
+    await inference.firstStarted;
+    await second.engine.handle(event);
+    expect(inference.calls).toHaveLength(1);
+
+    currentTime = '2026-08-03T10:00:34.000Z';
+    await second.engine.handle(event);
+
+    expect(inference.calls).toHaveLength(2);
+    expect(inference.calls.map((input) => input.workId)).toEqual([
+      `inference:${event.messageId}`,
+      `inference:${event.messageId}`,
+    ]);
+    expect(commandSink.commands).toHaveLength(1);
+    inference.release();
+    await stalePlanning;
+    expect(commandSink.commands).toHaveLength(1);
+    expect((await store.load(ids.session as never))?.state).toBe('EXECUTING');
+  });
+
+  it('clears a cross-instance inference claim on cancellation and ignores its late result', async () => {
+    const store = new InMemorySessionStore();
+    const inference = new DeferredInference();
+    const first = createEngine({ store, inference, claimantId: 'engine-a' });
+    const second = createEngine({ store, inference, claimantId: 'engine-b' });
+    await open(first.engine);
+    const planning = first.engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000057',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+    await inference.firstStarted;
+
+    await second.engine.handle({
+      type: 'task.cancelled',
+      messageId: '10000000-0000-4000-8000-000000000058',
+      sessionId: ids.session,
+      reason: 'cancelled by another engine',
+      occurredAt: '2026-08-03T10:00:04.000Z',
+    });
+    expect(await store.load(ids.session as never)).toMatchObject({ state: 'CANCELLED', workClaim: null });
+
+    inference.release();
+    await planning;
+    expect((await store.load(ids.session as never))?.state).toBe('CANCELLED');
+  });
+
   it('rejects a result for a different observation/action pair', async () => {
     const { engine } = createEngine();
     await open(engine);
@@ -483,7 +652,7 @@ describe('SessionEngine', () => {
       type: 'reconcile.request',
       messageId: '10000000-0000-4000-8000-000000000048',
       sessionId: ids.session,
-      lastReceivedSequence: -1,
+      lastReceivedSequence: 0,
       pendingActionIds: [],
       occurredAt: '2026-08-03T10:00:05.000Z',
     });
@@ -736,7 +905,7 @@ describe('SessionEngine', () => {
       type: 'reconcile.request',
       messageId: '10000000-0000-4000-8000-000000000036',
       sessionId: ids.session,
-      lastReceivedSequence: -1,
+      lastReceivedSequence: 0,
       pendingActionIds: [],
       occurredAt: '2026-08-03T10:00:05.000Z',
     });
@@ -747,8 +916,9 @@ describe('SessionEngine', () => {
   });
 
   it.each([
-    ['command sequence', 0, []],
-    ['pending action ID', -1, [ids.action]],
+    ['command sequence', 1, []],
+    ['higher command sequence', 2, []],
+    ['pending action ID', 0, [ids.action]],
   ])('does not replay when reconcile proves receipt by %s', async (_proof, lastReceivedSequence, pendingActionIds) => {
     const commandSink = new FailOnceCommands();
     const store = new InMemorySessionStore();
@@ -765,7 +935,7 @@ describe('SessionEngine', () => {
     const restarted = createEngine({ store, commandSink });
     await restarted.engine.handle({
       type: 'reconcile.request',
-      messageId: lastReceivedSequence === 0
+      messageId: lastReceivedSequence === 1
         ? '10000000-0000-4000-8000-000000000052'
         : '10000000-0000-4000-8000-000000000053',
       sessionId: ids.session,

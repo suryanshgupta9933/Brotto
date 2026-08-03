@@ -17,11 +17,12 @@ function assertJsonValue(value: unknown, path = '$', ancestors = new Set<object>
   }
   const nextAncestors = new Set(ancestors).add(value);
   if (Array.isArray(value)) {
-    if (
-      Object.getOwnPropertySymbols(value).length > 0 ||
-      Object.keys(value).length !== value.length
-    ) {
-      throw new TypeError(`Canonical session must contain only JSON values: ${path}`);
+    for (const key of Reflect.ownKeys(value)) {
+      if (key === 'length') continue;
+      const index = typeof key === 'string' ? Number(key) : Number.NaN;
+      if (!Number.isInteger(index) || index < 0 || index >= value.length || String(index) !== key) {
+        throw new TypeError(`Canonical session must contain only JSON values: ${path}`);
+      }
     }
     for (let index = 0; index < value.length; index += 1) {
       if (!Object.prototype.hasOwnProperty.call(value, index)) {

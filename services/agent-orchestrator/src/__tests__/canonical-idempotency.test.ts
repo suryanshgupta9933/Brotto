@@ -13,13 +13,14 @@ function session(revision: number, outcome?: StoredOutcome): CanonicalSession {
     completionCriteria: [],
     state: 'OBSERVING',
     revision,
-    nextSequence: 0,
+    nextSequence: 1,
     eventSequence: 0,
     trajectoryOutbox: [],
     startedAt: '2026-08-03T10:00:00.000Z',
     updatedAt: '2026-08-03T10:00:00.000Z',
     lastObservation: null,
     activeInferenceId: null,
+    workClaim: null,
     activeAction: null,
     pendingPostObservation: null,
     pendingPolicy: null,
@@ -123,6 +124,11 @@ describe('InMemorySessionStore', () => {
       return value;
     }],
     ['extra array keys', () => Object.assign(['value'], { extra: true })],
+    ['non-enumerable array keys', () => {
+      const value = ['value'];
+      Object.defineProperty(value, 'hidden', { value: true, enumerable: false });
+      return value;
+    }],
     ['symbol-keyed properties', () => ({ [Symbol('hidden')]: 'value' })],
     ['non-enumerable own properties', () => {
       const value = { visible: true };

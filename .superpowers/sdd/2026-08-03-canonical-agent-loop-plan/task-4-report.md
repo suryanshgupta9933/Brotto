@@ -159,3 +159,65 @@ The implementation now:
 - builds with `noUnusedLocals` and `noUnusedParameters` enabled.
 
 Focused GREEN: 2 suites, 49 tests passed. Full pre-commit GREEN: 6 suites, 141 tests passed; strict TypeScript build exited successfully.
+
+## Review Fix Round 3 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:test-driven-development` and execute these steps inline in the existing Task 4 worktree.
+
+**Goal:** Reserve command sequence `0` as the client “nothing received” watermark, make strict JSON array validation round-trip exact, and serialize inference/policy work across engine instances with persisted CAS leases.
+
+**Architecture:** `CanonicalSession` owns one optional `workClaim` because its state machine permits only one external inference or policy operation at a time. Each engine CAS-claims the stable work ID immediately before calling its port; only the current owner may apply a result, and successful transitions or cancellation clear the claim. An active lease blocks other engines, while lease expiry permits another engine to repeat the idempotent port call using the same work ID without a distributed lock.
+
+**Tech stack:** TypeScript, Jest, canonical revision CAS, injected ISO clock and 30-second default claim TTL.
+
+### Task A: Positive command sequence watermark
+
+**Files:** `src/engine/session-engine.ts`, `src/__tests__/canonical-engine.test.ts`, `src/__tests__/canonical-idempotency.test.ts`.
+
+- [x] Add a reconcile test proving command sequence `1` replays when `lastReceivedSequence` is `0`, but not when the watermark is `1` or the action ID is pending.
+- [x] Run the focused engine test and confirm the current sequence-`0` behavior fails the new expectation.
+- [x] Initialize `nextSequence` to `1` and update only fixtures/results whose command/result sequence contract changes.
+- [x] Re-run the focused test green.
+
+### Task B: Exact array own-key validation
+
+**Files:** `src/engine/session-store.ts`, `src/__tests__/canonical-idempotency.test.ts`.
+
+- [x] Add a failing test with a custom non-enumerable string property on an otherwise dense array.
+- [x] Run the store test and confirm the current `Object.keys` check incorrectly accepts it.
+- [x] Validate array `Reflect.ownKeys` against exactly `length` plus canonical dense indices `0..length-1`, while retaining hole, symbol, and enumerable-extra rejection.
+- [x] Re-run the store test green.
+
+### Task C: Cross-instance inference and policy claims
+
+**Files:** `src/engine/types.ts`, `src/engine/session-engine.ts`, `src/__tests__/canonical-engine.test.ts`.
+
+**Interfaces:** Add `WorkClaim`, `CanonicalSession.workClaim`, `PlanningInput.workId`, `PolicyInput.workId`, and `SessionEngineOptions.workClaimTtlMs`/`claimantId`. Use the existing `now()` injection for lease comparisons.
+
+- [x] Add shared-store two-engine tests proving one inference call and one policy call while a non-expired claim is active, with the same persisted work ID reaching the port.
+- [x] Run those tests RED because process-local recovery Sets cannot coordinate the engines.
+- [x] Add an expiry test proving another engine can CAS-reclaim after 30 seconds, calls with the same work ID, and ignores the stale first owner’s late result.
+- [x] Add a cross-engine cancellation test proving the claim is cleared and a late port result cannot leave `CANCELLED`.
+- [x] Run the new claim tests RED for the missing persisted claim protocol.
+- [x] Implement claim acquisition by revision CAS, active-lease observation, expired takeover, owner/work-ID result guards, atomic claim clearing on result transitions, and cancellation invalidation. Keep the local Sets only as an in-process optimization.
+- [x] Re-run all focused claim tests green, then refactor duplicated claim checks without changing behavior.
+
+### Task D: Verification and handoff
+
+- [x] Run both focused canonical suites, all orchestrator tests, and the strict TypeScript build.
+- [x] Append exact RED/GREEN evidence and test counts to this report.
+- [x] Inspect the scoped diff, commit only Task 4 files, and send the commit hash to the controller.
+
+### Review Fix Round 3 Evidence
+
+The focused RED run produced six expected failures: duplicate inference across two engines, duplicate policy evaluation across two engines, no active-lease suppression before expiry, no persisted claim to clear on cancellation, watermark `0` suppressing replay of command `0`, and acceptance of a non-enumerable custom array property. The remaining 48 focused tests passed.
+
+The implementation now:
+
+- reserves command sequence `0` as “nothing received,” allocates the first command at `1`, replays it for watermark `0`, and treats watermark `1` or greater and a matching pending action ID as receipt proof;
+- validates arrays with `Reflect.ownKeys`, allowing only `length` and dense canonical indices while rejecting holes, symbols, and enumerable or non-enumerable custom keys;
+- persists an inference or policy `workClaim` with a per-engine claimant, stable port `workId`, and injectable 30-second lease;
+- acquires ownership with the existing revision CAS before external calls, blocks other engines while the lease is active, and reclaims expired leases using the same idempotency ID; and
+- clears ownership in result/cancellation transitions and rejects late results from an owner displaced by takeover or cancellation.
+
+Focused GREEN: 2 suites, 55 tests passed. Final GREEN: 6 suites, 147 tests passed, 0 failures; strict TypeScript build exited successfully.

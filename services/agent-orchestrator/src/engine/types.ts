@@ -58,6 +58,7 @@ export interface EngineBudgets {
 }
 
 export interface PlanningInput {
+  workId: string;
   sessionId: SessionId;
   taskId: TaskId;
   goal: string;
@@ -67,6 +68,7 @@ export interface PlanningInput {
 }
 
 export interface PolicyInput {
+  workId: string;
   sessionId: SessionId;
   taskId: TaskId;
   actionId: ActionId;
@@ -150,6 +152,13 @@ export interface PendingApproval {
   policyDecision: PolicyDecisionV1;
 }
 
+export interface WorkClaim {
+  kind: 'inference' | 'policy';
+  workId: string;
+  claimantId: string;
+  leaseExpiresAt: string;
+}
+
 export interface CanonicalSession {
   sessionId: SessionId;
   taskId: TaskId;
@@ -164,6 +173,7 @@ export interface CanonicalSession {
   updatedAt: string;
   lastObservation: ObservationV1 | null;
   activeInferenceId: string | null;
+  workClaim: WorkClaim | null;
   activeAction: ActiveAction | null;
   pendingPostObservation: PendingPostObservation | null;
   pendingPolicy: PendingPolicy | null;
@@ -255,4 +265,6 @@ export interface SessionEngineOptions {
   budgets?: Partial<EngineBudgets>;
   now?: () => string;
   idGenerator?: () => string;
+  claimantId?: string;
+  workClaimTtlMs?: number;
 }

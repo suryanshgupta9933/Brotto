@@ -16,6 +16,7 @@ import type {
   SessionEngineEvent,
   SessionEngineOptions,
   StoredOutcome,
+  WorkClaim,
 } from './types.js';
 import { SessionEngineError } from './types.js';
 import {
@@ -43,6 +44,8 @@ export class SessionEngine {
   private readonly now: () => string;
   private readonly idGenerator: () => string;
   private readonly budgets;
+  private readonly claimantId: string;
+  private readonly workClaimTtlMs: number;
   private readonly recoveringSessions = new Set<string>();
   private readonly requestedRecovery = new Map<string, boolean>();
 
@@ -50,6 +53,8 @@ export class SessionEngine {
     this.now = options.now ?? (() => new Date().toISOString());
     this.idGenerator = options.idGenerator ?? randomUUID;
     this.budgets = { ...DEFAULT_ENGINE_BUDGETS, ...options.budgets };
+    this.claimantId = options.claimantId ?? randomUUID();
+    this.workClaimTtlMs = options.workClaimTtlMs ?? 30_000;
   }
 
   async handle(event: SessionEngineEvent): Promise<StoredOutcome> {
@@ -115,13 +120,14 @@ export class SessionEngine {
       completionCriteria: [...event.completionCriteria],
       state: 'OBSERVING',
       revision: 0,
-      nextSequence: 0,
+      nextSequence: 1,
       eventSequence: 0,
       trajectoryOutbox: [],
       startedAt: event.occurredAt,
       updatedAt: event.occurredAt,
       lastObservation: null,
       activeInferenceId: null,
+      workClaim: null,
       activeAction: null,
       pendingPostObservation: null,
       pendingPolicy: null,
@@ -177,6 +183,7 @@ export class SessionEngine {
     const expectedRevision = session.revision;
     session.state = 'PLANNING';
     session.activeInferenceId = `inference:${messageId}`;
+    session.workClaim = null;
     session.pendingPostObservation = null;
     session.lastObservation = observation;
     session.observationSignatures.push(observationSignature(observation));
@@ -185,6 +192,7 @@ export class SessionEngine {
     if (terminalReason !== null) {
       session.state = 'FAILED';
       session.activeInferenceId = null;
+      session.workClaim = null;
       session.terminalReason = terminalReason;
     }
     this.queueTrajectory(session, [
@@ -253,11 +261,11 @@ export class SessionEngine {
       await this.flushTrajectoryOutbox(sessionId);
       const session = await this.requireSession(sessionId);
       if (session.state === 'PLANNING' && session.activeInferenceId !== null) {
-        await this.resumePlanning(session);
+        if (!await this.resumePlanning(session)) return;
         continue;
       }
       if (session.state === 'POLICY_CHECK' && session.pendingPolicy !== null) {
-        await this.resumePolicy(session);
+        if (!await this.resumePolicy(session)) return;
         continue;
       }
       if (session.state === 'VERIFYING' && session.pendingPostObservation !== null) {
@@ -272,11 +280,13 @@ export class SessionEngine {
     throw new SessionEngineError('STORE_CONFLICT', 'Session recovery exceeded its transition limit');
   }
 
-  private async resumePlanning(session: CanonicalSession): Promise<void> {
+  private async resumePlanning(session: CanonicalSession): Promise<boolean> {
     const inferenceId = session.activeInferenceId;
     const observation = session.lastObservation;
-    if (inferenceId === null || observation === null) return;
+    if (inferenceId === null || observation === null) return false;
+    if (!await this.claimWork(session, 'inference', inferenceId)) return false;
     const proposal = await this.options.inference.plan({
+      workId: inferenceId,
       sessionId: session.sessionId,
       taskId: session.taskId,
       goal: session.goal,
@@ -285,6 +295,7 @@ export class SessionEngine {
       recentResults: session.recentResults,
     });
     await this.applyProposal(session.sessionId, inferenceId, proposal);
+    return true;
   }
 
   private async applyProposal(
@@ -293,10 +304,15 @@ export class SessionEngine {
     proposal: Awaited<ReturnType<SessionEngineOptions['inference']['plan']>>,
   ): Promise<void> {
     const session = await this.requireSession(sessionId);
-    if (session.activeInferenceId !== inferenceId || session.state !== 'PLANNING') return;
+    if (
+      session.activeInferenceId !== inferenceId ||
+      session.state !== 'PLANNING' ||
+      !this.ownsWorkClaim(session, 'inference', inferenceId)
+    ) return;
     const causationMessageId = inferenceId.slice('inference:'.length) as MessageId;
     const expectedObservationId = session.lastObservation?.observationId;
     if (expectedObservationId === undefined || proposal.observationId !== expectedObservationId) {
+      session.workClaim = null;
       await this.persistError(session, causationMessageId, new SessionEngineError(
         'STALE_PROPOSAL',
         'Model proposal does not match the persisted planning observation',
@@ -305,6 +321,7 @@ export class SessionEngine {
 
     const expectedRevision = session.revision;
     session.activeInferenceId = null;
+    session.workClaim = null;
     if (proposal.kind === 'completion') {
       session.state = proposal.status === 'succeeded' ? 'COMPLETED' : 'FAILED';
       session.terminalReason = {
@@ -365,10 +382,12 @@ export class SessionEngine {
     await this.options.store.transition(session, expectedRevision);
   }
 
-  private async resumePolicy(session: CanonicalSession): Promise<void> {
+  private async resumePolicy(session: CanonicalSession): Promise<boolean> {
     const pending = session.pendingPolicy;
-    if (pending === null) return;
+    if (pending === null) return false;
+    if (!await this.claimWork(session, 'policy', pending.policyDecisionId)) return false;
     const decision = await this.options.policy.evaluate({
+      workId: pending.policyDecisionId,
       sessionId: session.sessionId,
       taskId: session.taskId,
       actionId: pending.actionId,
@@ -376,6 +395,7 @@ export class SessionEngine {
       proposal: pending.proposal,
     });
     await this.applyPolicyDecision(session.sessionId, pending, decision);
+    return true;
   }
 
   private async applyPolicyDecision(
@@ -385,18 +405,25 @@ export class SessionEngine {
   ): Promise<void> {
     const session = await this.requireSession(sessionId);
     const pending = session.pendingPolicy;
-    if (session.state !== 'POLICY_CHECK' || pending === null || !this.samePendingPolicy(pending, expected)) return;
+    if (
+      session.state !== 'POLICY_CHECK' ||
+      pending === null ||
+      !this.samePendingPolicy(pending, expected) ||
+      !this.ownsWorkClaim(session, 'policy', pending.policyDecisionId)
+    ) return;
     if (
       decision.policyDecisionId !== pending.policyDecisionId ||
       decision.actionId !== pending.actionId ||
       decision.observationId !== pending.observationId
     ) {
+      session.workClaim = null;
       await this.persistError(session, pending.causationMessageId, new SessionEngineError(
         'STALE_POLICY_DECISION',
         'Policy decision does not match the persisted policy request',
       ));
     }
 
+    session.workClaim = null;
     const references = this.pendingReferences(pending);
     if (decision.decision === 'denied') {
       const expectedRevision = session.revision;
@@ -784,6 +811,7 @@ export class SessionEngine {
     const expectedRevision = session.revision;
     session.state = 'CANCELLED';
     session.activeInferenceId = null;
+    session.workClaim = null;
     session.activeAction = null;
     session.pendingPostObservation = null;
     session.pendingPolicy = null;
@@ -963,6 +991,43 @@ export class SessionEngine {
       throw new SessionEngineError('SESSION_NOT_FOUND', `Session ${sessionId} was not found`);
     }
     return session;
+  }
+
+  private async claimWork(
+    session: CanonicalSession,
+    kind: WorkClaim['kind'],
+    workId: string,
+  ): Promise<boolean> {
+    const now = this.now();
+    if (session.workClaim !== null && Date.parse(session.workClaim.leaseExpiresAt) > Date.parse(now)) {
+      return false;
+    }
+    const expectedRevision = session.revision;
+    session.workClaim = {
+      kind,
+      workId,
+      claimantId: this.claimantId,
+      leaseExpiresAt: new Date(Date.parse(now) + this.workClaimTtlMs).toISOString(),
+    };
+    session.updatedAt = now;
+    session.revision = expectedRevision + 1;
+    try {
+      await this.options.store.compareAndSwap(session, expectedRevision);
+      return true;
+    } catch (error) {
+      if (error instanceof SessionEngineError && error.code === 'STORE_CONFLICT') return false;
+      throw error;
+    }
+  }
+
+  private ownsWorkClaim(
+    session: CanonicalSession,
+    kind: WorkClaim['kind'],
+    workId: string,
+  ): boolean {
+    return session.workClaim?.kind === kind &&
+      session.workClaim.workId === workId &&
+      session.workClaim.claimantId === this.claimantId;
   }
 
   private canObserve(session: CanonicalSession): boolean {
