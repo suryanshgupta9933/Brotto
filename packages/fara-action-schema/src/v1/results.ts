@@ -60,6 +60,7 @@ const RejectedActionResultV1Schema = ActionResultBaseV1Schema.extend({
 const CancelledActionResultV1Schema = ActionResultBaseV1Schema.extend({
   status: z.literal('cancelled'),
   cancellation: z.object({ reason: z.string().min(1).max(2_000).optional() }).strict(),
+  postObservation: ObservationV1Schema,
 }).strict();
 
 export const ActionResultV1Schema = z.union([

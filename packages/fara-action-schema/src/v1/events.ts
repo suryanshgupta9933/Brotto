@@ -125,10 +125,10 @@ export const TrajectoryLinkageV1Schema = z.object({
   )) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'startedAt'], message: 'Observation, proposal, policy, dispatch, and execution timestamps must be chronological' });
   }
-  if (hasApprovalProof && (resolvedAt === undefined || !(decidedAt <= resolvedAt && resolvedAt <= dispatchedAt))) {
+  if ((hasApprovalProof && resolvedAt === undefined) || (resolvedAt !== undefined && !(decidedAt < resolvedAt && resolvedAt < dispatchedAt))) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['approvalResolution', 'resolvedAt'], message: 'Approval resolution must occur after policy decision and before dispatch' });
   }
-  if (result.status === 'succeeded' || result.status === 'failed_recoverable' || result.status === 'failed_terminal') {
+  if (result.status === 'succeeded' || result.status === 'failed_recoverable' || result.status === 'failed_terminal' || result.status === 'cancelled') {
     if (result.postObservation.observationId === command.observationId) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ['result', 'postObservation', 'observationId'], message: 'Executed action requires a distinct post-observation' });
     }

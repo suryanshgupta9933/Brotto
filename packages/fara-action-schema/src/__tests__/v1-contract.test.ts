@@ -139,6 +139,20 @@ describe('canonical v1 contracts', () => {
     })).toThrow(z.ZodError);
   });
 
+  it('requires a cancelled action result to carry a settled post-observation', () => {
+    expect(ActionResultV1Schema.parse({
+      ...validResult,
+      status: 'cancelled',
+      cancellation: { reason: 'Cancelled during execution' },
+    }).status).toBe('cancelled');
+    expect(() => ActionResultV1Schema.parse({
+      ...validResult,
+      status: 'cancelled',
+      cancellation: { reason: 'Cancelled during execution' },
+      postObservation: undefined,
+    })).toThrow(z.ZodError);
+  });
+
   it('requires findings with observation evidence for successful completion', () => {
     expect(() => AgentProposalV1Schema.parse({
       kind: 'completion',
@@ -332,6 +346,77 @@ describe('canonical v1 contracts', () => {
     })).toThrow(z.ZodError);
   });
 
+  it('rejects approval resolution at the policy-decision timestamp', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: {
+        ...validActionCommand,
+        policyContext: {
+          ...validActionCommand.policyContext,
+          approved: true,
+          approvalId: validApprovalResolution.approvalId,
+        },
+      },
+      policyDecision: { ...validPolicyDecision, decision: 'approval_required' },
+      approvalResolution: {
+        ...validApprovalResolution,
+        resolvedAt: validPolicyDecision.decidedAt,
+      },
+      result: validResult,
+    })).toThrow(z.ZodError);
+  });
+
+  it('rejects approval resolution at the command-dispatch timestamp', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: {
+        ...validActionCommand,
+        policyContext: {
+          ...validActionCommand.policyContext,
+          approved: true,
+          approvalId: validApprovalResolution.approvalId,
+        },
+      },
+      policyDecision: { ...validPolicyDecision, decision: 'approval_required' },
+      approvalResolution: {
+        ...validApprovalResolution,
+        resolvedAt: validActionCommand.dispatchedAt,
+      },
+      result: validResult,
+    })).toThrow(z.ZodError);
+  });
+
+  it('validates supplied approval chronology even without command approval proof', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: validActionCommand,
+      policyDecision: validPolicyDecision,
+      approvalResolution: {
+        ...validApprovalResolution,
+        resolvedAt: validPolicyDecision.decidedAt,
+      },
+      result: validResult,
+    })).toThrow(z.ZodError);
+  });
+
   it('rejects an executed failure whose post-observation predates completion', () => {
     expect(() => TrajectoryLinkageV1Schema.parse({
       sourceObservation: validObservation,
@@ -350,6 +435,52 @@ describe('canonical v1 contracts', () => {
         postObservation: {
           ...validResult.postObservation,
           capturedAt: '2026-08-03T10:00:01.500Z',
+        },
+      },
+    })).toThrow(z.ZodError);
+  });
+
+  it('rejects a cancelled action that reuses the source observation as post-state', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: validActionCommand,
+      policyDecision: validPolicyDecision,
+      result: {
+        ...validResult,
+        status: 'cancelled',
+        cancellation: { reason: 'Cancelled during execution' },
+        postObservation: {
+          ...validObservation,
+          capturedAt: '2026-08-03T10:00:02.001Z',
+        },
+      },
+    })).toThrow(z.ZodError);
+  });
+
+  it('rejects a cancelled action whose post-observation is captured at completion', () => {
+    expect(() => TrajectoryLinkageV1Schema.parse({
+      sourceObservation: validObservation,
+      proposal: {
+        kind: 'action',
+        observationId,
+        proposedAt: '2026-08-03T10:00:00.100Z',
+        action: validActionCommand.action,
+      },
+      command: validActionCommand,
+      policyDecision: validPolicyDecision,
+      result: {
+        ...validResult,
+        status: 'cancelled',
+        cancellation: { reason: 'Cancelled during execution' },
+        postObservation: {
+          ...validResult.postObservation,
+          capturedAt: validResult.completedAt,
         },
       },
     })).toThrow(z.ZodError);
