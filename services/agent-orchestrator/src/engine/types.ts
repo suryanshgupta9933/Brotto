@@ -87,6 +87,7 @@ export interface CommandSink {
 }
 
 export interface TrajectorySink {
+  /** Append is idempotent by event.eventId. */
   append(event: TrajectoryEventV1): Promise<void>;
 }
 
@@ -107,6 +108,19 @@ export interface CommandDelivery {
   attempts: number;
   lastAttemptAt: string | null;
   lastError: string | null;
+}
+
+export interface TrajectoryDelivery {
+  event: TrajectoryEventV1;
+  status: 'pending' | 'sent';
+  attempts: number;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+}
+
+export interface PendingPostObservation {
+  messageId: MessageId;
+  observation: ObservationV1;
 }
 
 export interface ActiveAction {
@@ -145,11 +159,13 @@ export interface CanonicalSession {
   revision: number;
   nextSequence: number;
   eventSequence: number;
+  trajectoryOutbox: TrajectoryDelivery[];
   startedAt: string;
   updatedAt: string;
   lastObservation: ObservationV1 | null;
   activeInferenceId: string | null;
   activeAction: ActiveAction | null;
+  pendingPostObservation: PendingPostObservation | null;
   pendingPolicy: PendingPolicy | null;
   pendingApproval: PendingApproval | null;
   recentResults: ActionResultV1[];

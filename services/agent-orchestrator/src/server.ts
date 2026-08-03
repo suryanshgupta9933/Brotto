@@ -12,11 +12,11 @@ import {
   type SessionConfig,
   type ActionResult,
 } from './session.js';
-import { HistoryManager, type HistoryEntry } from './history.js';
+import { HistoryManager } from './history.js';
 import { FaraInferenceClient, type InferenceConfig } from './inference.js';
 import { ToolCallParser, createToolCallParser } from './parser.js';
 import { PolicyIntegrator, createPolicyIntegrator } from './policy.js';
-import { ActionExecutor, createActionExecutor, type McpGatewayClient } from './executor.js';
+import type { McpGatewayClient } from './executor.js';
 import { CompletionDetector, createCompletionDetector } from './completion.js';
 import { AgentBudgetTracker, createAgentBudgetTracker } from './budget.js';
 import {
@@ -25,9 +25,7 @@ import {
   CircuitState,
 } from './retry.js';
 import {
-  ActionType,
   type FaraAction,
-  type ObservationId,
   createObservationId,
 } from '@fara-platform/fara-action-schema';
 
@@ -74,13 +72,11 @@ export type OrchestratorEventListener = (event: OrchestratorEvents[keyof Orchest
  * Main orchestrator that coordinates all components per ARCHITECTURE.md section 3.2
  */
 export class AgentOrchestrator {
-  private config: OrchestratorConfig;
   private session: SessionStateMachine;
   private history: HistoryManager;
   private inference: FaraInferenceClient;
   private parser: ToolCallParser;
   private policy: PolicyIntegrator;
-  private executor: ActionExecutor;
   private completion: CompletionDetector;
   private budget: AgentBudgetTracker;
   private resilient: ResilientExecutor;
@@ -90,7 +86,6 @@ export class AgentOrchestrator {
   private observationSequence = 0;
 
   constructor(config: OrchestratorConfig) {
-    this.config = config;
     this.listeners = new Map();
 
     // Initialize session
@@ -116,11 +111,6 @@ export class AgentOrchestrator {
     this.policy = createPolicyIntegrator({
       sessionId: config.session.sessionId,
       userId: config.session.userId,
-    });
-
-    this.executor = createActionExecutor({
-      mcpGateway: config.mcpGateway,
-      sessionId: config.session.sessionId,
     });
 
     this.completion = createCompletionDetector({
@@ -267,9 +257,6 @@ export class AgentOrchestrator {
    * Observe browser state - capture screenshot
    */
   private async observe(): Promise<void> {
-    // Capture screenshot via MCP
-    const context = this.session.getContext();
-
     // Update parser with current observation ID
     const observationId = createObservationId(this.observationSequence++);
     this.parser.setCurrentObservationId(observationId.value);
@@ -350,8 +337,6 @@ export class AgentOrchestrator {
    * Check policy for action
    */
   private async checkPolicy(): Promise<void> {
-    const context = this.session.getContext();
-
     // In real implementation, we would evaluate the action against policy
     // For now, we just transition to executing
     this.session.startExecuting();
@@ -381,9 +366,6 @@ export class AgentOrchestrator {
    * Execute approved action
    */
   private async execute(): Promise<void> {
-    const context = this.session.getContext();
-    const observationId = context.lastObservationId ?? createObservationId(this.observationSequence++);
-
     // In real implementation, we would get the action from the parsed actions
     // For this skeleton, we just verify and complete
     this.session.startVerifying();

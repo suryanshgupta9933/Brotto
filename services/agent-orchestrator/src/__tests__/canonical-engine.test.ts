@@ -8,6 +8,7 @@ import type {
 } from '@fara-platform/fara-action-schema';
 import { InMemorySessionStore } from '../engine/session-store.js';
 import { SessionEngine } from '../engine/session-engine.js';
+import { SessionEngineError } from '../engine/types.js';
 import {
   actionSignature,
   detectTerminalReason,
@@ -180,9 +181,47 @@ class PausingApprovalStore extends InMemorySessionStore {
 
 class RecordingTrajectory implements TrajectorySink {
   readonly events: TrajectoryEventV1[] = [];
+  readonly appendAttempts: string[] = [];
 
   async append(event: TrajectoryEventV1): Promise<void> {
-    this.events.push(event);
+    this.appendAttempts.push(event.eventId);
+    if (!this.events.some((existing) => existing.eventId === event.eventId)) {
+      this.events.push(event);
+    }
+  }
+}
+
+class FailOnceTrajectory extends RecordingTrajectory {
+  constructor(private readonly failedKind: TrajectoryEventV1['kind']) {
+    super();
+  }
+
+  override async append(event: TrajectoryEventV1): Promise<void> {
+    if (event.kind === this.failedKind && !this.appendAttempts.includes(event.eventId)) {
+      this.appendAttempts.push(event.eventId);
+      throw new Error(`simulated ${event.kind} append failure`);
+    }
+    await super.append(event);
+  }
+}
+
+class ConflictAfterTrajectoryAppendStore extends InMemorySessionStore {
+  private conflicted = false;
+
+  override async transition(
+    session: CanonicalSession,
+    expectedRevision: number,
+    outcome?: StoredOutcome,
+  ): Promise<void> {
+    const current = await this.load(session.sessionId);
+    const marksDelivered = current?.trajectoryOutbox?.some((entry, index) => (
+      entry.status === 'pending' && session.trajectoryOutbox?.[index]?.status === 'sent'
+    )) ?? false;
+    if (!this.conflicted && marksDelivered) {
+      this.conflicted = true;
+      throw new SessionEngineError('STORE_CONFLICT', 'simulated delivery mark conflict');
+    }
+    await super.transition(session, expectedRevision, outcome);
   }
 }
 
@@ -391,6 +430,88 @@ describe('SessionEngine', () => {
     });
   });
 
+  it('retries a durably queued observation event on duplicate and resumes planning once', async () => {
+    const trajectorySink = new FailOnceTrajectory('observation_captured');
+    const { engine, store, inference, commandSink } = createEngine({ trajectorySink });
+    await open(engine);
+    const event = {
+      type: 'observation.submitted' as const,
+      messageId: '10000000-0000-4000-8000-000000000046',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    };
+
+    await expect(engine.handle(event)).rejects.toThrow('simulated observation_captured append failure');
+    expect(inference.calls).toHaveLength(0);
+    expect(await store.load(ids.session as never)).toMatchObject({
+      state: 'PLANNING',
+      trajectoryOutbox: [
+        { status: 'sent', event: { kind: 'session_lifecycle', sequence: 0 } },
+        { status: 'pending', event: { kind: 'observation_captured', sequence: 1 } },
+        { status: 'pending', event: { kind: 'model_request', sequence: 2 } },
+      ],
+    });
+
+    await engine.handle(event);
+
+    expect(inference.calls).toHaveLength(1);
+    expect(commandSink.commands).toHaveLength(1);
+    expect(trajectorySink.events.map((entry) => entry.sequence)).toEqual(
+      trajectorySink.events.map((_, index) => index),
+    );
+    expect(new Set(trajectorySink.events.map((entry) => entry.eventId)).size).toBe(
+      trajectorySink.events.length,
+    );
+  });
+
+  it('reconnect flushes a stranded observation outbox and resumes planning once', async () => {
+    const trajectorySink = new FailOnceTrajectory('observation_captured');
+    const store = new InMemorySessionStore();
+    const first = createEngine({ trajectorySink, store });
+    await open(first.engine);
+    await expect(first.engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000047',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    })).rejects.toThrow('simulated observation_captured append failure');
+
+    const restarted = createEngine({ trajectorySink, store });
+    await restarted.engine.handle({
+      type: 'reconcile.request',
+      messageId: '10000000-0000-4000-8000-000000000048',
+      sessionId: ids.session,
+      lastReceivedSequence: -1,
+      pendingActionIds: [],
+      occurredAt: '2026-08-03T10:00:05.000Z',
+    });
+
+    expect(first.inference.calls).toHaveLength(0);
+    expect(restarted.inference.calls).toHaveLength(1);
+    expect(restarted.commandSink.commands).toHaveLength(1);
+    expect((await store.load(ids.session as never))?.trajectoryOutbox.every(
+      (entry) => entry.status === 'sent',
+    )).toBe(true);
+  });
+
+  it('uses eventId idempotency when delivery marking races after append success', async () => {
+    const trajectorySink = new RecordingTrajectory();
+    const store = new ConflictAfterTrajectoryAppendStore();
+    const { engine } = createEngine({ trajectorySink, store });
+
+    await open(engine);
+
+    expect(trajectorySink.events).toHaveLength(1);
+    expect(trajectorySink.appendAttempts).toHaveLength(2);
+    expect(new Set(trajectorySink.appendAttempts).size).toBe(1);
+    expect(await store.load(ids.session as never)).toMatchObject({
+      eventSequence: 1,
+      trajectoryOutbox: [{ status: 'sent', event: { sequence: 0 } }],
+    });
+  });
+
   it('persists the proposal and generated policy request before awaiting policy', async () => {
     const policy = new DeferredPolicy();
     const { engine, store } = createEngine({ policy });
@@ -451,6 +572,61 @@ describe('SessionEngine', () => {
     expect(commandSink.commands[0]?.policyContext).toMatchObject({
       approved: true,
       approvalId: ids.approval,
+    });
+  });
+
+  it('durably delivers approval resolution before acknowledgement and command send', async () => {
+    const trajectorySink = new RecordingTrajectory();
+    const kindsSeenAtSend: TrajectoryEventV1['kind'][] = [];
+    const commandSink: RecordingCommands = new class extends RecordingCommands {
+      override async send(command: ActionCommandV1): Promise<void> {
+        kindsSeenAtSend.push(...trajectorySink.events.map((event) => event.kind));
+        await super.send(command);
+      }
+    }();
+    const { engine, store } = createEngine({
+      commandSink,
+      trajectorySink,
+      policy: new FakePolicy('approval_required'),
+    });
+    await open(engine);
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000049',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+    await engine.handle({
+      type: 'approval.resolved',
+      messageId: '10000000-0000-4000-8000-000000000050',
+      sessionId: ids.session,
+      occurredAt: '2026-08-03T10:00:03.000Z',
+      resolution: {
+        approvalId: ids.approval,
+        policyDecisionId: ids.policy,
+        actionId: ids.action,
+        status: 'approved',
+        resolvedAt: '2026-08-03T10:00:03.000Z',
+      },
+    });
+
+    const approvalIndex = kindsSeenAtSend.indexOf('approval_resolved');
+    const acknowledgementIndex = kindsSeenAtSend.indexOf('action_acknowledged');
+    expect(approvalIndex).toBeGreaterThan(-1);
+    expect(acknowledgementIndex).toBeGreaterThan(approvalIndex);
+    expect(await store.load(ids.session as never)).toMatchObject({
+      activeAction: { delivery: { status: 'sent' } },
+      trajectoryOutbox: expect.arrayContaining([
+        expect.objectContaining({
+          status: 'sent',
+          event: expect.objectContaining({ kind: 'approval_resolved' }),
+        }),
+        expect.objectContaining({
+          status: 'sent',
+          event: expect.objectContaining({ kind: 'action_acknowledged' }),
+        }),
+      ]),
     });
   });
 
@@ -560,7 +736,7 @@ describe('SessionEngine', () => {
       type: 'reconcile.request',
       messageId: '10000000-0000-4000-8000-000000000036',
       sessionId: ids.session,
-      lastReceivedSequence: 0,
+      lastReceivedSequence: -1,
       pendingActionIds: [],
       occurredAt: '2026-08-03T10:00:05.000Z',
     });
@@ -568,6 +744,41 @@ describe('SessionEngine', () => {
     expect(outcome).toMatchObject({ kind: 'reconciled', pendingActionIds: [ids.action] });
     expect(commandSink.attempts).toBe(2);
     expect(commandSink.commands).toHaveLength(1);
+  });
+
+  it.each([
+    ['command sequence', 0, []],
+    ['pending action ID', -1, [ids.action]],
+  ])('does not replay when reconcile proves receipt by %s', async (_proof, lastReceivedSequence, pendingActionIds) => {
+    const commandSink = new FailOnceCommands();
+    const store = new InMemorySessionStore();
+    const first = createEngine({ store, commandSink });
+    await open(first.engine);
+    await expect(first.engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000051',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    })).rejects.toThrow('simulated send failure');
+
+    const restarted = createEngine({ store, commandSink });
+    await restarted.engine.handle({
+      type: 'reconcile.request',
+      messageId: lastReceivedSequence === 0
+        ? '10000000-0000-4000-8000-000000000052'
+        : '10000000-0000-4000-8000-000000000053',
+      sessionId: ids.session,
+      lastReceivedSequence,
+      pendingActionIds,
+      occurredAt: '2026-08-03T10:00:05.000Z',
+    });
+
+    expect(commandSink.attempts).toBe(1);
+    expect(commandSink.commands).toHaveLength(0);
+    expect((await store.load(ids.session as never))?.activeAction).toMatchObject({
+      delivery: { status: 'sent' },
+    });
   });
 
   it('accepts one matching terminal result and plans from its post-observation', async () => {

@@ -99,3 +99,63 @@ node_modules/.bin/tsc
 Local package installation required a temporary untracked pnpm workspace declaration because unrelated shared-worktree manifest changes caused pnpm to purge the service's dependencies. The temporary workspace file, package-local lockfile, `node_modules`, and generated `dist` remain excluded from the Task 4 commit.
 
 Final review-fix verification: 6 suites, 131 tests passed, 0 failures; TypeScript build exited successfully.
+
+## Review Fix Round 2 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:test-driven-development and execute these steps inline in the existing Task 4 worktree.
+
+**Goal:** Make trajectory delivery durable and causally ordered while allowing duplicate messages and reconnects to resume stranded canonical work.
+
+**Architecture:** `CanonicalSession` owns an ordered trajectory outbox. Business transitions allocate complete `TrajectoryEventV1` records and advance `eventSequence` inside the same CAS that stores state and any processed outcome. A recovery loop appends pending records through an event-ID-idempotent sink, marks delivery with CAS, and only then resumes persisted planning, policy, verification, or command work.
+
+**Global constraints:** Keep changes inside Task 4 and the minimal compiler cleanup required by `noUnusedLocals`/`noUnusedParameters`; add no database, WebSocket, or new runtime dependency.
+
+### Task A: Durable trajectory and recovery state
+
+**Files:** `src/engine/types.ts`, `src/engine/session-engine.ts`, `src/__tests__/canonical-engine.test.ts`.
+
+**Interfaces:** Add `TrajectoryDelivery` and `trajectoryOutbox` to `CanonicalSession`; keep `TrajectorySink.append(event)` but define it as idempotent by `event.eventId`. Add a persisted `pendingPostObservation` continuation for `VERIFYING` recovery.
+
+- [x] Add tests where observation event append fails after the state/outcome CAS, then the identical message and a new engine reconcile both retry the same event IDs and finish one action.
+- [x] Add an append-success/mark-conflict test whose idempotent sink observes one logical event per event ID.
+- [x] Replace post-CAS `emit()` with transition-local event allocation and an ordered flush/resume loop.
+- [x] Verify the focused engine suite passes.
+
+### Task B: Approval causality and receipt reconciliation
+
+**Files:** `src/engine/session-engine.ts`, `src/__tests__/canonical-engine.test.ts`.
+
+- [x] Add an approval test asserting `approval_resolved` precedes `action_acknowledged`, and the command sink sees both durably delivered first.
+- [x] Add receipt tests for matching `pendingActionIds`, received command sequence, and neither proof.
+- [x] Queue approval resolution and action acknowledgement in the same transition as the approved command, then gate send on outbox flush.
+- [x] Implement receipt-proof branches and verify the focused suite.
+
+### Task C: Exact JSON round trips and strict compiler gate
+
+**Files:** `src/engine/session-store.ts`, `src/__tests__/canonical-idempotency.test.ts`, `tsconfig.json`, and only compiler-identified orchestrator sources.
+
+- [x] Add failing tests for sparse arrays, enumerable extra array keys, symbol keys, and non-enumerable own object properties.
+- [x] Reject values whose own-key shape would change under JSON round trip.
+- [x] Set both unused compiler flags to `true`, remove the compiler-reported unused declarations/parameters, and run the build.
+
+### Task D: Final verification and handoff
+
+- [x] Run focused durability tests, all orchestrator tests, TypeScript build, and scoped diff checks.
+- [x] Append RED/GREEN evidence and exact counts to this report.
+- [x] Commit only Task 4 files and send the commit hash to the parent.
+
+### Review Fix Round 2 Evidence
+
+The first focused RED run produced nine failures: three durable trajectory/recovery cases, approval causal ordering, sequence-based receipt reconciliation, and four exact JSON round-trip cases. The strict-unused compiler RED independently reported 20 unused declarations or parameters in the orchestrator sources reconciled by Task 4.
+
+The implementation now:
+
+- allocates complete trajectory events and monotonically advances `eventSequence` while appending ordered `pending` outbox entries inside the same session CAS as the causal state/outcome;
+- retries the same `eventId` through an idempotent `TrajectorySink`, records append failures, and CAS-marks successful delivery;
+- resumes persisted inference, policy, post-observation verification, and command work only after earlier trajectory events are delivered;
+- atomically queues `approval_resolved` before `action_acknowledged` with the approved command and prevents command send until both are durably delivered;
+- uses either matching `pendingActionIds` or `lastReceivedSequence >= command.sequence` as receipt proof, and replays only when neither is present;
+- rejects sparse/extended arrays, symbol keys, and non-enumerable own properties in canonical JSON state; and
+- builds with `noUnusedLocals` and `noUnusedParameters` enabled.
+
+Focused GREEN: 2 suites, 49 tests passed. Full pre-commit GREEN: 6 suites, 141 tests passed; strict TypeScript build exited successfully.

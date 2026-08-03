@@ -32,10 +32,19 @@ interface TrajectoryReferences {
   observationId?: PendingApproval['observationId'];
 }
 
+interface TrajectorySpec extends TrajectoryReferences {
+  kind: TrajectoryEventKindV1;
+  correlationId: MessageId;
+  summary: string;
+  occurredAt?: string;
+}
+
 export class SessionEngine {
   private readonly now: () => string;
   private readonly idGenerator: () => string;
   private readonly budgets;
+  private readonly recoveringSessions = new Set<string>();
+  private readonly requestedRecovery = new Map<string, boolean>();
 
   constructor(private readonly options: SessionEngineOptions) {
     this.now = options.now ?? (() => new Date().toISOString());
@@ -58,28 +67,39 @@ export class SessionEngine {
 
   private async handleOnce(event: SessionEngineEvent): Promise<StoredOutcome> {
     const processed = await this.options.store.getProcessed(event.messageId);
-    if (processed !== null) {
-      if (processed.kind === 'error' && processed.error !== undefined) {
-        throw new SessionEngineError(processed.error.code, processed.error.message);
-      }
-      await this.deliverPendingCommand(event.sessionId);
-      return processed;
+    if (event.type === 'session.open') {
+      if (processed !== null) return this.returnProcessed(event.sessionId, processed);
+      return this.open(event);
     }
 
-    switch (event.type) {
-      case 'session.open':
-        return this.open(event);
-      case 'observation.submitted':
-        return this.observe(event);
-      case 'action.completed':
-        return this.completeAction(event);
-      case 'approval.resolved':
-        return this.resolveApproval(event);
-      case 'reconcile.request':
-        return this.reconcile(event);
-      case 'task.cancelled':
-        return this.cancel(event);
+    await this.flushTrajectoryOutbox(event.sessionId);
+    if (processed !== null) return this.returnProcessed(event.sessionId, processed);
+
+    if (event.type === 'reconcile.request') {
+      await this.resumeSession(event.sessionId, false);
+      return this.reconcile(event);
     }
+    if (event.type === 'task.cancelled') return this.cancel(event);
+    if (event.type === 'observation.submitted') {
+      await this.resumeSession(event.sessionId, true);
+      return this.observe(event);
+    }
+    if (event.type === 'action.completed') {
+      await this.resumeSession(event.sessionId, false);
+      return this.completeAction(event);
+    }
+    return this.resolveApproval(event);
+  }
+
+  private async returnProcessed(
+    sessionId: CanonicalSession['sessionId'],
+    processed: StoredOutcome,
+  ): Promise<StoredOutcome> {
+    if (processed.kind === 'error' && processed.error !== undefined) {
+      throw new SessionEngineError(processed.error.code, processed.error.message);
+    }
+    await this.resumeSession(sessionId, true);
+    return processed;
   }
 
   private async open(event: Extract<SessionEngineEvent, { type: 'session.open' }>): Promise<StoredOutcome> {
@@ -88,25 +108,26 @@ export class SessionEngine {
       throw new SessionEngineError('SESSION_ALREADY_EXISTS', `Session ${event.sessionId} already exists`);
     }
 
-    const outcome = this.outcome(event.messageId, event.sessionId, 1, 'OBSERVING', 'accepted', []);
     const session: CanonicalSession = {
       sessionId: event.sessionId,
       taskId: event.taskId,
       goal: event.goal,
       completionCriteria: [...event.completionCriteria],
       state: 'OBSERVING',
-      revision: 1,
+      revision: 0,
       nextSequence: 0,
       eventSequence: 0,
+      trajectoryOutbox: [],
       startedAt: event.occurredAt,
       updatedAt: event.occurredAt,
       lastObservation: null,
       activeInferenceId: null,
       activeAction: null,
+      pendingPostObservation: null,
       pendingPolicy: null,
       pendingApproval: null,
       recentResults: [],
-      processedMessages: { [event.messageId]: outcome },
+      processedMessages: {},
       completedActions: {},
       actionSignatures: [],
       observationSignatures: [],
@@ -116,8 +137,15 @@ export class SessionEngine {
       stepCount: 0,
       terminalReason: null,
     };
+    this.queueTrajectory(session, [{
+      kind: 'session_lifecycle',
+      correlationId: event.messageId,
+      summary: 'Session opened',
+      occurredAt: event.occurredAt,
+    }]);
+    const outcome = this.addOutcome(session, event.messageId, 'accepted');
     await this.options.store.transition(session, 0, outcome);
-    await this.emit(event.sessionId, 'session_lifecycle', event.messageId, 'Session opened');
+    await this.resumeSession(event.sessionId, true);
     return outcome;
   }
 
@@ -128,68 +156,145 @@ export class SessionEngine {
     if (this.isTerminal(session)) {
       throw new SessionEngineError('SESSION_TERMINAL', `Session ${session.sessionId} is terminal`);
     }
-    if (
-      session.activeInferenceId !== null ||
-      session.activeAction !== null ||
-      session.pendingPolicy !== null ||
-      session.pendingApproval !== null ||
-      (session.state !== 'OBSERVING' && session.state !== 'VERIFYING')
-    ) {
-      return this.persistOutcome(session, event.messageId, 'ignored');
-    }
+    if (!this.canObserve(session)) return this.persistOutcome(session, event.messageId, 'ignored');
 
+    const outcome = await this.acceptObservation(
+      session,
+      event.messageId,
+      event.observation,
+      event.occurredAt,
+    );
+    await this.resumeSession(event.sessionId, true);
+    return outcome;
+  }
+
+  private async acceptObservation(
+    session: CanonicalSession,
+    messageId: MessageId,
+    observation: NonNullable<CanonicalSession['lastObservation']>,
+    occurredAt: string,
+  ): Promise<StoredOutcome> {
     const expectedRevision = session.revision;
-    const inferenceId = `inference:${event.messageId}`;
     session.state = 'PLANNING';
-    session.activeInferenceId = inferenceId;
-    session.lastObservation = event.observation;
-    session.observationSignatures.push(observationSignature(event.observation));
-    session.updatedAt = event.occurredAt;
-    const terminalReason = detectTerminalReason(session, this.budgets, event.occurredAt);
+    session.activeInferenceId = `inference:${messageId}`;
+    session.pendingPostObservation = null;
+    session.lastObservation = observation;
+    session.observationSignatures.push(observationSignature(observation));
+    session.updatedAt = occurredAt;
+    const terminalReason = detectTerminalReason(session, this.budgets, occurredAt);
     if (terminalReason !== null) {
       session.state = 'FAILED';
       session.activeInferenceId = null;
       session.terminalReason = terminalReason;
     }
-    const accepted = this.addOutcome(
+    this.queueTrajectory(session, [
+      {
+        kind: 'observation_captured',
+        correlationId: messageId,
+        summary: 'Observation accepted',
+        observationId: observation.observationId,
+        occurredAt,
+      },
+      terminalReason === null
+        ? {
+            kind: 'model_request',
+            correlationId: messageId,
+            summary: 'Planning requested',
+            observationId: observation.observationId,
+          }
+        : {
+            kind: 'task_terminal_outcome',
+            correlationId: messageId,
+            summary: terminalReason.message,
+            observationId: observation.observationId,
+          },
+    ]);
+    const outcome = this.addOutcome(
       session,
-      event.messageId,
+      messageId,
       terminalReason === null ? 'accepted' : 'terminal',
     );
-    await this.options.store.transition(session, expectedRevision, accepted);
-    await this.emit(event.sessionId, 'observation_captured', event.messageId, 'Observation accepted', {
-      observationId: event.observation.observationId,
-    });
-    if (terminalReason !== null) {
-      await this.emit(event.sessionId, 'task_terminal_outcome', event.messageId, terminalReason.message, {
-        observationId: event.observation.observationId,
-      });
-      return accepted;
-    }
-    await this.emit(event.sessionId, 'model_request', event.messageId, 'Planning requested', {
-      observationId: event.observation.observationId,
-    });
+    await this.options.store.transition(session, expectedRevision, outcome);
+    return outcome;
+  }
 
+  private async resumeSession(
+    sessionId: CanonicalSession['sessionId'],
+    deliverCommand: boolean,
+  ): Promise<void> {
+    if (this.recoveringSessions.has(sessionId)) {
+      this.requestedRecovery.set(
+        sessionId,
+        (this.requestedRecovery.get(sessionId) ?? false) || deliverCommand,
+      );
+      return;
+    }
+    this.recoveringSessions.add(sessionId);
+    try {
+      let shouldDeliver = deliverCommand;
+      do {
+        this.requestedRecovery.delete(sessionId);
+        await this.resumeSessionWork(sessionId, shouldDeliver);
+        const requested = this.requestedRecovery.get(sessionId);
+        if (requested === undefined) break;
+        shouldDeliver ||= requested;
+      } while (true);
+    } finally {
+      this.requestedRecovery.delete(sessionId);
+      this.recoveringSessions.delete(sessionId);
+    }
+  }
+
+  private async resumeSessionWork(
+    sessionId: CanonicalSession['sessionId'],
+    deliverCommand: boolean,
+  ): Promise<void> {
+    for (let iteration = 0; iteration < 50; iteration += 1) {
+      await this.flushTrajectoryOutbox(sessionId);
+      const session = await this.requireSession(sessionId);
+      if (session.state === 'PLANNING' && session.activeInferenceId !== null) {
+        await this.resumePlanning(session);
+        continue;
+      }
+      if (session.state === 'POLICY_CHECK' && session.pendingPolicy !== null) {
+        await this.resumePolicy(session);
+        continue;
+      }
+      if (session.state === 'VERIFYING' && session.pendingPostObservation !== null) {
+        await this.resumeVerification(session);
+        continue;
+      }
+      if (session.state === 'EXECUTING' && deliverCommand) {
+        await this.deliverPendingCommand(sessionId);
+      }
+      return;
+    }
+    throw new SessionEngineError('STORE_CONFLICT', 'Session recovery exceeded its transition limit');
+  }
+
+  private async resumePlanning(session: CanonicalSession): Promise<void> {
+    const inferenceId = session.activeInferenceId;
+    const observation = session.lastObservation;
+    if (inferenceId === null || observation === null) return;
     const proposal = await this.options.inference.plan({
       sessionId: session.sessionId,
       taskId: session.taskId,
       goal: session.goal,
       completionCriteria: session.completionCriteria,
-      observation: event.observation,
+      observation,
       recentResults: session.recentResults,
     });
-    await this.applyProposal(session.sessionId, inferenceId, proposal, event.messageId);
-    return accepted;
+    await this.applyProposal(session.sessionId, inferenceId, proposal);
   }
 
   private async applyProposal(
     sessionId: CanonicalSession['sessionId'],
     inferenceId: string,
     proposal: Awaited<ReturnType<SessionEngineOptions['inference']['plan']>>,
-    causationMessageId: MessageId,
   ): Promise<void> {
-    let session = await this.requireSession(sessionId);
+    const session = await this.requireSession(sessionId);
     if (session.activeInferenceId !== inferenceId || session.state !== 'PLANNING') return;
+    const causationMessageId = inferenceId.slice('inference:'.length) as MessageId;
     const expectedObservationId = session.lastObservation?.observationId;
     if (expectedObservationId === undefined || proposal.observationId !== expectedObservationId) {
       await this.persistError(session, causationMessageId, new SessionEngineError(
@@ -198,9 +303,9 @@ export class SessionEngine {
       ));
     }
 
+    const expectedRevision = session.revision;
+    session.activeInferenceId = null;
     if (proposal.kind === 'completion') {
-      const expectedRevision = session.revision;
-      session.activeInferenceId = null;
       session.state = proposal.status === 'succeeded' ? 'COMPLETED' : 'FAILED';
       session.terminalReason = {
         code: 'MODEL_COMPLETION',
@@ -208,14 +313,22 @@ export class SessionEngine {
         detectedAt: this.now(),
       };
       session.updatedAt = this.now();
+      this.queueTrajectory(session, [
+        {
+          kind: 'model_response',
+          correlationId: causationMessageId,
+          summary: proposal.summary,
+          observationId: proposal.observationId,
+        },
+        {
+          kind: 'task_terminal_outcome',
+          correlationId: causationMessageId,
+          summary: proposal.summary,
+          observationId: proposal.observationId,
+        },
+      ]);
       session.revision = expectedRevision + 1;
       await this.options.store.transition(session, expectedRevision);
-      await this.emit(sessionId, 'model_response', causationMessageId, proposal.summary, {
-        observationId: proposal.observationId,
-      });
-      await this.emit(sessionId, 'task_terminal_outcome', causationMessageId, proposal.summary, {
-        observationId: proposal.observationId,
-      });
       return;
     }
 
@@ -230,25 +343,39 @@ export class SessionEngine {
       policyDecisionId,
       proposal,
     };
-    const expectedRevision = session.revision;
-    session.activeInferenceId = null;
     session.state = 'POLICY_CHECK';
     session.pendingPolicy = pending;
     session.updatedAt = this.now();
+    const references = this.pendingReferences(pending);
+    this.queueTrajectory(session, [
+      {
+        kind: 'model_response',
+        correlationId: causationMessageId,
+        summary: 'Action proposal received',
+        ...references,
+      },
+      {
+        kind: 'action_proposed',
+        correlationId: causationMessageId,
+        summary: proposal.action.type,
+        ...references,
+      },
+    ]);
     session.revision = expectedRevision + 1;
     await this.options.store.transition(session, expectedRevision);
-    const references = this.pendingReferences(pending);
-    await this.emit(sessionId, 'model_response', causationMessageId, 'Action proposal received', references);
-    await this.emit(sessionId, 'action_proposed', causationMessageId, proposal.action.type, references);
+  }
 
+  private async resumePolicy(session: CanonicalSession): Promise<void> {
+    const pending = session.pendingPolicy;
+    if (pending === null) return;
     const decision = await this.options.policy.evaluate({
       sessionId: session.sessionId,
       taskId: session.taskId,
-      actionId,
-      policyDecisionId,
-      proposal,
+      actionId: pending.actionId,
+      policyDecisionId: pending.policyDecisionId,
+      proposal: pending.proposal,
     });
-    await this.applyPolicyDecision(sessionId, pending, decision);
+    await this.applyPolicyDecision(session.sessionId, pending, decision);
   }
 
   private async applyPolicyDecision(
@@ -256,7 +383,7 @@ export class SessionEngine {
     expected: PendingPolicy,
     decision: PolicyDecisionV1,
   ): Promise<void> {
-    let session = await this.requireSession(sessionId);
+    const session = await this.requireSession(sessionId);
     const pending = session.pendingPolicy;
     if (session.state !== 'POLICY_CHECK' || pending === null || !this.samePendingPolicy(pending, expected)) return;
     if (
@@ -282,10 +409,22 @@ export class SessionEngine {
       session.pendingPolicy = null;
       session.terminalReason = reason;
       session.updatedAt = reason.detectedAt;
+      this.queueTrajectory(session, [
+        {
+          kind: 'policy_decided',
+          correlationId: pending.causationMessageId,
+          summary: decision.decision,
+          ...references,
+        },
+        {
+          kind: 'task_terminal_outcome',
+          correlationId: pending.causationMessageId,
+          summary: reason.message,
+          ...references,
+        },
+      ]);
       session.revision = expectedRevision + 1;
       await this.options.store.transition(session, expectedRevision);
-      await this.emit(sessionId, 'policy_decided', pending.causationMessageId, decision.decision, references);
-      await this.emit(sessionId, 'task_terminal_outcome', pending.causationMessageId, reason.message, references);
       return;
     }
 
@@ -301,34 +440,49 @@ export class SessionEngine {
         policyDecision: decision,
       };
       session.updatedAt = this.now();
+      this.queueTrajectory(session, [
+        {
+          kind: 'policy_decided',
+          correlationId: pending.causationMessageId,
+          summary: decision.decision,
+          ...references,
+        },
+        {
+          kind: 'approval_requested',
+          correlationId: pending.causationMessageId,
+          summary: 'Approval required',
+          ...references,
+        },
+      ]);
       session.revision = expectedRevision + 1;
       await this.options.store.transition(session, expectedRevision);
-      await this.emit(sessionId, 'policy_decided', pending.causationMessageId, decision.decision, references);
-      await this.emit(sessionId, 'approval_requested', pending.causationMessageId, 'Approval required', references);
       return;
     }
 
-    await this.emit(sessionId, 'policy_decided', pending.causationMessageId, decision.decision, references);
-    session = await this.requireSession(sessionId);
-    if (session.state !== 'POLICY_CHECK' || session.pendingPolicy === null ||
-      !this.samePendingPolicy(session.pendingPolicy, pending)) return;
     await this.persistDispatch(session, {
       actionId: pending.actionId,
       stepId: pending.stepId,
       observationId: pending.observationId,
       proposal: pending.proposal,
       policyDecision: decision,
-    }, pending.causationMessageId);
+    }, pending.causationMessageId, [{
+      kind: 'policy_decided',
+      correlationId: pending.causationMessageId,
+      summary: decision.decision,
+      ...references,
+    }]);
   }
 
   private async persistDispatch(
     session: CanonicalSession,
     pending: PendingApproval,
     causationMessageId: MessageId,
+    precedingEvents: TrajectorySpec[],
     approval?: Extract<SessionEngineEvent, { type: 'approval.resolved' }>['resolution'],
   ): Promise<StoredOutcome | null> {
     const expectedRevision = session.revision;
     const now = this.timestampAfter(approval?.resolvedAt ?? pending.policyDecision.decidedAt);
+    const references = this.pendingReferences(pending);
     const command: ActionCommandV1 = {
       actionId: pending.actionId,
       stepId: pending.stepId,
@@ -353,13 +507,20 @@ export class SessionEngine {
       session.pendingApproval = null;
       session.terminalReason = terminalReason;
       session.updatedAt = now;
+      this.queueTrajectory(session, [
+        ...precedingEvents,
+        {
+          kind: 'task_terminal_outcome',
+          correlationId: causationMessageId,
+          summary: terminalReason.message,
+          ...references,
+        },
+      ]);
       const outcome = approval === undefined
         ? null
         : this.addOutcome(session, causationMessageId, 'terminal');
       if (outcome === null) session.revision = expectedRevision + 1;
       await this.options.store.transition(session, expectedRevision, outcome ?? undefined);
-      await this.emit(session.sessionId, 'task_terminal_outcome', causationMessageId, terminalReason.message,
-        this.pendingReferences(pending));
       return outcome;
     }
 
@@ -379,14 +540,20 @@ export class SessionEngine {
     session.pendingPolicy = null;
     session.pendingApproval = null;
     session.updatedAt = now;
+    this.queueTrajectory(session, [
+      ...precedingEvents,
+      {
+        kind: 'action_acknowledged',
+        correlationId: causationMessageId,
+        summary: 'Action command persisted for dispatch',
+        ...references,
+      },
+    ]);
     const outcome = approval === undefined
       ? null
       : this.addOutcome(session, causationMessageId, 'accepted');
     if (outcome === null) session.revision = expectedRevision + 1;
     await this.options.store.transition(session, expectedRevision, outcome ?? undefined);
-    await this.emit(session.sessionId, 'action_acknowledged', causationMessageId,
-      'Action command persisted for dispatch', this.pendingReferences(pending));
-    await this.deliverPendingCommand(session.sessionId);
     return outcome;
   }
 
@@ -456,18 +623,36 @@ export class SessionEngine {
         detectedAt: event.occurredAt,
       };
       session.updatedAt = event.occurredAt;
+      this.queueTrajectory(session, [
+        {
+          kind: 'approval_resolved',
+          correlationId: event.messageId,
+          summary: 'Approval denied',
+          ...references,
+        },
+        {
+          kind: 'task_terminal_outcome',
+          correlationId: event.messageId,
+          summary: 'Approval denied',
+          ...references,
+        },
+      ]);
       const outcome = this.addOutcome(session, event.messageId, 'terminal');
       await this.options.store.transition(session, expectedRevision, outcome);
-      await this.emit(session.sessionId, 'approval_resolved', event.messageId, 'Approval denied', references);
-      await this.emit(session.sessionId, 'task_terminal_outcome', event.messageId, 'Approval denied', references);
+      await this.resumeSession(event.sessionId, true);
       return outcome;
     }
 
-    const outcome = await this.persistDispatch(session, pending, event.messageId, event.resolution);
+    const outcome = await this.persistDispatch(session, pending, event.messageId, [{
+      kind: 'approval_resolved',
+      correlationId: event.messageId,
+      summary: 'Approval granted',
+      ...references,
+    }], event.resolution);
     if (outcome === null) {
       throw new SessionEngineError('STORE_CONFLICT', 'Approval outcome was not persisted with its command');
     }
-    await this.emit(session.sessionId, 'approval_resolved', event.messageId, 'Approval granted', references);
+    await this.resumeSession(event.sessionId, true);
     return outcome;
   }
 
@@ -502,7 +687,6 @@ export class SessionEngine {
     const references = this.pendingReferences(active);
     const expectedRevision = session.revision;
     session.activeAction = null;
-    session.state = 'VERIFYING';
     session.recentResults = [...session.recentResults.slice(-19), event.result];
     const failed = event.result.status !== 'succeeded';
     session.consecutiveActionFailures = failed ? session.consecutiveActionFailures + 1 : 0;
@@ -520,7 +704,31 @@ export class SessionEngine {
     if (terminalReason !== null) {
       session.state = 'FAILED';
       session.terminalReason = terminalReason;
+      session.pendingPostObservation = null;
+    } else if ('postObservation' in event.result) {
+      session.state = 'VERIFYING';
+      session.pendingPostObservation = {
+        messageId: randomUUID() as MessageId,
+        observation: event.result.postObservation,
+      };
+    } else {
+      session.state = 'OBSERVING';
+      session.pendingPostObservation = null;
     }
+    this.queueTrajectory(session, [
+      {
+        kind: 'action_completed',
+        correlationId: event.messageId,
+        summary: event.result.status,
+        ...references,
+      },
+      ...(terminalReason === null ? [] : [{
+        kind: 'task_terminal_outcome' as const,
+        correlationId: event.messageId,
+        summary: terminalReason.message,
+        ...references,
+      }]),
+    ]);
     const outcome = this.addOutcome(
       session,
       event.messageId,
@@ -528,30 +736,19 @@ export class SessionEngine {
     );
     session.completedActions[event.result.actionId] = { result: event.result, outcome };
     await this.options.store.transition(session, expectedRevision, outcome);
-    await this.emit(session.sessionId, 'action_completed', event.messageId, event.result.status, references);
-
-    if (terminalReason !== null) {
-      await this.emit(session.sessionId, 'task_terminal_outcome', event.messageId, terminalReason.message, references);
-      return outcome;
-    }
-
-    if ('postObservation' in event.result) {
-      const planningMessageId = randomUUID() as MessageId;
-      await this.observe({
-        type: 'observation.submitted',
-        sessionId: event.sessionId,
-        messageId: planningMessageId,
-        occurredAt: event.result.postObservation.capturedAt,
-        observation: event.result.postObservation,
-      });
-    } else {
-      const latest = await this.requireSession(event.sessionId);
-      const latestRevision = latest.revision;
-      latest.state = 'OBSERVING';
-      latest.revision = latestRevision + 1;
-      await this.options.store.transition(latest, latestRevision);
-    }
+    await this.resumeSession(event.sessionId, true);
     return outcome;
+  }
+
+  private async resumeVerification(session: CanonicalSession): Promise<void> {
+    const pending = session.pendingPostObservation;
+    if (pending === null) return;
+    await this.acceptObservation(
+      session,
+      pending.messageId,
+      pending.observation,
+      pending.observation.capturedAt,
+    );
   }
 
   private async reconcile(
@@ -561,34 +758,16 @@ export class SessionEngine {
     const expectedRevision = session.revision;
     const active = session.activeAction;
     const authoritative = active === null ? [] : [active.actionId];
-    let requiresFreshObservation = event.pendingActionIds.some((id) => !authoritative.includes(id));
-
-    if (session.state === 'PLANNING' || session.state === 'POLICY_CHECK') {
-      session.state = 'OBSERVING';
-      session.activeInferenceId = null;
-      session.pendingPolicy = null;
-      requiresFreshObservation = true;
-    }
-    if (
-      active !== null &&
-      active.delivery.status === 'pending' &&
-      event.pendingActionIds.includes(active.actionId)
-    ) {
-      active.delivery.status = 'sent';
+    const requiresFreshObservation = event.pendingActionIds.some((id) => !authoritative.includes(id));
+    if (active !== null) {
+      const clientHasCommand = event.pendingActionIds.includes(active.actionId) ||
+        event.lastReceivedSequence >= active.command.sequence;
+      active.delivery.status = clientHasCommand ? 'sent' : 'pending';
       active.delivery.lastError = null;
-    }
-    const clientHasCommand = active !== null && (
-      event.pendingActionIds.includes(active.actionId) || event.lastReceivedSequence >= active.command.sequence
-    );
-    const shouldReplay = active !== null && active.delivery.status === 'pending' && !event.pendingActionIds.includes(active.actionId);
-    if (active !== null && active.delivery.status === 'sent' && !clientHasCommand) {
-      active.delivery.status = 'pending';
     }
     const outcome = this.addOutcome(session, event.messageId, 'reconciled', undefined, requiresFreshObservation);
     await this.options.store.transition(session, expectedRevision, outcome);
-    if (shouldReplay || (active !== null && active.delivery.status === 'pending' && !clientHasCommand)) {
-      await this.deliverPendingCommand(event.sessionId);
-    }
+    await this.resumeSession(event.sessionId, true);
     return outcome;
   }
 
@@ -596,9 +775,7 @@ export class SessionEngine {
     event: Extract<SessionEngineEvent, { type: 'task.cancelled' }>,
   ): Promise<StoredOutcome> {
     const session = await this.requireSession(event.sessionId);
-    if (this.isTerminal(session)) {
-      return this.persistOutcome(session, event.messageId, 'ignored');
-    }
+    if (this.isTerminal(session)) return this.persistOutcome(session, event.messageId, 'ignored');
     const references = session.activeAction === null
       ? session.pendingApproval === null
         ? session.pendingPolicy === null ? {} : this.pendingReferences(session.pendingPolicy)
@@ -608,6 +785,7 @@ export class SessionEngine {
     session.state = 'CANCELLED';
     session.activeInferenceId = null;
     session.activeAction = null;
+    session.pendingPostObservation = null;
     session.pendingPolicy = null;
     session.pendingApproval = null;
     session.terminalReason = {
@@ -616,10 +794,100 @@ export class SessionEngine {
       detectedAt: event.occurredAt,
     };
     session.updatedAt = event.occurredAt;
+    this.queueTrajectory(session, [{
+      kind: 'task_terminal_outcome',
+      correlationId: event.messageId,
+      summary: event.reason,
+      ...references,
+    }]);
     const outcome = this.addOutcome(session, event.messageId, 'terminal');
     await this.options.store.transition(session, expectedRevision, outcome);
-    await this.emit(session.sessionId, 'task_terminal_outcome', event.messageId, event.reason, references);
+    await this.resumeSession(event.sessionId, true);
     return outcome;
+  }
+
+  private async flushTrajectoryOutbox(sessionId: CanonicalSession['sessionId']): Promise<void> {
+    for (;;) {
+      let session = await this.requireSession(sessionId);
+      const entry = session.trajectoryOutbox.find((candidate) => candidate.status === 'pending');
+      if (entry === undefined) return;
+      const eventId = entry.event.eventId;
+
+      try {
+        await this.options.trajectorySink.append(entry.event);
+      } catch (error) {
+        await this.recordTrajectoryError(sessionId, eventId, error);
+        throw error;
+      }
+
+      session = await this.requireSession(sessionId);
+      const delivered = session.trajectoryOutbox.find((candidate) => candidate.event.eventId === eventId);
+      if (delivered === undefined || delivered.status === 'sent') continue;
+      const deliveredRevision = session.revision;
+      delivered.status = 'sent';
+      delivered.attempts += 1;
+      delivered.lastAttemptAt = this.now();
+      delivered.lastError = null;
+      session.revision = deliveredRevision + 1;
+      try {
+        await this.options.store.transition(session, deliveredRevision);
+      } catch (error) {
+        if (error instanceof SessionEngineError && error.code === 'STORE_CONFLICT') continue;
+        throw error;
+      }
+    }
+  }
+
+  private async recordTrajectoryError(
+    sessionId: CanonicalSession['sessionId'],
+    eventId: EventId,
+    error: unknown,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const session = await this.requireSession(sessionId);
+      const entry = session.trajectoryOutbox.find((candidate) => candidate.event.eventId === eventId);
+      if (entry === undefined || entry.status === 'sent') return;
+      const expectedRevision = session.revision;
+      entry.attempts += 1;
+      entry.lastAttemptAt = this.now();
+      entry.lastError = error instanceof Error ? error.message : String(error);
+      session.revision = expectedRevision + 1;
+      try {
+        await this.options.store.transition(session, expectedRevision);
+        return;
+      } catch (transitionError) {
+        if (!(transitionError instanceof SessionEngineError) || transitionError.code !== 'STORE_CONFLICT') {
+          throw transitionError;
+        }
+      }
+    }
+  }
+
+  private queueTrajectory(session: CanonicalSession, specs: TrajectorySpec[]): void {
+    for (const spec of specs) {
+      const { actionId, correlationId, kind, observationId, occurredAt, stepId, summary } = spec;
+      const event: TrajectoryEventV1 = {
+        eventId: randomUUID() as EventId,
+        sessionId: session.sessionId,
+        taskId: session.taskId,
+        ...(stepId === undefined ? {} : { stepId }),
+        ...(actionId === undefined ? {} : { actionId }),
+        ...(observationId === undefined ? {} : { observationId }),
+        correlationId,
+        sequence: session.eventSequence,
+        occurredAt: occurredAt ?? this.now(),
+        kind,
+        summary,
+      };
+      session.eventSequence += 1;
+      session.trajectoryOutbox.push({
+        event,
+        status: 'pending',
+        attempts: 0,
+        lastAttemptAt: null,
+        lastError: null,
+      });
+    }
   }
 
   private async persistError(
@@ -697,6 +965,14 @@ export class SessionEngine {
     return session;
   }
 
+  private canObserve(session: CanonicalSession): boolean {
+    return session.activeInferenceId === null &&
+      session.activeAction === null &&
+      session.pendingPolicy === null &&
+      session.pendingApproval === null &&
+      (session.state === 'OBSERVING' || session.state === 'VERIFYING');
+  }
+
   private isTerminal(session: CanonicalSession): boolean {
     return session.state === 'COMPLETED' || session.state === 'FAILED' || session.state === 'CANCELLED';
   }
@@ -738,40 +1014,5 @@ export class SessionEngine {
       );
     }
     return value;
-  }
-
-  private async emit(
-    sessionId: CanonicalSession['sessionId'],
-    kind: TrajectoryEventKindV1,
-    correlationId: MessageId,
-    summary: string,
-    references: TrajectoryReferences = {},
-  ): Promise<void> {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const session = await this.requireSession(sessionId);
-      const expectedRevision = session.revision;
-      const event: TrajectoryEventV1 = {
-        eventId: randomUUID() as EventId,
-        sessionId: session.sessionId,
-        taskId: session.taskId,
-        ...references,
-        correlationId,
-        sequence: session.eventSequence,
-        occurredAt: this.now(),
-        kind,
-        summary,
-      };
-      session.eventSequence += 1;
-      session.revision = expectedRevision + 1;
-      try {
-        await this.options.store.transition(session, expectedRevision);
-        await this.options.trajectorySink.append(event);
-        return;
-      } catch (error) {
-        if (!(error instanceof SessionEngineError) || error.code !== 'STORE_CONFLICT' || attempt === 2) {
-          throw error;
-        }
-      }
-    }
   }
 }

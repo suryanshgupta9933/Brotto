@@ -15,7 +15,6 @@
 import type {
   FaraAction,
   ActionResult,
-  ObservationId,
 } from '@fara-platform/fara-action-schema';
 
 /**
@@ -132,7 +131,7 @@ export class CompletionDetector {
     currentUrl?: string;
     accessibilitySnapshot?: AccessibilitySnapshotResult;
   }): CompletionDetectionResult {
-    const { goal, goalAchieved, goalConfidence, screenshotAvailable } = options;
+    const { goalAchieved, goalConfidence } = options;
 
     // If goal is clearly achieved with high confidence
     if (goalAchieved && goalConfidence >= this.config.completionConfidenceThreshold) {
@@ -209,7 +208,7 @@ export class CompletionDetector {
     lastUrl?: string;
     currentUrl?: string;
   }): FailureDetectionResult {
-    const { action, result, lastUrl, currentUrl } = options;
+    const { result } = options;
 
     // Action succeeded
     if (result.success) {

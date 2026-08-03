@@ -81,13 +81,11 @@ const DEFAULT_EXECUTION_TIMEOUT = 30000; // 30 seconds
  */
 export class ActionExecutor {
   private mcpGateway: McpGatewayClient;
-  private sessionId: string;
   private maxExecutionTimeMs: number;
   private isExecuting = false;
 
   constructor(config: ExecutorConfig) {
     this.mcpGateway = config.mcpGateway;
-    this.sessionId = config.sessionId;
     this.maxExecutionTimeMs = config.maxExecutionTimeMs ?? DEFAULT_EXECUTION_TIMEOUT;
   }
 
@@ -161,7 +159,7 @@ export class ActionExecutor {
    */
   private async executeMcpAction(
     action: FaraAction,
-    observationId: ObservationId,
+    _observationId: ObservationId,
     startTime: number
   ): Promise<ActionResult> {
     const toolName = getMcpToolName(action.type);

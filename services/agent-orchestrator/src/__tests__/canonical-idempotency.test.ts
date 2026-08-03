@@ -15,11 +15,13 @@ function session(revision: number, outcome?: StoredOutcome): CanonicalSession {
     revision,
     nextSequence: 0,
     eventSequence: 0,
+    trajectoryOutbox: [],
     startedAt: '2026-08-03T10:00:00.000Z',
     updatedAt: '2026-08-03T10:00:00.000Z',
     lastObservation: null,
     activeInferenceId: null,
     activeAction: null,
+    pendingPostObservation: null,
     pendingPolicy: null,
     pendingApproval: null,
     recentResults: [],
@@ -107,6 +109,30 @@ describe('InMemorySessionStore', () => {
     const store = new InMemorySessionStore();
     const invalid = session(1) as unknown as Record<string, unknown>;
     invalid.invalid = invalidValue;
+
+    await expect(store.compareAndSwap(invalid as unknown as CanonicalSession, 0)).rejects.toThrow(
+      'Canonical session must contain only JSON values',
+    );
+    expect(await store.load(sessionId as never)).toBeNull();
+  });
+
+  it.each([
+    ['sparse array holes', () => {
+      const value = new Array<unknown>(2);
+      value[1] = 'present';
+      return value;
+    }],
+    ['extra array keys', () => Object.assign(['value'], { extra: true })],
+    ['symbol-keyed properties', () => ({ [Symbol('hidden')]: 'value' })],
+    ['non-enumerable own properties', () => {
+      const value = { visible: true };
+      Object.defineProperty(value, 'hidden', { value: true, enumerable: false });
+      return value;
+    }],
+  ])('rejects %s that would change under a JSON round trip', async (_label, makeInvalid) => {
+    const store = new InMemorySessionStore();
+    const invalid = session(1) as unknown as Record<string, unknown>;
+    invalid.invalid = makeInvalid();
 
     await expect(store.compareAndSwap(invalid as unknown as CanonicalSession, 0)).rejects.toThrow(
       'Canonical session must contain only JSON values',

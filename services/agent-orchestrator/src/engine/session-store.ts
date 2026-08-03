@@ -17,7 +17,18 @@ function assertJsonValue(value: unknown, path = '$', ancestors = new Set<object>
   }
   const nextAncestors = new Set(ancestors).add(value);
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertJsonValue(item, `${path}[${index}]`, nextAncestors));
+    if (
+      Object.getOwnPropertySymbols(value).length > 0 ||
+      Object.keys(value).length !== value.length
+    ) {
+      throw new TypeError(`Canonical session must contain only JSON values: ${path}`);
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(value, index)) {
+        throw new TypeError(`Canonical session must contain only JSON values: ${path}[${index}]`);
+      }
+      assertJsonValue(value[index], `${path}[${index}]`, nextAncestors);
+    }
     return;
   }
   const prototype = Object.getPrototypeOf(value) as { constructor?: { name?: string } } | null;
@@ -26,6 +37,11 @@ function assertJsonValue(value: unknown, path = '$', ancestors = new Set<object>
     (prototype !== null && prototype.constructor?.name !== 'Object')
   ) {
     throw new TypeError(`Canonical session must contain only JSON values: ${path}`);
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key === 'symbol' || !Object.getOwnPropertyDescriptor(value, key)?.enumerable) {
+      throw new TypeError(`Canonical session must contain only JSON values: ${path}`);
+    }
   }
   for (const [key, nested] of Object.entries(value)) {
     assertJsonValue(nested, `${path}.${key}`, nextAncestors);

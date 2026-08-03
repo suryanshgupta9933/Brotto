@@ -27,14 +27,6 @@ import {
 import { ActionType, type FaraAction } from '@fara-platform/fara-action-schema';
 
 /**
- * Action type mapping from Fara action types to critical action types
- */
-const FARA_ACTION_TO_CRITICAL_TYPE: Partial<Record<ActionType, string[]>> = {
-  visit_url: ['navigate_to_domain'],
-  key: ['enter_password', 'enter_otp'],
-};
-
-/**
  * Policy evaluation result for orchestrator
  */
 export interface PolicyEvaluationOrchestratorResult {
@@ -72,7 +64,6 @@ export interface PolicyConfig {
  */
 export class PolicyIntegrator {
   private sessionId: string;
-  private userId: string;
   private classifier: CriticalActionClassifier;
   private policyEngine: PolicyEngine;
   private approvalManager: ApprovalRequestManager;
@@ -81,7 +72,6 @@ export class PolicyIntegrator {
 
   constructor(config: PolicyConfig) {
     this.sessionId = config.sessionId;
-    this.userId = config.userId;
     this.classifier = config.classifier ?? getDefaultClassifier();
     this.policyEngine = config.policyEngine ?? getDefaultPolicyEngine();
     this.approvalManager = config.approvalManager ?? new ApprovalRequestManager();
@@ -302,7 +292,7 @@ export class PolicyIntegrator {
    * Generate consequence summary
    */
   private generateConsequenceSummary(
-    action: FaraAction,
+    _action: FaraAction,
     classification: ClassificationResult
   ): string {
     const baseDescriptions: Record<string, string> = {
