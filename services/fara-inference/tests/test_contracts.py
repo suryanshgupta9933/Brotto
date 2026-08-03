@@ -106,3 +106,47 @@ def test_planning_request_rejects_secret_bearing_semantic_attribute():
 
     with pytest.raises(ValidationError, match="sensitive browser data"):
         PlanningRequest.model_validate(body)
+
+
+def test_planning_request_rejects_overlong_safe_semantic_attribute():
+    body = valid_request_body()
+    body["observation"]["semanticTargets"][0]["attributes"] = {"aria-label": "x" * 513}
+
+    with pytest.raises(ValidationError):
+        PlanningRequest.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("aria-expanded", "maybe"),
+        ("aria-haspopup", "popup"),
+        ("aria-current", "current"),
+        ("aria-pressed", "yes"),
+        ("aria-selected", "selected"),
+    ],
+)
+def test_planning_request_rejects_invalid_semantic_attribute_state(attribute: str, value: str):
+    body = valid_request_body()
+    body["observation"]["semanticTargets"][0]["attributes"] = {attribute: value}
+
+    with pytest.raises(ValidationError):
+        PlanningRequest.model_validate(body)
+
+
+def test_planning_request_accepts_canonical_semantic_attribute_boundaries_and_states():
+    body = valid_request_body()
+    body["observation"]["semanticTargets"][0]["attributes"] = {
+        "aria-label": "x" * 512,
+        "aria-describedby": "description",
+        "aria-controls": "results",
+        "aria-expanded": "true",
+        "aria-haspopup": "listbox",
+        "aria-current": "page",
+        "aria-pressed": "mixed",
+        "aria-selected": "false",
+    }
+
+    request = PlanningRequest.model_validate(body)
+
+    assert request.observation.semantic_targets[0].attributes is not None

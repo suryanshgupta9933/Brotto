@@ -195,27 +195,40 @@ class LocatorCandidate(BrowserSafeModel):
         return self
 
 
+SafeSemanticText = Annotated[str, Field(min_length=1, max_length=512)]
+
+
+class SemanticAttributes(BrowserSafeModel):
+    """Exact V1 safe semantic-attribute object; state values are finite ARIA literals."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=False, allow_inf_nan=False)
+
+    aria_label: SafeSemanticText | None = Field(default=None, alias="aria-label")
+    aria_describedby: SafeSemanticText | None = Field(default=None, alias="aria-describedby")
+    aria_controls: SafeSemanticText | None = Field(default=None, alias="aria-controls")
+    aria_expanded: Literal["true", "false"] | None = Field(default=None, alias="aria-expanded")
+    aria_haspopup: Literal["true", "false", "menu", "listbox", "tree", "grid", "dialog"] | None = (
+        Field(default=None, alias="aria-haspopup")
+    )
+    aria_current: Literal["true", "false", "page", "step", "location", "date", "time"] | None = (
+        Field(default=None, alias="aria-current")
+    )
+    aria_pressed: Literal["true", "false", "mixed"] | None = Field(
+        default=None, alias="aria-pressed"
+    )
+    aria_selected: Literal["true", "false"] | None = Field(default=None, alias="aria-selected")
+
+    _safe_text = field_validator("aria_label", "aria_describedby", "aria_controls")(
+        _is_safe_semantic_text
+    )
+
+
 class SemanticTarget(BrowserSafeModel):
     target_id: UUID_STRING = Field(alias="targetId")
     tag: Annotated[str, Field(min_length=1, max_length=64)]
     role: Annotated[str, Field(min_length=1, max_length=128)] | None = None
     accessible_name: AccessibleName | None = Field(default=None, alias="accessibleName")
-    attributes: (
-        dict[
-            Literal[
-                "aria-label",
-                "aria-describedby",
-                "aria-controls",
-                "aria-expanded",
-                "aria-haspopup",
-                "aria-current",
-                "aria-pressed",
-                "aria-selected",
-            ],
-            str,
-        ]
-        | None
-    ) = None
+    attributes: SemanticAttributes | None = None
     control: ControlMetadata
     bounding_box: BoundingBox = Field(alias="boundingBox")
     visible: bool
@@ -231,14 +244,6 @@ class SemanticTarget(BrowserSafeModel):
         if self.tag.lower() == "input" and self.control.kind != "input":
             raise ValueError("Input targets require input control metadata")
         return self
-
-    @field_validator("attributes")
-    @classmethod
-    def validate_safe_attributes(cls, value: dict[str, str] | None) -> dict[str, str] | None:
-        if value is not None:
-            for attribute_value in value.values():
-                _is_safe_semantic_text(attribute_value)
-        return value
 
 
 class Observation(BrowserSafeModel):
