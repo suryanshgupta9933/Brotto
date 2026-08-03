@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from .client import InferenceRequest, VLLMClient, VLLMClientError
 from .contracts import (
+    CompletionProposal,
     ContractErrorProposal,
     PlanningRequest,
     PlanningResponse,
@@ -70,13 +71,23 @@ class FaraAdapter:
                 usage=dict(response.usage),
                 model=response.model,
             )
-            parsed = self.parse_model_output(response.content)
+            parsed = (
+                self._contract_error(f"Unsupported model finish reason: {response.finish_reason}")
+                if response.finish_reason != "stop"
+                else self.parse_model_output(response.content)
+            )
             if (
                 parsed.kind != "contract_error"
                 and parsed.observation_id != request.observation.observation_id
             ):
                 parsed = self._contract_error(
                     "Proposal observationId does not match the planning observation"
+                )
+            if parsed.kind == "completion" and not self._completion_evidence_is_allowed(
+                parsed, request
+            ):
+                parsed = self._contract_error(
+                    "Completion findings reference an observation outside the planning context"
                 )
             if parsed.kind != "contract_error":
                 return parsed
@@ -167,6 +178,20 @@ class FaraAdapter:
                 "schema": PlanningResponseAdapter.json_schema(),
             },
         }
+
+    @staticmethod
+    def _completion_evidence_is_allowed(
+        completion: CompletionProposal, request: PlanningRequest
+    ) -> bool:
+        allowed_observation_ids = {request.observation.observation_id}
+        allowed_observation_ids.update(
+            event.observation_id for event in request.trajectory if event.observation_id is not None
+        )
+        return all(
+            observation_id in allowed_observation_ids
+            for finding in completion.findings
+            for observation_id in finding.observation_ids
+        )
 
     @staticmethod
     def _contract_error(message: str) -> ContractErrorProposal:

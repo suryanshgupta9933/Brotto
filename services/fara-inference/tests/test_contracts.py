@@ -82,3 +82,27 @@ def test_planning_request_rejects_unknown_browser_fields():
 
     with pytest.raises(ValidationError):
         PlanningRequest.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    ("field", "secret"),
+    [("role", "Password"), ("testId", "auth-token")],
+)
+def test_planning_request_rejects_secret_bearing_locator_content(field: str, secret: str):
+    body = valid_request_body()
+    candidate = body["observation"]["semanticTargets"][0]["locatorCandidates"][0]
+    if field == "testId":
+        candidate.clear()
+        candidate.update({"kind": "test_id", "testId": secret})
+    candidate[field] = secret
+
+    with pytest.raises(ValidationError, match="sensitive browser data"):
+        PlanningRequest.model_validate(body)
+
+
+def test_planning_request_rejects_secret_bearing_semantic_attribute():
+    body = valid_request_body()
+    body["observation"]["semanticTargets"][0]["attributes"] = {"aria-label": "Password reset"}
+
+    with pytest.raises(ValidationError, match="sensitive browser data"):
+        PlanningRequest.model_validate(body)

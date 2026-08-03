@@ -170,6 +170,10 @@ class LocatorCandidate(BrowserSafeModel):
     )
     value: Annotated[str, Field(min_length=1, max_length=512)] | None = None
 
+    _safe_role = field_validator("role")(_is_safe_semantic_text)
+    _safe_test_id = field_validator("test_id")(_is_safe_semantic_text)
+    _safe_value = field_validator("value")(_is_safe_semantic_text)
+
     @model_validator(mode="after")
     def validate_variant(self) -> LocatorCandidate:
         required = {
@@ -299,11 +303,17 @@ class PlanningRequest(BrowserSafeModel):
     limits: PlanningLimits = Field(default_factory=PlanningLimits)
 
 
-class LeftClickAction(StrictModel):
-    type: Literal["left_click", "double_click", "right_click", "mouse_move"]
+class ClickAction(StrictModel):
+    type: Literal["left_click", "double_click", "right_click"]
     x: Annotated[int, Field(ge=0)]
     y: Annotated[int, Field(ge=0)]
     target_id: UUID_STRING | None = Field(default=None, alias="targetId")
+
+
+class MouseMoveAction(StrictModel):
+    type: Literal["mouse_move"]
+    x: Annotated[int, Field(ge=0)]
+    y: Annotated[int, Field(ge=0)]
 
 
 class DragAction(StrictModel):
@@ -350,7 +360,8 @@ class WaitAction(StrictModel):
 
 
 ExecutableAction = Annotated[
-    LeftClickAction
+    ClickAction
+    | MouseMoveAction
     | DragAction
     | ScrollAction
     | KeyAction

@@ -28,6 +28,16 @@ def test_prose_only_never_becomes_completion(adapter: FaraAdapter, corpus: dict)
     assert result.kind == "contract_error"
 
 
+def test_mouse_move_with_target_id_is_not_an_executable_proposal(adapter: FaraAdapter):
+    result = adapter.parse_model_output(
+        '{"kind":"action","observationId":"11111111-1111-4111-8111-111111111111",'
+        '"proposedAt":"2026-08-03T10:00:01Z","action":{"type":"mouse_move",'
+        '"x":42,"y":84,"targetId":"44444444-4444-4444-8444-444444444444"}}'
+    )
+
+    assert result.kind == "contract_error"
+
+
 @pytest.mark.parametrize(
     ("case_name", "expected_kind"),
     [
@@ -184,3 +194,119 @@ async def test_plan_omits_json_schema_when_endpoint_does_not_support_it():
     assert client.request.temperature == 0
     assert client.request.response_format is None
     assert client.request.messages[1]["content"][1]["type"] == "image_url"
+
+
+@pytest.mark.asyncio
+async def test_length_finished_completion_is_repaired_then_rejected():
+    class LengthClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"kind":"completion","observationId":"11111111-1111-4111-8111-111111111111",'
+                        '"type":"terminate","status":"succeeded","summary":"Done",'
+                        '"findings":[{"fact":"Visible","observationIds":['
+                        '"11111111-1111-4111-8111-111111111111"]}],"unmetCriteria":[],"confidence":1}'
+                    ),
+                    "finish_reason": "length",
+                    "usage": {"total_tokens": 1},
+                    "model": "fara-test",
+                },
+            )()
+
+    client = LengthClient()
+    result = await FaraAdapter(client=client).plan(
+        PlanningRequest.model_validate(valid_request_body())
+    )
+
+    assert result.kind == "contract_error"
+    assert client.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_completion_accepts_evidence_from_bounded_trajectory():
+    historical_id = "88888888-8888-4888-8888-888888888888"
+    body = valid_request_body()
+    body["trajectory"] = [
+        {
+            "eventId": "99999999-9999-4999-8999-999999999999",
+            "sessionId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "taskId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "sequence": 1,
+            "kind": "observation_captured",
+            "occurredAt": "2026-08-03T10:00:00Z",
+            "observationId": historical_id,
+        }
+    ]
+
+    class HistoricalEvidenceClient:
+        async def complete(self, request):
+            return type(
+                "Response",
+                (),
+                {
+                    "content": json.dumps(
+                        {
+                            "kind": "completion",
+                            "observationId": "11111111-1111-4111-8111-111111111111",
+                            "type": "terminate",
+                            "status": "succeeded",
+                            "summary": "Done",
+                            "findings": [
+                                {"fact": "Historical proof", "observationIds": [historical_id]}
+                            ],
+                            "unmetCriteria": [],
+                            "confidence": 1,
+                        }
+                    ),
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "model": "fara-test",
+                },
+            )()
+
+    result = await FaraAdapter(client=HistoricalEvidenceClient()).plan(
+        PlanningRequest.model_validate(body)
+    )
+
+    assert result.kind == "completion"
+    assert result.findings[0].observation_ids == [historical_id]
+
+
+@pytest.mark.asyncio
+async def test_completion_with_fabricated_evidence_is_repaired_then_rejected():
+    class FabricatedEvidenceClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"kind":"completion","observationId":"11111111-1111-4111-8111-111111111111",'
+                        '"type":"terminate","status":"succeeded","summary":"Done",'
+                        '"findings":[{"fact":"Invented","observationIds":['
+                        '"99999999-9999-4999-8999-999999999999"]}],"unmetCriteria":[],"confidence":1}'
+                    ),
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "model": "fara-test",
+                },
+            )()
+
+    client = FabricatedEvidenceClient()
+    result = await FaraAdapter(client=client).plan(
+        PlanningRequest.model_validate(valid_request_body())
+    )
+
+    assert result.kind == "contract_error"
+    assert client.calls == 3
