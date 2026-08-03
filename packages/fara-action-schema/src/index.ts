@@ -5,6 +5,11 @@
  * Defines the canonical set of actions the Fara model can produce and their validation rules.
  */
 
+export * from './v1';
+// The legacy numeric ObservationId remains a top-level export below. Use this
+// explicit alias for the canonical v1 branded UUID when importing from root.
+export type { ObservationId as ObservationV1Id } from './v1/ids';
+
 // Types and enums
 export {
   ActionType,
@@ -61,7 +66,6 @@ export {
   type BaseActionResult,
   type ActionSuccessResult,
   type ActionSuccessData,
-  type CookieData,
   type ActionFailureResult,
   type ActionResult,
   type LeftClickResult,

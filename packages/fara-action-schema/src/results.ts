@@ -75,24 +75,6 @@ export interface ActionSuccessData {
   url?: string;
   /** Console messages if captured */
   consoleMessages?: string[];
-  /** Cookies if captured */
-  cookies?: CookieData[];
-  /** Local storage if captured */
-  localStorage?: Record<string, string>;
-}
-
-/**
- * Cookie data structure.
- */
-export interface CookieData {
-  name: string;
-  value: string;
-  domain?: string;
-  path?: string;
-  expires?: number;
-  httpOnly?: boolean;
-  secure?: boolean;
-  sameSite?: 'Strict' | 'Lax' | 'None';
 }
 
 /**
