@@ -83,3 +83,28 @@ exit 0
 ```
 
 The complete extension run reaches 7 passing suites and 105 passing tests, then remains blocked by the same three unrelated legacy TypeScript test-compilation failures in `pairing.test.ts`, `crypto.test.ts`, and `debugger.test.ts`. Full `build:tsc` remains blocked only by the same three unrelated pre-existing `background.ts` errors documented above.
+
+## Re-review Fix Round — 2026-08-04
+
+- Replaced light-DOM iframe counting with authoritative `Page.getFrameTree` topology proofs before and after screenshot capture. A missing, malformed, cyclic, oversized, changed, or multi-frame topology rejects locally.
+- CDP topology covers child frames independently of light DOM or open/closed shadow-root placement. A mocked shadow-hosted descendant now proves that no screenshot is taken when any child frame exists.
+- The verified CDP main-frame ID contributes only to the client-scoped opaque frame UUID seed; the raw CDP identifier is never serialized.
+- Unified URL and title classification through `containsSensitiveBrowserData()`, using Unicode normalization, compact normalized credential signals, browser-secret words, bearer forms, JWT shapes, and `sk_live` values.
+- Unknown/sensitive query keys remain removed, and credential-shaped values are now removed even under allowlisted `q` and `query` keys. Browser titles containing the same forms are replaced wholesale with `[redacted]`.
+
+### Re-review TDD evidence
+
+Focused RED reproduced missing authoritative topology handling, a topology response that could not be proven, a mocked shadow-hosted child frame, and credential-shaped values surviving allowlisted query/title fields.
+
+Focused GREEN:
+
+```text
+pnpm --config.verify-deps-before-run=false --dir clients/browser-extension test --runInBand redaction observation
+2 suites, 51 tests passed
+
+tsc -p clients/browser-extension/tsconfig.task7.json (temporary scoped config)
+exit 0
+
+esbuild src/canonical/observation.ts --bundle --write=false (programmatic API)
+exit 0
+```

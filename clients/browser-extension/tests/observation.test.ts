@@ -32,7 +32,6 @@ const PAGE_SNAPSHOT = {
   readyState: "complete",
   visibility: "visible",
   documentToken: "document-1",
-  childFrameCount: 0,
   domScanComplete: true,
   sensitiveRegionOverflow: false,
   sensitiveRegions: [] as Array<{
@@ -85,7 +84,10 @@ function defaultOptions(
     getZoom: async () => 1,
     maskScreenshot: async () => MASKED_PNG_BYTES,
     now: () => new Date("2026-08-03T12:34:56.000Z"),
-    sendCdpCommand: async () => ({ result: { value: snapshot } }),
+    sendCdpCommand: async (_tabId, method) =>
+      method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "main-frame" } } }
+        : { result: { value: snapshot } },
     ...overrides,
   };
 }
@@ -121,7 +123,9 @@ function captureFixture(marker: string) {
     defaultOptions(snapshot, {
       sendCdpCommand: async (_tabId: number, method: string) => {
         methods.push(method);
-        return { result: { value: snapshot } };
+        return method === "Page.getFrameTree"
+          ? { frameTree: { frame: { id: "main-frame" } } }
+          : { result: { value: snapshot } };
       },
     }),
   ).then((observation) => ({ observation, methods }));
@@ -282,7 +286,12 @@ describe("canonical browser observation capture", () => {
   it("uses only the safe Runtime evaluation CDP boundary", async () => {
     const { methods } = await captureFixture("cookie");
 
-    expect(methods).toEqual(["Runtime.evaluate", "Runtime.evaluate"]);
+    expect(methods).toEqual([
+      "Page.getFrameTree",
+      "Runtime.evaluate",
+      "Page.getFrameTree",
+      "Runtime.evaluate",
+    ]);
     expect(
       methods.some((method) => /cookie|storage|network/i.test(method)),
     ).toBe(false);
@@ -384,26 +393,60 @@ describe("canonical browser observation capture", () => {
       captureObservation(
         42,
         defaultOptions(PAGE_SNAPSHOT, {
-          sendCdpCommand: async () => ({
-            result: { value: snapshots.shift() },
-          }),
+          sendCdpCommand: async (_tabId, method) =>
+            method === "Page.getFrameTree"
+              ? { frameTree: { frame: { id: "main-frame" } } }
+              : { result: { value: snapshots.shift() } },
         }),
       ),
     ).rejects.toThrow("page changed during capture");
   });
 
-  it("fails closed when the page contains child frames", async () => {
+  it("fails closed for a shadow-hosted child reported by CDP topology", async () => {
     const captureVisibleTab = jest.fn(async () => SAFE_PNG);
 
     await expect(
       captureObservation(
         42,
-        defaultOptions(
-          { ...PAGE_SNAPSHOT, childFrameCount: 1 },
-          { captureVisibleTab },
-        ),
+        defaultOptions(PAGE_SNAPSHOT, {
+          captureVisibleTab,
+          sendCdpCommand: async (_tabId, method) =>
+            method === "Page.getFrameTree"
+              ? {
+                  frameTree: {
+                    frame: { id: "main-frame" },
+                    childFrames: [
+                      {
+                        frame: {
+                          id: "shadow-hosted-child",
+                          parentId: "main-frame",
+                        },
+                      },
+                    ],
+                  },
+                }
+              : { result: { value: PAGE_SNAPSHOT } },
+        }),
       ),
     ).rejects.toThrow("child frames");
+    expect(captureVisibleTab).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when CDP frame topology cannot be proven", async () => {
+    const captureVisibleTab = jest.fn(async () => SAFE_PNG);
+
+    await expect(
+      captureObservation(
+        42,
+        defaultOptions(PAGE_SNAPSHOT, {
+          captureVisibleTab,
+          sendCdpCommand: async (_tabId, method) =>
+            method === "Page.getFrameTree"
+              ? { frameTree: null }
+              : { result: { value: PAGE_SNAPSHOT } },
+        }),
+      ),
+    ).rejects.toThrow("frame topology");
     expect(captureVisibleTab).not.toHaveBeenCalled();
   });
 

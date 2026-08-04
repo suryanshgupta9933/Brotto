@@ -10,8 +10,12 @@ const MAX_ROLE_LENGTH = 128;
 const MAX_LOCATOR_CANDIDATES = 10;
 const MAX_OBSERVATION_URL_LENGTH = 2048;
 
-const SENSITIVE_TEXT =
-  /\b(?:authorization|cookies?|credentials?|local[\s_-]*storage|password|passcode|profile|proxy[\s_-]*authorization|secret|session[\s_-]*storage|tokens?)\b/i;
+const SENSITIVE_BROWSER_WORDS =
+  /\b(?:api[\s_-]*keys?|auth(?:entication|orization)?|bearer|cookies?|credentials?|local[\s_-]*storage|password|passcode|profile|proxy[\s_-]*authorization|secret|session[\s_-]*storage|tokens?)\b/i;
+const STRONG_CREDENTIAL_VALUE =
+  /(?:\beyj[a-z0-9_-]{10,}\.[a-z0-9_-]+(?:\.[a-z0-9_-]+)?|\bsk[\s_-]*live[\s_-]*[a-z0-9_-]{8,}|\bbearer\s+[a-z0-9._~+/-]{3,})/i;
+const NORMALIZED_CREDENTIAL_SIGNAL =
+  /(?:accesstoken|apikey|authorization|authtoken|bearer|clientsecret|credential|idtoken|password|passcode|refreshtoken|secretkey|sessiontoken|sklive)/;
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -128,7 +132,7 @@ function normalizedText(
   if (typeof value !== "string") return undefined;
 
   const normalized = value.replace(/\s+/g, " ").trim();
-  if (!normalized || SENSITIVE_TEXT.test(normalized)) return undefined;
+  if (!normalized || containsSensitiveBrowserData(normalized)) return undefined;
 
   return normalized.slice(0, maxLength);
 }
@@ -399,9 +403,20 @@ export function sanitizeBrowserText(
   if (typeof value !== "string") return "";
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) return "";
-  return SENSITIVE_TEXT.test(normalized)
+  return containsSensitiveBrowserData(normalized)
     ? "[redacted]"
     : normalized.slice(0, maxLength);
+}
+
+export function containsSensitiveBrowserData(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const normalized = value.normalize("NFKC").toLowerCase();
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  return (
+    SENSITIVE_BROWSER_WORDS.test(normalized) ||
+    STRONG_CREDENTIAL_VALUE.test(normalized) ||
+    NORMALIZED_CREDENTIAL_SIGNAL.test(compact)
+  );
 }
 
 export function sanitizeObservationUrl(value: unknown): string {
@@ -420,14 +435,14 @@ export function sanitizeObservationUrl(value: unknown): string {
     const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
     if (
       !SAFE_QUERY_KEYS.has(normalizedKey) ||
-      SENSITIVE_TEXT.test(key) ||
-      SENSITIVE_TEXT.test(entryValue)
+      containsSensitiveBrowserData(key) ||
+      containsSensitiveBrowserData(entryValue)
     ) {
       url.searchParams.delete(key);
     }
   }
 
-  if (SENSITIVE_TEXT.test(decodeURIComponent(url.pathname))) {
+  if (containsSensitiveBrowserData(decodeURIComponent(url.pathname))) {
     url.pathname = "/";
   }
 

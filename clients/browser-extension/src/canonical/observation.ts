@@ -66,7 +66,6 @@ interface RawPageSnapshot {
   readyState?: unknown;
   visibility?: unknown;
   documentToken?: unknown;
-  childFrameCount?: unknown;
   domScanComplete?: unknown;
   sensitiveRegionOverflow?: unknown;
   sensitiveRegions?: unknown;
@@ -86,7 +85,6 @@ interface PageSnapshot {
   readyState: ObservationV1["page"]["lifecycle"];
   visibility: ObservationV1["page"]["visibility"];
   documentToken: string;
-  childFrameCount: number;
   domScanComplete: true;
   sensitiveRegionOverflow: false;
   sensitiveRegions: SensitiveRegion[];
@@ -96,6 +94,10 @@ interface PageSnapshot {
 interface RuntimeEvaluateResult {
   result?: { value?: unknown };
   exceptionDetails?: unknown;
+}
+
+interface FrameTopology {
+  mainFrameId: string;
 }
 
 interface ParsedPng {
@@ -357,7 +359,6 @@ function collectPageSnapshot(
   const semanticTargets: RawSemanticTarget[] = [];
   const sensitiveRegions: SensitiveRegion[] = [];
   let sensitiveRegionOverflow = false;
-  let childFrameCount = 0;
   let inspected = 0;
   const walker = document.createTreeWalker(
     document.documentElement,
@@ -369,8 +370,6 @@ function collectPageSnapshot(
     inspected += 1;
     const element = node as Element;
     const tag = element.tagName.toLowerCase();
-    if (tag === "iframe" || tag === "frame") childFrameCount += 1;
-
     if (isVisible(element)) {
       const rect = element.getBoundingClientRect();
       const type = element.getAttribute("type") ?? "";
@@ -499,7 +498,6 @@ function collectPageSnapshot(
     readyState: document.readyState,
     visibility: document.visibilityState,
     documentToken: `${performance.timeOrigin}:${location.href}`,
-    childFrameCount,
     domScanComplete: node === null,
     sensitiveRegionOverflow,
     sensitiveRegions,
@@ -701,12 +699,6 @@ function validatePageSnapshot(value: unknown): PageSnapshot {
   ) {
     throw securityError("Page document identity is invalid");
   }
-  const childFrameCount = requireFiniteNumber(
-    "childFrameCount",
-    raw.childFrameCount,
-  );
-  if (!Number.isInteger(childFrameCount) || childFrameCount < 0)
-    throw securityError("Child frame count is invalid");
   if (raw.domScanComplete !== true)
     throw securityError("DOM scan limit reached before privacy scan completed");
   if (raw.sensitiveRegionOverflow !== false)
@@ -721,7 +713,6 @@ function validatePageSnapshot(value: unknown): PageSnapshot {
     readyState: raw.readyState as PageSnapshot["readyState"],
     visibility: raw.visibility as PageSnapshot["visibility"],
     documentToken: raw.documentToken,
-    childFrameCount,
     domScanComplete: true,
     sensitiveRegionOverflow: false,
     sensitiveRegions: validateSensitiveRegions(raw.sensitiveRegions, viewport),
@@ -743,6 +734,72 @@ async function capturePageSnapshot(
   if (runtimeResult.exceptionDetails)
     throw securityError("Page snapshot evaluation failed");
   return validatePageSnapshot(runtimeResult.result?.value);
+}
+
+function validateFrameTopology(value: unknown): FrameTopology {
+  if (!value || typeof value !== "object") {
+    throw securityError("CDP frame topology cannot be proven");
+  }
+  const frameTree = (value as { frameTree?: unknown }).frameTree;
+  if (!frameTree || typeof frameTree !== "object") {
+    throw securityError("CDP frame topology cannot be proven");
+  }
+
+  const visited = new Set<string>();
+  let nodeCount = 0;
+  const visit = (rawNode: unknown): string => {
+    if (!rawNode || typeof rawNode !== "object") {
+      throw securityError("CDP frame topology contains an invalid node");
+    }
+    nodeCount += 1;
+    if (nodeCount > 1_000) {
+      throw securityError("CDP frame topology exceeds node limit");
+    }
+
+    const node = rawNode as { frame?: unknown; childFrames?: unknown };
+    if (!node.frame || typeof node.frame !== "object") {
+      throw securityError("CDP frame topology contains an invalid frame");
+    }
+    const id = (node.frame as { id?: unknown }).id;
+    if (
+      typeof id !== "string" ||
+      id.length === 0 ||
+      id.length > 512 ||
+      visited.has(id)
+    ) {
+      throw securityError("CDP frame topology contains an invalid frame ID");
+    }
+    visited.add(id);
+
+    if (node.childFrames !== undefined && !Array.isArray(node.childFrames)) {
+      throw securityError("CDP frame topology contains invalid children");
+    }
+    const children = node.childFrames ?? [];
+    for (const child of children) visit(child);
+    return id;
+  };
+
+  const mainFrameId = visit(frameTree);
+  if (nodeCount > 1) {
+    throw securityError(
+      "Observation capture does not support child frames; capture is incomplete",
+    );
+  }
+  return { mainFrameId };
+}
+
+async function captureFrameTopology(
+  tabId: number,
+  sendCdpCommand: CdpCommandSender,
+): Promise<FrameTopology> {
+  try {
+    return validateFrameTopology(
+      await sendCdpCommand(tabId, "Page.getFrameTree"),
+    );
+  } catch (error) {
+    if (error instanceof ObservationSecurityError) throw error;
+    throw securityError("CDP frame topology cannot be proven", error);
+  }
 }
 
 function requireActiveIdentity(
@@ -833,24 +890,20 @@ async function captureObservationInternal(
     await getTabIdentity(tabId),
   );
   const zoomBefore = requireBoundedPositive("zoom", await getZoom(tabId));
+  const topologyBefore = await captureFrameTopology(tabId, sendCdpCommand);
   const before = await capturePageSnapshot(
     tabId,
     sendCdpCommand,
     maxSemanticTargets,
     maxDomElements,
   );
-  if (before.childFrameCount > 0) {
-    throw securityError(
-      "Observation capture does not support child frames; capture is incomplete",
-    );
-  }
-
   requireActiveIdentity(tabId, initialIdentity, await getTabIdentity(tabId));
   const rawScreenshot = parsePngDataUrl(
     await captureVisibleTab(tabId, initialIdentity.windowId),
   );
   requireActiveIdentity(tabId, initialIdentity, await getTabIdentity(tabId));
 
+  const topologyAfter = await captureFrameTopology(tabId, sendCdpCommand);
   const after = await capturePageSnapshot(
     tabId,
     sendCdpCommand,
@@ -858,15 +911,13 @@ async function captureObservationInternal(
     maxDomElements,
   );
   const zoomAfter = requireBoundedPositive("zoom", await getZoom(tabId));
-  if (after.childFrameCount > 0) {
-    throw securityError(
-      "Observation capture does not support child frames; capture is incomplete",
-    );
-  }
   if (zoomBefore !== zoomAfter || !pageSnapshotsMatch(before, after)) {
     throw securityError(
       "The page changed during capture; observation rejected",
     );
+  }
+  if (topologyBefore.mainFrameId !== topologyAfter.mainFrameId) {
+    throw securityError("The frame topology changed during capture");
   }
   validateScreenshotViewport(rawScreenshot, after.viewport, zoomAfter);
 
@@ -893,7 +944,9 @@ async function captureObservationInternal(
   }
   validateScreenshotViewport(screenshot, after.viewport, zoomAfter);
   const screenshotHash = bytesToHex(await sha256(screenshot.bytes));
-  const pageFrameId = await opaqueUuid(`frame:${tabId}:main`);
+  const pageFrameId = await opaqueUuid(
+    `frame:${tabId}:${topologyAfter.mainFrameId}`,
+  );
   const canonicalTargets: SemanticTarget[] = [];
 
   for (const [index, rawTarget] of after.semanticTargets.entries()) {

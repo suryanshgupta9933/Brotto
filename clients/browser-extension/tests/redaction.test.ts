@@ -1,4 +1,5 @@
 import {
+  sanitizeBrowserText,
   sanitizeObservationUrl,
   sanitizeSemanticTarget,
 } from "../src/canonical/redaction";
@@ -160,6 +161,36 @@ describe("semantic target redaction", () => {
         "https://example.test/search?q=boots&access_token=a&api-key=b&AUTH=c&bearer=d&customer=e#secret",
       ),
     ).toBe("https://example.test/search?q=boots");
+  });
+
+  it.each([
+    ["q", "api_key=super-secret-value"],
+    ["query", "API-Key=super-secret-value"],
+    ["q", "sk_live_1234567890abcdef"],
+    ["query", "Bearer abc.def.ghi"],
+    ["q", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature"],
+    ["query", "access_token=abc123"],
+    ["q", "secret=abc123"],
+  ])(
+    "drops credential-shaped values from allowlisted %s: %s",
+    (queryKey, secret) => {
+      expect(
+        sanitizeObservationUrl(
+          `https://example.test/search?${queryKey}=${encodeURIComponent(secret)}&page=2`,
+        ),
+      ).toBe("https://example.test/search?page=2");
+    },
+  );
+
+  it.each([
+    "API-Key: super-secret-value",
+    "sk_live_1234567890abcdef",
+    "Bearer abc.def.ghi",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+    "access_token=abc123",
+    "secret=abc123",
+  ])("redacts credential-shaped browser titles: %s", (title) => {
+    expect(sanitizeBrowserText(title)).toBe("[redacted]");
   });
 
   it("rejects overlong observation URLs", () => {
