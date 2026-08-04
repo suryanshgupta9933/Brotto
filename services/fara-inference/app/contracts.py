@@ -7,7 +7,15 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 FORBIDDEN_BROWSER_DATA_KEYS = {
     "cookie",
@@ -432,3 +440,7 @@ PlanningResponse = Annotated[
     Field(discriminator="kind"),
 ]
 PlanningResponseAdapter: TypeAdapter[PlanningResponse] = TypeAdapter(PlanningResponse)
+
+
+class PlanningResponseEnvelope(RootModel[PlanningResponse]):
+    """Pydantic entry point for consumers that must validate the response union."""

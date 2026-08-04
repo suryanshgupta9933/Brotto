@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -31,6 +32,20 @@ UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
+MAX_CORPUS_BYTES = 16 * 1024 * 1024
+MAX_REQUEST_BYTES = 12 * 1024 * 1024
+MAX_RESPONSE_BYTES = 1024 * 1024
+FORBIDDEN_BROWSER_DATA_KEYS = {
+    "authorization",
+    "cookie",
+    "cookies",
+    "credentials",
+    "localstorage",
+    "password",
+    "profile",
+    "proxyauthorization",
+    "sessionstorage",
+}
 ACTION_FIELDS: dict[str, tuple[set[str], set[str]]] = {
     "left_click": ({"type", "x", "y"}, {"targetId"}),
     "double_click": ({"type", "x", "y"}, {"targetId"}),
@@ -86,6 +101,8 @@ class FixtureTransport:
             body_text = fixture["bodyText"]
         else:
             raise EvaluationError("fixture response is missing a body")
+        if len(body_text.encode("utf-8")) > MAX_RESPONSE_BYTES:
+            raise EvaluationError("fixture response exceeds the byte limit")
         latency = fixture.get("latencyMs", 0)
         if not isinstance(latency, (int, float)) or isinstance(latency, bool) or latency < 0:
             raise EvaluationError("fixture response has an invalid latency")
@@ -97,8 +114,14 @@ class LiveTransport:
 
     mode = "live"
 
-    def __init__(self, endpoint: str, api_key: str | None = None, timeout: float = 30) -> None:
-        self._endpoint = _planning_endpoint(endpoint)
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str | None = None,
+        timeout: float = 30,
+        allow_insecure_http: bool = False,
+    ) -> None:
+        self._endpoint = _planning_endpoint(endpoint, allow_insecure_http)
         self._api_key = api_key
         if not math.isfinite(timeout) or timeout <= 0:
             raise EvaluationError("timeout must be a positive finite number")
@@ -109,6 +132,8 @@ class LiveTransport:
         if not isinstance(planning_request, dict):
             raise EvaluationError("evaluation case is missing a planning request")
         body = _canonical_json(planning_request).encode("utf-8")
+        if len(body) > MAX_REQUEST_BYTES:
+            raise EvaluationError("planning request exceeds the byte limit")
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -120,12 +145,12 @@ class LiveTransport:
         started = time.perf_counter()
         try:
             with urlopen(request, timeout=self._timeout) as response:  # noqa: S310
-                response_body = response.read().decode("utf-8", errors="replace")
+                response_body = _read_bounded(response).decode("utf-8", errors="replace")
                 status = int(response.status)
                 repair_count = _repair_count(response.headers.get("x-fara-repair-count"))
         except HTTPError as error:
             status = int(error.code)
-            response_body = error.read().decode("utf-8", errors="replace")
+            response_body = _read_bounded(error).decode("utf-8", errors="replace")
             repair_count = _repair_count(error.headers.get("x-fara-repair-count"))
         except (OSError, TimeoutError, URLError, ValueError) as error:
             raise EvaluationError("live endpoint request failed") from error
@@ -136,8 +161,12 @@ class LiveTransport:
 def load_cases(path: Path) -> list[dict[str, Any]]:
     """Load a dedicated corpus or the ``faraEvalCases`` section of Task 11 tasks."""
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        with path.open("rb") as source:
+            raw_document = source.read(MAX_CORPUS_BYTES + 1)
+        if len(raw_document) > MAX_CORPUS_BYTES:
+            raise EvaluationError("evaluation corpus exceeds the byte limit")
+        document = json.loads(raw_document)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise EvaluationError("unable to load evaluation corpus") from error
     request_template: dict[str, Any] | None = None
     if isinstance(document, list):
@@ -166,6 +195,8 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
             if not isinstance(request, dict):
                 raise EvaluationError("every evaluation case requires a planning request")
             case["request"] = _deep_merge(request_template, request)
+    for case in expanded:
+        _validate_case_definition(case)
     return expanded
 
 
@@ -185,8 +216,122 @@ def validate_proposal(value: Any) -> tuple[bool, str]:
     return False, "proposal kind is unsupported"
 
 
+def _load_contract_models() -> tuple[Any, Any] | None:
+    """Load the service-owned Pydantic contract without importing app startup code."""
+    contracts_path = (
+        Path(__file__).resolve().parents[2]
+        / "services"
+        / "fara-inference"
+        / "app"
+        / "contracts.py"
+    )
+    try:
+        spec = importlib.util.spec_from_file_location("fara_eval_contracts", contracts_path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module.PlanningRequest, module.PlanningResponseEnvelope
+    except Exception:
+        sys.modules.pop("fara_eval_contracts", None)
+        return None
+
+
+def _validate_planning_request(request: Any, contract_models: tuple[Any, Any] | None) -> None:
+    if not isinstance(request, dict):
+        raise EvaluationError("evaluation case is missing a planning request")
+    encoded = _canonical_json(request).encode("utf-8")
+    if len(encoded) > MAX_REQUEST_BYTES:
+        raise EvaluationError("planning request exceeds the byte limit")
+    _assert_no_forbidden_browser_data(request)
+    if contract_models is not None:
+        try:
+            contract_models[0].model_validate(request)
+        except Exception as error:
+            raise EvaluationError("planning request violates the canonical contract") from error
+        return
+    if set(request) != {"goal", "completionCriteria", "observation", "trajectory", "limits"}:
+        raise EvaluationError("planning request violates the fallback contract")
+    observation = request.get("observation")
+    if not isinstance(observation, dict) or not _uuid(observation.get("observationId")):
+        raise EvaluationError("planning request violates the fallback contract")
+    screenshot = observation.get("screenshot")
+    if not isinstance(screenshot, dict) or not isinstance(screenshot.get("sha256"), str):
+        raise EvaluationError("planning request violates the fallback contract")
+    if not isinstance(request.get("trajectory"), list):
+        raise EvaluationError("planning request violates the fallback contract")
+
+
+def _validate_response(
+    value: Any, contract_models: tuple[Any, Any] | None
+) -> tuple[bool, str, Any]:
+    if contract_models is not None:
+        try:
+            envelope = contract_models[1].model_validate(value)
+            normalized = envelope.root.model_dump(by_alias=True, exclude_none=True)
+            return True, "valid", normalized
+        except Exception:
+            return False, "proposal violates the canonical contract", value
+    valid, reason = validate_proposal(value)
+    return valid, reason, value
+
+
+def _validate_case_definition(case: Mapping[str, Any]) -> None:
+    if not isinstance(case.get("category"), str) or not case["category"]:
+        raise EvaluationError("every evaluation case requires a category")
+    if not isinstance(case.get("request"), dict):
+        raise EvaluationError("every evaluation case requires a planning request")
+    expected = case.get("expected")
+    if not isinstance(expected, dict):
+        raise EvaluationError("every evaluation case requires an expected outcome")
+    kind = expected.get("kind")
+    if kind == "action":
+        if set(expected) != {"kind", "action"} or not isinstance(expected["action"], dict):
+            raise EvaluationError("action expectations require one exact action")
+        valid, _ = _validate_action_proposal(
+            {
+                "kind": "action",
+                "observationId": "11111111-1111-4111-8111-111111111111",
+                "proposedAt": "2026-08-03T10:00:00Z",
+                "action": expected["action"],
+            }
+        )
+        if not valid:
+            raise EvaluationError("expected action violates the planning contract")
+    elif kind == "completion":
+        if set(expected) != {"kind", "status"} or expected.get("status") not in {
+            "succeeded",
+            "partial",
+            "failed",
+        }:
+            raise EvaluationError("completion expectations require one exact status")
+    elif kind == "question":
+        if set(expected) != {"kind", "question"} or not _bounded_string(
+            expected.get("question"), 2_000
+        ):
+            raise EvaluationError("question expectations require exact question text")
+    else:
+        raise EvaluationError("expected outcome kind is unsupported")
+
+
+def _assert_no_forbidden_browser_data(value: Any, path: str = "$") -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = "".join(char for char in str(key).lower() if char.isalnum())
+            if any(forbidden in normalized for forbidden in FORBIDDEN_BROWSER_DATA_KEYS):
+                raise EvaluationError(f"forbidden browser data at {path}")
+            _assert_no_forbidden_browser_data(nested, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            _assert_no_forbidden_browser_data(nested, f"{path}[{index}]")
+
+
 def evaluate_cases(cases: Sequence[Mapping[str, Any]], transport: Transport) -> dict[str, Any]:
     """Evaluate cases and return a payload-free scorecard."""
+    contract_models = _load_contract_models()
+    if transport.mode == "live" and contract_models is None:
+        raise EvaluationError("canonical planning contract is unavailable")
     valid_count = 0
     correct_count = 0
     scored_count = 0
@@ -205,6 +350,8 @@ def evaluate_cases(cases: Sequence[Mapping[str, Any]], transport: Transport) -> 
     representative: dict[str, dict[str, int]] = {}
 
     for case in cases:
+        _validate_case_definition(case)
+        _validate_planning_request(case.get("request"), contract_models)
         result = transport.send(case)
         latencies.append(result.latency_ms)
         if result.repair_count is None:
@@ -219,7 +366,7 @@ def evaluate_cases(cases: Sequence[Mapping[str, Any]], transport: Transport) -> 
         valid = False
         reason = output_kind
         if output_kind == "json":
-            valid, reason = validate_proposal(parsed)
+            valid, reason, parsed = _validate_response(parsed, contract_models)
             if valid and isinstance(parsed, dict) and parsed.get("kind") == "contract_error":
                 contract_error_count += 1
                 valid = False
@@ -245,7 +392,7 @@ def evaluate_cases(cases: Sequence[Mapping[str, Any]], transport: Transport) -> 
 
         expected = case.get("expected")
         correct = valid and _matches_expected(parsed, expected)
-        if case.get("scoreNextAction") is True:
+        if isinstance(expected, dict) and expected.get("kind") == "action":
             scored_count += 1
             correct_count += int(correct)
         if (
@@ -439,18 +586,15 @@ def _matches_expected(proposal: Any, expected: Any) -> bool:
         return False
     if proposal.get("kind") != expected.get("kind"):
         return False
-    expected_action = expected.get("actionType")
-    if expected_action is not None:
+    expected_action = expected.get("action")
+    if expected.get("kind") == "action":
         action = proposal.get("action")
-        if not isinstance(action, dict) or action.get("type") != expected_action:
+        if not isinstance(action, dict) or action != expected_action:
             return False
-    expected_fields = expected.get("actionFields")
-    if expected_fields is not None:
-        action = proposal.get("action")
-        if not isinstance(action, dict) or not isinstance(expected_fields, dict):
-            return False
-        if any(action.get(key) != wanted for key, wanted in expected_fields.items()):
-            return False
+    if expected.get("kind") == "completion" and proposal.get("status") != expected.get("status"):
+        return False
+    if expected.get("kind") == "question" and proposal.get("question") != expected.get("question"):
+        return False
     return True
 
 
@@ -493,17 +637,25 @@ def _parse_output(text: str) -> tuple[Any, str]:
         return None, "speculative_prose"
 
 
-def _planning_endpoint(endpoint: str) -> str:
+def _planning_endpoint(endpoint: str, allow_insecure_http: bool = False) -> str:
     try:
         parsed = urlsplit(endpoint)
     except ValueError as error:
         raise EvaluationError("live endpoint is invalid") from error
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise EvaluationError("live endpoint must use HTTP(S)")
-    path = parsed.path.rstrip("/")
-    if not path:
+    if parsed.username is not None or parsed.password is not None:
+        raise EvaluationError("live endpoint may not contain user information")
+    if parsed.query or parsed.fragment:
+        raise EvaluationError("live endpoint may not contain query or fragment data")
+    path = parsed.path
+    if path in {"", "/"}:
         path = "/v1/plan"
-    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+    elif path != "/v1/plan":
+        raise EvaluationError("live endpoint path must be /v1/plan")
+    if parsed.scheme == "http" and not allow_insecure_http:
+        raise EvaluationError("HTTP requires explicit development opt-in")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _repair_count(raw: str | None) -> int | None:
@@ -514,6 +666,13 @@ def _repair_count(raw: str | None) -> int | None:
     except ValueError:
         return None
     return value if value >= 0 else None
+
+
+def _read_bounded(stream: Any) -> bytes:
+    body = stream.read(MAX_RESPONSE_BYTES + 1)
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise EvaluationError("live response exceeds the byte limit")
+    return body
 
 
 def _latency_metrics(values: Sequence[float]) -> dict[str, float]:
@@ -597,6 +756,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", choices=("fixture", "live"), default="fixture")
     parser.add_argument("--endpoint", help="Live HTTP(S) endpoint; key remains environment-only")
+    parser.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help="Allow HTTP for an explicitly configured development endpoint",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     parser.add_argument("--output", type=Path, help="Optional path for the metrics-only JSON report")
     return parser
@@ -613,7 +777,12 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
         cases = load_cases(args.tasks)
         if args.mode == "live":
             api_key = env.get("FARA_EVAL_API_KEY") or env.get("FARA_API_KEY")
-            transport: Transport = LiveTransport(endpoint, api_key, args.timeout_seconds)
+            transport: Transport = LiveTransport(
+                endpoint,
+                api_key,
+                args.timeout_seconds,
+                allow_insecure_http=args.allow_insecure_http,
+            )
         else:
             transport = FixtureTransport()
         report = evaluate_cases(cases, transport)

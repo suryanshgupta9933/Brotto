@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.contracts import PlanningRequest
+from app.contracts import PlanningRequest, PlanningResponseEnvelope
 
 
 def valid_request_body() -> dict:
@@ -65,6 +65,19 @@ def test_planning_request_accepts_screenshot_and_sanitized_targets():
 
     assert request.observation.screenshot.kind == "inline"
     assert request.observation.semantic_targets[0].accessible_name.text == "Continue"
+
+
+def test_planning_response_envelope_validates_the_canonical_proposal_union():
+    response = PlanningResponseEnvelope.model_validate(
+        {
+            "kind": "action",
+            "observationId": "11111111-1111-4111-8111-111111111111",
+            "proposedAt": "2026-08-03T10:00:01Z",
+            "action": {"type": "wait", "durationMs": 100},
+        }
+    )
+
+    assert response.root.kind == "action"
 
 
 def test_planning_request_rejects_forbidden_browser_data_at_any_depth():

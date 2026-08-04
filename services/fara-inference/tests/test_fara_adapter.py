@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api import get_fara_adapter
+from app.client import VLLMClientError
 from app.contracts import ContractErrorProposal, PlanningRequest
 from app.fara_adapter import FaraAdapter
 from app.main import create_app
@@ -141,11 +142,55 @@ def test_plan_emits_model_response_provenance_in_stable_headers():
     assert response.headers["x-request-id"] == "request-123"
     assert response.headers["x-fara-model"] == "fara-test"
     assert response.headers["x-fara-finish-reason"] == "stop"
+    assert response.headers["x-fara-repair-count"] == "0"
     assert json.loads(response.headers["x-fara-usage"]) == {
         "prompt_tokens": 10,
         "completion_tokens": 4,
         "total_tokens": 14,
     }
+
+
+def test_plan_reports_successful_bounded_repair_count():
+    class RepairedClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            content = (
+                "not json"
+                if self.calls == 1
+                else json.dumps(
+                    {
+                        "kind": "action",
+                        "observationId": "11111111-1111-4111-8111-111111111111",
+                        "proposedAt": "2026-08-03T10:00:01Z",
+                        "action": {"type": "wait", "durationMs": 100},
+                    }
+                )
+            )
+            return type(
+                "Response",
+                (),
+                {
+                    "content": content,
+                    "finish_reason": "stop",
+                    "usage": {"total_tokens": 1},
+                    "model": "fara-test",
+                },
+            )()
+
+    adapter = FaraAdapter(client=RepairedClient())
+    app = create_app()
+    app.dependency_overrides[get_fara_adapter] = lambda: adapter
+    with TestClient(app) as client:
+        response = client.post("/v1/plan", json=valid_request_body())
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "action"
+    assert response.headers["x-fara-repair-count"] == "1"
+    assert adapter.last_inference_metadata is not None
+    assert adapter.last_inference_metadata.repair_count == 1
 
 
 @pytest.mark.asyncio
@@ -169,10 +214,43 @@ async def test_plan_stops_after_two_repairs_for_invalid_model_output():
 
     client = InvalidOutputClient()
     request = PlanningRequest.model_validate(valid_request_body())
-    result = await FaraAdapter(client=client).plan(request)
+    adapter = FaraAdapter(client=client)
+    result = await adapter.plan(request)
 
     assert result.kind == "contract_error"
     assert client.calls == 3
+    assert adapter.last_inference_metadata is not None
+    assert adapter.last_inference_metadata.repair_count == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_repair_attempt_is_reflected_in_metadata():
+    class FailedRepairClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            if self.calls == 2:
+                raise VLLMClientError("repair endpoint failed")
+            return type(
+                "Response",
+                (),
+                {
+                    "content": "not json",
+                    "finish_reason": "stop",
+                    "usage": {"total_tokens": 1},
+                    "model": "fara-test",
+                },
+            )()
+
+    adapter = FaraAdapter(client=FailedRepairClient())
+    result = await adapter.plan(PlanningRequest.model_validate(valid_request_body()))
+
+    assert result.kind == "contract_error"
+    assert adapter.last_repair_count == 1
+    assert adapter.last_inference_metadata is not None
+    assert adapter.last_inference_metadata.repair_count == 1
 
 
 @pytest.mark.asyncio
@@ -208,11 +286,14 @@ async def test_plan_repairs_a_proposal_for_a_different_observation():
 
     client = StaleProposalClient()
     request = PlanningRequest.model_validate(valid_request_body())
-    result = await FaraAdapter(client=client).plan(request)
+    adapter = FaraAdapter(client=client)
+    result = await adapter.plan(request)
 
     assert result.kind == "action"
     assert result.observation_id == request.observation.observation_id
     assert client.calls == 2
+    assert adapter.last_inference_metadata is not None
+    assert adapter.last_inference_metadata.repair_count == 1
 
 
 @pytest.mark.asyncio

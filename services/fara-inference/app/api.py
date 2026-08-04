@@ -45,6 +45,9 @@ async def plan(
     proposal = await adapter.plan(request)
     response.headers["X-Request-ID"] = request_id or str(uuid4())
     metadata = getattr(adapter, "last_inference_metadata", None)
+    repair_count = getattr(metadata, "repair_count", getattr(adapter, "last_repair_count", None))
+    if isinstance(repair_count, int) and repair_count >= 0:
+        response.headers["X-Fara-Repair-Count"] = str(repair_count)
     if metadata is not None:
         response.headers["X-Fara-Model"] = metadata.model
         response.headers["X-Fara-Finish-Reason"] = metadata.finish_reason

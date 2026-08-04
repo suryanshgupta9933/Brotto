@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from pydantic import ValidationError
@@ -28,6 +28,7 @@ class InferenceMetadata:
     finish_reason: str
     usage: dict[str, int]
     model: str
+    repair_count: int
 
 
 class FaraAdapter:
@@ -53,23 +54,33 @@ class FaraAdapter:
             else True
         )
         self.last_inference_metadata: InferenceMetadata | None = None
+        self.last_repair_count = 0
 
     async def plan(self, request: PlanningRequest) -> PlanningResponse:
+        self.last_inference_metadata = None
+        self.last_repair_count = 0
         if self.client is None:
             return self._contract_error("No model client is configured")
 
         messages = self._planning_messages(request)
         last_error = "Model output did not satisfy the planning contract"
         for attempt in range(request.limits.max_repair_attempts + 1):
+            self.last_repair_count = attempt
             try:
                 response = await self.client.complete(self._inference_request(request, messages))
             except VLLMClientError as error:
+                if self.last_inference_metadata is not None:
+                    self.last_inference_metadata = replace(
+                        self.last_inference_metadata,
+                        repair_count=attempt,
+                    )
                 return self._contract_error(f"Model endpoint failed: {error}")
 
             self.last_inference_metadata = InferenceMetadata(
                 finish_reason=response.finish_reason,
                 usage=dict(response.usage),
                 model=response.model,
+                repair_count=attempt,
             )
             parsed = (
                 self._contract_error(f"Unsupported model finish reason: {response.finish_reason}")
