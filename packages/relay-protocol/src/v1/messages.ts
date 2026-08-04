@@ -28,6 +28,7 @@ const ProtocolErrorDetailsSchema = z.record(z.unknown()).superRefine((value, con
 export const SessionOpenSchema = z.object({
   type: z.literal('session.open'),
   client: ClientSchema,
+  goal: z.string().trim().min(1).max(4_000),
 }).strict();
 
 export const SessionAcceptedSchema = z.object({

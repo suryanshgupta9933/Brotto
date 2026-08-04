@@ -1,396 +1,303 @@
-/**
- * Background service worker for the Fara1.5 Browser Extension
- * Handles all extension lifecycle events, tab management, and relay coordination
- */
-
-import * as crypto from "./crypto";
-import * as pairing from "./pairing";
+import { createCanonicalExecutionPipeline } from "./canonical/action-executor";
+import {
+  CanonicalExtensionController,
+  ControlPlaneConnectionBootstrap,
+  type BootstrapInput,
+  type ConnectionBootstrapPort,
+  type ControllerUiEvent,
+} from "./canonical/controller";
+import { captureObservation } from "./canonical/observation";
+import { PageSettler } from "./canonical/page-settler";
+import { CanonicalSessionStore, type StorageAreaPort } from "./canonical/session-store";
+import { CanonicalTransport } from "./canonical/transport";
 import * as debuggerModule from "./debugger";
-import * as relay from "./relay";
 
-export interface AutomationSession {
-  id: string;
-  tabId: number;
-  tabGroupId?: number;
-  startTime: number;
-  relayUrl: string;
-  sessionId: string;
-  status: "active" | "disconnecting" | "disconnected";
-}
+const BADGE_ACTIVE_COLOR = "#22c55e";
+const BADGE_INACTIVE_COLOR = "#6b7280";
+const BOOTSTRAP_PATH = "/v1/browser-extension/sessions";
 
-const ACTIVE_SESSION_KEY = "activeAutomationSession";
-const BADGE_ACTIVE_COLOR = "#22c55e"; // Green
-const BADGE_INACTIVE_COLOR = "#6b7280"; // Gray
+let managedHostnames = new Set<string>();
+let managedOrigins: string[] = [];
 
-let activeSession: AutomationSession | null = null;
+const store = new CanonicalSessionStore({
+  local: chrome.storage.local as unknown as StorageAreaPort,
+  ...(chrome.storage.session === undefined
+    ? {}
+    : { session: chrome.storage.session as unknown as StorageAreaPort }),
+});
 
-/**
- * Initialize the background service worker
- */
-async function initialize(): Promise<void> {
-  console.log("Fara1.5 extension initializing...");
-
-  // Set up message handlers
-  chrome.runtime.onMessage.addListener(handleMessage);
-
-  // Set up extension install/update handlers
-  chrome.runtime.onInstalled.addListener(handleInstalled);
-
-  // Restore active session if any
-  await restoreSession();
-
-  // Update badge to show current state
-  updateBadge();
-}
-
-/**
- * Handle messages from popup and content scripts
- */
-async function handleMessage(
-  message: Record<string, unknown>,
-  sender: chrome.runtime.MessageSender,
-  sendResponse: (response: Record<string, unknown>) => void
-): Promise<void> {
-  console.log("Background received message:", message.type);
-
-  try {
-    switch (message.type) {
-      case "start_pairing":
-        await handleStartPairing(message.serverUrl as string);
-        sendResponse({ success: true });
-        break;
-
-      case "get_pairing_state":
-        const state = await pairing.getPairingState();
-        sendResponse({ success: true, state });
-        break;
-
-      case "exchange_pairing_code":
-        const identity = await pairing.exchangePairingCode(
-          message.serverUrl as string,
-          message.code as string
-        );
-        sendResponse({ success: true, identity });
-        break;
-
-      case "authenticate":
-        const tokens = await pairing.authenticate(
-          message.serverUrl as string,
-          message.deviceId as string,
-          message.keyId as string
-        );
-        sendResponse({ success: true, tokens });
-        break;
-
-      case "get_session":
-        sendResponse({ success: true, session: activeSession });
-        break;
-
-      case "start_automation":
-        const startResult = await handleStartAutomation(
-          message.tabId as number,
-          message.relayUrl as string,
-          message.sessionId as string
-        );
-        sendResponse(startResult);
-        break;
-
-      case "stop_automation":
-        await handleStopAutomation();
-        sendResponse({ success: true });
-        break;
-
-      case "get_tabs":
-        const tabs = await getAvailableTabs();
-        sendResponse({ success: true, tabs });
-        break;
-
-      case "get_tab_groups":
-        const groups = await getTabGroups();
-        sendResponse({ success: true, groups });
-        break;
-
-      case "check_tab_security":
-        const security = await debuggerModule.checkTabSecurity(message.tabId as number);
-        sendResponse({ success: true, security });
-        break;
-
-      case "get_connection_status":
-        const status = relay.getConnectionState();
-        sendResponse({ success: true, status });
-        break;
-
-      case "logout":
-        await handleLogout();
-        sendResponse({ success: true });
-        break;
-
-      default:
-        sendResponse({ success: false, error: "Unknown message type" });
+const bootstrap: ConnectionBootstrapPort = {
+  async bootstrap(input: BootstrapInput, signal: AbortSignal) {
+    const settings = await chrome.storage.local.get("settings");
+    const rawServerUrl = (settings.settings as { serverUrl?: unknown } | undefined)?.serverUrl;
+    if (typeof rawServerUrl !== "string" || rawServerUrl.length === 0) {
+      throw new Error("Configure the customer control-plane URL in extension options");
     }
-  } catch (err) {
-    console.error("Message handler error:", err);
-    sendResponse({
-      success: false,
-      error: err instanceof Error ? err.message : String(err)
-    });
-  }
-}
+    const endpoint = bootstrapEndpoint(rawServerUrl);
+    return new ControlPlaneConnectionBootstrap(endpoint).bootstrap(input, signal);
+  },
+};
 
-/**
- * Handle extension install/update
- */
-async function handleInstalled(
-  details: chrome.runtime.InstalledDetails
-): Promise<void> {
-  if (details.reason === "install") {
-    console.log("Extension installed");
-    // Clear any stale data
-    await chrome.storage.local.clear();
-  } else if (details.reason === "update") {
-    console.log("Extension updated to version", chrome.runtime.getManifest().version);
-    // Handle migrations if needed
-  }
-}
-
-/**
- * Handle start pairing request
- */
-async function handleStartPairing(serverUrl: string): Promise<void> {
-  const { pairingCode, expiresAt } = await pairing.initiatePairing(serverUrl);
-
-  // Store the code for later exchange
-  await chrome.storage.local.set({
-    pendingPairingCode: pairingCode,
-    pendingPairingExpiresAt: expiresAt,
-    serverUrl
-  });
-
-  console.log(`Pairing code generated: ${pairingCode}, expires at ${new Date(expiresAt).toISOString()}`);
-}
-
-/**
- * Handle start automation request
- */
-async function handleStartAutomation(
-  tabId: number,
-  relayUrl: string,
-  sessionId: string
-): Promise<{ success: boolean; error?: string }> {
-  // Check if already have an active session
-  if (activeSession && activeSession.status === "active") {
-    return {
-      success: false,
-      error: "An automation session is already active"
-    };
-  }
-
-  try {
-    // Verify tab security
-    const security = await debuggerModule.checkTabSecurity(tabId);
-    if (!security.isSecure) {
-      console.warn("Tab security warnings:", security.warnings);
-      // Allow attachment but log warnings
-    }
-
-    // Attach debugger to tab
-    const session = await debuggerModule.attachToTab(tabId);
-    console.log(`Attached debugger to tab ${tabId}, session: ${session.sessionId}`);
-
-    // Get authentication token
-    const token = await pairing.getAccessToken();
-    if (!token) {
-      await debuggerModule.detachFromTab(tabId);
-      return { success: false, error: "Not authenticated" };
-    }
-
-    // Connect to relay
-    const storedIdentity = await chrome.storage.local.get("deviceIdentity");
-    await relay.connect({
-      relayUrl,
-      sessionId,
-      deviceId: storedIdentity.deviceIdentity?.deviceId || "",
-      token,
-      tenantId: storedIdentity.deviceIdentity?.tenantId
-    });
-
-    // Register CDP event handler
-    debuggerModule.registerEventHandler(tabId, (event) => {
-      relay.forwardCdpEvent(session, event.method, event.params);
-    });
-
-    // Create session record
-    activeSession = {
-      id: sessionId,
+const controller = new CanonicalExtensionController({
+  bootstrap,
+  store,
+  tabs: {
+    activeTabId: async () => {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tabId = tabs.length === 1 ? tabs[0]?.id : undefined;
+      if (tabId === undefined) throw new Error("Exactly one active browser tab is required");
+      const url = tabs[0]?.url;
+      if (url === undefined || !/^https?:\/\//i.test(url)) throw new Error("The active tab must use HTTP(S)");
+      return tabId;
+    },
+    attach: async (tabId) => { await debuggerModule.attachToTab(tabId); },
+    detach: async (tabId) => { await debuggerModule.detachFromTab(tabId); },
+    isAttached: async (tabId) => {
+      if (debuggerModule.isAttached(tabId)) return true;
+      const targets = await debuggerModule.getTargets() as unknown as Array<{ tabId?: number; attached?: boolean }>;
+      return targets.some((target) => target.tabId === tabId && target.attached === true);
+    },
+  },
+  capture: async (tabId, signal) => {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const before = await mainFrameId(tabId);
+    const observation = await captureObservation(tabId);
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const after = await mainFrameId(tabId);
+    if (before !== after) throw new Error("The main frame changed across canonical capture");
+    return { observation, mainFrameId: after };
+  },
+  executionPipelineFactory: ({ tabId, serverUrl, observationAuthority, approvals }) => createCanonicalExecutionPipeline({
+    tabId,
+    observationAuthority,
+    approvals,
+    resolver: new CustomerControlledDnsResolver(serverUrl),
+    trustedHostnamePolicy: { isTrusted: (hostname) => managedHostnames.has(hostname.toLowerCase()) },
+    allowedOrigins: managedOrigins,
+    createSettler: (mainFrame, initialPageState) => new PageSettler({
       tabId,
-      startTime: Date.now(),
-      relayUrl,
-      sessionId: session.sessionId,
-      status: "active"
-    };
+      mainFrameId: mainFrame,
+      initialPageState,
+      getPageState: () => readPageState(tabId),
+    }),
+    send: async (id, command) => debuggerModule.sendCommand(id, command),
+  }),
+  transportFactory: (context) => new CanonicalTransport({
+    material: context.material,
+    initialSequences: {
+      lastReceivedSequence: context.recovery.lastReceivedSequence,
+      lastSentSequence: context.recovery.lastSentSequence,
+    },
+    pendingActionIds: context.pendingActionIds,
+    getReconnectMaterial: context.getReconnectMaterial,
+    onMaterial: context.onMaterial,
+    onMessage: context.onMessage,
+    onStateChange: context.onStateChange,
+    onProtocolError: (code) => notifyUi({ type: "canonical_error", code, message: "A canonical protocol message was rejected" }),
+  }),
+  emitUiEvent: (event) => {
+    updateBadgeForEvent(event);
+    notifyUi(event);
+  },
+});
 
-    // Persist session
-    await chrome.storage.local.set({
-      [ACTIVE_SESSION_KEY]: activeSession
-    });
-
-    // Update badge
-    updateBadge();
-
-    // Notify popup
-    notifyPopup("session_started", activeSession);
-
-    return { success: true };
-  } catch (err) {
-    console.error("Failed to start automation:", err);
-    return {
+function handleMessage(
+  message: Record<string, unknown>,
+  _sender: chrome.runtime.MessageSender,
+  sendResponse: (response: Record<string, unknown>) => void,
+): boolean {
+  void dispatchMessage(message)
+    .then((response) => sendResponse(response))
+    .catch((error: unknown) => sendResponse({
       success: false,
-      error: err instanceof Error ? err.message : String(err)
-    };
-  }
+      error: error instanceof Error ? error.message : "Canonical extension request failed",
+    }));
+  return true;
 }
 
-/**
- * Handle stop automation request
- */
-async function handleStopAutomation(): Promise<void> {
-  if (!activeSession) {
-    return;
-  }
-
-  activeSession.status = "disconnecting";
-  notifyPopup("session_stopping", activeSession);
-
-  try {
-    // Disconnect relay first
-    relay.disconnect();
-
-    // Unregister event handlers
-    debuggerModule.unregisterEventHandlers(activeSession.tabId);
-
-    // Detach debugger
-    await debuggerModule.detachFromTab(activeSession.tabId);
-
-    // Clear session
-    activeSession.status = "disconnected";
-    await chrome.storage.local.remove(ACTIVE_SESSION_KEY);
-
-    console.log(`Automation session ${activeSession.id} stopped`);
-  } catch (err) {
-    console.error("Error during cleanup:", err);
-  } finally {
-    activeSession = null;
-    updateBadge();
-    notifyPopup("session_stopped", null);
-  }
-}
-
-/**
- * Handle logout request - revoke tokens and clear identity
- */
-async function handleLogout(): Promise<void> {
-  // Stop any active automation first
-  if (activeSession) {
-    await handleStopAutomation();
-  }
-
-  // Revoke tokens and clear identity
-  await pairing.revokeAndClear();
-
-  // Clear all storage
-  await chrome.storage.local.clear();
-
-  updateBadge();
-  notifyPopup("logged_out", null);
-}
-
-/**
- * Restore session after service worker restart
- */
-async function restoreSession(): Promise<void> {
-  const stored = await chrome.storage.local.get(ACTIVE_SESSION_KEY);
-  if (stored[ACTIVE_SESSION_KEY]) {
-    const session = stored[ACTIVE_SESSION_KEY] as AutomationSession;
-    if (session.status === "active") {
-      // Session was active but we lost connection
-      // Don't auto-reconnect per architecture requirements
-      console.log("Found inactive session, user must reconnect manually");
-      session.status = "disconnected";
-      activeSession = session;
+async function dispatchMessage(message: Record<string, unknown>): Promise<Record<string, unknown>> {
+  switch (message.type) {
+    case "get_connection_status": {
+      const state = await controller.viewState();
+      return {
+        success: true,
+        status: {
+          connected: state.transport?.status === "open",
+          recovery: state.recovery,
+          reconnect: state.transport,
+          trajectory: state.trajectory,
+        },
+      };
     }
+    case "send_task":
+      await loadManagedPolicy();
+      await controller.startTask(String(message.task ?? ""));
+      return { success: true };
+    case "cancel_task":
+    case "stop_task":
+      await controller.cancel(typeof message.reason === "string" ? message.reason : undefined);
+      return { success: true };
+    case "disconnect_relay":
+      await controller.disconnect();
+      return { success: true };
+    case "approve_action":
+      await controller.resolveApproval(true);
+      return { success: true };
+    case "deny_action":
+      await controller.resolveApproval(false);
+      return { success: true };
+    case "login_complete":
+      await controller.submitFreshObservation("User interaction completed; fresh observation submitted");
+      return { success: true };
+    case "clear_trajectory":
+      await store.clearTrajectory();
+      return { success: true };
+    case "connect_relay":
+      return { success: false, error: "Sending a task starts its authenticated canonical session" };
+    default:
+      return { success: false, error: "Unknown message type" };
   }
 }
 
-/**
- * Get tabs available for automation
- */
-async function getAvailableTabs(): Promise<chrome.tabs.Tab[]> {
-  const tabs = await chrome.tabs.query({});
-  // Filter to useful tabs (no chrome:// except devtools, etc.)
-  return tabs.filter((tab) => {
-    if (!tab.url) return false;
-    // Exclude certain URLs
-    const excluded = [
-      "chrome://",
-      "chrome-extension://",
-      "about:",
-      "file://",
-      "devtools://"
-    ];
-    return !excluded.some((prefix) => tab.url!.startsWith(prefix));
+async function initialize(): Promise<void> {
+  chrome.runtime.onMessage.addListener(handleMessage);
+  chrome.runtime.onInstalled.addListener(() => { void setBadge(false); });
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status !== undefined || changeInfo.url !== undefined) controller.invalidateObservation(tabId);
   });
-}
-
-/**
- * Get tab groups
- */
-async function getTabGroups(): Promise<chrome.tabGroups.TabGroup[]> {
-  return chrome.tabGroups.query({});
-}
-
-/**
- * Update extension badge
- */
-function updateBadge(): void {
-  if (activeSession && activeSession.status === "active") {
-    chrome.action.setBadgeBackgroundColor({ color: BADGE_ACTIVE_COLOR });
-    chrome.action.setBadgeText({ text: "ON" });
-    chrome.action.setTitle({ title: "Fara1.5 - Automation Active" });
-  } else {
-    chrome.action.setBadgeBackgroundColor({ color: BADGE_INACTIVE_COLOR });
-    chrome.action.setBadgeText({ text: "" });
-    chrome.action.setTitle({ title: "Fara1.5 Browser Automation" });
-  }
-}
-
-/**
- * Notify popup of state changes
- */
-function notifyPopup(event: string, data: unknown): void {
-  chrome.runtime.sendMessage({ type: event, data }).catch(() => {
-    // Popup not open, ignore
+  chrome.tabs.onActivated.addListener(({ tabId }) => { controller.invalidateObservation(tabId); });
+  await loadManagedPolicy();
+  const restored = await controller.restore().catch((error: unknown) => {
+    notifyUi({
+      type: "canonical_error",
+      code: "SESSION_RESTORE_FAILED",
+      message: error instanceof Error ? error.message : "Session restoration failed",
+    });
+    return false;
   });
+  await setBadge(restored);
 }
 
-/**
- * Set up disconnect on socket close (cleanup)
- */
-relay.onStatusChange((status) => {
-  if (status === "disconnected" && activeSession) {
-    // Relay disconnected unexpectedly
-    console.log("Relay disconnected, cleaning up session");
-    handleStopAutomation();
-  }
-});
+class CustomerControlledDnsResolver {
+  private readonly endpoint: string;
 
-// Initialize on service worker start
-initialize().catch(console.error);
-
-// Handle service worker shutdown/restart
-self.addEventListener("unload", () => {
-  console.log("Service worker unloading");
-  if (activeSession && activeSession.status === "active") {
-    // Don't auto-reconnect per architecture requirements
-    console.log("Service worker stopping, session marked for manual reconnect");
+  constructor(serverUrl: string) {
+    const url = new URL(serverUrl);
+    url.protocol = "https:";
+    url.pathname = "/v1/browser-extension/dns/resolve";
+    url.search = "";
+    url.hash = "";
+    this.endpoint = url.href;
   }
-});
+
+  async resolve(hostname: string, signal?: AbortSignal): Promise<readonly string[]> {
+    const response = await fetch(this.endpoint, {
+      method: "POST",
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hostname }),
+      signal,
+    });
+    if (!response.ok) throw new Error("Customer-controlled DNS resolution failed");
+    const body = await response.json() as { addresses?: unknown };
+    if (!Array.isArray(body.addresses) || !body.addresses.every((value) => typeof value === "string")) {
+      throw new Error("Customer-controlled DNS response is invalid");
+    }
+    return body.addresses;
+  }
+}
+
+function bootstrapEndpoint(rawServerUrl: string): string {
+  const url = new URL(rawServerUrl);
+  if (url.protocol === "wss:") url.protocol = "https:";
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "") {
+    throw new Error("Control-plane URL must use HTTPS");
+  }
+  url.pathname = BOOTSTRAP_PATH;
+  url.search = "";
+  url.hash = "";
+  return url.href;
+}
+
+async function loadManagedPolicy(): Promise<void> {
+  try {
+    const managed = await chrome.storage.managed.get(["canonicalAllowedHostnames", "canonicalAllowedOrigins"]);
+    const hostnames = Array.isArray(managed.canonicalAllowedHostnames) ? managed.canonicalAllowedHostnames : [];
+    const origins = Array.isArray(managed.canonicalAllowedOrigins) ? managed.canonicalAllowedOrigins : [];
+    managedHostnames = new Set(hostnames.flatMap((value) => typeof value === "string" && validHostname(value) ? [value.toLowerCase()] : []));
+    managedOrigins = origins.flatMap((value) => typeof value === "string" && validHttpsOrigin(value) ? [new URL(value).origin] : []);
+  } catch {
+    managedHostnames = new Set();
+    managedOrigins = [];
+  }
+}
+
+async function mainFrameId(tabId: number): Promise<string> {
+  const result = await debuggerModule.sendCommand(tabId, { method: "Page.getFrameTree" }) as {
+    frameTree?: { frame?: { id?: unknown }; childFrames?: unknown[] };
+  };
+  const id = result.frameTree?.frame?.id;
+  if (typeof id !== "string" || id.length === 0 || (result.frameTree?.childFrames?.length ?? 0) > 0) {
+    throw new Error("A single canonical main frame could not be proven");
+  }
+  return id;
+}
+
+async function readPageState(tabId: number): Promise<{
+  url: string;
+  title: string;
+  lifecycle: "loading" | "interactive" | "complete" | "frozen";
+}> {
+  const result = await debuggerModule.sendCommand(tabId, {
+    method: "Runtime.evaluate",
+    params: {
+      expression: "({url:location.href,title:document.title,lifecycle:document.readyState})",
+      returnByValue: true,
+      awaitPromise: false,
+    },
+  }) as { result?: { value?: unknown }; exceptionDetails?: unknown };
+  if (result.exceptionDetails !== undefined || result.result?.value === null || typeof result.result?.value !== "object") {
+    throw new Error("Page state is unavailable");
+  }
+  const value = result.result.value as Record<string, unknown>;
+  if (typeof value.url !== "string" || typeof value.title !== "string" ||
+    !["loading", "interactive", "complete"].includes(String(value.lifecycle))) {
+    throw new Error("Page state is invalid");
+  }
+  return {
+    url: value.url,
+    title: value.title,
+    lifecycle: value.lifecycle as "loading" | "interactive" | "complete",
+  };
+}
+
+function validHostname(value: string): boolean {
+  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(value);
+}
+
+function validHttpsOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.username === "" && url.password === "" && url.origin === value.replace(/\/$/, "");
+  } catch {
+    return false;
+  }
+}
+
+function updateBadgeForEvent(event: ControllerUiEvent): void {
+  if (event.type !== "canonical_status") return;
+  void setBadge(event.status === "connected" || event.status === "executing" || event.status === "waiting_for_approval");
+}
+
+async function setBadge(active: boolean): Promise<void> {
+  await chrome.action.setBadgeBackgroundColor({ color: active ? BADGE_ACTIVE_COLOR : BADGE_INACTIVE_COLOR });
+  await chrome.action.setBadgeText({ text: active ? "ON" : "" });
+}
+
+function notifyUi(event: ControllerUiEvent): void {
+  void chrome.runtime.sendMessage(event).catch(() => undefined);
+}
+
+void initialize();

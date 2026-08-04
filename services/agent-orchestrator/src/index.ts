@@ -154,4 +154,5 @@ export {
   type TransportResult,
   type ConnectionLeaseStore,
   type LeaseToken,
+  type ConnectionEnvelopeSignerResolver,
 } from './transport/ws-server.js';

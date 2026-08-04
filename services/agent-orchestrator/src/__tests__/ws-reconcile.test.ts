@@ -33,6 +33,39 @@ async function wire(sequence: number, payload: Parameters<typeof createEnvelope>
 }
 
 describe('websocket reconciliation transport', () => {
+  test('maps session.open goal to the canonical engine session-open event', async () => {
+    const engine: TransportEngine = {
+      handle: jest.fn(async (event) => ({
+        kind: 'accepted',
+        sessionId: ids.session,
+        messageId: event.messageId,
+        revision: 1,
+        state: 'OBSERVING',
+        pendingActionIds: [],
+      })),
+    };
+    const session = new TransportSession({
+      claims,
+      recipientId: ids.recipient,
+      verifier: signer,
+      engine,
+      now: () => 1_700_000_000_000,
+    });
+
+    await expect(session.receive(await wire(1, {
+      type: 'session.open',
+      client: 'browser_extension',
+      goal: 'Find the current product price',
+    }))).resolves.toMatchObject({ kind: 'outcome' });
+    expect(engine.handle).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.open',
+      sessionId: ids.session,
+      taskId: ids.correlation,
+      goal: 'Find the current product price',
+      completionCriteria: [],
+    }));
+  });
+
   test('registers a server command as flow authority and routes its client completion', async () => {
     const observation = {
       observationId: '70000000-0000-4000-8000-000000000001', capturedAt: '2023-11-14T22:13:20.000Z', url: 'https://example.com', title: 'Example',

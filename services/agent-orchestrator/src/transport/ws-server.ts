@@ -9,7 +9,7 @@ import {
   type AgentMessageV1,
   type EnvelopeSigner,
 } from '@fara-platform/relay-protocol';
-import type { ActionCommandV1, SessionId } from '@fara-platform/fara-action-schema';
+import type { ActionCommandV1, SessionId, TaskId } from '@fara-platform/fara-action-schema';
 import type { CanonicalSession, CommandSink, SessionEngineEvent, SessionStore, StoredOutcome } from '../engine/types.js';
 import { ConnectionAuthError, createConnectionAuthenticator, type ConnectionClaims, type ConnectionCredentialStore, type ConnectionTokenVerifier } from './auth.js';
 
@@ -161,7 +161,7 @@ export class TransportSession {
     if (admitted.message.type === 'reconcile.request' && admitted.message.lastSentClientSequence !== envelope.sequence) {
       throw new TransportError('CLIENT_SEQUENCE_MISMATCH', 'Reconnect client sequence does not match signed envelope');
     }
-    let event = toEngineEvent(envelope.messageId, envelope.sessionId, envelope.createdAt, admitted.message, connectionFence);
+    let event = toEngineEvent(envelope.messageId, envelope.sessionId, envelope.correlationId, envelope.createdAt, admitted.message, connectionFence);
     if (event === null) throw new TransportError('MESSAGE_DIRECTION_INVALID', 'Server-originated message received from client');
     if (connectionFence !== undefined) {
       const admission = await this.options.store?.admitInbound?.({ sessionId: envelope.sessionId, messageId: envelope.messageId, sequence: envelope.sequence, event });
@@ -222,10 +222,23 @@ function commandMessage(session: CanonicalSession): Extract<AgentMessageV1, { ty
   return active === null ? undefined : { type: 'action.command', proposal: active.proposal, policyDecision: active.policyDecision, command: active.command };
 }
 
-export interface OutboundConnection { claims: Readonly<ConnectionClaims>; session: TransportSession; queue: OrderedOutboundQueue }
+export interface ConnectionEnvelopeSignerResolver {
+  resolve(claims: Readonly<ConnectionClaims>): Promise<EnvelopeSigner>;
+}
+
+export interface OutboundConnection {
+  claims: Readonly<ConnectionClaims>;
+  session: TransportSession;
+  queue: OrderedOutboundQueue;
+  signer?: EnvelopeSigner;
+}
 export class AgentTransportHub implements CommandSink {
   private readonly connections = new Map<string, OutboundConnection>();
-  constructor(private readonly store: SessionStore, private readonly signer: EnvelopeSigner, private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly store: SessionStore,
+    private readonly defaultSigner?: EnvelopeSigner,
+    private readonly now: () => number = Date.now,
+  ) {}
   attach(connection: OutboundConnection): () => void {
     this.connections.set(connection.claims.sessionId, connection);
     return () => { if (this.connections.get(connection.claims.sessionId) === connection) this.connections.delete(connection.claims.sessionId); };
@@ -240,7 +253,9 @@ export class AgentTransportHub implements CommandSink {
       recipientId: connection.claims.deviceId, tenantId: connection.claims.tenantId, deviceId: connection.claims.deviceId,
       sequence: command.sequence, createdAt: new Date(this.now()).toISOString(), expiresAt: Date.parse(command.expiresAt), payload });
     connection.session.registerOutbound(envelope);
-    await connection.queue.enqueue(JSON.stringify(await signEnvelope(envelope, this.signer)));
+    const signer = connection.signer ?? this.defaultSigner;
+    if (signer === undefined) throw new TransportError('SIGNER_UNAVAILABLE', 'No authenticated session envelope signer is configured');
+    await connection.queue.enqueue(JSON.stringify(await signEnvelope(envelope, signer)));
   }
   private async findSession(command: ActionCommandV1): Promise<CanonicalSession | null> {
     for (const sessionId of this.connections.keys()) {
@@ -254,9 +269,16 @@ export class AgentTransportHub implements CommandSink {
 // Optional optimized store lookup without making it part of the canonical persistence contract.
 declare module '../engine/types.js' { interface SessionStore { loadByAction?(actionId: ActionCommandV1['actionId']): Promise<CanonicalSession | null> } }
 
-function toEngineEvent(messageId: string, sessionId: string, occurredAt: string, message: AgentMessageV1, connectionFence?: number): SessionEngineEvent | null {
+function toEngineEvent(messageId: string, sessionId: string, correlationId: string, occurredAt: string, message: AgentMessageV1, connectionFence?: number): SessionEngineEvent | null {
   const meta = { messageId, sessionId, occurredAt, ...(connectionFence === undefined ? {} : { connectionFence }) } as const;
   switch (message.type) {
+    case 'session.open': return {
+      ...meta,
+      type: message.type,
+      taskId: correlationId as TaskId,
+      goal: message.goal,
+      completionCriteria: [],
+    } as unknown as SessionEngineEvent;
     case 'observation.submitted': return { ...meta, type: message.type, observation: message.observation } as SessionEngineEvent;
     case 'action.completed': return { ...meta, type: message.type, result: message.result } as SessionEngineEvent;
     case 'approval.resolved': return { ...meta, type: message.type, resolution: message.resolution } as SessionEngineEvent;
@@ -277,7 +299,7 @@ export function connectionTokenFromProtocols(headerValue: string | undefined): s
 }
 
 export async function registerAgentWebSocket(app: FastifyInstance, options: {
-  tokenVerifier: ConnectionTokenVerifier; envelopeVerifier: EnvelopeSigner; engine: TransportEngine; store: SessionStore;
+  tokenVerifier: ConnectionTokenVerifier; envelopeVerifier?: EnvelopeSigner; envelopeSignerResolver?: ConnectionEnvelopeSignerResolver; engine: TransportEngine; store: SessionStore;
   leases: ConnectionLeaseStore; credentials: ConnectionCredentialStore; recipientId: string; allowedOrigins: ReadonlySet<string>; hub?: AgentTransportHub;
   now?: () => number; heartbeatTimeoutMs?: number; maxOutboundBytes?: number;
 }): Promise<void> {
@@ -306,10 +328,14 @@ export async function registerAgentWebSocket(app: FastifyInstance, options: {
     ).then(async (initialLease) => {
       if (closed) { await options.leases.release(initialLease); return null; }
       const state = { lease: initialLease };
-      const session = new TransportSession({ claims, recipientId: options.recipientId, verifier: options.envelopeVerifier, engine: options.engine, store: options.store, now });
+      const envelopeSigner = options.envelopeSignerResolver === undefined
+        ? options.envelopeVerifier
+        : await options.envelopeSignerResolver.resolve(claims);
+      if (envelopeSigner === undefined) throw new TransportError('SIGNER_UNAVAILABLE', 'Authenticated session envelope signer is unavailable');
+      const session = new TransportSession({ claims, recipientId: options.recipientId, verifier: envelopeSigner, engine: options.engine, store: options.store, now });
       const outboundLimit = options.maxOutboundBytes ?? 1_000_000;
       const queue = new OrderedOutboundQueue({ maxBytes: outboundLimit, send: (value) => socketSend(socket, value, outboundLimit) });
-      const detach = options.hub?.attach({ claims, session, queue });
+      const detach = options.hub?.attach({ claims, session, queue, signer: envelopeSigner });
       let alive = true;
       const timer = setInterval(() => { void options.leases.isOwner(claims.sessionId, state.lease, now()).then(async (owner) => {
         if (!owner || !alive || state.lease.expiresAt <= now()) { socket.close(4001, 'connection lease expired'); clearInterval(timer); return; }

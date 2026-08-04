@@ -1,317 +1,217 @@
-/**
- * Popup JavaScript - Compiled from popup.tsx
- * Note: For a real extension, use a bundler like webpack or esbuild
- */
+const statusBadge = document.getElementById('statusBadge');
+const statusText = document.getElementById('statusText');
+const taskInput = document.getElementById('taskInput');
+const sendTaskBtn = document.getElementById('sendTaskBtn');
+const cancelTaskBtn = document.getElementById('cancelTaskBtn');
+const optionsBtn = document.getElementById('optionsBtn');
+const clearLogBtn = document.getElementById('clearLogBtn');
+const logContent = document.getElementById('logContent');
+const approvalPanel = document.getElementById('approvalPanel');
+const approvalReason = document.getElementById('approvalReason');
+const approveBtn = document.getElementById('approveBtn');
+const denyBtn = document.getElementById('denyBtn');
+const resultPanel = document.getElementById('resultPanel');
+const resultContent = document.getElementById('resultContent');
+const loginPrompt = document.getElementById('loginPrompt');
+const loginDoneBtn = document.getElementById('loginDoneBtn');
 
-// Simple popup implementation using vanilla JS since we can't bundle React easily
-document.addEventListener("DOMContentLoaded", () => {
-  initPopup();
+document.addEventListener('DOMContentLoaded', () => { void initialize(); });
+
+async function initialize() {
+  sendTaskBtn.addEventListener('click', () => { void sendTask(); });
+  cancelTaskBtn.addEventListener('click', () => { void cancelTask(); });
+  optionsBtn.addEventListener('click', () => { void chrome.runtime.openOptionsPage(); });
+  clearLogBtn.addEventListener('click', () => { void clearTrajectory(); });
+  approveBtn.addEventListener('click', () => { void resolveApproval(true); });
+  denyBtn.addEventListener('click', () => { void resolveApproval(false); });
+  loginDoneBtn.addEventListener('click', () => { void loginComplete(); });
+  taskInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) void sendTask();
+  });
+  await refreshState();
+}
+
+async function refreshState() {
+  const response = await sendMessage({ type: 'get_connection_status' });
+  if (!response.success) {
+    updateStatus('failed');
+    appendLog('Unable to read canonical session state', 'error');
+    return;
+  }
+  const recovery = response.status?.recovery;
+  updateStatus(recovery?.status || 'disconnected', response.status?.reconnect?.reconnectAttempt);
+  renderTrajectory(response.status?.trajectory || []);
+}
+
+async function sendTask() {
+  const task = taskInput.value.trim();
+  if (!task) return;
+  updateStatus('connecting');
+  appendLog('Starting authenticated canonical session', 'connection');
+  sendTaskBtn.disabled = true;
+  try {
+    const response = await sendMessage({ type: 'send_task', task });
+    if (!response.success) throw new Error(response.error || 'Task start failed');
+    taskInput.value = '';
+  } catch (error) {
+    updateStatus('failed');
+    appendLog(error instanceof Error ? error.message : 'Task start failed', 'error');
+  } finally {
+    sendTaskBtn.disabled = false;
+  }
+}
+
+async function cancelTask() {
+  cancelTaskBtn.disabled = true;
+  const response = await sendMessage({ type: 'cancel_task', reason: 'User cancelled from the extension popup' });
+  if (!response.success) appendLog(response.error || 'Cancellation failed', 'error');
+  cancelTaskBtn.disabled = false;
+}
+
+async function resolveApproval(approved) {
+  approveBtn.disabled = true;
+  denyBtn.disabled = true;
+  const response = await sendMessage({ type: approved ? 'approve_action' : 'deny_action' });
+  if (!response.success) appendLog(response.error || 'Approval response failed', 'error');
+  else approvalPanel.hidden = true;
+  approveBtn.disabled = false;
+  denyBtn.disabled = false;
+}
+
+async function loginComplete() {
+  const response = await sendMessage({ type: 'login_complete' });
+  if (!response.success) appendLog(response.error || 'Fresh observation failed', 'error');
+  else loginPrompt.hidden = true;
+}
+
+async function clearTrajectory() {
+  await sendMessage({ type: 'clear_trajectory' });
+  logContent.replaceChildren(emptyLog());
+}
+
+function updateStatus(status, reconnectAttempt = 0) {
+  const active = ['connected', 'executing', 'waiting_for_approval', 'reconnecting', 'connecting', 'cancelling'].includes(status);
+  statusBadge.className = `status-badge ${status}`;
+  const labels = {
+    connected: 'Connected',
+    executing: 'Executing',
+    waiting_for_approval: 'Approval required',
+    reconnecting: `Reconnecting${reconnectAttempt ? ` (${reconnectAttempt})` : ''}`,
+    connecting: 'Connecting',
+    cancelling: 'Cancelling',
+    cancelled: 'Cancelled',
+    completed: 'Completed',
+    failed: 'Failed',
+    disconnected: 'Disconnected',
+  };
+  statusText.textContent = labels[status] || 'Disconnected';
+  cancelTaskBtn.hidden = !active;
+}
+
+function renderTrajectory(events) {
+  logContent.replaceChildren();
+  if (!events.length) {
+    logContent.appendChild(emptyLog());
+    return;
+  }
+  for (const event of events) appendLog(event.summary, event.type, event.occurredAt);
+}
+
+function appendLog(summary, type = 'connection', occurredAt = new Date().toISOString()) {
+  logContent.querySelector('.log-empty')?.remove();
+  const row = document.createElement('div');
+  row.className = `log-entry ${type}`;
+  const time = document.createElement('time');
+  time.dateTime = occurredAt;
+  time.textContent = new Date(occurredAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const message = document.createElement('span');
+  message.textContent = summary;
+  row.append(time, message);
+  logContent.appendChild(row);
+  logContent.scrollTop = logContent.scrollHeight;
+}
+
+function emptyLog() {
+  const element = document.createElement('div');
+  element.className = 'log-empty';
+  element.textContent = 'No canonical steps yet.';
+  return element;
+}
+
+function renderTerminal(message) {
+  resultContent.replaceChildren();
+  const heading = document.createElement('h3');
+  heading.textContent = message.type === 'task.completed' ? 'Task completed' : message.type === 'task.failed' ? 'Task failed' : 'Task cancelled';
+  resultContent.appendChild(heading);
+  if (message.completion) {
+    const summary = document.createElement('p');
+    summary.textContent = message.completion.summary;
+    resultContent.appendChild(summary);
+    if (message.completion.findings.length) {
+      const findingsHeading = document.createElement('h4');
+      findingsHeading.textContent = 'Findings';
+      const findings = document.createElement('ul');
+      for (const finding of message.completion.findings) {
+        const item = document.createElement('li');
+        item.textContent = finding.fact;
+        findings.appendChild(item);
+      }
+      resultContent.append(findingsHeading, findings);
+    }
+    if (message.completion.unmetCriteria.length) {
+      const unmetHeading = document.createElement('h4');
+      unmetHeading.textContent = 'Unmet criteria';
+      const unmet = document.createElement('ul');
+      for (const criterion of message.completion.unmetCriteria) {
+        const item = document.createElement('li');
+        item.textContent = criterion;
+        unmet.appendChild(item);
+      }
+      resultContent.append(unmetHeading, unmet);
+    }
+  } else if (message.reason) {
+    const reason = document.createElement('p');
+    reason.textContent = message.reason;
+    resultContent.appendChild(reason);
+  }
+  resultPanel.hidden = false;
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  switch (message.type) {
+    case 'canonical_status':
+      updateStatus(message.status, message.reconnectAttempt);
+      break;
+    case 'canonical_reconnect':
+      updateStatus(message.status === 'failed' ? 'failed' : 'reconnecting', message.attempt);
+      appendLog(message.status === 'failed' ? 'Reconnect limit reached' : 'Reconnecting canonical session', message.status === 'failed' ? 'error' : 'connection');
+      break;
+    case 'canonical_step':
+      appendLog(message.summary, 'action');
+      break;
+    case 'canonical_approval':
+      approvalReason.textContent = message.request.reason;
+      approvalPanel.hidden = false;
+      updateStatus('waiting_for_approval');
+      break;
+    case 'canonical_terminal':
+      renderTerminal(message.message);
+      updateStatus(message.message.type === 'task.completed' ? 'completed' : message.message.type === 'task.failed' ? 'failed' : 'cancelled');
+      break;
+    case 'canonical_error':
+      appendLog(`${message.code}: ${message.message}`, 'error');
+      break;
+    case 'canonical_user_input':
+      loginPrompt.hidden = false;
+      break;
+  }
 });
 
-async function initPopup() {
-  const root = document.getElementById("root");
-  if (!root) return;
-
-  // Simple state
-  let state = {
-    view: "main",
-    pairingState: null,
-    session: null,
-    tabs: [],
-    selectedTabId: null,
-    error: null,
-    loading: false
-  };
-
-  // Initial load
-  await loadState();
-
-  // Render loop
-  render();
-
-  async function loadState() {
-    try {
-      const [stateResponse, sessionResponse] = await Promise.all([
-        sendMessage({ type: "get_pairing_state" }),
-        sendMessage({ type: "get_session" })
-      ]);
-
-      if (stateResponse.success) {
-        state.pairingState = stateResponse.state;
-      }
-
-      if (sessionResponse.success && sessionResponse.session) {
-        state.session = sessionResponse.session;
-        if (sessionResponse.session.status === "active") {
-          state.view = "automation_active";
-        }
-      }
-    } catch (err) {
-      console.error("Failed to load state:", err);
-    }
-  }
-
-  function sendMessage(message) {
-    return new Promise((resolve) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        resolve(response || { success: false, error: "No response" });
-      });
+function sendMessage(message) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      const error = chrome.runtime.lastError;
+      resolve(error ? { success: false, error: error.message } : response || { success: false, error: 'No response' });
     });
-  }
-
-  function render() {
-    switch (state.view) {
-      case "main":
-        root.innerHTML = renderMain();
-        attachMainListeners();
-        break;
-      case "tab_selector":
-        root.innerHTML = renderTabSelector();
-        attachTabSelectorListeners();
-        break;
-      case "automation_active":
-        root.innerHTML = renderAutomationActive();
-        attachAutomationActiveListeners();
-        break;
-      default:
-        root.innerHTML = renderMain();
-        attachMainListeners();
-    }
-  }
-
-  function renderMain() {
-    return `
-      <div class="popup-container">
-        <header class="popup-header">
-          <h1>Fara1.5</h1>
-          <span class="status-badge ${state.session?.status === 'active' ? 'connected' : 'disconnected'}">
-            ${state.session?.status === 'active' ? 'Active' : 'Ready'}
-          </span>
-        </header>
-        <main class="popup-content">
-          ${state.error ? `<div class="error-message">${state.error}</div>` : ""}
-          ${state.session?.status === 'active' ? renderActiveSession() : renderMainActions()}
-        </main>
-        <footer class="popup-footer">
-          <button class="text-button" id="logoutBtn">Logout</button>
-        </footer>
-      </div>
-    `;
-  }
-
-  function renderActiveSession() {
-    const duration = Math.floor((Date.now() - state.session.startTime) / 1000);
-    const minutes = Math.floor(duration / 60);
-    const seconds = duration % 60;
-    return `
-      <div class="active-session">
-        <h2>Automation Active</h2>
-        <p>Tab ${state.session.tabId} is being automated</p>
-        <p>Started: ${new Date(state.session.startTime).toLocaleTimeString()}</p>
-        <p>Duration: ${minutes}:${seconds.toString().padStart(2, '0')}</p>
-        <button class="primary" id="viewSessionBtn">View Session</button>
-      </div>
-    `;
-  }
-
-  function renderMainActions() {
-    return `
-      <div class="actions">
-        <button class="primary" id="startAutomationBtn" ${state.loading ? 'disabled' : ''}>
-          ${state.loading ? 'Loading...' : 'Start Automation'}
-        </button>
-      </div>
-    `;
-  }
-
-  function renderTabSelector() {
-    const tabItems = state.tabs.map(tab => `
-      <div class="tab-item ${state.selectedTabId === tab.id ? 'selected' : ''}" data-tab-id="${tab.id}">
-        ${tab.favIconUrl ? `<img src="${tab.favIconUrl}" alt="" class="tab-icon">` : '<div class="tab-icon-placeholder"></div>'}
-        <div class="tab-info">
-          <span class="tab-title">${tab.title || 'Untitled'}</span>
-          <span class="tab-url">${truncateUrl(tab.url)}</span>
-        </div>
-        ${tab.incognito ? '<span class="badge incognito">Incognito</span>' : ''}
-      </div>
-    `).join('');
-
-    return `
-      <div class="popup-container">
-        <header class="popup-header">
-          <button class="back-button" id="backBtn">Back</button>
-          <h1>Select Tab</h1>
-        </header>
-        <main class="popup-content">
-          ${state.error ? `<div class="error-message">${state.error}</div>` : ''}
-          <div class="tab-list">
-            ${tabItems || '<p class="empty-message">No available tabs found</p>'}
-          </div>
-          <div class="warning-box">
-            <strong>Warning:</strong> The extension will attach to the selected tab.
-            Only select tabs you intend to automate.
-          </div>
-          <button class="primary full-width" id="attachBtn" ${state.selectedTabId === null || state.loading ? 'disabled' : ''}>
-            ${state.loading ? 'Connecting...' : 'Attach to Tab'}
-          </button>
-        </main>
-      </div>
-    `;
-  }
-
-  function renderAutomationActive() {
-    const duration = Math.floor((Date.now() - state.session.startTime) / 1000);
-    const minutes = Math.floor(duration / 60);
-    const seconds = duration % 60;
-    return `
-      <div class="popup-container">
-        <header class="popup-header">
-          <h1>Active Session</h1>
-        </header>
-        <main class="popup-content">
-          <div class="session-info">
-            <div class="session-stat">
-              <span class="label">Status</span>
-              <span class="value active">Active</span>
-            </div>
-            <div class="session-stat">
-              <span class="label">Duration</span>
-              <span class="value">${minutes}:${seconds.toString().padStart(2, '0')}</span>
-            </div>
-            <div class="session-stat">
-              <span class="label">Tab ID</span>
-              <span class="value">${state.session.tabId}</span>
-            </div>
-          </div>
-          <div class="actions">
-            <button class="danger" id="stopBtn" ${state.loading ? 'disabled' : ''}>
-              ${state.loading ? 'Stopping...' : 'Stop Automation'}
-            </button>
-          </div>
-        </main>
-      </div>
-    `;
-  }
-
-  function truncateUrl(url, maxLength = 50) {
-    if (url.length <= maxLength) return url;
-    return url.substring(0, maxLength) + "...";
-  }
-
-  function attachMainListeners() {
-    const startBtn = document.getElementById("startAutomationBtn");
-    const viewBtn = document.getElementById("viewSessionBtn");
-    const logoutBtn = document.getElementById("logoutBtn");
-
-    if (startBtn) {
-      startBtn.addEventListener("click", async () => {
-        state.loading = true;
-        render();
-        try {
-          const response = await sendMessage({ type: "get_tabs" });
-          if (response.success) {
-            state.tabs = response.tabs;
-            state.view = "tab_selector";
-          } else {
-            state.error = "Failed to load tabs";
-          }
-        } catch (err) {
-          state.error = err.message;
-        } finally {
-          state.loading = false;
-          render();
-        }
-      });
-    }
-
-    if (viewBtn) {
-      viewBtn.addEventListener("click", () => {
-        state.view = "automation_active";
-        render();
-      });
-    }
-
-    if (logoutBtn) {
-      logoutBtn.addEventListener("click", async () => {
-        await sendMessage({ type: "logout" });
-        state.pairingState = null;
-        state.session = null;
-        state.view = "main";
-        render();
-      });
-    }
-  }
-
-  function attachTabSelectorListeners() {
-    const backBtn = document.getElementById("backBtn");
-    const attachBtn = document.getElementById("attachBtn");
-    const tabItems = document.querySelectorAll(".tab-item");
-
-    if (backBtn) {
-      backBtn.addEventListener("click", () => {
-        state.view = "main";
-        state.selectedTabId = null;
-        render();
-      });
-    }
-
-    tabItems.forEach(item => {
-      item.addEventListener("click", () => {
-        state.selectedTabId = parseInt(item.dataset.tabId, 10);
-        render();
-      });
-    });
-
-    if (attachBtn) {
-      attachBtn.addEventListener("click", async () => {
-        if (state.selectedTabId === null) return;
-        state.loading = true;
-        render();
-
-        try {
-          const relayUrl = "wss://relay.fara1.5.example.com/ws";
-          const sessionId = `session-${Date.now()}`;
-
-          const response = await sendMessage({
-            type: "start_automation",
-            tabId: state.selectedTabId,
-            relayUrl,
-            sessionId
-          });
-
-          if (response.success) {
-            state.session = response.session;
-            state.view = "automation_active";
-          } else {
-            state.error = response.error || "Failed to start automation";
-          }
-        } catch (err) {
-          state.error = err.message;
-        } finally {
-          state.loading = false;
-          render();
-        }
-      });
-    }
-  }
-
-  function attachAutomationActiveListeners() {
-    const stopBtn = document.getElementById("stopBtn");
-    if (stopBtn) {
-      stopBtn.addEventListener("click", async () => {
-        state.loading = true;
-        render();
-        try {
-          await sendMessage({ type: "stop_automation" });
-          state.session = null;
-          state.view = "main";
-        } catch (err) {
-          state.error = err.message;
-        } finally {
-          state.loading = false;
-          render();
-        }
-      });
-    }
-  }
+  });
 }

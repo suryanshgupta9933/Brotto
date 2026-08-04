@@ -25,6 +25,7 @@ function sessionOpenEnvelope() {
     payload: {
       type: 'session.open',
       client: 'browser_extension',
+      goal: 'Find the current product price',
     },
   });
 }
@@ -37,9 +38,26 @@ describe('canonical agent envelope', () => {
     expect(roundTripped).toMatchObject({
       protocolVersion: '1.0',
       sequence: 0,
-      payload: { type: 'session.open', client: 'browser_extension' },
+      payload: { type: 'session.open', client: 'browser_extension', goal: 'Find the current product price' },
     });
     expect([...canonicalEnvelopeBytes(envelope)]).toEqual([...canonicalEnvelopeBytes(roundTripped)]);
+  });
+
+  it('requires a bounded task goal when opening a browser-extension session', () => {
+    expect(() => AgentMessageV1Schema.parse({
+      type: 'session.open',
+      client: 'browser_extension',
+    })).toThrow();
+    expect(() => AgentMessageV1Schema.parse({
+      type: 'session.open',
+      client: 'browser_extension',
+      goal: 'x'.repeat(4_001),
+    })).toThrow();
+    expect(AgentMessageV1Schema.parse({
+      type: 'session.open',
+      client: 'browser_extension',
+      goal: 'Find the current product price',
+    })).toMatchObject({ goal: 'Find the current product price' });
   });
 
   it('rejects forbidden browser data before creating an envelope', () => {

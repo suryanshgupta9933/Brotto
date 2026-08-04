@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { EnvelopeSigner } from '@fara-platform/relay-protocol';
-import { AgentTransportHub, registerAgentWebSocket, type TransportEngine } from './transport/ws-server.js';
+import { AgentTransportHub, registerAgentWebSocket, type ConnectionEnvelopeSignerResolver, type TransportEngine } from './transport/ws-server.js';
 import type { CommandSink } from './engine/types.js';
 import type { ConnectionTokenVerifier } from './transport/auth.js';
 import type { ConnectionCredentialStore } from './transport/auth.js';
@@ -9,7 +9,8 @@ import type { ConnectionLeaseStore } from './transport/ws-server.js';
 
 export interface OrchestratorAppOptions {
   tokenVerifier: ConnectionTokenVerifier;
-  envelopeVerifier: EnvelopeSigner;
+  envelopeVerifier?: EnvelopeSigner;
+  envelopeSignerResolver?: ConnectionEnvelopeSignerResolver;
   createEngine(commandSink: CommandSink): TransportEngine;
   store: SessionStore;
   leases: ConnectionLeaseStore;
@@ -21,6 +22,9 @@ export interface OrchestratorAppOptions {
 
 export async function createOrchestratorApp(options: OrchestratorAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 2_000_000 });
+  if (options.envelopeVerifier === undefined && options.envelopeSignerResolver === undefined) {
+    throw new TypeError('An envelope verifier or authenticated session signer resolver is required');
+  }
   const hub = new AgentTransportHub(options.store, options.envelopeVerifier, options.now);
   const engine = options.createEngine(hub);
   app.get('/healthz', async () => ({ status: 'ok' }));

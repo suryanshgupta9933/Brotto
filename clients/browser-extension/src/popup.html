@@ -1,316 +1,82 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fara1.5 Browser Automation</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fara Browser Agent</title>
   <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      width: 360px;
-      min-height: 400px;
-      background: #1a1a2e;
-      color: #eee;
-    }
-
-    .popup-container {
-      display: flex;
-      flex-direction: column;
-      min-height: 400px;
-    }
-
-    .popup-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 16px;
-      background: #16213e;
-      border-bottom: 1px solid #0f3460;
-    }
-
-    .popup-header h1 {
-      font-size: 18px;
-      font-weight: 600;
-    }
-
-    .popup-header .back-button {
-      background: none;
-      border: none;
-      color: #eee;
-      cursor: pointer;
-      font-size: 14px;
-      padding: 4px 8px;
-    }
-
-    .popup-content {
-      flex: 1;
-      padding: 16px;
-    }
-
-    .popup-footer {
-      padding: 12px 16px;
-      border-top: 1px solid #0f3460;
-      display: flex;
-      justify-content: flex-end;
-    }
-
-    .status-badge {
-      font-size: 12px;
-      padding: 4px 8px;
-      border-radius: 4px;
-      background: #0f3460;
-    }
-
-    .status-badge.connected {
-      background: #22c55e;
-      color: #000;
-    }
-
-    .status-badge.disconnected {
-      background: #6b7280;
-    }
-
-    .error-message {
-      background: #dc2626;
-      color: #fff;
-      padding: 8px 12px;
-      border-radius: 4px;
-      margin-bottom: 12px;
-      font-size: 13px;
-    }
-
-    .actions {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    button {
-      padding: 12px 16px;
-      border: none;
-      border-radius: 6px;
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: opacity 0.2s;
-    }
-
-    button:hover {
-      opacity: 0.9;
-    }
-
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    button.primary {
-      background: #3b82f6;
-      color: #fff;
-    }
-
-    button.secondary {
-      background: #0f3460;
-      color: #eee;
-    }
-
-    button.danger {
-      background: #dc2626;
-      color: #fff;
-    }
-
-    button.text-button {
-      background: none;
-      color: #9ca3af;
-      padding: 8px;
-    }
-
-    button.text-button:hover {
-      color: #eee;
-    }
-
-    button.full-width {
-      width: 100%;
-    }
-
-    .pairing-code-input {
-      width: 100%;
-      padding: 12px;
-      font-size: 20px;
-      text-align: center;
-      letter-spacing: 4px;
-      text-transform: uppercase;
-      background: #0f3460;
-      border: 1px solid #16213e;
-      border-radius: 6px;
-      color: #eee;
-      margin-bottom: 12px;
-    }
-
-    .pairing-code-input::placeholder {
-      letter-spacing: 4px;
-      opacity: 0.5;
-    }
-
-    .pairing-info {
-      text-align: center;
-    }
-
-    .pairing-info p {
-      margin-bottom: 16px;
-      color: #9ca3af;
-      font-size: 14px;
-    }
-
-    .tab-list {
-      max-height: 300px;
-      overflow-y: auto;
-    }
-
-    .tab-item {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 10px;
-      border-radius: 6px;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-
-    .tab-item:hover {
-      background: #16213e;
-    }
-
-    .tab-item.selected {
-      background: #0f3460;
-      outline: 2px solid #3b82f6;
-    }
-
-    .tab-icon {
-      width: 20px;
-      height: 20px;
-      border-radius: 4px;
-    }
-
-    .tab-icon-placeholder {
-      width: 20px;
-      height: 20px;
-      background: #6b7280;
-      border-radius: 4px;
-    }
-
-    .tab-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .tab-title {
-      display: block;
-      font-size: 13px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .tab-url {
-      display: block;
-      font-size: 11px;
-      color: #9ca3af;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .badge {
-      font-size: 10px;
-      padding: 2px 6px;
-      border-radius: 3px;
-      background: #6b7280;
-    }
-
-    .badge.incognito {
-      background: #9333ea;
-    }
-
-    .warning-box {
-      background: #78350f;
-      padding: 12px;
-      border-radius: 6px;
-      margin-top: 16px;
-      font-size: 12px;
-      line-height: 1.5;
-    }
-
-    .session-info {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .session-stat {
-      display: flex;
-      justify-content: space-between;
-      padding: 12px;
-      background: #16213e;
-      border-radius: 6px;
-    }
-
-    .session-stat .label {
-      color: #9ca3af;
-    }
-
-    .session-stat .value {
-      font-weight: 500;
-    }
-
-    .session-stat .value.active {
-      color: #22c55e;
-    }
-
-    .setting-item {
-      margin-bottom: 16px;
-    }
-
-    .setting-item label {
-      display: block;
-      margin-bottom: 6px;
-      font-size: 13px;
-      color: #9ca3af;
-    }
-
-    .setting-item input[type="url"] {
-      width: 100%;
-      padding: 10px;
-      background: #0f3460;
-      border: 1px solid #16213e;
-      border-radius: 6px;
-      color: #eee;
-      font-size: 14px;
-    }
-
-    .setting-value {
-      font-size: 14px;
-    }
-
-    .setting-item input[type="checkbox"] {
-      margin-right: 8px;
-    }
-
-    .setting-checkbox {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
+    * { box-sizing: border-box; }
+    body { margin: 0; width: 420px; min-height: 560px; background: #0f1220; color: #eef2ff; font: 13px/1.45 system-ui, sans-serif; }
+    .shell { display: grid; gap: 14px; padding: 16px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h1, h2, h3, h4, p { margin: 0; }
+    h1 { font-size: 16px; }
+    h2 { font-size: 13px; color: #a5b4fc; }
+    .status-badge { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #334155; border-radius: 999px; padding: 4px 9px; color: #cbd5e1; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
+    .connected .dot, .executing .dot { background: #22c55e; }
+    .connecting .dot, .reconnecting .dot, .waiting_for_approval .dot, .cancelling .dot { background: #f59e0b; }
+    .failed .dot, .cancelled .dot { background: #ef4444; }
+    .completed .dot { background: #38bdf8; }
+    .card { display: grid; gap: 10px; padding: 12px; border: 1px solid #26314d; border-radius: 10px; background: #171c2f; }
+    textarea { width: 100%; min-height: 82px; resize: vertical; border: 1px solid #334155; border-radius: 8px; padding: 10px; background: #0b1020; color: #fff; font: inherit; }
+    textarea:focus { outline: 2px solid #4f46e5; outline-offset: 1px; }
+    .actions { display: flex; gap: 8px; }
+    button { border: 0; border-radius: 7px; padding: 9px 12px; background: #334155; color: #fff; cursor: pointer; font: inherit; }
+    button.primary { flex: 1; background: #4f46e5; }
+    button.danger { background: #b91c1c; }
+    button:disabled { opacity: .5; cursor: default; }
+    .log-content { max-height: 190px; overflow: auto; display: grid; gap: 7px; }
+    .log-entry { display: grid; grid-template-columns: 64px 1fr; gap: 8px; color: #cbd5e1; }
+    .log-entry time { color: #64748b; font: 11px ui-monospace, monospace; }
+    .log-entry.error span { color: #fca5a5; }
+    .log-empty { color: #64748b; }
+    .approval { border-color: #a16207; background: #2b210f; }
+    .result { border-color: #0369a1; background: #0c2233; }
+    .result-content { display: grid; gap: 9px; white-space: normal; overflow-wrap: anywhere; }
+    .result-content ul { margin: 0; padding-left: 20px; display: grid; gap: 5px; }
+    .subtle { color: #94a3b8; }
   </style>
 </head>
 <body>
-  <div id="root"></div>
-  <script type="module" src="popup.js"></script>
+  <main class="shell">
+    <header>
+      <h1>Fara Browser Agent</h1>
+      <div id="statusBadge" class="status-badge disconnected"><span class="dot"></span><span id="statusText">Disconnected</span></div>
+    </header>
+
+    <section class="card">
+      <h2>Canonical task</h2>
+      <textarea id="taskInput" maxlength="4000" placeholder="Describe the task for the active HTTP(S) tab"></textarea>
+      <div class="actions">
+        <button id="sendTaskBtn" class="primary">Start secure task</button>
+        <button id="cancelTaskBtn" class="danger" hidden>Cancel</button>
+        <button id="optionsBtn">Options</button>
+      </div>
+      <p class="subtle">Ctrl/⌘ + Enter starts the task. No visited-site credentials or storage values are collected.</p>
+    </section>
+
+    <section id="approvalPanel" class="card approval" hidden>
+      <h2>Approval required</h2>
+      <p id="approvalReason"></p>
+      <div class="actions"><button id="approveBtn" class="primary">Approve</button><button id="denyBtn" class="danger">Deny</button></div>
+    </section>
+
+    <section id="loginPrompt" class="card approval" hidden>
+      <h2>User interaction required</h2>
+      <p>Complete the requested interaction directly in the attached tab, then submit a fresh observation.</p>
+      <button id="loginDoneBtn" class="primary">Interaction complete</button>
+    </section>
+
+    <section id="resultPanel" class="card result" hidden>
+      <div id="resultContent" class="result-content"></div>
+    </section>
+
+    <section class="card">
+      <div class="actions"><h2 style="flex:1">Sanitized trajectory</h2><button id="clearLogBtn">Clear</button></div>
+      <div id="logContent" class="log-content"><div class="log-empty">No canonical steps yet.</div></div>
+    </section>
+  </main>
+  <script src="popup.js"></script>
 </body>
 </html>

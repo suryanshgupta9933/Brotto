@@ -80,6 +80,63 @@ describe('connection authentication', () => {
     await expect(store.consume(claims.credentialId, claims.expiresAt, now + 1)).resolves.toBe(false);
   });
 
+  test('resolves the envelope signer from the authenticated session credential', async () => {
+    const sessionSigner = {
+      sign: jest.fn(async () => 'session-signature'),
+      verify: jest.fn(async (_bytes: Uint8Array, signature: string) => signature === 'session-signature'),
+    };
+    const resolver = {
+      resolve: jest.fn(async () => sessionSigner),
+    };
+    const handle = jest.fn(async (event: { messageId: string }) => ({
+      kind: 'accepted' as const,
+      sessionId: claims.sessionId,
+      messageId: event.messageId,
+      revision: 1,
+      state: 'OBSERVING' as const,
+      pendingActionIds: [],
+    }));
+    const app = await createOrchestratorApp({
+      tokenVerifier: { verify: async () => claims },
+      envelopeSignerResolver: resolver,
+      createEngine: () => ({ handle: handle as never }),
+      store: new InMemorySessionStore(),
+      leases: new InMemoryConnectionLeaseStore(),
+      credentials: new InMemoryConnectionCredentialStore(),
+      recipientId: '40000000-0000-4000-8000-000000000001',
+      allowedOrigins: new Set(['chrome-extension://trusted-extension']),
+      now: () => now,
+    });
+    await app.ready();
+    const socket = await app.injectWS('/v1/agent', { headers: {
+      origin: 'chrome-extension://trusted-extension',
+      'sec-websocket-protocol': 'fara-v1, fara-credential.token',
+    } });
+    const opened = await signEnvelope(createEnvelope({
+      messageId: '20000000-0000-4000-8000-000000000001',
+      sessionId: claims.sessionId,
+      correlationId: '30000000-0000-4000-8000-000000000001',
+      causationId: '30000000-0000-4000-8000-000000000001',
+      recipientId: '40000000-0000-4000-8000-000000000001',
+      tenantId: claims.tenantId,
+      deviceId: claims.deviceId,
+      sequence: 1,
+      createdAt: '2023-11-14T22:13:20.000Z',
+      expiresAt: now + 30_000,
+      payload: { type: 'session.open', client: 'browser_extension', goal: 'Find the current product price' },
+    }), sessionSigner);
+    socket.send(JSON.stringify(opened));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(resolver.resolve).toHaveBeenCalledWith(claims);
+    expect(sessionSigner.verify).toHaveBeenCalled();
+    expect(handle).toHaveBeenCalledTimes(1);
+    const closed = once(socket, 'close');
+    socket.terminate();
+    await closed;
+    await app.close();
+  });
+
   test('wires the engine command sink to the authenticated socket', async () => {
     const observation = { observationId: '70000000-0000-4000-8000-000000000001', capturedAt: '2023-11-14T22:13:20.000Z', url: 'https://example.com', title: 'Example',
       screenshot: { kind: 'artifact' as const, artifactId: '71000000-0000-4000-8000-000000000001', sha256: 'a'.repeat(64), width: 1, height: 1, encoding: 'png' as const },
