@@ -3,6 +3,26 @@ import {
   type CanonicalExecutionCommand,
   type CdpSender,
 } from "../src/canonical/action-executor";
+import { ClientPolicy, type ExecutionAuthorization } from "../src/canonical/client-policy";
+
+function authorizationFor(input: CanonicalExecutionCommand): ExecutionAuthorization {
+  const policy = new ClientPolicy().evaluate(input as never, {
+    tabId: 7,
+    attachedTabIds: new Set([7]),
+    approvedApprovalIds: new Set(),
+    observation: {
+      observationId: "33333333-3333-4333-8333-333333333333" as never,
+      url: "https://example.test/",
+      semanticTargets: [],
+    },
+  });
+  if (policy.decision !== "allowed") throw new Error("Test command was not authorized");
+  return policy.authorization;
+}
+
+function executeAuthorized(executor: CanonicalActionExecutor, input: CanonicalExecutionCommand) {
+  return executor.execute(input, undefined, authorizationFor(input));
+}
 
 function command(action: Record<string, unknown>): CanonicalExecutionCommand {
   return {
@@ -45,10 +65,33 @@ function setup() {
 }
 
 describe("CanonicalActionExecutor", () => {
+  it("rejects direct execution without a policy authorization capability", async () => {
+    const { calls, executor } = setup();
+
+    await expect(executor.execute(command({ type: "scroll", deltaX: 0, deltaY: 10 })))
+      .resolves.toMatchObject({ ok: false, error: { code: "POLICY_AUTHORIZATION_REQUIRED" } });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("sanitizes CDP errors without reflecting secret-bearing messages", async () => {
+    const input = command({ type: "scroll", deltaX: 0, deltaY: 10 });
+    const executor = new CanonicalActionExecutor({
+      tabId: 7,
+      capture: { viewportWidth: 800, viewportHeight: 600, devicePixelRatio: 1, zoom: 1 },
+      send: async () => { throw new Error("https://alice:secret@example.test/?token=raw entered-text"); },
+    });
+
+    const result = await executor.execute(input, undefined, authorizationFor(input));
+
+    expect(result).toMatchObject({ ok: false, error: { code: "CDP_COMMAND_FAILED", message: "The controlled browser command failed" } });
+    expect(JSON.stringify(result)).not.toContain("secret");
+    expect(JSON.stringify(result)).not.toContain("entered-text");
+  });
+
   it("transforms captured coordinates through DPR and zoom before clicking", async () => {
     const { calls, executor } = setup();
 
-    expect(await executor.execute(command({ type: "left_click", x: 500, y: 250 }))).toMatchObject({ ok: true });
+    expect(await executeAuthorized(executor, command({ type: "left_click", x: 500, y: 250 }))).toMatchObject({ ok: true });
     expect(calls).toEqual([
       { method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", x: 200, y: 100 } },
       { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x: 200, y: 100, button: "left", clickCount: 1 } },
@@ -59,7 +102,7 @@ describe("CanonicalActionExecutor", () => {
   it("rejects coordinates outside the captured viewport", async () => {
     const { calls, executor } = setup();
 
-    expect(await executor.execute(command({ type: "mouse_move", x: 2001, y: 50 })))
+    expect(await executeAuthorized(executor, command({ type: "mouse_move", x: 2001, y: 50 })))
       .toMatchObject({ ok: false, error: { code: "COORDINATE_OUT_OF_BOUNDS", retryable: true } });
     expect(calls).toHaveLength(0);
   });
@@ -67,7 +110,7 @@ describe("CanonicalActionExecutor", () => {
   it("uses Input.insertText without reflecting entered text in the result", async () => {
     const { calls, executor } = setup();
 
-    const result = await executor.execute(command({ type: "insert_text", text: "not-returned" }));
+    const result = await executeAuthorized(executor, command({ type: "insert_text", text: "not-returned" }));
 
     expect(result).toEqual({ ok: true, effect: { kind: "text_inserted", characterCount: 12 } });
     expect(calls).toEqual([{ method: "Input.insertText", params: { text: "not-returned" } }]);
@@ -76,18 +119,18 @@ describe("CanonicalActionExecutor", () => {
   it("converts key modifiers to the CDP modifier bitmask", async () => {
     const { calls, executor } = setup();
 
-    await executor.execute(command({ type: "key", key: "Enter", modifiers: { ctrl: true, shift: true, alt: true, meta: true } }));
+    await executeAuthorized(executor, command({ type: "key", key: "A", modifiers: { ctrl: true, shift: true, alt: true, meta: true } }));
 
     expect(calls).toEqual([
-      { method: "Input.dispatchKeyEvent", params: { type: "keyDown", key: "Enter", modifiers: 15 } },
-      { method: "Input.dispatchKeyEvent", params: { type: "keyUp", key: "Enter", modifiers: 15 } },
+      { method: "Input.dispatchKeyEvent", params: { type: "keyDown", key: "A", modifiers: 15 } },
+      { method: "Input.dispatchKeyEvent", params: { type: "keyUp", key: "A", modifiers: 15 } },
     ]);
   });
 
   it("does not reflect typed key content in its execution result", async () => {
     const { executor } = setup();
 
-    const result = await executor.execute(command({ type: "key", key: "s" }));
+    const result = await executeAuthorized(executor, command({ type: "key", key: "s" }));
 
     expect(JSON.stringify(result)).not.toContain('"s"');
   });
@@ -95,7 +138,7 @@ describe("CanonicalActionExecutor", () => {
   it("dispatches a drag using transformed endpoints", async () => {
     const { calls, executor } = setup();
 
-    await executor.execute(command({ type: "drag", startX: 250, startY: 250, endX: 750, endY: 500 }));
+    await executeAuthorized(executor, command({ type: "drag", startX: 250, startY: 250, endX: 750, endY: 500 }));
 
     expect(calls).toEqual([
       { method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", x: 100, y: 100 } },
@@ -108,7 +151,7 @@ describe("CanonicalActionExecutor", () => {
   it("passes the requested wheel deltas instead of treating them as coordinates", async () => {
     const { calls, executor } = setup();
 
-    await executor.execute(command({ type: "scroll", deltaX: -17, deltaY: 423 }));
+    await executeAuthorized(executor, command({ type: "scroll", deltaX: -17, deltaY: 423 }));
 
     expect(calls).toEqual([{ method: "Input.dispatchMouseEvent", params: {
       type: "mouseWheel", x: 400, y: 300, deltaX: -17, deltaY: 423,
@@ -118,7 +161,7 @@ describe("CanonicalActionExecutor", () => {
   it("uses navigation history and Page.navigate for history_back", async () => {
     const { calls, executor } = setup();
 
-    await executor.execute(command({ type: "history_back", steps: 2 }));
+    await executeAuthorized(executor, command({ type: "history_back", steps: 2 }));
 
     expect(calls).toEqual([
       { method: "Page.getNavigationHistory" },
@@ -126,22 +169,13 @@ describe("CanonicalActionExecutor", () => {
     ]);
   });
 
-  it("rejects navigation URLs containing embedded credentials", async () => {
-    const { calls, executor } = setup();
-
-    expect(await executor.execute(command({ type: "visit_url", url: "https://alice:secret@example.test/" })))
-      .toMatchObject({ ok: false, error: { code: "INVALID_NAVIGATION_URL", retryable: false } });
-    expect(calls).toHaveLength(0);
-  });
-
   it.each([
     [{ type: "left_click", x: 10 }, "MISSING_ACTION_PARAMETER"],
-    [{ type: "visit_url" }, "MISSING_ACTION_PARAMETER"],
     [{ type: "run_javascript", source: "document.cookie" }, "UNKNOWN_ACTION"],
   ])("returns a typed failure for invalid action %#", async (action, code) => {
     const { calls, executor } = setup();
 
-    expect(await executor.execute(command(action))).toMatchObject({ ok: false, error: { code, retryable: false } });
+    expect(await executeAuthorized(executor, command(action))).toMatchObject({ ok: false, error: { code, retryable: false } });
     expect(calls).toHaveLength(0);
   });
 });

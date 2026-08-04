@@ -1,6 +1,11 @@
-import type { ActionCommandV1, ExecutableActionV1 } from "@fara-platform/fara-action-schema";
+import type { ActionCommandV1, ExecutableActionV1, SemanticTarget } from "@fara-platform/fara-action-schema";
 import { sendCommand } from "../debugger";
 import { sanitizeObservationUrl } from "./redaction";
+import { consumePolicyAuthorization, type ExecutionAuthorization } from "./client-policy";
+import { transformCapturedPoint, type CapturedCoordinateContext } from "./coordinate-context";
+
+export { transformCapturedPoint } from "./coordinate-context";
+export type { CapturedCoordinateContext } from "./coordinate-context";
 
 type MouseButton = "left" | "right";
 
@@ -13,17 +18,10 @@ export type AllowedCdpCommand =
 
 export type CdpSender = (tabId: number, command: AllowedCdpCommand) => Promise<unknown>;
 
-export interface CapturedCoordinateContext {
-  readonly viewportWidth: number;
-  readonly viewportHeight: number;
-  readonly devicePixelRatio: number;
-  /** Browser zoom multiplier, where 1 is 100%. */
-  readonly zoom: number;
-}
-
 export interface CanonicalActionExecutorOptions {
   readonly tabId: number;
   readonly capture: CapturedCoordinateContext;
+  readonly observation?: { readonly semanticTargets: readonly SemanticTarget[] };
   readonly send?: CdpSender;
   readonly wait?: (durationMs: number) => Promise<void>;
 }
@@ -36,6 +34,9 @@ export interface ActionExecutionError {
     | "INVALID_NAVIGATION_URL"
     | "HISTORY_ENTRY_UNAVAILABLE"
     | "UNKNOWN_ACTION"
+    | "POLICY_AUTHORIZATION_REQUIRED"
+    | "TARGET_NOT_FOUND"
+    | "TARGET_COORDINATE_MISMATCH"
     | "CDP_COMMAND_FAILED";
   readonly message: string;
   readonly retryable: boolean;
@@ -53,34 +54,47 @@ export class CanonicalActionExecutor {
   private readonly tabId: number;
   private readonly capture: CapturedCoordinateContext;
   private readonly send: CdpSender;
+  private readonly observation?: { readonly semanticTargets: readonly SemanticTarget[] };
   private readonly wait: (durationMs: number) => Promise<void>;
+  private active = false;
+  private activeSignal?: AbortSignal;
 
   constructor(options: CanonicalActionExecutorOptions) {
     this.tabId = options.tabId;
     this.capture = options.capture;
+    this.observation = options.observation;
     this.send = options.send ?? ((tabId, command) => sendCommand(tabId, command));
     this.wait = options.wait ?? ((durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)));
   }
 
-  async execute(command: CanonicalExecutionCommand): Promise<ActionExecutionResult> {
+  async execute(command: CanonicalExecutionCommand, signal?: AbortSignal, authorization?: ExecutionAuthorization): Promise<ActionExecutionResult> {
+    if (!consumePolicyAuthorization(command as never, authorization)) {
+      return failure("POLICY_AUTHORIZATION_REQUIRED", "A valid client-policy authorization is required", false);
+    }
+    if (signal?.aborted) return failure("CDP_COMMAND_FAILED", "Controlled action was cancelled", false);
     const action = command?.action as ExecutableActionV1 | undefined;
     if (!action || typeof action !== "object" || typeof (action as { type?: unknown }).type !== "string") {
       return failure("MISSING_ACTION_PARAMETER", "The action type is required", false);
     }
+    const targetFailure = this.verifyDeclaredTarget(action);
+    if (targetFailure !== undefined) return targetFailure;
+    if (this.active) return failure("CDP_COMMAND_FAILED", "Another controlled action is already executing", true);
+    this.active = true;
+    this.activeSignal = signal;
 
     try {
       switch (action.type) {
-        case "left_click": return this.click(action, "left", 1);
-        case "double_click": return this.click(action, "left", 2);
-        case "right_click": return this.click(action, "right", 1);
-        case "mouse_move": return this.mouseMove(action);
-        case "drag": return this.drag(action);
-        case "scroll": return this.scroll(action);
-        case "key": return this.key(action);
-        case "insert_text": return this.insertText(action);
-        case "visit_url": return this.navigate(action);
-        case "history_back": return this.historyBack(action);
-        case "wait": return this.waitFor(action);
+        case "left_click": return await this.click(action, "left", 1);
+        case "double_click": return await this.click(action, "left", 2);
+        case "right_click": return await this.click(action, "right", 1);
+        case "mouse_move": return await this.mouseMove(action);
+        case "drag": return await this.drag(action);
+        case "scroll": return await this.scroll(action);
+        case "key": return await this.key(action);
+        case "insert_text": return await this.insertText(action);
+        case "visit_url": return await this.navigate(action);
+        case "history_back": return await this.historyBack(action);
+        case "wait": return await this.waitFor(action);
         case "ask_user_question":
         case "memorize_fact":
           return failure("UNKNOWN_ACTION", `${action.type} is not a browser execution action`, false);
@@ -90,9 +104,12 @@ export class CanonicalActionExecutor {
     } catch (error) {
       return failure(
         "CDP_COMMAND_FAILED",
-        error instanceof Error ? error.message : "The controlled browser command failed",
+        "The controlled browser command failed",
         true,
       );
+    } finally {
+      this.active = false;
+      this.activeSignal = undefined;
     }
   }
 
@@ -155,7 +172,7 @@ export class CanonicalActionExecutor {
     if (typeof action.text !== "string" || action.text.length === 0) {
       return failure("MISSING_ACTION_PARAMETER", "Text insertion requires non-empty text", false);
     }
-    await this.send(this.tabId, { method: "Input.insertText", params: { text: action.text } });
+    await this.sendAllowed({ method: "Input.insertText", params: { text: action.text } });
     return { ok: true, effect: { kind: "text_inserted", characterCount: [...action.text].length } };
   }
 
@@ -173,7 +190,7 @@ export class CanonicalActionExecutor {
     if (url.username !== "" || url.password !== "") {
       return failure("INVALID_NAVIGATION_URL", "Navigation URL must not contain embedded credentials", false);
     }
-    await this.send(this.tabId, { method: "Page.navigate", params: { url: url.href } });
+    await this.sendAllowed({ method: "Page.navigate", params: { url: url.href } });
     return { ok: true, effect: { kind: "navigation", url: sanitizeObservationUrl(url.href) } };
   }
 
@@ -182,7 +199,7 @@ export class CanonicalActionExecutor {
     if (!Number.isInteger(steps) || (steps as number) < 1 || (steps as number) > 20) {
       return failure("INVALID_ACTION_PARAMETER", "History steps must be an integer from 1 to 20", false);
     }
-    const history = await this.send(this.tabId, { method: "Page.getNavigationHistory" });
+    const history = await this.sendAllowed({ method: "Page.getNavigationHistory" });
     const parsed = navigationHistory(history);
     if (!parsed) return failure("CDP_COMMAND_FAILED", "Navigation history response was invalid", true);
     const target = parsed.entries[parsed.currentIndex - (steps as number)];
@@ -194,7 +211,7 @@ export class CanonicalActionExecutor {
     if (url.username !== "" || url.password !== "") {
       return failure("INVALID_NAVIGATION_URL", "History target contains embedded credentials", false);
     }
-    await this.send(this.tabId, { method: "Page.navigate", params: { url: url.href } });
+    await this.sendAllowed({ method: "Page.navigate", params: { url: url.href } });
     return { ok: true, effect: { kind: "navigation", url: sanitizeObservationUrl(url.href) } };
   }
 
@@ -203,6 +220,7 @@ export class CanonicalActionExecutor {
       return failure("INVALID_ACTION_PARAMETER", "Wait duration must be from 1 to 60000 milliseconds", false);
     }
     await this.wait(action.durationMs as number);
+    this.throwIfAborted();
     return { ok: true, effect: { kind: "wait", durationMs: action.durationMs } };
   }
 
@@ -210,26 +228,41 @@ export class CanonicalActionExecutor {
     if (!finite(rawX) || !finite(rawY)) {
       return failure("MISSING_ACTION_PARAMETER", "Pointer actions require finite x and y coordinates", false);
     }
-    const scale = this.capture.devicePixelRatio * this.capture.zoom;
-    if (!Number.isFinite(scale) || scale <= 0 || this.capture.viewportWidth <= 0 || this.capture.viewportHeight <= 0) {
-      return failure("INVALID_ACTION_PARAMETER", "Captured viewport transform is invalid", false);
+    return transformCapturedPoint(rawX, rawY, this.capture);
+  }
+
+  private verifyDeclaredTarget(action: ExecutableActionV1): ActionExecutionFailure | undefined {
+    if (this.observation === undefined || !("targetId" in action) || action.targetId === undefined) return undefined;
+    const target = this.observation.semanticTargets.find((candidate) => candidate.visible && candidate.targetId === action.targetId);
+    if (target === undefined) return failure("TARGET_NOT_FOUND", "Declared semantic target is unavailable", true);
+    if (!("x" in action) || !("y" in action)) return undefined;
+    const point = transformCapturedPoint(action.x, action.y, this.capture);
+    if ("error" in point) return point;
+    const box = target.boundingBox;
+    if (point.x < box.x || point.x > box.x + box.width || point.y < box.y || point.y > box.y + box.height) {
+      return failure("TARGET_COORDINATE_MISMATCH", "Pointer coordinate does not match the declared semantic target", true);
     }
-    const maxX = this.capture.viewportWidth * scale;
-    const maxY = this.capture.viewportHeight * scale;
-    if (rawX < 0 || rawY < 0 || rawX > maxX || rawY > maxY) {
-      return failure("COORDINATE_OUT_OF_BOUNDS", "Pointer coordinate lies outside the captured viewport", true);
-    }
-    return { x: rawX / scale, y: rawY / scale };
+    return undefined;
   }
 
   private mouse(params: Record<string, unknown>): Promise<unknown> {
-    return this.send(this.tabId, { method: "Input.dispatchMouseEvent", params });
+    return this.sendAllowed({ method: "Input.dispatchMouseEvent", params });
   }
 
   private keyboard(params: Record<string, unknown>): Promise<unknown> {
-    return this.send(this.tabId, { method: "Input.dispatchKeyEvent", params });
+    return this.sendAllowed({ method: "Input.dispatchKeyEvent", params });
+  }
+
+  private sendAllowed(command: AllowedCdpCommand): Promise<unknown> {
+    this.throwIfAborted();
+    return this.send(this.tabId, command);
+  }
+
+  private throwIfAborted(): void {
+    if (this.activeSignal?.aborted) throw new DOMException("Aborted", "AbortError");
   }
 }
+
 
 function finite(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);

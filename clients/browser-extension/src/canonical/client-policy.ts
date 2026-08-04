@@ -4,6 +4,7 @@ import type {
   ObservationV1,
   SemanticTarget,
 } from "@fara-platform/fara-action-schema";
+import { transformCapturedPoint, type CapturedCoordinateContext } from "./coordinate-context";
 
 export type ClientPolicyDecision = "allowed" | "requires_approval" | "denied";
 
@@ -20,10 +21,19 @@ export type ClientPolicyCode =
   | "HIGH_IMPACT_APPROVAL_REQUIRED"
   | "APPROVAL_PROOF_INVALID";
 
-export interface ClientPolicyResult {
-  readonly decision: ClientPolicyDecision;
-  readonly code: ClientPolicyCode;
-  readonly reason: string;
+export interface ExecutionAuthorization { readonly kind: "policy_authorization" }
+
+export type ClientPolicyResult =
+  | { readonly decision: "allowed"; readonly code: "ALLOWED"; readonly reason: string; readonly authorization: ExecutionAuthorization }
+  | { readonly decision: "requires_approval"; readonly code: "HIGH_IMPACT_APPROVAL_REQUIRED"; readonly reason: string }
+  | { readonly decision: "denied"; readonly code: Exclude<ClientPolicyCode, "ALLOWED" | "HIGH_IMPACT_APPROVAL_REQUIRED">; readonly reason: string };
+
+const issuedAuthorizations = new WeakMap<object, string>();
+
+export function consumePolicyAuthorization(command: ClientPolicyCommand, authorization: ExecutionAuthorization | undefined): boolean {
+  if (authorization === undefined || issuedAuthorizations.get(authorization) !== JSON.stringify(command.action)) return false;
+  issuedAuthorizations.delete(authorization);
+  return true;
 }
 
 export type ClientPolicyCommand = Pick<
@@ -41,6 +51,7 @@ export interface ClientPolicyContext {
   /** Approval IDs resolved and retained locally for the active session. */
   readonly approvedApprovalIds: ReadonlySet<string>;
   readonly observation: ClientPolicyObservation;
+  readonly capture?: CapturedCoordinateContext;
 }
 
 export interface ClientPolicyOptions {
@@ -83,7 +94,7 @@ export class ClientPolicy {
       if (navigationDecision !== undefined) return navigationDecision;
     }
 
-    if (isHighImpact(command.action, context.observation.semanticTargets)) {
+    if (isHighImpact(command.action, context.observation.semanticTargets, context.capture)) {
       if (!hasValidApprovalProof(command, context.approvedApprovalIds)) {
         if (command.policyContext.approved || command.policyContext.approvalId !== undefined) {
           return denied("APPROVAL_PROOF_INVALID", "High-impact action approval proof is incomplete");
@@ -96,7 +107,9 @@ export class ClientPolicy {
       }
     }
 
-    return { decision: "allowed", code: "ALLOWED", reason: "Client policy permits the action" };
+    const authorization: ExecutionAuthorization = Object.freeze({ kind: "policy_authorization" });
+    issuedAuthorizations.set(authorization, JSON.stringify(command.action));
+    return { decision: "allowed", code: "ALLOWED", reason: "Client policy permits the action", authorization };
   }
 
   private evaluateNavigation(rawUrl: string): ClientPolicyResult | undefined {
@@ -155,10 +168,10 @@ function hasValidApprovalProof(command: ClientPolicyCommand, approvedApprovalIds
     command.policyContext.policyDecisionId.length > 0;
 }
 
-function isHighImpact(action: ExecutableActionV1, targets: readonly SemanticTarget[]): boolean {
+function isHighImpact(action: ExecutableActionV1, targets: readonly SemanticTarget[], capture?: CapturedCoordinateContext): boolean {
   if (action.type === "key" && action.key.toLowerCase() === "enter") return true;
 
-  return actionTargets(action, targets).some((target) => {
+  return actionTargets(action, targets, capture).some((target) => {
     if (action.type === "insert_text" && target.control.kind === "input") {
       if (["email", "tel"].includes(target.control.inputType)) return true;
     }
@@ -177,18 +190,20 @@ function isHighImpact(action: ExecutableActionV1, targets: readonly SemanticTarg
   });
 }
 
-function actionTargets(action: ExecutableActionV1, targets: readonly SemanticTarget[]): SemanticTarget[] {
+function actionTargets(action: ExecutableActionV1, targets: readonly SemanticTarget[], capture?: CapturedCoordinateContext): SemanticTarget[] {
   const matches = new Map<string, SemanticTarget>();
   if ("targetId" in action && action.targetId !== undefined) {
     const declared = targets.find((candidate) => candidate.visible && candidate.targetId === action.targetId);
     if (declared !== undefined) matches.set(declared.targetId, declared);
   }
   if ("x" in action && "y" in action) {
+    const point = capture === undefined ? { x: action.x, y: action.y } : transformCapturedPoint(action.x, action.y, capture);
+    if ("error" in point) return [...matches.values()];
     for (const candidate of targets) {
       if (!candidate.visible) continue;
       const box = candidate.boundingBox;
-      if (action.x >= box.x && action.x <= box.x + box.width &&
-          action.y >= box.y && action.y <= box.y + box.height) {
+      if (point.x >= box.x && point.x <= box.x + box.width &&
+          point.y >= box.y && point.y <= box.y + box.height) {
         matches.set(candidate.targetId, candidate);
       }
     }

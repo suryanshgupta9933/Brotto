@@ -228,9 +228,58 @@ describe("PageSettler", () => {
     clock.advanceBy(100);
 
     await expect(settlement).resolves.toMatchObject({ pageState: {
-      url: "https://example.test/account?view=summary",
+      url: "https://example.test/account",
       lifecycle: "complete",
       title: "[redacted]",
     } });
+  });
+
+  it("resolves deterministically when page-state capture never returns", async () => {
+    const clock = new FakeClock();
+    const settler = new PageSettler({
+      tabId: 7,
+      events: new FakeEvents(),
+      clock,
+      getPageState: () => new Promise(() => {}),
+      stabilityMs: 100,
+      timeoutMs: 1_000,
+    });
+    const settlement = settler.settle(async () => {});
+    await flush();
+    clock.advanceBy(100);
+
+    await expect(settlement).resolves.toMatchObject({ status: "settled", pageState: { url: "about:blank" } });
+  });
+
+  it("ignores subframe navigation and load events", async () => {
+    const clock = new FakeClock();
+    const events = new FakeEvents();
+    const settler = new PageSettler({
+      tabId: 7, events, clock, mainFrameId: "main",
+      getPageState: async () => ({ url: "https://example.test", lifecycle: "complete" }),
+      stabilityMs: 100,
+    });
+    const settlement = settler.settle(async () => {
+      events.emit("Page.frameStartedLoading", { frameId: "child" });
+      events.emit("Page.lifecycleEvent", { frameId: "child", name: "load" });
+    });
+    await flush();
+    clock.advanceBy(100);
+
+    await expect(settlement).resolves.toMatchObject({ status: "settled", navigation: false });
+  });
+
+  it("cancels settlement through AbortSignal without executing later work", async () => {
+    const controller = new AbortController();
+    const execute = jest.fn(async () => new Promise(() => {}));
+    const settler = new PageSettler({
+      tabId: 7, events: new FakeEvents(), clock: new FakeClock(),
+      getPageState: async () => ({ url: "https://example.test", lifecycle: "complete" }),
+    });
+    const settlement = settler.settle(execute, controller.signal);
+    await flush();
+    controller.abort();
+
+    await expect(settlement).resolves.toMatchObject({ status: "cancelled", code: "ACTION_CANCELLED" });
   });
 });

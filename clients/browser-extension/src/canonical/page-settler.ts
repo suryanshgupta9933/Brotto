@@ -1,4 +1,4 @@
-import { registerEventHandler, sendCommand, unregisterEventHandlers, type CdpEvent } from "../debugger";
+import { sendCommand } from "../debugger";
 import { sanitizeBrowserText, sanitizeObservationUrl } from "./redaction";
 
 export interface PageEvent {
@@ -35,6 +35,7 @@ export type PageSettlementResult =
   | ({ readonly status: "settled" } & SettlementDetails)
   | ({ readonly status: "timeout"; readonly code: "SETTLEMENT_TIMEOUT" } & SettlementDetails)
   | ({ readonly status: "detached"; readonly code: "DEBUGGER_DETACHED" } & SettlementDetails)
+  | ({ readonly status: "cancelled"; readonly code: "ACTION_CANCELLED" } & SettlementDetails)
   | ({ readonly status: "execution_failed"; readonly code: "ACTION_EXECUTION_FAILED"; readonly message: string } & SettlementDetails);
 
 export interface PageSettlerOptions {
@@ -46,6 +47,7 @@ export interface PageSettlerOptions {
   readonly prepareEvents?: () => Promise<void>;
   readonly stabilityMs?: number;
   readonly timeoutMs?: number;
+  readonly mainFrameId?: string;
 }
 
 const realClock: SettlementClock = {
@@ -62,6 +64,7 @@ export class PageSettler {
   private readonly prepareEvents: () => Promise<void>;
   private readonly stabilityMs: number;
   private readonly timeoutMs: number;
+  private readonly configuredMainFrameId?: string;
 
   constructor(options: PageSettlerOptions) {
     this.tabId = options.tabId;
@@ -75,9 +78,10 @@ export class PageSettler {
     );
     this.stabilityMs = boundedPositive(options.stabilityMs, 250);
     this.timeoutMs = boundedPositive(options.timeoutMs, 10_000);
+    this.configuredMainFrameId = options.mainFrameId;
   }
 
-  settle(execute: () => Promise<unknown>): Promise<PageSettlementResult> {
+  settle(execute: () => Promise<unknown>, signal?: AbortSignal): Promise<PageSettlementResult> {
     return new Promise((resolve) => {
       let completed = false;
       let executionFinished = false;
@@ -87,6 +91,10 @@ export class PageSettler {
       let dialog: SettlementDetails["dialog"];
       let stabilityTimer: unknown;
       let timeoutTimer: unknown;
+      let mainFrameId = this.configuredMainFrameId;
+      let latestPageState: SettledPageState = { url: "about:blank", lifecycle: "loading" };
+
+      void this.safePageState().then((state) => { latestPageState = state; });
 
       let cleanupSubscription = () => {};
 
@@ -94,24 +102,25 @@ export class PageSettler {
         if (stabilityTimer !== undefined) this.clock.clearTimeout(stabilityTimer);
         if (timeoutTimer !== undefined) this.clock.clearTimeout(timeoutTimer);
         cleanupSubscription();
+        signal?.removeEventListener("abort", onAbort);
       };
 
-      const finish = async (
+      const finish = (
         status: PageSettlementResult["status"],
         extra: { code?: "SETTLEMENT_TIMEOUT" | "DEBUGGER_DETACHED" | "ACTION_EXECUTION_FAILED"; message?: string } = {},
       ) => {
         if (completed) return;
         completed = true;
         cleanup();
-        const pageState = await this.safePageState();
         const details: SettlementDetails = {
           navigation,
           targetCreated,
           ...(dialog === undefined ? {} : { dialog }),
-          pageState,
+          pageState: latestPageState,
         };
         if (status === "timeout") resolve({ status, code: "SETTLEMENT_TIMEOUT", ...details });
         else if (status === "detached") resolve({ status, code: "DEBUGGER_DETACHED", ...details });
+        else if (status === "cancelled") resolve({ status, code: "ACTION_CANCELLED", ...details });
         else if (status === "execution_failed") resolve({
           status,
           code: "ACTION_EXECUTION_FAILED",
@@ -129,6 +138,11 @@ export class PageSettler {
 
       function onEvent(event: PageEvent): void {
         if (completed) return;
+        if (event.method === "Page.frameNavigated") {
+          const frame = event.params?.frame as Record<string, unknown> | undefined;
+          if (frame && frame.parentId === undefined && typeof frame.id === "string") mainFrameId = frame.id;
+        }
+        if (isFrameEvent(event) && mainFrameId !== undefined && eventFrameId(event) !== mainFrameId) return;
         if (isNavigationStart(event)) {
           navigation = true;
           loadComplete = false;
@@ -153,9 +167,11 @@ export class PageSettler {
           return;
         }
         if (event.method === "Debugger.detached") {
-          void finish("detached");
+          finish("detached");
         }
       }
+
+      const onAbort = () => finish("cancelled");
 
       const clockClear = () => {
         if (stabilityTimer !== undefined) this.clock.clearTimeout(stabilityTimer);
@@ -168,13 +184,18 @@ export class PageSettler {
         return;
       }
       timeoutTimer = this.clock.setTimeout(() => { void finish("timeout"); }, this.timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) {
+        finish("cancelled");
+        return;
+      }
 
       let preparation: Promise<void>;
       try {
         preparation = this.prepareEvents();
       } catch (error) {
         void finish("execution_failed", {
-          message: error instanceof Error ? error.message : "Page event preparation failed",
+          message: "Page event preparation failed",
         });
         return;
       }
@@ -187,7 +208,7 @@ export class PageSettler {
         })
         .catch((error: unknown) => {
           void finish("execution_failed", {
-            message: error instanceof Error ? error.message : "Action execution failed",
+          message: "Action execution failed",
           });
         });
     });
@@ -216,17 +237,32 @@ async function prepareDefaultEvents(tabId: number): Promise<void> {
 
 class DebuggerPageEventSource implements PageEventSource {
   subscribe(tabId: number, handler: (event: PageEvent) => void): () => void {
-    const cdpHandler = (event: CdpEvent) => handler(event);
+    const cdpHandler = (source: chrome.debugger.Debuggee, method: string, params?: object) => {
+      if (source.tabId === tabId) handler({ method, params: params as Record<string, unknown> | undefined });
+    };
     const detachHandler = (source: chrome.debugger.Debuggee) => {
       if (source.tabId === tabId) handler({ method: "Debugger.detached" });
     };
-    registerEventHandler(tabId, cdpHandler);
+    chrome.debugger.onEvent.addListener(cdpHandler);
     chrome.debugger.onDetach.addListener(detachHandler);
     return () => {
-      unregisterEventHandlers(tabId);
+      chrome.debugger.onEvent.removeListener(cdpHandler);
       chrome.debugger.onDetach.removeListener(detachHandler);
     };
   }
+}
+
+function isFrameEvent(event: PageEvent): boolean {
+  return event.method === "Page.frameStartedLoading" || event.method === "Page.frameStoppedLoading" ||
+    event.method === "Page.frameNavigated" || event.method === "Page.navigatedWithinDocument" ||
+    event.method === "Page.lifecycleEvent";
+}
+
+function eventFrameId(event: PageEvent): unknown {
+  if (event.method === "Page.frameNavigated") {
+    return (event.params?.frame as Record<string, unknown> | undefined)?.id;
+  }
+  return event.params?.frameId;
 }
 
 function boundedPositive(value: number | undefined, fallback: number): number {
