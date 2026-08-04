@@ -35,6 +35,8 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
+    "@fara-platform/fara-action-schema": "workspace:*",
+    "@fara-platform/relay-protocol": "workspace:*",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
@@ -56,6 +58,9 @@
     ],
     "setupFilesAfterEnv": [
       "<rootDir>/tests/setup.ts"
-    ]
+    ],
+    "moduleNameMapper": {
+      "^@fara-platform/fara-action-schema$": "<rootDir>/../../packages/fara-action-schema/src/index.ts"
+    }
   }
 }
