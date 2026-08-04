@@ -63,10 +63,10 @@ export class InMemorySessionStore implements SessionStore {
     return true;
   }
 
-  async admitInbound(input: { sessionId: SessionId; messageId: MessageId; sequence: number; event: SessionEngineEvent }): Promise<'accepted' | 'resume' | 'duplicate' | 'gap'> {
+  async admitInbound(input: { sessionId: SessionId; messageId: MessageId; sequence: number; event: SessionEngineEvent }): Promise<'accepted' | 'resume' | 'completed' | 'duplicate' | 'gap'> {
     const existing = this.inbound.get(input.messageId);
     if (existing !== undefined) return existing.sessionId === input.sessionId && existing.sequence === input.sequence ? 'resume' : 'duplicate';
-    if (this.processed.has(input.messageId)) return 'resume';
+    if (this.processed.has(input.messageId)) return 'completed';
     const sessionId = input.sessionId;
     const sequence = input.sequence;
     const current = this.clientSequences.get(sessionId);

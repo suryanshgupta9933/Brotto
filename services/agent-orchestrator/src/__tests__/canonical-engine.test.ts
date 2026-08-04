@@ -7,6 +7,7 @@ import type {
   TrajectoryEventV1,
 } from '@fara-platform/fara-action-schema';
 import { InMemorySessionStore } from '../engine/session-store.js';
+import { InMemoryConnectionLeaseStore } from '../transport/ws-server.js';
 import { SessionEngine } from '../engine/session-engine.js';
 import { InferenceContractError, SessionEngineError } from '../engine/types.js';
 import {
@@ -677,7 +678,16 @@ describe('SessionEngine', () => {
       observation: observation(), occurredAt: '2026-08-03T10:00:00.000Z', connectionFence: 1,
     });
     await inference.firstStarted;
-    await store.claimConnectionFence(ids.session as never, 2);
+    const leases = new InMemoryConnectionLeaseStore();
+    await leases.acquire(
+      { tenantId: 'tenant-a', deviceId: 'device-a', sessionId: ids.session, audience: 'browser-extension', expiresAt: Date.now() + 60_000, credentialId: 'credential-old' },
+      'connection-old', Date.now() + 60_000, Date.now(),
+    );
+    await leases.acquire(
+      { tenantId: 'tenant-a', deviceId: 'device-a', sessionId: ids.session, audience: 'browser-extension', expiresAt: Date.now() + 60_000, credentialId: 'credential-a' },
+      'connection-new', Date.now() + 60_000, Date.now(),
+      (sessionId, fence) => store.claimConnectionFence(sessionId as never, fence),
+    );
     inference.release();
     await expect(planning).rejects.toMatchObject({ code: 'STALE_CONNECTION_FENCE' });
     expect(commandSink.commands).toHaveLength(0);

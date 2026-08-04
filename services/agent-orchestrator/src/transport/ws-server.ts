@@ -20,7 +20,7 @@ export class TransportError extends Error {
 
 export interface LeaseToken { sessionId: string; connectionId: string; fence: number; expiresAt: number }
 export interface ConnectionLeaseStore {
-  acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, now: number): Promise<LeaseToken>;
+  acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, now: number, claimFence?: (sessionId: string, fence: number) => Promise<boolean>): Promise<LeaseToken>;
   isOwner(sessionId: string, token: LeaseToken, now?: number): Promise<boolean>;
   renew(token: LeaseToken, expiresAt: number, now: number): Promise<LeaseToken | null>;
   release(token: LeaseToken): Promise<void>;
@@ -40,11 +40,12 @@ export class InMemoryConnectionLeaseStore implements ConnectionLeaseStore {
     this.backend.gate = result.then(() => undefined, () => undefined);
     return result;
   }
-  acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, now: number): Promise<LeaseToken> {
-    return this.exclusive(() => {
+  acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, now: number, claimFence?: (sessionId: string, fence: number) => Promise<boolean>): Promise<LeaseToken> {
+    return this.exclusive(async () => {
     const current = this.backend.leases.get(claims.sessionId);
     if (current !== undefined && current.expiresAt <= now) this.backend.leases.delete(claims.sessionId);
     const fence = Math.max(this.backend.fenceCounters.get(claims.sessionId) ?? 0, current?.fence ?? 0) + 1;
+    if (claimFence !== undefined && !await claimFence(claims.sessionId, fence)) throw new TransportError('LEASE_FENCED', 'Session fence rejected lease takeover');
     this.backend.fenceCounters.set(claims.sessionId, fence);
     const token = { sessionId: claims.sessionId, connectionId, fence, expiresAt };
     this.backend.leases.set(claims.sessionId, token);
@@ -167,6 +168,11 @@ export class TransportSession {
       if (admission === undefined) throw new TransportError('SEQUENCE_STORE_REQUIRED', 'Durable inbound store is required');
       if (admission === 'duplicate') throw new TransportError('SEQUENCE_REPLAY', 'Client sequence was already accepted');
       if (admission === 'gap') throw new TransportError('CLIENT_SEQUENCE_GAP', 'Client sequence contains a gap');
+      if (admission === 'completed') {
+        const completed = await this.options.store?.getProcessed(envelope.messageId);
+        if (completed === undefined || completed === null) throw new TransportError('OUTCOME_READ_FAILED', 'Completed inbound outcome cannot be loaded');
+        return { kind: 'outcome', outcome: completed };
+      }
       const durableEvent = await this.options.store?.loadInbound?.(envelope.messageId);
       if (durableEvent === undefined || durableEvent === null) throw new TransportError('INBOX_READ_FAILED', 'Durably admitted event cannot be loaded');
       event = { ...durableEvent, connectionFence } as SessionEngineEvent;
@@ -291,7 +297,14 @@ export async function registerAgentWebSocket(app: FastifyInstance, options: {
     const claims = authenticated.get(request);
     if (claims === undefined) { socket.close(4401, 'TOKEN_INVALID'); return; }
     const connectionId = randomUUID();
-    const ready = options.leases.acquire(claims, connectionId, now() + (options.heartbeatTimeoutMs ?? 30_000) * 2, now()).then((initialLease) => {
+    let closed = false;
+    let cleanup: (() => void) | undefined;
+    socket.on('close', () => { closed = true; cleanup?.(); });
+    const ready = options.leases.acquire(
+      claims, connectionId, now() + (options.heartbeatTimeoutMs ?? 30_000) * 2, now(),
+      async (sessionId, fence) => await options.store.claimConnectionFence?.(sessionId as SessionId, fence) ?? false,
+    ).then(async (initialLease) => {
+      if (closed) { await options.leases.release(initialLease); return null; }
       const state = { lease: initialLease };
       const session = new TransportSession({ claims, recipientId: options.recipientId, verifier: options.envelopeVerifier, engine: options.engine, store: options.store, now });
       const outboundLimit = options.maxOutboundBytes ?? 1_000_000;
@@ -306,13 +319,18 @@ export async function registerAgentWebSocket(app: FastifyInstance, options: {
       }); }, options.heartbeatTimeoutMs ?? 30_000);
       timer.unref();
       socket.on('pong', () => { alive = true; });
-      socket.on('close', () => { clearInterval(timer); detach?.(); void options.leases.release(state.lease); });
+      cleanup = () => { clearInterval(timer); detach?.(); void options.leases.release(state.lease); };
+      if (closed) { cleanup(); return null; }
       return { state, session, queue };
     });
-    socket.on('message', (data) => { void ready.then(({ state, session, queue }) => options.leases.runIfOwner(state.lease, now(), async () => {
+    socket.on('message', (data) => { void ready.then((active) => {
+      if (active === null || closed) return undefined;
+      const { state, session, queue } = active;
+      return options.leases.runIfOwner(state.lease, now(), async () => {
       const result = await session.receive(normalizeWire(data), state.lease.fence);
       if (result.kind === 'outcome' && result.responseWire !== undefined) await queue.enqueue(result.responseWire);
-    })).catch((error: unknown) => socket.close(closeCode(error), safeReason(error))); });
+      });
+    }).catch((error: unknown) => socket.close(closeCode(error), safeReason(error))); });
     void ready.catch((error: unknown) => socket.close(closeCode(error), safeReason(error)));
   });
 }

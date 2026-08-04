@@ -184,4 +184,19 @@ describe('websocket reconciliation transport', () => {
     await expect(reconnect.receive(message, 2)).resolves.toMatchObject({ kind: 'outcome', outcome: { kind: 'terminal' } });
     expect(engine.handle).toHaveBeenCalledTimes(2);
   });
+
+  test('returns a completed durable outcome when the response was lost', async () => {
+    const outcome = { kind: 'terminal' as const, sessionId: ids.session, messageId: '27000000-0000-4000-8000-000000000001', revision: 4, state: 'CANCELLED' as const, pendingActionIds: [] };
+    const store = {
+      admitInbound: jest.fn(async () => 'completed' as const),
+      getProcessed: jest.fn(async () => outcome),
+      loadInbound: jest.fn(async () => { throw new Error('completed inbox was deleted'); }),
+    };
+    const engine: TransportEngine = { handle: jest.fn() };
+    const message = await wire(1, { type: 'task.cancelled', taskId: '60000000-0000-4000-8000-000000000001', occurredAt: '2023-11-14T22:13:20.000Z', reason: 'offline cancellation', observationId: '70000000-0000-4000-8000-000000000001' }, outcome.messageId);
+    const reconnect = new TransportSession({ claims, recipientId: ids.recipient, verifier: signer, engine, store: store as never, now: () => 1_700_000_000_000 });
+    await expect(reconnect.receive(message, 2)).resolves.toEqual({ kind: 'outcome', outcome });
+    expect(store.loadInbound).not.toHaveBeenCalled();
+    expect(engine.handle).not.toHaveBeenCalled();
+  });
 });

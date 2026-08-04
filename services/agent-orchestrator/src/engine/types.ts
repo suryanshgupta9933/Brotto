@@ -254,7 +254,7 @@ export interface SessionStore {
   compareAndSwap(session: CanonicalSession, expectedRevision: number, expectedConnectionFence?: number): Promise<void>;
   getProcessed(messageId: MessageId): Promise<StoredOutcome | null>;
   claimConnectionFence?(sessionId: SessionId, fence: number): Promise<boolean>;
-  admitInbound?(input: { sessionId: SessionId; messageId: MessageId; sequence: number; event: SessionEngineEvent }): Promise<'accepted' | 'resume' | 'duplicate' | 'gap'>;
+  admitInbound?(input: { sessionId: SessionId; messageId: MessageId; sequence: number; event: SessionEngineEvent }): Promise<'accepted' | 'resume' | 'completed' | 'duplicate' | 'gap'>;
   loadInbound?(messageId: MessageId): Promise<SessionEngineEvent | null>;
 }
 

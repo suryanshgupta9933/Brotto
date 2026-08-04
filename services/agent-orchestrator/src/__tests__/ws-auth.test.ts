@@ -121,4 +121,31 @@ describe('connection authentication', () => {
     await closed;
     await app.close();
   });
+
+  test('releases a delayed lease when the socket closes before acquisition finishes', async () => {
+    let resolveAcquire!: (token: { sessionId: string; connectionId: string; fence: number; expiresAt: number }) => void;
+    const acquisition = new Promise<{ sessionId: string; connectionId: string; fence: number; expiresAt: number }>((resolve) => { resolveAcquire = resolve; });
+    const release = jest.fn(async () => undefined);
+    const leases = {
+      acquire: jest.fn(async () => acquisition),
+      isOwner: jest.fn(async () => true), renew: jest.fn(), release,
+      runIfOwner: jest.fn(async (_token: unknown, _now: number, work: () => Promise<unknown>) => work()),
+    };
+    const app = await createOrchestratorApp({ tokenVerifier: { verify: async () => claims }, envelopeVerifier: { sign: async () => 'valid', verify: async () => true },
+      store: new InMemorySessionStore(), leases: leases as never, credentials: new InMemoryConnectionCredentialStore(), recipientId: '40000000-0000-4000-8000-000000000001',
+      allowedOrigins: new Set(['chrome-extension://trusted-extension']), now: () => now, createEngine: () => ({ handle: jest.fn() as never }),
+    });
+    await app.ready();
+    const socket = await app.injectWS('/v1/agent', { headers: { origin: 'chrome-extension://trusted-extension', 'sec-websocket-protocol': 'fara-v1, fara-credential.token' } });
+    const closed = once(socket, 'close');
+    socket.terminate();
+    await closed;
+    const token = { sessionId: claims.sessionId, connectionId: 'late', fence: 1, expiresAt: now + 60_000 };
+    resolveAcquire(token);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(release).toHaveBeenCalledWith(token);
+    expect(leases.isOwner).not.toHaveBeenCalled();
+    expect(leases.renew).not.toHaveBeenCalled();
+    await app.close();
+  });
 });

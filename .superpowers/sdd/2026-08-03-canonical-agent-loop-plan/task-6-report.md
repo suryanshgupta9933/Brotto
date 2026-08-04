@@ -12,7 +12,10 @@ Implemented the authenticated browser-agent WebSocket transport and closed the f
 - Active connections use an injectable shared lease store with durable monotonically increasing fencing counters that survive release/reconnect and are shared across store instances, plus renewal, takeover, and expiry checks.
 - App composition constructs exactly one transport hub and supplies it as the engine command sink; a real Fastify WebSocket test proves engine-to-socket delivery.
 - Lease-owned message processing is one fenced work boundary. Every durable engine transition/CAS checks the claimed connection fence atomically, so async work from a superseded connection cannot commit after takeover.
+- Lease acquisition coordinates its new fence with the durable session store before publishing the connection as active. A paused old planner cannot persist or dispatch once takeover acquisition succeeds.
 - Client sequence admission and durable inbox storage are atomic. Accepted work survives handler failure/reconnect, is resumed from its stored event, and is removed atomically with the persisted outcome; duplicates and gaps are rejected before engine work.
+- A response-lost retry returns its stored durable outcome directly; completed messages never depend on their intentionally deleted inbox entry.
+- Socket close cleanup is registered before asynchronous lease acquisition. A close during acquisition releases the eventual lease and never attaches the transport hub or starts heartbeat work.
 - Heartbeat, message/byte rate limits, signature/schema/expiry/replay checks, and cancellation routing remain enforced.
 
 ## Verification
@@ -31,7 +34,7 @@ NODE_OPTIONS='--experimental-vm-modules' ../../services/agent-orchestrator/node_
 
 Results:
 
-- agent-orchestrator: 11 suites, 227 tests passed; TypeScript build passed. The focused transport/engine run passed 70 tests without open-handle warnings.
+- agent-orchestrator: 11 suites, 229 tests passed; TypeScript build passed. The focused transport/engine run passed 72 tests without open-handle warnings.
 - relay-protocol: 6 suites, 84 tests passed; TypeScript build passed.
 
 No cookies, authorization headers, local/session storage, password values, or visited-site credentials are represented by the transport schema or logs.
