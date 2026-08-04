@@ -22,6 +22,9 @@ Implementation and independent-review hardening are complete.
   idempotency, resolves and re-verifies DNS, binds and consumes approvals,
   enforces client policy, and settles with AbortSignal propagation. There is no
   exported raw executor or caller-mintable execution authorization.
+- The former callback-accepting builder is no longer exported. Cross-module
+  physical execution requires a one-shot permit held in a module-private
+  WeakSet, so caller-created objects fail closed.
 - A trusted observation authority supplies attachment/freshness-verified policy
   context, capture coordinates, and the main-frame ID. Settlement ignores
   subframe and unscoped DOM events when that ID is present.
@@ -31,24 +34,28 @@ Implementation and independent-review hardening are complete.
   DNS failures and any private, loopback, link-local, reserved, metadata, or
   mixed public/private resolution fail closed. Navigation re-resolves before
   execution to detect rebinding within extension constraints.
+- `history_back` is normalized from the trusted browser history response into a
+  checked navigation before execution. Missing, untrusted, private, or unstable
+  history destinations are denied before `Page.navigate`.
 - Approval grants bind approval/action/policy/observation IDs, the complete
   target/action digest, idempotency key, grant expiry, and command expiry. Both
   command and approval expiry are rechecked immediately before physical action.
-- Page-state capture cannot hang completion; timeout/settlement returns the
-  latest sanitized trusted state available.
+- Page-state capture cannot hang completion; bounded reads refresh initially,
+  after actions/events, and at terminal settlement. Timeout/settlement returns
+  the latest successful sanitized state, and failures never replace it.
 
 ## Verification
 
 - Scoped test command using the existing local Jest binary:
   `./node_modules/.bin/jest --runInBand client-policy canonical-action-executor canonical-execution-pipeline page-settler`
   - 4 suites passed
-  - 53 tests passed
+  - 56 tests passed
 - Extension build using the existing local build entry point:
   `node build.mjs`
   - passed (`Build complete!`)
 - Full TypeScript check reaches three unrelated existing errors in
   `src/background.ts` (lines 126, 136, and 246); it reports no Task 8 errors.
-- Full Jest run reaches 116 passing tests, then fails three unrelated legacy
+- Full Jest run reaches 119 passing tests, then fails three unrelated legacy
   test-suite compile checks in `pairing.test.ts`, `crypto.test.ts`, and
   `debugger.test.ts`.
 - The requested pnpm command was not allowed to purge/reinstall the shared

@@ -4,6 +4,7 @@ import {
   type SemanticTarget,
 } from "@fara-platform/fara-action-schema";
 import {
+  executePermittedPhysicalAction,
   type ActionExecutionResult,
   type CdpSender,
 } from "./action-executor";
@@ -94,19 +95,24 @@ export interface CanonicalExecutionPipelineOptions {
   readonly privateNetworkOrigins?: readonly string[];
 }
 
-type ExecutePhysicalAction = (command: ActionCommandV1, context: TrustedExecutionContext, signal?: AbortSignal) => Promise<ActionExecutionResult>;
+const physicalExecutionPermits = new WeakSet<object>();
+
+/** @internal Validates and consumes an opaque one-shot permit that callers cannot mint. */
+export function consumePhysicalExecutionPermit(permit: object): boolean {
+  if (!physicalExecutionPermits.has(permit)) return false;
+  physicalExecutionPermits.delete(permit);
+  return true;
+}
 
 class CanonicalExecutionPipeline {
   private readonly options: CanonicalExecutionPipelineOptions;
-  private readonly executePhysicalAction: ExecutePhysicalAction;
   private readonly policy: ClientPolicy;
   private readonly completed = new Map<string, PipelineResult>();
   private readonly inFlight = new Map<string, Promise<PipelineResult>>();
   private readonly idempotencySignatures = new Map<string, string>();
 
-  constructor(options: CanonicalExecutionPipelineOptions, executePhysicalAction: ExecutePhysicalAction) {
+  constructor(options: CanonicalExecutionPipelineOptions) {
     this.options = options;
-    this.executePhysicalAction = executePhysicalAction;
     this.policy = new ClientPolicy({
       allowedOrigins: options.allowedOrigins,
       privateNetworkOrigins: options.privateNetworkOrigins,
@@ -151,16 +157,23 @@ class CanonicalExecutionPipeline {
         : { status: "denied", code: "OBSERVATION_AUTHORITY_DENIED" };
     }
 
-    const targetCheck = verifyTargetFidelity(command, trusted.observation.semanticTargets, trusted.capture);
+    let executableCommand = command;
+    if (command.action.type === "history_back") {
+      const destination = await historyDestination(this.options.tabId, command.action.steps ?? 1, this.options.send, signal);
+      if (destination === undefined) return { status: "denied", code: "HISTORY_ENTRY_UNAVAILABLE" };
+      executableCommand = { ...command, action: { type: "visit_url", url: destination.href } } as ActionCommandV1;
+    }
+
+    const targetCheck = verifyTargetFidelity(executableCommand, trusted.observation.semanticTargets, trusted.capture);
     if (targetCheck !== undefined) return { status: "denied", code: targetCheck };
 
-    if (command.action.type === "visit_url") {
-      const hostname = stripBrackets(new URL(command.action.url).hostname);
+    if (executableCommand.action.type === "visit_url") {
+      const hostname = stripBrackets(new URL(executableCommand.action.url).hostname);
       if (!isIpLiteral(hostname) && this.options.trustedHostnamePolicy?.isTrusted(hostname) !== true) {
         return { status: "denied", code: "HOSTNAME_NOT_TRUSTED" };
       }
     }
-    const destinations = navigationDestinations(command, trusted.observation.url);
+    const destinations = navigationDestinations(executableCommand, trusted.observation.url);
     const pins = new Map<string, readonly string[]>();
     for (const destination of destinations) {
       const resolution = await resolvePublic(destination, this.options.resolver, signal, this.options.resolverTimeoutMs ?? 1_000);
@@ -185,8 +198,8 @@ class CanonicalExecutionPipeline {
     if (policy.decision === "requires_approval") return { status: "approval_required", code: policy.code };
     if (policy.decision === "denied") return { status: "denied", code: policy.code };
 
-    if (command.action.type === "visit_url") {
-      const destination = new URL(command.action.url);
+    if (executableCommand.action.type === "visit_url") {
+      const destination = new URL(executableCommand.action.url);
       const second = await resolvePublic(destination, this.options.resolver, signal, this.options.resolverTimeoutMs ?? 1_000);
       if (second.code === "ACTION_CANCELLED") return { status: "cancelled", code: "ACTION_CANCELLED" };
       const first = pins.get(destination.hostname) ?? [];
@@ -213,7 +226,9 @@ class CanonicalExecutionPipeline {
         preExecutionDenial = "APPROVAL_PROOF_INVALID";
         return;
       }
-      execution = await this.executePhysicalAction(command, trusted, signal);
+      const permit = {};
+      physicalExecutionPermits.add(permit);
+      execution = await executePermittedPhysicalAction(permit, this.options, executableCommand, trusted, signal);
       if (!execution.ok) throw new Error("Controlled action failed");
     }, signal);
     if (signal?.aborted || settlement.status === "cancelled") return { status: "cancelled", code: "ACTION_CANCELLED" };
@@ -224,12 +239,29 @@ class CanonicalExecutionPipeline {
   }
 }
 
-/** @internal Called only by the public factory that owns the physical executor. */
-export function buildCanonicalExecutionPipeline(
+async function historyDestination(tabId: number, steps: number, sender: CdpSender | undefined, signal?: AbortSignal): Promise<URL | undefined> {
+  if (signal?.aborted) return undefined;
+  const send = sender ?? ((id, command) => import("../debugger").then(({ sendCommand }) => sendCommand(id, command)));
+  try {
+    const response = await send(tabId, { method: "Page.getNavigationHistory" }) as {
+      currentIndex?: unknown;
+      entries?: Array<{ url?: unknown }>;
+    };
+    if (!Number.isInteger(response.currentIndex) || !Array.isArray(response.entries)) return undefined;
+    const entry = response.entries[(response.currentIndex as number) - steps];
+    if (typeof entry?.url !== "string") return undefined;
+    const url = new URL(entry.url);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username !== "" || url.password !== "") return undefined;
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
+export function createCanonicalExecutionPipeline(
   options: CanonicalExecutionPipelineOptions,
-  executePhysicalAction: ExecutePhysicalAction,
 ): { execute(input: unknown, signal?: AbortSignal): Promise<PipelineResult> } {
-  return new CanonicalExecutionPipeline(options, executePhysicalAction);
+  return new CanonicalExecutionPipeline(options);
 }
 
 export async function actionAuthorizationDigest(command: Pick<ActionCommandV1, "action" | "actionId" | "observationId" | "idempotencyKey">): Promise<string> {

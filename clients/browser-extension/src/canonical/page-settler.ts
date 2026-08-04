@@ -47,6 +47,7 @@ export interface PageSettlerOptions {
   readonly prepareEvents?: () => Promise<void>;
   readonly stabilityMs?: number;
   readonly timeoutMs?: number;
+  readonly pageStateReadTimeoutMs?: number;
   readonly mainFrameId?: string;
   readonly initialPageState?: SettledPageState;
 }
@@ -65,6 +66,7 @@ export class PageSettler {
   private readonly prepareEvents: () => Promise<void>;
   private readonly stabilityMs: number;
   private readonly timeoutMs: number;
+  private readonly pageStateReadTimeoutMs: number;
   private readonly configuredMainFrameId?: string;
   private readonly initialPageState: SettledPageState;
 
@@ -80,6 +82,7 @@ export class PageSettler {
     );
     this.stabilityMs = boundedPositive(options.stabilityMs, 250);
     this.timeoutMs = boundedPositive(options.timeoutMs, 10_000);
+    this.pageStateReadTimeoutMs = boundedPositive(options.pageStateReadTimeoutMs, 250);
     this.configuredMainFrameId = options.mainFrameId;
     this.initialPageState = options.initialPageState === undefined
       ? { url: "about:blank", lifecycle: "loading" }
@@ -89,6 +92,7 @@ export class PageSettler {
   settle(execute: () => Promise<unknown>, signal?: AbortSignal): Promise<PageSettlementResult> {
     return new Promise((resolve) => {
       let completed = false;
+      let finishing = false;
       let executionFinished = false;
       let navigation = false;
       let loadComplete = false;
@@ -99,7 +103,12 @@ export class PageSettler {
       let mainFrameId = this.configuredMainFrameId;
       let latestPageState: SettledPageState = this.initialPageState;
 
-      void this.safePageState().then((state) => { latestPageState = state; });
+      const refreshPageState = async () => {
+        await this.safePageState().then((state) => {
+          if (!completed && state !== undefined) latestPageState = state;
+        });
+      };
+      void refreshPageState();
 
       let cleanupSubscription = () => {};
 
@@ -110,11 +119,13 @@ export class PageSettler {
         signal?.removeEventListener("abort", onAbort);
       };
 
-      const finish = (
+      const finish = async (
         status: PageSettlementResult["status"],
         extra: { code?: "SETTLEMENT_TIMEOUT" | "DEBUGGER_DETACHED" | "ACTION_EXECUTION_FAILED"; message?: string } = {},
       ) => {
-        if (completed) return;
+        if (completed || finishing) return;
+        finishing = true;
+        await refreshPageState();
         completed = true;
         cleanup();
         const details: SettlementDetails = {
@@ -143,6 +154,7 @@ export class PageSettler {
 
       function onEvent(event: PageEvent): void {
         if (completed) return;
+        void refreshPageState();
         if (event.method === "Page.frameNavigated") {
           const frame = event.params?.frame as Record<string, unknown> | undefined;
           if (frame && frame.parentId === undefined && typeof frame.id === "string") mainFrameId = frame.id;
@@ -185,7 +197,7 @@ export class PageSettler {
       };
 
       cleanupSubscription = this.events.subscribe(this.tabId, onEvent);
-      if (completed) {
+      if (completed || finishing) {
         cleanupSubscription();
         return;
       }
@@ -207,9 +219,10 @@ export class PageSettler {
       }
 
       void preparation
-        .then(() => completed ? undefined : execute())
+        .then(() => completed || finishing ? undefined : execute())
         .then(() => {
           executionFinished = true;
+          void refreshPageState();
           scheduleStability();
         })
         .catch((error: unknown) => {
@@ -220,11 +233,20 @@ export class PageSettler {
     });
   }
 
-  private async safePageState(): Promise<SettledPageState> {
+  private async safePageState(): Promise<SettledPageState | undefined> {
+    let timeout: unknown;
     try {
-      return sanitizePageState(await this.getPageState());
+      const state = await Promise.race([
+        this.getPageState(),
+        new Promise<undefined>((resolve) => {
+          timeout = this.clock.setTimeout(() => resolve(undefined), this.pageStateReadTimeoutMs);
+        }),
+      ]);
+      return state === undefined ? undefined : sanitizePageState(state);
     } catch {
-      return { url: "about:blank", lifecycle: "loading" };
+      return undefined;
+    } finally {
+      if (timeout !== undefined) this.clock.clearTimeout(timeout);
     }
   }
 }

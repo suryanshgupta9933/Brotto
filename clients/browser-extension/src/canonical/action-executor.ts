@@ -3,9 +3,9 @@ import { sendCommand } from "../debugger";
 import { sanitizeObservationUrl } from "./redaction";
 import { transformCapturedPoint, type CapturedCoordinateContext } from "./coordinate-context";
 import {
-  buildCanonicalExecutionPipeline,
   type CanonicalExecutionPipelineOptions,
   type PipelineResult,
+  consumePhysicalExecutionPermit,
 } from "./execution-pipeline";
 
 export { transformCapturedPoint } from "./coordinate-context";
@@ -266,10 +266,19 @@ class CanonicalActionExecutor {
 
 export type { ObservationAuthority } from "./execution-pipeline";
 
-export function createCanonicalExecutionPipeline(
+export { createCanonicalExecutionPipeline } from "./execution-pipeline";
+
+/** @internal Unusable without the one-shot module-private permit minted by the pipeline. */
+export async function executePermittedPhysicalAction(
+  permit: object,
   options: CanonicalExecutionPipelineOptions,
-): { execute(input: unknown, signal?: AbortSignal): Promise<PipelineResult> } {
-  return buildCanonicalExecutionPipeline(options, async (command, trusted, signal) => {
+  command: ActionCommandV1,
+  trusted: import("./execution-pipeline").TrustedExecutionContext,
+  signal?: AbortSignal,
+): Promise<ActionExecutionResult> {
+  if (!consumePhysicalExecutionPermit(permit)) {
+    return failure("POLICY_AUTHORIZATION_REQUIRED", "Physical execution permit is invalid", false);
+  }
     const executor = new CanonicalActionExecutor({
       tabId: options.tabId,
       capture: trusted.capture,
@@ -278,7 +287,6 @@ export function createCanonicalExecutionPipeline(
       wait: options.wait,
     });
     return executor.execute(command as never, signal);
-  });
 }
 
 

@@ -248,10 +248,35 @@ describe("PageSettler", () => {
     const settlement = settler.settle(async () => {});
     await flush();
     clock.advanceBy(100);
+    await flush();
+    clock.advanceBy(250);
 
     await expect(settlement).resolves.toMatchObject({
       status: "settled",
       pageState: { url: "https://previous.example/private", lifecycle: "interactive" },
+    });
+  });
+
+  it("returns the newest successful sanitized post-action page state", async () => {
+    const clock = new FakeClock();
+    let reads = 0;
+    const settler = new PageSettler({
+      tabId: 7,
+      events: new FakeEvents(),
+      clock,
+      initialPageState: { url: "https://initial.example/", lifecycle: "interactive" },
+      getPageState: async () => reads++ === 0
+        ? ({ url: "https://before.example/", lifecycle: "interactive" })
+        : ({ url: "https://after.example/result?secret=value", lifecycle: "complete" }),
+      stabilityMs: 100,
+    });
+    const settlement = settler.settle(async () => {});
+    await flush();
+    clock.advanceBy(100);
+
+    await expect(settlement).resolves.toMatchObject({
+      status: "settled",
+      pageState: { url: "https://after.example/result", lifecycle: "complete" },
     });
   });
 

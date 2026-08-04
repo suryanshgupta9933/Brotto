@@ -59,6 +59,7 @@ function setup(options: {
   now?: number | (() => number);
   trustedHostname?: boolean;
   authority?: ObservationAuthority;
+  historyUrl?: string;
 } = {}) {
   const fixedNow = typeof options.now === "number" ? options.now : Date.parse("2026-08-03T10:00:02.000Z");
   const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
@@ -88,7 +89,13 @@ function setup(options: {
     trustedHostnamePolicy: { isTrusted: (hostname) => options.trustedHostname ?? (hostname === "example.test" || hostname.endsWith(".example")) },
     approvals: options.approvals ?? new InMemoryApprovalStore(),
     createSettler: () => ({ settle } as unknown as PageSettler),
-    send: async (_tabId, cdp) => { calls.push(cdp); return {}; },
+    send: async (_tabId, cdp) => {
+      calls.push(cdp);
+      if (cdp.method === "Page.getNavigationHistory") {
+        return { currentIndex: 1, entries: [{ url: options.historyUrl ?? "https://previous.example/" }, { url: "https://example.test/" }] };
+      }
+      return {};
+    },
     now: typeof options.now === "function" ? options.now : () => fixedNow,
   });
   return { calls, pipeline, settle };
@@ -127,6 +134,22 @@ describe("CanonicalExecutionPipeline", () => {
 
     await expect(pipeline.execute(command({ type: "visit_url", url: "https://93.184.216.34/path" })))
       .resolves.toMatchObject({ status: "succeeded" });
+  });
+
+  it("denies history navigation to an untrusted hostname before navigating", async () => {
+    const { calls, pipeline } = setup({ historyUrl: "https://untrusted.invalid/private" });
+
+    await expect(pipeline.execute(command({ type: "history_back", steps: 1 })))
+      .resolves.toMatchObject({ status: "denied", code: "HOSTNAME_NOT_TRUSTED" });
+    expect(calls.map(({ method }) => method)).toEqual(["Page.getNavigationHistory"]);
+  });
+
+  it("denies history navigation to a private literal before navigating", async () => {
+    const { calls, pipeline } = setup({ historyUrl: "http://127.0.0.1/admin" });
+
+    await expect(pipeline.execute(command({ type: "history_back", steps: 1 })))
+      .resolves.toMatchObject({ status: "denied", code: "PRIVATE_NETWORK_DENIED" });
+    expect(calls.map(({ method }) => method)).toEqual(["Page.getNavigationHistory"]);
   });
 
   it("bounds a resolver that ignores AbortSignal", async () => {
