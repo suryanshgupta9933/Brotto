@@ -241,6 +241,7 @@ describe("PageSettler", () => {
       events: new FakeEvents(),
       clock,
       getPageState: () => new Promise(() => {}),
+      initialPageState: { url: "https://previous.example/private?token=secret", lifecycle: "interactive" },
       stabilityMs: 100,
       timeoutMs: 1_000,
     });
@@ -248,7 +249,10 @@ describe("PageSettler", () => {
     await flush();
     clock.advanceBy(100);
 
-    await expect(settlement).resolves.toMatchObject({ status: "settled", pageState: { url: "about:blank" } });
+    await expect(settlement).resolves.toMatchObject({
+      status: "settled",
+      pageState: { url: "https://previous.example/private", lifecycle: "interactive" },
+    });
   });
 
   it("ignores subframe navigation and load events", async () => {

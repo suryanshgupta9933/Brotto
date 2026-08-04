@@ -21,20 +21,10 @@ export type ClientPolicyCode =
   | "HIGH_IMPACT_APPROVAL_REQUIRED"
   | "APPROVAL_PROOF_INVALID";
 
-export interface ExecutionAuthorization { readonly kind: "policy_authorization" }
-
 export type ClientPolicyResult =
-  | { readonly decision: "allowed"; readonly code: "ALLOWED"; readonly reason: string; readonly authorization: ExecutionAuthorization }
+  | { readonly decision: "allowed"; readonly code: "ALLOWED"; readonly reason: string }
   | { readonly decision: "requires_approval"; readonly code: "HIGH_IMPACT_APPROVAL_REQUIRED"; readonly reason: string }
   | { readonly decision: "denied"; readonly code: Exclude<ClientPolicyCode, "ALLOWED" | "HIGH_IMPACT_APPROVAL_REQUIRED">; readonly reason: string };
-
-const issuedAuthorizations = new WeakMap<object, string>();
-
-export function consumePolicyAuthorization(command: ClientPolicyCommand, authorization: ExecutionAuthorization | undefined): boolean {
-  if (authorization === undefined || issuedAuthorizations.get(authorization) !== JSON.stringify(command.action)) return false;
-  issuedAuthorizations.delete(authorization);
-  return true;
-}
 
 export type ClientPolicyCommand = Pick<
   ActionCommandV1,
@@ -107,9 +97,7 @@ export class ClientPolicy {
       }
     }
 
-    const authorization: ExecutionAuthorization = Object.freeze({ kind: "policy_authorization" });
-    issuedAuthorizations.set(authorization, JSON.stringify(command.action));
-    return { decision: "allowed", code: "ALLOWED", reason: "Client policy permits the action", authorization };
+    return { decision: "allowed", code: "ALLOWED", reason: "Client policy permits the action" };
   }
 
   private evaluateNavigation(rawUrl: string): ClientPolicyResult | undefined {

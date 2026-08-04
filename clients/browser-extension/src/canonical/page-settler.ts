@@ -48,6 +48,7 @@ export interface PageSettlerOptions {
   readonly stabilityMs?: number;
   readonly timeoutMs?: number;
   readonly mainFrameId?: string;
+  readonly initialPageState?: SettledPageState;
 }
 
 const realClock: SettlementClock = {
@@ -65,6 +66,7 @@ export class PageSettler {
   private readonly stabilityMs: number;
   private readonly timeoutMs: number;
   private readonly configuredMainFrameId?: string;
+  private readonly initialPageState: SettledPageState;
 
   constructor(options: PageSettlerOptions) {
     this.tabId = options.tabId;
@@ -79,6 +81,9 @@ export class PageSettler {
     this.stabilityMs = boundedPositive(options.stabilityMs, 250);
     this.timeoutMs = boundedPositive(options.timeoutMs, 10_000);
     this.configuredMainFrameId = options.mainFrameId;
+    this.initialPageState = options.initialPageState === undefined
+      ? { url: "about:blank", lifecycle: "loading" }
+      : sanitizePageState(options.initialPageState);
   }
 
   settle(execute: () => Promise<unknown>, signal?: AbortSignal): Promise<PageSettlementResult> {
@@ -92,7 +97,7 @@ export class PageSettler {
       let stabilityTimer: unknown;
       let timeoutTimer: unknown;
       let mainFrameId = this.configuredMainFrameId;
-      let latestPageState: SettledPageState = { url: "about:blank", lifecycle: "loading" };
+      let latestPageState: SettledPageState = this.initialPageState;
 
       void this.safePageState().then((state) => { latestPageState = state; });
 
@@ -143,6 +148,7 @@ export class PageSettler {
           if (frame && frame.parentId === undefined && typeof frame.id === "string") mainFrameId = frame.id;
         }
         if (isFrameEvent(event) && mainFrameId !== undefined && eventFrameId(event) !== mainFrameId) return;
+        if (event.method === "DOM.documentUpdated" && mainFrameId !== undefined && event.params?.frameId !== mainFrameId) return;
         if (isNavigationStart(event)) {
           navigation = true;
           loadComplete = false;
@@ -216,16 +222,19 @@ export class PageSettler {
 
   private async safePageState(): Promise<SettledPageState> {
     try {
-      const state = await this.getPageState();
-      return {
-        url: sanitizeObservationUrl(state.url),
-        lifecycle: state.lifecycle,
-        ...(state.title === undefined ? {} : { title: sanitizeBrowserText(state.title, 512) }),
-      };
+      return sanitizePageState(await this.getPageState());
     } catch {
       return { url: "about:blank", lifecycle: "loading" };
     }
   }
+}
+
+function sanitizePageState(state: SettledPageState): SettledPageState {
+  return {
+    url: sanitizeObservationUrl(state.url),
+    lifecycle: state.lifecycle,
+    ...(state.title === undefined ? {} : { title: sanitizeBrowserText(state.title, 512) }),
+  };
 }
 
 async function prepareDefaultEvents(tabId: number): Promise<void> {

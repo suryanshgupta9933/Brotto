@@ -1,5 +1,8 @@
 import {
-  CanonicalExecutionPipeline,
+  createCanonicalExecutionPipeline,
+  type ObservationAuthority,
+} from "../src/canonical/action-executor";
+import {
   InMemoryApprovalStore,
   actionAuthorizationDigest,
   type ApprovalGrant,
@@ -53,8 +56,11 @@ function setup(options: {
   resolver?: DnsResolver;
   approvals?: InMemoryApprovalStore;
   observationTargets?: ReturnType<typeof target>[];
-  now?: number;
+  now?: number | (() => number);
+  trustedHostname?: boolean;
+  authority?: ObservationAuthority;
 } = {}) {
+  const fixedNow = typeof options.now === "number" ? options.now : Date.parse("2026-08-03T10:00:02.000Z");
   const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
   const settle = jest.fn(async (execute: () => Promise<unknown>, signal?: AbortSignal) => {
     if (signal?.aborted) return { status: "cancelled", code: "ACTION_CANCELLED" };
@@ -66,20 +72,24 @@ function setup(options: {
       pageState: { url: "https://example.test/", lifecycle: "complete" },
     };
   });
-  const pipeline = new CanonicalExecutionPipeline({
+  const observation = {
+    observationId: IDS.observationId,
+    url: "https://example.test/",
+    semanticTargets: options.observationTargets ?? [target()],
+  } as never;
+  const pipeline = createCanonicalExecutionPipeline({
     tabId: 7,
-    attachedTabIds: new Set([7]),
-    observation: {
-      observationId: IDS.observationId,
-      url: "https://example.test/",
-      semanticTargets: options.observationTargets ?? [target()],
-    } as never,
-    capture: { viewportWidth: 800, viewportHeight: 600, devicePixelRatio: 2, zoom: 1.25 },
+    observationAuthority: options.authority ?? { verify: async () => ({
+      observation,
+      capture: { viewportWidth: 800, viewportHeight: 600, devicePixelRatio: 2, zoom: 1.25 },
+      mainFrameId: "main",
+    }) },
     resolver: options.resolver ?? { resolve: async () => ["93.184.216.34"] },
+    trustedHostnamePolicy: { isTrusted: (hostname) => options.trustedHostname ?? (hostname === "example.test" || hostname.endsWith(".example")) },
     approvals: options.approvals ?? new InMemoryApprovalStore(),
-    settler: { settle } as unknown as PageSettler,
+    createSettler: () => ({ settle } as unknown as PageSettler),
     send: async (_tabId, cdp) => { calls.push(cdp); return {}; },
-    now: () => options.now ?? Date.parse("2026-08-03T10:00:02.000Z"),
+    now: typeof options.now === "function" ? options.now : () => fixedNow,
   });
   return { calls, pipeline, settle };
 }
@@ -93,6 +103,55 @@ describe("CanonicalExecutionPipeline", () => {
     });
     expect(calls).toHaveLength(0);
     expect(settle).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when trusted observation authority rejects attachment or freshness", async () => {
+    const authority: ObservationAuthority = { verify: async () => { throw new Error("stale secret detail"); } };
+    const { calls, pipeline } = setup({ authority });
+
+    await expect(pipeline.execute(command({ type: "scroll", deltaX: 0, deltaY: 50 })))
+      .resolves.toMatchObject({ status: "denied", code: "OBSERVATION_AUTHORITY_DENIED" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("fails closed for hostname navigation without exact administrator trust", async () => {
+    const { calls, pipeline } = setup({ trustedHostname: false });
+
+    await expect(pipeline.execute(command({ type: "visit_url", url: "https://untrusted.example/path" })))
+      .resolves.toMatchObject({ status: "denied", code: "HOSTNAME_NOT_TRUSTED" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("allows a literal public IP without hostname trust", async () => {
+    const { pipeline } = setup({ trustedHostname: false });
+
+    await expect(pipeline.execute(command({ type: "visit_url", url: "https://93.184.216.34/path" })))
+      .resolves.toMatchObject({ status: "succeeded" });
+  });
+
+  it("bounds a resolver that ignores AbortSignal", async () => {
+    jest.useFakeTimers();
+    const { pipeline } = setup({
+      trustedHostname: true,
+      resolver: { resolve: () => new Promise(() => {}) },
+    });
+    const result = pipeline.execute(command({ type: "visit_url", url: "https://trusted.example/" }));
+    await jest.advanceTimersByTimeAsync(1_001);
+
+    await expect(result).resolves.toMatchObject({ status: "denied", code: "DNS_RESOLUTION_FAILED" });
+    jest.useRealTimers();
+  });
+
+  it("cancels immediately when a resolver ignores AbortSignal", async () => {
+    jest.useFakeTimers();
+    const controller = new AbortController();
+    const { pipeline } = setup({ resolver: { resolve: () => new Promise(() => {}) } });
+    const result = pipeline.execute(command({ type: "scroll", deltaX: 0, deltaY: 50 }), controller.signal);
+    controller.abort();
+    await Promise.resolve();
+
+    await expect(result).resolves.toMatchObject({ status: "cancelled", code: "ACTION_CANCELLED" });
+    jest.useRealTimers();
   });
 
   it("executes a duplicate idempotency key physically once and returns the cached result", async () => {
@@ -196,6 +255,26 @@ describe("CanonicalExecutionPipeline", () => {
     approvals.register(grant);
     expect(approvals.consume(input as never, digest, Date.parse("2026-08-03T10:00:02.000Z"))).toBe(true);
     expect(approvals.consume(input as never, digest, Date.parse("2026-08-03T10:00:02.000Z"))).toBe(false);
+  });
+
+  it("rechecks approval expiry immediately before physical execution", async () => {
+    const approvals = new InMemoryApprovalStore();
+    const input = command(
+      { type: "left_click", x: 250, y: 250, targetId: IDS.targetId },
+      { policyContext: { policyDecisionId: IDS.policyDecisionId, policyVersion: "test-v1", approved: true, approvalId: IDS.approvalId } },
+    );
+    approvals.register({
+      approvalId: IDS.approvalId, actionId: IDS.actionId, policyDecisionId: IDS.policyDecisionId,
+      observationId: IDS.observationId, actionDigest: await actionAuthorizationDigest(input as never),
+      idempotencyKey: "idempotency-1", expiresAt: "2026-08-03T10:00:03.000Z",
+      commandExpiresAt: "2026-08-03T10:01:01.000Z",
+    });
+    let clockReads = 0;
+    const now = () => Date.parse(clockReads++ < 2 ? "2026-08-03T10:00:02.000Z" : "2026-08-03T10:00:04.000Z");
+    const { calls, pipeline } = setup({ approvals, observationTargets: [target("Buy now")], now });
+
+    await expect(pipeline.execute(input)).resolves.toMatchObject({ status: "denied", code: "APPROVAL_PROOF_INVALID" });
+    expect(calls).toHaveLength(0);
   });
 
   it("uses transformed screenshot coordinates to identify a purchase target", async () => {

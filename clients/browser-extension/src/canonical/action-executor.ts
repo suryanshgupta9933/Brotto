@@ -1,8 +1,12 @@
 import type { ActionCommandV1, ExecutableActionV1, SemanticTarget } from "@fara-platform/fara-action-schema";
 import { sendCommand } from "../debugger";
 import { sanitizeObservationUrl } from "./redaction";
-import { consumePolicyAuthorization, type ExecutionAuthorization } from "./client-policy";
 import { transformCapturedPoint, type CapturedCoordinateContext } from "./coordinate-context";
+import {
+  buildCanonicalExecutionPipeline,
+  type CanonicalExecutionPipelineOptions,
+  type PipelineResult,
+} from "./execution-pipeline";
 
 export { transformCapturedPoint } from "./coordinate-context";
 export type { CapturedCoordinateContext } from "./coordinate-context";
@@ -50,7 +54,7 @@ type ActionExecutionFailure = Extract<ActionExecutionResult, { readonly ok: fals
 
 export type CanonicalExecutionCommand = Pick<ActionCommandV1, "action">;
 
-export class CanonicalActionExecutor {
+class CanonicalActionExecutor {
   private readonly tabId: number;
   private readonly capture: CapturedCoordinateContext;
   private readonly send: CdpSender;
@@ -67,10 +71,7 @@ export class CanonicalActionExecutor {
     this.wait = options.wait ?? ((durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)));
   }
 
-  async execute(command: CanonicalExecutionCommand, signal?: AbortSignal, authorization?: ExecutionAuthorization): Promise<ActionExecutionResult> {
-    if (!consumePolicyAuthorization(command as never, authorization)) {
-      return failure("POLICY_AUTHORIZATION_REQUIRED", "A valid client-policy authorization is required", false);
-    }
+  async execute(command: CanonicalExecutionCommand, signal?: AbortSignal): Promise<ActionExecutionResult> {
     if (signal?.aborted) return failure("CDP_COMMAND_FAILED", "Controlled action was cancelled", false);
     const action = command?.action as ExecutableActionV1 | undefined;
     if (!action || typeof action !== "object" || typeof (action as { type?: unknown }).type !== "string") {
@@ -261,6 +262,23 @@ export class CanonicalActionExecutor {
   private throwIfAborted(): void {
     if (this.activeSignal?.aborted) throw new DOMException("Aborted", "AbortError");
   }
+}
+
+export type { ObservationAuthority } from "./execution-pipeline";
+
+export function createCanonicalExecutionPipeline(
+  options: CanonicalExecutionPipelineOptions,
+): { execute(input: unknown, signal?: AbortSignal): Promise<PipelineResult> } {
+  return buildCanonicalExecutionPipeline(options, async (command, trusted, signal) => {
+    const executor = new CanonicalActionExecutor({
+      tabId: options.tabId,
+      capture: trusted.capture,
+      observation: trusted.observation,
+      send: options.send,
+      wait: options.wait,
+    });
+    return executor.execute(command as never, signal);
+  });
 }
 
 

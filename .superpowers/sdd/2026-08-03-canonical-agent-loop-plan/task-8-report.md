@@ -2,9 +2,7 @@
 
 ## Status
 
-Implementation, scoped verification, and the required commit are complete.
-An independent-review hardening pass is also complete and pending its scoped
-follow-up commit.
+Implementation and independent-review hardening are complete.
 
 ## Implemented
 
@@ -19,34 +17,50 @@ follow-up commit.
   action execution, observes navigation/load, DOM changes, dialogs, targets,
   and debugger detach, and uses injectable bounded timers. Returned page state
   is sanitized.
-- A single canonical execution pipeline now schema-validates, checks expiry and
+- One public production factory owns the non-exported physical executor. Its
+  canonical pipeline schema-validates, checks expiry and
   idempotency, resolves and re-verifies DNS, binds and consumes approvals,
-  enforces client policy, executes through a one-shot authorization capability,
-  and settles with AbortSignal propagation.
-- DNS failures and any private, loopback, link-local, reserved, metadata, or
+  enforces client policy, and settles with AbortSignal propagation. There is no
+  exported raw executor or caller-mintable execution authorization.
+- A trusted observation authority supplies attachment/freshness-verified policy
+  context, capture coordinates, and the main-frame ID. Settlement ignores
+  subframe and unscoped DOM events when that ID is present.
+- Hostname navigation is denied unless an exact administrator-owned trust policy
+  permits it; public IP literals are allowed and private literals are denied.
+  Resolver calls have bounded deadlines and immediate AbortSignal cancellation.
+  DNS failures and any private, loopback, link-local, reserved, metadata, or
   mixed public/private resolution fail closed. Navigation re-resolves before
   execution to detect rebinding within extension constraints.
 - Approval grants bind approval/action/policy/observation IDs, the complete
-  target/action digest, idempotency key, grant expiry, and command expiry.
+  target/action digest, idempotency key, grant expiry, and command expiry. Both
+  command and approval expiry are rechecked immediately before physical action.
+- Page-state capture cannot hang completion; timeout/settlement returns the
+  latest sanitized trusted state available.
 
 ## Verification
 
 - Scoped test command using the existing local Jest binary:
-  `./node_modules/.bin/jest --runInBand client-policy canonical-action-executor page-settler`
+  `./node_modules/.bin/jest --runInBand client-policy canonical-action-executor canonical-execution-pipeline page-settler`
   - 4 suites passed
-  - 56 tests passed
+  - 53 tests passed
 - Extension build using the existing local build entry point:
   `node build.mjs`
   - passed (`Build complete!`)
 - Full TypeScript check reaches three unrelated existing errors in
   `src/background.ts` (lines 126, 136, and 246); it reports no Task 8 errors.
-- Full Jest run reaches 105 passing tests, then fails three unrelated legacy
+- Full Jest run reaches 116 passing tests, then fails three unrelated legacy
   test-suite compile checks in `pairing.test.ts`, `crypto.test.ts`, and
   `debugger.test.ts`.
 - The requested pnpm command was not allowed to purge/reinstall the shared
   dependency tree; the installed local binaries were used instead.
 
 ## Concerns
+
+- Chrome receives a hostname URL, not a connection pinned to the resolver result.
+  Exact administrative hostname trust plus two bounded A/AAAA checks narrows DNS
+  rebinding exposure, but cannot eliminate a DNS change between the final check
+  and Chrome's network connection. A browser/network-layer pin is required to
+  remove that residual risk.
 
 - An independent reviewer agent could not be started because all concurrency
   slots were occupied. A local brief-driven security review added regression
