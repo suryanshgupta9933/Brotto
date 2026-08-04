@@ -49,3 +49,37 @@ The temporary type-check config was removed after verification; the in-memory es
 - The prescribed pnpm command attempts to reconcile the pre-existing dependency directory and aborts in a non-TTY. Verification therefore used `--config.verify-deps-before-run=false`, which runs the existing local binaries without installing, purging, or mutating dependencies.
 - The repository build script writes `dist`; because this task explicitly forbids touching generated bundles, bundle validity was checked with esbuild `write:false` instead.
 - An independent reviewer subagent could not be started because all concurrency slots were occupied; a scoped self-review and fresh verification were completed instead.
+
+## Review Fix Round — 2026-08-04
+
+Addressed all Task 7 Critical/Important privacy and integrity findings:
+
+- Visible screenshot capture is now fenced to the exact requested active tab and window. Identity is checked initially, immediately before capture, and immediately after capture; inactive, switched, or window-mismatched tabs reject the observation locally.
+- Capture is sequential. Strict pre/post page snapshots, zoom, URL, title, viewport/DPR/scroll, lifecycle, visibility, document token, sensitive regions, and semantic metadata must match before an observation can be emitted.
+- Visible password, OTP, passcode, token, API-key, bearer, credential, and account regions are detected without reading form values. Sensitive leaf text masks its parent container, opaque canvas/video surfaces are masked, and bounded token/OTP/account-value patterns are treated as sensitive.
+- Sensitive PNG regions are painted opaque black through `OffscreenCanvas` before encoding, hashing, schema validation, or return. If masking support, decoding, context creation, bounds, or re-encoding fails, capture fails closed.
+- A sensitive-region masker must change the screenshot bytes; a no-op masking result is rejected before hashing or return.
+- PNG encoded length, decoded length, dimensions, and total pixels are validated before full base64 decode/allocation/hash. Masked output is revalidated and must retain dimensions related to the stable viewport/DPR/zoom.
+- URL serialization now allowlists benign query keys, normalizes key names, removes fragments/credentials/unknown parameters, rejects sensitive values, and enforces a 2,048-character cap. Titles remain capped at 512 characters.
+- Numeric capture options, tab IDs, timestamps, zoom, viewport numbers, sensitive rectangles, and snapshot state are strictly validated rather than rounded/clamped/defaulted from malformed values.
+- DOM inspection uses a bounded `TreeWalker`. Incomplete scans or sensitive-region overflow reject capture instead of returning a partially privacy-checked observation.
+- Child-frame presence rejects capture because `ObservationV1` cannot represent observation completeness. Main-frame targets use an explicit empty `framePath` plus opaque page frame provenance; invalid or overlong frame/shadow paths now reject instead of silently filtering segments.
+
+### Review TDD evidence
+
+Focused RED reproduced missing active-tab/masking APIs, screenshot byte leakage, tab switching, page drift, frame ambiguity, malformed numeric options, oversized PNG allocation, dimension mismatch, allowlist bypasses (`access_token`, `api_key`, `auth`, `bearer`), overlong URLs, and silent invalid path filtering.
+
+Focused GREEN after the review fixes:
+
+```text
+pnpm --config.verify-deps-before-run=false --dir clients/browser-extension test --runInBand redaction observation
+2 suites, 37 tests passed
+
+tsc -p clients/browser-extension/tsconfig.task7.json (temporary scoped config)
+exit 0
+
+esbuild src/canonical/observation.ts --bundle --write=false (programmatic API)
+exit 0
+```
+
+The complete extension run reaches 7 passing suites and 105 passing tests, then remains blocked by the same three unrelated legacy TypeScript test-compilation failures in `pairing.test.ts`, `crypto.test.ts`, and `debugger.test.ts`. Full `build:tsc` remains blocked only by the same three unrelated pre-existing `background.ts` errors documented above.

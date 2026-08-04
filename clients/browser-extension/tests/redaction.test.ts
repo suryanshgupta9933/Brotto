@@ -1,4 +1,7 @@
-import { sanitizeSemanticTarget } from "../src/canonical/redaction";
+import {
+  sanitizeObservationUrl,
+  sanitizeSemanticTarget,
+} from "../src/canonical/redaction";
 
 const TARGET_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -132,6 +135,37 @@ describe("semantic target redaction", () => {
         locatorCandidates: [],
       }),
     ).toBeNull();
+  });
+
+  it("rejects an opaque path when any segment is invalid", () => {
+    expect(
+      sanitizeSemanticTarget({
+        targetId: TARGET_ID,
+        tag: "button",
+        role: "button",
+        boundingBox: { x: 1, y: 2, width: 100, height: 20 },
+        visible: true,
+        framePath: [
+          "22222222-2222-4222-8222-222222222222",
+          "main-frame-selector",
+        ],
+        locatorCandidates: [],
+      }),
+    ).toBeNull();
+  });
+
+  it("allowlists query keys and removes normalized credential parameters", () => {
+    expect(
+      sanitizeObservationUrl(
+        "https://example.test/search?q=boots&access_token=a&api-key=b&AUTH=c&bearer=d&customer=e#secret",
+      ),
+    ).toBe("https://example.test/search?q=boots");
+  });
+
+  it("rejects overlong observation URLs", () => {
+    expect(() =>
+      sanitizeObservationUrl(`https://example.test/${"a".repeat(2048)}`),
+    ).toThrow("maximum length");
   });
 
   it("caps strings and locator candidates to canonical limits", () => {

@@ -8,6 +8,7 @@ const MAX_SEMANTIC_TEXT_LENGTH = 512;
 const MAX_TAG_LENGTH = 64;
 const MAX_ROLE_LENGTH = 128;
 const MAX_LOCATOR_CANDIDATES = 10;
+const MAX_OBSERVATION_URL_LENGTH = 2048;
 
 const SENSITIVE_TEXT =
   /\b(?:authorization|cookies?|credentials?|local[\s_-]*storage|password|passcode|profile|proxy[\s_-]*authorization|secret|session[\s_-]*storage|tokens?)\b/i;
@@ -79,6 +80,19 @@ const TEXT_ARIA_ATTRIBUTES = new Set([
   "aria-label",
   "aria-describedby",
   "aria-controls",
+]);
+
+const SAFE_QUERY_KEYS = new Set([
+  "category",
+  "filter",
+  "lang",
+  "locale",
+  "order",
+  "page",
+  "q",
+  "query",
+  "search",
+  "sort",
 ]);
 
 export interface RawAccessibleName {
@@ -169,11 +183,16 @@ function sanitizeBoundingBox(
 
 function sanitizeOpaquePath(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const path = value.filter(
-    (segment): segment is string =>
-      typeof segment === "string" && UUID.test(segment),
-  );
-  return path.slice(0, 20);
+  if (value.length > 20) return undefined;
+  if (
+    !value.every(
+      (segment): segment is string =>
+        typeof segment === "string" && UUID.test(segment),
+    )
+  ) {
+    return undefined;
+  }
+  return value;
 }
 
 function sanitizeAttributes(
@@ -344,6 +363,7 @@ export function sanitizeSemanticTarget(
   }
 
   const shadowPath = sanitizeOpaquePath(raw.shadowPath);
+  if (raw.shadowPath !== undefined && !shadowPath) return null;
   const control: SemanticTarget["control"] =
     tag === "input"
       ? {
@@ -397,7 +417,12 @@ export function sanitizeObservationUrl(value: unknown): string {
   url.hash = "";
 
   for (const [key, entryValue] of [...url.searchParams.entries()]) {
-    if (SENSITIVE_TEXT.test(key) || SENSITIVE_TEXT.test(entryValue)) {
+    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (
+      !SAFE_QUERY_KEYS.has(normalizedKey) ||
+      SENSITIVE_TEXT.test(key) ||
+      SENSITIVE_TEXT.test(entryValue)
+    ) {
       url.searchParams.delete(key);
     }
   }
@@ -406,5 +431,9 @@ export function sanitizeObservationUrl(value: unknown): string {
     url.pathname = "/";
   }
 
-  return url.toString();
+  const sanitized = url.toString();
+  if (sanitized.length > MAX_OBSERVATION_URL_LENGTH) {
+    throw new Error("Observation URL exceeds maximum length");
+  }
+  return sanitized;
 }
