@@ -1,8 +1,13 @@
 import type { CanonicalBootstrapMaterial } from "./transport";
+import { AgentMessageV1Schema, type AgentMessageV1 } from "@fara-platform/relay-protocol";
+import { ActionResultV1Schema, type ActionResultV1 } from "@fara-platform/fara-action-schema";
 
 const RECOVERY_KEY = "canonicalRecovery";
 const BOOTSTRAP_KEY = "canonicalBootstrap";
 const TRAJECTORY_KEY = "canonicalTrajectory";
+const ACTION_EXECUTION_KEY = "canonicalActionExecution";
+const TERMINAL_KEY = "canonicalTerminal";
+const APPROVAL_KEY = "canonicalApproval";
 const MAX_TRAJECTORY_EVENTS = 100;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SENSITIVE_SUMMARY = /(?:https?:\/\/|authorization|bearer|cookie|credential|local\s*storage|password|profile|secret|session\s*storage|token)/i;
@@ -38,6 +43,32 @@ export interface SanitizedTrajectorySummary {
   readonly summary: string;
   readonly occurredAt: string;
 }
+
+export type DurableActionExecution = {
+  readonly actionId: string;
+  readonly idempotencyKey: string;
+  readonly observationId: string;
+  readonly status: "started";
+} | {
+  readonly actionId: string;
+  readonly idempotencyKey: string;
+  readonly observationId: string;
+  readonly status: "completed";
+  readonly result: ActionResultV1;
+};
+
+export interface DurableApprovalMetadata {
+  readonly approvalId: string;
+  readonly policyDecisionId: string;
+  readonly actionId: string;
+  readonly observationId: string;
+  readonly requestedAt: string;
+  readonly reason: "Approval required";
+}
+
+export type DurableTerminalMessage = Extract<AgentMessageV1, {
+  type: "task.completed" | "task.failed" | "task.cancelled";
+}>;
 
 export interface StorageAreaPort {
   get(key: string): Promise<Record<string, unknown>>;
@@ -135,6 +166,91 @@ export class CanonicalSessionStore {
   async clearTrajectory(): Promise<void> {
     await this.local.remove(TRAJECTORY_KEY);
   }
+
+  async saveActionExecution(input: unknown): Promise<void> {
+    await this.local.set({ [ACTION_EXECUTION_KEY]: parseActionExecution(input) });
+  }
+
+  async loadActionExecution(): Promise<DurableActionExecution | null> {
+    return this.loadValidated(ACTION_EXECUTION_KEY, parseActionExecution);
+  }
+
+  async clearActionExecution(): Promise<void> {
+    await this.local.remove(ACTION_EXECUTION_KEY);
+  }
+
+  async saveTerminal(input: unknown): Promise<void> {
+    await this.local.set({ [TERMINAL_KEY]: parseTerminal(input) });
+  }
+
+  async loadTerminal(): Promise<DurableTerminalMessage | null> {
+    return this.loadValidated(TERMINAL_KEY, parseTerminal);
+  }
+
+  async clearTerminal(): Promise<void> {
+    await this.local.remove(TERMINAL_KEY);
+  }
+
+  async saveApproval(input: unknown): Promise<void> {
+    await this.local.set({ [APPROVAL_KEY]: parseApproval(input) });
+  }
+
+  async loadApproval(): Promise<DurableApprovalMetadata | null> {
+    return this.loadValidated(APPROVAL_KEY, parseApproval);
+  }
+
+  async clearApproval(): Promise<void> {
+    await this.local.remove(APPROVAL_KEY);
+  }
+
+  private async loadValidated<T>(key: string, parse: (input: unknown) => T): Promise<T | null> {
+    const raw = (await this.local.get(key))[key];
+    if (raw === undefined) return null;
+    try {
+      return parse(raw);
+    } catch {
+      await this.local.remove(key);
+      return null;
+    }
+  }
+}
+
+function parseActionExecution(input: unknown): DurableActionExecution {
+  const value = record(input, "Action execution");
+  const base = {
+    actionId: uuid(value.actionId, "actionId"),
+    idempotencyKey: boundedString(value.idempotencyKey, "idempotencyKey", 256),
+    observationId: uuid(value.observationId, "observationId"),
+  };
+  if (value.status === "started") return { ...base, status: "started" };
+  if (value.status === "completed") return {
+    ...base,
+    status: "completed",
+    result: ActionResultV1Schema.parse(value.result),
+  };
+  throw new TypeError("Action execution status is invalid");
+}
+
+function parseTerminal(input: unknown): DurableTerminalMessage {
+  const message = AgentMessageV1Schema.parse(input);
+  if (message.type !== "task.completed" && message.type !== "task.failed" && message.type !== "task.cancelled") {
+    throw new TypeError("Terminal message is invalid");
+  }
+  return message;
+}
+
+function parseApproval(input: unknown): DurableApprovalMetadata {
+  const value = record(input, "Approval metadata");
+  const requestedAt = boundedString(value.requestedAt, "requestedAt", 64);
+  if (!Number.isFinite(Date.parse(requestedAt))) throw new TypeError("Approval timestamp is invalid");
+  return {
+    approvalId: uuid(value.approvalId, "approvalId"),
+    policyDecisionId: uuid(value.policyDecisionId, "policyDecisionId"),
+    actionId: uuid(value.actionId, "actionId"),
+    observationId: uuid(value.observationId, "observationId"),
+    requestedAt: new Date(requestedAt).toISOString(),
+    reason: "Approval required",
+  };
 }
 
 function parseRecovery(input: unknown): CanonicalRecoveryState {

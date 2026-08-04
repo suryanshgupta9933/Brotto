@@ -1,5 +1,5 @@
 import * as esbuild from 'esbuild';
-import { copyFileSync, mkdirSync, readdirSync, existsSync, rmSync } from 'fs';
+import { copyFileSync, mkdirSync, existsSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
@@ -24,32 +24,12 @@ if (existsSync(distDir)) {
 }
 mkdirSync(distDir, { recursive: true });
 
-// Copy only the runtime assets declared by the extension manifest.
-const copyFiles = ['popup.js', 'options.js'];
-for (const file of copyFiles) {
-  const src = join(srcDir, file);
-  if (existsSync(src)) {
-    copyFileSync(src, join(distDir, file));
-  }
-}
-
-// Copy HTML files
-for (const file of readdirSync(srcDir)) {
-  if (file.endsWith('.html')) {
-    copyFileSync(join(srcDir, file), join(distDir, file));
-  }
-}
-
-// Copy icons
-const iconsDir = join(__dirname, 'icons');
-if (existsSync(iconsDir)) {
-  mkdirSync(join(distDir, 'icons'), { recursive: true });
-  for (const icon of readdirSync(iconsDir)) {
-    if (icon.endsWith('.png')) {
-      copyFileSync(join(iconsDir, icon), join(distDir, 'icons', icon));
-    }
-  }
-}
+// Every declared static runtime asset is required. A missing file aborts the build.
+const requiredRuntimeFiles = [
+  [join(srcDir, 'popup.js'), join(distDir, 'popup.js')],
+  [join(srcDir, 'popup.html'), join(distDir, 'popup.html')],
+];
+for (const [source, destination] of requiredRuntimeFiles) copyFileSync(source, destination);
 
 // Copy manifest.json
 copyFileSync(join(__dirname, 'manifest.json'), join(distDir, 'manifest.json'));

@@ -71,6 +71,7 @@ export interface CanonicalTransportOptions {
   readonly getReconnectMaterial?: (signal: AbortSignal) => Promise<CanonicalBootstrapMaterial>;
   readonly onMaterial?: (material: CanonicalBootstrapMaterial) => void | Promise<void>;
   readonly onMessage?: (message: TransportMessage) => void | Promise<void>;
+  readonly onMessageError?: (error: unknown) => void;
   readonly onStateChange?: (snapshot: TransportSnapshot) => void;
   readonly onProtocolError?: (code: string) => void;
   readonly websocketFactory?: (url: string, protocols: readonly string[]) => TransportSocket;
@@ -111,6 +112,7 @@ export class CanonicalTransport {
   private heartbeatTimer: unknown;
   private sendTail: Promise<void> = Promise.resolve();
   private receiveTail: Promise<void> = Promise.resolve();
+  private receiveFault: unknown;
 
   constructor(options: CanonicalTransportOptions) {
     this.options = options;
@@ -135,6 +137,7 @@ export class CanonicalTransport {
 
   async drained(): Promise<void> {
     await this.receiveTail;
+    if (this.receiveFault !== undefined) throw this.receiveFault;
     await this.sendTail;
   }
 
@@ -218,7 +221,14 @@ export class CanonicalTransport {
       socket.onmessage = (event) => {
         this.receiveTail = this.receiveTail
           .then(() => this.acceptWire(event.data))
-          .catch(() => undefined);
+          .catch((error: unknown) => {
+            this.receiveFault = error;
+            this.options.onMessageError?.(error);
+            this.explicitClose = true;
+            this.clearTimers();
+            this.setStatus("failed");
+            if (socket.readyState < 2) socket.close(4400, "MESSAGE_HANDLER_FAILED");
+          });
       };
       socket.onerror = () => {
         if (!settled) reject(new Error("WebSocket connection failed"));

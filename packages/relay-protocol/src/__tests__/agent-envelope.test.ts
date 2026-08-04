@@ -60,6 +60,31 @@ describe('canonical agent envelope', () => {
     })).toMatchObject({ goal: 'Find the current product price' });
   });
 
+  it('carries the authoritative structured terminal message during reconciliation', () => {
+    const terminal = {
+      type: 'task.completed',
+      completion: {
+        kind: 'completion',
+        observationId: '50000000-0000-4000-8000-000000000001',
+        type: 'terminate',
+        status: 'succeeded',
+        summary: 'Done',
+        findings: [{ fact: 'Verified fact', observationIds: ['50000000-0000-4000-8000-000000000001'] }],
+        unmetCriteria: [],
+        confidence: 0.95,
+      },
+    };
+    expect(AgentMessageV1Schema.parse({
+      type: 'reconcile.response',
+      nextSequence: 4,
+      pendingActionIds: [],
+      requiresFreshObservation: false,
+      authoritativeState: 'COMPLETED',
+      terminal,
+      respondedAt: '2026-08-04T10:00:00.000Z',
+    })).toMatchObject({ terminal });
+  });
+
   it('rejects forbidden browser data before creating an envelope', () => {
     expect(() => createEnvelope({
       ...IDS,
@@ -140,7 +165,7 @@ describe('canonical agent envelope', () => {
     })).toThrow();
   });
 
-  it('requires task cancellation identity, timing, reason, and observation linkage', () => {
+  it('requires task cancellation identity, timing, and reason with optional observation linkage', () => {
     const cancelled = {
       type: 'task.cancelled',
       taskId: '99999999-9999-4999-8999-999999999999',
@@ -150,6 +175,7 @@ describe('canonical agent envelope', () => {
     };
 
     expect(AgentMessageV1Schema.parse(cancelled).type).toBe('task.cancelled');
-    expect(() => AgentMessageV1Schema.parse({ ...cancelled, observationId: undefined })).toThrow();
+    expect(AgentMessageV1Schema.parse({ ...cancelled, observationId: undefined }).type).toBe('task.cancelled');
+    expect(() => AgentMessageV1Schema.parse({ ...cancelled, taskId: undefined })).toThrow();
   });
 });

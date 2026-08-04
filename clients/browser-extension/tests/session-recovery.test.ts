@@ -1,7 +1,9 @@
 import {
   CanonicalSessionStore,
+  type DurableActionExecution,
   type CanonicalRecoveryState,
 } from "../src/canonical/session-store";
+import type { AgentMessageV1 } from "@fara-platform/relay-protocol";
 import type { CanonicalBootstrapMaterial } from "../src/canonical/transport";
 
 const NOW = Date.parse("2026-08-04T10:00:00.000Z");
@@ -47,6 +49,67 @@ function area(initial: Record<string, unknown> = {}) {
 }
 
 describe("CanonicalSessionStore", () => {
+  it("writes only non-secret action identity before execution and preserves a completed result", async () => {
+    const local = area();
+    const store = new CanonicalSessionStore({ local, now: () => NOW });
+    const started: DurableActionExecution = {
+      actionId: "55555555-5555-4555-8555-555555555555",
+      idempotencyKey: "action-once",
+      observationId: "44444444-4444-4444-8444-444444444444",
+      status: "started",
+    };
+
+    await store.saveActionExecution({ ...started, action: { type: "insert_text", text: "never-persist-me" } } as unknown as DurableActionExecution);
+    expect(await store.loadActionExecution()).toEqual(started);
+    expect(JSON.stringify(local.values)).not.toContain("never-persist-me");
+
+    const completed = {
+      actionId: started.actionId,
+      stepId: "77777777-7777-4777-8777-777777777777",
+      observationId: started.observationId,
+      sequence: 2,
+      startedAt: "2026-08-04T10:00:00.000Z",
+      completedAt: "2026-08-04T10:00:01.000Z",
+      durationMs: 1_000,
+      status: "rejected_stale",
+      rejection: { code: "EXECUTION_OUTCOME_INDETERMINATE", message: "A fresh observation is required", retryable: true },
+    } as const;
+    await store.saveActionExecution({ ...started, status: "completed", result: completed });
+    await expect(store.loadActionExecution()).resolves.toMatchObject({ status: "completed", result: completed });
+  });
+
+  it("persists and restores canonical terminal and identifier-only approval state", async () => {
+    const local = area();
+    const store = new CanonicalSessionStore({ local, now: () => NOW });
+    const terminal = {
+      type: "task.completed",
+      completion: {
+        kind: "completion",
+        observationId: "44444444-4444-4444-8444-444444444444",
+        type: "terminate",
+        status: "succeeded",
+        summary: "Done",
+        findings: [{ fact: "Price is 42", observationIds: ["44444444-4444-4444-8444-444444444444"] }],
+        unmetCriteria: [],
+        confidence: 0.9,
+      },
+    } as AgentMessageV1;
+    await store.saveTerminal(terminal as Extract<AgentMessageV1, { type: "task.completed" }>);
+    await store.saveApproval({
+      approvalId: "66666666-6666-4666-8666-666666666666",
+      policyDecisionId: "77777777-7777-4777-8777-777777777777",
+      actionId: "55555555-5555-4555-8555-555555555555",
+      observationId: "44444444-4444-4444-8444-444444444444",
+      requestedAt: "2026-08-04T10:00:00.000Z",
+      reason: "Approval required",
+      action: { text: "never-persist-me" },
+    } as never);
+
+    await expect(store.loadTerminal()).resolves.toEqual(terminal);
+    await expect(store.loadApproval()).resolves.toMatchObject({ reason: "Approval required" });
+    expect(JSON.stringify(local.values)).not.toContain("never-persist-me");
+  });
+
   it("restores only the minimal non-secret service-worker state", async () => {
     const local = area();
     const session = area();

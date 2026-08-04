@@ -9,6 +9,7 @@ import {
   getStoredDeviceKeys,
   isDevicePaired,
   createChallengeResponse,
+  exportPublicKey,
   type DeviceKeyPair
 } from "./crypto";
 
@@ -96,7 +97,7 @@ export async function exchangePairingCode(
   }
 
   // Prepare the pairing request
-  const publicKeyJwk = await importPublicKey(keys.publicKey);
+  const publicKeyJwk = await exportPublicKey(keys.publicKey);
 
   const response = await fetch(`${serverUrl}/api/v1/pairing/exchange`, {
     method: "POST",
@@ -354,20 +355,4 @@ export async function getPairingState(): Promise<PairingState> {
     serverUrl: null,
     error: null
   };
-}
-
-/**
- * Import public key from JWK format
- */
-async function importPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    "jwk",
-    jwk,
-    {
-      name: "ECDSA",
-      namedCurve: "P-256"
-    },
-    true,
-    ["verify"]
-  );
 }

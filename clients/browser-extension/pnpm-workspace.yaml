@@ -1,0 +1,7 @@
+packages:
+  - "."
+  - "../../packages/fara-action-schema"
+  - "../../packages/relay-protocol"
+
+allowBuilds:
+  esbuild: true

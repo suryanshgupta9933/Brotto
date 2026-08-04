@@ -7,7 +7,7 @@ const mockStorage: Record<string, unknown> = {};
 global.chrome = {
   storage: {
     local: {
-      get: async (key: string) => {
+      get: async (key: string | string[]) => {
         const result: Record<string, unknown> = {};
         if (typeof key === "string") {
           result[key] = mockStorage[key];
@@ -141,6 +141,7 @@ describe("Device Pairing", () => {
 
       // Store device identity first
       await chrome.storage.local.set({
+        deviceKeys: { keyId: "key-456" },
         deviceIdentity: {
           deviceId: "device-123",
           keyId: "key-456",

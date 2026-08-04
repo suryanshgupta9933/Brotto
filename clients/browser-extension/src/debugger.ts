@@ -99,7 +99,8 @@ export async function sendCommand(
   command: CdpCommand
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand({ tabId }, command.method, command.params, (result, error) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (chrome.debugger.sendCommand as any)({ tabId }, command.method, command.params, (result: unknown, error: unknown) => {
       const lastError = chrome.runtime.lastError;
       if (lastError) {
         reject(new Error(`Command failed: ${lastError.message}`));
@@ -117,7 +118,7 @@ export async function sendCommand(
 /**
  * Get debuggable targets (tabs with debugging URLs)
  */
-export function getTargets(): Promise<chrome.debugger.Target[]> {
+export function getTargets(): Promise<chrome.debugger.TargetInfo[]> {
   return new Promise((resolve) => {
     chrome.debugger.getTargets((targets) => {
       resolve(targets);
@@ -161,7 +162,8 @@ export function registerEventHandler(tabId: number, eventHandler: CdpEventHandle
 
   // Attach the global debugger event listener if this is the first handler
   if (existingHandlers.length === 1) {
-    chrome.debugger.onEvent.addListener(debuggerEventListener);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (chrome.debugger.onEvent.addListener as any)(debuggerEventListener);
   }
 }
 
@@ -173,7 +175,8 @@ export function unregisterEventHandlers(tabId: number): void {
 
   // If no more handlers, remove the global listener
   if (eventHandlers.size === 0) {
-    chrome.debugger.onEvent.removeListener(debuggerEventListener);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (chrome.debugger.onEvent.removeListener as any)(debuggerEventListener);
   }
 }
 

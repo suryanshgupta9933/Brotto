@@ -5,8 +5,18 @@
 // Mock chrome.debugger
 const mockAttachedTabs = new Set<number>();
 const mockEventListeners = new Map<string, ((...args: unknown[]) => void)[]>();
+const defaultTab = (tabId: number) => ({
+  id: tabId,
+  title: "Test Tab",
+  url: "https://example.com",
+  favIconUrl: "https://example.com/favicon.ico",
+  incognito: false,
+  windowId: 1,
+});
+const mockTabsGet = jest.fn(async (tabId: number) => defaultTab(tabId));
 
 global.chrome = {
+  runtime: { lastError: undefined },
   debugger: {
     attach: (
       target: chrome.debugger.Debuggee,
@@ -32,7 +42,7 @@ global.chrome = {
     ) => {
       callback?.({ success: true }, undefined);
     },
-    getTargets: (callback: (targets: chrome.debugger.Target[]) => void) => {
+    getTargets: (callback: (targets: chrome.debugger.TargetInfo[]) => void) => {
       callback([
         {
           id: "target1",
@@ -78,14 +88,7 @@ global.chrome = {
     }
   },
   tabs: {
-    get: async (tabId: number) => ({
-      id: tabId,
-      title: "Test Tab",
-      url: "https://example.com",
-      favIconUrl: "https://example.com/favicon.ico",
-      incognito: false,
-      windowId: 1
-    })
+    get: mockTabsGet,
   }
 } as unknown as typeof chrome;
 
@@ -103,8 +106,11 @@ import {
 } from "../src/debugger";
 
 describe("chrome.debugger Wrapper", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await detachAll();
     mockAttachedTabs.clear();
+    mockTabsGet.mockReset();
+    mockTabsGet.mockImplementation(async (tabId: number) => defaultTab(tabId));
   });
 
   describe("attachToTab", () => {

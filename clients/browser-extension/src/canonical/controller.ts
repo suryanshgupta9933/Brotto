@@ -123,6 +123,7 @@ export class CanonicalExtensionController {
   private captured: CapturedControllerObservation | null = null;
   private pendingApproval: Extract<AgentMessageV1, { type: "approval.requested" }> | null = null;
   private terminalEmitted = false;
+  private restoredLease = false;
 
   constructor(options: CanonicalExtensionControllerOptions) {
     this.options = options;
@@ -135,6 +136,11 @@ export class CanonicalExtensionController {
     const goal = validateGoal(rawGoal);
     const taskId = requireUuid(this.idGenerator(), "task ID");
     this.resetLease();
+    await Promise.all([
+      this.options.store.clearTerminal(),
+      this.options.store.clearApproval(),
+      this.options.store.clearActionExecution(),
+    ]);
     let tabId: number | null = null;
     try {
       this.emit({ type: "canonical_status", status: "connecting" });
@@ -164,8 +170,8 @@ export class CanonicalExtensionController {
       this.emit({ type: "canonical_step", kind: "observation", summary: "Initial observation submitted" });
       this.emit({ type: "canonical_status", status: "connected" });
     } catch (error) {
-      if (tabId !== null) await this.safeDetach(tabId);
-      await this.transport?.close("startup failed");
+      if (tabId !== null) await boundedCleanup(this.safeDetach(tabId));
+      await boundedCleanup(this.transport?.close("startup failed"));
       this.transport = null;
       await this.options.store.clearBootstrap();
       this.emitError("SESSION_START_FAILED", error);
@@ -175,8 +181,13 @@ export class CanonicalExtensionController {
 
   async restore(): Promise<boolean> {
     const recovery = await this.options.store.loadRecovery();
-    if (recovery === null || recovery.attachedTabId === null || isTerminalStatus(recovery.status)) return false;
+    if (recovery === null || recovery.attachedTabId === null) return false;
+    if (isTerminalStatus(recovery.status)) {
+      this.recovery = recovery;
+      return false;
+    }
     this.resetLease();
+    this.restoredLease = true;
     let material = await this.options.store.loadBootstrap();
     if (material === null) {
       material = await this.options.bootstrap.bootstrap({ mode: "resume", recovery }, this.lifecycleAbort.signal);
@@ -184,6 +195,11 @@ export class CanonicalExtensionController {
     }
     assertRecoveryBinding(recovery, material);
     this.recovery = recovery;
+    const approval = await this.options.store.loadApproval();
+    if (approval !== null) this.pendingApproval = AgentMessageV1Schema.parse({
+      type: "approval.requested",
+      ...approval,
+    }) as Extract<AgentMessageV1, { type: "approval.requested" }>;
     const attached = await this.options.tabs.isAttached(recovery.attachedTabId);
     if (!attached) await this.options.tabs.attach(recovery.attachedTabId);
     this.prepareAttachedRuntime(recovery.attachedTabId);
@@ -202,6 +218,7 @@ export class CanonicalExtensionController {
         return;
       case "approval.requested":
         this.pendingApproval = message;
+        await this.options.store.saveApproval(message);
         await this.updateRecovery({ status: "waiting_for_approval", pendingActionId: message.actionId });
         await this.options.store.appendTrajectory(trajectory("approval", "Approval required", this.now()));
         this.emit({ type: "canonical_approval", request: message });
@@ -239,22 +256,21 @@ export class CanonicalExtensionController {
     });
     this.approvalResolutions.set(request.actionId, resolution);
     this.pendingApproval = null;
+    await this.options.store.clearApproval();
     await this.options.store.appendTrajectory(trajectory("approval", approved ? "Approval granted" : "Approval denied", this.now()));
     await this.updateRecovery({ status: "connected", pendingActionId: null });
   }
 
   async cancel(reason = "User cancelled the task"): Promise<void> {
     const recovery = this.recovery;
-    if (recovery === null) return;
     this.lifecycleAbort.abort();
     this.actionAbort?.abort();
+    if (recovery === null) {
+      await this.disconnectRuntime("cancelled", true);
+      return;
+    }
     await this.updateRecovery({ status: "cancelling" });
     this.emit({ type: "canonical_status", status: "cancelling" });
-    try {
-      await this.activeAction;
-    } catch {
-      // The canonical cancellation below remains authoritative.
-    }
     if (this.transport !== null && recovery.lastObservationId !== null) {
       await this.transport.send({
         type: "task.cancelled",
@@ -298,11 +314,15 @@ export class CanonicalExtensionController {
     recovery: CanonicalRecoveryState | null;
     transport: TransportSnapshot | null;
     trajectory: Awaited<ReturnType<CanonicalSessionStore["loadTrajectory"]>>;
+    terminal: Awaited<ReturnType<CanonicalSessionStore["loadTerminal"]>>;
+    approval: Awaited<ReturnType<CanonicalSessionStore["loadApproval"]>>;
   }> {
     return {
       recovery: this.recovery ?? await this.options.store.loadRecovery(),
       transport: this.transport?.snapshot() ?? null,
       trajectory: await this.options.store.loadTrajectory(),
+      terminal: await this.options.store.loadTerminal(),
+      approval: await this.options.store.loadApproval(),
     };
   }
 
@@ -329,6 +349,27 @@ export class CanonicalExtensionController {
     this.emit({ type: "canonical_step", kind: "acknowledged", summary: "Action acknowledged", actionId: command.actionId });
 
     const signature = canonicalCommandSignature(command);
+    const durable = await this.options.store.loadActionExecution();
+    const durableMatches = durable !== null && durable.actionId === command.actionId && durable.idempotencyKey === command.idempotencyKey &&
+      durable.observationId === command.observationId;
+    const unknownRestoredAction = durable === null && this.restoredLease && this.recovery?.pendingActionId === command.actionId;
+    if (durableMatches || unknownRestoredAction) {
+      const message = {
+        type: "action.completed",
+        result: durable?.status === "completed" ? durable.result : indeterminateResult(command, this.now()),
+      } as const;
+      if (durable?.status !== "completed") await this.options.store.saveActionExecution({
+        actionId: command.actionId,
+        idempotencyKey: command.idempotencyKey,
+        observationId: command.observationId,
+        status: "completed",
+        result: message.result,
+      });
+      this.resultCache.set(command.idempotencyKey, { signature, message });
+      await transport.send(message, { correlationId: command.actionId, causationId: command.actionId });
+      await this.updateRecovery({ status: "connected", pendingActionId: null, lastObservationId: resultObservationId(message.result) });
+      return;
+    }
     const cached = this.resultCache.get(command.idempotencyKey);
     if (cached !== undefined && cached.signature === signature) {
       await transport.send(cached.message, { correlationId: command.actionId, causationId: command.actionId });
@@ -342,6 +383,12 @@ export class CanonicalExtensionController {
     }
 
     if (command.policyContext.approved) await this.registerApproval(command);
+    await this.options.store.saveActionExecution({
+      actionId: command.actionId,
+      idempotencyKey: command.idempotencyKey,
+      observationId: command.observationId,
+      status: "started",
+    });
     const work = this.executeCommand(command, signature);
     this.inFlightResults.set(command.idempotencyKey, work);
     this.activeAction = work;
@@ -361,13 +408,25 @@ export class CanonicalExtensionController {
     signature: string,
   ): Promise<Extract<AgentMessageV1, { type: "action.completed" }>> {
     const pipeline = this.pipeline;
-    if (pipeline === null) throw new Error("Trusted canonical execution pipeline is unavailable");
     this.actionAbort = new AbortController();
     const startedAtMs = Math.max(this.now(), Date.parse(command.dispatchedAt));
     this.emit({ type: "canonical_step", kind: "action", summary: actionSummary(command), actionId: command.actionId });
-    const pipelineResult = await pipeline.execute(command, this.actionAbort.signal);
-    const result = await this.toActionResult(command, pipelineResult, startedAtMs, this.actionAbort.signal);
+    let result: ActionResultV1;
+    try {
+      if (pipeline === null) throw new Error("Trusted canonical execution pipeline is unavailable");
+      const pipelineResult = await pipeline.execute(command, this.actionAbort.signal);
+      result = await this.toActionResult(command, pipelineResult, startedAtMs, this.actionAbort.signal);
+    } catch {
+      result = indeterminateResult(command, this.now(), startedAtMs, "CLIENT_EXECUTION_INDETERMINATE");
+    }
     const message = { type: "action.completed", result } as const;
+    await this.options.store.saveActionExecution({
+      actionId: command.actionId,
+      idempotencyKey: command.idempotencyKey,
+      observationId: command.observationId,
+      status: "completed",
+      result,
+    });
     this.resultCache.set(command.idempotencyKey, { signature, message });
     await this.options.store.appendTrajectory(trajectory("action", resultSummary(command, result), this.now()));
     this.emit({ type: "canonical_step", kind: "result", summary: resultSummary(command, result), actionId: command.actionId });
@@ -445,6 +504,14 @@ export class CanonicalExtensionController {
   }
 
   private async handleReconciliation(message: Extract<AgentMessageV1, { type: "reconcile.response" }>): Promise<void> {
+    if (message.terminal !== undefined) {
+      await this.handleTerminal(message.terminal);
+      return;
+    }
+    if (["COMPLETED", "FAILED", "CANCELLED"].includes(message.authoritativeState)) {
+      await this.disconnectRuntime("terminal reconciliation missing result", true);
+      throw new Error("Authoritative terminal reconciliation omitted its structured terminal result");
+    }
     if (message.storedResult !== undefined) {
       await this.updateRecovery({ pendingActionId: null, status: terminalStateStatus(message.authoritativeState) });
       return;
@@ -468,6 +535,8 @@ export class CanonicalExtensionController {
     this.terminalEmitted = true;
     this.actionAbort?.abort();
     const status = message.type === "task.completed" ? "completed" : message.type === "task.failed" ? "failed" : "cancelled";
+    await this.options.store.saveTerminal(message);
+    await this.options.store.clearApproval();
     await this.updateRecovery({ status, pendingActionId: null });
     await this.options.store.appendTrajectory(trajectory("terminal", `Task ${status}`, this.now()));
     this.emit({ type: "canonical_terminal", message });
@@ -547,9 +616,9 @@ export class CanonicalExtensionController {
   private async disconnectRuntime(reason: string, clearBootstrap: boolean): Promise<void> {
     const transport = this.transport;
     this.transport = null;
-    await transport?.close(reason);
+    await boundedCleanup(transport?.close(reason));
     const tabId = this.recovery?.attachedTabId;
-    if (tabId !== null && tabId !== undefined) await this.safeDetach(tabId);
+    if (tabId !== null && tabId !== undefined) await boundedCleanup(this.safeDetach(tabId));
     if (clearBootstrap) await this.options.store.clearBootstrap();
   }
 
@@ -572,6 +641,7 @@ export class CanonicalExtensionController {
     this.approvalResolutions.clear();
     this.pendingApproval = null;
     this.terminalEmitted = false;
+    this.restoredLease = false;
     this.captured = null;
     this.pipeline = null;
     this.transport = null;
@@ -684,6 +754,40 @@ function resultSummary(command: ActionCommandV1, result: ActionResultV1): string
 
 function resultObservationId(result: ActionResultV1): string | null {
   return "postObservation" in result ? result.postObservation.observationId : result.observationId;
+}
+
+function indeterminateResult(
+  command: ActionCommandV1,
+  completedAtMs: number,
+  startedAtMs = completedAtMs,
+  code = "EXECUTION_OUTCOME_INDETERMINATE",
+): ActionResultV1 {
+  const completed = Math.max(startedAtMs, completedAtMs);
+  return ActionResultV1Schema.parse({
+    actionId: command.actionId,
+    stepId: command.stepId,
+    observationId: command.observationId,
+    sequence: command.sequence + 1,
+    startedAt: new Date(startedAtMs).toISOString(),
+    completedAt: new Date(completed).toISOString(),
+    durationMs: completed - startedAtMs,
+    status: "rejected_stale",
+    rejection: {
+      code,
+      message: "Execution outcome is indeterminate; a fresh observation is required",
+      retryable: true,
+    },
+  });
+}
+
+async function boundedCleanup(work: Promise<void> | undefined, timeoutMs = 1_000): Promise<void> {
+  if (work === undefined) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    work.catch(() => undefined),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
 }
 
 function trajectory(type: "connection" | "observation" | "action" | "approval" | "terminal" | "error", summary: string, now: number) {

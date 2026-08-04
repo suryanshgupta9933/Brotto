@@ -20,7 +20,7 @@ const mockStorage: Record<string, unknown> = {};
 global.chrome = {
   storage: {
     local: {
-      get: async (key: string) => {
+      get: async (key: string | string[]) => {
         const result: Record<string, unknown> = {};
         if (typeof key === "string") {
           result[key] = mockStorage[key];

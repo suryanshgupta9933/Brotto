@@ -104,7 +104,7 @@ const TaskCancelledSchema = z.object({
   taskId: TaskIdSchema,
   occurredAt: TimestampSchema,
   reason: z.string().min(1).max(2_000),
-  observationId: ObservationIdSchema,
+  observationId: ObservationIdSchema.optional(),
   actionId: ActionIdSchema.optional(),
   stepId: StepIdSchema.optional(),
 }).strict();
@@ -131,6 +131,7 @@ export const ReconcileResponseSchema = z.object({
   authoritativeState: z.enum(['CREATED', 'OBSERVING', 'PLANNING', 'VALIDATING', 'POLICY_CHECK', 'WAITING_FOR_APPROVAL', 'WAITING_FOR_USER', 'DISPATCHING', 'EXECUTING', 'VERIFYING', 'COMPLETED', 'FAILED', 'CANCELLED']),
   command: ActionCommandMessageSchema.optional(),
   storedResult: ActionResultV1Schema.optional(),
+  terminal: TaskTerminalSchema.optional(),
   respondedAt: TimestampSchema,
 }).strict();
 
@@ -167,6 +168,13 @@ const AgentMessageV1BaseSchema = z.discriminatedUnion('type', [
 
 /** The application message union; raw CDP frames are intentionally not representable. */
 export const AgentMessageV1Schema = AgentMessageV1BaseSchema.superRefine((message, context) => {
+  if (message.type === 'reconcile.response' && message.terminal !== undefined) {
+    const expected = message.terminal.type === 'task.completed' ? 'COMPLETED'
+      : message.terminal.type === 'task.failed' ? 'FAILED' : 'CANCELLED';
+    if (message.authoritativeState !== expected) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['terminal'], message: 'Terminal message does not match authoritative state' });
+    }
+  }
   try {
     assertNoForbiddenBrowserData(message);
   } catch (error) {

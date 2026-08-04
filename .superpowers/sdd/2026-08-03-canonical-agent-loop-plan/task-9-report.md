@@ -49,4 +49,40 @@ No `.env`, source map, dependency directory, cookie, authorization header, local
 
 ## Concern
 
-The brief's literal command `pnpm --dir clients/browser-extension test -- --runInBand` exits before test execution because the existing `test: jest` script expands to `jest -- --runInBand`, which treats `--runInBand` as a test-name pattern and reports `No tests found`. The equivalent direct Jest command above is green. The full legacy extension suite also retains unrelated pairing/debugger failures documented by Tasks 7 and 8; Task 9's focused suites, type-check, and build are green.
+The initial implementation inherited a broken pnpm/Jest argument-forwarding path and legacy pairing/debugger failures. The review-hardening round below fixes those suite-level issues; the only remaining invocation caveat is pnpm 11's shared-worktree pre-run dependency-status check, documented with the final commands.
+
+## Review hardening
+
+- Added a local-storage write-ahead execution journal containing only action ID, idempotency key, observation ID, status, and a schema-validated completed result. A `started` record is never re-executed after suspension; it becomes a typed retryable indeterminate result requiring a fresh observation. A completed record is durably replayed after a crash between browser effect and result transmission.
+- Persisted the full canonical structured terminal result and identifier-only approval metadata. Terminal reconciliation now carries the authoritative terminal message, persists it before UI emission, emits once, closes transport, clears bootstrap, and performs bounded debugger detach. Popup reopening restores terminal and approval state.
+- Cancellation now owns the lifecycle abort controller from bootstrap start. It does not wait for a non-cooperative action, and startup/terminal/cancel close and detach work is bounded.
+- Pipeline and post-observation failures after ACK are contained in exactly one sanitized typed `action.completed`. Transport message-handler failures are surfaced, stored as transport faults, and fail the socket closed instead of disappearing in a promise-tail catch.
+- Popup terminal rendering now includes full summary, status, observation ID, confidence, findings, evidence observation IDs, and unmet criteria. Approval, cancellation, and reconnect UI remain available.
+- Removed the legacy options page and redundant `activeTab`/icon declarations. Bootstrap configuration is administrator-managed; the active bundle has no legacy HTTP task/SSE/raw executor import path.
+- The build requires every declared runtime asset, copies only manifest/popup assets, runs type-check first, and produces no source map. A package-local workspace and frozen lockfile cover the extension plus its two workspace protocol dependencies. The test runner normalizes pnpm's forwarded `-- --runInBand` arguments.
+- Repaired the legacy debugger test isolation/mocks and pairing public-key export bug rather than excluding suites.
+
+### Review TDD and final verification
+
+RED regressions reproduced all review failures: started actions executed again, completed results disappeared before send, terminal/approval state was absent after restart, bootstrap cancellation did not abort, non-cooperative detach hung, pipeline errors escaped, controller faults were swallowed, and the manifest/build/popup retained unsafe or incomplete surfaces.
+
+Final clean-dependency verification:
+
+```text
+CI=true pnpm --dir clients/browser-extension install --frozen-lockfile
+332 packages installed from the frozen three-project workspace; lockfile policy verification passed
+
+pnpm --config.verify-deps-before-run=false --dir clients/browser-extension test -- --runInBand
+14 suites, 195 tests passed
+
+pnpm --config.verify-deps-before-run=false --dir clients/browser-extension run build:tsc
+exit 0
+
+pnpm --config.verify-deps-before-run=false --dir clients/browser-extension run build
+exit 0; no warnings
+
+pnpm --config.verify-deps-before-run=false --filter @fara-platform/relay-protocol exec jest --runInBand agent-envelope
+1 suite, 9 tests passed
+```
+
+The pnpm 11 pre-run dependency-status check still attempts an interactive module purge when invoked through `--dir` in this shared dirty monorepo. The explicit `--config.verify-deps-before-run=false` runs the already frozen-installed dependency tree; the separate clean frozen install above proves lockfile completeness.

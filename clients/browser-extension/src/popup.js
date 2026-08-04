@@ -3,7 +3,6 @@ const statusText = document.getElementById('statusText');
 const taskInput = document.getElementById('taskInput');
 const sendTaskBtn = document.getElementById('sendTaskBtn');
 const cancelTaskBtn = document.getElementById('cancelTaskBtn');
-const optionsBtn = document.getElementById('optionsBtn');
 const clearLogBtn = document.getElementById('clearLogBtn');
 const logContent = document.getElementById('logContent');
 const approvalPanel = document.getElementById('approvalPanel');
@@ -20,7 +19,6 @@ document.addEventListener('DOMContentLoaded', () => { void initialize(); });
 async function initialize() {
   sendTaskBtn.addEventListener('click', () => { void sendTask(); });
   cancelTaskBtn.addEventListener('click', () => { void cancelTask(); });
-  optionsBtn.addEventListener('click', () => { void chrome.runtime.openOptionsPage(); });
   clearLogBtn.addEventListener('click', () => { void clearTrajectory(); });
   approveBtn.addEventListener('click', () => { void resolveApproval(true); });
   denyBtn.addEventListener('click', () => { void resolveApproval(false); });
@@ -41,6 +39,13 @@ async function refreshState() {
   const recovery = response.status?.recovery;
   updateStatus(recovery?.status || 'disconnected', response.status?.reconnect?.reconnectAttempt);
   renderTrajectory(response.status?.trajectory || []);
+  if (response.status?.terminal) renderTerminal(response.status.terminal);
+  if (response.status?.approval) {
+    approvalReason.textContent = response.status.approval.reason;
+    approvalPanel.hidden = false;
+  } else {
+    approvalPanel.hidden = true;
+  }
 }
 
 async function sendTask() {
@@ -144,16 +149,27 @@ function renderTerminal(message) {
   heading.textContent = message.type === 'task.completed' ? 'Task completed' : message.type === 'task.failed' ? 'Task failed' : 'Task cancelled';
   resultContent.appendChild(heading);
   if (message.completion) {
+    const status = document.createElement('p');
+    status.textContent = `Status: ${message.completion.status}`;
+    const observation = document.createElement('p');
+    observation.textContent = `Observation: ${message.completion.observationId}`;
+    const confidence = document.createElement('p');
+    confidence.textContent = `Confidence: ${message.completion.confidence}`;
     const summary = document.createElement('p');
     summary.textContent = message.completion.summary;
-    resultContent.appendChild(summary);
+    resultContent.append(status, observation, confidence, summary);
     if (message.completion.findings.length) {
       const findingsHeading = document.createElement('h4');
       findingsHeading.textContent = 'Findings';
       const findings = document.createElement('ul');
       for (const finding of message.completion.findings) {
         const item = document.createElement('li');
-        item.textContent = finding.fact;
+        const fact = document.createElement('div');
+        fact.textContent = finding.fact;
+        const evidence = document.createElement('div');
+        evidence.className = 'subtle';
+        evidence.textContent = `Evidence observations: ${finding.observationIds.join(', ')}`;
+        item.append(fact, evidence);
         findings.appendChild(item);
       }
       resultContent.append(findingsHeading, findings);

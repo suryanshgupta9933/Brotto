@@ -142,11 +142,16 @@ function area() {
   };
 }
 
-function setup(options: { execute?: (input: unknown, signal?: AbortSignal) => Promise<unknown> } = {}) {
+function setup(options: {
+  execute?: (input: unknown, signal?: AbortSignal) => Promise<unknown>;
+  store?: CanonicalSessionStore;
+  bootstrap?: ConnectionBootstrapPort;
+  detach?: (tabId: number) => Promise<void>;
+} = {}) {
   const transport = new FakeTransport();
   const ui: ControllerUiEvent[] = [];
   const order: string[] = [];
-  const detach = jest.fn(async () => {});
+  const detach = jest.fn(options.detach ?? (async () => {}));
   const execute = jest.fn(options.execute ?? (async () => {
     order.push("execute");
     return {
@@ -167,12 +172,12 @@ function setup(options: { execute?: (input: unknown, signal?: AbortSignal) => Pr
     return send(message);
   };
   let captureCount = 0;
-  const bootstrap: ConnectionBootstrapPort = {
+  const bootstrap: ConnectionBootstrapPort = options.bootstrap ?? {
     bootstrap: jest.fn(async () => material()),
   };
   const local = area();
   const session = area();
-  const store = new CanonicalSessionStore({ local, session, now: () => NOW });
+  const store = options.store ?? new CanonicalSessionStore({ local, session, now: () => NOW });
   const controller = new CanonicalExtensionController({
     bootstrap,
     store,
@@ -249,6 +254,76 @@ describe("CanonicalExtensionController", () => {
     expect(results[0]).toEqual(results[1]);
   });
 
+  it("never re-executes a write-ahead started action after service-worker suspension", async () => {
+    const { controller, execute, store, transport } = setup();
+    await controller.startTask("Find the current price");
+    await store.saveActionExecution({
+      actionId: IDS.actionId,
+      idempotencyKey: "scroll-once",
+      observationId: IDS.observationId,
+      status: "started",
+    });
+
+    await controller.handleTransportMessage(inbound(commandMessage()));
+
+    expect(execute).not.toHaveBeenCalled();
+    const completed = transport.sent.filter((message) => message.type === "action.completed").pop();
+    expect(completed).toMatchObject({
+      result: {
+        status: "rejected_stale",
+        rejection: { code: "EXECUTION_OUTCOME_INDETERMINATE", retryable: true },
+      },
+    });
+  });
+
+  it("never executes an unknown pending action restored without a journal record", async () => {
+    const sharedStore = new CanonicalSessionStore({ local: area(), session: area(), now: () => NOW });
+    await sharedStore.saveRecovery({
+      version: 1,
+      serverUrl: material().serverUrl,
+      sessionId: IDS.sessionId,
+      deviceId: IDS.deviceId,
+      lastReceivedSequence: 5,
+      lastSentSequence: 6,
+      attachedTabId: 42,
+      taskId: IDS.taskId,
+      lastObservationId: IDS.observationId,
+      pendingActionId: IDS.actionId,
+      status: "executing",
+    });
+    await sharedStore.saveBootstrap(material());
+    const { controller, execute, transport } = setup({ store: sharedStore });
+    await controller.restore();
+
+    await controller.handleTransportMessage(inbound(commandMessage()));
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(transport.sent.filter((message) => message.type === "action.completed").pop()).toMatchObject({
+      result: { rejection: { code: "EXECUTION_OUTCOME_INDETERMINATE" } },
+    });
+  });
+
+  it("durably replays a completed action after a crash between browser effect and result send", async () => {
+    const sharedStore = new CanonicalSessionStore({ local: area(), session: area(), now: () => NOW });
+    const first = setup({ store: sharedStore });
+    await first.controller.startTask("Find the current price");
+    const send = first.transport.send.bind(first.transport);
+    first.transport.send = async (message) => {
+      if (message.type === "action.completed") throw new Error("worker stopped before send");
+      return send(message);
+    };
+
+    await expect(first.controller.handleTransportMessage(inbound(commandMessage()))).rejects.toThrow("worker stopped before send");
+    expect(first.execute).toHaveBeenCalledTimes(1);
+    await expect(sharedStore.loadActionExecution()).resolves.toMatchObject({ status: "completed" });
+
+    const resumed = setup({ store: sharedStore });
+    await resumed.controller.restore();
+    await resumed.controller.handleTransportMessage(inbound(commandMessage()));
+    expect(resumed.execute).not.toHaveBeenCalled();
+    expect(resumed.transport.sent.filter((message) => message.type === "action.completed").pop()).toBeDefined();
+  });
+
   it("cancellation aborts bootstrap/execution, sends canonical cancellation, closes, and detaches", async () => {
     let executionSignal: AbortSignal | undefined;
     let markStarted!: () => void;
@@ -298,6 +373,123 @@ describe("CanonicalExtensionController", () => {
     expect(terminals).toHaveLength(1);
     expect(terminals[0]).toMatchObject({ message: terminal });
     expect(JSON.stringify(terminals[0])).toContain("The complete finding remains available.");
+    expect(await controller.viewState()).toMatchObject({ terminal });
+  });
+
+  it("closes and durably publishes the authoritative terminal reconciliation", async () => {
+    const { controller, detach, transport, ui } = setup();
+    await controller.startTask("Find the current price");
+    const terminal = {
+      type: "task.completed",
+      completion: {
+        kind: "completion",
+        observationId: IDS.observationId,
+        type: "terminate",
+        status: "succeeded",
+        summary: "Done",
+        findings: [{ fact: "Price is 42", observationIds: [IDS.observationId] }],
+        unmetCriteria: [],
+        confidence: 0.98,
+      },
+    } as const;
+    await controller.handleTransportMessage(inbound({
+      type: "reconcile.response",
+      nextSequence: 8,
+      pendingActionIds: [],
+      requiresFreshObservation: false,
+      authoritativeState: "COMPLETED",
+      terminal,
+      respondedAt: "2026-08-04T10:00:12.000Z",
+    } as AgentMessageV1));
+
+    expect(transport.closed).toBe(true);
+    expect(detach).toHaveBeenCalledWith(42);
+    expect(ui.filter((event) => event.type === "canonical_terminal")).toHaveLength(1);
+    expect(await controller.viewState()).toMatchObject({ terminal });
+    await expect(controller.restore()).resolves.toBe(false);
+  });
+
+  it("restores identifier-only approval metadata and can resolve it after suspension", async () => {
+    const sharedStore = new CanonicalSessionStore({ local: area(), session: area(), now: () => NOW });
+    const first = setup({ store: sharedStore });
+    await first.controller.startTask("Find the current price");
+    const approval = {
+      type: "approval.requested",
+      approvalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      policyDecisionId: IDS.policyDecisionId,
+      actionId: IDS.actionId,
+      observationId: IDS.observationId,
+      requestedAt: "2026-08-04T10:00:05.000Z",
+      reason: "Approve consequential action",
+    } as AgentMessageV1;
+    await first.controller.handleTransportMessage(inbound(approval));
+
+    const resumed = setup({ store: sharedStore });
+    await resumed.controller.restore();
+    expect(await resumed.controller.viewState()).toMatchObject({
+      approval: { approvalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", reason: "Approval required" },
+    });
+    await resumed.controller.resolveApproval(true);
+    expect(resumed.transport.sent.filter((message) => message.type === "approval.resolved").pop()).toBeDefined();
+  });
+
+  it("aborts an in-progress bootstrap even before recovery state exists", async () => {
+    let bootstrapSignal: AbortSignal | undefined;
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const bootstrap: ConnectionBootstrapPort = {
+      bootstrap: jest.fn(async (_input, signal) => {
+        bootstrapSignal = signal;
+        markEntered();
+        await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
+        return material();
+      }),
+    };
+    const { controller } = setup({ bootstrap });
+    const starting = controller.startTask("Find the current price");
+    await entered;
+
+    await controller.cancel();
+
+    expect(bootstrapSignal?.aborted).toBe(true);
+    await expect(starting).rejects.toThrow("Aborted");
+  });
+
+  it("bounds debugger detach when cancellation interrupts bootstrap", async () => {
+    jest.useFakeTimers();
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const bootstrap: ConnectionBootstrapPort = {
+      bootstrap: async (_input, signal) => {
+        markEntered();
+        await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
+        return material();
+      },
+    };
+    const { controller } = setup({
+      bootstrap,
+      detach: async () => new Promise<void>(() => undefined),
+    });
+    const starting = controller.startTask("Find the current price");
+    const rejected = expect(starting).rejects.toThrow("Aborted");
+    await entered;
+    await controller.cancel();
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    await rejected;
+    jest.useRealTimers();
+  });
+
+  it("contains pipeline failures in one typed action result", async () => {
+    const { controller, transport } = setup({ execute: async () => { throw new Error("page secret must not escape"); } });
+    await controller.startTask("Find the current price");
+
+    await controller.handleTransportMessage(inbound(commandMessage()));
+
+    const completed = transport.sent.filter((message) => message.type === "action.completed");
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({ result: { status: "rejected_stale", rejection: { code: "CLIENT_EXECUTION_INDETERMINATE" } } });
+    expect(JSON.stringify(completed[0])).not.toContain("page secret");
   });
 
   it("restores a suspended non-secret session and reconnects for reconciliation", async () => {

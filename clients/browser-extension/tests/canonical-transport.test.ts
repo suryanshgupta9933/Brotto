@@ -147,6 +147,40 @@ describe("CanonicalTransport", () => {
     await transport.close();
   });
 
+  it("surfaces controller message failures and fails the socket closed", async () => {
+    const socket = new FakeSocket();
+    const faults: unknown[] = [];
+    const transport = new CanonicalTransport({
+      material: material(),
+      now: () => NOW,
+      websocketFactory: () => socket,
+      onMessage: async () => { throw new Error("controller failed"); },
+      onMessageError: (error) => { faults.push(error); },
+    });
+    const connecting = transport.connect();
+    socket.open();
+    await connecting;
+    const signer = await deriveBootstrapEnvelopeSigner(material());
+    const valid = await signEnvelope(createEnvelope({
+      messageId: "77777777-7777-4777-8777-777777777777",
+      sessionId: IDS.sessionId,
+      correlationId: IDS.taskId,
+      causationId: IDS.taskId,
+      recipientId: IDS.deviceId,
+      tenantId: "tenant-a",
+      deviceId: IDS.deviceId,
+      sequence: 1,
+      createdAt: new Date(NOW).toISOString(),
+      expiresAt: NOW + 30_000,
+      payload: { type: "heartbeat", sentAt: new Date(NOW).toISOString() },
+    }), signer);
+
+    socket.receive(JSON.stringify(valid));
+    await expect(transport.drained()).rejects.toThrow("controller failed");
+    expect(faults).toHaveLength(1);
+    expect(socket.readyState).toBe(3);
+  });
+
   it("uses fresh bootstrap material and reconciles pending work after bounded reconnect", async () => {
     jest.useFakeTimers();
     const sockets: FakeSocket[] = [];

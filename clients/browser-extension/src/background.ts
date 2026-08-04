@@ -18,6 +18,7 @@ const BOOTSTRAP_PATH = "/v1/browser-extension/sessions";
 
 let managedHostnames = new Set<string>();
 let managedOrigins: string[] = [];
+let managedControlPlaneUrl: string | null = null;
 
 const store = new CanonicalSessionStore({
   local: chrome.storage.local as unknown as StorageAreaPort,
@@ -28,12 +29,8 @@ const store = new CanonicalSessionStore({
 
 const bootstrap: ConnectionBootstrapPort = {
   async bootstrap(input: BootstrapInput, signal: AbortSignal) {
-    const settings = await chrome.storage.local.get("settings");
-    const rawServerUrl = (settings.settings as { serverUrl?: unknown } | undefined)?.serverUrl;
-    if (typeof rawServerUrl !== "string" || rawServerUrl.length === 0) {
-      throw new Error("Configure the customer control-plane URL in extension options");
-    }
-    const endpoint = bootstrapEndpoint(rawServerUrl);
+    if (managedControlPlaneUrl === null) throw new Error("Administrator-managed control-plane URL is unavailable");
+    const endpoint = bootstrapEndpoint(managedControlPlaneUrl);
     return new ControlPlaneConnectionBootstrap(endpoint).bootstrap(input, signal);
   },
 };
@@ -92,6 +89,11 @@ const controller = new CanonicalExtensionController({
     getReconnectMaterial: context.getReconnectMaterial,
     onMaterial: context.onMaterial,
     onMessage: context.onMessage,
+    onMessageError: (error) => notifyUi({
+      type: "canonical_error",
+      code: "CONTROLLER_MESSAGE_FAILED",
+      message: error instanceof Error ? error.message : "Canonical controller message failed",
+    }),
     onStateChange: context.onStateChange,
     onProtocolError: (code) => notifyUi({ type: "canonical_error", code, message: "A canonical protocol message was rejected" }),
   }),
@@ -126,6 +128,8 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
           recovery: state.recovery,
           reconnect: state.transport,
           trajectory: state.trajectory,
+          terminal: state.terminal,
+          approval: state.approval,
         },
       };
     }
@@ -223,14 +227,18 @@ function bootstrapEndpoint(rawServerUrl: string): string {
 
 async function loadManagedPolicy(): Promise<void> {
   try {
-    const managed = await chrome.storage.managed.get(["canonicalAllowedHostnames", "canonicalAllowedOrigins"]);
+    const managed = await chrome.storage.managed.get(["canonicalAllowedHostnames", "canonicalAllowedOrigins", "canonicalControlPlaneUrl"]);
     const hostnames = Array.isArray(managed.canonicalAllowedHostnames) ? managed.canonicalAllowedHostnames : [];
     const origins = Array.isArray(managed.canonicalAllowedOrigins) ? managed.canonicalAllowedOrigins : [];
     managedHostnames = new Set(hostnames.flatMap((value) => typeof value === "string" && validHostname(value) ? [value.toLowerCase()] : []));
     managedOrigins = origins.flatMap((value) => typeof value === "string" && validHttpsOrigin(value) ? [new URL(value).origin] : []);
+    managedControlPlaneUrl = typeof managed.canonicalControlPlaneUrl === "string" && validHttpsOrigin(managed.canonicalControlPlaneUrl)
+      ? managed.canonicalControlPlaneUrl
+      : null;
   } catch {
     managedHostnames = new Set();
     managedOrigins = [];
+    managedControlPlaneUrl = null;
   }
 }
 

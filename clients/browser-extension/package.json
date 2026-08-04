@@ -6,10 +6,9 @@
   "scripts": {
     "build": "node build.mjs",
     "build:tsc": "tsc --noEmit",
-    "build:copy": "cp manifest.json dist/ && cp -r src/*.html dist/ && cp src/popup.js dist/ && mkdir -p dist/icons && cp src/icons/*.png dist/icons/ 2>/dev/null || true",
     "dev": "npm run build && npm run watch",
     "watch": "tsc --watch",
-    "test": "jest",
+    "test": "node test.mjs",
     "test:coverage": "jest --coverage",
     "lint": "eslint src --ext .ts,.tsx,.js",
     "prettier": "prettier --write \"src/**/*.{ts,tsx,js,html}\"",
