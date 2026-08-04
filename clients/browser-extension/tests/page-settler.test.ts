@@ -280,6 +280,43 @@ describe("PageSettler", () => {
     });
   });
 
+  it("does not let an older overlapping page-state read overwrite a newer one", async () => {
+    const clock = new FakeClock();
+    const events = new FakeEvents();
+    const pending: Array<(state: { url: string; lifecycle: "complete" }) => void> = [];
+    const getPageState = jest.fn(() => new Promise<{ url: string; lifecycle: "complete" }>((resolve) => pending.push(resolve)));
+    const settler = new PageSettler({
+      tabId: 7,
+      events,
+      clock,
+      initialPageState: { url: "https://initial.example/", lifecycle: "interactive" },
+      getPageState,
+      stabilityMs: 100,
+      pageStateReadTimeoutMs: 250,
+    });
+    const settlement = settler.settle(async () => {
+      events.emit("Page.javascriptDialogOpening", { type: "alert" });
+    });
+    await flush();
+    expect(pending).toHaveLength(3);
+
+    pending[1]!({ url: "https://newer.example/result?secret=value", lifecycle: "complete" });
+    await flush();
+    pending[2]!({ url: "https://newest.example/final?token=hidden", lifecycle: "complete" });
+    await flush();
+    pending[0]!({ url: "https://older.example/stale", lifecycle: "complete" });
+    await flush();
+    clock.advanceBy(100);
+    await flush();
+    expect(pending).toHaveLength(4);
+    clock.advanceBy(250);
+
+    await expect(settlement).resolves.toMatchObject({
+      status: "settled",
+      pageState: { url: "https://newest.example/final", lifecycle: "complete" },
+    });
+  });
+
   it("ignores subframe navigation and load events", async () => {
     const clock = new FakeClock();
     const events = new FakeEvents();

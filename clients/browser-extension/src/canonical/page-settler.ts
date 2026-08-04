@@ -102,11 +102,21 @@ export class PageSettler {
       let timeoutTimer: unknown;
       let mainFrameId = this.configuredMainFrameId;
       let latestPageState: SettledPageState = this.initialPageState;
+      let nextRefreshGeneration = 0;
+      let committedRefreshGeneration = 0;
+      const pendingRefreshes = new Set<Promise<void>>();
 
-      const refreshPageState = async () => {
-        await this.safePageState().then((state) => {
-          if (!completed && state !== undefined) latestPageState = state;
+      const refreshPageState = (): Promise<void> => {
+        const generation = ++nextRefreshGeneration;
+        const refresh = this.safePageState().then((state) => {
+          if (!completed && state !== undefined && generation > committedRefreshGeneration) {
+            latestPageState = state;
+            committedRefreshGeneration = generation;
+          }
         });
+        pendingRefreshes.add(refresh);
+        void refresh.finally(() => pendingRefreshes.delete(refresh));
+        return refresh;
       };
       void refreshPageState();
 
@@ -125,7 +135,8 @@ export class PageSettler {
       ) => {
         if (completed || finishing) return;
         finishing = true;
-        await refreshPageState();
+        const terminalRefresh = refreshPageState();
+        await Promise.allSettled([...pendingRefreshes, terminalRefresh]);
         completed = true;
         cleanup();
         const details: SettlementDetails = {

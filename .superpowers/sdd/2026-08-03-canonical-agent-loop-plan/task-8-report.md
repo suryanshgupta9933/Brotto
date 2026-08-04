@@ -43,13 +43,16 @@ Implementation and independent-review hardening are complete.
 - Page-state capture cannot hang completion; bounded reads refresh initially,
   after actions/events, and at terminal settlement. Timeout/settlement returns
   the latest successful sanitized state, and failures never replace it.
+  Monotonic refresh generations prevent a late older read from overwriting a
+  newer completed read, and terminal settlement awaits all bounded reads that
+  were already in flight plus its terminal refresh.
 
 ## Verification
 
 - Scoped test command using the existing local Jest binary:
   `./node_modules/.bin/jest --runInBand client-policy canonical-action-executor canonical-execution-pipeline page-settler`
   - 4 suites passed
-  - 56 tests passed
+  - 57 tests passed
 - Extension build using the existing local build entry point:
   `node build.mjs`
   - passed (`Build complete!`)
