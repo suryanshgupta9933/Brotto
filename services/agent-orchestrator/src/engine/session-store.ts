@@ -1,5 +1,5 @@
 import type { MessageId, SessionId } from '@fara-platform/fara-action-schema';
-import type { CanonicalSession, SessionStore, StoredOutcome } from './types.js';
+import type { CanonicalSession, SessionEngineEvent, SessionStore, StoredOutcome } from './types.js';
 import { SessionEngineError } from './types.js';
 
 function clone<T>(value: T): T {
@@ -54,6 +54,7 @@ export class InMemorySessionStore implements SessionStore {
   private readonly processed = new Map<string, StoredOutcome>();
   private readonly connectionFences = new Map<string, number>();
   private readonly clientSequences = new Map<string, number>();
+  private readonly inbound = new Map<string, { sessionId: SessionId; sequence: number; event: SessionEngineEvent }>();
 
   async claimConnectionFence(sessionId: SessionId, fence: number): Promise<boolean> {
     const current = this.connectionFences.get(sessionId) ?? 0;
@@ -62,13 +63,28 @@ export class InMemorySessionStore implements SessionStore {
     return true;
   }
 
-  async acceptClientSequence(sessionId: SessionId, sequence: number): Promise<'accepted' | 'duplicate' | 'gap'> {
+  async admitInbound(input: { sessionId: SessionId; messageId: MessageId; sequence: number; event: SessionEngineEvent }): Promise<'accepted' | 'resume' | 'duplicate' | 'gap'> {
+    const existing = this.inbound.get(input.messageId);
+    if (existing !== undefined) return existing.sessionId === input.sessionId && existing.sequence === input.sequence ? 'resume' : 'duplicate';
+    if (this.processed.has(input.messageId)) return 'resume';
+    const sessionId = input.sessionId;
+    const sequence = input.sequence;
     const current = this.clientSequences.get(sessionId);
-    if (current === undefined) { this.clientSequences.set(sessionId, sequence); return 'accepted'; }
+    if (current === undefined) {
+      this.clientSequences.set(sessionId, sequence);
+      this.inbound.set(input.messageId, { sessionId, sequence, event: clone(input.event) });
+      return 'accepted';
+    }
     if (sequence <= current) return 'duplicate';
     if (sequence !== current + 1) return 'gap';
     this.clientSequences.set(sessionId, sequence);
+    this.inbound.set(input.messageId, { sessionId, sequence, event: clone(input.event) });
     return 'accepted';
+  }
+
+  async loadInbound(messageId: MessageId): Promise<SessionEngineEvent | null> {
+    const stored = this.inbound.get(messageId);
+    return stored === undefined ? null : clone(stored.event);
   }
 
   async load(sessionId: SessionId): Promise<CanonicalSession | null> {
@@ -76,15 +92,19 @@ export class InMemorySessionStore implements SessionStore {
     return session === undefined ? null : clone(session);
   }
 
-  async compareAndSwap(session: CanonicalSession, expectedRevision: number): Promise<void> {
-    await this.transition(session, expectedRevision);
+  async compareAndSwap(session: CanonicalSession, expectedRevision: number, expectedConnectionFence?: number): Promise<void> {
+    await this.transition(session, expectedRevision, undefined, expectedConnectionFence);
   }
 
   async transition(
     session: CanonicalSession,
     expectedRevision: number,
     outcome?: StoredOutcome,
+    expectedConnectionFence?: number,
   ): Promise<void> {
+    if (expectedConnectionFence !== undefined && this.connectionFences.get(session.sessionId) !== expectedConnectionFence) {
+      throw new SessionEngineError('STALE_CONNECTION_FENCE', 'Connection fence changed before durable transition');
+    }
     assertJsonValue(session);
     if (outcome !== undefined) {
       assertJsonValue(outcome);
@@ -111,6 +131,7 @@ export class InMemorySessionStore implements SessionStore {
       this.processed.set(messageId, clone(outcome));
     }
     if (outcome !== undefined) this.processed.set(outcome.messageId, clone(outcome));
+    if (outcome !== undefined) this.inbound.delete(outcome.messageId);
   }
 
   async getProcessed(messageId: MessageId): Promise<StoredOutcome | null> {

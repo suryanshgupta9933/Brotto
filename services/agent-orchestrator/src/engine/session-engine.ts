@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   ActionCommandV1,
   ActionId,
@@ -42,6 +43,7 @@ interface TrajectorySpec extends TrajectoryReferences {
 }
 
 export class SessionEngine {
+  private readonly connectionFence = new AsyncLocalStorage<number | undefined>();
   private readonly now: () => string;
   private readonly idGenerator: () => string;
   private readonly budgets;
@@ -69,6 +71,7 @@ export class SessionEngine {
       const accepted = await this.options.store.claimConnectionFence?.(event.sessionId, event.connectionFence);
       if (accepted !== true) throw new SessionEngineError('STALE_CONNECTION_FENCE', 'Connection fence is stale or the store cannot persist fences');
     }
+    return this.connectionFence.run(event.connectionFence, async () => {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         return await this.handleOnce(event);
@@ -79,6 +82,15 @@ export class SessionEngine {
       }
     }
     throw new SessionEngineError('STORE_CONFLICT', 'Session update could not be serialized');
+    });
+  }
+
+  private transition(session: CanonicalSession, expectedRevision: number, outcome?: StoredOutcome): Promise<void> {
+    return this.options.store.transition(session, expectedRevision, outcome, this.connectionFence.getStore());
+  }
+
+  private compareAndSwap(session: CanonicalSession, expectedRevision: number): Promise<void> {
+    return this.options.store.compareAndSwap(session, expectedRevision, this.connectionFence.getStore());
   }
 
   private async handleOnce(event: SessionEngineEvent): Promise<StoredOutcome> {
@@ -164,7 +176,7 @@ export class SessionEngine {
       occurredAt: event.occurredAt,
     }]);
     const outcome = this.addOutcome(session, event.messageId, 'accepted');
-    await this.options.store.transition(session, 0, outcome);
+    await this.transition(session, 0, outcome);
     await this.resumeSession(event.sessionId, true);
     return outcome;
   }
@@ -236,7 +248,7 @@ export class SessionEngine {
       messageId,
       terminalReason === null ? 'accepted' : 'terminal',
     );
-    await this.options.store.transition(session, expectedRevision, outcome);
+    await this.transition(session, expectedRevision, outcome);
     return outcome;
   }
 
@@ -369,7 +381,7 @@ export class SessionEngine {
       }]),
     ]);
     session.revision = expectedRevision + 1;
-    await this.options.store.transition(session, expectedRevision);
+    await this.transition(session, expectedRevision);
   }
 
   private async applyProposal(
@@ -420,7 +432,7 @@ export class SessionEngine {
         },
       ]);
       session.revision = expectedRevision + 1;
-      await this.options.store.transition(session, expectedRevision);
+      await this.transition(session, expectedRevision);
       return;
     }
     if ('summary' in proposal) {
@@ -466,7 +478,7 @@ export class SessionEngine {
       ]);
       if (session.terminalReason !== null) this.abortSessionWork(sessionId, session.terminalReason.message);
       session.revision = expectedRevision + 1;
-      await this.options.store.transition(session, expectedRevision);
+      await this.transition(session, expectedRevision);
       return;
     }
 
@@ -500,7 +512,7 @@ export class SessionEngine {
       },
     ]);
     session.revision = expectedRevision + 1;
-    await this.options.store.transition(session, expectedRevision);
+    await this.transition(session, expectedRevision);
   }
 
   private async resumePolicy(session: CanonicalSession): Promise<boolean> {
@@ -582,7 +594,7 @@ export class SessionEngine {
         },
       ]);
       session.revision = expectedRevision + 1;
-      await this.options.store.transition(session, expectedRevision);
+      await this.transition(session, expectedRevision);
       return;
     }
 
@@ -613,7 +625,7 @@ export class SessionEngine {
         },
       ]);
       session.revision = expectedRevision + 1;
-      await this.options.store.transition(session, expectedRevision);
+      await this.transition(session, expectedRevision);
       return;
     }
 
@@ -678,7 +690,7 @@ export class SessionEngine {
         ? null
         : this.addOutcome(session, causationMessageId, 'terminal');
       if (outcome === null) session.revision = expectedRevision + 1;
-      await this.options.store.transition(session, expectedRevision, outcome ?? undefined);
+      await this.transition(session, expectedRevision, outcome ?? undefined);
       return outcome;
     }
 
@@ -712,7 +724,7 @@ export class SessionEngine {
       ? null
       : this.addOutcome(session, causationMessageId, 'accepted');
     if (outcome === null) session.revision = expectedRevision + 1;
-    await this.options.store.transition(session, expectedRevision, outcome ?? undefined);
+    await this.transition(session, expectedRevision, outcome ?? undefined);
     return outcome;
   }
 
@@ -727,7 +739,7 @@ export class SessionEngine {
     active.delivery.lastError = null;
     session.updatedAt = this.now();
     session.revision = expectedRevision + 1;
-    await this.options.store.transition(session, expectedRevision);
+    await this.transition(session, expectedRevision);
 
     try {
       await this.options.commandSink.send(active.command);
@@ -738,7 +750,7 @@ export class SessionEngine {
         session.activeAction.delivery.lastError = error instanceof Error ? error.message : String(error);
         session.updatedAt = this.now();
         session.revision = failureRevision + 1;
-        await this.options.store.transition(session, failureRevision);
+        await this.transition(session, failureRevision);
       }
       throw error;
     }
@@ -750,7 +762,7 @@ export class SessionEngine {
     session.activeAction.delivery.lastError = null;
     session.updatedAt = this.now();
     session.revision = sentRevision + 1;
-    await this.options.store.transition(session, sentRevision);
+    await this.transition(session, sentRevision);
   }
 
   private async resolveApproval(
@@ -797,7 +809,7 @@ export class SessionEngine {
         },
       ]);
       const outcome = this.addOutcome(session, event.messageId, 'terminal');
-      await this.options.store.transition(session, expectedRevision, outcome);
+      await this.transition(session, expectedRevision, outcome);
       await this.resumeSession(event.sessionId, true);
       return outcome;
     }
@@ -894,7 +906,7 @@ export class SessionEngine {
       terminalReason === null ? 'accepted' : 'terminal',
     );
     session.completedActions[event.result.actionId] = { result: event.result, outcome };
-    await this.options.store.transition(session, expectedRevision, outcome);
+    await this.transition(session, expectedRevision, outcome);
     await this.resumeSession(event.sessionId, true);
     return outcome;
   }
@@ -927,7 +939,7 @@ export class SessionEngine {
       active.delivery.lastError = null;
     }
     const outcome = this.addOutcome(session, event.messageId, 'reconciled', undefined, requiresFreshObservation);
-    await this.options.store.transition(session, expectedRevision, outcome);
+    await this.transition(session, expectedRevision, outcome);
     await this.resumeSession(event.sessionId, true);
     return outcome;
   }
@@ -965,7 +977,7 @@ export class SessionEngine {
       ...references,
     }]);
     const outcome = this.addOutcome(session, event.messageId, 'terminal');
-    await this.options.store.transition(session, expectedRevision, outcome);
+    await this.transition(session, expectedRevision, outcome);
     await this.resumeSession(event.sessionId, true);
     return outcome;
   }
@@ -994,7 +1006,7 @@ export class SessionEngine {
       delivered.lastError = null;
       session.revision = deliveredRevision + 1;
       try {
-        await this.options.store.transition(session, deliveredRevision);
+        await this.transition(session, deliveredRevision);
       } catch (error) {
         if (error instanceof SessionEngineError && error.code === 'STORE_CONFLICT') continue;
         throw error;
@@ -1017,7 +1029,7 @@ export class SessionEngine {
       entry.lastError = error instanceof Error ? error.message : String(error);
       session.revision = expectedRevision + 1;
       try {
-        await this.options.store.transition(session, expectedRevision);
+        await this.transition(session, expectedRevision);
         return;
       } catch (transitionError) {
         if (!(transitionError instanceof SessionEngineError) || transitionError.code !== 'STORE_CONFLICT') {
@@ -1061,7 +1073,7 @@ export class SessionEngine {
   ): Promise<never> {
     const expectedRevision = session.revision;
     const outcome = this.addOutcome(session, messageId, 'error', error);
-    await this.options.store.transition(session, expectedRevision, outcome);
+    await this.transition(session, expectedRevision, outcome);
     throw error;
   }
 
@@ -1072,7 +1084,7 @@ export class SessionEngine {
   ): Promise<StoredOutcome> {
     const expectedRevision = session.revision;
     const outcome = this.addOutcome(session, messageId, kind);
-    await this.options.store.transition(session, expectedRevision, outcome);
+    await this.transition(session, expectedRevision, outcome);
     return outcome;
   }
 
@@ -1148,7 +1160,7 @@ export class SessionEngine {
     session.updatedAt = now;
     session.revision = expectedRevision + 1;
     try {
-      await this.options.store.compareAndSwap(session, expectedRevision);
+      await this.compareAndSwap(session, expectedRevision);
       this.abortSupersededLocalWork(session.sessionId, workId);
       return true;
     } catch (error) {

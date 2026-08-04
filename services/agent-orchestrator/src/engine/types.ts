@@ -249,11 +249,13 @@ export interface SessionStore {
     session: CanonicalSession,
     expectedRevision: number,
     outcome?: StoredOutcome,
+    expectedConnectionFence?: number,
   ): Promise<void>;
-  compareAndSwap(session: CanonicalSession, expectedRevision: number): Promise<void>;
+  compareAndSwap(session: CanonicalSession, expectedRevision: number, expectedConnectionFence?: number): Promise<void>;
   getProcessed(messageId: MessageId): Promise<StoredOutcome | null>;
   claimConnectionFence?(sessionId: SessionId, fence: number): Promise<boolean>;
-  acceptClientSequence?(sessionId: SessionId, sequence: number): Promise<'accepted' | 'duplicate' | 'gap'>;
+  admitInbound?(input: { sessionId: SessionId; messageId: MessageId; sequence: number; event: SessionEngineEvent }): Promise<'accepted' | 'resume' | 'duplicate' | 'gap'>;
+  loadInbound?(messageId: MessageId): Promise<SessionEngineEvent | null>;
 }
 
 interface EventMetadata {

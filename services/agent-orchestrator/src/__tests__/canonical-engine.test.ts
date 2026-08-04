@@ -667,6 +667,22 @@ describe('SessionEngine', () => {
     await planning;
   });
 
+  it('cannot commit a stale in-flight plan after a connection fence takeover', async () => {
+    const store = new InMemorySessionStore();
+    const inference = new DeferredInference();
+    const { engine, commandSink } = createEngine({ store, inference });
+    await open(engine);
+    const planning = engine.handle({
+      type: 'observation.submitted', messageId: '10000000-0000-4000-8000-000000000068', sessionId: ids.session,
+      observation: observation(), occurredAt: '2026-08-03T10:00:00.000Z', connectionFence: 1,
+    });
+    await inference.firstStarted;
+    await store.claimConnectionFence(ids.session as never, 2);
+    inference.release();
+    await expect(planning).rejects.toMatchObject({ code: 'STALE_CONNECTION_FENCE' });
+    expect(commandSink.commands).toHaveLength(0);
+  });
+
   it('lets only one engine call policy while a persisted claim is active', async () => {
     const store = new InMemorySessionStore();
     const policy = new DeferredPolicy();

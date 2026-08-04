@@ -28,47 +28,53 @@ export interface ConnectionLeaseStore {
 }
 
 /** Test/dev adapter. Production deployments inject a durable Redis/SQL implementation. */
+export class InMemoryConnectionLeaseBackend {
+  readonly leases = new Map<string, LeaseToken>();
+  readonly fenceCounters = new Map<string, number>();
+  gate: Promise<void> = Promise.resolve();
+}
 export class InMemoryConnectionLeaseStore implements ConnectionLeaseStore {
-  private readonly leases = new Map<string, LeaseToken>();
-  private gate: Promise<void> = Promise.resolve();
+  constructor(private readonly backend = new InMemoryConnectionLeaseBackend()) {}
   private exclusive<T>(work: () => Promise<T> | T): Promise<T> {
-    const result = this.gate.then(work);
-    this.gate = result.then(() => undefined, () => undefined);
+    const result = this.backend.gate.then(work);
+    this.backend.gate = result.then(() => undefined, () => undefined);
     return result;
   }
   acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, now: number): Promise<LeaseToken> {
     return this.exclusive(() => {
-    const current = this.leases.get(claims.sessionId);
-    if (current !== undefined && current.expiresAt <= now) this.leases.delete(claims.sessionId);
-    const token = { sessionId: claims.sessionId, connectionId, fence: (current?.fence ?? 0) + 1, expiresAt };
-    this.leases.set(claims.sessionId, token);
+    const current = this.backend.leases.get(claims.sessionId);
+    if (current !== undefined && current.expiresAt <= now) this.backend.leases.delete(claims.sessionId);
+    const fence = Math.max(this.backend.fenceCounters.get(claims.sessionId) ?? 0, current?.fence ?? 0) + 1;
+    this.backend.fenceCounters.set(claims.sessionId, fence);
+    const token = { sessionId: claims.sessionId, connectionId, fence, expiresAt };
+    this.backend.leases.set(claims.sessionId, token);
     return { ...token };
     });
   }
   isOwner(sessionId: string, token: LeaseToken, now = Date.now()): Promise<boolean> {
     return this.exclusive(() => {
-    const current = this.leases.get(sessionId);
+    const current = this.backend.leases.get(sessionId);
     return current?.connectionId === token.connectionId && current.fence === token.fence && current.expiresAt > now;
     });
   }
   release(token: LeaseToken): Promise<void> {
     return this.exclusive(() => {
-      const current = this.leases.get(token.sessionId);
-      if (current?.connectionId === token.connectionId && current.fence === token.fence) this.leases.delete(token.sessionId);
+      const current = this.backend.leases.get(token.sessionId);
+      if (current?.connectionId === token.connectionId && current.fence === token.fence) this.backend.leases.delete(token.sessionId);
     });
   }
   renew(token: LeaseToken, expiresAt: number, now: number): Promise<LeaseToken | null> {
     return this.exclusive(() => {
-    const current = this.leases.get(token.sessionId);
+    const current = this.backend.leases.get(token.sessionId);
     if (current?.connectionId !== token.connectionId || current.fence !== token.fence || current.expiresAt <= now) return null;
     const renewed = { ...token, expiresAt };
-    this.leases.set(token.sessionId, renewed);
+    this.backend.leases.set(token.sessionId, renewed);
     return { ...renewed };
     });
   }
   runIfOwner<T>(token: LeaseToken, now: number, work: () => Promise<T>): Promise<T> {
     return this.exclusive(async () => {
-      const current = this.leases.get(token.sessionId);
+      const current = this.backend.leases.get(token.sessionId);
       if (current?.connectionId !== token.connectionId || current.fence !== token.fence || current.expiresAt <= now) {
         throw new TransportError('LEASE_FENCED', 'Connection lease is stale or expired');
       }
@@ -154,14 +160,17 @@ export class TransportSession {
     if (admitted.message.type === 'reconcile.request' && admitted.message.lastSentClientSequence !== envelope.sequence) {
       throw new TransportError('CLIENT_SEQUENCE_MISMATCH', 'Reconnect client sequence does not match signed envelope');
     }
-    if (connectionFence !== undefined) {
-      const sequence = await this.options.store?.acceptClientSequence?.(envelope.sessionId, envelope.sequence);
-      if (sequence === undefined) throw new TransportError('SEQUENCE_STORE_REQUIRED', 'Durable client sequence store is required');
-      if (sequence === 'duplicate') throw new TransportError('SEQUENCE_REPLAY', 'Client sequence was already accepted');
-      if (sequence === 'gap') throw new TransportError('CLIENT_SEQUENCE_GAP', 'Client sequence contains a gap');
-    }
-    const event = toEngineEvent(envelope.messageId, envelope.sessionId, envelope.createdAt, admitted.message, connectionFence);
+    let event = toEngineEvent(envelope.messageId, envelope.sessionId, envelope.createdAt, admitted.message, connectionFence);
     if (event === null) throw new TransportError('MESSAGE_DIRECTION_INVALID', 'Server-originated message received from client');
+    if (connectionFence !== undefined) {
+      const admission = await this.options.store?.admitInbound?.({ sessionId: envelope.sessionId, messageId: envelope.messageId, sequence: envelope.sequence, event });
+      if (admission === undefined) throw new TransportError('SEQUENCE_STORE_REQUIRED', 'Durable inbound store is required');
+      if (admission === 'duplicate') throw new TransportError('SEQUENCE_REPLAY', 'Client sequence was already accepted');
+      if (admission === 'gap') throw new TransportError('CLIENT_SEQUENCE_GAP', 'Client sequence contains a gap');
+      const durableEvent = await this.options.store?.loadInbound?.(envelope.messageId);
+      if (durableEvent === undefined || durableEvent === null) throw new TransportError('INBOX_READ_FAILED', 'Durably admitted event cannot be loaded');
+      event = { ...durableEvent, connectionFence } as SessionEngineEvent;
+    }
     const outcome = await this.options.engine.handle(event);
     if (admitted.message.type !== 'reconcile.request' || this.options.store === undefined) return { kind: 'outcome', outcome };
     return { kind: 'outcome', outcome, responseWire: await this.reconcileWire(envelope, outcome) };

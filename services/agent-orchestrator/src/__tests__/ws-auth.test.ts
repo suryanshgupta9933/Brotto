@@ -89,7 +89,8 @@ describe('connection authentication', () => {
       policyContext: { policyDecisionId: '76000000-0000-4000-8000-000000000001', policyVersion: 'v1', approved: false }, dispatchedAt: '2023-11-14T22:13:20.100Z', expiresAt: '2023-11-14T22:14:00.000Z', idempotencyKey: 'once' };
     const activeAction = { actionId: command.actionId, proposal: { kind: 'action' as const, observationId: observation.observationId, proposedAt: '2023-11-14T22:13:20.010Z', action },
       policyDecision: { policyDecisionId: command.policyContext.policyDecisionId, actionId: command.actionId, observationId: observation.observationId, decision: 'allowed' as const, decidedAt: '2023-11-14T22:13:20.050Z' }, command };
-    const store = { load: jest.fn(async () => ({ sessionId: claims.sessionId, activeAction })), acceptClientSequence: async () => 'accepted' as const, claimConnectionFence: async () => true };
+    let durableEvent: unknown;
+    const store = { load: jest.fn(async () => ({ sessionId: claims.sessionId, activeAction })), admitInbound: async (input: { event: unknown }) => { durableEvent = input.event; return 'accepted' as const; }, loadInbound: async () => durableEvent, claimConnectionFence: async () => true };
     const envelopeSigner = { sign: jest.fn(async () => 'valid'), verify: async (_bytes: Uint8Array, signature: string) => signature === 'valid' };
     let engineSink: Parameters<NonNullable<Parameters<typeof createOrchestratorApp>[0]['createEngine']>>[0] | undefined;
     const handle = jest.fn(async (event: { messageId: string }) => { await engineSink!.send(command); return { kind: 'accepted' as const, sessionId: claims.sessionId, messageId: event.messageId, revision: 1, state: 'EXECUTING' as const, pendingActionIds: [command.actionId] }; });
@@ -116,7 +117,7 @@ describe('connection authentication', () => {
     expect(event).toMatchObject({ kind: 'message' });
     expect(JSON.parse(String('frame' in event ? event.frame : '')).payload).toMatchObject({ type: 'action.command', command: { actionId: command.actionId } });
     const closed = once(socket, 'close');
-    socket.close();
+    socket.terminate();
     await closed;
     await app.close();
   });

@@ -146,6 +146,7 @@ export {
   TransportSession,
   AgentTransportHub,
   InMemoryConnectionLeaseStore,
+  InMemoryConnectionLeaseBackend,
   OrderedOutboundQueue,
   connectionTokenFromProtocols,
   registerAgentWebSocket,
