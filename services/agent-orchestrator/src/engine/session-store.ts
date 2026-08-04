@@ -52,6 +52,24 @@ function assertJsonValue(value: unknown, path = '$', ancestors = new Set<object>
 export class InMemorySessionStore implements SessionStore {
   private readonly sessions = new Map<string, CanonicalSession>();
   private readonly processed = new Map<string, StoredOutcome>();
+  private readonly connectionFences = new Map<string, number>();
+  private readonly clientSequences = new Map<string, number>();
+
+  async claimConnectionFence(sessionId: SessionId, fence: number): Promise<boolean> {
+    const current = this.connectionFences.get(sessionId) ?? 0;
+    if (fence < current) return false;
+    this.connectionFences.set(sessionId, fence);
+    return true;
+  }
+
+  async acceptClientSequence(sessionId: SessionId, sequence: number): Promise<'accepted' | 'duplicate' | 'gap'> {
+    const current = this.clientSequences.get(sessionId);
+    if (current === undefined) { this.clientSequences.set(sessionId, sequence); return 'accepted'; }
+    if (sequence <= current) return 'duplicate';
+    if (sequence !== current + 1) return 'gap';
+    this.clientSequences.set(sessionId, sequence);
+    return 'accepted';
+  }
 
   async load(sessionId: SessionId): Promise<CanonicalSession | null> {
     const session = this.sessions.get(sessionId);

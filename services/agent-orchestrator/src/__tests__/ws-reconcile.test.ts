@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 import type { EnvelopeSigner } from '@fara-platform/relay-protocol';
 import { createEnvelope, signEnvelope } from '@fara-platform/relay-protocol';
 import { AgentTransportHub, InMemoryConnectionLeaseStore, OrderedOutboundQueue, TransportSession, type TransportEngine } from '../transport/ws-server.js';
+import { InMemorySessionStore } from '../engine/session-store.js';
 
 const ids = {
   session: '10000000-0000-4000-8000-000000000001',
@@ -111,8 +112,19 @@ describe('websocket reconciliation transport', () => {
     const first = await leases.acquire(claims, 'connection-1', 1_700_000_030_000, 1_700_000_000_000);
     const second = await leases.acquire(claims, 'connection-2', 1_700_000_040_000, 1_700_000_000_001);
     expect(second.fence).toBeGreaterThan(first.fence);
-    await expect(leases.isOwner(ids.session, first)).resolves.toBe(false);
-    await expect(leases.isOwner(ids.session, second)).resolves.toBe(true);
+    await expect(leases.isOwner(ids.session, first, 1_700_000_000_001)).resolves.toBe(false);
+    await expect(leases.isOwner(ids.session, second, 1_700_000_000_001)).resolves.toBe(true);
+    await expect(leases.isOwner(ids.session, second, 1_700_000_040_000)).resolves.toBe(false);
+  });
+
+  test('fences a takeover that occurs after an optimistic ownership precheck', async () => {
+    const leases = new InMemoryConnectionLeaseStore();
+    const first = await leases.acquire(claims, 'connection-1', 1_700_000_030_000, 1_700_000_000_000);
+    expect(await leases.isOwner(ids.session, first, 1_700_000_000_001)).toBe(true);
+    await leases.acquire(claims, 'connection-2', 1_700_000_030_000, 1_700_000_000_002);
+    const engine = jest.fn(async () => 'should-not-run');
+    await expect(leases.runIfOwner(first, 1_700_000_000_003, engine)).rejects.toMatchObject({ code: 'LEASE_FENCED' });
+    expect(engine).not.toHaveBeenCalled();
   });
 
   test('preserves outbound order and rejects beyond its byte bound', async () => {
@@ -132,6 +144,17 @@ describe('websocket reconciliation transport', () => {
       type: 'task.cancelled', taskId: '60000000-0000-4000-8000-000000000001', occurredAt: '2023-11-14T22:13:20.000Z', reason: 'user cancelled while offline', observationId: '70000000-0000-4000-8000-000000000001',
     }));
     expect(result).toMatchObject({ kind: 'outcome', outcome: { kind: 'terminal' } });
+    expect(engine.handle).toHaveBeenCalledTimes(1);
+  });
+
+  test('persists the accepted client sequence across reconnects and rejects gaps', async () => {
+    const store = new InMemorySessionStore();
+    const engine: TransportEngine = { handle: jest.fn(async (event) => ({ kind: 'reconciled', sessionId: ids.session, messageId: event.messageId, revision: 1, state: 'OBSERVING', pendingActionIds: [] })) };
+    const first = new TransportSession({ claims, recipientId: ids.recipient, verifier: signer, engine, store, now: () => 1_700_000_000_000 });
+    await first.receive(await wire(1, { type: 'task.cancelled', taskId: '60000000-0000-4000-8000-000000000001', occurredAt: '2023-11-14T22:13:20.000Z', reason: 'offline cancellation', observationId: '70000000-0000-4000-8000-000000000001' }), 1);
+    const reconnect = new TransportSession({ claims, recipientId: ids.recipient, verifier: signer, engine, store, now: () => 1_700_000_000_000 });
+    await expect(reconnect.receive(await wire(3, { type: 'reconcile.request', lastReceivedSequence: 0, lastSentClientSequence: 3, pendingActionIds: [], requestedAt: '2023-11-14T22:13:20.000Z' }, '25000000-0000-4000-8000-000000000001'), 2))
+      .rejects.toMatchObject({ code: 'CLIENT_SEQUENCE_GAP' });
     expect(engine.handle).toHaveBeenCalledTimes(1);
   });
 });

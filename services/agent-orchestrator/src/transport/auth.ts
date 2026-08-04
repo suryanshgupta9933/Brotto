@@ -1,4 +1,4 @@
-import { jwtVerify, type JWTVerifyGetKey, type KeyLike } from 'jose';
+import { errors as joseErrors, jwtVerify, type JWTVerifyGetKey, type KeyLike } from 'jose';
 
 export interface ConnectionClaims {
   tenantId: string;
@@ -35,6 +35,7 @@ export class JoseConnectionTokenVerifier implements ConnectionTokenVerifier {
       return { tenantId, deviceId, sessionId, audience: 'browser-extension', expiresAt: exp * 1_000, credentialId: jti };
     } catch (error) {
       if (error instanceof ConnectionAuthError) throw error;
+      if (error instanceof joseErrors.JWTExpired) throw new ConnectionAuthError('TOKEN_EXPIRED', 'Connection token has expired');
       throw new ConnectionAuthError('TOKEN_INVALID', 'Connection token is invalid');
     }
   }

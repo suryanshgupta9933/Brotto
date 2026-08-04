@@ -65,6 +65,10 @@ export class SessionEngine {
   }
 
   async handle(event: SessionEngineEvent): Promise<StoredOutcome> {
+    if (event.connectionFence !== undefined) {
+      const accepted = await this.options.store.claimConnectionFence?.(event.sessionId, event.connectionFence);
+      if (accepted !== true) throw new SessionEngineError('STALE_CONNECTION_FENCE', 'Connection fence is stale or the store cannot persist fences');
+    }
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         return await this.handleOnce(event);

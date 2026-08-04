@@ -21,32 +21,59 @@ export class TransportError extends Error {
 export interface LeaseToken { sessionId: string; connectionId: string; fence: number; expiresAt: number }
 export interface ConnectionLeaseStore {
   acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, now: number): Promise<LeaseToken>;
-  isOwner(sessionId: string, token: LeaseToken): Promise<boolean>;
-  renew(token: LeaseToken, expiresAt: number): Promise<LeaseToken | null>;
+  isOwner(sessionId: string, token: LeaseToken, now?: number): Promise<boolean>;
+  renew(token: LeaseToken, expiresAt: number, now: number): Promise<LeaseToken | null>;
   release(token: LeaseToken): Promise<void>;
+  runIfOwner<T>(token: LeaseToken, now: number, work: () => Promise<T>): Promise<T>;
 }
 
 /** Test/dev adapter. Production deployments inject a durable Redis/SQL implementation. */
 export class InMemoryConnectionLeaseStore implements ConnectionLeaseStore {
   private readonly leases = new Map<string, LeaseToken>();
-  async acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, _now: number): Promise<LeaseToken> {
+  private gate: Promise<void> = Promise.resolve();
+  private exclusive<T>(work: () => Promise<T> | T): Promise<T> {
+    const result = this.gate.then(work);
+    this.gate = result.then(() => undefined, () => undefined);
+    return result;
+  }
+  acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, now: number): Promise<LeaseToken> {
+    return this.exclusive(() => {
     const current = this.leases.get(claims.sessionId);
+    if (current !== undefined && current.expiresAt <= now) this.leases.delete(claims.sessionId);
     const token = { sessionId: claims.sessionId, connectionId, fence: (current?.fence ?? 0) + 1, expiresAt };
     this.leases.set(claims.sessionId, token);
     return { ...token };
+    });
   }
-  async isOwner(sessionId: string, token: LeaseToken): Promise<boolean> {
+  isOwner(sessionId: string, token: LeaseToken, now = Date.now()): Promise<boolean> {
+    return this.exclusive(() => {
     const current = this.leases.get(sessionId);
-    return current?.connectionId === token.connectionId && current.fence === token.fence;
+    return current?.connectionId === token.connectionId && current.fence === token.fence && current.expiresAt > now;
+    });
   }
-  async release(token: LeaseToken): Promise<void> {
-    if (await this.isOwner(token.sessionId, token)) this.leases.delete(token.sessionId);
+  release(token: LeaseToken): Promise<void> {
+    return this.exclusive(() => {
+      const current = this.leases.get(token.sessionId);
+      if (current?.connectionId === token.connectionId && current.fence === token.fence) this.leases.delete(token.sessionId);
+    });
   }
-  async renew(token: LeaseToken, expiresAt: number): Promise<LeaseToken | null> {
-    if (!await this.isOwner(token.sessionId, token)) return null;
+  renew(token: LeaseToken, expiresAt: number, now: number): Promise<LeaseToken | null> {
+    return this.exclusive(() => {
+    const current = this.leases.get(token.sessionId);
+    if (current?.connectionId !== token.connectionId || current.fence !== token.fence || current.expiresAt <= now) return null;
     const renewed = { ...token, expiresAt };
     this.leases.set(token.sessionId, renewed);
     return { ...renewed };
+    });
+  }
+  runIfOwner<T>(token: LeaseToken, now: number, work: () => Promise<T>): Promise<T> {
+    return this.exclusive(async () => {
+      const current = this.leases.get(token.sessionId);
+      if (current?.connectionId !== token.connectionId || current.fence !== token.fence || current.expiresAt <= now) {
+        throw new TransportError('LEASE_FENCED', 'Connection lease is stale or expired');
+      }
+      return work();
+    });
   }
 }
 
@@ -114,7 +141,7 @@ export class TransportSession {
     if (result.status === 'rejected') throw new TransportError(result.code, 'Outbound flow registration failed');
   }
 
-  async receive(raw: string | Uint8Array): Promise<TransportResult> {
+  async receive(raw: string | Uint8Array, connectionFence?: number): Promise<TransportResult> {
     this.charge(raw);
     const admitted = await this.ingress.accept(raw);
     if (admitted.status === 'duplicate') return { kind: 'duplicate' };
@@ -127,7 +154,13 @@ export class TransportSession {
     if (admitted.message.type === 'reconcile.request' && admitted.message.lastSentClientSequence !== envelope.sequence) {
       throw new TransportError('CLIENT_SEQUENCE_MISMATCH', 'Reconnect client sequence does not match signed envelope');
     }
-    const event = toEngineEvent(envelope.messageId, envelope.sessionId, envelope.createdAt, admitted.message);
+    if (connectionFence !== undefined) {
+      const sequence = await this.options.store?.acceptClientSequence?.(envelope.sessionId, envelope.sequence);
+      if (sequence === undefined) throw new TransportError('SEQUENCE_STORE_REQUIRED', 'Durable client sequence store is required');
+      if (sequence === 'duplicate') throw new TransportError('SEQUENCE_REPLAY', 'Client sequence was already accepted');
+      if (sequence === 'gap') throw new TransportError('CLIENT_SEQUENCE_GAP', 'Client sequence contains a gap');
+    }
+    const event = toEngineEvent(envelope.messageId, envelope.sessionId, envelope.createdAt, admitted.message, connectionFence);
     if (event === null) throw new TransportError('MESSAGE_DIRECTION_INVALID', 'Server-originated message received from client');
     const outcome = await this.options.engine.handle(event);
     if (admitted.message.type !== 'reconcile.request' || this.options.store === undefined) return { kind: 'outcome', outcome };
@@ -206,8 +239,8 @@ export class AgentTransportHub implements CommandSink {
 // Optional optimized store lookup without making it part of the canonical persistence contract.
 declare module '../engine/types.js' { interface SessionStore { loadByAction?(actionId: ActionCommandV1['actionId']): Promise<CanonicalSession | null> } }
 
-function toEngineEvent(messageId: string, sessionId: string, occurredAt: string, message: AgentMessageV1): SessionEngineEvent | null {
-  const meta = { messageId, sessionId, occurredAt } as const;
+function toEngineEvent(messageId: string, sessionId: string, occurredAt: string, message: AgentMessageV1, connectionFence?: number): SessionEngineEvent | null {
+  const meta = { messageId, sessionId, occurredAt, ...(connectionFence === undefined ? {} : { connectionFence }) } as const;
   switch (message.type) {
     case 'observation.submitted': return { ...meta, type: message.type, observation: message.observation } as SessionEngineEvent;
     case 'action.completed': return { ...meta, type: message.type, result: message.result } as SessionEngineEvent;
@@ -249,31 +282,36 @@ export async function registerAgentWebSocket(app: FastifyInstance, options: {
     const claims = authenticated.get(request);
     if (claims === undefined) { socket.close(4401, 'TOKEN_INVALID'); return; }
     const connectionId = randomUUID();
-    void options.leases.acquire(claims, connectionId, now() + (options.heartbeatTimeoutMs ?? 30_000) * 2, now()).then((initialLease) => {
-      let lease = initialLease;
+    const ready = options.leases.acquire(claims, connectionId, now() + (options.heartbeatTimeoutMs ?? 30_000) * 2, now()).then((initialLease) => {
+      const state = { lease: initialLease };
       const session = new TransportSession({ claims, recipientId: options.recipientId, verifier: options.envelopeVerifier, engine: options.engine, store: options.store, now });
-      const queue = new OrderedOutboundQueue({ maxBytes: options.maxOutboundBytes ?? 1_000_000, send: (value) => socketSend(socket, value) });
+      const outboundLimit = options.maxOutboundBytes ?? 1_000_000;
+      const queue = new OrderedOutboundQueue({ maxBytes: outboundLimit, send: (value) => socketSend(socket, value, outboundLimit) });
       const detach = options.hub?.attach({ claims, session, queue });
       let alive = true;
-      const timer = setInterval(() => { void options.leases.isOwner(claims.sessionId, lease).then(async (owner) => {
-        if (!owner || !alive || lease.expiresAt <= now()) { socket.close(4001, 'connection lease expired'); clearInterval(timer); return; }
-        const renewed = await options.leases.renew(lease, now() + (options.heartbeatTimeoutMs ?? 30_000) * 2);
+      const timer = setInterval(() => { void options.leases.isOwner(claims.sessionId, state.lease, now()).then(async (owner) => {
+        if (!owner || !alive || state.lease.expiresAt <= now()) { socket.close(4001, 'connection lease expired'); clearInterval(timer); return; }
+        const renewed = await options.leases.renew(state.lease, now() + (options.heartbeatTimeoutMs ?? 30_000) * 2, now());
         if (renewed === null) { socket.close(4001, 'connection lease fenced'); clearInterval(timer); return; }
-        lease = renewed; alive = false; socket.ping();
+        state.lease = renewed; alive = false; socket.ping();
       }); }, options.heartbeatTimeoutMs ?? 30_000);
       timer.unref();
       socket.on('pong', () => { alive = true; });
-      socket.on('message', (data) => { void options.leases.isOwner(claims.sessionId, lease).then(async (owner) => {
-        if (!owner) throw new TransportError('LEASE_FENCED', 'Connection lease was replaced');
-        const result = await session.receive(normalizeWire(data));
-        if (result.kind === 'outcome' && result.responseWire !== undefined) await queue.enqueue(result.responseWire);
-      }).catch((error: unknown) => socket.close(closeCode(error), safeReason(error))); });
-      socket.on('close', () => { clearInterval(timer); detach?.(); void options.leases.release(lease); });
-    }).catch((error: unknown) => socket.close(closeCode(error), safeReason(error)));
+      socket.on('close', () => { clearInterval(timer); detach?.(); void options.leases.release(state.lease); });
+      return { state, session, queue };
+    });
+    socket.on('message', (data) => { void ready.then(({ state, session, queue }) => options.leases.runIfOwner(state.lease, now(), async () => {
+      const result = await session.receive(normalizeWire(data), state.lease.fence);
+      if (result.kind === 'outcome' && result.responseWire !== undefined) await queue.enqueue(result.responseWire);
+    })).catch((error: unknown) => socket.close(closeCode(error), safeReason(error))); });
+    void ready.catch((error: unknown) => socket.close(closeCode(error), safeReason(error)));
   });
 }
 
-function socketSend(socket: SocketLike, value: string): Promise<void> { return new Promise((resolve, reject) => socket.send(value, (error) => error === undefined ? resolve() : reject(error))); }
+function socketSend(socket: SocketLike, value: string, maxBufferedBytes: number): Promise<void> {
+  if (socket.bufferedAmount + Buffer.byteLength(value) > maxBufferedBytes) return Promise.reject(new TransportError('BACKPRESSURE', 'Socket buffer is full'));
+  try { socket.send(value); return Promise.resolve(); } catch (error) { return Promise.reject(error); }
+}
 function header(value: string | string[] | undefined): string | undefined { return Array.isArray(value) ? value[0] : value; }
 function normalizeWire(data: unknown): string | Uint8Array { if (typeof data === 'string' || data instanceof Uint8Array) return data; throw new TransportError('INVALID_WIRE', 'WebSocket frame must be text or binary'); }
 function closeCode(error: unknown): number { return error instanceof ConnectionAuthError ? 4401 : error instanceof TransportError && error.code === 'RATE_LIMITED' ? 4429 : 4400; }

@@ -252,12 +252,15 @@ export interface SessionStore {
   ): Promise<void>;
   compareAndSwap(session: CanonicalSession, expectedRevision: number): Promise<void>;
   getProcessed(messageId: MessageId): Promise<StoredOutcome | null>;
+  claimConnectionFence?(sessionId: SessionId, fence: number): Promise<boolean>;
+  acceptClientSequence?(sessionId: SessionId, sequence: number): Promise<'accepted' | 'duplicate' | 'gap'>;
 }
 
 interface EventMetadata {
   sessionId: SessionId;
   messageId: MessageId;
   occurredAt: string;
+  connectionFence?: number;
 }
 
 export type SessionEngineEvent =
@@ -298,7 +301,8 @@ export type EngineErrorCode =
   | 'STALE_POLICY_DECISION'
   | 'STALE_ACTION_RESULT'
   | 'STALE_APPROVAL_RESOLUTION'
-  | 'STORE_CONFLICT';
+  | 'STORE_CONFLICT'
+  | 'STALE_CONNECTION_FENCE';
 
 export class SessionEngineError extends Error {
   constructor(
