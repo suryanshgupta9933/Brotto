@@ -7,7 +7,8 @@ import type {
   TrajectoryEventV1,
 } from '@fara-platform/fara-action-schema';
 import { InMemorySessionStore } from '../engine/session-store.js';
-import { InMemoryConnectionLeaseStore } from '../transport/ws-server.js';
+import { InMemoryConnectionLeaseStore, TransportSession } from '../transport/ws-server.js';
+import { createEnvelope, signEnvelope, type EnvelopeSigner } from '@fara-platform/relay-protocol';
 import { SessionEngine } from '../engine/session-engine.js';
 import { InferenceContractError, SessionEngineError } from '../engine/types.js';
 import {
@@ -668,27 +669,43 @@ describe('SessionEngine', () => {
     await planning;
   });
 
-  it('cannot commit a stale in-flight plan after a connection fence takeover', async () => {
+  it('takes over while old transport work is paused and fences its eventual commit', async () => {
     const store = new InMemorySessionStore();
     const inference = new DeferredInference();
     const { engine, commandSink } = createEngine({ store, inference });
     await open(engine);
-    const planning = engine.handle({
-      type: 'observation.submitted', messageId: '10000000-0000-4000-8000-000000000068', sessionId: ids.session,
-      observation: observation(), occurredAt: '2026-08-03T10:00:00.000Z', connectionFence: 1,
-    });
-    await inference.firstStarted;
     const leases = new InMemoryConnectionLeaseStore();
-    await leases.acquire(
-      { tenantId: 'tenant-a', deviceId: 'device-a', sessionId: ids.session, audience: 'browser-extension', expiresAt: Date.now() + 60_000, credentialId: 'credential-old' },
-      'connection-old', Date.now() + 60_000, Date.now(),
-    );
-    await leases.acquire(
-      { tenantId: 'tenant-a', deviceId: 'device-a', sessionId: ids.session, audience: 'browser-extension', expiresAt: Date.now() + 60_000, credentialId: 'credential-a' },
-      'connection-new', Date.now() + 60_000, Date.now(),
+    const now = Date.parse('2026-08-03T10:00:00.000Z');
+    const claims = { tenantId: 'tenant-a', deviceId: '50000000-0000-4000-8000-000000000001', sessionId: ids.session, audience: 'browser-extension' as const, expiresAt: now + 60_000, credentialId: 'credential-old' };
+    const oldLease = await leases.acquire(
+      claims, 'connection-old', now + 60_000, now,
       (sessionId, fence) => store.claimConnectionFence(sessionId as never, fence),
     );
+    const signer: EnvelopeSigner = { sign: async () => 'valid', verify: async (_bytes, signature) => signature === 'valid' };
+    const transport = new TransportSession({ claims, recipientId: '40000000-0000-4000-8000-000000000001', verifier: signer, engine, store, now: () => now });
+    const wire = JSON.stringify(await signEnvelope(createEnvelope({
+      messageId: '10000000-0000-4000-8000-000000000068', sessionId: ids.session, correlationId: ids.task, causationId: ids.task,
+      recipientId: '40000000-0000-4000-8000-000000000001', tenantId: claims.tenantId, deviceId: claims.deviceId, sequence: 1,
+      createdAt: new Date(now).toISOString(), expiresAt: now + 60_000, payload: { type: 'observation.submitted', observation: observation() },
+    }), signer));
+    const planning = leases.runIfOwner(oldLease, now, async () => await transport.receive(wire, oldLease.fence));
+    await Promise.race([
+      inference.firstStarted,
+      planning.then((value) => { throw new Error(`transport work finished before inference: ${JSON.stringify(value)}`); }),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('transport work did not reach inference')), 100)),
+    ]);
+    const takeover = leases.acquire(
+      { ...claims, credentialId: 'credential-new' },
+      'connection-new', now + 60_000, now,
+      (sessionId, fence) => store.claimConnectionFence(sessionId as never, fence),
+    );
+    const takeoverResult = await Promise.race([
+      takeover.then(() => 'acquired'),
+      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 25)),
+    ]);
     inference.release();
+    await takeover;
+    expect(takeoverResult).toBe('acquired');
     await expect(planning).rejects.toMatchObject({ code: 'STALE_CONNECTION_FENCE' });
     expect(commandSink.commands).toHaveLength(0);
   });

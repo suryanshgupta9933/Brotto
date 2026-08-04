@@ -73,14 +73,14 @@ export class InMemoryConnectionLeaseStore implements ConnectionLeaseStore {
     return { ...renewed };
     });
   }
-  runIfOwner<T>(token: LeaseToken, now: number, work: () => Promise<T>): Promise<T> {
-    return this.exclusive(async () => {
+  async runIfOwner<T>(token: LeaseToken, now: number, work: () => Promise<T>): Promise<T> {
+    await this.exclusive(() => {
       const current = this.backend.leases.get(token.sessionId);
       if (current?.connectionId !== token.connectionId || current.fence !== token.fence || current.expiresAt <= now) {
         throw new TransportError('LEASE_FENCED', 'Connection lease is stale or expired');
       }
-      return work();
     });
+    return work();
   }
 }
 
