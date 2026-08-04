@@ -913,7 +913,9 @@ export class SessionEngine {
     const expectedRevision = session.revision;
     const active = session.activeAction;
     const authoritative = active === null ? [] : [active.actionId];
-    const requiresFreshObservation = event.pendingActionIds.some((id) => !authoritative.includes(id));
+    const requiresFreshObservation = event.pendingActionIds.some((id) =>
+      !authoritative.includes(id) && session.completedActions[id] === undefined,
+    );
     if (active !== null) {
       const clientHasCommand = event.pendingActionIds.includes(active.actionId) ||
         event.lastReceivedSequence >= active.command.sequence;

@@ -891,6 +891,7 @@ describe('SessionEngine', () => {
       messageId: '10000000-0000-4000-8000-000000000048',
       sessionId: ids.session,
       lastReceivedSequence: 0,
+      lastSentClientSequence: 0,
       pendingActionIds: [],
       occurredAt: '2026-08-03T10:00:05.000Z',
     });
@@ -1144,6 +1145,7 @@ describe('SessionEngine', () => {
       messageId: '10000000-0000-4000-8000-000000000036',
       sessionId: ids.session,
       lastReceivedSequence: 0,
+      lastSentClientSequence: 0,
       pendingActionIds: [],
       occurredAt: '2026-08-03T10:00:05.000Z',
     });
@@ -1349,6 +1351,7 @@ describe('SessionEngine', () => {
       messageId: '10000000-0000-4000-8000-000000000012',
       sessionId: ids.session,
       lastReceivedSequence: 0,
+      lastSentClientSequence: 0,
       pendingActionIds: [],
       occurredAt: '2026-08-03T10:00:04.000Z',
     });
@@ -1368,6 +1371,7 @@ describe('SessionEngine', () => {
       messageId: '10000000-0000-4000-8000-000000000037',
       sessionId: ids.session,
       lastReceivedSequence: 0,
+      lastSentClientSequence: 0,
       pendingActionIds: [ids.staleAction],
       occurredAt: '2026-08-03T10:00:05.000Z',
     });

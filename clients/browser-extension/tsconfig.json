@@ -15,6 +15,11 @@
     "sourceMap": true,
     "outDir": "./dist",
     "rootDir": "./src",
+    "baseUrl": ".",
+    "paths": {
+      "@fara-platform/fara-action-schema": ["../../packages/fara-action-schema/dist/index"],
+      "@fara-platform/relay-protocol": ["../../packages/relay-protocol/dist/index"]
+    },
     "types": ["chrome", "jest", "node"],
     "allowSyntheticDefaultImports": true
   },

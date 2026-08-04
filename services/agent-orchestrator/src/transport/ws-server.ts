@@ -1,49 +1,117 @@
+import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import websocket from '@fastify/websocket';
 import {
   SecureAgentIngress,
+  createEnvelope,
+  signEnvelope,
+  type AgentEnvelopeV1,
   type AgentMessageV1,
   type EnvelopeSigner,
 } from '@fara-platform/relay-protocol';
-import type { SessionEngineEvent, StoredOutcome } from '../engine/types.js';
-import {
-  ConnectionAuthError,
-  createConnectionAuthenticator,
-  type ConnectionClaims,
-  type ConnectionTokenVerifier,
-} from './auth.js';
+import type { ActionCommandV1, SessionId } from '@fara-platform/fara-action-schema';
+import type { CanonicalSession, CommandSink, SessionEngineEvent, SessionStore, StoredOutcome } from '../engine/types.js';
+import { ConnectionAuthError, createConnectionAuthenticator, type ConnectionClaims, type ConnectionCredentialStore, type ConnectionTokenVerifier } from './auth.js';
 
 export interface TransportEngine { handle(event: SessionEngineEvent): Promise<StoredOutcome> }
-
 export class TransportError extends Error {
   constructor(public readonly code: string, message: string) { super(message); this.name = 'TransportError'; }
 }
 
-export type TransportResult = { kind: 'heartbeat' } | { kind: 'duplicate' } | { kind: 'outcome'; outcome: StoredOutcome };
+export interface LeaseToken { sessionId: string; connectionId: string; fence: number; expiresAt: number }
+export interface ConnectionLeaseStore {
+  acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, now: number): Promise<LeaseToken>;
+  isOwner(sessionId: string, token: LeaseToken): Promise<boolean>;
+  renew(token: LeaseToken, expiresAt: number): Promise<LeaseToken | null>;
+  release(token: LeaseToken): Promise<void>;
+}
 
-interface RateWindow { startedAt: number; messages: number; bytes: number }
+/** Test/dev adapter. Production deployments inject a durable Redis/SQL implementation. */
+export class InMemoryConnectionLeaseStore implements ConnectionLeaseStore {
+  private readonly leases = new Map<string, LeaseToken>();
+  async acquire(claims: Readonly<ConnectionClaims>, connectionId: string, expiresAt: number, _now: number): Promise<LeaseToken> {
+    const current = this.leases.get(claims.sessionId);
+    const token = { sessionId: claims.sessionId, connectionId, fence: (current?.fence ?? 0) + 1, expiresAt };
+    this.leases.set(claims.sessionId, token);
+    return { ...token };
+  }
+  async isOwner(sessionId: string, token: LeaseToken): Promise<boolean> {
+    const current = this.leases.get(sessionId);
+    return current?.connectionId === token.connectionId && current.fence === token.fence;
+  }
+  async release(token: LeaseToken): Promise<void> {
+    if (await this.isOwner(token.sessionId, token)) this.leases.delete(token.sessionId);
+  }
+  async renew(token: LeaseToken, expiresAt: number): Promise<LeaseToken | null> {
+    if (!await this.isOwner(token.sessionId, token)) return null;
+    const renewed = { ...token, expiresAt };
+    this.leases.set(token.sessionId, renewed);
+    return { ...renewed };
+  }
+}
+
+export class OrderedOutboundQueue {
+  private readonly pending: Array<{ value: string; bytes: number; resolve: () => void; reject: (error: unknown) => void }> = [];
+  private pendingBytes = 0;
+  private pumping = false;
+  private drainWaiters: Array<() => void> = [];
+  constructor(private readonly options: { maxBytes: number; send(value: string): Promise<void> }) {}
+
+  enqueue(value: string): Promise<void> {
+    const bytes = Buffer.byteLength(value);
+    if (bytes > this.options.maxBytes || this.pendingBytes + bytes > this.options.maxBytes) {
+      return Promise.reject(new TransportError('BACKPRESSURE', 'Outbound queue is full'));
+    }
+    this.pendingBytes += bytes;
+    const promise = new Promise<void>((resolve, reject) => this.pending.push({ value, bytes, resolve, reject }));
+    void this.pump();
+    return promise;
+  }
+
+  drained(): Promise<void> {
+    if (!this.pumping && this.pending.length === 0) return Promise.resolve();
+    return new Promise((resolve) => this.drainWaiters.push(resolve));
+  }
+
+  private async pump(): Promise<void> {
+    if (this.pumping) return;
+    this.pumping = true;
+    while (this.pending.length > 0) {
+      const item = this.pending[0]!;
+      try { await this.options.send(item.value); item.resolve(); }
+      catch (error) { item.reject(error); }
+      this.pending.shift();
+      this.pendingBytes -= item.bytes;
+    }
+    this.pumping = false;
+    for (const resolve of this.drainWaiters.splice(0)) resolve();
+  }
+}
+
+export type TransportResult =
+  | { kind: 'heartbeat' }
+  | { kind: 'duplicate' }
+  | { kind: 'outcome'; outcome: StoredOutcome; responseWire?: string };
 
 export class TransportSession {
   private readonly ingress: SecureAgentIngress;
-  private rate: RateWindow;
-  private readonly maxMessagesPerMinute: number;
-  private readonly maxBytesPerMinute: number;
-
+  private rate: { startedAt: number; messages: number; bytes: number };
+  private readonly now: () => number;
   constructor(private readonly options: {
-    claims: Readonly<ConnectionClaims>;
-    recipientId: string;
-    verifier: EnvelopeSigner;
-    engine: TransportEngine;
-    now?: () => number;
-    maxWireBytes?: number;
-    maxMessagesPerMinute?: number;
-    maxBytesPerMinute?: number;
+    claims: Readonly<ConnectionClaims>; recipientId: string; verifier: EnvelopeSigner; engine: TransportEngine;
+    store?: SessionStore; now?: () => number; maxWireBytes?: number; maxMessagesPerMinute?: number; maxBytesPerMinute?: number;
   }) {
-    const now = options.now ?? Date.now;
-    this.ingress = new SecureAgentIngress({ now, maxBytes: options.maxWireBytes ?? 2_000_000, expectedRecipientId: options.recipientId, verifier: options.verifier });
-    this.rate = { startedAt: now(), messages: 0, bytes: 0 };
-    this.maxMessagesPerMinute = options.maxMessagesPerMinute ?? 120;
-    this.maxBytesPerMinute = options.maxBytesPerMinute ?? 20_000_000;
+    this.now = options.now ?? Date.now;
+    this.ingress = new SecureAgentIngress({ now: this.now, maxBytes: options.maxWireBytes ?? 2_000_000, expectedRecipientId: options.recipientId, verifier: options.verifier });
+    this.rate = { startedAt: this.now(), messages: 0, bytes: 0 };
+  }
+
+  registerOutbound(envelope: AgentEnvelopeV1): void {
+    if (envelope.sessionId !== this.options.claims.sessionId || envelope.tenantId !== this.options.claims.tenantId || envelope.deviceId !== this.options.claims.deviceId) {
+      throw new TransportError('CLAIM_MISMATCH', 'Outbound envelope does not match connection claims');
+    }
+    const result = this.ingress.registerOutbound(envelope);
+    if (result.status === 'rejected') throw new TransportError(result.code, 'Outbound flow registration failed');
   }
 
   async receive(raw: string | Uint8Array): Promise<TransportResult> {
@@ -51,26 +119,92 @@ export class TransportSession {
     const admitted = await this.ingress.accept(raw);
     if (admitted.status === 'duplicate') return { kind: 'duplicate' };
     if (admitted.status === 'rejected') throw new TransportError(admitted.code, `Protocol message rejected: ${admitted.code}`);
-    if (admitted.envelope.sessionId !== this.options.claims.sessionId) {
-      throw new TransportError('CLAIM_MISMATCH', 'Envelope session does not match connection claims');
+    const envelope = admitted.envelope;
+    if (envelope.sessionId !== this.options.claims.sessionId || envelope.tenantId !== this.options.claims.tenantId || envelope.deviceId !== this.options.claims.deviceId) {
+      throw new TransportError('CLAIM_MISMATCH', 'Envelope binding does not match connection claims');
     }
     if (admitted.message.type === 'heartbeat') return { kind: 'heartbeat' };
-    const event = toEngineEvent(admitted.envelope.messageId, admitted.envelope.sessionId, admitted.envelope.createdAt, admitted.message);
+    if (admitted.message.type === 'reconcile.request' && admitted.message.lastSentClientSequence !== envelope.sequence) {
+      throw new TransportError('CLIENT_SEQUENCE_MISMATCH', 'Reconnect client sequence does not match signed envelope');
+    }
+    const event = toEngineEvent(envelope.messageId, envelope.sessionId, envelope.createdAt, admitted.message);
     if (event === null) throw new TransportError('MESSAGE_DIRECTION_INVALID', 'Server-originated message received from client');
-    return { kind: 'outcome', outcome: await this.options.engine.handle(event) };
+    const outcome = await this.options.engine.handle(event);
+    if (admitted.message.type !== 'reconcile.request' || this.options.store === undefined) return { kind: 'outcome', outcome };
+    return { kind: 'outcome', outcome, responseWire: await this.reconcileWire(envelope, outcome) };
+  }
+
+  private async reconcileWire(request: AgentEnvelopeV1, outcome: StoredOutcome): Promise<string> {
+    const session = await this.options.store!.load(request.sessionId as SessionId);
+    if (session === null) throw new TransportError('SESSION_NOT_FOUND', 'Session disappeared during reconciliation');
+    const requested = request.payload.type === 'reconcile.request' ? request.payload.pendingActionIds : [];
+    const stored = requested.map((id) => session.completedActions[id]?.result).find((value) => value !== undefined);
+    const command = session.activeAction === null ? undefined : commandMessage(session);
+    const response = createEnvelope({
+      messageId: randomUUID(), sessionId: request.sessionId, correlationId: request.messageId, causationId: request.messageId,
+      recipientId: this.options.claims.deviceId, tenantId: this.options.claims.tenantId, deviceId: this.options.claims.deviceId,
+      sequence: session.nextSequence, createdAt: new Date(this.now()).toISOString(), expiresAt: this.now() + 30_000,
+      payload: { type: 'reconcile.response', nextSequence: session.nextSequence, pendingActionIds: outcome.pendingActionIds,
+        requiresFreshObservation: outcome.requiresFreshObservation ?? false, authoritativeState: session.state,
+        ...(command === undefined ? {} : { command }), ...(stored === undefined ? {} : { storedResult: stored }),
+        respondedAt: new Date(this.now()).toISOString() },
+    });
+    if (command !== undefined) {
+      if (session.lastObservation === null) throw new TransportError('ACTION_FLOW_INVALID', 'Stored command has no source observation');
+      this.ingress.restoreObservation(session.sessionId, session.lastObservation);
+      this.registerOutbound(responseWithCommandFlow(response, command));
+    }
+    return JSON.stringify(await signEnvelope(response, this.options.verifier));
   }
 
   private charge(raw: string | Uint8Array): void {
-    const now = (this.options.now ?? Date.now)();
+    const now = this.now();
     if (now - this.rate.startedAt >= 60_000) this.rate = { startedAt: now, messages: 0, bytes: 0 };
-    const bytes = typeof raw === 'string' ? Buffer.byteLength(raw) : raw.byteLength;
     this.rate.messages += 1;
-    this.rate.bytes += bytes;
-    if (this.rate.messages > this.maxMessagesPerMinute || this.rate.bytes > this.maxBytesPerMinute) {
-      throw new TransportError('RATE_LIMITED', 'Connection message rate exceeded');
-    }
+    this.rate.bytes += typeof raw === 'string' ? Buffer.byteLength(raw) : raw.byteLength;
+    if (this.rate.messages > (this.options.maxMessagesPerMinute ?? 120) || this.rate.bytes > (this.options.maxBytesPerMinute ?? 20_000_000)) throw new TransportError('RATE_LIMITED', 'Connection message rate exceeded');
   }
 }
+
+function responseWithCommandFlow(response: AgentEnvelopeV1, command: AgentMessageV1): AgentEnvelopeV1 {
+  return { ...response, payload: command } as AgentEnvelopeV1;
+}
+function commandMessage(session: CanonicalSession): Extract<AgentMessageV1, { type: 'action.command' }> | undefined {
+  const active = session.activeAction;
+  return active === null ? undefined : { type: 'action.command', proposal: active.proposal, policyDecision: active.policyDecision, command: active.command };
+}
+
+export interface OutboundConnection { claims: Readonly<ConnectionClaims>; session: TransportSession; queue: OrderedOutboundQueue }
+export class AgentTransportHub implements CommandSink {
+  private readonly connections = new Map<string, OutboundConnection>();
+  constructor(private readonly store: SessionStore, private readonly signer: EnvelopeSigner, private readonly now: () => number = Date.now) {}
+  attach(connection: OutboundConnection): () => void {
+    this.connections.set(connection.claims.sessionId, connection);
+    return () => { if (this.connections.get(connection.claims.sessionId) === connection) this.connections.delete(connection.claims.sessionId); };
+  }
+  async send(command: ActionCommandV1): Promise<void> {
+    const session = await this.store.loadByAction?.(command.actionId) ?? await this.findSession(command);
+    if (session === null || session.activeAction === null) throw new TransportError('SESSION_NOT_FOUND', 'No active session for command');
+    const connection = this.connections.get(session.sessionId);
+    if (connection === undefined) throw new TransportError('CLIENT_DISCONNECTED', 'Client is not connected');
+    const payload = commandMessage(session)!;
+    const envelope = createEnvelope({ messageId: randomUUID(), sessionId: session.sessionId, correlationId: command.actionId, causationId: command.observationId,
+      recipientId: connection.claims.deviceId, tenantId: connection.claims.tenantId, deviceId: connection.claims.deviceId,
+      sequence: command.sequence, createdAt: new Date(this.now()).toISOString(), expiresAt: Date.parse(command.expiresAt), payload });
+    connection.session.registerOutbound(envelope);
+    await connection.queue.enqueue(JSON.stringify(await signEnvelope(envelope, this.signer)));
+  }
+  private async findSession(command: ActionCommandV1): Promise<CanonicalSession | null> {
+    for (const sessionId of this.connections.keys()) {
+      const session = await this.store.load(sessionId as SessionId);
+      if (session?.activeAction?.actionId === command.actionId) return session;
+    }
+    return null;
+  }
+}
+
+// Optional optimized store lookup without making it part of the canonical persistence contract.
+declare module '../engine/types.js' { interface SessionStore { loadByAction?(actionId: ActionCommandV1['actionId']): Promise<CanonicalSession | null> } }
 
 function toEngineEvent(messageId: string, sessionId: string, occurredAt: string, message: AgentMessageV1): SessionEngineEvent | null {
   const meta = { messageId, sessionId, occurredAt } as const;
@@ -78,69 +212,69 @@ function toEngineEvent(messageId: string, sessionId: string, occurredAt: string,
     case 'observation.submitted': return { ...meta, type: message.type, observation: message.observation } as SessionEngineEvent;
     case 'action.completed': return { ...meta, type: message.type, result: message.result } as SessionEngineEvent;
     case 'approval.resolved': return { ...meta, type: message.type, resolution: message.resolution } as SessionEngineEvent;
-    case 'reconcile.request': return { ...meta, type: message.type, lastReceivedSequence: message.lastReceivedSequence, pendingActionIds: message.pendingActionIds } as SessionEngineEvent;
+    case 'reconcile.request': return { ...meta, type: message.type, lastReceivedSequence: message.lastReceivedSequence, lastSentClientSequence: message.lastSentClientSequence, pendingActionIds: message.pendingActionIds } as SessionEngineEvent;
     case 'task.cancelled': return { ...meta, type: message.type, reason: message.reason } as SessionEngineEvent;
     default: return null;
   }
 }
 
-interface SocketLike {
-  bufferedAmount: number;
-  send(data: string): void;
-  close(code?: number, reason?: string): void;
-  ping(): void;
-  on(event: 'message', listener: (data: unknown) => void): void;
-  on(event: 'pong' | 'close', listener: () => void): void;
+interface SocketLike { bufferedAmount: number; send(data: string, callback?: (error?: Error) => void): void; close(code?: number, reason?: string): void; ping(): void; on(event: 'message', listener: (data: unknown) => void): void; on(event: 'pong' | 'close', listener: () => void): void }
+
+export function connectionTokenFromProtocols(headerValue: string | undefined): string {
+  const protocols = (headerValue ?? '').split(',').map((value) => value.trim());
+  if (!protocols.includes('fara-v1')) throw new ConnectionAuthError('TOKEN_REQUIRED', 'Required WebSocket protocol is missing');
+  const credential = protocols.find((value) => value.startsWith('fara-credential.'));
+  if (credential === undefined || credential.length === 'fara-credential.'.length) throw new ConnectionAuthError('TOKEN_REQUIRED', 'Connection credential is missing');
+  return credential.slice('fara-credential.'.length);
 }
 
 export async function registerAgentWebSocket(app: FastifyInstance, options: {
-  tokenVerifier: ConnectionTokenVerifier;
-  envelopeVerifier: EnvelopeSigner;
-  engine: TransportEngine;
-  recipientId: string;
-  allowedOrigins: ReadonlySet<string>;
-  now?: () => number;
-  heartbeatTimeoutMs?: number;
-  maxOutboundBytes?: number;
+  tokenVerifier: ConnectionTokenVerifier; envelopeVerifier: EnvelopeSigner; engine: TransportEngine; store: SessionStore;
+  leases: ConnectionLeaseStore; credentials: ConnectionCredentialStore; recipientId: string; allowedOrigins: ReadonlySet<string>; hub?: AgentTransportHub;
+  now?: () => number; heartbeatTimeoutMs?: number; maxOutboundBytes?: number;
 }): Promise<void> {
   await app.register(websocket);
-  const authenticate = createConnectionAuthenticator({ verifier: options.tokenVerifier, now: options.now, allowedOrigins: options.allowedOrigins });
-  const active = new Map<string, SocketLike>();
-  app.get('/v1/agent', { websocket: true }, async (socketValue, request: FastifyRequest) => {
+  const now = options.now ?? Date.now;
+  const authenticate = createConnectionAuthenticator({ verifier: options.tokenVerifier, now, allowedOrigins: options.allowedOrigins });
+  const authenticated = new WeakMap<FastifyRequest, Readonly<ConnectionClaims>>();
+  app.get('/v1/agent', {
+    websocket: true,
+    preValidation: async (request) => {
+      const claims = await authenticate({ token: connectionTokenFromProtocols(header(request.headers['sec-websocket-protocol'])), origin: header(request.headers.origin) });
+      if (!await options.credentials.consume(claims.credentialId, claims.expiresAt, now())) throw new ConnectionAuthError('TOKEN_REPLAY', 'Connection credential was already used');
+      authenticated.set(request, claims);
+    },
+  }, (socketValue, request) => {
     const socket = socketValue as unknown as SocketLike;
-    try {
-      const query = request.query as { token?: string };
-      const claims = await authenticate({ token: query.token, origin: header(request.headers.origin) });
-      const old = active.get(claims.sessionId);
-      if (old !== undefined) old.close(4001, 'connection lease replaced');
-      active.set(claims.sessionId, socket);
-      const session = new TransportSession({ claims, recipientId: options.recipientId, verifier: options.envelopeVerifier, engine: options.engine, now: options.now });
+    const claims = authenticated.get(request);
+    if (claims === undefined) { socket.close(4401, 'TOKEN_INVALID'); return; }
+    const connectionId = randomUUID();
+    void options.leases.acquire(claims, connectionId, now() + (options.heartbeatTimeoutMs ?? 30_000) * 2, now()).then((initialLease) => {
+      let lease = initialLease;
+      const session = new TransportSession({ claims, recipientId: options.recipientId, verifier: options.envelopeVerifier, engine: options.engine, store: options.store, now });
+      const queue = new OrderedOutboundQueue({ maxBytes: options.maxOutboundBytes ?? 1_000_000, send: (value) => socketSend(socket, value) });
+      const detach = options.hub?.attach({ claims, session, queue });
       let alive = true;
-      const timer = setInterval(() => {
-        if (!alive) { socket.close(4000, 'heartbeat timeout'); clearInterval(timer); return; }
-        alive = false;
-        socket.ping();
-      }, options.heartbeatTimeoutMs ?? 30_000);
+      const timer = setInterval(() => { void options.leases.isOwner(claims.sessionId, lease).then(async (owner) => {
+        if (!owner || !alive || lease.expiresAt <= now()) { socket.close(4001, 'connection lease expired'); clearInterval(timer); return; }
+        const renewed = await options.leases.renew(lease, now() + (options.heartbeatTimeoutMs ?? 30_000) * 2);
+        if (renewed === null) { socket.close(4001, 'connection lease fenced'); clearInterval(timer); return; }
+        lease = renewed; alive = false; socket.ping();
+      }); }, options.heartbeatTimeoutMs ?? 30_000);
       timer.unref();
       socket.on('pong', () => { alive = true; });
-      socket.on('message', (data) => {
-        void session.receive(normalizeWire(data)).then((result) => {
-          const body = JSON.stringify(result);
-          if (socket.bufferedAmount + Buffer.byteLength(body) > (options.maxOutboundBytes ?? 1_000_000)) throw new TransportError('BACKPRESSURE', 'Outbound queue is full');
-          socket.send(body);
-        }).catch((error: unknown) => socket.close(closeCode(error), safeReason(error)));
-      });
-      socket.on('close', () => { clearInterval(timer); if (active.get(claims.sessionId) === socket) active.delete(claims.sessionId); });
-    } catch (error) {
-      socket.close(closeCode(error), safeReason(error));
-    }
+      socket.on('message', (data) => { void options.leases.isOwner(claims.sessionId, lease).then(async (owner) => {
+        if (!owner) throw new TransportError('LEASE_FENCED', 'Connection lease was replaced');
+        const result = await session.receive(normalizeWire(data));
+        if (result.kind === 'outcome' && result.responseWire !== undefined) await queue.enqueue(result.responseWire);
+      }).catch((error: unknown) => socket.close(closeCode(error), safeReason(error))); });
+      socket.on('close', () => { clearInterval(timer); detach?.(); void options.leases.release(lease); });
+    }).catch((error: unknown) => socket.close(closeCode(error), safeReason(error)));
   });
 }
 
+function socketSend(socket: SocketLike, value: string): Promise<void> { return new Promise((resolve, reject) => socket.send(value, (error) => error === undefined ? resolve() : reject(error))); }
 function header(value: string | string[] | undefined): string | undefined { return Array.isArray(value) ? value[0] : value; }
-function normalizeWire(data: unknown): string | Uint8Array {
-  if (typeof data === 'string' || data instanceof Uint8Array) return data;
-  throw new TransportError('INVALID_WIRE', 'WebSocket frame must be text or binary');
-}
+function normalizeWire(data: unknown): string | Uint8Array { if (typeof data === 'string' || data instanceof Uint8Array) return data; throw new TransportError('INVALID_WIRE', 'WebSocket frame must be text or binary'); }
 function closeCode(error: unknown): number { return error instanceof ConnectionAuthError ? 4401 : error instanceof TransportError && error.code === 'RATE_LIMITED' ? 4429 : 4400; }
 function safeReason(error: unknown): string { return error instanceof ConnectionAuthError || error instanceof TransportError ? error.code : 'INTERNAL_ERROR'; }

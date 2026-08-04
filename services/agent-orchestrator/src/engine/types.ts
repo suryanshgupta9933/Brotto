@@ -282,6 +282,7 @@ export type SessionEngineEvent =
   | (EventMetadata & {
       type: 'reconcile.request';
       lastReceivedSequence: number;
+      lastSentClientSequence: number;
       pendingActionIds: ActionId[];
     })
   | (EventMetadata & {

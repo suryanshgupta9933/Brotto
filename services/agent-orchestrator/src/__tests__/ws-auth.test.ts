@@ -1,14 +1,18 @@
 import { jest } from '@jest/globals';
-import { createConnectionAuthenticator, type ConnectionTokenVerifier } from '../transport/auth.js';
+import { createConnectionAuthenticator, InMemoryConnectionCredentialStore, type ConnectionTokenVerifier } from '../transport/auth.js';
 import { createOrchestratorApp } from '../app.js';
+import { connectionTokenFromProtocols } from '../transport/ws-server.js';
+import { InMemorySessionStore } from '../engine/session-store.js';
+import { InMemoryConnectionLeaseStore } from '../transport/ws-server.js';
 
 const now = 1_700_000_000_000;
 const claims = {
   tenantId: 'tenant-a',
-  deviceId: 'device-a',
+  deviceId: '50000000-0000-4000-8000-000000000001',
   sessionId: '10000000-0000-4000-8000-000000000001',
   audience: 'browser-extension' as const,
   expiresAt: now + 30_000,
+  credentialId: 'credential-1',
 };
 
 describe('connection authentication', () => {
@@ -39,7 +43,7 @@ describe('connection authentication', () => {
 
   test.each([
     [{ tenantId: 'tenant-b' }],
-    [{ deviceId: 'device-b' }],
+    [{ deviceId: '50000000-0000-4000-8000-000000000002' }],
     [{ sessionId: '10000000-0000-4000-8000-000000000009' }],
   ])('rejects a token with the wrong tenant/device/session binding', async (expected) => {
     await expect(authenticate({ token: 'x', origin: 'chrome-extension://trusted-extension', expected }))
@@ -51,6 +55,9 @@ describe('connection authentication', () => {
       tokenVerifier: verifier,
       envelopeVerifier: { sign: async () => 'unused', verify: async () => true },
       engine: { handle: async () => { throw new Error('unused'); } },
+      store: new InMemorySessionStore(),
+      leases: new InMemoryConnectionLeaseStore(),
+      credentials: new InMemoryConnectionCredentialStore(),
       recipientId: '40000000-0000-4000-8000-000000000001',
       allowedOrigins: new Set(['chrome-extension://trusted-extension']),
     });
@@ -58,5 +65,16 @@ describe('connection authentication', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ status: 'ok' });
     await app.close();
+  });
+
+  test('extracts the short-lived credential from WebSocket subprotocols, never a URL', () => {
+    expect(connectionTokenFromProtocols('fara-v1, fara-credential.header.payload.signature')).toBe('header.payload.signature');
+    expect(() => connectionTokenFromProtocols(undefined)).toThrow(expect.objectContaining({ code: 'TOKEN_REQUIRED' }));
+  });
+
+  test('atomically consumes a connection credential only once', async () => {
+    const store = new InMemoryConnectionCredentialStore();
+    await expect(store.consume(claims.credentialId, claims.expiresAt, now)).resolves.toBe(true);
+    await expect(store.consume(claims.credentialId, claims.expiresAt, now + 1)).resolves.toBe(false);
   });
 });

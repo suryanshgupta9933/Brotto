@@ -117,6 +117,7 @@ export const TaskTerminalSchema = z.discriminatedUnion('type', [
 export const ReconcileRequestSchema = z.object({
   type: z.literal('reconcile.request'),
   lastReceivedSequence: SequenceSchema,
+  lastSentClientSequence: SequenceSchema,
   pendingActionIds: z.array(ActionIdSchema).max(100),
   requestedAt: TimestampSchema,
 }).strict();
@@ -125,6 +126,10 @@ export const ReconcileResponseSchema = z.object({
   type: z.literal('reconcile.response'),
   nextSequence: SequenceSchema,
   pendingActionIds: z.array(ActionIdSchema).max(100),
+  requiresFreshObservation: z.boolean(),
+  authoritativeState: z.enum(['CREATED', 'OBSERVING', 'PLANNING', 'VALIDATING', 'POLICY_CHECK', 'WAITING_FOR_APPROVAL', 'WAITING_FOR_USER', 'DISPATCHING', 'EXECUTING', 'VERIFYING', 'COMPLETED', 'FAILED', 'CANCELLED']),
+  command: ActionCommandMessageSchema.optional(),
+  storedResult: ActionResultV1Schema.optional(),
   respondedAt: TimestampSchema,
 }).strict();
 

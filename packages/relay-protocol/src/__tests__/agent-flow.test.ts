@@ -108,10 +108,17 @@ describe('secure agent ingress flow', () => {
     const secureIngress = ingress();
 
     expect((await send(secureIngress, envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }))).status).toBe('accepted');
-    expect((await send(secureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', approvalRequiredCommandMessage))).status).toBe('accepted');
+    expect(secureIngress.registerOutbound(envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', approvalRequiredCommandMessage)).status).toBe('accepted');
     expect((await send(secureIngress, envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', { type: 'approval.resolved', resolution: approvalResolution }))).status).toBe('accepted');
     expect(await send(secureIngress, envelope(3, '13131313-1313-4313-8313-131313131313', { type: 'action.completed', result })))
       .toMatchObject({ status: 'accepted', message: { type: 'action.completed' } });
+  });
+
+  it('rejects server-originated flow messages received from a client', async () => {
+    const secureIngress = ingress();
+    await send(secureIngress, envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }));
+    expect(await send(secureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
+      .toMatchObject({ status: 'rejected', code: 'MESSAGE_DIRECTION_INVALID' });
   });
 
   it('rejects a signed action completion without an accepted predecessor trajectory', async () => {
@@ -124,7 +131,7 @@ describe('secure agent ingress flow', () => {
   it('rejects a completion that does not match its accepted action command', async () => {
     const secureIngress = ingress();
     await send(secureIngress, envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }));
-    await send(secureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage));
+    secureIngress.registerOutbound(envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage));
 
     expect(await send(secureIngress, envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', {
       type: 'action.completed', result: { ...result, actionId: '12121212-1212-4212-8212-121212121212' },
@@ -134,7 +141,7 @@ describe('secure agent ingress flow', () => {
   it('rejects an approval-required completion without a matching prior resolution', async () => {
     const secureIngress = ingress();
     await send(secureIngress, envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }));
-    await send(secureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', approvalRequiredCommandMessage));
+    secureIngress.registerOutbound(envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', approvalRequiredCommandMessage));
 
     expect(await send(secureIngress, envelope(2, 'ffffffff-ffff-4fff-8fff-ffffffffffff', { type: 'action.completed', result })))
       .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
@@ -145,14 +152,14 @@ describe('secure agent ingress flow', () => {
     const unsignedObservation = JSON.stringify(envelope(0, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', { type: 'observation.submitted', observation }));
 
     expect(await secureIngress.accept(unsignedObservation)).toMatchObject({ status: 'rejected', code: 'SIGNATURE_REQUIRED' });
-    expect(await send(secureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
+    expect(secureIngress.registerOutbound(envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
       .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
   });
 
   it('rejects malformed wire and invalid signatures without recording flow state', async () => {
     const malformedIngress = ingress();
     expect(await malformedIngress.accept('{not json')).toMatchObject({ status: 'rejected', code: 'INVALID_WIRE' });
-    expect(await send(malformedIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
+    expect(malformedIngress.registerOutbound(envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
       .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
 
     const invalidSignatureIngress = ingress();
@@ -161,7 +168,7 @@ describe('secure agent ingress flow', () => {
     );
     expect(await invalidSignatureIngress.accept(JSON.stringify({ ...signedObservation, signature: 'invalid' })))
       .toMatchObject({ status: 'rejected', code: 'SIGNATURE_INVALID' });
-    expect(await send(invalidSignatureIngress, envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
+    expect(invalidSignatureIngress.registerOutbound(envelope(1, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', commandMessage)))
       .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
   });
 
@@ -182,6 +189,6 @@ describe('secure agent ingress flow', () => {
     const padding = ' '.repeat(maxBytes - new TextEncoder().encode(signedObservation).byteLength + 1);
     expect(await paddedIngress.accept(`${padding}${signedObservation}`)).toMatchObject({ status: 'rejected', code: 'MESSAGE_TOO_LARGE' });
     expect(await paddedIngress.accept(signedCommand))
-      .toMatchObject({ status: 'rejected', code: 'ACTION_FLOW_INVALID' });
+      .toMatchObject({ status: 'rejected', code: 'MESSAGE_DIRECTION_INVALID' });
   });
 });

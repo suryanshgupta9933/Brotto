@@ -1,4 +1,4 @@
-import { TrajectoryLinkageV1Schema } from '@fara-platform/fara-action-schema';
+import { ObservationV1Schema, TrajectoryLinkageV1Schema } from '@fara-platform/fara-action-schema';
 import { AgentEnvelopeV1Schema, type AgentEnvelopeV1 } from './envelope.js';
 
 type FlowRecord = {
@@ -65,6 +65,12 @@ export class AgentFlowGuard {
       default:
         return { status: 'accepted', envelope };
     }
+  }
+
+  restoreObservation(sessionId: string, observation: unknown): void {
+    const parsed = ObservationV1Schema.safeParse(observation);
+    if (!parsed.success) throw new TypeError('Cannot restore invalid flow observation');
+    this.sessionMap(this.observationsBySession, sessionId).set(parsed.data.observationId, parsed.data);
   }
 
   private sessionMap<T>(store: Map<string, Map<string, T>>, sessionId: string): Map<string, T> {

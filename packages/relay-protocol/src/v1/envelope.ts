@@ -17,6 +17,8 @@ export const AgentEnvelopeV1Schema = z.object({
   correlationId: UuidSchema,
   causationId: UuidSchema,
   recipientId: UuidSchema,
+  tenantId: z.string().min(1).max(256).optional(),
+  deviceId: z.string().min(1).max(256).optional(),
   sequence: SequenceSchema,
   createdAt: z.string().datetime(),
   expiresAt: ExpirySchema,
@@ -45,6 +47,8 @@ export interface CreateEnvelopeInput {
   correlationId: string;
   causationId: string;
   recipientId: string;
+  tenantId?: string;
+  deviceId?: string;
   sequence: number;
   createdAt: string;
   expiresAt: number;

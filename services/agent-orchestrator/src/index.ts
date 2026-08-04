@@ -135,14 +135,22 @@ export { createOrchestratorApp, type OrchestratorAppOptions } from './app.js';
 export {
   ConnectionAuthError,
   JoseConnectionTokenVerifier,
+  InMemoryConnectionCredentialStore,
   createConnectionAuthenticator,
   type ConnectionClaims,
   type ConnectionTokenVerifier,
+  type ConnectionCredentialStore,
 } from './transport/auth.js';
 export {
   TransportError,
   TransportSession,
+  AgentTransportHub,
+  InMemoryConnectionLeaseStore,
+  OrderedOutboundQueue,
+  connectionTokenFromProtocols,
   registerAgentWebSocket,
   type TransportEngine,
   type TransportResult,
+  type ConnectionLeaseStore,
+  type LeaseToken,
 } from './transport/ws-server.js';

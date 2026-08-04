@@ -7,6 +7,7 @@ import {
 import { AgentFlowGuard } from './flow-guard.js';
 import { ProtocolGuard, type ProtocolGuardResult } from './guard.js';
 import type { AgentMessageV1 } from './messages.js';
+import type { ObservationV1 } from '@fara-platform/fara-action-schema';
 
 export interface SecureAgentIngressOptions {
   now: () => number;
@@ -18,7 +19,7 @@ export interface SecureAgentIngressOptions {
 export type SecureAgentIngressResult =
   | { status: 'accepted'; envelope: AgentEnvelopeV1; message: AgentMessageV1 }
   | { status: 'duplicate'; messageId: string }
-  | { status: 'rejected'; code: 'ACTION_FLOW_INVALID' | 'INVALID_ENVELOPE' | 'INVALID_WIRE' | 'MESSAGE_EXPIRED' | 'MESSAGE_TOO_LARGE' | 'RECIPIENT_MISMATCH' | 'SEQUENCE_REPLAY' | 'SIGNATURE_INVALID' | 'SIGNATURE_REQUIRED' };
+  | { status: 'rejected'; code: 'ACTION_FLOW_INVALID' | 'INVALID_ENVELOPE' | 'INVALID_WIRE' | 'MESSAGE_DIRECTION_INVALID' | 'MESSAGE_EXPIRED' | 'MESSAGE_TOO_LARGE' | 'RECIPIENT_MISMATCH' | 'SEQUENCE_REPLAY' | 'SIGNATURE_INVALID' | 'SIGNATURE_REQUIRED' };
 
 /**
  * Mandatory secure ingress for raw application wire data.
@@ -71,12 +72,31 @@ export class SecureAgentIngress {
     const admitted = this.protocolGuard.accept(envelope);
     if (admitted.status !== 'accepted') return this.protocolResult(admitted);
 
+    if (isServerOriginMessage(admitted.envelope.payload.type)) {
+      return { status: 'rejected', code: 'MESSAGE_DIRECTION_INVALID' };
+    }
+
     const flowed = this.flowGuard.accept(admitted.envelope);
     if (flowed.status !== 'accepted') return flowed;
     return { status: 'accepted', envelope: admitted.envelope, message: admitted.envelope.payload };
   }
 
+  /** Register an already authenticated server emission as flow authority. */
+  registerOutbound(envelope: AgentEnvelopeV1): ReturnType<AgentFlowGuard['accept']> {
+    if (!isServerOriginMessage(envelope.payload.type)) return { status: 'rejected', code: 'ACTION_FLOW_INVALID' };
+    return this.flowGuard.accept(envelope);
+  }
+
+  restoreObservation(sessionId: string, observation: ObservationV1): void {
+    this.flowGuard.restoreObservation(sessionId, observation);
+  }
+
   private protocolResult(result: Exclude<ProtocolGuardResult, { status: 'accepted'; envelope: AgentEnvelopeV1 }>): SecureAgentIngressResult {
     return result;
   }
+}
+
+function isServerOriginMessage(type: AgentMessageV1['type']): boolean {
+  return type === 'session.accepted' || type === 'action.command' || type === 'approval.requested' ||
+    type === 'task.completed' || type === 'task.failed' || type === 'reconcile.response' || type === 'protocol.error';
 }
