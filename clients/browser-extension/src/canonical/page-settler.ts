@@ -1,0 +1,251 @@
+import { registerEventHandler, sendCommand, unregisterEventHandlers, type CdpEvent } from "../debugger";
+import { sanitizeBrowserText, sanitizeObservationUrl } from "./redaction";
+
+export interface PageEvent {
+  readonly method: string;
+  readonly params?: Readonly<Record<string, unknown>>;
+}
+
+export interface PageEventSource {
+  subscribe(tabId: number, handler: (event: PageEvent) => void): () => void;
+}
+
+export interface SettlementClock {
+  now(): number;
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+export interface SettledPageState {
+  readonly url: string;
+  readonly lifecycle: "loading" | "interactive" | "complete" | "frozen";
+  readonly title?: string;
+}
+
+export type DialogKind = "alert" | "confirm" | "prompt" | "beforeunload";
+
+interface SettlementDetails {
+  readonly navigation: boolean;
+  readonly targetCreated: boolean;
+  readonly dialog?: { readonly present: true; readonly kind: DialogKind };
+  readonly pageState: SettledPageState;
+}
+
+export type PageSettlementResult =
+  | ({ readonly status: "settled" } & SettlementDetails)
+  | ({ readonly status: "timeout"; readonly code: "SETTLEMENT_TIMEOUT" } & SettlementDetails)
+  | ({ readonly status: "detached"; readonly code: "DEBUGGER_DETACHED" } & SettlementDetails)
+  | ({ readonly status: "execution_failed"; readonly code: "ACTION_EXECUTION_FAILED"; readonly message: string } & SettlementDetails);
+
+export interface PageSettlerOptions {
+  readonly tabId: number;
+  readonly getPageState: () => Promise<SettledPageState>;
+  readonly events?: PageEventSource;
+  readonly clock?: SettlementClock;
+  /** Enables the fixed browser event domains after subscribing and before action execution. */
+  readonly prepareEvents?: () => Promise<void>;
+  readonly stabilityMs?: number;
+  readonly timeoutMs?: number;
+}
+
+const realClock: SettlementClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+export class PageSettler {
+  private readonly tabId: number;
+  private readonly getPageState: () => Promise<SettledPageState>;
+  private readonly events: PageEventSource;
+  private readonly clock: SettlementClock;
+  private readonly prepareEvents: () => Promise<void>;
+  private readonly stabilityMs: number;
+  private readonly timeoutMs: number;
+
+  constructor(options: PageSettlerOptions) {
+    this.tabId = options.tabId;
+    this.getPageState = options.getPageState;
+    this.events = options.events ?? new DebuggerPageEventSource();
+    this.clock = options.clock ?? realClock;
+    this.prepareEvents = options.prepareEvents ?? (
+      options.events === undefined
+        ? () => prepareDefaultEvents(this.tabId)
+        : async () => {}
+    );
+    this.stabilityMs = boundedPositive(options.stabilityMs, 250);
+    this.timeoutMs = boundedPositive(options.timeoutMs, 10_000);
+  }
+
+  settle(execute: () => Promise<unknown>): Promise<PageSettlementResult> {
+    return new Promise((resolve) => {
+      let completed = false;
+      let executionFinished = false;
+      let navigation = false;
+      let loadComplete = false;
+      let targetCreated = false;
+      let dialog: SettlementDetails["dialog"];
+      let stabilityTimer: unknown;
+      let timeoutTimer: unknown;
+
+      let cleanupSubscription = () => {};
+
+      const cleanup = () => {
+        if (stabilityTimer !== undefined) this.clock.clearTimeout(stabilityTimer);
+        if (timeoutTimer !== undefined) this.clock.clearTimeout(timeoutTimer);
+        cleanupSubscription();
+      };
+
+      const finish = async (
+        status: PageSettlementResult["status"],
+        extra: { code?: "SETTLEMENT_TIMEOUT" | "DEBUGGER_DETACHED" | "ACTION_EXECUTION_FAILED"; message?: string } = {},
+      ) => {
+        if (completed) return;
+        completed = true;
+        cleanup();
+        const pageState = await this.safePageState();
+        const details: SettlementDetails = {
+          navigation,
+          targetCreated,
+          ...(dialog === undefined ? {} : { dialog }),
+          pageState,
+        };
+        if (status === "timeout") resolve({ status, code: "SETTLEMENT_TIMEOUT", ...details });
+        else if (status === "detached") resolve({ status, code: "DEBUGGER_DETACHED", ...details });
+        else if (status === "execution_failed") resolve({
+          status,
+          code: "ACTION_EXECUTION_FAILED",
+          message: extra.message ?? "Action execution failed",
+          ...details,
+        });
+        else resolve({ status, ...details });
+      };
+
+      const scheduleStability = () => {
+        if (completed || !executionFinished || (navigation && !loadComplete)) return;
+        if (stabilityTimer !== undefined) this.clock.clearTimeout(stabilityTimer);
+        stabilityTimer = this.clock.setTimeout(() => { void finish("settled"); }, this.stabilityMs);
+      };
+
+      function onEvent(event: PageEvent): void {
+        if (completed) return;
+        if (isNavigationStart(event)) {
+          navigation = true;
+          loadComplete = false;
+          if (stabilityTimer !== undefined) clockClear();
+          return;
+        }
+        if (isLoadComplete(event)) {
+          loadComplete = true;
+          scheduleStability();
+          return;
+        }
+        if (event.method === "DOM.documentUpdated") {
+          scheduleStability();
+          return;
+        }
+        if (event.method === "Page.javascriptDialogOpening") {
+          dialog = { present: true, kind: dialogKind(event.params?.type) };
+          return;
+        }
+        if (event.method === "Target.targetCreated" || event.method === "Target.attachedToTarget") {
+          targetCreated = true;
+          return;
+        }
+        if (event.method === "Debugger.detached") {
+          void finish("detached");
+        }
+      }
+
+      const clockClear = () => {
+        if (stabilityTimer !== undefined) this.clock.clearTimeout(stabilityTimer);
+        stabilityTimer = undefined;
+      };
+
+      cleanupSubscription = this.events.subscribe(this.tabId, onEvent);
+      if (completed) {
+        cleanupSubscription();
+        return;
+      }
+      timeoutTimer = this.clock.setTimeout(() => { void finish("timeout"); }, this.timeoutMs);
+
+      let preparation: Promise<void>;
+      try {
+        preparation = this.prepareEvents();
+      } catch (error) {
+        void finish("execution_failed", {
+          message: error instanceof Error ? error.message : "Page event preparation failed",
+        });
+        return;
+      }
+
+      void preparation
+        .then(() => completed ? undefined : execute())
+        .then(() => {
+          executionFinished = true;
+          scheduleStability();
+        })
+        .catch((error: unknown) => {
+          void finish("execution_failed", {
+            message: error instanceof Error ? error.message : "Action execution failed",
+          });
+        });
+    });
+  }
+
+  private async safePageState(): Promise<SettledPageState> {
+    try {
+      const state = await this.getPageState();
+      return {
+        url: sanitizeObservationUrl(state.url),
+        lifecycle: state.lifecycle,
+        ...(state.title === undefined ? {} : { title: sanitizeBrowserText(state.title, 512) }),
+      };
+    } catch {
+      return { url: "about:blank", lifecycle: "loading" };
+    }
+  }
+}
+
+async function prepareDefaultEvents(tabId: number): Promise<void> {
+  await sendCommand(tabId, { method: "Page.enable" });
+  await sendCommand(tabId, { method: "Page.setLifecycleEventsEnabled", params: { enabled: true } });
+  await sendCommand(tabId, { method: "DOM.enable" });
+  await sendCommand(tabId, { method: "Target.setDiscoverTargets", params: { discover: true } });
+}
+
+class DebuggerPageEventSource implements PageEventSource {
+  subscribe(tabId: number, handler: (event: PageEvent) => void): () => void {
+    const cdpHandler = (event: CdpEvent) => handler(event);
+    const detachHandler = (source: chrome.debugger.Debuggee) => {
+      if (source.tabId === tabId) handler({ method: "Debugger.detached" });
+    };
+    registerEventHandler(tabId, cdpHandler);
+    chrome.debugger.onDetach.addListener(detachHandler);
+    return () => {
+      unregisterEventHandlers(tabId);
+      chrome.debugger.onDetach.removeListener(detachHandler);
+    };
+  }
+}
+
+function boundedPositive(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function isNavigationStart(event: PageEvent): boolean {
+  return event.method === "Page.frameStartedLoading" ||
+    event.method === "Page.frameNavigated" ||
+    event.method === "Page.navigatedWithinDocument" ||
+    (event.method === "Page.lifecycleEvent" && event.params?.name === "init");
+}
+
+function isLoadComplete(event: PageEvent): boolean {
+  return event.method === "Page.loadEventFired" ||
+    event.method === "Page.frameStoppedLoading" ||
+    (event.method === "Page.lifecycleEvent" && event.params?.name === "load");
+}
+
+function dialogKind(raw: unknown): DialogKind {
+  return raw === "confirm" || raw === "prompt" || raw === "beforeunload" ? raw : "alert";
+}
