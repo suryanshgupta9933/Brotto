@@ -19,6 +19,7 @@ import {
   validateCoordinatesInBounds,
 } from '@fara-platform/fara-action-schema';
 import type { FaraToolCall } from './inference.js';
+export type { FaraToolCall };
 
 /**
  * Action type mapping from tool names

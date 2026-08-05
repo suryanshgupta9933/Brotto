@@ -31,7 +31,7 @@ export {
 // Inference client
 export {
   FaraInferenceClient,
-  type InferenceConfig,
+  type InferenceConfig as LegacyInferenceConfig,
   type InferenceRequest,
   type InferenceResponse,
   type FaraToolCall,

@@ -67,6 +67,9 @@ export interface InferenceConfig {
   timeout?: number;
 }
 
+/** @deprecated Alias for the legacy FaraInferenceClient config. New code should use InferenceConfig from inference-registry. */
+export type LegacyInferenceConfig = InferenceConfig;
+
 /**
  * Default configuration
  */

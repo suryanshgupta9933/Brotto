@@ -16,7 +16,7 @@ import {
   type PlanningInput,
   type PlanningOutcome,
 } from '../engine/types.js';
-import { buildToolSchemas, type ToolSchema } from '../prompts/tool-schemas.js';
+import { buildToolSchemas } from '../prompts/tool-schemas.js';
 import { ToolCallParser, type FaraToolCall } from '../parser.js';
 
 export interface OpenAICompatibleConfig {
@@ -269,7 +269,7 @@ You can use: browser_action (left_click, double_click, right_click, drag, key, t
 
   private buildActionProposal(
     input: PlanningInput,
-    toolCalls: SseChunk['choices'][0]['delta']['tool_calls'],
+    toolCalls: NonNullable<NonNullable<SseChunk['choices']>[0]['delta']['tool_calls']>,
   ): ActionProposalV1 {
     const faraToolCalls: FaraToolCall[] = toolCalls.map((tc) => ({
       name: tc.function.name ?? '',
