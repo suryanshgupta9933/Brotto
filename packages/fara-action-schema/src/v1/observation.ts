@@ -187,6 +187,7 @@ export const BoundingBoxSchema = z.object({
 
 export const SemanticTargetSchema = withForbiddenBrowserDataGuard(z.object({
   targetId: SemanticTargetIdSchema,
+  stableRef: z.string().regex(/^[a-f0-9]{16}$/i).optional(),
   tag: z.string().min(1).max(64),
   role: z.string().min(1).max(128).optional(),
   accessibleName: SanitizedAccessibleNameSchema.optional(),
@@ -203,6 +204,24 @@ export const SemanticTargetSchema = withForbiddenBrowserDataGuard(z.object({
   }
 });
 
+export const AXTupleSchema = z.object({
+  role: z.string(),
+  index: z.number().int().nonnegative(),
+  name: z.string().optional(),
+});
+
+export const AccessibilityNodeSchema = z.object({
+  axNodeId: z.string(),
+  role: z.string(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  value: z.string().optional(),
+  attributes: z.record(z.string(), z.string()).optional(),
+  bounds: BoundingBoxSchema.optional(),
+  axPath: z.array(AXTupleSchema),
+  attributeHash: z.string(),
+});
+
 export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({
   observationId: ObservationIdSchema,
   capturedAt: z.string().datetime(),
@@ -212,6 +231,7 @@ export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({
   viewport: ViewportSchema,
   page: PageStateSchema,
   semanticTargets: z.array(SemanticTargetSchema).max(200),
+  accessibilityNodes: z.array(AccessibilityNodeSchema).optional(),
 }).strict());
 
 export type Screenshot = z.infer<typeof ScreenshotSchema>;
@@ -223,3 +243,5 @@ export type SanitizedAccessibleName = z.infer<typeof SanitizedAccessibleNameSche
 export type LocatorCandidateV1 = z.infer<typeof LocatorCandidateV1Schema>;
 export type ControlMetadata = z.infer<typeof ControlMetadataSchema>;
 export type ObservationV1 = z.infer<typeof ObservationV1Schema>;
+export type AXTuple = z.infer<typeof AXTupleSchema>;
+export type AccessibilityNode = z.infer<typeof AccessibilityNodeSchema>;
