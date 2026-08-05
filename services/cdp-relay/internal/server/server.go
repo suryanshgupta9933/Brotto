@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -22,10 +24,133 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024 * 32, // 32KB
 	WriteBufferSize: 1024 * 32, // 32KB
-	CheckOrigin: func(r *http.Request) bool {
-		// In production, implement proper origin checking
-		return true
-	},
+}
+
+// allowedCDPMethods contains the allowlist of safe CDP methods that the relay
+// will forward from clients to the browser. Dangerous methods that could execute
+// arbitrary code, modify browser state, or access sensitive data are blocked.
+var allowedCDPMethods = map[string]bool{
+	// Page navigation and lifecycle
+	"Page.enable":                true,
+	"Page.disable":               true,
+	"Page.navigate":              true,
+	"Page.reload":                true,
+	"Page.goBack":                true,
+	"Page.goForward":             true,
+
+	// DOM inspection (read-only)
+	"DOM.enable":                 true,
+	"DOM.disable":                true,
+	"DOM.getDocument":            true,
+	"DOM.querySelector":          true,
+	"DOM.querySelectorAll":       true,
+	"DOM.getOuterHTML":           true,
+	"DOM.getAttributes":          true,
+	"DOM.getChildNodes":          true,
+	"DOM.getBoxModel":            true,
+
+	// Runtime inspection (read-only)
+	"Runtime.enable":             true,
+	"Runtime.disable":            true,
+	"Runtime.evaluate":           false, // BLOCKED - allows arbitrary JS execution
+	"Runtime.callFunctionOn":     false, // BLOCKED - allows arbitrary JS execution
+	"Runtime.compileScript":       false, // BLOCKED - allows arbitrary JS execution
+	"Runtime.runScript":          false, // BLOCKED - allows arbitrary JS execution
+
+	// Input simulation
+	"Input.enable":               true,
+	"Input.disable":              true,
+	"Input.dispatchMouseEvent":   true,
+	"Input.dispatchKeyEvent":     true,
+	"Input.setInterceptFileChooserDialog": true,
+
+	// Screenshot (read-only)
+	"Page.captureScreenshot":     true,
+	"Page.captureSnapshot":       true,
+
+	// Console messages (read-only)
+	"Log.enable":                 true,
+	"Log.disable":                true,
+	"Runtime.consoleAPICalled":    true,
+	"Runtime.exceptionThrown":    true,
+
+	// Target/Session management
+	"Target.enable":               true,
+	"Target.disable":              true,
+	"Target.setDiscoverTargets":   true,
+	"Target.createBrowserContext": true,
+	"Target.disposeBrowserContext": true,
+
+	// Network inspection (read-only)
+	"Network.enable":              true,
+	"Network.disable":             true,
+	"Network.setRequestInterception": true,
+
+	// Performance
+	"Performance.enable":          true,
+	"Performance.disable":         true,
+	"Performance.metrics":         true,
+
+	// CSS inspection (read-only)
+	"CSS.enable":                  true,
+	"CSS.disable":                 true,
+	"CSS.getMatchedStylesForNode": true,
+	"CSS.getComputedStyleForNode": true,
+
+	// Storage inspection (read-only)
+	"Storage.enable":              true,
+	"Storage.disable":             true,
+	"Storage.getStorageKeyForFrame": true,
+	"Storage.trackCacheStorageForOrigin": true,
+
+	// Fetch inspection
+	"Fetch.enable":                 true,
+	"Fetch.disable":                true,
+	"Fetch.failRequest":             true,
+	"Fetch.continueRequest":         true,
+	"Fetch.continueResponse":        true,
+
+	// Box model (read-only)
+	"DOM.getBoxModel":             true,
+	"DOM.getContentQuads":         true,
+
+	// Autofill
+	"Autofill.enable":             true,
+	"Autofill.disable":            true,
+
+	// PREVENTED: Dangerous methods that are explicitly blocked
+	// These methods could be used for malicious purposes:
+	// - Runtime.evaluate, Runtime.callFunctionOn: arbitrary code execution
+	// - Page.setDownloadBehavior: modify download behavior
+	// - Storage.clear: delete all storage data
+	// - Storage.setStorageItems: inject data
+	// - Page.setPermission: modify permissions
+	// - Browser commands that could harm the browser session
+}
+
+func allowedOriginValidator(allowed []string) func(r *http.Request) bool {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, origin := range allowed {
+		allowedSet[origin] = true
+	}
+	return func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// Non-browser clients (curl, ws client) may not send Origin
+			// Require explicit allowlist when configured
+			if len(allowed) > 0 {
+				return false
+			}
+			return true
+		}
+		return allowedSet[origin]
+	}
+}
+
+func (s *Server) Upgrader() websocket.Upgrader {
+	up := upgrader
+	up.CheckOrigin = allowedOriginValidator(s.config.AllowedOrigins)
+	return up
 }
 
 // Config holds server configuration
@@ -37,6 +162,7 @@ type Config struct {
 	MaxMessageSize     int64
 	RateLimitConfig    ratelimit.Config
 	AllowedClientTypes []string
+	AllowedOrigins     []string // e.g. ["chrome-extension://<ext-id>"]
 }
 
 // TLSConfig holds TLS configuration
@@ -169,7 +295,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ws, err := upgrader.Upgrade(w, r, nil)
+	ws, err := s.Upgrader().Upgrade(w, r, nil)
 	if err != nil {
 		s.logger.Error("WebSocket upgrade failed", zap.Error(err))
 		return
@@ -552,7 +678,7 @@ func (c *Connection) handleChannelClose(msg *protocol.RelayMessage) error {
 	return c.send(closed)
 }
 
-// handleCDPFrame handles CDP frame forwarding
+// handleCDPFrame handles CDP frame forwarding with method validation
 func (c *Connection) handleCDPFrame(msg *protocol.RelayMessage) error {
 	if c.SessionID == "" || !c.sessManager.IsSessionValid(c.SessionID) {
 		return errors.New("invalid session")
@@ -568,6 +694,26 @@ func (c *Connection) handleCDPFrame(msg *protocol.RelayMessage) error {
 	frame, err := tunnel.ParseCDPFrame(msg.Payload)
 	if err != nil {
 		return err
+	}
+
+	// Validate CDP method against allowlist for command frames (those with a method specified)
+	// Response and event frames don't have a method field that can be exploited
+	if frame.Method != "" {
+		allowed, exists := allowedCDPMethods[frame.Method]
+		if !exists {
+			c.logger.Warn("CDP method not in allowlist - blocked",
+				zap.String("method", frame.Method),
+				zap.String("session", c.SessionID),
+				zap.String("channel", msg.ChannelID))
+			return errors.New("CDP method not allowed: " + frame.Method)
+		}
+		if !allowed {
+			c.logger.Warn("CDP method explicitly blocked - rejected",
+				zap.String("method", frame.Method),
+				zap.String("session", c.SessionID),
+				zap.String("channel", msg.ChannelID))
+			return errors.New("CDP method explicitly blocked: " + frame.Method)
+		}
 	}
 
 	// Forward to upstream (browser CDP)
@@ -758,7 +904,21 @@ func (s *Server) buildTLSConfig() *tls.Config {
 	if s.config.TLS.MTLSEnabled {
 		cfg.ClientAuth = tls.RequireAndVerifyClientCert
 		if s.config.TLS.MTLSCAFile != "" {
-			// Load CA certificate
+			// Load CA certificate and create a certificate pool for client cert verification
+			caCert, err := os.ReadFile(s.config.TLS.MTLSCAFile)
+			if err != nil {
+				s.logger.Fatal("Failed to read mTLS CA certificate", zap.String("file", s.config.TLS.MTLSCAFile), zap.Error(err))
+			}
+
+			caCertPool := x509.NewCertPool()
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				s.logger.Fatal("Failed to parse mTLS CA certificate", zap.String("file", s.config.TLS.MTLSCAFile))
+			}
+
+			cfg.ClientCAs = caCertPool
+			s.logger.Info("mTLS CA certificate loaded for client verification", zap.String("file", s.config.TLS.MTLSCAFile))
+		} else {
+			s.logger.Warn("mTLS enabled but no CA file specified - client certificates will not be verified against a CA")
 		}
 	}
 

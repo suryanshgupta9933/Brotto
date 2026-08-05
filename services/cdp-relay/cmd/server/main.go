@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -56,6 +57,7 @@ func init() {
 	rootCmd.PersistentFlags().Float64("rate-limit-tps", 1000, "Rate limit tokens per second")
 	rootCmd.PersistentFlags().Int64("rate-limit-burst", 100, "Rate limit burst size")
 	rootCmd.PersistentFlags().String("log-level", "info", "Log level (debug, info, warn, error)")
+	rootCmd.PersistentFlags().String("allowed-origins", "", "Comma-separated list of allowed origins (e.g. chrome-extension://<id>)")
 
 	viper.BindPFlag("address", rootCmd.PersistentFlags().Lookup("address"))
 	viper.BindPFlag("tls.cert", rootCmd.PersistentFlags().Lookup("tls-cert"))
@@ -68,6 +70,7 @@ func init() {
 	viper.BindPFlag("rate_limit.tps", rootCmd.PersistentFlags().Lookup("rate-limit-tps"))
 	viper.BindPFlag("rate_limit.burst", rootCmd.PersistentFlags().Lookup("rate-limit-burst"))
 	viper.BindPFlag("log.level", rootCmd.PersistentFlags().Lookup("log-level"))
+	viper.BindPFlag("allowed_origins", rootCmd.PersistentFlags().Lookup("allowed-origins"))
 
 	viper.SetEnvPrefix("CDP_RELAY")
 	viper.AutomaticEnv()
@@ -144,6 +147,8 @@ func runServer() {
 		MaxMessageSize:    viper.GetInt64("max_message_size"),
 		RateLimitConfig:   rateLimitConfig,
 	}
+	if origins := viper.GetString("allowed_origins"); origins != "" {
+		cfg.AllowedOrigins = strings.Split(origins, ",")
 
 	srv := server.NewServer(cfg, logger)
 

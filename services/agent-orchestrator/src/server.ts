@@ -26,8 +26,13 @@ import {
 } from './retry.js';
 import {
   type FaraAction,
+  type ObservationId,
   createObservationId,
 } from '@fara-platform/fara-action-schema';
+import { ActionExecutor, createActionExecutor } from './executor.js';
+
+// Default approval timeout in milliseconds (5 minutes)
+const APPROVAL_DEFAULT_TIMEOUT_MS = parseInt(process.env.APPROVAL_DEFAULT_TIMEOUT_MS ?? '300000', 10);
 
 /**
  * Orchestrator server configuration
@@ -80,10 +85,12 @@ export class AgentOrchestrator {
   private completion: CompletionDetector;
   private budget: AgentBudgetTracker;
   private resilient: ResilientExecutor;
+  private executor: ActionExecutor;
   private listeners: Map<string, Set<OrchestratorEventListener>>;
   private isRunning = false;
   private shouldStop = false;
   private observationSequence = 0;
+  private pendingAction: FaraAction | null = null;
 
   constructor(config: OrchestratorConfig) {
     this.listeners = new Map();
@@ -111,6 +118,7 @@ export class AgentOrchestrator {
     this.policy = createPolicyIntegrator({
       sessionId: config.session.sessionId,
       userId: config.session.userId,
+      defaultTimeoutMs: APPROVAL_DEFAULT_TIMEOUT_MS,
     });
 
     this.completion = createCompletionDetector({
@@ -127,6 +135,13 @@ export class AgentOrchestrator {
       { failureThreshold: 5, timeoutMs: 30000 },
       { maxRetries: 3 }
     );
+
+    // Initialize action executor with MCP gateway
+    this.executor = createActionExecutor({
+      mcpGateway: config.mcpGateway,
+      sessionId: config.session.sessionId,
+      maxExecutionTimeMs: 30000,
+    });
 
     // Wire up session events
     this.session.on('stateChanged', (oldState, newState) => {
@@ -326,8 +341,8 @@ export class AgentOrchestrator {
       return;
     }
 
-    // Store parsed actions for execution
-    // In a real implementation, we'd store these somewhere accessible
+    // Store the first action for execution
+    this.pendingAction = parseResult.actions[0].action;
 
     // Move to policy check with first action
     this.session.checkPolicy();
@@ -363,12 +378,51 @@ export class AgentOrchestrator {
   }
 
   /**
-   * Execute approved action
+   * Execute approved action through MCP gateway
    */
   private async execute(): Promise<void> {
-    // In real implementation, we would get the action from the parsed actions
-    // For this skeleton, we just verify and complete
-    this.session.startVerifying();
+    const action = this.pendingAction;
+    if (!action) {
+      console.error('No pending action to execute');
+      this.session.fail('No action to execute');
+      return;
+    }
+
+    const lastObsId = this.session.getContext().lastObservationId;
+    const observationId: ObservationId = lastObsId ?? createObservationId(this.observationSequence++);
+
+    try {
+      const result = await this.executor.execute(action, observationId);
+
+      // Record result in history (result is already the correct ActionResult type)
+      this.history.recordAction({
+        action,
+        result,
+        observationIdAtExecution: observationId,
+        executedAt: new Date(),
+        durationMs: 0, // TODO: measure actual duration
+      });
+
+      // Emit action executed event (session ActionResult has string actionId)
+      this.emit('actionExecuted', action, {
+        actionId: String(observationId.value),
+        success: result.success,
+        error: result.success ? undefined : result.error.message,
+        observationId,
+      });
+
+      // Update session context with last action result
+      if (!result.success) {
+        this.budget.recordFailedAction();
+      }
+
+      // Move to verifying state
+      this.session.startVerifying();
+    } catch (error) {
+      console.error('Execution failed:', error);
+      this.budget.recordFailedAction();
+      this.session.startVerifying();
+    }
   }
 
   /**

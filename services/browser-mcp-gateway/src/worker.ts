@@ -7,7 +7,16 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { SessionConfig } from './types.js';
 import { FaraActionAdapter, createFaraActionAdapter, createAccessibilityVerifier } from './adapter.js';
-import { AccessibilityVerifier } from './verifier.js';
+
+/**
+ * Cookie structure for session persistence
+ */
+export interface SessionCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+}
 
 /**
  * Worker interface for managing an isolated MCP session
@@ -15,10 +24,12 @@ import { AccessibilityVerifier } from './verifier.js';
 export interface MCPWorker {
   sessionId: string;
   adapter: FaraActionAdapter;
-  verifier: AccessibilityVerifier;
+  verifier: ReturnType<typeof createAccessibilityVerifier>;
   initialize(): Promise<void>;
   terminate(): Promise<void>;
   isHealthy(): boolean;
+  setCookies(cookies: SessionCookie[]): Promise<void>;
+  getCookies(): SessionCookie[];
 }
 
 /**
@@ -38,6 +49,7 @@ export interface WorkerOptions {
  */
 export class MockMCPClient {
   private tools: Map<string, { description?: string }> = new Map();
+  private cookies: SessionCookie[] = [];
 
   constructor() {
     // Register standard tools
@@ -79,7 +91,7 @@ export class MockMCPClient {
 export class PlaywrightMCPWorker implements MCPWorker {
   public readonly sessionId: string;
   public readonly adapter: FaraActionAdapter;
-  public readonly verifier: AccessibilityVerifier;
+  public readonly verifier: ReturnType<typeof createAccessibilityVerifier>;
   public readonly cdpEndpoint: string;
   public readonly viewportWidth: number;
   public readonly viewportHeight: number;
@@ -90,6 +102,7 @@ export class PlaywrightMCPWorker implements MCPWorker {
   private transport: StdioClientTransport | null = null;
   private healthy = false;
   private initPromise: Promise<void> | null = null;
+  private cookies: SessionCookie[] = [];
 
   constructor(sessionId: string, options: WorkerOptions) {
     this.sessionId = sessionId;
@@ -119,39 +132,52 @@ export class PlaywrightMCPWorker implements MCPWorker {
 
   private async _initializeInternal(): Promise<void> {
     try {
-      // In production, this would connect to the actual Playwright MCP server
-      // The Playwright MCP SDK uses stdio transport for local IPC
+      // Connect to Playwright MCP server using stdio transport
+      // The CDP endpoint tells Playwright which browser to connect to
+      const cdpUrl = new URL(this.cdpEndpoint);
+      const playwrightArgs = [
+        '-y',
+        '@playwright/mcp@latest',
+        '--',
+        '--browser',
+        this.browserType,
+      ];
 
-      /*
-      // Production code (commented out until Playwright MCP is properly integrated):
+      const chromiumPath = this.browserType === 'chromium' && !process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+        ? '/usr/bin/chromium-browser'
+        : process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+
       this.transport = new StdioClientTransport({
         command: 'npx',
-        args: ['-y', '@playwright/mcp@latest'],
+        args: playwrightArgs,
         env: {
           ...process.env,
-          // Pass CDP endpoint configuration
-          CDP_ENDPOINT: this.cdpEndpoint,
-          BROWSER_TYPE: this.browserType,
+          // Playwright MCP configuration via environment
+          PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH ?? '',
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: chromiumPath ?? '',
+          // Pass viewport configuration
           VIEWPORT_WIDTH: String(this.viewportWidth),
           VIEWPORT_HEIGHT: String(this.viewportHeight),
-          VISION_ENABLED: String(this.visionEnabled),
+          // Vision mode for screenshots
+          PLAYWRIGHT_VISION_ENABLED: String(this.visionEnabled),
         },
       });
 
       this.client = new Client({
         name: 'fara-browser-gateway',
         version: '0.1.0',
-      }, {
-        capabilities: {
-          tools: {},
-        },
       });
 
-      await this.client.connect(this.transport);
-      */
+      // Connect with timeout
+      await Promise.race([
+        this.client.connect(this.transport),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('MCP connection timeout')), 30000)
+        ),
+      ]);
 
-      // For now, mark as healthy with mock client
       this.healthy = true;
+      console.log(`[MCPWorker] Connected to Playwright MCP for session ${this.sessionId}`);
     } catch (error) {
       this.healthy = false;
       throw new Error(`Failed to initialize MCP worker: ${error instanceof Error ? error.message : String(error)}`);
@@ -185,6 +211,21 @@ export class PlaywrightMCPWorker implements MCPWorker {
    */
   isHealthy(): boolean {
     return this.healthy;
+  }
+
+  /**
+   * Set cookies for session persistence
+   */
+  async setCookies(cookies: SessionCookie[]): Promise<void> {
+    this.cookies = cookies;
+    console.log(`[MCPWorker] Stored ${cookies.length} cookies for session ${this.sessionId}`);
+  }
+
+  /**
+   * Get cookies for session
+   */
+  getCookies(): SessionCookie[] {
+    return this.cookies;
   }
 
   /**
@@ -247,6 +288,24 @@ export class WorkerManager {
    */
   getActiveSessions(): string[] {
     return Array.from(this.workers.keys());
+  }
+
+  /**
+   * Set cookies for a session
+   */
+  async setCookies(sessionId: string, cookies: SessionCookie[]): Promise<void> {
+    const worker = this.workers.get(sessionId);
+    if (worker) {
+      await worker.setCookies(cookies);
+    }
+  }
+
+  /**
+   * Get cookies for a session
+   */
+  getCookies(sessionId: string): SessionCookie[] {
+    const worker = this.workers.get(sessionId);
+    return worker ? worker.getCookies() : [];
   }
 
   /**

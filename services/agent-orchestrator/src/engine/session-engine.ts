@@ -796,6 +796,9 @@ export class SessionEngine {
     const expectedRevision = session.revision;
     const now = this.now();
     if (terminal.notification.expiresAt <= Date.parse(now)) {
+      terminal.notification.messageId = this.idGenerator() as MessageId;
+      terminal.notification.sequence = session.nextSequence;
+      session.nextSequence += 1;
       terminal.notification.createdAt = now;
       terminal.notification.expiresAt = Date.parse(now) + 30_000;
     }
@@ -1250,6 +1253,7 @@ export class SessionEngine {
     const createdAt = this.now();
     session.terminalDelivery = {
       notification: {
+        terminalId: this.idGenerator() as MessageId,
         messageId: this.idGenerator() as MessageId,
         correlationId,
         sessionId: session.sessionId,
