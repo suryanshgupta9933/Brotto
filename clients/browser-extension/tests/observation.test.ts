@@ -291,6 +291,7 @@ describe("canonical browser observation capture", () => {
       "Runtime.evaluate",
       "Page.getFrameTree",
       "Runtime.evaluate",
+      "Accessibility.getFullAXTree",
     ]);
     expect(
       methods.some((method) => /cookie|storage|network/i.test(method)),
@@ -457,5 +458,50 @@ describe("canonical browser observation capture", () => {
         defaultOptions({ ...PAGE_SNAPSHOT, domScanComplete: false }),
       ),
     ).rejects.toThrow("DOM scan limit");
+  });
+
+  it("includes accessibilityNodes when sendCdpCommand returns AXTree", async () => {
+    const methods: string[] = [];
+    const sendCdpCommand = jest.fn(
+      async (_tabId: number, method: string) => {
+        methods.push(method);
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { id: "main-frame" } } };
+        }
+        if (method === "Accessibility.getFullAXTree") {
+          return {
+            nodes: [
+              {
+                nodeId: "AXNode-1",
+                role: { value: "button" },
+                name: { value: "Submit" },
+                properties: [{ name: "data-testid", value: { value: "submit-btn" } }],
+                boundingBox: { x: 10, y: 20, width: 100, height: 40 },
+              },
+              {
+                nodeId: "AXNode-2",
+                role: { value: "StaticText" },
+                name: { value: "Hello world" },
+              },
+            ],
+          };
+        }
+        return { result: { value: PAGE_SNAPSHOT } };
+      },
+    );
+
+    const obs = await captureObservation(
+      42,
+      defaultOptions(PAGE_SNAPSHOT, { sendCdpCommand }),
+    );
+
+    expect(methods).toContain("Accessibility.getFullAXTree");
+    expect(obs.accessibilityNodes).toBeDefined();
+    expect(obs.accessibilityNodes!.length).toBeGreaterThan(0);
+    expect(obs.accessibilityNodes![0]).toMatchObject({
+      role: "button",
+      name: "Submit",
+      attributes: expect.objectContaining({ "data-testid": "submit-btn" }),
+    });
   });
 });

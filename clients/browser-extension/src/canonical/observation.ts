@@ -10,6 +10,7 @@ import {
   sanitizeSemanticTarget,
   type RawSemanticTarget,
 } from "./redaction";
+import { collectAccessibilitySnapshot } from "./ax-snapshot";
 
 const DEFAULT_MAX_SEMANTIC_TARGETS = 200;
 const DEFAULT_MAX_DOM_ELEMENTS = 5_000;
@@ -968,6 +969,7 @@ async function captureObservationInternal(
     `observation:${tabId}:${capturedAt}:${screenshotHash}`,
   );
   const opaqueTabId = await opaqueUuid(`tab:${tabId}`);
+  const accessibilityNodes = await collectAccessibilitySnapshot(tabId, sendCdpCommand);
   const observation: ObservationV1 = {
     observationId: observationId as ObservationV1["observationId"],
     capturedAt,
@@ -992,6 +994,7 @@ async function captureObservationInternal(
       visibility: after.visibility,
     },
     semanticTargets: canonicalTargets,
+    accessibilityNodes: accessibilityNodes.length > 0 ? accessibilityNodes : undefined,
   };
 
   assertNoForbiddenBrowserData(observation);
