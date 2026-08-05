@@ -219,7 +219,7 @@ export const AccessibilityNodeSchema = z.object({
   attributes: z.record(z.string(), z.string()).optional(),
   bounds: BoundingBoxSchema.optional(),
   axPath: z.array(AXTupleSchema),
-  attributeHash: z.string(),
+  attributeHash: Sha256Schema,
 });
 
 export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({

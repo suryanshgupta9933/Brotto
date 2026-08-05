@@ -2,18 +2,25 @@ import { AccessibilityNodeSchema, ObservationV1Schema } from '../v1/observation'
 
 describe('AccessibilityNodeSchema', () => {
   it('parses a minimal node', () => {
+    const hash = 'a'.repeat(64);
     const node = AccessibilityNodeSchema.parse({
       axNodeId: '1',
       role: 'button',
       axPath: [{ role: 'Document', index: 0 }],
-      attributeHash: 'abc123',
+      attributeHash: hash,
     });
     expect(node.role).toBe('button');
   });
 
   it('rejects missing axPath', () => {
-    expect(() => AccessibilityNodeSchema.parse({ axNodeId: '1', role: 'button', attributeHash: 'x' }))
+    expect(() => AccessibilityNodeSchema.parse({ axNodeId: '1', role: 'button', attributeHash: 'a'.repeat(64) }))
       .toThrow();
+  });
+
+  it('rejects non-SHA256 attributeHash', () => {
+    expect(() => AccessibilityNodeSchema.parse({
+      axNodeId: '1', role: 'button', axPath: [], attributeHash: 'short',
+    })).toThrow();
   });
 });
 
@@ -33,8 +40,10 @@ describe('ObservationV1Schema with accessibilityNodes', () => {
     expect(() => ObservationV1Schema.parse(baseObs)).not.toThrow();
   });
 
-  it('parses with accessibilityNodes', () => {
-    const obs = { ...baseObs, accessibilityNodes: [{ axNodeId: '1', role: 'button', axPath: [], attributeHash: 'x' }] };
-    expect(() => ObservationV1Schema.parse(obs)).not.toThrow();
+  it('parses with accessibilityNodes and exposes the array', () => {
+    const hash = 'a'.repeat(64);
+    const obs = { ...baseObs, accessibilityNodes: [{ axNodeId: '1', role: 'button', axPath: [], attributeHash: hash }] };
+    const parsed = ObservationV1Schema.parse(obs);
+    expect(parsed.accessibilityNodes).toHaveLength(1);
   });
 });
