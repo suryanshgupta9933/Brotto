@@ -579,7 +579,7 @@ export class AgentOrchestrator {
    */
   async requestInferenceViaPlanner(input: PlanningInput, signal: AbortSignal): Promise<PlanningOutcome> {
     if (!this.planner) {
-      throw new Error("plannerConfig not set on this orchestrator");
+      throw new Error("InferencePort planner not configured on this orchestrator");
     }
     return this.planner.plan(input, signal);
   }
