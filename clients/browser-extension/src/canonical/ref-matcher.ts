@@ -1,7 +1,7 @@
-import type { AccessibilityNode, BoundingBox } from "@fara-platform/fara-action-schema";
+import type { AccessibilityNode } from "@fara-platform/fara-action-schema";
 import { StableRef } from "./stable-ref";
 
-export type MatchStrategy = "exact" | "fuzzy-bounds" | "role-name" | "miss";
+export type MatchStrategy = "exact" | "role-name" | "miss";
 
 export interface MatchResult {
   confidence: number;
@@ -9,13 +9,7 @@ export interface MatchResult {
   strategy: MatchStrategy;
 }
 
-export const DEFAULT_BOUNDS_TOLERANCE_PX = 10;
 export const MATCH_CONFIDENCE_THRESHOLD = 0.8;
-
-function boundsDelta(a: BoundingBox | undefined, b: BoundingBox | undefined): number {
-  if (!a || !b) return Number.POSITIVE_INFINITY;
-  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
-}
 
 function levenshtein(a: string, b: string): number {
   if (a === b) return 0;
@@ -35,49 +29,23 @@ function levenshtein(a: string, b: string): number {
   return prev[n];
 }
 
-export interface MatchOptions {
-  boundsTolerance?: number;
-}
-
+// ponytail: removed "fuzzy-bounds" step — bounds aren't in StableRef identity,
+// and attributeHash already includes name, so any element whose bounds drift
+// also has a different hash and fails exact match. Re-add when StableRef
+// stores lastSeenBounds and the algorithm compares current bounds against
+// the reference's stored bounds.
 export function matchStableRef(
   ref: StableRef,
   snapshot: AccessibilityNode[],
-  options: MatchOptions = {},
 ): MatchResult {
-  const tolerance = options.boundsTolerance ?? DEFAULT_BOUNDS_TOLERANCE_PX;
-
-  // 1. exact: same hash + axPath via StableRef.equals
+  // 1. exact: full identity match via StableRef.equals (hash + axPath + role + name)
   for (const node of snapshot) {
     if (StableRef.fromAXNode(node).equals(ref)) {
       return { confidence: 1.0, node, strategy: "exact" };
     }
   }
 
-  // 2. fuzzy-bounds: locate reference node via axPath (role+name+index chain) in snapshot,
-  // then find another node with same hash+role but drifted bounds
-  const refNode = snapshot.find((n) => {
-    if (n.attributeHash !== ref.attributeHash) return false;
-    if (n.role !== ref.role) return false;
-    // match by axPath chain (role+index at each level, ignoring name for robustness)
-    if (n.axPath.length !== ref.axPath.length) return false;
-    for (let i = 0; i < n.axPath.length; i++) {
-      if (n.axPath[i].role !== ref.axPath[i].role) return false;
-      if (n.axPath[i].index !== ref.axPath[i].index) return false;
-    }
-    return true;
-  });
-  if (refNode) {
-    for (const node of snapshot) {
-      if (node === refNode) continue; // skip self
-      if (node.attributeHash !== ref.attributeHash || node.role !== ref.role) continue;
-      const delta = boundsDelta(refNode.bounds, node.bounds);
-      if (delta <= tolerance) {
-        return { confidence: 0.9, node, strategy: "fuzzy-bounds" };
-      }
-    }
-  }
-
-  // 3. role-name: same role + nearest name (Levenshtein)
+  // 2. role-name: same role + nearest name (Levenshtein)
   const sameRole = snapshot.filter((n) => n.role === ref.role && n.name);
   if (sameRole.length && ref.name) {
     let best: AccessibilityNode | null = null;

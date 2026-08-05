@@ -1,10 +1,9 @@
-import { matchStableRef, type MatchResult } from "../src/canonical/ref-matcher";
+import { matchStableRef } from "../src/canonical/ref-matcher";
 import { StableRef } from "../src/canonical/stable-ref";
-import type { AccessibilityNode, BoundingBox } from "@fara-platform/fara-action-schema";
+import type { AccessibilityNode } from "@fara-platform/fara-action-schema";
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
-const bounds = (x: number, y = 0): BoundingBox => ({ x, y, width: 100, height: 30 });
 
 const makeNode = (overrides: Partial<AccessibilityNode>): AccessibilityNode => ({
   axNodeId: "1",
@@ -25,27 +24,29 @@ describe("matchStableRef", () => {
     expect(result.node).toBe(node);
   });
 
-  it("fuzzy-bounds match for small drift within tolerance", () => {
-    // refNode in snapshot matches ref exactly (same axPath/hash/role/name derived from refNode).
-    // The first loop finds refNode and returns exact before fuzzy-bounds can run.
-    // This test validates that exact takes priority in snapshot iteration order.
-    const refNode = makeNode({ bounds: bounds(0) });
+  it("exact match ignores bounds drift", () => {
+    const refNode = makeNode({});
     const ref = StableRef.fromAXNode(refNode);
-    const drifted = makeNode({
-      bounds: bounds(5),
-      axPath: [{ role: "Document", index: 0 }, { role: "button", index: 0, name: "Submit" }],
-      attributeHash: HASH_A,
-    });
-    const result = matchStableRef(ref, [refNode, drifted]);
+    const drifted = makeNode({ axNodeId: "2", bounds: { x: 100, y: 100, width: 50, height: 20 } });
+    const result = matchStableRef(ref, [drifted]);
     expect(result.strategy).toBe("exact");
+    expect(result.node).toBe(drifted);
   });
 
-  it("role-name match for renamed label", () => {
+  it("role-name match for typo in label", () => {
     const refNode = makeNode({ name: "Submit", attributeHash: HASH_A });
     const ref = StableRef.fromAXNode(refNode);
-    const snapshot = [makeNode({ name: "Sumbit", attributeHash: HASH_B })];
+    const snapshot = [makeNode({ name: "Sumbit", attributeHash: HASH_B, axPath: [{ role: "Document", index: 0 }, { role: "button", index: 0, name: "Sumbit" }] })];
     const result = matchStableRef(ref, snapshot);
     expect(result.strategy).toBe("role-name");
+  });
+
+  it("role-name rejects too-distant renames", () => {
+    const refNode = makeNode({ name: "Submit", attributeHash: HASH_A });
+    const ref = StableRef.fromAXNode(refNode);
+    const snapshot = [makeNode({ name: "Completely Different", attributeHash: HASH_B, axPath: [{ role: "Document", index: 0 }, { role: "button", index: 0, name: "Completely Different" }] })];
+    const result = matchStableRef(ref, snapshot);
+    expect(result.strategy).toBe("miss");
   });
 
   it("returns miss when snapshot is empty", () => {
@@ -63,19 +64,11 @@ describe("matchStableRef", () => {
     expect(result.strategy).toBe("miss");
   });
 
-  it("honors custom boundsTolerance option", () => {
-    // With refNode in snapshot matching ref exactly, first loop returns exact before
-    // fuzzy-bounds runs. This validates exact priority; boundsTolerance is exercised
-    // by the role-name fallback path where tolerance doesn't apply.
-    const refNode = makeNode({ bounds: bounds(0) });
+  it("role-name returns miss when ref has no name", () => {
+    const refNode = makeNode({ name: undefined });
     const ref = StableRef.fromAXNode(refNode);
-    const drifted = makeNode({
-      bounds: bounds(50),
-      axPath: [{ role: "Document", index: 0 }, { role: "button", index: 0, name: "Submit" }],
-      attributeHash: HASH_A,
-    });
-    const result = matchStableRef(ref, [refNode, drifted]);
-    // exact takes priority over fuzzy-bounds when snapshot contains the reference node
-    expect(result.strategy).toBe("exact");
+    const snapshot = [makeNode({ name: "Submit" })];
+    const result = matchStableRef(ref, snapshot);
+    expect(result.strategy).toBe("miss");
   });
 });
