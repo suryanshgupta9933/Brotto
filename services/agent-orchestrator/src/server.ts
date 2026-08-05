@@ -13,7 +13,9 @@ import {
   type ActionResult,
 } from './session.js';
 import { HistoryManager } from './history.js';
-import { FaraInferenceClient, type InferenceConfig } from './inference.js';
+import { FaraInferenceClient, type LegacyInferenceConfig } from './inference.js';
+import { createPlanner, type InferenceConfig } from './inference-registry.js';
+import type { InferencePort, PlanningInput, PlanningOutcome } from './engine/types.js';
 import { ToolCallParser, createToolCallParser } from './parser.js';
 import { PolicyIntegrator, createPolicyIntegrator } from './policy.js';
 import type { McpGatewayClient } from './executor.js';
@@ -44,13 +46,16 @@ export interface OrchestratorConfig {
     tenantId: string;
     userId: string;
   };
-  inference: InferenceConfig;
+  /** Legacy inference config for FaraInferenceClient path */
+  inference: LegacyInferenceConfig;
   mcpGateway: McpGatewayClient;
   budget?: {
     maxSteps?: number;
     maxSessionDurationMs?: number;
     maxConsecutiveFailedActions?: number;
   };
+  /** Optional multi-model planner via InferencePort */
+  plannerConfig?: InferenceConfig;
 }
 
 /**
@@ -86,6 +91,7 @@ export class AgentOrchestrator {
   private budget: AgentBudgetTracker;
   private resilient: ResilientExecutor;
   private executor: ActionExecutor;
+  private planner: InferencePort | null = null;
   private listeners: Map<string, Set<OrchestratorEventListener>>;
   private isRunning = false;
   private shouldStop = false;
@@ -112,6 +118,10 @@ export class AgentOrchestrator {
     });
 
     this.inference = new FaraInferenceClient(config.inference);
+
+    if (config.plannerConfig) {
+      this.planner = createPlanner(config.plannerConfig);
+    }
 
     this.parser = createToolCallParser();
 
@@ -561,6 +571,21 @@ export class AgentOrchestrator {
    */
   isActive(): boolean {
     return this.isRunning && !this.shouldStop;
+  }
+
+  /**
+   * Request inference via the new InferencePort-based planner (multi-model).
+   * Coexists with the legacy FaraInferenceClient path.
+   */
+  async requestInferenceViaPlanner(input: PlanningInput, signal: AbortSignal): Promise<PlanningOutcome> {
+    if (!this.planner) {
+      throw new Error("plannerConfig not set on this orchestrator");
+    }
+    return this.planner.plan(input, signal);
+  }
+
+  hasPlanner(): boolean {
+    return this.planner !== null;
   }
 }
 

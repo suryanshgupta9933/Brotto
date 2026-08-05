@@ -40,6 +40,14 @@ export {
   isInferenceError,
 } from './inference';
 
+// Inference registry (multi-model)
+export {
+  createPlanner,
+  inferFamilyFromEnv,
+  type InferenceConfig,
+  type InferenceFamily,
+} from './inference-registry';
+
 // Canonical stateless planner adapter
 export {
   FaraPlanner,
