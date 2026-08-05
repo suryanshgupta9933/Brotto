@@ -14,6 +14,10 @@ export function createPlanner(config: InferenceConfig): InferencePort {
       return new FaraPlanner(config);
     case "openai-compatible":
       return new OpenAICompatiblePlanner(config);
+    default: {
+      const _exhaustive: never = config;
+      throw new Error(`Unsupported inference family: ${(config as { family: string }).family}`);
+    }
   }
 }
 
