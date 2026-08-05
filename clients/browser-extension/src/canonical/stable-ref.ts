@@ -36,6 +36,7 @@ export class StableRef {
     return true;
   }
 
+  // Wire format key for StableRef transport (plan 2); full identity uses equals().
   toJSON(): StableRefJSON {
     return { axPath: this.axPath, attributeHash: this.attributeHash };
   }
