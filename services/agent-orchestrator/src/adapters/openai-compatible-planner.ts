@@ -170,6 +170,9 @@ You can use: browser_action (left_click, double_click, right_click, drag, key, t
     return messages;
   }
 
+  // ponytail: buffered SSE — assemble full response then parse. Memory ceiling is
+  // a few MB of transcript per call. Switch to incremental parsing if peak memory
+  // matters or when tool-call deltas need real-time exposure.
   private async readSseStream(
     body: ReadableStream<Uint8Array>,
     signal: AbortSignal,
@@ -283,9 +286,11 @@ You can use: browser_action (left_click, double_click, right_click, drag, key, t
     const parseResult = parser.parse(faraToolCalls);
 
     if (parseResult.errors.length > 0) {
+      // retryable=false: a model consistently producing malformed tool calls
+      // won't fix itself; hammering it just wastes the retry budget.
       throw new OpenAICompatiblePlannerError(
         `Tool call parsing failed: ${parseResult.errors[0].error}`,
-        true,
+        false,
       );
     }
 
