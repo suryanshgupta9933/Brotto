@@ -1,7 +1,10 @@
 import type { ActionCommandV1, ExecutableActionV1, SemanticTarget } from "@fara-platform/fara-action-schema";
+import type { AccessibilityNode } from "@fara-platform/fara-action-schema";
 import { sendCommand } from "../debugger";
 import { sanitizeObservationUrl } from "./redaction";
 import { transformCapturedPoint, type CapturedCoordinateContext } from "./coordinate-context";
+import { matchStableRef, MATCH_CONFIDENCE_THRESHOLD } from "./ref-matcher";
+import type { StableRef } from "./stable-ref";
 import {
   type CanonicalExecutionPipelineOptions,
   type PipelineResult,
@@ -233,17 +236,7 @@ class CanonicalActionExecutor {
   }
 
   private verifyDeclaredTarget(action: ExecutableActionV1): ActionExecutionFailure | undefined {
-    if (this.observation === undefined || !("targetId" in action) || action.targetId === undefined) return undefined;
-    const target = this.observation.semanticTargets.find((candidate) => candidate.visible && candidate.targetId === action.targetId);
-    if (target === undefined) return failure("TARGET_NOT_FOUND", "Declared semantic target is unavailable", true);
-    if (!("x" in action) || !("y" in action)) return undefined;
-    const point = transformCapturedPoint(action.x, action.y, this.capture);
-    if ("error" in point) return point;
-    const box = target.boundingBox;
-    if (point.x < box.x || point.x > box.x + box.width || point.y < box.y || point.y > box.y + box.height) {
-      return failure("TARGET_COORDINATE_MISMATCH", "Pointer coordinate does not match the declared semantic target", true);
-    }
-    return undefined;
+    return verifyDeclaredTarget(action, this.observation, this.capture);
   }
 
   private mouse(params: Record<string, unknown>): Promise<unknown> {
@@ -287,6 +280,41 @@ export async function executePermittedPhysicalAction(
       wait: options.wait,
     });
     return executor.execute(command as never, signal);
+}
+
+/**
+ * Verifies an action's declared target using stable ref matching first,
+ * falling back to coordinate verification if ref match confidence is insufficient.
+ *
+ * @param action - The action to verify, may contain a `ref` property with a StableRef
+ * @param observation - The observation containing accessibilityNodes for ref matching
+ * @param capture - The coordinate capture context for coordinate verification
+ * @returns undefined if verified (proceed), or an ActionExecutionFailure if verification fails
+ */
+export function verifyDeclaredTarget(
+  action: ExecutableActionV1,
+  observation: { readonly semanticTargets: readonly SemanticTarget[]; readonly accessibilityNodes?: readonly AccessibilityNode[] } | undefined,
+  capture: CapturedCoordinateContext,
+): ActionExecutionFailure | undefined {
+  const ref = (action as { ref?: StableRef }).ref;
+  const axNodes = observation?.accessibilityNodes;
+  if (ref && axNodes && axNodes.length > 0) {
+    const match = matchStableRef(ref, Array.from(axNodes));
+    if (match.confidence >= MATCH_CONFIDENCE_THRESHOLD) {
+      return undefined; // verified via stable-ref; skip coordinate fallback
+    }
+  }
+  if (observation === undefined || !("targetId" in action) || action.targetId === undefined) return undefined;
+  const target = observation.semanticTargets.find((candidate) => candidate.visible && candidate.targetId === action.targetId);
+  if (target === undefined) return failure("TARGET_NOT_FOUND", "Declared semantic target is unavailable", true);
+  if (!("x" in action) || !("y" in action)) return undefined;
+  const point = transformCapturedPoint(action.x, action.y, capture);
+  if ("error" in point) return point;
+  const box = target.boundingBox;
+  if (point.x < box.x || point.x > box.x + box.width || point.y < box.y || point.y > box.y + box.height) {
+    return failure("TARGET_COORDINATE_MISMATCH", "Pointer coordinate does not match the declared semantic target", true);
+  }
+  return undefined;
 }
 
 
