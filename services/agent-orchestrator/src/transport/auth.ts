@@ -14,6 +14,7 @@ export interface ConnectionTokenVerifier {
 }
 
 export class ConnectionAuthError extends Error {
+  readonly statusCode = 401;
   constructor(public readonly code: 'TOKEN_REQUIRED' | 'TOKEN_INVALID' | 'TOKEN_EXPIRED' | 'TOKEN_REPLAY' | 'ORIGIN_REJECTED', message: string) {
     super(message);
     this.name = 'ConnectionAuthError';

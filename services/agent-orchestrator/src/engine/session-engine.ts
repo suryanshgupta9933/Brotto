@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   ActionCommandV1,
   ActionId,
+  CompletionProposalV1,
   EventId,
   MessageId,
   PolicyDecisionV1,
@@ -17,6 +18,8 @@ import type {
   SessionEngineEvent,
   SessionEngineOptions,
   StoredOutcome,
+  TaskTerminalMessage,
+  TerminalReason,
   WorkClaim,
 } from './types.js';
 import { InferenceContractError, SessionEngineError } from './types.js';
@@ -104,7 +107,6 @@ export class SessionEngine {
     if (processed !== null) return this.returnProcessed(event.sessionId, processed);
 
     if (event.type === 'reconcile.request') {
-      await this.resumeSession(event.sessionId, false);
       return this.reconcile(event);
     }
     if (event.type === 'task.cancelled') return this.cancel(event);
@@ -116,6 +118,7 @@ export class SessionEngine {
       await this.resumeSession(event.sessionId, false);
       return this.completeAction(event);
     }
+    if (event.type === 'action.acknowledged') return this.acknowledgeAction(event);
     return this.resolveApproval(event);
   }
 
@@ -168,6 +171,7 @@ export class SessionEngine {
       maxVerifierFailures: this.budgets.maxVerifierFailures,
       stepCount: 0,
       terminalReason: null,
+      terminalDelivery: null,
     };
     this.queueTrajectory(session, [{
       kind: 'session_lifecycle',
@@ -220,6 +224,7 @@ export class SessionEngine {
       session.activeInferenceId = null;
       session.workClaim = null;
       session.terminalReason = terminalReason;
+      this.queueFailureTerminal(session, messageId, terminalReason);
     }
     this.queueTrajectory(session, [
       {
@@ -286,6 +291,10 @@ export class SessionEngine {
     for (let iteration = 0; iteration < 50; iteration += 1) {
       await this.flushTrajectoryOutbox(sessionId);
       const session = await this.requireSession(sessionId);
+      if (this.isTerminal(session)) {
+        if (deliverCommand) await this.deliverPendingTerminal(sessionId);
+        return;
+      }
       if (session.state === 'PLANNING' && session.activeInferenceId !== null) {
         if (!await this.resumePlanning(session)) return;
         continue;
@@ -363,6 +372,7 @@ export class SessionEngine {
       session.state = 'FAILED';
       session.activeInferenceId = null;
       session.terminalReason = terminalReason;
+      this.queueFailureTerminal(session, causationMessageId, terminalReason);
       this.abortSessionWork(sessionId, terminalReason.message);
     }
     session.updatedAt = this.now();
@@ -455,6 +465,16 @@ export class SessionEngine {
           message: proposal.summary,
           detectedAt: this.now(),
         });
+      if (session.state === 'COMPLETED') {
+        this.queueTerminal(session, causationMessageId, { type: 'task.completed', completion: proposal });
+      } else if (session.state === 'FAILED' && session.terminalReason !== null) {
+        this.queueTerminal(session, causationMessageId, {
+          type: 'task.failed',
+          completion: proposal.status === 'failed'
+            ? proposal
+            : this.failureCompletion(session, session.terminalReason),
+        });
+      }
       session.updatedAt = this.now();
       this.queueTrajectory(session, [
         {
@@ -577,6 +597,7 @@ export class SessionEngine {
       session.state = 'FAILED';
       session.pendingPolicy = null;
       session.terminalReason = reason;
+      this.queueFailureTerminal(session, pending.causationMessageId, reason);
       session.updatedAt = reason.detectedAt;
       this.abortSessionWork(sessionId, reason.message);
       this.queueTrajectory(session, [
@@ -676,6 +697,7 @@ export class SessionEngine {
       session.pendingPolicy = null;
       session.pendingApproval = null;
       session.terminalReason = terminalReason;
+      this.queueFailureTerminal(session, causationMessageId, terminalReason);
       session.updatedAt = now;
       this.queueTrajectory(session, [
         ...precedingEvents,
@@ -706,6 +728,7 @@ export class SessionEngine {
         lastAttemptAt: null,
         lastError: null,
       },
+      acknowledgement: null,
     };
     session.pendingPolicy = null;
     session.pendingApproval = null;
@@ -714,7 +737,7 @@ export class SessionEngine {
     this.queueTrajectory(session, [
       ...precedingEvents,
       {
-        kind: 'action_acknowledged',
+        kind: 'action_dispatched',
         correlationId: causationMessageId,
         summary: 'Action command persisted for dispatch',
         ...references,
@@ -765,6 +788,48 @@ export class SessionEngine {
     await this.transition(session, sentRevision);
   }
 
+  private async deliverPendingTerminal(sessionId: CanonicalSession['sessionId']): Promise<void> {
+    let session = await this.requireSession(sessionId);
+    const terminal = session.terminalDelivery;
+    if (terminal === null || terminal.status !== 'pending' || !this.isTerminal(session)) return;
+
+    const expectedRevision = session.revision;
+    const now = this.now();
+    if (terminal.notification.expiresAt <= Date.parse(now)) {
+      terminal.notification.createdAt = now;
+      terminal.notification.expiresAt = Date.parse(now) + 30_000;
+    }
+    terminal.attempts += 1;
+    terminal.lastAttemptAt = now;
+    terminal.lastError = null;
+    session.updatedAt = now;
+    session.revision = expectedRevision + 1;
+    await this.transition(session, expectedRevision);
+
+    try {
+      await this.options.terminalSink.sendTerminal(terminal.notification);
+    } catch (error) {
+      session = await this.requireSession(sessionId);
+      if (session.terminalDelivery?.notification.messageId === terminal.notification.messageId && session.terminalDelivery.status === 'pending') {
+        const failureRevision = session.revision;
+        session.terminalDelivery.lastError = error instanceof Error ? error.message : String(error);
+        session.updatedAt = this.now();
+        session.revision = failureRevision + 1;
+        await this.transition(session, failureRevision);
+      }
+      throw error;
+    }
+
+    session = await this.requireSession(sessionId);
+    if (session.terminalDelivery?.notification.messageId !== terminal.notification.messageId || session.terminalDelivery.status !== 'pending') return;
+    const sentRevision = session.revision;
+    session.terminalDelivery.status = 'sent';
+    session.terminalDelivery.lastError = null;
+    session.updatedAt = this.now();
+    session.revision = sentRevision + 1;
+    await this.transition(session, sentRevision);
+  }
+
   private async resolveApproval(
     event: Extract<SessionEngineEvent, { type: 'approval.resolved' }>,
   ): Promise<StoredOutcome> {
@@ -793,6 +858,7 @@ export class SessionEngine {
         message: 'User denied the requested approval',
         detectedAt: event.occurredAt,
       };
+      this.queueFailureTerminal(session, event.messageId, session.terminalReason);
       session.updatedAt = event.occurredAt;
       this.queueTrajectory(session, [
         {
@@ -827,6 +893,55 @@ export class SessionEngine {
     return outcome;
   }
 
+  private async acknowledgeAction(
+    event: Extract<SessionEngineEvent, { type: 'action.acknowledged' }>,
+  ): Promise<StoredOutcome> {
+    const session = await this.requireSession(event.sessionId);
+    const active = session.activeAction;
+    if (
+      session.state !== 'EXECUTING' ||
+      active === null ||
+      active.actionId !== event.actionId ||
+      active.stepId !== event.stepId ||
+      active.observationId !== event.observationId ||
+      active.command.idempotencyKey !== `${session.sessionId}:${event.actionId}` ||
+      !Number.isInteger(event.clientSequence) ||
+      event.clientSequence <= 0 ||
+      Date.parse(event.acknowledgedAt) < Date.parse(active.command.dispatchedAt) ||
+      Date.parse(event.acknowledgedAt) > Date.parse(event.occurredAt)
+    ) {
+      return this.persistError(session, event.messageId, new SessionEngineError(
+        'STALE_ACTION_ACKNOWLEDGEMENT',
+        'Action acknowledgement does not match the active command binding or chronology',
+      ));
+    }
+    if (active.acknowledgement !== null) {
+      return this.persistError(session, event.messageId, new SessionEngineError(
+        'STALE_ACTION_ACKNOWLEDGEMENT',
+        'The active command already has a different acknowledgement',
+      ));
+    }
+
+    const expectedRevision = session.revision;
+    active.acknowledgement = {
+      messageId: event.messageId,
+      clientSequence: event.clientSequence,
+      acknowledgedAt: event.acknowledgedAt,
+    };
+    session.updatedAt = event.occurredAt;
+    this.queueTrajectory(session, [{
+      kind: 'action_acknowledged',
+      correlationId: event.messageId,
+      summary: 'Client acknowledged action command',
+      ...this.pendingReferences(active),
+      occurredAt: event.acknowledgedAt,
+    }]);
+    const outcome = this.addOutcome(session, event.messageId, 'accepted');
+    await this.transition(session, expectedRevision, outcome);
+    await this.resumeSession(event.sessionId, false);
+    return outcome;
+  }
+
   private async completeAction(
     event: Extract<SessionEngineEvent, { type: 'action.completed' }>,
   ): Promise<StoredOutcome> {
@@ -854,6 +969,18 @@ export class SessionEngine {
         'Action result does not match the active command tuple and sequence',
       ));
     }
+    if (active.acknowledgement === null) {
+      return this.persistError(session, event.messageId, new SessionEngineError(
+        'ACTION_ACK_REQUIRED',
+        'Action result arrived before the active command was acknowledged by the client',
+      ));
+    }
+    if (Date.parse(event.result.startedAt) < Date.parse(active.acknowledgement.acknowledgedAt)) {
+      return this.persistError(session, event.messageId, new SessionEngineError(
+        'ACTION_ACK_REQUIRED',
+        'Action execution started before the durable client acknowledgement',
+      ));
+    }
 
     const references = this.pendingReferences(active);
     const expectedRevision = session.revision;
@@ -876,6 +1003,7 @@ export class SessionEngine {
       session.state = 'FAILED';
       session.terminalReason = terminalReason;
       session.pendingPostObservation = null;
+      this.queueFailureTerminal(session, event.messageId, terminalReason);
     } else if ('postObservation' in event.result) {
       session.state = 'VERIFYING';
       session.pendingPostObservation = {
@@ -938,6 +1066,11 @@ export class SessionEngine {
       active.delivery.status = clientHasCommand ? 'sent' : 'pending';
       active.delivery.lastError = null;
     }
+    if (session.terminalDelivery !== null) {
+      const clientHasTerminal = event.lastReceivedSequence >= session.terminalDelivery.notification.sequence;
+      session.terminalDelivery.status = clientHasTerminal ? 'sent' : 'pending';
+      session.terminalDelivery.lastError = null;
+    }
     const outcome = this.addOutcome(session, event.messageId, 'reconciled', undefined, requiresFreshObservation);
     await this.transition(session, expectedRevision, outcome);
     await this.resumeSession(event.sessionId, true);
@@ -969,6 +1102,15 @@ export class SessionEngine {
       message: event.reason,
       detectedAt: event.occurredAt,
     };
+    this.queueTerminal(session, event.messageId, {
+      type: 'task.cancelled',
+      taskId: session.taskId,
+      occurredAt: event.occurredAt,
+      reason: event.reason,
+      ...(session.lastObservation === null ? {} : { observationId: session.lastObservation.observationId }),
+      ...(references.actionId === undefined ? {} : { actionId: references.actionId }),
+      ...(references.stepId === undefined ? {} : { stepId: references.stepId }),
+    });
     session.updatedAt = event.occurredAt;
     this.queueTrajectory(session, [{
       kind: 'task_terminal_outcome',
@@ -1064,6 +1206,64 @@ export class SessionEngine {
         lastError: null,
       });
     }
+  }
+
+  private queueFailureTerminal(
+    session: CanonicalSession,
+    correlationId: MessageId,
+    reason: TerminalReason,
+  ): void {
+    this.queueTerminal(session, correlationId, {
+      type: 'task.failed',
+      completion: this.failureCompletion(session, reason),
+    });
+  }
+
+  private failureCompletion(session: CanonicalSession, reason: TerminalReason): CompletionProposalV1 {
+    const observationId = session.lastObservation?.observationId;
+    if (observationId === undefined) {
+      throw new TypeError('A failed canonical task requires an authoritative observation');
+    }
+    return {
+      kind: 'completion',
+      observationId,
+      type: 'terminate',
+      status: 'failed',
+      summary: reason.message.slice(0, 4_000),
+      findings: [],
+      unmetCriteria: session.completionCriteria.slice(0, 100).map((criterion) => criterion.slice(0, 1_000)),
+      confidence: 1,
+    };
+  }
+
+  private queueTerminal(
+    session: CanonicalSession,
+    correlationId: MessageId,
+    payload: TaskTerminalMessage,
+  ): void {
+    if (session.terminalDelivery !== null) {
+      if (!this.sameJson(session.terminalDelivery.notification.payload, payload)) {
+        throw new TypeError('Canonical session cannot persist more than one terminal payload');
+      }
+      return;
+    }
+    const createdAt = this.now();
+    session.terminalDelivery = {
+      notification: {
+        messageId: this.idGenerator() as MessageId,
+        correlationId,
+        sessionId: session.sessionId,
+        sequence: session.nextSequence,
+        createdAt,
+        expiresAt: Date.parse(createdAt) + 30_000,
+        payload,
+      },
+      status: 'pending',
+      attempts: 0,
+      lastAttemptAt: null,
+      lastError: null,
+    };
+    session.nextSequence += 1;
   }
 
   private async persistError(

@@ -8,7 +8,8 @@
     "apps/*",
     "services/*",
     "clients/*",
-    "packages/*"
+    "packages/*",
+    "evals/*"
   ],
   "scripts": {
     "build": "turbo build",
@@ -24,6 +25,5 @@
   "engines": {
     "node": ">=20.0.0",
     "npm": ">=10.0.0"
-  },
-  "packageManager": "npm@10.0.0"
+  }
 }

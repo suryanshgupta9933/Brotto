@@ -3,6 +3,7 @@ import type { EnvelopeSigner } from '@fara-platform/relay-protocol';
 import { createEnvelope, signEnvelope } from '@fara-platform/relay-protocol';
 import { AgentTransportHub, InMemoryConnectionLeaseBackend, InMemoryConnectionLeaseStore, OrderedOutboundQueue, TransportSession, type TransportEngine } from '../transport/ws-server.js';
 import { InMemorySessionStore } from '../engine/session-store.js';
+import type { TerminalNotification } from '../engine/types.js';
 
 const ids = {
   session: '10000000-0000-4000-8000-000000000001',
@@ -91,6 +92,69 @@ describe('websocket reconciliation transport', () => {
     detach();
     await expect(session.receive(await wire(2, { type: 'action.completed', result: { actionId: command.actionId, stepId: command.stepId, observationId: observation.observationId, sequence: 2, status: 'succeeded', startedAt: '2023-11-14T22:13:20.200Z', completedAt: '2023-11-14T22:13:20.300Z', durationMs: 100, postObservation: { ...observation, observationId: '77000000-0000-4000-8000-000000000001', capturedAt: '2023-11-14T22:13:20.301Z' } } }, '23000000-0000-4000-8000-000000000001'))).resolves.toMatchObject({ kind: 'outcome' });
     expect(engine.handle).toHaveBeenCalledTimes(2);
+  });
+
+  test('routes the signed client acknowledgement with its durable client sequence', async () => {
+    const engine: TransportEngine = {
+      handle: jest.fn(async (event) => ({
+        kind: 'accepted', sessionId: ids.session, messageId: event.messageId,
+        revision: 2, state: 'EXECUTING', pendingActionIds: [],
+      })),
+    };
+    const session = new TransportSession({ claims, recipientId: ids.recipient, verifier: signer, engine, now: () => 1_700_000_000_000 });
+    const actionId = '74000000-0000-4000-8000-000000000002';
+    const stepId = '75000000-0000-4000-8000-000000000002';
+    const observationId = '70000000-0000-4000-8000-000000000002';
+
+    await expect(session.receive(await wire(7, {
+      type: 'action.acknowledged', actionId, stepId, observationId,
+      acknowledgedAt: '2023-11-14T22:13:20.100Z',
+    }, '28000000-0000-4000-8000-000000000001'))).resolves.toMatchObject({ kind: 'outcome' });
+    expect(engine.handle).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'action.acknowledged', actionId, stepId, observationId, clientSequence: 7,
+    }));
+  });
+
+  test('delivers a terminal through the authenticated signer with a stable replay identity', async () => {
+    const engine: TransportEngine = { handle: jest.fn() };
+    const session = new TransportSession({ claims, recipientId: ids.recipient, verifier: signer, engine, now: () => 1_700_000_000_000 });
+    const sent: string[] = [];
+    const hub = new AgentTransportHub(new InMemorySessionStore(), undefined, () => 1_700_000_000_000);
+    const detach = hub.attach({
+      claims,
+      session,
+      signer,
+      queue: new OrderedOutboundQueue({ maxBytes: 10_000, send: async (value) => { sent.push(value); } }),
+    });
+    const notification = {
+      messageId: '29000000-0000-4000-8000-000000000001',
+      correlationId: '29000000-0000-4000-8000-000000000002',
+      sessionId: ids.session,
+      sequence: 9,
+      createdAt: '2023-11-14T22:13:20.000Z',
+      expiresAt: 1_700_000_030_000,
+      payload: {
+        type: 'task.cancelled',
+        taskId: '60000000-0000-4000-8000-000000000001',
+        occurredAt: '2023-11-14T22:13:20.000Z',
+        reason: 'User cancelled',
+      },
+    } as TerminalNotification;
+
+    await hub.sendTerminal(notification);
+    await hub.sendTerminal(notification);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toBe(sent[0]);
+    expect(JSON.parse(sent[0]!)).toMatchObject({
+      messageId: notification.messageId,
+      sequence: notification.sequence,
+      recipientId: claims.deviceId,
+      signature: 'valid',
+      payload: { type: 'task.cancelled', reason: 'User cancelled' },
+    });
+    detach();
   });
 
   test('rejects expired envelopes, replayed sequences, and claim mismatch before engine routing', async () => {

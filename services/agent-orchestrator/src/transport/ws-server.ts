@@ -10,7 +10,7 @@ import {
   type EnvelopeSigner,
 } from '@fara-platform/relay-protocol';
 import type { ActionCommandV1, SessionId, TaskId } from '@fara-platform/fara-action-schema';
-import type { CanonicalSession, CommandSink, SessionEngineEvent, SessionStore, StoredOutcome } from '../engine/types.js';
+import type { CanonicalSession, CommandSink, SessionEngineEvent, SessionStore, StoredOutcome, TerminalNotification, TerminalSink } from '../engine/types.js';
 import { ConnectionAuthError, createConnectionAuthenticator, type ConnectionClaims, type ConnectionCredentialStore, type ConnectionTokenVerifier } from './auth.js';
 
 export interface TransportEngine { handle(event: SessionEngineEvent): Promise<StoredOutcome> }
@@ -161,7 +161,7 @@ export class TransportSession {
     if (admitted.message.type === 'reconcile.request' && admitted.message.lastSentClientSequence !== envelope.sequence) {
       throw new TransportError('CLIENT_SEQUENCE_MISMATCH', 'Reconnect client sequence does not match signed envelope');
     }
-    let event = toEngineEvent(envelope.messageId, envelope.sessionId, envelope.correlationId, envelope.createdAt, admitted.message, connectionFence);
+    let event = toEngineEvent(envelope.messageId, envelope.sessionId, envelope.correlationId, envelope.createdAt, admitted.message, connectionFence, envelope.sequence);
     if (event === null) throw new TransportError('MESSAGE_DIRECTION_INVALID', 'Server-originated message received from client');
     if (connectionFence !== undefined) {
       const admission = await this.options.store?.admitInbound?.({ sessionId: envelope.sessionId, messageId: envelope.messageId, sequence: envelope.sequence, event });
@@ -232,7 +232,7 @@ export interface OutboundConnection {
   queue: OrderedOutboundQueue;
   signer?: EnvelopeSigner;
 }
-export class AgentTransportHub implements CommandSink {
+export class AgentTransportHub implements CommandSink, TerminalSink {
   private readonly connections = new Map<string, OutboundConnection>();
   constructor(
     private readonly store: SessionStore,
@@ -257,6 +257,27 @@ export class AgentTransportHub implements CommandSink {
     if (signer === undefined) throw new TransportError('SIGNER_UNAVAILABLE', 'No authenticated session envelope signer is configured');
     await connection.queue.enqueue(JSON.stringify(await signEnvelope(envelope, signer)));
   }
+  async sendTerminal(notification: TerminalNotification): Promise<void> {
+    const connection = this.connections.get(notification.sessionId);
+    if (connection === undefined) throw new TransportError('CLIENT_DISCONNECTED', 'Client is not connected');
+    const envelope = createEnvelope({
+      messageId: notification.messageId,
+      sessionId: notification.sessionId,
+      correlationId: notification.correlationId,
+      causationId: notification.correlationId,
+      recipientId: connection.claims.deviceId,
+      tenantId: connection.claims.tenantId,
+      deviceId: connection.claims.deviceId,
+      sequence: notification.sequence,
+      createdAt: notification.createdAt,
+      expiresAt: notification.expiresAt,
+      payload: notification.payload,
+    });
+    connection.session.registerOutbound(envelope);
+    const signer = connection.signer ?? this.defaultSigner;
+    if (signer === undefined) throw new TransportError('SIGNER_UNAVAILABLE', 'No authenticated session envelope signer is configured');
+    await connection.queue.enqueue(JSON.stringify(await signEnvelope(envelope, signer)));
+  }
   private async findSession(command: ActionCommandV1): Promise<CanonicalSession | null> {
     for (const sessionId of this.connections.keys()) {
       const session = await this.store.load(sessionId as SessionId);
@@ -269,7 +290,7 @@ export class AgentTransportHub implements CommandSink {
 // Optional optimized store lookup without making it part of the canonical persistence contract.
 declare module '../engine/types.js' { interface SessionStore { loadByAction?(actionId: ActionCommandV1['actionId']): Promise<CanonicalSession | null> } }
 
-function toEngineEvent(messageId: string, sessionId: string, correlationId: string, occurredAt: string, message: AgentMessageV1, connectionFence?: number): SessionEngineEvent | null {
+function toEngineEvent(messageId: string, sessionId: string, correlationId: string, occurredAt: string, message: AgentMessageV1, connectionFence?: number, clientSequence?: number): SessionEngineEvent | null {
   const meta = { messageId, sessionId, occurredAt, ...(connectionFence === undefined ? {} : { connectionFence }) } as const;
   switch (message.type) {
     case 'session.open': return {
@@ -280,6 +301,7 @@ function toEngineEvent(messageId: string, sessionId: string, correlationId: stri
       completionCriteria: [],
     } as unknown as SessionEngineEvent;
     case 'observation.submitted': return { ...meta, type: message.type, observation: message.observation } as SessionEngineEvent;
+    case 'action.acknowledged': return { ...meta, type: message.type, clientSequence, actionId: message.actionId, stepId: message.stepId, observationId: message.observationId, acknowledgedAt: message.acknowledgedAt } as SessionEngineEvent;
     case 'action.completed': return { ...meta, type: message.type, result: message.result } as SessionEngineEvent;
     case 'approval.resolved': return { ...meta, type: message.type, resolution: message.resolution } as SessionEngineEvent;
     case 'reconcile.request': return { ...meta, type: message.type, lastReceivedSequence: message.lastReceivedSequence, lastSentClientSequence: message.lastSentClientSequence, pendingActionIds: message.pendingActionIds } as SessionEngineEvent;

@@ -13,6 +13,7 @@ import type {
   TaskId,
   TrajectoryEventV1,
 } from '@fara-platform/fara-action-schema';
+import type { AgentMessageV1 } from '@fara-platform/relay-protocol';
 
 export type CanonicalSessionState =
   | 'CREATED'
@@ -136,6 +137,24 @@ export interface CommandSink {
   send(command: ActionCommandV1): Promise<void>;
 }
 
+export type TaskTerminalMessage = Extract<AgentMessageV1, {
+  type: 'task.completed' | 'task.failed' | 'task.cancelled';
+}>;
+
+export interface TerminalNotification {
+  messageId: MessageId;
+  correlationId: MessageId;
+  sessionId: SessionId;
+  sequence: number;
+  createdAt: string;
+  expiresAt: number;
+  payload: TaskTerminalMessage;
+}
+
+export interface TerminalSink {
+  sendTerminal(notification: TerminalNotification): Promise<void>;
+}
+
 export interface TrajectorySink {
   /** Append is idempotent by event.eventId. */
   append(event: TrajectoryEventV1): Promise<void>;
@@ -181,6 +200,15 @@ export interface ActiveAction {
   policyDecision: PolicyDecisionV1;
   command: ActionCommandV1;
   delivery: CommandDelivery;
+  acknowledgement: {
+    messageId: MessageId;
+    clientSequence: number;
+    acknowledgedAt: string;
+  } | null;
+}
+
+export interface TerminalDelivery extends CommandDelivery {
+  notification: TerminalNotification;
 }
 
 export interface PendingPolicy {
@@ -241,6 +269,7 @@ export interface CanonicalSession {
   maxVerifierFailures: number;
   stepCount: number;
   terminalReason: TerminalReason | null;
+  terminalDelivery: TerminalDelivery | null;
 }
 
 export interface SessionStore {
@@ -281,6 +310,14 @@ export type SessionEngineEvent =
       resolution: ApprovalResolutionV1;
     })
   | (EventMetadata & {
+      type: 'action.acknowledged';
+      clientSequence: number;
+      actionId: ActionId;
+      stepId: StepId;
+      observationId: ObservationV1['observationId'];
+      acknowledgedAt: string;
+    })
+  | (EventMetadata & {
       type: 'action.completed';
       result: ActionResultV1;
     })
@@ -302,6 +339,8 @@ export type EngineErrorCode =
   | 'STALE_PROPOSAL'
   | 'STALE_POLICY_DECISION'
   | 'STALE_ACTION_RESULT'
+  | 'STALE_ACTION_ACKNOWLEDGEMENT'
+  | 'ACTION_ACK_REQUIRED'
   | 'STALE_APPROVAL_RESOLUTION'
   | 'STORE_CONFLICT'
   | 'STALE_CONNECTION_FENCE';
@@ -321,6 +360,7 @@ export interface SessionEngineOptions {
   inference: InferencePort;
   policy: PolicyPort;
   commandSink: CommandSink;
+  terminalSink: TerminalSink;
   trajectorySink: TrajectorySink;
   completionVerifier?: CompletionVerificationPort;
   budgets?: Partial<EngineBudgets>;

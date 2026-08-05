@@ -3,7 +3,7 @@
  * Main entry point for the MCP gateway service
  */
 
-import { WorkerManager, type MCPWorker } from './worker.js';
+import { WorkerManager, type MCPWorker, type SessionCookie } from './worker.js';
 import { FaraActionAdapter, AccessibilityVerifier, DISABLED_TOOLS } from './adapter.js';
 import type { SessionConfig, FaraAction, ToolCallResult } from './types.js';
 import { z } from 'zod';
@@ -99,6 +99,20 @@ export class BrowserMCPGateway {
   }
 
   /**
+   * Set cookies for a session
+   */
+  async setCookies(sessionId: string, cookies: SessionCookie[]): Promise<void> {
+    await this.workerManager.setCookies(sessionId, cookies);
+  }
+
+  /**
+   * Get cookies for a session
+   */
+  getCookies(sessionId: string): SessionCookie[] {
+    return this.workerManager.getCookies(sessionId);
+  }
+
+  /**
    * Execute a Fara action for a session
    */
   async executeAction(sessionId: string, action: FaraAction): Promise<ToolCallResult> {
@@ -158,11 +172,65 @@ export interface GatewayMetrics {
 }
 
 /**
+ * RFC 1918 private IP ranges
+ * 10.0.0.0/8    - 10.0.0.0 to 10.255.255.255
+ * 172.16.0.0/12 - 172.16.0.0 to 172.31.255.255
+ * 192.168.0.0/16 - 192.168.0.0 to 192.168.255.255
+ */
+const RFC_1918_PRIVATE_RANGES = [
+  /^10\./,                                    // 10.0.0.0/8
+  /^172\.(1[6-9]|2[0-9]|3[0-1])\./,           // 172.16.0.0/12
+  /^192\.168\./,                              // 192.168.0.0/16
+];
+
+/**
+ * Check if a host is localhost, loopback, or RFC 1918 private
+ */
+function isLocalOrInternalHost(host: string): boolean {
+  const lowerHost = host.toLowerCase();
+
+  // Check for localhost
+  if (lowerHost === 'localhost' || lowerHost === '127.0.0.1' || lowerHost === '::1' || lowerHost === '0.0.0.0') {
+    return true;
+  }
+
+  // Check RFC 1918 private ranges
+  for (const range of RFC_1918_PRIVATE_RANGES) {
+    if (range.test(host)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Validate that a CDP endpoint URL points to a local/internal host
+ * Prevents SSRF attacks where an attacker redirects CDP traffic to external hosts
+ */
+function validateCdpEndpoint(endpoint: string): boolean {
+  try {
+    const url = new URL(endpoint);
+
+    // Only allow ws:// and wss:// protocols
+    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+      return false;
+    }
+
+    return isLocalOrInternalHost(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Request validation schemas
  */
 export const CreateSessionSchema = z.object({
   session_id: z.string().min(1),
-  cdp_endpoint: z.string().url(),
+  cdp_endpoint: z.string().url().refine(validateCdpEndpoint, {
+    message: 'CDP endpoint must point to localhost, loopback, or an internal IP (RFC 1918 private range)',
+  }),
   viewport_width: z.number().positive().max(4096),
   viewport_height: z.number().positive().max(4096),
   browser_type: z.enum(['chromium', 'firefox', 'webkit']).optional().default('chromium'),

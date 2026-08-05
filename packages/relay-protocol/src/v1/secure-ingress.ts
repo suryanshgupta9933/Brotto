@@ -83,7 +83,11 @@ export class SecureAgentIngress {
 
   /** Register an already authenticated server emission as flow authority. */
   registerOutbound(envelope: AgentEnvelopeV1): ReturnType<AgentFlowGuard['accept']> {
-    if (!isServerOriginMessage(envelope.payload.type)) return { status: 'rejected', code: 'ACTION_FLOW_INVALID' };
+    // Cancellation is intentionally bidirectional: the client can request it,
+    // and the server must durably confirm the authoritative terminal state.
+    if (!isServerOriginMessage(envelope.payload.type) && envelope.payload.type !== 'task.cancelled') {
+      return { status: 'rejected', code: 'ACTION_FLOW_INVALID' };
+    }
     return this.flowGuard.accept(envelope);
   }
 

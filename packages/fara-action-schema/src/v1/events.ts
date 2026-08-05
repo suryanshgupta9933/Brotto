@@ -22,6 +22,7 @@ export const TrajectoryEventKindV1Schema = z.enum([
   'policy_decided',
   'approval_requested',
   'approval_resolved',
+  'action_dispatched',
   'action_acknowledged',
   'action_completed',
   'verification_result',

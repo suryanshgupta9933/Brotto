@@ -101,6 +101,31 @@ export {
 // Canonical deterministic completion verifier
 export { CompletionVerifier } from './engine/completion-verifier';
 
+// Public canonical composition ports for deterministic and production adapters.
+export { SessionEngine } from './engine/session-engine.js';
+export { InMemorySessionStore } from './engine/session-store.js';
+export type {
+  CanonicalSession,
+  CommandSink,
+  CompletionVerificationPort,
+  EngineBudgets,
+  InferencePort,
+  PlanningInput,
+  PlanningOutcome,
+  PolicyInput,
+  PolicyPort,
+  SessionEngineEvent,
+  SessionEngineOptions,
+  SessionStore,
+  StoredOutcome,
+  TaskTerminalMessage,
+  TerminalDelivery,
+  TerminalNotification,
+  TerminalSink,
+  TrajectorySink,
+} from './engine/types.js';
+export { InferenceContractError, SessionEngineError } from './engine/types.js';
+
 // Budget tracking
 export {
   AgentBudgetTracker,
@@ -141,6 +166,20 @@ export {
   type ConnectionTokenVerifier,
   type ConnectionCredentialStore,
 } from './transport/auth.js';
+export {
+  InMemoryBrowserSessionBootstrapBackend,
+  InMemoryBrowserSessionBootstrapStore,
+  JoseConnectionCredentialCodec,
+  createHmacEnvelopeSigner,
+  registerBrowserSessionBootstrap,
+  type BrowserSessionBootstrapOptions,
+  type BrowserSessionBootstrapStore,
+  type BrowserSessionRegistration,
+  type ConnectionCredentialIssuer,
+  type DeviceBootstrapAuthenticator,
+  type DeviceBootstrapIdentity,
+  type DeviceBootstrapInput,
+} from './transport/bootstrap.js';
 export {
   TransportError,
   TransportSession,

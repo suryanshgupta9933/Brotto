@@ -24,6 +24,8 @@ import type {
   TrajectorySink,
   StoredOutcome,
   CanonicalSession,
+  TerminalNotification,
+  TerminalSink,
 } from '../engine/types.js';
 
 const ids = {
@@ -231,6 +233,16 @@ class RecordingTrajectory implements TrajectorySink {
   }
 }
 
+class RecordingTerminals implements TerminalSink {
+  readonly notifications: TerminalNotification[] = [];
+
+  async sendTerminal(notification: TerminalNotification): Promise<void> {
+    if (!this.notifications.some((existing) => existing.messageId === notification.messageId)) {
+      this.notifications.push(structuredClone(notification));
+    }
+  }
+}
+
 class FailOnceTrajectory extends RecordingTrajectory {
   constructor(private readonly failedKind: TrajectoryEventV1['kind']) {
     super();
@@ -280,11 +292,13 @@ function createEngine<TInference extends InferencePort = FakeInference>(options:
   const store = options.store ?? new InMemorySessionStore();
   const inference = (options.inference ?? new FakeInference()) as TInference;
   const trajectorySink = options.trajectorySink ?? new RecordingTrajectory();
+  const terminalSink = new RecordingTerminals();
   const engine = new SessionEngine({
     store,
     inference,
     policy: options.policy ?? new FakePolicy(),
     commandSink,
+    terminalSink,
     trajectorySink,
     now: options.now ?? (() => '2026-08-03T10:00:03.000Z'),
     idGenerator: (() => {
@@ -308,6 +322,25 @@ async function open(engine: SessionEngine): Promise<void> {
     goal: 'Click the target',
     completionCriteria: ['The target was clicked'],
     occurredAt: '2026-08-03T10:00:00.000Z',
+  });
+}
+
+async function acknowledge(
+  engine: SessionEngine,
+  command: ActionCommandV1,
+  messageId = '10000000-0000-4000-8000-000000000090',
+): Promise<void> {
+  const acknowledgedAt = new Date(Date.parse(command.dispatchedAt) + 1).toISOString();
+  await engine.handle({
+    type: 'action.acknowledged',
+    messageId,
+    sessionId: ids.session,
+    clientSequence: 1,
+    actionId: command.actionId,
+    stepId: command.stepId,
+    observationId: command.observationId,
+    acknowledgedAt,
+    occurredAt: acknowledgedAt,
   });
 }
 
@@ -1063,9 +1096,9 @@ describe('SessionEngine', () => {
     });
 
     const approvalIndex = kindsSeenAtSend.indexOf('approval_resolved');
-    const acknowledgementIndex = kindsSeenAtSend.indexOf('action_acknowledged');
+    const dispatchIndex = kindsSeenAtSend.indexOf('action_dispatched');
     expect(approvalIndex).toBeGreaterThan(-1);
-    expect(acknowledgementIndex).toBeGreaterThan(approvalIndex);
+    expect(dispatchIndex).toBeGreaterThan(approvalIndex);
     expect(await store.load(ids.session as never)).toMatchObject({
       activeAction: { delivery: { status: 'sent' } },
       trajectoryOutbox: expect.arrayContaining([
@@ -1075,7 +1108,7 @@ describe('SessionEngine', () => {
         }),
         expect.objectContaining({
           status: 'sent',
-          event: expect.objectContaining({ kind: 'action_acknowledged' }),
+          event: expect.objectContaining({ kind: 'action_dispatched' }),
         }),
       ]),
     });
@@ -1274,6 +1307,7 @@ describe('SessionEngine', () => {
       postObservation,
     } as ActionResultV1;
 
+    await acknowledge(engine, command);
     const first = await engine.handle({
       type: 'action.completed',
       messageId: '10000000-0000-4000-8000-000000000010',
@@ -1334,6 +1368,7 @@ describe('SessionEngine', () => {
         screenshot: { ...observation(ids.observation2).screenshot, sha256: 'b'.repeat(64) },
       },
     } as ActionResultV1;
+    await acknowledge(engine, command);
     await engine.handle({
       type: 'action.completed',
       messageId: '10000000-0000-4000-8000-000000000043',
@@ -1368,7 +1403,7 @@ describe('SessionEngine', () => {
     for (const event of trajectorySink.events.filter((candidate) => [
       'action_proposed',
       'policy_decided',
-      'action_acknowledged',
+      'action_dispatched',
     ].includes(candidate.kind))) {
       expect(event).toMatchObject({
         stepId: ids.step,
@@ -1376,6 +1411,80 @@ describe('SessionEngine', () => {
         observationId: ids.observation1,
       });
     }
+  });
+
+  it('persists the real client ACK once and rejects results that arrive before it', async () => {
+    const { engine, commandSink, store, trajectorySink } = createEngine();
+    await open(engine);
+    await engine.handle({
+      type: 'observation.submitted',
+      messageId: '10000000-0000-4000-8000-000000000080',
+      sessionId: ids.session,
+      observation: observation(),
+      occurredAt: '2026-08-03T10:00:00.000Z',
+    });
+    const command = commandSink.commands[0]!;
+    const result = {
+      actionId: command.actionId,
+      stepId: command.stepId,
+      observationId: command.observationId,
+      sequence: command.sequence + 1,
+      status: 'succeeded',
+      startedAt: '2026-08-03T10:00:04.000Z',
+      completedAt: '2026-08-03T10:00:05.000Z',
+      durationMs: 1000,
+      postObservation: {
+        ...observation(ids.observation2),
+        capturedAt: '2026-08-03T10:00:06.000Z',
+        screenshot: { ...observation(ids.observation2).screenshot, sha256: 'b'.repeat(64) },
+      },
+    } as ActionResultV1;
+
+    result.status = 'failed_terminal';
+    (result as Extract<ActionResultV1, { status: 'failed_terminal' }>).error = {
+      code: 'SIMULATED_TERMINAL', message: 'simulated terminal action failure', retryable: false,
+    };
+    await expect(engine.handle({
+      type: 'action.completed',
+      messageId: '10000000-0000-4000-8000-000000000081',
+      sessionId: ids.session,
+      result,
+      occurredAt: result.completedAt,
+    })).rejects.toMatchObject({ code: 'ACTION_ACK_REQUIRED' });
+
+    const acknowledgement = {
+      type: 'action.acknowledged',
+      messageId: '10000000-0000-4000-8000-000000000082',
+      sessionId: ids.session,
+      clientSequence: 3,
+      actionId: command.actionId,
+      stepId: command.stepId,
+      observationId: command.observationId,
+      acknowledgedAt: '2026-08-03T10:00:03.000Z',
+      occurredAt: '2026-08-03T10:00:03.000Z',
+    } as never;
+    await expect(engine.handle(acknowledgement)).resolves.toMatchObject({ kind: 'accepted' });
+    await expect(engine.handle(acknowledgement)).resolves.toMatchObject({ kind: 'accepted' });
+
+    expect(await store.load(ids.session as never)).toMatchObject({
+      activeAction: {
+        acknowledgement: {
+          messageId: acknowledgement.messageId,
+          clientSequence: 3,
+          acknowledgedAt: acknowledgement.acknowledgedAt,
+        },
+      },
+    });
+    expect(trajectorySink.events.filter((event) => event.kind === 'action_acknowledged')).toHaveLength(1);
+    expect(trajectorySink.events.some((event) => event.kind === ('action_dispatched' as never))).toBe(true);
+
+    await expect(engine.handle({
+      type: 'action.completed',
+      messageId: '10000000-0000-4000-8000-000000000083',
+      sessionId: ids.session,
+      result,
+      occurredAt: result.completedAt,
+    })).resolves.toMatchObject({ kind: 'terminal' });
   });
 
   it('returns the authoritative pending action during reconnect', async () => {
@@ -1566,6 +1675,7 @@ describe('SessionEngine', () => {
       postObservation: unchangedPostObservation,
     } as ActionResultV1;
 
+    await acknowledge(engine, command);
     await engine.handle({
       type: 'action.completed',
       messageId: '10000000-0000-4000-8000-000000000023',
