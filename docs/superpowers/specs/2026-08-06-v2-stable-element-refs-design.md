@@ -34,7 +34,7 @@ Add deterministic, mutation-tolerant element references to the canonical observa
 ## Module Layout
 
 ```
-clients/browser-extension/src/canonical/
+clients/brotto-extension/src/canonical/
 ├── observation.ts                UPDATED — adds AX capture merge (~360 lines)
 ├── ax-snapshot.ts                NEW  — AXTree capture + flattening (~120 lines)
 ├── stable-ref.ts                 NEW  — StableRef class (pure, ~80 lines)
@@ -49,13 +49,13 @@ clients/browser-extension/src/canonical/
 ├── coordinate-context.ts
 └── page-settler.ts
 
-clients/browser-extension/tests/
+clients/brotto-extension/tests/
 ├── ax-snapshot.test.ts           NEW
 ├── stable-ref.test.ts            NEW
 ├── ref-matcher.test.ts           NEW
 └── observation.test.ts           UPDATED — assert accessibilityNodes populated
 
-packages/fara-action-schema/src/v1/
+packages/brotto-action-schema/src/v1/
 ├── observation.ts                UPDATED — add AccessibilityNodeSchema, extend ObservationV1
 ├── actions.ts
 ├── events.ts
@@ -75,7 +75,7 @@ evals/contract/
 
 ## Components
 
-### 1. Schema (`packages/fara-action-schema/src/v1/observation.ts`)
+### 1. Schema (`packages/brotto-action-schema/src/v1/observation.ts`)
 
 ```typescript
 export const AccessibilityNodeSchema = z.object({
@@ -159,7 +159,7 @@ export function matchStableRef(
 }
 ```
 
-No external deps beyond `fara-action-schema` types. Pure function, easy to test.
+No external deps beyond `brotto-action-schema` types. Pure function, easy to test.
 
 ### 6. `canonical/action-executor.ts` (UPDATED, +10 lines)
 
@@ -195,7 +195,7 @@ Only change: `verifyDeclaredTarget` first calls `matchStableRef(target.ref, obse
 - **Pure where possible.** `StableRef` and `matchStableRef` are pure — testable without mocks.
 - **No new abstractions.** No factory, no interface-with-one-impl. Classes only where state + behavior belong together (`StableRef`).
 - **Constants named, not magic.** `MAX_AX_NODES = 2000`, `DEFAULT_BOUNDS_TOLERANCE_PX = 10`, `MATCH_CONFIDENCE_THRESHOLD = 0.8`.
-- **Tests in top-level `tests/`.** Convention here is `clients/browser-extension/tests/` mirroring source names (e.g., `observation.test.ts`, `canonical-action-executor.test.ts`). New tests follow same pattern.
+- **Tests in top-level `tests/`.** Convention here is `clients/brotto-extension/tests/` mirroring source names (e.g., `observation.test.ts`, `canonical-action-executor.test.ts`). New tests follow same pattern.
 - **JSDoc on every exported symbol.** The existing `observation.ts` has minimal JSDoc — new modules set the bar higher.
 - **Re-exports preserve paths.** `observation.ts` moves directory but `import { captureObservation } from "./canonical/observation"` continues to work via re-export from `canonical/observation/index.ts`.
 - **No premature generalization.** Plan 2 will extend `refs/` with workflow refs — that's a future concern, no abstract base class now.
@@ -215,16 +215,16 @@ Only change: `verifyDeclaredTarget` first calls `matchStableRef(target.ref, obse
 
 | File | Lines |
 |---|---|
-| `packages/fara-action-schema/src/v1/observation.ts` | +30 |
-| `clients/browser-extension/src/canonical/ax-snapshot.ts` | +120 (new) |
-| `clients/browser-extension/src/canonical/observation.ts` | +20 modified |
-| `clients/browser-extension/src/canonical/stable-ref.ts` | +80 (new) |
-| `clients/browser-extension/src/canonical/ref-matcher.ts` | +100 (new) |
-| `clients/browser-extension/src/canonical/action-executor.ts` | +10 modified |
-| `clients/browser-extension/tests/ax-snapshot.test.ts` | +60 (new) |
-| `clients/browser-extension/tests/stable-ref.test.ts` | +50 (new) |
-| `clients/browser-extension/tests/ref-matcher.test.ts` | +70 (new) |
-| `clients/browser-extension/tests/observation.test.ts` | modified (assert accessibilityNodes) |
+| `packages/brotto-action-schema/src/v1/observation.ts` | +30 |
+| `clients/brotto-extension/src/canonical/ax-snapshot.ts` | +120 (new) |
+| `clients/brotto-extension/src/canonical/observation.ts` | +20 modified |
+| `clients/brotto-extension/src/canonical/stable-ref.ts` | +80 (new) |
+| `clients/brotto-extension/src/canonical/ref-matcher.ts` | +100 (new) |
+| `clients/brotto-extension/src/canonical/action-executor.ts` | +10 modified |
+| `clients/brotto-extension/tests/ax-snapshot.test.ts` | +60 (new) |
+| `clients/brotto-extension/tests/stable-ref.test.ts` | +50 (new) |
+| `clients/brotto-extension/tests/ref-matcher.test.ts` | +70 (new) |
+| `clients/brotto-extension/tests/observation.test.ts` | modified (assert accessibilityNodes) |
 | `evals/contract/ax-shape.test.ts` | +30 (new) |
 
 ## Ponytail Cuts (deliberate simplifications)

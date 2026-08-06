@@ -11,7 +11,7 @@ import {
   createDefaultViewportConfig,
   type Viewport,
   type ViewportConfig,
-} from '@fara-platform/fara-action-schema';
+} from '@brotto/brotto-action-schema';
 
 describe('Model Prompt Compatibility Contract Tests', () => {
   describe('Viewport Configuration', () => {

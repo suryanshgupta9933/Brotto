@@ -1,4 +1,4 @@
-# Contributing to Fara1.5 Browser Automation Platform
+# Contributing to Brotto Browser Automation Platform
 
 We welcome contributions from the community. This document outlines the process for contributing to the project.
 
@@ -14,15 +14,15 @@ This project adheres to the [Code of Conduct](CODE_OF_CONDUCT.md). By participat
 - npm >= 10.0.0
 - Rust (for desktop-connector)
 - Go (optional, for cdp-relay)
-- Python 3.11+ (for fara-inference)
+- Python 3.11+ (for brotto-inference)
 
 ### Development Setup
 
 1. Fork the repository
 2. Clone your fork:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/fara15-platform.git
-   cd fara15-platform
+   git clone https://github.com/YOUR_USERNAME/fara15.git
+   cd fara15
    ```
 3. Install dependencies:
    ```bash
@@ -79,4 +79,4 @@ Create feature branches from `master`:
 
 ## License
 
-By contributing to the Fara1.5 Browser Automation Platform, you agree that your contributions will be licensed under the Apache License, Version 2.0.
+By contributing to the Brotto Browser Automation Platform, you agree that your contributions will be licensed under the Apache License, Version 2.0.

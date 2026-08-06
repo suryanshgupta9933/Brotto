@@ -1,5 +1,5 @@
 {
-  "name": "@fara-platform/evals-canonical-loop",
+  "name": "@brotto/evals-canonical-loop",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,9 +7,9 @@
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest --runInBand --testPathPattern='.*'"
   },
   "dependencies": {
-    "@fara/agent-orchestrator": "workspace:*",
-    "@fara-platform/fara-action-schema": "workspace:*",
-    "@fara-platform/relay-protocol": "workspace:*"
+    "@brotto/agent-orchestrator": "workspace:*",
+    "@brotto/brotto-action-schema": "workspace:*",
+    "@brotto/relay-protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/jest": "^29.5.12",

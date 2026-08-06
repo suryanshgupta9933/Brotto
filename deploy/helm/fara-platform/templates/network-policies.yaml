@@ -4,13 +4,13 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-control-plane
+  name: {{ include "fara.fullname" . }}-control-plane
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      {{- include "fara.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: control-plane
   policyTypes:
     - Ingress
@@ -54,13 +54,13 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-orchestrator
+  name: {{ include "fara.fullname" . }}-orchestrator
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      {{- include "fara.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: orchestrator
   policyTypes:
     - Ingress
@@ -77,7 +77,7 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/component: fara-inference
+              app.kubernetes.io/component: brotto-inference
       ports:
         - protocol: TCP
           port: 8080
@@ -111,18 +111,18 @@ spec:
           port: 6379
 
 ---
-# Network Policy for Fara Inference
+# Network Policy for Brotto Inference
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-fara-inference
+  name: {{ include "fara.fullname" . }}-brotto-inference
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: fara-inference
+      {{- include "fara.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: brotto-inference
   policyTypes:
     - Ingress
     - Egress
@@ -142,13 +142,13 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-playwright-mcp-gateway
+  name: {{ include "fara.fullname" . }}-playwright-mcp-gateway
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      {{- include "fara.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: playwright-mcp-gateway
   policyTypes:
     - Ingress
@@ -175,13 +175,13 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-cdp-relay
+  name: {{ include "fara.fullname" . }}-cdp-relay
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      {{- include "fara.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: cdp-relay
   policyTypes:
     - Ingress
@@ -203,13 +203,13 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-artifact-service
+  name: {{ include "fara.fullname" . }}-artifact-service
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      {{- include "fara.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: artifact-service
   policyTypes:
     - Ingress
@@ -231,13 +231,13 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-audit-service
+  name: {{ include "fara.fullname" . }}-audit-service
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      {{- include "fara.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: audit-service
   policyTypes:
     - Ingress

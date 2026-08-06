@@ -1,5 +1,5 @@
 /**
- * Metrics definitions for Fara1.5 Browser Automation Platform
+ * Metrics definitions for Brotto Browser Automation Platform
  *
  * Defines standard metrics for session count, action count, latency, and error rates.
  * Per ARCHITECTURE.md section 11, OpenTelemetry dashboards should be published.
@@ -8,7 +8,7 @@
 import { Meter, metrics } from '@opentelemetry/api';
 
 /**
- * Metric names for Fara platform
+ * Metric names for Brotto platform
  */
 export const METRIC_NAMES = {
   // Session metrics
@@ -64,7 +64,7 @@ export const METRIC_LABELS = {
 } as const;
 
 /**
- * Create a meter instance for the Fara platform
+ * Create a meter instance for the Brotto platform
  */
 export function createFaraMeter(name: string, version = '0.1.0'): Meter {
   return metrics.getMeter(name, version);

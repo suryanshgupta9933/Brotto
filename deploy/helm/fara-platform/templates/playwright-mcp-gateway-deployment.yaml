@@ -2,15 +2,15 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-playwright-mcp-gateway
+  name: {{ include "fara.fullname" . }}-playwright-mcp-gateway
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: playwright-mcp-gateway
 spec:
   replicas: {{ .Values.playwrightMcpGateway.replicaCount }}
   selector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      {{- include "fara.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: playwright-mcp-gateway
   template:
     metadata:
@@ -19,10 +19,10 @@ spec:
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
       labels:
-        {{- include "fara-platform.selectorLabels" . | nindent 8 }}
+        {{- include "fara.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: playwright-mcp-gateway
     spec:
-      serviceAccountName: {{ include "fara-platform.serviceAccountName" . }}
+      serviceAccountName: {{ include "fara.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -41,7 +41,7 @@ spec:
             - name: HOST
               value: {{ .Values.playwrightMcpGateway.env.HOST | quote }}
             - name: CDP_RELAY_URL
-              value: "ws://{{ include "fara-platform.fullname" . }}-cdp-relay:8080"
+              value: "ws://{{ include "fara.fullname" . }}-cdp-relay:8080"
             - name: LOG_LEVEL
               value: {{ .Values.playwrightMcpGateway.env.LOG_LEVEL | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -82,9 +82,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-playwright-mcp-gateway
+  name: {{ include "fara.fullname" . }}-playwright-mcp-gateway
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: playwright-mcp-gateway
 spec:
   type: {{ .Values.playwrightMcpGateway.service.type }}
@@ -94,6 +94,6 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "fara-platform.selectorLabels" . | nindent 4 }}
+    {{- include "fara.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: playwright-mcp-gateway
 {{- end }}

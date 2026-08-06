@@ -1,6 +1,6 @@
 # Threat Model Documentation
 
-Detailed threat model analysis for the Fara1.5 Browser Automation Platform.
+Detailed threat model analysis for the Brotto Browser Automation Platform.
 
 ## Contents
 

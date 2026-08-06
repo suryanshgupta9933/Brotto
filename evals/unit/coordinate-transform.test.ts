@@ -19,7 +19,7 @@ import {
   validateTab,
   type ViewportInfo,
   type ScreenshotMetadata,
-} from '@fara-platform/coordinate-transform';
+} from '@brotto/coordinate-transform';
 
 describe('Coordinate Transform Package', () => {
   describe('Screenshot Normalization', () => {

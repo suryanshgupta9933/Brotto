@@ -2,7 +2,7 @@
 
 ## Project Governance
 
-The Fara1.5 Browser Automation Platform is an open-source project governed by the principles defined in this document.
+The Brotto Browser Automation Platform is an open-source project governed by the principles defined in this document.
 
 ## Project Leadership
 

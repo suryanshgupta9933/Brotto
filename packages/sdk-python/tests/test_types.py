@@ -1,7 +1,7 @@
-"""Tests for fara_sdk.types"""
+"""Tests for brotto_sdk.types"""
 import pytest
 from datetime import datetime
-from fara_sdk.types import (
+from brotto_sdk.types import (
     ActionType,
     Coordinates,
     TaskStatus,

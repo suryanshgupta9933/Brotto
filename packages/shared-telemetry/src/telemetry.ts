@@ -1,5 +1,5 @@
 /**
- * Main OpenTelemetry setup for Fara1.5 Browser Automation Platform
+ * Main OpenTelemetry setup for Brotto Browser Automation Platform
  *
  * Provides centralized telemetry configuration and initialization.
  */

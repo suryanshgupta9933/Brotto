@@ -75,11 +75,11 @@ export default function ModelDeployment() {
 
   const getModelBadgeStyle = (model: string) => {
     const colors: Record<string, { bg: string; text: string }> = {
-      'fara-4b': { bg: 'rgba(34, 197, 94, 0.1)', text: '#22c55e' },
-      'fara-9b': { bg: 'rgba(100, 108, 255, 0.1)', text: '#646cff' },
-      'fara-27b': { bg: 'rgba(234, 179, 8, 0.1)', text: '#eab308' },
+      'brotto-4b': { bg: 'rgba(34, 197, 94, 0.1)', text: '#22c55e' },
+      'brotto-9b': { bg: 'rgba(100, 108, 255, 0.1)', text: '#646cff' },
+      'brotto-27b': { bg: 'rgba(234, 179, 8, 0.1)', text: '#eab308' },
     }
-    const style = colors[model] || colors['fara-9b']
+    const style = colors[model] || colors['brotto-9b']
     return {
       display: 'inline-block',
       padding: '0.2rem 0.6rem',
@@ -196,7 +196,7 @@ export default function ModelDeployment() {
     <div>
       <PageHeader
         title="Model Deployment"
-        description="Configure and manage Fara model inference deployments"
+        description="Configure and manage Brotto model inference deployments"
       />
 
       <div style={{

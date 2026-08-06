@@ -23,7 +23,7 @@ export function Navigation() {
         <div className="flex justify-between h-16">
           <div className="flex">
             <div className="flex-shrink-0 flex items-center">
-              <span className="text-xl font-bold text-blue-600">Fara1.5</span>
+              <span className="text-xl font-bold text-blue-600">Brotto</span>
               <span className="ml-2 text-sm text-gray-500">Control Plane</span>
             </div>
             <div className="hidden sm:ml-8 sm:flex sm:space-x-4">

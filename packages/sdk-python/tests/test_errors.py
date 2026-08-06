@@ -1,6 +1,6 @@
-"""Tests for fara_sdk.errors"""
+"""Tests for brotto_sdk.errors"""
 import pytest
-from fara_sdk.errors import (
+from brotto_sdk.errors import (
     FaraSDKError,
     AuthenticationError,
     AuthorizationError,

@@ -1,8 +1,8 @@
 {
-  "name": "fara15-platform",
+  "name": "fara15",
   "version": "0.1.0",
   "private": true,
-  "description": "Fara1.5 Browser Automation Platform - server-hosted agent harness with desktop connector and browser extension clients",
+  "description": "Brotto Browser Automation Platform - server-hosted agent harness with desktop connector and browser extension clients",
   "license": "Apache-2.0",
   "workspaces": [
     "apps/*",

@@ -1,6 +1,6 @@
 # Security Evaluation
 
-Comprehensive security test suite for the Fara1.5 platform.
+Comprehensive security test suite for the Brotto platform.
 
 ## Purpose
 

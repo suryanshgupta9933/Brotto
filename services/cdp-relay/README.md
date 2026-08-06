@@ -126,6 +126,5 @@ go test -v -race ./...
 ## Related
 
 - [Browser MCP Gateway](../browser-mcp-gateway/README.md)
-- [Desktop Connector](../../clients/desktop-connector/README.md)
-- [Browser Extension](../../clients/browser-extension/README.md)
-- [Relay Protocol](../../packages/relay-protocol/README.md)
+- [Desktop Connector](../../...- [Browser Extension](../../clients/brotto-extension/README.md)
+- [Relay Protocol](../../packages/brotto-relay-protocol/README.md)

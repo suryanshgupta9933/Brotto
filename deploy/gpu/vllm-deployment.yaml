@@ -1,28 +1,28 @@
-# Fara1.5 GPU Deployment Examples
-# Production vLLM deployment configurations for Fara Inference Service
+# Brotto GPU Deployment Examples
+# Production vLLM deployment configurations for Brotto Inference Service
 
 ---
 # Single GPU Deployment (T4/NVIDIA RTX 4090)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: fara-inference-single-gpu
+  name: brotto-inference-single-gpu
   labels:
-    app.kubernetes.io/name: fara-platform
-    app.kubernetes.io/component: fara-inference
+    app.kubernetes.io/name: fara
+    app.kubernetes.io/component: brotto-inference
     gpu-type: single
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: fara-platform
-      app.kubernetes.io/component: fara-inference
+      app.kubernetes.io/name: fara
+      app.kubernetes.io/component: brotto-inference
       gpu-type: single
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: fara-platform
-        app.kubernetes.io/component: fara-inference
+        app.kubernetes.io/name: fara
+        app.kubernetes.io/component: brotto-inference
         gpu-type: single
     spec:
       nodeSelector:
@@ -32,8 +32,8 @@ spec:
           operator: "Exists"
           effect: "NoSchedule"
       containers:
-        - name: fara-inference
-          image: ghcr.io/inventic/fara15/fara-inference:latest
+        - name: brotto-inference
+          image: ghcr.io/inventic/fara15/brotto-inference:latest
           ports:
             - name: vllm
               containerPort: 8000
@@ -75,29 +75,29 @@ spec:
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: fara-inference-model-cache
+            claimName: brotto-inference-model-cache
 ---
 # Multi-GPU Deployment (A100/H100)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: fara-inference-multi-gpu
+  name: brotto-inference-multi-gpu
   labels:
-    app.kubernetes.io/name: fara-platform
-    app.kubernetes.io/component: fara-inference
+    app.kubernetes.io/name: fara
+    app.kubernetes.io/component: brotto-inference
     gpu-type: multi
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: fara-platform
-      app.kubernetes.io/component: fara-inference
+      app.kubernetes.io/name: fara
+      app.kubernetes.io/component: brotto-inference
       gpu-type: multi
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: fara-platform
-        app.kubernetes.io/component: fara-inference
+        app.kubernetes.io/name: fara
+        app.kubernetes.io/component: brotto-inference
         gpu-type: multi
     spec:
       nodeSelector:
@@ -107,8 +107,8 @@ spec:
           operator: "Exists"
           effect: "NoSchedule"
       containers:
-        - name: fara-inference
-          image: ghcr.io/inventic/fara15/fara-inference:latest
+        - name: brotto-inference
+          image: ghcr.io/inventic/fara15/brotto-inference:latest
           ports:
             - name: vllm
               containerPort: 8000
@@ -152,18 +152,18 @@ spec:
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: fara-inference-model-cache
+            claimName: brotto-inference-model-cache
 ---
 # Autoscaling GPU Deployment
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: fara-inference-hpa
+  name: brotto-inference-hpa
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: fara-inference-single-gpu
+    name: brotto-inference-single-gpu
   minReplicas: 1
   maxReplicas: 3
   metrics:
@@ -202,14 +202,14 @@ data:
       amiFamily: Ubuntu
       role: karpenter-node-role
       subnetSelectors:
-        karpenter.sh/discovery: fara15-platform
+        karpenter.sh/discovery: fara15
       securityGroupSelectors:
-        karpenter.sh/discovery: fara15-platform
+        karpenter.sh/discovery: fara15
       amiSelectorTerms:
         - id: ami-0123456789abcdef0
       tags:
         Name: fara15-gpu
-        Karpenter.sh/discovery: fara15-platform
+        Karpenter.sh/discovery: fara15
 
   # GPU-ready node template
   gpu-node-template.yaml: |

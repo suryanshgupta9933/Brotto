@@ -16,16 +16,16 @@
 
 | File | Status | Responsibility |
 |---|---|---|
-| `packages/fara-action-schema/src/v1/observation.ts` | MODIFY | Add `AccessibilityNodeSchema`, extend `ObservationV1Schema` |
-| `clients/browser-extension/src/canonical/ax-snapshot.ts` | CREATE | AX tree capture + flatten + hash |
-| `clients/browser-extension/src/canonical/stable-ref.ts` | CREATE | `StableRef` class (pure) |
-| `clients/browser-extension/src/canonical/ref-matcher.ts` | CREATE | `matchStableRef()` (pure) |
-| `clients/browser-extension/src/canonical/observation.ts` | MODIFY | Parallel capture in `captureObservationInternal` |
-| `clients/browser-extension/src/canonical/action-executor.ts` | MODIFY | Use `matchStableRef` first in `verifyDeclaredTarget` |
-| `clients/browser-extension/tests/ax-snapshot.test.ts` | CREATE | Unit tests for AX capture |
-| `clients/browser-extension/tests/stable-ref.test.ts` | CREATE | Unit tests for StableRef |
-| `clients/browser-extension/tests/ref-matcher.test.ts` | CREATE | Unit tests for matchStableRef |
-| `clients/browser-extension/tests/observation.test.ts` | MODIFY | Assert `accessibilityNodes` populated |
+| `packages/brotto-action-schema/src/v1/observation.ts` | MODIFY | Add `AccessibilityNodeSchema`, extend `ObservationV1Schema` |
+| `clients/brotto-extension/src/canonical/ax-snapshot.ts` | CREATE | AX tree capture + flatten + hash |
+| `clients/brotto-extension/src/canonical/stable-ref.ts` | CREATE | `StableRef` class (pure) |
+| `clients/brotto-extension/src/canonical/ref-matcher.ts` | CREATE | `matchStableRef()` (pure) |
+| `clients/brotto-extension/src/canonical/observation.ts` | MODIFY | Parallel capture in `captureObservationInternal` |
+| `clients/brotto-extension/src/canonical/action-executor.ts` | MODIFY | Use `matchStableRef` first in `verifyDeclaredTarget` |
+| `clients/brotto-extension/tests/ax-snapshot.test.ts` | CREATE | Unit tests for AX capture |
+| `clients/brotto-extension/tests/stable-ref.test.ts` | CREATE | Unit tests for StableRef |
+| `clients/brotto-extension/tests/ref-matcher.test.ts` | CREATE | Unit tests for matchStableRef |
+| `clients/brotto-extension/tests/observation.test.ts` | MODIFY | Assert `accessibilityNodes` populated |
 | `evals/contract/ax-shape.test.ts` | CREATE | Wire format validates against schema |
 
 **Dependency order (TDD, sequential):** Task 1 (schema) → Task 2 (StableRef) → Task 3 (ref-matcher) → Task 4 (ax-snapshot) → Task 5 (observation orchestrator) → Task 6 (action-executor) → Task 7 (evals fixture).
@@ -35,13 +35,13 @@
 ## Task 1: Add AccessibilityNodeSchema + Extend ObservationV1Schema
 
 **Files:**
-- Modify: `packages/fara-action-schema/src/v1/observation.ts:188-226`
-- Modify: `packages/fara-action-schema/src/v1/index.ts` (verify re-export)
-- Test: `packages/fara-action-schema/src/__tests__/accessibility-node.test.ts`
+- Modify: `packages/brotto-action-schema/src/v1/observation.ts:188-226`
+- Modify: `packages/brotto-action-schema/src/v1/index.ts` (verify re-export)
+- Test: `packages/brotto-action-schema/src/__tests__/accessibility-node.test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `packages/fara-action-schema/src/__tests__/accessibility-node.test.ts`:
+Create `packages/brotto-action-schema/src/__tests__/accessibility-node.test.ts`:
 
 ```typescript
 import { AccessibilityNodeSchema, ObservationV1Schema } from '../v1/observation';
@@ -85,12 +85,12 @@ describe('ObservationV1Schema with accessibilityNodes', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd packages/fara-action-schema && pnpm test -- accessibility-node`
+Run: `cd packages/brotto-action-schema && pnpm test -- accessibility-node`
 Expected: FAIL — `AccessibilityNodeSchema` not exported.
 
 - [ ] **Step 3: Add AccessibilityNodeSchema + extend ObservationV1**
 
-In `packages/fara-action-schema/src/v1/observation.ts`, after `SemanticTargetSchema` and before `ObservationV1Schema`:
+In `packages/brotto-action-schema/src/v1/observation.ts`, after `SemanticTargetSchema` and before `ObservationV1Schema`:
 
 ```typescript
 export const AXTupleSchema = z.object({
@@ -125,14 +125,14 @@ Add `export type AccessibilityNode = z.infer<...>` next to existing exports (lin
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd packages/fara-action-schema && pnpm test -- accessibility-node`
+Run: `cd packages/brotto-action-schema && pnpm test -- accessibility-node`
 Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Build + commit**
 
 ```bash
-cd packages/fara-action-schema && pnpm build
-git add packages/fara-action-schema/src/v1/observation.ts packages/fara-action-schema/src/__tests__/accessibility-node.test.ts
+cd packages/brotto-action-schema && pnpm build
+git add packages/brotto-action-schema/src/v1/observation.ts packages/brotto-action-schema/src/__tests__/accessibility-node.test.ts
 git commit -m "feat(schema): add AccessibilityNodeSchema and accessibilityNodes field"
 ```
 
@@ -141,16 +141,16 @@ git commit -m "feat(schema): add AccessibilityNodeSchema and accessibilityNodes 
 ## Task 2: Implement StableRef Class (Pure)
 
 **Files:**
-- Create: `clients/browser-extension/src/canonical/stable-ref.ts`
-- Test: `clients/browser-extension/tests/stable-ref.test.ts`
+- Create: `clients/brotto-extension/src/canonical/stable-ref.ts`
+- Test: `clients/brotto-extension/tests/stable-ref.test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `clients/browser-extension/tests/stable-ref.test.ts`:
+Create `clients/brotto-extension/tests/stable-ref.test.ts`:
 
 ```typescript
 import { StableRef } from '../src/canonical/stable-ref';
-import type { AccessibilityNode } from '@fara-platform/fara-action-schema';
+import type { AccessibilityNode } from '@brotto/brotto-action-schema';
 
 const node: AccessibilityNode = {
   axNodeId: '1',
@@ -192,15 +192,15 @@ describe('StableRef', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd clients/browser-extension && pnpm test -- stable-ref`
+Run: `cd clients/brotto-extension && pnpm test -- stable-ref`
 Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement StableRef**
 
-Create `clients/browser-extension/src/canonical/stable-ref.ts`:
+Create `clients/brotto-extension/src/canonical/stable-ref.ts`:
 
 ```typescript
-import type { AccessibilityNode, AXTuple } from '@fara-platform/fara-action-schema';
+import type { AccessibilityNode, AXTuple } from '@brotto/brotto-action-schema';
 
 export interface StableRefJSON {
   axPath: AXTuple[];
@@ -244,13 +244,13 @@ export class StableRef {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd clients/browser-extension && pnpm test -- stable-ref`
+Run: `cd clients/brotto-extension && pnpm test -- stable-ref`
 Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add clients/browser-extension/src/canonical/stable-ref.ts clients/browser-extension/tests/stable-ref.test.ts
+git add clients/brotto-extension/src/canonical/stable-ref.ts clients/brotto-extension/tests/stable-ref.test.ts
 git commit -m "feat(extension): add StableRef class for element references"
 ```
 
@@ -259,17 +259,17 @@ git commit -m "feat(extension): add StableRef class for element references"
 ## Task 3: Implement matchStableRef (Pure Heuristic Chain)
 
 **Files:**
-- Create: `clients/browser-extension/src/canonical/ref-matcher.ts`
-- Test: `clients/browser-extension/tests/ref-matcher.test.ts`
+- Create: `clients/brotto-extension/src/canonical/ref-matcher.ts`
+- Test: `clients/brotto-extension/tests/ref-matcher.test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `clients/browser-extension/tests/ref-matcher.test.ts`:
+Create `clients/brotto-extension/tests/ref-matcher.test.ts`:
 
 ```typescript
 import { matchStableRef, type MatchResult } from '../src/canonical/ref-matcher';
 import { StableRef } from '../src/canonical/stable-ref';
-import type { AccessibilityNode, BoundingBox } from '@fara-platform/fara-action-schema';
+import type { AccessibilityNode, BoundingBox } from '@brotto/brotto-action-schema';
 
 const bounds = (x: number): BoundingBox => ({ x, y: 0, width: 100, height: 30 });
 
@@ -326,15 +326,15 @@ describe('matchStableRef', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd clients/browser-extension && pnpm test -- ref-matcher`
+Run: `cd clients/brotto-extension && pnpm test -- ref-matcher`
 Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement matchStableRef**
 
-Create `clients/browser-extension/src/canonical/ref-matcher.ts`:
+Create `clients/brotto-extension/src/canonical/ref-matcher.ts`:
 
 ```typescript
-import type { AccessibilityNode, BoundingBox } from '@fara-platform/fara-action-schema';
+import type { AccessibilityNode, BoundingBox } from '@brotto/brotto-action-schema';
 import { StableRef } from './stable-ref';
 
 export type MatchStrategy = 'exact' | 'fuzzy-bounds' | 'role-name' | 'miss';
@@ -422,13 +422,13 @@ export function matchStableRef(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd clients/browser-extension && pnpm test -- ref-matcher`
+Run: `cd clients/brotto-extension && pnpm test -- ref-matcher`
 Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add clients/browser-extension/src/canonical/ref-matcher.ts clients/browser-extension/tests/ref-matcher.test.ts
+git add clients/brotto-extension/src/canonical/ref-matcher.ts clients/brotto-extension/tests/ref-matcher.test.ts
 git commit -m "feat(extension): add matchStableRef heuristic chain"
 ```
 
@@ -437,12 +437,12 @@ git commit -m "feat(extension): add matchStableRef heuristic chain"
 ## Task 4: Implement collectAccessibilitySnapshot (CDP)
 
 **Files:**
-- Create: `clients/browser-extension/src/canonical/ax-snapshot.ts`
-- Test: `clients/browser-extension/tests/ax-snapshot.test.ts`
+- Create: `clients/brotto-extension/src/canonical/ax-snapshot.ts`
+- Test: `clients/brotto-extension/tests/ax-snapshot.test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `clients/browser-extension/tests/ax-snapshot.test.ts`:
+Create `clients/brotto-extension/tests/ax-snapshot.test.ts`:
 
 ```typescript
 import { collectAccessibilitySnapshot, MAX_AX_NODES } from '../src/canonical/ax-snapshot';
@@ -500,15 +500,15 @@ describe('collectAccessibilitySnapshot', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd clients/browser-extension && pnpm test -- ax-snapshot`
+Run: `cd clients/brotto-extension && pnpm test -- ax-snapshot`
 Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement collectAccessibilitySnapshot**
 
-Create `clients/browser-extension/src/canonical/ax-snapshot.ts`:
+Create `clients/brotto-extension/src/canonical/ax-snapshot.ts`:
 
 ```typescript
-import type { AccessibilityNode, AXTuple } from '@fara-platform/fara-action-schema';
+import type { AccessibilityNode, AXTuple } from '@brotto/brotto-action-schema';
 import type { CdpCommandSender } from './observation';
 
 export const MAX_AX_NODES = 2000;
@@ -623,13 +623,13 @@ export async function collectAccessibilitySnapshot(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd clients/browser-extension && pnpm test -- ax-snapshot`
+Run: `cd clients/brotto-extension && pnpm test -- ax-snapshot`
 Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add clients/browser-extension/src/canonical/ax-snapshot.ts clients/browser-extension/tests/ax-snapshot.test.ts
+git add clients/brotto-extension/src/canonical/ax-snapshot.ts clients/brotto-extension/tests/ax-snapshot.test.ts
 git commit -m "feat(extension): add collectAccessibilitySnapshot with AX tree flatten"
 ```
 
@@ -638,16 +638,16 @@ git commit -m "feat(extension): add collectAccessibilitySnapshot with AX tree fl
 ## Task 5: Wire AX Snapshot into captureObservation (Parallel Capture)
 
 **Files:**
-- Modify: `clients/browser-extension/src/canonical/observation.ts` (the `captureObservationInternal` function, ~line 856)
-- Modify: `clients/browser-extension/tests/observation.test.ts` (add assertion)
+- Modify: `clients/brotto-extension/src/canonical/observation.ts` (the `captureObservationInternal` function, ~line 856)
+- Modify: `clients/brotto-extension/tests/observation.test.ts` (add assertion)
 
 - [ ] **Step 1: Read the relevant slice to confirm shape**
 
-Open `clients/browser-extension/src/canonical/observation.ts` around line 856 (`captureObservationInternal`). The function builds `ObservationV1` at line ~971. The new field `accessibilityNodes` is added on the built object.
+Open `clients/brotto-extension/src/canonical/observation.ts` around line 856 (`captureObservationInternal`). The function builds `ObservationV1` at line ~971. The new field `accessibilityNodes` is added on the built object.
 
 - [ ] **Step 2: Update the existing test**
 
-In `clients/browser-extension/tests/observation.test.ts`, find the existing test that exercises `captureObservation` end-to-end. After it captures, add:
+In `clients/brotto-extension/tests/observation.test.ts`, find the existing test that exercises `captureObservation` end-to-end. After it captures, add:
 
 ```typescript
   it('includes accessibilityNodes when sendCdpCommand returns AXTree', async () => {
@@ -670,12 +670,12 @@ Wire the `sendCdpCommand` mock to satisfy both the existing DOM mock surface and
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `cd clients/browser-extension && pnpm test -- observation`
+Run: `cd clients/brotto-extension && pnpm test -- observation`
 Expected: FAIL — `accessibilityNodes` undefined on result.
 
 - [ ] **Step 4: Add parallel AX capture to observation.ts**
 
-In `clients/browser-extension/src/canonical/observation.ts`:
+In `clients/brotto-extension/src/canonical/observation.ts`:
 
 1. Add import at top (after existing imports):
 
@@ -699,13 +699,13 @@ Keep all existing fields untouched. Don't change DOM capture timing or order.
 
 - [ ] **Step 5: Run test to verify it passes**
 
-Run: `cd clients/browser-extension && pnpm test -- observation`
+Run: `cd clients/brotto-extension && pnpm test -- observation`
 Expected: PASS (existing tests + new test).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add clients/browser-extension/src/canonical/observation.ts clients/browser-extension/tests/observation.test.ts
+git add clients/brotto-extension/src/canonical/observation.ts clients/brotto-extension/tests/observation.test.ts
 git commit -m "feat(extension): wire AX snapshot into captureObservation"
 ```
 
@@ -714,19 +714,19 @@ git commit -m "feat(extension): wire AX snapshot into captureObservation"
 ## Task 6: Integrate matchStableRef into verifyDeclaredTarget
 
 **Files:**
-- Modify: `clients/browser-extension/src/canonical/action-executor.ts` (the `verifyDeclaredTarget` function)
-- Test: `clients/browser-extension/tests/canonical-action-executor.test.ts` (add a case if missing; otherwise create)
+- Modify: `clients/brotto-extension/src/canonical/action-executor.ts` (the `verifyDeclaredTarget` function)
+- Test: `clients/brotto-extension/tests/canonical-action-executor.test.ts` (add a case if missing; otherwise create)
 
 - [ ] **Step 1: Read verifyDeclaredTarget**
 
-Open `clients/browser-extension/src/canonical/action-executor.ts`. Find `verifyDeclaredTarget` — confirm its current shape (takes `target`, `observation`, returns a verdict). It currently uses `coordinate-context.ts` for bounds checking.
+Open `clients/brotto-extension/src/canonical/action-executor.ts`. Find `verifyDeclaredTarget` — confirm its current shape (takes `target`, `observation`, returns a verdict). It currently uses `coordinate-context.ts` for bounds checking.
 
 - [ ] **Step 2: Add a failing test**
 
-In `clients/browser-extension/tests/canonical-action-executor.test.ts`, append:
+In `clients/brotto-extension/tests/canonical-action-executor.test.ts`, append:
 
 ```typescript
-import type { AccessibilityNode } from '@fara-platform/fara-action-schema';
+import type { AccessibilityNode } from '@brotto/brotto-action-schema';
 import { StableRef } from '../src/canonical/stable-ref';
 
 describe('verifyDeclaredTarget with StableRef', () => {
@@ -759,12 +759,12 @@ Adapt `target` and `observation` shapes to match the existing `verifyDeclaredTar
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `cd clients/browser-extension && pnpm test -- canonical-action-executor`
+Run: `cd clients/brotto-extension && pnpm test -- canonical-action-executor`
 Expected: FAIL — current `verifyDeclaredTarget` ignores `target.ref`.
 
 - [ ] **Step 4: Update verifyDeclaredTarget**
 
-In `clients/browser-extension/src/canonical/action-executor.ts`:
+In `clients/brotto-extension/src/canonical/action-executor.ts`:
 
 1. Add imports at top:
 
@@ -792,13 +792,13 @@ Use `as` casts only because `target.ref` is not yet in the action protocol (per 
 
 - [ ] **Step 5: Run tests to verify all pass**
 
-Run: `cd clients/browser-extension && pnpm test`
+Run: `cd clients/brotto-extension && pnpm test`
 Expected: PASS — full suite, no regressions.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add clients/browser-extension/src/canonical/action-executor.ts clients/browser-extension/tests/canonical-action-executor.test.ts
+git add clients/brotto-extension/src/canonical/action-executor.ts clients/brotto-extension/tests/canonical-action-executor.test.ts
 git commit -m "feat(extension): verifyDeclaredTarget uses StableRef match first"
 ```
 
@@ -818,7 +818,7 @@ Run: `ls evals/contract/` and read one existing test to match style (jest? tap? 
 Create `evals/contract/ax-shape.test.ts` (adapt imports/test-runner to match local convention):
 
 ```typescript
-import { ObservationV1Schema, AccessibilityNodeSchema } from '@fara-platform/fara-action-schema';
+import { ObservationV1Schema, AccessibilityNodeSchema } from '@brotto/brotto-action-schema';
 
 const node = {
   axNodeId: '1',
@@ -877,7 +877,7 @@ git commit -m "test(evals): add AX wire format contract"
 
 After completing all tasks:
 
-1. **All existing tests pass:** `cd clients/browser-extension && pnpm test && cd ../../packages/fara-action-schema && pnpm test && cd ../../evals/contract && pnpm test`
+1. **All existing tests pass:** `cd clients/brotto-extension && pnpm test && cd ../../packages/brotto-action-schema && pnpm test && cd ../../evals/contract && pnpm test`
 2. **No `any` leakage in new code.** Casts in Task 6 use `as` for protocol gap; flagged in spec.
 3. **Type consistency:** `StableRef`, `matchStableRef`, `collectAccessibilitySnapshot`, `AccessibilityNode`, `AXTuple` — same names and shapes across all tasks.
 4. **Schema additive:** `accessibilityNodes` is `.optional()` — old observations still validate.

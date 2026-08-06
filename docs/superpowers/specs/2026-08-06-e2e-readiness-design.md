@@ -39,7 +39,7 @@ Prove the MVP loop works end-to-end on a real task: headless Chrome → orchestr
 ## Module Layout
 
 ```
-services/agent-orchestrator/
+services/brotto-orchestrator/
 ├── src/
 │   ├── server.ts                       MODIFY — wire planner into plan()
 │   └── ...
@@ -55,7 +55,7 @@ services/agent-orchestrator/
 ├── package.json                        MODIFY — add e2e script + playwright dev dep
 └── README.md                           MODIFY — "Run with Ollama" section
 
-clients/browser-extension/
+clients/brotto-extension/
 ├── scripts/
 │   └── build-extension.sh              NEW — package as .zip for Chrome load
 └── README.md                           MODIFY — manual install steps
@@ -68,7 +68,7 @@ clients/browser-extension/
 
 ## Components
 
-### 1. `services/agent-orchestrator/src/server.ts` — wire planner
+### 1. `services/brotto-orchestrator/src/server.ts` — wire planner
 
 Refactor `plan()` method (around line 285):
 
@@ -99,11 +99,11 @@ const outcome = await this.resilient.execute(
 );
 ```
 
-Add `buildObservation(): ObservationV1` method — converts internal state into the schema shape. Fara path and OpenAI path now share this code.
+Add `buildObservation(): ObservationV1` method — converts internal state into the schema shape. Brotto path and OpenAI path now share this code.
 
 `inference: LegacyInferenceConfig` becomes optional with `plannerConfig: InferenceConfig` required. Server boot fails fast if neither is set. Migration: `plannerConfig` derives from `inferFamilyFromEnv()` plus env-driven config.
 
-### 2. `services/agent-orchestrator/scripts/smoke.ts` — local smoke (~80 lines)
+### 2. `services/brotto-orchestrator/scripts/smoke.ts` — local smoke (~80 lines)
 
 ```typescript
 import { createPlanner, inferFamilyFromEnv } from "../dist/inference-registry.js";
@@ -124,7 +124,7 @@ console.log(`Planner responded in ${elapsed}ms:`, JSON.stringify(outcome, null, 
 
 Run: `pnpm smoke` after `pnpm build`. Asserts the planner responds to a canned observation; doesn't verify correctness.
 
-### 3. `services/agent-orchestrator/__e2e__/fixtures/ollama.ts` — Ollama lifecycle
+### 3. `services/brotto-orchestrator/__e2e__/fixtures/ollama.ts` — Ollama lifecycle
 
 ```typescript
 export async function startOllama(): Promise<{ url: string; cleanup: () => Promise<void> }> {
@@ -141,11 +141,11 @@ export async function startOllama(): Promise<{ url: string; cleanup: () => Promi
 }
 ```
 
-### 4. `services/agent-orchestrator/__e2e__/fixtures/playwright-observation.ts` — observation builder
+### 4. `services/brotto-orchestrator/__e2e__/fixtures/playwright-observation.ts` — observation builder
 
 ```typescript
 import { chromium } from "playwright";
-import type { ObservationV1 } from "@fara-platform/fara-action-schema";
+import type { ObservationV1 } from "@brotto/brotto-action-schema";
 
 export async function captureObservation(page: Page, workId: string): Promise<ObservationV1> {
   const url = page.url();
@@ -167,7 +167,7 @@ export async function captureObservation(page: Page, workId: string): Promise<Ob
 }
 ```
 
-### 5. `services/agent-orchestrator/__e2e__/mvp.test.ts` — the real test
+### 5. `services/brotto-orchestrator/__e2e__/mvp.test.ts` — the real test
 
 ```typescript
 describe("MVP E2E (real Ollama + Playwright)", () => {
@@ -222,7 +222,7 @@ describe("MVP E2E (real Ollama + Playwright)", () => {
 });
 ```
 
-### 6. `services/agent-orchestrator/__e2e__/helpers/metrics.ts`
+### 6. `services/brotto-orchestrator/__e2e__/helpers/metrics.ts`
 
 Captures and prints: total wall time, per-step latency (p50, p95, max), prompt tokens, completion tokens, total steps. Printed at end of run for perf visibility.
 
@@ -283,7 +283,7 @@ Captures and prints: total wall time, per-step latency (p50, p95, max), prompt t
 | Test | Asserts |
 |---|---|
 | Slice A: planner wired | `Orchestrator.planStep()` calls `planner.plan()` (spy or log assertion) |
-| Slice A: Fara path still works | Existing 30 unit tests + 1 new that the planner is called |
+| Slice A: Brotto path still works | Existing 30 unit tests + 1 new that the planner is called |
 | Slice B: `pnpm smoke` | Local script completes; planner responds; prints outcome |
 | Slice B: `pnpm build` succeeds | Both extension and orchestrator compile clean |
 | Slice C: `pnpm test:e2e` (local with Ollama) | Real task completes; metrics printed |
@@ -306,16 +306,16 @@ Captures and prints: total wall time, per-step latency (p50, p95, max), prompt t
 
 | File | Lines |
 |---|---|
-| `services/agent-orchestrator/src/server.ts` | +30 (modified) |
-| `services/agent-orchestrator/scripts/smoke.ts` | +80 (new) |
-| `services/agent-orchestrator/__e2e__/mvp.test.ts` | +280 (new) |
-| `services/agent-orchestrator/__e2e__/fixtures/ollama.ts` | +60 (new) |
-| `services/agent-orchestrator/__e2e__/fixtures/playwright-observation.ts` | +80 (new) |
-| `services/agent-orchestrator/__e2e__/helpers/metrics.ts` | +40 (new) |
-| `services/agent-orchestrator/package.json` | +10 (modified — e2e script + playwright dep) |
-| `services/agent-orchestrator/README.md` | +30 (modified) |
-| `clients/browser-extension/scripts/build-extension.sh` | +30 (new) |
-| `clients/browser-extension/README.md` | +20 (modified) |
+| `services/brotto-orchestrator/src/server.ts` | +30 (modified) |
+| `services/brotto-orchestrator/scripts/smoke.ts` | +80 (new) |
+| `services/brotto-orchestrator/__e2e__/mvp.test.ts` | +280 (new) |
+| `services/brotto-orchestrator/__e2e__/fixtures/ollama.ts` | +60 (new) |
+| `services/brotto-orchestrator/__e2e__/fixtures/playwright-observation.ts` | +80 (new) |
+| `services/brotto-orchestrator/__e2e__/helpers/metrics.ts` | +40 (new) |
+| `services/brotto-orchestrator/package.json` | +10 (modified — e2e script + playwright dep) |
+| `services/brotto-orchestrator/README.md` | +30 (modified) |
+| `clients/brotto-extension/scripts/build-extension.sh` | +30 (new) |
+| `clients/brotto-extension/README.md` | +20 (modified) |
 | `.github/workflows/build.yml` | +50 (new) |
 | `.github/workflows/e2e.yml` | +80 (new) |
 

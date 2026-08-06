@@ -53,4 +53,4 @@ The connector launches Chromium with:
 ## Related
 
 - [CDP Relay](../../services/cdp-relay/README.md)
-- [Browser Extension](../browser-extension/README.md)
+- [Browser Extension](.....README.md)

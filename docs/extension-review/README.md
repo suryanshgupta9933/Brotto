@@ -36,4 +36,4 @@ The extension:
 
 ## Related
 
-- [Browser Extension Client](../../clients/browser-extension/README.md)
+- [Browser Extension Client](../../clients/brotto-extension/README.md)

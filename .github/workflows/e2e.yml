@@ -3,8 +3,8 @@ name: e2e
 on:
   pull_request:
     paths:
-      - "services/agent-orchestrator/**"
-      - "packages/fara-action-schema/**"
+      - "services/brotto-orchestrator/**"
+      - "packages/brotto-action-schema/**"
       - ".github/workflows/e2e.yml"
   workflow_dispatch:
 
@@ -50,15 +50,15 @@ jobs:
         run: ollama pull qwen2.5:3b
 
       - name: Install Playwright Chromium
-        run: cd services/agent-orchestrator && pnpm exec playwright install chromium
+        run: cd services/brotto-orchestrator && pnpm exec playwright install chromium
 
       - name: Run E2E test
-        run: cd services/agent-orchestrator && pnpm test:e2e
+        run: cd services/brotto-orchestrator && pnpm test:e2e
 
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs
-          path: services/agent-orchestrator/__e2e__/
+          path: services/brotto-orchestrator/__e2e__/
           if-no-files-found: ignore

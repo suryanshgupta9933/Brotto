@@ -10,20 +10,20 @@ import {
   TransportSession,
   type DeviceBootstrapAuthenticator,
   type PolicyInput,
-} from '@fara/agent-orchestrator';
+} from '@brotto/agent-orchestrator';
 import {
   SecureAgentIngress,
   createEnvelope,
   signEnvelope,
-} from '@fara-platform/relay-protocol';
+} from '@brotto/relay-protocol';
 import {
   ForbiddenBrowserDataError,
   assertNoForbiddenBrowserData,
   type ActionProposalV1,
   type ObservationV1,
-} from '@fara-platform/fara-action-schema';
-import { ClientPolicy } from '../../clients/browser-extension/src/canonical/client-policy.js';
-import { captureObservation } from '../../clients/browser-extension/src/canonical/observation.js';
+} from '@brotto/brotto-action-schema';
+import { ClientPolicy } from '../../clients/brotto-extension/src/canonical/client-policy.js';
+import { captureObservation } from '../../clients/brotto-extension/src/canonical/observation.js';
 import { IDS, observation } from './helpers/fakes.js';
 
 const DEVICE_ID = '30000000-0000-4000-8000-000000000001';
@@ -74,20 +74,20 @@ describe('authenticated browser session bootstrap', () => {
     await app.ready();
 
     const denied = await app.inject({
-      method: 'POST', url: '/v1/browser-extension/sessions',
+      method: 'POST', url: '/v1...sessions',
       headers: { origin: ORIGIN, authorization: 'Pairing wrong-proof' },
       payload: {},
     });
     expect(denied.statusCode).toBe(401);
     const wrongOrigin = await app.inject({
-      method: 'POST', url: '/v1/browser-extension/sessions',
+      method: 'POST', url: '/v1...sessions',
       headers: { origin: 'https://evil.example', authorization: 'Pairing device-proof' },
       payload: {},
     });
     expect(wrongOrigin.statusCode).toBe(401);
 
     const response = await app.inject({
-      method: 'POST', url: '/v1/browser-extension/sessions',
+      method: 'POST', url: '/v1...sessions',
       headers: { origin: ORIGIN, authorization: 'Pairing device-proof' },
       payload: {},
     });
@@ -112,7 +112,7 @@ describe('authenticated browser session bootstrap', () => {
 
     const socket = await app.injectWS('/v1/agent', { headers: {
       origin: ORIGIN,
-      'sec-websocket-protocol': `fara-v1, fara-credential.${material.connectionCredential}`,
+      'sec-websocket-protocol': `brotto-v1, brotto-credential.${material.connectionCredential}`,
     } });
     const signer = createHmacEnvelopeSigner(material.hmacKey);
     const opened = await signEnvelope(createEnvelope({
@@ -134,7 +134,7 @@ describe('authenticated browser session bootstrap', () => {
 
     await expect(app.injectWS('/v1/agent', { headers: {
       origin: ORIGIN,
-      'sec-websocket-protocol': `fara-v1, fara-credential.${material.connectionCredential}`,
+      'sec-websocket-protocol': `brotto-v1, brotto-credential.${material.connectionCredential}`,
     } })).rejects.toThrow(/Unexpected server response: 401/);
 
     now = material.expiresAt;

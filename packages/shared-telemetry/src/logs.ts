@@ -1,5 +1,5 @@
 /**
- * Log correlation for Fara1.5 Browser Automation Platform
+ * Log correlation for Brotto Browser Automation Platform
  *
  * Provides trace_id and span_id injection for correlated logging.
  * Per ARCHITECTURE.md section 8.9, keep normal application logs separate

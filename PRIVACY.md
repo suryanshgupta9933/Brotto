@@ -2,7 +2,7 @@
 
 ## Data Collection and Handling
 
-The Fara1.5 Browser Automation Platform is designed with privacy as a core principle. This document describes how data is handled.
+The Brotto Browser Automation Platform is designed with privacy as a core principle. This document describes how data is handled.
 
 ## Platform Architecture and Privacy
 

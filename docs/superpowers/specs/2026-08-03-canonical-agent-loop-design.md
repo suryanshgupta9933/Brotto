@@ -6,13 +6,13 @@
 
 ## 1. Objective
 
-Build one secure, versioned, testable execution path from browser observation through Fara planning to local browser action, action acknowledgement, post-action observation, deterministic verification, and terminal outcome. Replace prompt-driven control decisions with controller-enforced invariants and create the stable identifiers and trajectory events required by later audit and recipe work.
+Build one secure, versioned, testable execution path from browser observation through Brotto planning to local browser action, action acknowledgement, post-action observation, deterministic verification, and terminal outcome. Replace prompt-driven control decisions with controller-enforced invariants and create the stable identifiers and trajectory events required by later audit and recipe work.
 
 This design does not implement the recipe compiler. It establishes the event and execution foundation the compiler will consume.
 
 ## 2. Selected approach
 
-Complete the committed TypeScript agent orchestrator and shared protocol packages, while restricting Python to a narrow Fara inference API. Migrate the extension from the ad-hoc HTTP/SSE prototype to the canonical authenticated WebSocket protocol. Keep the prototype available as reference until contract, integration, security, and controlled-browser end-to-end tests demonstrate equivalent connectivity and superior correctness; then quarantine it from supported runtime paths.
+Complete the committed TypeScript agent orchestrator and shared protocol packages, while restricting Python to a narrow Brotto inference API. Migrate the extension from the ad-hoc HTTP/SSE prototype to the canonical authenticated WebSocket protocol. Keep the prototype available as reference until contract, integration, security, and controlled-browser end-to-end tests demonstrate equivalent connectivity and superior correctness; then quarantine it from supported runtime paths.
 
 This approach is preferred over hardening the Python relay because it avoids investing in a second controller contract. It is preferred over a simultaneous greenfield rewrite because it permits independently testable migration steps and preserves useful existing modules.
 
@@ -60,7 +60,7 @@ The orchestrator owns the authoritative session state machine, budgets, inferenc
 
 It must allow one in-flight inference request and one in-flight action per session. It must persist enough session state to reconcile reconnects and reject stale, duplicate, reordered, or conflicting messages.
 
-### 4.4 Python Fara inference service
+### 4.4 Python Brotto inference service
 
 The inference service exposes a narrow structured operation:
 
@@ -69,7 +69,7 @@ The inference service exposes a narrow structured operation:
   -> action proposal | completion proposal | user-question proposal
 ```
 
-It owns the exact Fara 1.5 chat template, multimodal request construction, constrained structured decoding when supported, model metadata, and raw-response diagnostics. It does not own session transitions, policy, action execution, retries across browser steps, or completion authority.
+It owns the exact Brotto 1.5 chat template, multimodal request construction, constrained structured decoding when supported, model metadata, and raw-response diagnostics. It does not own session transitions, policy, action execution, retries across browser steps, or completion authority.
 
 ## 5. Canonical session flow
 
@@ -163,7 +163,7 @@ The result includes execution timing, sanitized target metadata, navigation or d
 
 ## 7. Model contract and completion
 
-Fara output uses constrained JSON matching a versioned proposal schema. XML-regex extraction is removed from the canonical path. The schema distinguishes action, completion, and user-question proposals.
+Brotto output uses constrained JSON matching a versioned proposal schema. XML-regex extraction is removed from the canonical path. The schema distinguishes action, completion, and user-question proposals.
 
 If decoding or validation fails, the inference layer records the parse failure, performs a bounded repair request with validation diagnostics, and returns `INFERENCE_CONTRACT_ERROR` after the configured limit. It must never synthesize completion from unparsed content.
 
@@ -199,7 +199,7 @@ Prompt instructions may explain policy but never authorize an action or downgrad
 ## 9. Reliability and recovery
 
 - Invalid model output receives bounded repair and then a typed failure.
-- Recoverable execution failure is returned to Fara with the exact error and post-state.
+- Recoverable execution failure is returned to Brotto with the exact error and post-state.
 - Page settlement uses CDP navigation/lifecycle events, DOM stability, and bounded fallback timeouts rather than unconditional sleeps.
 - No-progress detection compares normalized action signatures, URLs, observation hashes, and verified effects.
 - Repeated-action and repeated-state thresholds force alternative planning or terminal failure.
@@ -239,7 +239,7 @@ Test cookie/header/storage/password leakage, guessed session identifiers, replay
 
 ### 11.6 Integration and E2E tests
 
-Use a simulated extension to test the complete protocol deterministically. Use controlled local browser fixtures for navigation, search, scrolling, forms, popups, approvals, failure recovery, and completion evidence. Run isolated real-Fara evaluations against the same observation corpus to distinguish model capability from controller defects. Public websites are exploratory diagnostics, not release gates.
+Use a simulated extension to test the complete protocol deterministically. Use controlled local browser fixtures for navigation, search, scrolling, forms, popups, approvals, failure recovery, and completion evidence. Run isolated real-Brotto evaluations against the same observation corpus to distinguish model capability from controller defects. Public websites are exploratory diagnostics, not release gates.
 
 ## 12. Acceptance criteria
 
@@ -252,7 +252,7 @@ Use a simulated extension to test the complete protocol deterministically. Use c
 - No task produces duplicate terminal events.
 - Cancellation reaches a terminal state and detaches the client within five seconds.
 - Contract and state-machine tests contain no fixed-delay-dependent flaky assertions.
-- The selected Fara deployment achieves at least 90% completion on the controlled multi-step browser-task suite.
+- The selected Brotto deployment achieves at least 90% completion on the controlled multi-step browser-task suite.
 - The canonical runtime does not import or call the ad-hoc HTTP/SSE relay.
 
 ## 13. Migration and deletion policy

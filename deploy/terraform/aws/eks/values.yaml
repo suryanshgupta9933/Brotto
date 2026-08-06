@@ -1,4 +1,4 @@
-# AWS EKS Values for Fara Platform
+# AWS EKS Values for Brotto Platform
 
 # Replica counts
 controlPlane:

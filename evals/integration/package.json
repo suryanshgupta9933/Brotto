@@ -1,14 +1,14 @@
 {
-  "name": "@fara-platform/evals-integration",
+  "name": "@brotto/evals-integration",
   "version": "0.1.0",
   "private": true,
-  "description": "Browser integration test matrix for Fara1.5",
+  "description": "Browser integration test matrix for Brotto",
   "type": "module",
   "scripts": {
     "test": "playwright test",
     "test:headed": "playwright test --headed",
     "test:browser": "playwright test --browser",
-    "test:platform": "playwright test --platform",
+    "test:platform": "playwright test -",
     "test:debug": "playwright test --debug"
   },
   "devDependencies": {

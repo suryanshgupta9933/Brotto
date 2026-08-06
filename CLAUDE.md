@@ -1,17 +1,20 @@
-# Fara1.5 Browser Automation Platform
+# Brotto
 
-This is the project working directory for the Fara1.5 Browser Automation Platform.
+Open-source browser automation framework. The agent harness runs any
+OpenAI-compatible model against your real Chrome session via a Manifest V3
+extension. See [README.md](README.md) for the one-paragraph pitch; this file
+covers the architecture.
 
 ## Architecture Overview
 
 Server-hosted agent harness with two thin client connection options:
 - **Desktop Connector**: Native executable (Rust/Go) for dedicated browser profiles
-- **Browser Extension**: Manifest V3 extension using chrome.debugger for existing browser sessions
+- **Browser Extension**: Manifest V3 extension using chrome.debugger for the user's existing browser session
 
 ## Key Security Principles
 
 - Never expose client CDP ports to public internet
-- Server runs Fara inference, agent loop, Playwright MCP, CDP relay
+- Server runs the agent loop, action execution, and CDP relay
 - Outbound WSS relay rather than inbound public CDP
 - Mandatory approval for irreversible actions
 - No arbitrary Playwright code execution exposed to the model
@@ -20,9 +23,9 @@ Server-hosted agent harness with two thin client connection options:
 
 ```
 /apps           - control-plane-web, admin-console
-/services       - api-gateway, agent-orchestrator, fara-inference, browser-mcp-gateway, cdp-relay, artifact-service, audit-service
-/clients        - desktop-connector, browser-extension
-/packages       - relay-protocol, fara-action-schema, policy-engine, coordinate-transform, sdk-typescript, sdk-python, shared-telemetry
+/services       - api-gateway, brotto-orchestrator, brotto-inference, cdp-relay, artifact-service, audit-service
+/clients        - desktop-connector, brotto-extension
+/packages       - brotto-relay-protocol, brotto-action-schema, policy-engine, coordinate-transform, sdk-typescript, sdk-python, shared-telemetry
 /deploy         - docker-compose, helm, terraform-examples
 /evals          - browser-tasks, prompt-injection, security, reliability, performance
 /docs           - architecture, security, threat-model, protocol, deployment docs
@@ -32,7 +35,7 @@ Server-hosted agent harness with two thin client connection options:
 
 1. Phase 0 - Architecture validation
 2. Phase 1 - Relay protocol and desktop connector
-3. Phase 2 - Core Fara agent loop
+3. Phase 2 - Core agent loop
 4. Phase 3 - Policy and human approval
 5. Phase 4 - Browser extension
 6. Phase 5 - Files, credentials, authenticated workflows
@@ -42,19 +45,19 @@ Server-hosted agent harness with two thin client connection options:
 
 ## Technology Stack
 
-- **Server**: TypeScript, Go/Rust (CDP relay), Python/vLLM (inference), PostgreSQL, Redis
+- **Server**: TypeScript, Go/Rust (CDP relay), Python (inference), PostgreSQL, Redis
 - **Desktop connector**: Rust or Go, single executable, OS keychain integration
 - **Extension**: TypeScript, Manifest V3, WebCrypto device keys, chrome.debugger
-- **Model**: Fara1.5-9B (standard), Fara1.5-4B (economy), Fara1.5-27B (quality)
+- **Model**: model-agnostic. Works with any OpenAI-compatible endpoint (OpenAI, Azure OpenAI, Ollama, vLLM, Fara). No vendor lock-in.
 
 ## Locked Decisions
 
 1. Apache-2.0 license
-2. Fara1.5-9B as standard model
+2. Model-agnostic — works with any OpenAI-compatible endpoint
 3. Dedicated browser profile for desktop connector
 4. Outbound WSS relay
 5. Server-only Playwright MCP and agent harness
-6. Fixed Fara action schema with controlled MCP adapter
+6. Fixed action schema with controlled MCP adapter
 7. Mandatory approval for irreversible actions
 8. Screenshot retention disabled by default
 9. Chrome and Edge support first
@@ -63,14 +66,16 @@ Server-hosted agent harness with two thin client connection options:
 ## Commands
 
 ```bash
-# Start development environment
-docker-compose -f deploy/docker-compose/dev.yml up
+# Start the demo planner (port 3001)
+cd services/brotto-orchestrator
+set -a && source .env.demo && set +a   # OPENAI_API_KEY, SMOKE_MODEL
+pnpm demo:server
 
-# Run tests
-npm test
+# Build the extension
+cd clients/brotto-extension && pnpm build
 
-# Build desktop connector
-cd clients/desktop-connector && cargo build --release
+# Run extension tests
+node test.mjs
 ```
 
 ## Relevant Skills

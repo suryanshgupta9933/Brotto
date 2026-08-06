@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add OpenAI-compatible inference adapter to the agent orchestrator alongside the existing Fara planner. Registry selects adapter via env-var config. Streaming via SSE with AbortSignal cancellation.
+**Goal:** Add OpenAI-compatible inference adapter to the agent orchestrator alongside the existing Brotto planner. Registry selects adapter via env-var config. Streaming via SSE with AbortSignal cancellation.
 
-**Architecture:** Implement `OpenAICompatiblePlanner` against the existing `InferencePort` interface. Add `InferenceRegistry` factory that returns the right planner per family. Server picks planner via env vars. Fara planner unchanged.
+**Architecture:** Implement `OpenAICompatiblePlanner` against the existing `InferencePort` interface. Add `InferenceRegistry` factory that returns the right planner per family. Server picks planner via env vars. Brotto planner unchanged.
 
 **Tech Stack:** TypeScript, Node fetch + SSE streaming, Zod, Jest. OpenAI-compatible protocol (`/v1/chat/completions`) for OpenAI / Azure OpenAI / Ollama / vLLM / LM Studio.
 
@@ -16,14 +16,14 @@
 
 | File | Status | Responsibility |
 |---|---|---|
-| `services/agent-orchestrator/src/prompts/tool-schemas.ts` | CREATE | Pure tool-schema definitions for OpenAI tool-calling API |
-| `services/agent-orchestrator/src/adapters/openai-compatible-planner.ts` | CREATE | OpenAI-compatible planner with SSE streaming |
-| `services/agent-orchestrator/src/inference-registry.ts` | CREATE | Factory + env-var family detection |
-| `services/agent-orchestrator/src/server.ts` | MODIFY | Use `createPlanner()` instead of `new FaraPlanner()` |
-| `services/agent-orchestrator/src/__tests__/tool-schemas.test.ts` | CREATE | Unit tests for tool schema definitions |
-| `services/agent-orchestrator/src/__tests__/openai-compatible-planner.test.ts` | CREATE | Unit tests with mocked fetch + SSE |
-| `services/agent-orchestrator/src/__tests__/inference-registry.test.ts` | CREATE | Unit tests for factory + env detection |
-| `services/agent-orchestrator/src/index.ts` | MODIFY | Re-export new public types |
+| `services/brotto-orchestrator/src/prompts/tool-schemas.ts` | CREATE | Pure tool-schema definitions for OpenAI tool-calling API |
+| `services/brotto-orchestrator/src/adapters/openai-compatible-planner.ts` | CREATE | OpenAI-compatible planner with SSE streaming |
+| `services/brotto-orchestrator/src/inference-registry.ts` | CREATE | Factory + env-var family detection |
+| `services/brotto-orchestrator/src/server.ts` | MODIFY | Use `createPlanner()` instead of `new FaraPlanner()` |
+| `services/brotto-orchestrator/src/__tests__/tool-schemas.test.ts` | CREATE | Unit tests for tool schema definitions |
+| `services/brotto-orchestrator/src/__tests__/openai-compatible-planner.test.ts` | CREATE | Unit tests with mocked fetch + SSE |
+| `services/brotto-orchestrator/src/__tests__/inference-registry.test.ts` | CREATE | Unit tests for factory + env detection |
+| `services/brotto-orchestrator/src/index.ts` | MODIFY | Re-export new public types |
 
 **Dependency order (sequential TDD):** Task 1 (tool-schemas) → Task 2 (OpenAICompatiblePlanner) → Task 3 (InferenceRegistry) → Task 4 (server wire-up).
 
@@ -32,12 +32,12 @@
 ## Task 1: Tool Schema Definitions
 
 **Files:**
-- Create: `services/agent-orchestrator/src/prompts/tool-schemas.ts`
-- Create: `services/agent-orchestrator/src/__tests__/tool-schemas.test.ts`
+- Create: `services/brotto-orchestrator/src/prompts/tool-schemas.ts`
+- Create: `services/brotto-orchestrator/src/__tests__/tool-schemas.test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `services/agent-orchestrator/src/__tests__/tool-schemas.test.ts`:
+Create `services/brotto-orchestrator/src/__tests__/tool-schemas.test.ts`:
 
 ```typescript
 import { buildToolSchemas } from "../prompts/tool-schemas";
@@ -91,18 +91,18 @@ describe("buildToolSchemas", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd services/agent-orchestrator && npx jest --testPathPattern tool-schemas`
+Run: `cd services/brotto-orchestrator && npx jest --testPathPattern tool-schemas`
 Expected: FAIL — module not found.
 
 - [ ] **Step 3: Create prompts directory and implement tool-schemas.ts**
 
-Create directory: `services/agent-orchestrator/src/prompts/`
+Create directory: `services/brotto-orchestrator/src/prompts/`
 
-Create `services/agent-orchestrator/src/prompts/tool-schemas.ts`:
+Create `services/brotto-orchestrator/src/prompts/tool-schemas.ts`:
 
 ```typescript
 // Tool definitions exposed to OpenAI-compatible models via the tool-calling API.
-// All tool schemas derive from fara-action-schema action types so every model
+// All tool schemas derive from brotto-action-schema action types so every model
 // sees the same surface — a model swap never changes the action vocabulary.
 
 export interface ToolFunctionSchema {
@@ -192,13 +192,13 @@ export function buildToolSchemas(): ToolSchema[] {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd services/agent-orchestrator && npx jest --testPathPattern tool-schemas`
+Run: `cd services/brotto-orchestrator && npx jest --testPathPattern tool-schemas`
 Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add services/agent-orchestrator/src/prompts/tool-schemas.ts services/agent-orchestrator/src/__tests__/tool-schemas.test.ts
+git add services/brotto-orchestrator/src/prompts/tool-schemas.ts services/brotto-orchestrator/src/__tests__/tool-schemas.test.ts
 git commit -m "feat(orchestrator): add tool schema definitions for OpenAI tool-calling"
 ```
 
@@ -207,12 +207,12 @@ git commit -m "feat(orchestrator): add tool schema definitions for OpenAI tool-c
 ## Task 2: OpenAICompatiblePlanner with SSE Streaming
 
 **Files:**
-- Create: `services/agent-orchestrator/src/adapters/openai-compatible-planner.ts`
-- Create: `services/agent-orchestrator/src/__tests__/openai-compatible-planner.test.ts`
+- Create: `services/brotto-orchestrator/src/adapters/openai-compatible-planner.ts`
+- Create: `services/brotto-orchestrator/src/__tests__/openai-compatible-planner.test.ts`
 
 - [ ] **Step 1: Write the failing test (happy path + HTTP error classification)**
 
-Create `services/agent-orchestrator/src/__tests__/openai-compatible-planner.test.ts`:
+Create `services/brotto-orchestrator/src/__tests__/openai-compatible-planner.test.ts`:
 
 ```typescript
 import {
@@ -383,12 +383,12 @@ describe("OpenAICompatiblePlanner", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd services/agent-orchestrator && npx jest --testPathPattern openai-compatible-planner`
+Run: `cd services/brotto-orchestrator && npx jest --testPathPattern openai-compatible-planner`
 Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement OpenAICompatiblePlanner**
 
-Create `services/agent-orchestrator/src/adapters/openai-compatible-planner.ts`:
+Create `services/brotto-orchestrator/src/adapters/openai-compatible-planner.ts`:
 
 ```typescript
 import { InferenceContractError, type InferencePort, type PlanningInput, type PlanningOutcome } from "../engine/types.js";
@@ -572,20 +572,20 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd services/agent-orchestrator && npx jest --testPathPattern openai-compatible-planner`
+Run: `cd services/brotto-orchestrator && npx jest --testPathPattern openai-compatible-planner`
 Expected: PASS, 9 tests.
 
-If `ToolCallParser.parseToolCalls` doesn't exist or has a different signature, read `services/agent-orchestrator/src/parser.ts` to find the actual API and adjust the integration. The test should pass either way; if the parser returns a different shape, update `parseResponse` accordingly.
+If `ToolCallParser.parseToolCalls` doesn't exist or has a different signature, read `services/brotto-orchestrator/src/parser.ts` to find the actual API and adjust the integration. The test should pass either way; if the parser returns a different shape, update `parseResponse` accordingly.
 
 - [ ] **Step 5: Run full test suite for regressions**
 
-Run: `cd services/agent-orchestrator && npx jest`
+Run: `cd services/brotto-orchestrator && npx jest`
 Expected: PASS — all existing tests + 9 new.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add services/agent-orchestrator/src/adapters/openai-compatible-planner.ts services/agent-orchestrator/src/__tests__/openai-compatible-planner.test.ts
+git add services/brotto-orchestrator/src/adapters/openai-compatible-planner.ts services/brotto-orchestrator/src/__tests__/openai-compatible-planner.test.ts
 git commit -m "feat(orchestrator): add OpenAICompatiblePlanner with SSE streaming"
 ```
 
@@ -594,12 +594,12 @@ git commit -m "feat(orchestrator): add OpenAICompatiblePlanner with SSE streamin
 ## Task 3: InferenceRegistry (Factory + Env Detection)
 
 **Files:**
-- Create: `services/agent-orchestrator/src/inference-registry.ts`
-- Create: `services/agent-orchestrator/src/__tests__/inference-registry.test.ts`
+- Create: `services/brotto-orchestrator/src/inference-registry.ts`
+- Create: `services/brotto-orchestrator/src/__tests__/inference-registry.test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `services/agent-orchestrator/src/__tests__/inference-registry.test.ts`:
+Create `services/brotto-orchestrator/src/__tests__/inference-registry.test.ts`:
 
 ```typescript
 import { createPlanner, inferFamilyFromEnv, type InferenceConfig } from "../inference-registry";
@@ -609,7 +609,7 @@ describe("createPlanner", () => {
     const config: InferenceConfig = {
       family: "fara",
       endpoint: "http://localhost:8000",
-      model: "fara-9b",
+      model: "brotto-9b",
     };
     const planner = createPlanner(config);
     expect(planner).toBeDefined();
@@ -678,15 +678,15 @@ describe("inferFamilyFromEnv", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd services/agent-orchestrator && npx jest --testPathPattern inference-registry`
+Run: `cd services/brotto-orchestrator && npx jest --testPathPattern inference-registry`
 Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement inference-registry.ts**
 
-Create `services/agent-orchestrator/src/inference-registry.ts`:
+Create `services/brotto-orchestrator/src/inference-registry.ts`:
 
 ```typescript
-import { FaraPlanner, type FaraPlannerConfig } from "./adapters/fara-planner.js";
+import { FaraPlanner, type FaraPlannerConfig } from "./adapters/brotto-planner.js";
 import { OpenAICompatiblePlanner, type OpenAICompatibleConfig } from "./adapters/openai-compatible-planner.js";
 import type { InferencePort } from "./engine/types.js";
 
@@ -718,13 +718,13 @@ export function inferFamilyFromEnv(): InferenceFamily {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd services/agent-orchestrator && npx jest --testPathPattern inference-registry`
+Run: `cd services/brotto-orchestrator && npx jest --testPathPattern inference-registry`
 Expected: PASS, 7 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add services/agent-orchestrator/src/inference-registry.ts services/agent-orchestrator/src/__tests__/inference-registry.test.ts
+git add services/brotto-orchestrator/src/inference-registry.ts services/brotto-orchestrator/src/__tests__/inference-registry.test.ts
 git commit -m "feat(orchestrator): add InferenceRegistry with env-var family detection"
 ```
 
@@ -733,12 +733,12 @@ git commit -m "feat(orchestrator): add InferenceRegistry with env-var family det
 ## Task 4: Wire InferenceRegistry into Server
 
 **Files:**
-- Modify: `services/agent-orchestrator/src/server.ts` (around line 47, 82, 114)
-- Modify: `services/agent-orchestrator/src/index.ts`
+- Modify: `services/brotto-orchestrator/src/server.ts` (around line 47, 82, 114)
+- Modify: `services/brotto-orchestrator/src/index.ts`
 
 - [ ] **Step 1: Read the relevant slices**
 
-Open `services/agent-orchestrator/src/server.ts`. Find:
+Open `services/brotto-orchestrator/src/server.ts`. Find:
 - Line ~47: `inference: InferenceConfig;` in `OrchestratorConfig`
 - Line ~82: `private inference: FaraInferenceClient;`
 - Line ~114: `this.inference = new FaraInferenceClient(config.inference);`
@@ -751,7 +751,7 @@ The server is the OLD path. We need to migrate `AgentOrchestrator` to use the re
 
 **Minimal viable change:** Make `AgentOrchestrator.inference` accept any `InferencePort`. The class has a private `inference: FaraInferenceClient` that's used in `requestInference` (around line 285). Find what methods are called on it (`buildSystemPrompt`, `buildUserMessage`, `infer`, `cancel`).
 
-If `FaraInferenceClient` is tightly coupled to Fara and hard to generalize, **keep the FaraInferenceClient path AND add a new code path that uses `InferencePort`**. The cleanest cut:
+If `FaraInferenceClient` is tightly coupled to Brotto and hard to generalize, **keep the FaraInferenceClient path AND add a new code path that uses `InferencePort`**. The cleanest cut:
 
 1. Add a new `planner: InferencePort` field to `AgentOrchestrator` (alongside the existing `inference`).
 2. Add a new method `requestInferenceViaPlanner(input, signal)` that delegates to `planner.plan()`.
@@ -762,7 +762,7 @@ This is the laziest integration — both paths coexist. Plan 2 picks one as prim
 
 - [ ] **Step 2: Modify server.ts**
 
-In `services/agent-orchestrator/src/server.ts`:
+In `services/brotto-orchestrator/src/server.ts`:
 
 1. Add import:
 ```typescript
@@ -801,7 +801,7 @@ import { createPlanner, type InferenceConfig } from "./inference-registry.js";
 
 - [ ] **Step 3: Update index.ts re-exports**
 
-In `services/agent-orchestrator/src/index.ts`, add (if not present):
+In `services/brotto-orchestrator/src/index.ts`, add (if not present):
 
 ```typescript
 export {
@@ -814,13 +814,13 @@ export {
 
 - [ ] **Step 4: Run full test suite**
 
-Run: `cd services/agent-orchestrator && npx jest`
+Run: `cd services/brotto-orchestrator && npx jest`
 Expected: PASS — all existing + new tests (10 from Task 1-3).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add services/agent-orchestrator/src/server.ts services/agent-orchestrator/src/index.ts
+git add services/brotto-orchestrator/src/server.ts services/brotto-orchestrator/src/index.ts
 git commit -m "feat(orchestrator): wire InferenceRegistry alongside existing FaraInferenceClient"
 ```
 
@@ -847,18 +847,18 @@ After completing all tasks:
    - `OpenAICompatiblePlannerError extends InferenceContractError` — matches existing FaraPlanner pattern
    - `OpenAICompatiblePlannerRequestError` shape mirrors `FaraPlannerRequestError` (name, retryable, status)
 
-4. **No regressions:** Task 4 keeps FaraInferenceClient path intact; adds planner path alongside. All existing Fara tests should still pass.
+4. **No regressions:** Task 4 keeps FaraInferenceClient path intact; adds planner path alongside. All existing Brotto tests should still pass.
 
 ## Verification Checklist (from spec)
 
 - [ ] `createPlanner({family: 'fara'})` returns a planner with `plan()` method
 - [ ] `createPlanner({family: 'openai-compatible'})` returns a planner with `plan()` method
-- [ ] `inferFamilyFromEnv` reads env vars with documented precedence (FARA > OPENAI > AZURE > OLLAMA)
+- [ ] `inferFamilyFromEnv` reads env vars with documented precedence (BROTTO > OPENAI > AZURE > OLLAMA)
 - [ ] `OpenAICompatiblePlanner.plan` POSTs to `{baseUrl}/chat/completions` with `stream: true`
 - [ ] SSE chunks assembled, `[DONE]` sentinel handled, malformed chunks skipped
 - [ ] Tool-calls map to `PlanningOutcome` via parser
 - [ ] HTTP 401/4xx → retryable=false; HTTP 429/5xx → retryable=true
 - [ ] AbortSignal aborts stream mid-flight
-- [ ] Existing Fara tests still pass
+- [ ] Existing Brotto tests still pass
 - [ ] Azure uses `api-key` header (not `authorization`)
 - [ ] Ollama (no apiKey) skips auth header

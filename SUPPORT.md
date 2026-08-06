@@ -2,7 +2,7 @@
 
 ## Getting Help
 
-If you need help with the Fara1.5 Browser Automation Platform, here are the available resources:
+If you need help with the Brotto Browser Automation Platform, here are the available resources:
 
 ### Documentation
 
@@ -26,7 +26,7 @@ For enterprise support, training, and custom development, contact Inventic at:
 
 When reporting issues, please include:
 
-- Platform version (`npm list fara15-platform` or equivalent)
+- Platform version (`npm list fara15` or equivalent)
 - Client type (desktop-connector, browser-extension, or SDK)
 - Server version and deployment type
 - Steps to reproduce

@@ -1,6 +1,6 @@
 # Control Plane Web
 
-The web-based control interface for the Fara1.5 Browser Automation Platform. This is the primary UI where users create tasks, monitor sessions, approve critical actions, and manage policies.
+The web-based control interface for the Brotto Browser Automation Platform. This is the primary UI where users create tasks, monitor sessions, approve critical actions, and manage policies.
 
 ## Purpose
 
@@ -27,5 +27,5 @@ The control plane must not directly send arbitrary CDP commands. All browser com
 
 ## Related
 
-- [Agent Orchestrator](../services/agent-orchestrator/README.md)
+- [Agent Orchestrator](../services/brotto-orchestrator/README.md)
 - [Admin Console](../apps/admin-console/README.md)

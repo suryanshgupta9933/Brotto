@@ -1,9 +1,9 @@
-"""Tests for fara_sdk.auth"""
+"""Tests for brotto_sdk.auth"""
 import pytest
 import base64
 import json
 import time
-from fara_sdk.auth import (
+from brotto_sdk.auth import (
     generate_state,
     generate_code_verifier,
     TokenManager,
@@ -123,7 +123,7 @@ class TestTokenManager:
 
     def test_token_manager_set_tokens(self):
         """Test setting tokens on TokenManager."""
-        from fara_sdk.auth import OIDCTokens
+        from brotto_sdk.auth import OIDCTokens
 
         manager = TokenManager("https://issuer", "client-id")
         tokens = OIDCTokens(
@@ -141,7 +141,7 @@ class TestTokenManager:
 
     def test_token_manager_clear(self):
         """Test clearing tokens."""
-        from fara_sdk.auth import OIDCTokens
+        from brotto_sdk.auth import OIDCTokens
 
         manager = TokenManager("https://issuer", "client-id")
         tokens = OIDCTokens(

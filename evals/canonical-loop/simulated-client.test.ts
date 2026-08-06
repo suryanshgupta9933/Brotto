@@ -1,5 +1,5 @@
-import type { ActionProposalV1, ActionResultV1, CompletionProposalV1, MessageId } from '@fara-platform/fara-action-schema';
-import { InferenceContractError } from '@fara/agent-orchestrator';
+import type { ActionProposalV1, ActionResultV1, CompletionProposalV1, MessageId } from '@brotto/brotto-action-schema';
+import { InferenceContractError } from '@brotto/agent-orchestrator';
 import { IDS, createHarness, observation, succeededResult } from './helpers/fakes.js';
 
 describe('deterministic canonical simulated client', () => {

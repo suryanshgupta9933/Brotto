@@ -1,6 +1,6 @@
 # API Gateway
 
-Central API gateway for the Fara1.5 Browser Automation Platform. Routes incoming requests to appropriate services and handles authentication, rate limiting, and request validation.
+Central API gateway for the Brotto Browser Automation Platform. Routes incoming requests to appropriate services and handles authentication, rate limiting, and request validation.
 
 ## Purpose
 

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the ad-hoc HTTP/SSE prototype with one secure, versioned TypeScript-controlled observation → plan → policy → action → result → verification loop, using Python only as the structured Fara inference adapter.
+**Goal:** Replace the ad-hoc HTTP/SSE prototype with one secure, versioned TypeScript-controlled observation → plan → policy → action → result → verification loop, using Python only as the structured Brotto inference adapter.
 
 **Architecture:** Shared Zod schemas are the only wire and action contracts. A pure TypeScript session engine enforces one in-flight action, idempotency, budgets, policy, and verified completion; an authenticated WebSocket server connects it to a modular MV3 extension client. The Python inference service accepts multimodal observations and returns constrained action/completion proposals without owning session state.
 
@@ -12,7 +12,7 @@
 
 - Screenshots and sanitized semantic observation metadata may travel only to the configured customer-controlled server.
 - Cookies, authorization headers, local/session-storage values, credentials, password values, and browser-profile data must never be collected or transmitted.
-- TypeScript owns the canonical controller; Python owns only Fara request/response adaptation.
+- TypeScript owns the canonical controller; Python owns only Brotto request/response adaptation.
 - Exactly one inference request and one action may be in flight per session.
 - Parse failure, unsupported output, or speculative prose must never become successful completion.
 - Every action must link its source observation, policy decision, execution result, and settled post-action observation.
@@ -25,41 +25,41 @@
 
 ### Shared contracts
 
-- `packages/fara-action-schema/src/v1/ids.ts`: branded run, task, step, observation, action, and message identifiers.
-- `packages/fara-action-schema/src/v1/observation.ts`: sanitized observation and semantic-target schemas.
-- `packages/fara-action-schema/src/v1/actions.ts`: canonical action, proposal, completion, and user-question schemas.
-- `packages/fara-action-schema/src/v1/results.ts`: typed action outcomes with no browser-secret fields.
-- `packages/fara-action-schema/src/v1/events.ts`: append-only trajectory-event schemas.
-- `packages/relay-protocol/src/v1/envelope.ts`: authenticated application envelope.
-- `packages/relay-protocol/src/v1/messages.ts`: session, observation, action, approval, terminal, heartbeat, and reconciliation messages.
-- `packages/relay-protocol/src/v1/guard.ts`: size, expiry, sequence, replay, and idempotency validation.
+- `packages/brotto-action-schema/src/v1/ids.ts`: branded run, task, step, observation, action, and message identifiers.
+- `packages/brotto-action-schema/src/v1/observation.ts`: sanitized observation and semantic-target schemas.
+- `packages/brotto-action-schema/src/v1/actions.ts`: canonical action, proposal, completion, and user-question schemas.
+- `packages/brotto-action-schema/src/v1/results.ts`: typed action outcomes with no browser-secret fields.
+- `packages/brotto-action-schema/src/v1/events.ts`: append-only trajectory-event schemas.
+- `packages/brotto-relay-protocol/src/v1/envelope.ts`: authenticated application envelope.
+- `packages/brotto-relay-protocol/src/v1/messages.ts`: session, observation, action, approval, terminal, heartbeat, and reconciliation messages.
+- `packages/brotto-relay-protocol/src/v1/guard.ts`: size, expiry, sequence, replay, and idempotency validation.
 
-### Fara inference
+### Brotto inference
 
-- `services/fara-inference/app/contracts.py`: Pydantic multimodal planning request and structured proposal response.
-- `services/fara-inference/app/fara_adapter.py`: exact Fara request construction, constrained output, and bounded repair.
-- `services/fara-inference/tests/fixtures/model_outputs.json`: golden valid and invalid response corpus.
+- `services/brotto-inference/app/contracts.py`: Pydantic multimodal planning request and structured proposal response.
+- `services/brotto-inference/app/brotto_adapter.py`: exact Brotto request construction, constrained output, and bounded repair.
+- `services/brotto-inference/tests/fixtures/model_outputs.json`: golden valid and invalid response corpus.
 
 ### Canonical orchestrator
 
-- `services/agent-orchestrator/src/engine/types.ts`: ports and engine state.
-- `services/agent-orchestrator/src/engine/session-engine.ts`: authoritative pure session loop.
-- `services/agent-orchestrator/src/engine/progress.ts`: repeated-action/state and completion evidence checks.
-- `services/agent-orchestrator/src/engine/session-store.ts`: session persistence/idempotency interface and in-memory implementation.
-- `services/agent-orchestrator/src/transport/ws-server.ts`: authenticated WebSocket connection and routing.
-- `services/agent-orchestrator/src/transport/auth.ts`: short-lived connection credential verification.
-- `services/agent-orchestrator/src/app.ts`: production composition root.
+- `services/brotto-orchestrator/src/engine/types.ts`: ports and engine state.
+- `services/brotto-orchestrator/src/engine/session-engine.ts`: authoritative pure session loop.
+- `services/brotto-orchestrator/src/engine/progress.ts`: repeated-action/state and completion evidence checks.
+- `services/brotto-orchestrator/src/engine/session-store.ts`: session persistence/idempotency interface and in-memory implementation.
+- `services/brotto-orchestrator/src/transport/ws-server.ts`: authenticated WebSocket connection and routing.
+- `services/brotto-orchestrator/src/transport/auth.ts`: short-lived connection credential verification.
+- `services/brotto-orchestrator/src/app.ts`: production composition root.
 
 ### Browser extension
 
-- `clients/browser-extension/src/canonical/session-store.ts`: resumable non-secret MV3 state.
-- `clients/browser-extension/src/canonical/transport.ts`: canonical WebSocket client and reconciliation.
-- `clients/browser-extension/src/canonical/redaction.ts`: observation sanitization and forbidden-data defense.
-- `clients/browser-extension/src/canonical/observation.ts`: screenshot and semantic candidate capture.
-- `clients/browser-extension/src/canonical/client-policy.ts`: URL and high-impact action enforcement.
-- `clients/browser-extension/src/canonical/action-executor.ts`: canonical CDP action execution.
-- `clients/browser-extension/src/canonical/page-settler.ts`: lifecycle/DOM stability settlement.
-- `clients/browser-extension/src/canonical/controller.ts`: action ACK, execution, result, and reconnect orchestration.
+- `clients/brotto-extension/src/canonical/session-store.ts`: resumable non-secret MV3 state.
+- `clients/brotto-extension/src/canonical/transport.ts`: canonical WebSocket client and reconciliation.
+- `clients/brotto-extension/src/canonical/redaction.ts`: observation sanitization and forbidden-data defense.
+- `clients/brotto-extension/src/canonical/observation.ts`: screenshot and semantic candidate capture.
+- `clients/brotto-extension/src/canonical/client-policy.ts`: URL and high-impact action enforcement.
+- `clients/brotto-extension/src/canonical/action-executor.ts`: canonical CDP action execution.
+- `clients/brotto-extension/src/canonical/page-settler.ts`: lifecycle/DOM stability settlement.
+- `clients/brotto-extension/src/canonical/controller.ts`: action ACK, execution, result, and reconnect orchestration.
 
 ### End-to-end verification
 
@@ -67,23 +67,23 @@
 - `evals/canonical-loop/simulated-client.test.ts`: full loop without Chrome.
 - `evals/canonical-loop/security.test.ts`: forbidden-data and protocol attacks.
 - `evals/canonical-loop/browser.spec.ts`: controlled Chrome end-to-end tasks.
-- `evals/canonical-loop/fara-eval.py`: isolated Fara contract/task evaluation.
+- `evals/canonical-loop/brotto-eval.py`: isolated Brotto contract/task evaluation.
 
 ---
 
 ### Task 1: Establish canonical identifiers and secret-free action/observation schemas
 
 **Files:**
-- Create: `packages/fara-action-schema/src/v1/ids.ts`
-- Create: `packages/fara-action-schema/src/v1/observation.ts`
-- Create: `packages/fara-action-schema/src/v1/actions.ts`
-- Create: `packages/fara-action-schema/src/v1/results.ts`
-- Create: `packages/fara-action-schema/src/v1/events.ts`
-- Create: `packages/fara-action-schema/src/v1/index.ts`
-- Modify: `packages/fara-action-schema/src/index.ts`
-- Modify: `packages/fara-action-schema/src/results.ts`
-- Test: `packages/fara-action-schema/src/__tests__/v1-contract.test.ts`
-- Test: `packages/fara-action-schema/src/__tests__/v1-forbidden-data.test.ts`
+- Create: `packages/brotto-action-schema/src/v1/ids.ts`
+- Create: `packages/brotto-action-schema/src/v1/observation.ts`
+- Create: `packages/brotto-action-schema/src/v1/actions.ts`
+- Create: `packages/brotto-action-schema/src/v1/results.ts`
+- Create: `packages/brotto-action-schema/src/v1/events.ts`
+- Create: `packages/brotto-action-schema/src/v1/index.ts`
+- Modify: `packages/brotto-action-schema/src/index.ts`
+- Modify: `packages/brotto-action-schema/src/results.ts`
+- Test: `packages/brotto-action-schema/src/__tests__/v1-contract.test.ts`
+- Test: `packages/brotto-action-schema/src/__tests__/v1-forbidden-data.test.ts`
 
 **Interfaces:**
 - Produces: `ObservationV1`, `ActionProposalV1`, `CompletionProposalV1`, `AgentProposalV1`, `ActionCommandV1`, `ActionResultV1`, `TrajectoryEventV1`, and branded string IDs.
@@ -106,7 +106,7 @@ it('requires an action to reference its exact source observation', () => {
 
 - [ ] **Step 2: Run the focused tests and verify contract symbols are missing**
 
-Run: `pnpm --filter @fara-platform/fara-action-schema test -- --runInBand v1-contract v1-forbidden-data`
+Run: `pnpm --filter @brotto/brotto-action-schema test -- --runInBand v1-contract v1-forbidden-data`
 
 Expected: FAIL because the `v1` schemas do not exist.
 
@@ -147,14 +147,14 @@ The function must traverse objects and arrays, normalize key casing and punctuat
 
 - [ ] **Step 5: Run package tests and type build**
 
-Run: `pnpm --filter @fara-platform/fara-action-schema test -- --runInBand && pnpm --filter @fara-platform/fara-action-schema build`
+Run: `pnpm --filter @brotto/brotto-action-schema test -- --runInBand && pnpm --filter @brotto/brotto-action-schema build`
 
 Expected: PASS; generated declarations contain no cookie or storage result fields.
 
 - [ ] **Step 6: Commit the contract foundation**
 
 ```bash
-git add packages/fara-action-schema/src
+git add packages/brotto-action-schema/src
 git commit -m "feat(schema): add secure canonical agent contracts"
 ```
 
@@ -163,14 +163,14 @@ git commit -m "feat(schema): add secure canonical agent contracts"
 ### Task 2: Replace the generic CDP relay envelope with canonical agent-loop messages
 
 **Files:**
-- Create: `packages/relay-protocol/src/v1/envelope.ts`
-- Create: `packages/relay-protocol/src/v1/messages.ts`
-- Create: `packages/relay-protocol/src/v1/guard.ts`
-- Create: `packages/relay-protocol/src/v1/index.ts`
-- Modify: `packages/relay-protocol/src/index.ts`
-- Modify: `packages/relay-protocol/package.json`
-- Test: `packages/relay-protocol/src/__tests__/agent-envelope.test.ts`
-- Test: `packages/relay-protocol/src/__tests__/agent-guard.test.ts`
+- Create: `packages/brotto-relay-protocol/src/v1/envelope.ts`
+- Create: `packages/brotto-relay-protocol/src/v1/messages.ts`
+- Create: `packages/brotto-relay-protocol/src/v1/guard.ts`
+- Create: `packages/brotto-relay-protocol/src/v1/index.ts`
+- Modify: `packages/brotto-relay-protocol/src/index.ts`
+- Modify: `packages/brotto-relay-protocol/package.json`
+- Test: `packages/brotto-relay-protocol/src/__tests__/agent-envelope.test.ts`
+- Test: `packages/brotto-relay-protocol/src/__tests__/agent-guard.test.ts`
 - Test: `evals/contract/relay-protocol.test.ts`
 
 **Interfaces:**
@@ -195,7 +195,7 @@ it('rejects an expired envelope', () => {
 
 - [ ] **Step 2: Run tests and verify the application messages are absent**
 
-Run: `pnpm --filter @fara-platform/relay-protocol test -- --runInBand agent-envelope agent-guard`
+Run: `pnpm --filter @brotto/relay-protocol test -- --runInBand agent-envelope agent-guard`
 
 Expected: FAIL on missing exports.
 
@@ -212,7 +212,7 @@ export const AgentMessageV1Schema = z.discriminatedUnion('type', [
 
 The envelope uses `protocolVersion: '1.0'`, UUID `messageId/sessionId/correlationId/causationId`, non-negative monotonic `sequence`, ISO timestamps, expiry, and the typed message payload. Keep raw CDP frames out of this application protocol.
 
-Add `zod` and `@fara-platform/fara-action-schema: workspace:*` as runtime dependencies of `@fara-platform/relay-protocol`; do not duplicate the action payload shapes inside the relay package.
+Add `zod` and `@brotto/brotto-action-schema: workspace:*` as runtime dependencies of `@brotto/relay-protocol`; do not duplicate the action payload shapes inside the relay package.
 
 - [ ] **Step 4: Implement signing and validation ports without browser-incompatible Node globals**
 
@@ -231,14 +231,14 @@ Update evals to assert the real `protocolVersion`, `type`, sequence, expiry, and
 
 - [ ] **Step 6: Run unit, contract, and build checks**
 
-Run: `pnpm --filter @fara-platform/relay-protocol test -- --runInBand && pnpm --filter @fara-platform/relay-protocol build && pnpm --dir evals/contract test -- --runInBand relay-protocol`
+Run: `pnpm --filter @brotto/relay-protocol test -- --runInBand && pnpm --filter @brotto/relay-protocol build && pnpm --dir evals/contract test -- --runInBand relay-protocol`
 
 Expected: PASS.
 
 - [ ] **Step 7: Commit the wire protocol**
 
 ```bash
-git add packages/relay-protocol evals/contract/relay-protocol.test.ts
+git add packages/brotto-relay-protocol evals/contract/relay-protocol.test.ts
 git commit -m "feat(protocol): define canonical agent loop messages"
 ```
 
@@ -247,14 +247,14 @@ git commit -m "feat(protocol): define canonical agent loop messages"
 ### Task 3: Make the Python inference boundary multimodal and structurally reliable
 
 **Files:**
-- Create: `services/fara-inference/app/contracts.py`
-- Create: `services/fara-inference/app/fara_adapter.py`
-- Create: `services/fara-inference/tests/fixtures/model_outputs.json`
-- Create: `services/fara-inference/tests/test_contracts.py`
-- Create: `services/fara-inference/tests/test_fara_adapter.py`
-- Modify: `services/fara-inference/app/api.py`
-- Modify: `services/fara-inference/app/models.py`
-- Modify: `services/fara-inference/app/prompts.py`
+- Create: `services/brotto-inference/app/contracts.py`
+- Create: `services/brotto-inference/app/brotto_adapter.py`
+- Create: `services/brotto-inference/tests/fixtures/model_outputs.json`
+- Create: `services/brotto-inference/tests/test_contracts.py`
+- Create: `services/brotto-inference/tests/test_brotto_adapter.py`
+- Modify: `services/brotto-inference/app/api.py`
+- Modify: `services/brotto-inference/app/models.py`
+- Modify: `services/brotto-inference/app/prompts.py`
 
 **Interfaces:**
 - Consumes: JSON-compatible mirror of Task 1 proposal/observation contracts.
@@ -278,7 +278,7 @@ def test_planning_request_accepts_screenshot_and_sanitized_targets(client, reque
 
 - [ ] **Step 3: Run the focused tests and verify failure**
 
-Run: `cd services/fara-inference && pytest tests/test_contracts.py tests/test_fara_adapter.py -q`
+Run: `cd services/brotto-inference && pytest tests/test_contracts.py tests/test_brotto_adapter.py -q`
 
 Expected: FAIL because `/v1/plan` and the adapter do not exist.
 
@@ -302,15 +302,15 @@ Tests must prove that findings, evidence references, unmet criteria, and summary
 
 - [ ] **Step 7: Run Python tests and static checks**
 
-Run: `cd services/fara-inference && pytest -q && ruff check app tests && mypy app`
+Run: `cd services/brotto-inference && pytest -q && ruff check app tests && mypy app`
 
 Expected: PASS.
 
 - [ ] **Step 8: Commit the inference boundary**
 
 ```bash
-git add services/fara-inference/app services/fara-inference/tests
-git commit -m "feat(inference): add constrained Fara planning contract"
+git add services/brotto-inference/app services/brotto-inference/tests
+git commit -m "feat(inference): add constrained Brotto planning contract"
 ```
 
 ---
@@ -318,14 +318,14 @@ git commit -m "feat(inference): add constrained Fara planning contract"
 ### Task 4: Implement the authoritative session engine and idempotent store
 
 **Files:**
-- Create: `services/agent-orchestrator/src/engine/types.ts`
-- Create: `services/agent-orchestrator/src/engine/session-store.ts`
-- Create: `services/agent-orchestrator/src/engine/session-engine.ts`
-- Create: `services/agent-orchestrator/src/engine/progress.ts`
-- Test: `services/agent-orchestrator/src/__tests__/canonical-engine.test.ts`
-- Test: `services/agent-orchestrator/src/__tests__/canonical-idempotency.test.ts`
-- Modify: `services/agent-orchestrator/package.json`
-- Modify: `services/agent-orchestrator/tsconfig.json`
+- Create: `services/brotto-orchestrator/src/engine/types.ts`
+- Create: `services/brotto-orchestrator/src/engine/session-store.ts`
+- Create: `services/brotto-orchestrator/src/engine/session-engine.ts`
+- Create: `services/brotto-orchestrator/src/engine/progress.ts`
+- Test: `services/brotto-orchestrator/src/__tests__/canonical-engine.test.ts`
+- Test: `services/brotto-orchestrator/src/__tests__/canonical-idempotency.test.ts`
+- Modify: `services/brotto-orchestrator/package.json`
+- Modify: `services/brotto-orchestrator/tsconfig.json`
 
 **Interfaces:**
 - Consumes: `AgentProposalV1`, `ActionResultV1`, `ObservationV1`, and trajectory events.
@@ -333,7 +333,7 @@ git commit -m "feat(inference): add constrained Fara planning contract"
 
 - [ ] **Step 1: Correct workspace dependency names before engine tests**
 
-Replace all stale `@fara/fara-action-schema` source/test imports with `@fara-platform/fara-action-schema`, add `@fara-platform/relay-protocol: workspace:*`, and restore a test command that resolves workspace packages.
+Replace all stale `@brotto/brotto-action-schema` source/test imports with `@brotto/brotto-action-schema`, add `@brotto/relay-protocol: workspace:*`, and restore a test command that resolves workspace packages.
 
 - [ ] **Step 2: Write failing state-machine and single-flight tests**
 
@@ -353,7 +353,7 @@ it('rejects a result for a different observation/action pair', async () => {
 
 - [ ] **Step 3: Run tests and confirm the canonical engine is absent**
 
-Run: `pnpm --filter @fara/agent-orchestrator test -- --runInBand canonical-engine canonical-idempotency`
+Run: `pnpm --filter @brotto/agent-orchestrator test -- --runInBand canonical-engine canonical-idempotency`
 
 Expected: FAIL on missing engine modules, not module resolution.
 
@@ -381,14 +381,14 @@ Hash normalized action type/parameters and observation URL/screenshot hash. Dete
 
 - [ ] **Step 7: Run all orchestrator tests and build**
 
-Run: `pnpm --filter @fara/agent-orchestrator test -- --runInBand && pnpm --filter @fara/agent-orchestrator build`
+Run: `pnpm --filter @brotto/agent-orchestrator test -- --runInBand && pnpm --filter @brotto/agent-orchestrator build`
 
 Expected: PASS without the existing asynchronous retry-test crash.
 
 - [ ] **Step 8: Commit the session engine**
 
 ```bash
-git add services/agent-orchestrator
+git add services/brotto-orchestrator
 git commit -m "feat(orchestrator): implement canonical session engine"
 ```
 
@@ -397,13 +397,13 @@ git commit -m "feat(orchestrator): implement canonical session engine"
 ### Task 5: Integrate inference repair, policy, and evidence-based completion
 
 **Files:**
-- Create: `services/agent-orchestrator/src/adapters/fara-planner.ts`
-- Create: `services/agent-orchestrator/src/adapters/policy-adapter.ts`
-- Create: `services/agent-orchestrator/src/engine/completion-verifier.ts`
-- Test: `services/agent-orchestrator/src/__tests__/planner-contract.test.ts`
-- Test: `services/agent-orchestrator/src/__tests__/completion-verifier.test.ts`
-- Test: `services/agent-orchestrator/src/__tests__/policy-enforcement.test.ts`
-- Modify: `services/agent-orchestrator/src/engine/session-engine.ts`
+- Create: `services/brotto-orchestrator/src/adapters/brotto-planner.ts`
+- Create: `services/brotto-orchestrator/src/adapters/policy-adapter.ts`
+- Create: `services/brotto-orchestrator/src/engine/completion-verifier.ts`
+- Test: `services/brotto-orchestrator/src/__tests__/planner-contract.test.ts`
+- Test: `services/brotto-orchestrator/src/__tests__/completion-verifier.test.ts`
+- Test: `services/brotto-orchestrator/src/__tests__/policy-enforcement.test.ts`
+- Modify: `services/brotto-orchestrator/src/engine/session-engine.ts`
 
 **Interfaces:**
 - Consumes: Task 3 `/v1/plan`, Task 4 ports, existing `policy-engine` rules.
@@ -426,7 +426,7 @@ it('does not replan around a policy denial', async () => {
 
 - [ ] **Step 2: Run focused tests and verify failure**
 
-Run: `pnpm --filter @fara/agent-orchestrator test -- --runInBand planner-contract completion-verifier policy-enforcement`
+Run: `pnpm --filter @brotto/agent-orchestrator test -- --runInBand planner-contract completion-verifier policy-enforcement`
 
 Expected: FAIL on missing adapters/verifier.
 
@@ -444,14 +444,14 @@ Require structured findings, at least one referenced observation or verified bro
 
 - [ ] **Step 6: Run orchestrator tests and build**
 
-Run: `pnpm --filter @fara/agent-orchestrator test -- --runInBand && pnpm --filter @fara/agent-orchestrator build`
+Run: `pnpm --filter @brotto/agent-orchestrator test -- --runInBand && pnpm --filter @brotto/agent-orchestrator build`
 
 Expected: PASS.
 
 - [ ] **Step 7: Commit planner, policy, and verifier**
 
 ```bash
-git add services/agent-orchestrator/src
+git add services/brotto-orchestrator/src
 git commit -m "feat(orchestrator): enforce policy and verified completion"
 ```
 
@@ -460,13 +460,13 @@ git commit -m "feat(orchestrator): enforce policy and verified completion"
 ### Task 6: Add authenticated WebSocket session transport and reconciliation
 
 **Files:**
-- Create: `services/agent-orchestrator/src/transport/auth.ts`
-- Create: `services/agent-orchestrator/src/transport/ws-server.ts`
-- Create: `services/agent-orchestrator/src/app.ts`
-- Test: `services/agent-orchestrator/src/__tests__/ws-auth.test.ts`
-- Test: `services/agent-orchestrator/src/__tests__/ws-reconcile.test.ts`
-- Modify: `services/agent-orchestrator/package.json`
-- Modify: `services/agent-orchestrator/src/index.ts`
+- Create: `services/brotto-orchestrator/src/transport/auth.ts`
+- Create: `services/brotto-orchestrator/src/transport/ws-server.ts`
+- Create: `services/brotto-orchestrator/src/app.ts`
+- Test: `services/brotto-orchestrator/src/__tests__/ws-auth.test.ts`
+- Test: `services/brotto-orchestrator/src/__tests__/ws-reconcile.test.ts`
+- Modify: `services/brotto-orchestrator/package.json`
+- Modify: `services/brotto-orchestrator/src/index.ts`
 
 **Interfaces:**
 - Consumes: Task 2 protocol guard and Task 4 engine/store.
@@ -478,7 +478,7 @@ Test missing/expired token, wrong tenant/device binding, invalid origin, expired
 
 - [ ] **Step 2: Run focused tests and verify failure**
 
-Run: `pnpm --filter @fara/agent-orchestrator test -- --runInBand ws-auth ws-reconcile`
+Run: `pnpm --filter @brotto/agent-orchestrator test -- --runInBand ws-auth ws-reconcile`
 
 Expected: FAIL on missing transport.
 
@@ -496,7 +496,7 @@ export interface ConnectionClaims {
 
 Bind the claims to the WSS session and reject payload tenant/device/session mismatches. Do not place visited-site credentials in connection metadata or logs.
 
-Add explicit runtime dependencies on `fastify`, `@fastify/websocket`, `jose`, `@fara-platform/relay-protocol`, and `@fara-platform/fara-action-schema`. Pin them through the workspace lockfile and keep token verification behind the `ConnectionTokenVerifier` interface so unit tests do not depend on wall-clock time or real keys.
+Add explicit runtime dependencies on `fastify`, `@fastify/websocket`, `jose`, `@brotto/relay-protocol`, and `@brotto/brotto-action-schema`. Pin them through the workspace lockfile and keep token verification behind the `ConnectionTokenVerifier` interface so unit tests do not depend on wall-clock time or real keys.
 
 - [ ] **Step 4: Implement guarded routing and bounded queues**
 
@@ -508,14 +508,14 @@ The client sends last received server sequence, last sent client sequence, and a
 
 - [ ] **Step 6: Run transport tests and build**
 
-Run: `pnpm --filter @fara/agent-orchestrator test -- --runInBand && pnpm --filter @fara/agent-orchestrator build`
+Run: `pnpm --filter @brotto/agent-orchestrator test -- --runInBand && pnpm --filter @brotto/agent-orchestrator build`
 
 Expected: PASS.
 
 - [ ] **Step 7: Commit the server transport**
 
 ```bash
-git add services/agent-orchestrator
+git add services/brotto-orchestrator
 git commit -m "feat(orchestrator): add authenticated agent websocket transport"
 ```
 
@@ -524,12 +524,12 @@ git commit -m "feat(orchestrator): add authenticated agent websocket transport"
 ### Task 7: Capture sanitized deterministic browser observations
 
 **Files:**
-- Create: `clients/browser-extension/src/canonical/redaction.ts`
-- Create: `clients/browser-extension/src/canonical/observation.ts`
-- Test: `clients/browser-extension/tests/redaction.test.ts`
-- Test: `clients/browser-extension/tests/observation.test.ts`
-- Modify: `clients/browser-extension/package.json`
-- Modify: `clients/browser-extension/tsconfig.json`
+- Create: `clients/brotto-extension/src/canonical/redaction.ts`
+- Create: `clients/brotto-extension/src/canonical/observation.ts`
+- Test: `clients/brotto-extension/tests/redaction.test.ts`
+- Test: `clients/brotto-extension/tests/observation.test.ts`
+- Modify: `clients/brotto-extension/package.json`
+- Modify: `clients/brotto-extension/tsconfig.json`
 
 **Interfaces:**
 - Consumes: Task 1 `ObservationV1`.
@@ -549,7 +549,7 @@ it.each(['password', 'cookie', 'authorization', 'localStorage', 'sessionStorage'
 
 - [ ] **Step 2: Run focused extension tests and verify failure**
 
-Run: `pnpm --dir clients/browser-extension test -- --runInBand redaction observation`
+Run: `pnpm --dir clients/brotto-extension test -- --runInBand redaction observation`
 
 Expected: FAIL on missing canonical modules.
 
@@ -557,7 +557,7 @@ Expected: FAIL on missing canonical modules.
 
 Capture visible-tab PNG, hash it with WebCrypto SHA-256, and capture URL, sanitized title, viewport, DPR, zoom, scroll position, visibility, ready state, and opaque frame identifiers. Do not call cookie/storage/network-header CDP domains.
 
-Add `@fara-platform/fara-action-schema: workspace:*` and `@fara-platform/relay-protocol: workspace:*` to the extension runtime dependencies so the bundle consumes the canonical schemas rather than copied interfaces.
+Add `@brotto/brotto-action-schema: workspace:*` and `@brotto/relay-protocol: workspace:*` to the extension runtime dependencies so the bundle consumes the canonical schemas rather than copied interfaces.
 
 - [ ] **Step 4: Implement semantic candidate capture with allowlisted fields**
 
@@ -569,14 +569,14 @@ Run `assertNoForbiddenBrowserData()` on the completed observation before returni
 
 - [ ] **Step 6: Run tests, type-check, and build**
 
-Run: `pnpm --dir clients/browser-extension test -- --runInBand && pnpm --dir clients/browser-extension run build:tsc && pnpm --dir clients/browser-extension run build`
+Run: `pnpm --dir clients/brotto-extension test -- --runInBand && pnpm --dir clients/brotto-extension run build:tsc && pnpm --dir clients/brotto-extension run build`
 
 Expected: PASS; build must return non-zero on TypeScript/esbuild failure.
 
 - [ ] **Step 7: Commit observation capture**
 
 ```bash
-git add clients/browser-extension/src/canonical clients/browser-extension/tests clients/browser-extension/package.json clients/browser-extension/tsconfig.json
+git add clients/brotto-extension/src/canonical clients/brotto-extension/tests clients/brotto-extension/package.json clients/brotto-extension/tsconfig.json
 git commit -m "feat(extension): capture sanitized browser observations"
 ```
 
@@ -585,12 +585,12 @@ git commit -m "feat(extension): capture sanitized browser observations"
 ### Task 8: Implement client policy, canonical CDP execution, and deterministic settlement
 
 **Files:**
-- Create: `clients/browser-extension/src/canonical/client-policy.ts`
-- Create: `clients/browser-extension/src/canonical/action-executor.ts`
-- Create: `clients/browser-extension/src/canonical/page-settler.ts`
-- Test: `clients/browser-extension/tests/client-policy.test.ts`
-- Test: `clients/browser-extension/tests/canonical-action-executor.test.ts`
-- Test: `clients/browser-extension/tests/page-settler.test.ts`
+- Create: `clients/brotto-extension/src/canonical/client-policy.ts`
+- Create: `clients/brotto-extension/src/canonical/action-executor.ts`
+- Create: `clients/brotto-extension/src/canonical/page-settler.ts`
+- Test: `clients/brotto-extension/tests/client-policy.test.ts`
+- Test: `clients/brotto-extension/tests/canonical-action-executor.test.ts`
+- Test: `clients/brotto-extension/tests/page-settler.test.ts`
 
 **Interfaces:**
 - Consumes: Task 1 action commands/results and existing `src/debugger.ts` command wrapper.
@@ -602,7 +602,7 @@ Cover `file:`, `chrome:`, extension URLs, private-network destinations, purchase
 
 - [ ] **Step 2: Run focused tests and verify failure**
 
-Run: `pnpm --dir clients/browser-extension test -- --runInBand client-policy canonical-action-executor page-settler`
+Run: `pnpm --dir clients/brotto-extension test -- --runInBand client-policy canonical-action-executor page-settler`
 
 Expected: FAIL on missing modules.
 
@@ -620,14 +620,14 @@ Subscribe before execution to navigation/lifecycle, dialog, target, and debugger
 
 - [ ] **Step 6: Run extension tests, type-check, and build**
 
-Run: `pnpm --dir clients/browser-extension test -- --runInBand && pnpm --dir clients/browser-extension run build:tsc && pnpm --dir clients/browser-extension run build`
+Run: `pnpm --dir clients/brotto-extension test -- --runInBand && pnpm --dir clients/brotto-extension run build:tsc && pnpm --dir clients/brotto-extension run build`
 
 Expected: PASS.
 
 - [ ] **Step 7: Commit secure execution**
 
 ```bash
-git add clients/browser-extension/src/canonical clients/browser-extension/tests
+git add clients/brotto-extension/src/canonical clients/brotto-extension/tests
 git commit -m "feat(extension): enforce policy and deterministic actions"
 ```
 
@@ -636,17 +636,17 @@ git commit -m "feat(extension): enforce policy and deterministic actions"
 ### Task 9: Connect the MV3 extension to the canonical protocol with recovery
 
 **Files:**
-- Create: `clients/browser-extension/src/canonical/session-store.ts`
-- Create: `clients/browser-extension/src/canonical/transport.ts`
-- Create: `clients/browser-extension/src/canonical/controller.ts`
-- Test: `clients/browser-extension/tests/canonical-transport.test.ts`
-- Test: `clients/browser-extension/tests/canonical-controller.test.ts`
-- Test: `clients/browser-extension/tests/session-recovery.test.ts`
-- Modify: `clients/browser-extension/src/background.ts`
-- Modify: `clients/browser-extension/src/popup.js`
-- Modify: `clients/browser-extension/src/popup.html`
-- Modify: `clients/browser-extension/manifest.json`
-- Modify: `clients/browser-extension/build.mjs`
+- Create: `clients/brotto-extension/src/canonical/session-store.ts`
+- Create: `clients/brotto-extension/src/canonical/transport.ts`
+- Create: `clients/brotto-extension/src/canonical/controller.ts`
+- Test: `clients/brotto-extension/tests/canonical-transport.test.ts`
+- Test: `clients/brotto-extension/tests/canonical-controller.test.ts`
+- Test: `clients/brotto-extension/tests/session-recovery.test.ts`
+- Modify: `clients/brotto-extension/src/background.ts`
+- Modify: `clients/brotto-extension/src/popup.js`
+- Modify: `clients/brotto-extension/src/popup.html`
+- Modify: `clients/brotto-extension/manifest.json`
+- Modify: `clients/brotto-extension/build.mjs`
 
 **Interfaces:**
 - Consumes: Tasks 2, 7, and 8.
@@ -658,7 +658,7 @@ Prove ACK precedes execution, only one command executes, duplicate commands retu
 
 - [ ] **Step 2: Run focused tests and verify failure**
 
-Run: `pnpm --dir clients/browser-extension test -- --runInBand canonical-transport canonical-controller session-recovery`
+Run: `pnpm --dir clients/brotto-extension test -- --runInBand canonical-transport canonical-controller session-recovery`
 
 Expected: FAIL on missing controller.
 
@@ -688,14 +688,14 @@ Run `tsc --noEmit` before esbuild and propagate any error exit code. Copy only r
 
 - [ ] **Step 9: Run the complete extension suite and build**
 
-Run: `pnpm --dir clients/browser-extension test -- --runInBand && pnpm --dir clients/browser-extension run build:tsc && pnpm --dir clients/browser-extension run build`
+Run: `pnpm --dir clients/brotto-extension test -- --runInBand && pnpm --dir clients/brotto-extension run build:tsc && pnpm --dir clients/brotto-extension run build`
 
 Expected: PASS.
 
 - [ ] **Step 10: Commit the canonical extension runtime**
 
 ```bash
-git add clients/browser-extension/manifest.json clients/browser-extension/build.mjs clients/browser-extension/src clients/browser-extension/tests
+git add clients/brotto-extension/manifest.json clients/brotto-extension/build.mjs clients/brotto-extension/src clients/brotto-extension/tests
 git commit -m "feat(extension): use canonical agent protocol"
 ```
 
@@ -736,7 +736,7 @@ Do not add test-only branches. Compose the real engine with fake ports through t
 
 - [ ] **Step 5: Run canonical, contract, orchestrator, and extension suites together**
 
-Run: `pnpm --dir evals/canonical-loop test -- --runInBand && pnpm --dir evals/contract test -- --runInBand && pnpm --filter @fara/agent-orchestrator test -- --runInBand && pnpm --dir clients/browser-extension test -- --runInBand`
+Run: `pnpm --dir evals/canonical-loop test -- --runInBand && pnpm --dir evals/contract test -- --runInBand && pnpm --filter @brotto/agent-orchestrator test -- --runInBand && pnpm --dir clients/brotto-extension test -- --runInBand`
 
 Expected: PASS with zero forbidden-data leaks and zero duplicate terminal events.
 
@@ -749,7 +749,7 @@ git commit -m "test(e2e): gate canonical agent loop and security"
 
 ---
 
-### Task 11: Validate controlled Chrome tasks and isolated Fara capability
+### Task 11: Validate controlled Chrome tasks and isolated Brotto capability
 
 **Files:**
 - Create: `evals/canonical-loop/fixtures/server.ts`
@@ -758,13 +758,13 @@ git commit -m "test(e2e): gate canonical agent loop and security"
 - Create: `evals/canonical-loop/fixtures/pages/form.html`
 - Create: `evals/canonical-loop/browser.spec.ts`
 - Create: `evals/canonical-loop/playwright.config.ts`
-- Create: `evals/canonical-loop/fara-eval.py`
+- Create: `evals/canonical-loop/brotto-eval.py`
 - Create: `evals/canonical-loop/tasks.json`
 - Create: `evals/canonical-loop/README.md`
 
 **Interfaces:**
 - Consumes: complete canonical runtime.
-- Produces: controlled-browser release gate and isolated Fara scorecard.
+- Produces: controlled-browser release gate and isolated Brotto scorecard.
 
 - [ ] **Step 1: Define controlled tasks and expected evidence**
 
@@ -784,21 +784,21 @@ Expected before final wiring: FAIL with a concrete missing runtime/configuration
 
 Add explicit development-issued short-lived connection credentials, fixture-origin allowlist, in-memory session store, and configured inference endpoint. Production continues to require WSS and externally supplied signing/auth configuration.
 
-- [ ] **Step 5: Implement the isolated Fara evaluation runner**
+- [ ] **Step 5: Implement the isolated Brotto evaluation runner**
 
 Feed the same screenshot/trajectory corpus directly to `/v1/plan`. Score valid-schema rate, correct next-action rate, premature-completion rate, repair rate, and latency separately from browser execution. Save only hashes/metrics by default; raw screenshots require explicit local opt-in.
 
 - [ ] **Step 6: Run release gates and record evidence**
 
-Run: `pnpm --dir evals/canonical-loop exec playwright test && python3 evals/canonical-loop/fara-eval.py --tasks evals/canonical-loop/tasks.json`
+Run: `pnpm --dir evals/canonical-loop exec playwright test && python3 evals/canonical-loop/brotto-eval.py --tasks evals/canonical-loop/tasks.json`
 
-Expected: controlled deterministic tasks pass; Fara valid-schema rate is 100% after bounded repair, premature-completion acceptance is 0%, and task completion reaches the approved 90% KPI or is reported as a model-deployment blocker rather than hidden by the controller.
+Expected: controlled deterministic tasks pass; Brotto valid-schema rate is 100% after bounded repair, premature-completion acceptance is 0%, and task completion reaches the approved 90% KPI or is reported as a model-deployment blocker rather than hidden by the controller.
 
 - [ ] **Step 7: Commit controlled E2E and model evals**
 
 ```bash
 git add evals/canonical-loop
-git commit -m "test(e2e): validate browser loop and Fara capability"
+git commit -m "test(e2e): validate browser loop and Brotto capability"
 ```
 
 ---
@@ -810,8 +810,8 @@ git commit -m "test(e2e): validate browser loop and Fara capability"
 - Modify: `docs/project-memory/mvp-delivery-tracker.md`
 - Modify: `docs/protocol/README.md`
 - Modify: `docs/architecture/README.md`
-- Modify: `clients/browser-extension/README.md`
-- Modify: `services/agent-orchestrator/README.md`
+- Modify: `clients/brotto-extension/README.md`
+- Modify: `services/brotto-orchestrator/README.md`
 - Modify: `deploy/docker-compose/dev.yml`
 - Quarantine or delete after dependency proof: `services/playwright-relay/`
 
@@ -835,16 +835,16 @@ First inspect `services/playwright-relay/.env` and ensure it remains ignored and
 
 - [ ] **Step 4: Update architecture and protocol documentation**
 
-Document the canonical message lifecycle, privacy boundary, forbidden-data invariant, authentication/reconciliation behavior, local development setup, controlled E2E command, and Fara evaluation interpretation. Mark audit persistence and recipe compilation as subsequent delivery items.
+Document the canonical message lifecycle, privacy boundary, forbidden-data invariant, authentication/reconciliation behavior, local development setup, controlled E2E command, and Brotto evaluation interpretation. Mark audit persistence and recipe compilation as subsequent delivery items.
 
 - [ ] **Step 5: Update the delivery tracker using evidence**
 
-Set item 1 to `complete` only when every acceptance criterion is met. If the isolated Fara task-completion KPI is below 90% while all controller gates pass, mark item 1 `blocked on model deployment capability` and include the scorecard; do not claim completion.
+Set item 1 to `complete` only when every acceptance criterion is met. If the isolated Brotto task-completion KPI is below 90% while all controller gates pass, mark item 1 `blocked on model deployment capability` and include the scorecard; do not claim completion.
 
 - [ ] **Step 6: Commit the supported-path documentation and quarantine**
 
 ```bash
-git add docs clients/browser-extension/README.md services/agent-orchestrator/README.md deploy/docker-compose/dev.yml
+git add docs clients/brotto-extension/README.md services/brotto-orchestrator/README.md deploy/docker-compose/dev.yml
 git commit -m "docs: publish canonical agent loop verification"
 ```
 

@@ -199,10 +199,10 @@ On replay start, offer "resume from checkpoint" option.
 
 ## Files to Create
 
-- `clients/browser-extension/src/canonical/recording-controller.ts` — Recording logic
-- `clients/browser-extension/src/canonical/replay-controller.ts` — Workflow replay
-- `clients/browser-extension/src/canonical/workflow-types.ts` — `WorkflowDefinition`, `WorkflowStep`, etc.
-- `clients/browser-extension/src/storage.ts` — IndexedDB wrapper
+- `clients/brotto-extension/src/canonical/recording-controller.ts` — Recording logic
+- `clients/brotto-extension/src/canonical/replay-controller.ts` — Workflow replay
+- `clients/brotto-extension/src/canonical/workflow-types.ts` — `WorkflowDefinition`, `WorkflowStep`, etc.
+- `clients/brotto-extension/src/storage.ts` — IndexedDB wrapper
 - `tools/workflow-converter/` — Node CLI for conversion
 
 ## Verification

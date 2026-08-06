@@ -1,8 +1,8 @@
 /**
- * TypeScript types for the Fara1.5 Platform SDK
+ * TypeScript types for the Brotto Platform SDK
  */
 
-// Re-export action types from fara-action-schema
+// Re-export action types from brotto-action-schema
 // These are the canonical action types for browser automation
 
 export enum ActionType {

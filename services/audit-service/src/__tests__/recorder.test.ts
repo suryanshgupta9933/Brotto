@@ -25,7 +25,7 @@ describe('AuditRecorder', () => {
       organizationId,
       userId,
       device: mockDevice,
-      modelVersion: 'fara-1.5-9b',
+      modelVersion: 'brotto-1.5-9b',
       promptTemplateVersion: 'v1.0',
     });
   });

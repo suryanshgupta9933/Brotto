@@ -1,7 +1,7 @@
 """
-Fara1.5 Platform SDK - Python
+Brotto Platform SDK - Python
 
-Official Python SDK for interacting with the Fara1.5 Browser Automation Platform.
+Official Python SDK for interacting with the Brotto Browser Automation Platform.
 Provides typed clients for task creation, session management, and real-time events.
 """
 

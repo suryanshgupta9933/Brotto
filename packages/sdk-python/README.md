@@ -1,6 +1,6 @@
 # SDK Python
 
-Official Python SDK for interacting with the Fara1.5 Browser Automation Platform. Provides idiomatic Python clients for task creation, session management, and real-time events.
+Official Python SDK for interacting with the Brotto Browser Automation Platform. Provides idiomatic Python clients for task creation, session management, and real-time events.
 
 ## Purpose
 
@@ -15,7 +15,7 @@ The Python SDK provides:
 ## Installation
 
 ```bash
-pip install fara-platform-sdk
+pip install brotto-sdk
 ```
 
 Or install from source:
@@ -30,7 +30,7 @@ pip install -e .
 
 ```python
 import os
-from fara_sdk import FaraClient, create_client_with_api_key
+from brotto_sdk import FaraClient, create_client_with_api_key
 
 # With API key
 client = create_client_with_api_key(
@@ -39,7 +39,7 @@ client = create_client_with_api_key(
 )
 
 # Or with OIDC
-from fara_sdk import create_client_with_oidc
+from brotto_sdk import create_client_with_oidc
 
 client = create_client_with_oidc(
     base_url="https://api.fara.example.com",
@@ -58,7 +58,7 @@ client = create_client_with_oidc(
 
 ```python
 import asyncio
-from fara_sdk import FaraClient, CreateTaskInput, Priority
+from brotto_sdk import FaraClient, CreateTaskInput, Priority
 
 async def main():
     client = FaraClient(config=FaraClientConfig(
@@ -100,7 +100,7 @@ asyncio.run(main())
 ### Sessions
 
 ```python
-from fara_sdk import CreateSessionInput
+from brotto_sdk import CreateSessionInput
 
 async def main():
     # Create a session for a task
@@ -131,7 +131,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from fara_sdk import WebSocketClient, create_websocket_url
+from brotto_sdk import WebSocketClient, create_websocket_url
 
 async def main():
     ws_url = create_websocket_url(
@@ -166,7 +166,7 @@ async def watch_with_iterator():
 ### Approvals
 
 ```python
-from fara_sdk import ApprovalDecision
+from brotto_sdk import ApprovalDecision
 
 async def main():
     # List pending approvals
@@ -189,7 +189,7 @@ asyncio.run(main())
 ### Session Helpers
 
 ```python
-from fara_sdk import (
+from brotto_sdk import (
     is_terminal_state,
     is_active_state,
     get_state_description,
@@ -218,7 +218,7 @@ while replay.has_next():
 ### Authentication
 
 ```python
-from fara_sdk import (
+from brotto_sdk import (
     TokenManager,
     fetch_oidc_discovery,
     build_authorization_url,
@@ -280,7 +280,7 @@ asyncio.run(oidc_flow())
 ### Error Handling
 
 ```python
-from fara_sdk import (
+from brotto_sdk import (
     FaraClient,
     AuthenticationError,
     NotFoundError,
@@ -320,4 +320,4 @@ asyncio.run(main())
 
 - [SDK TypeScript](../sdk-typescript/README.md)
 - [API Gateway](../../services/api-gateway/README.md)
-- [Fara Action Schema](../fara-action-schema/README.md)
+- [Brotto Action Schema](../brotto-action-schema/README.md)

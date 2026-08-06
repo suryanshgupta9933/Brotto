@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate Fara's strict planning contract without launching a browser.
+"""Evaluate Brotto's strict planning contract without launching a browser.
 
 Fixture mode is deterministic and performs no network I/O. Live mode is opt-in and
 posts the same sanitized planning requests to a configured ``/v1/plan`` endpoint.
@@ -137,7 +137,7 @@ class LiveTransport:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "fara-contract-eval/1",
+            "User-Agent": "brotto-contract-eval/1",
         }
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -147,11 +147,11 @@ class LiveTransport:
             with urlopen(request, timeout=self._timeout) as response:  # noqa: S310
                 response_body = _read_bounded(response).decode("utf-8", errors="replace")
                 status = int(response.status)
-                repair_count = _repair_count(response.headers.get("x-fara-repair-count"))
+                repair_count = _repair_count(response.headers.get("x-brotto-repair-count"))
         except HTTPError as error:
             status = int(error.code)
             response_body = _read_bounded(error).decode("utf-8", errors="replace")
-            repair_count = _repair_count(error.headers.get("x-fara-repair-count"))
+            repair_count = _repair_count(error.headers.get("x-brotto-repair-count"))
         except (OSError, TimeoutError, URLError, ValueError) as error:
             raise EvaluationError("live endpoint request failed") from error
         latency_ms = (time.perf_counter() - started) * 1000
@@ -221,12 +221,12 @@ def _load_contract_models() -> tuple[Any, Any] | None:
     contracts_path = (
         Path(__file__).resolve().parents[2]
         / "services"
-        / "fara-inference"
+        / "brotto-inference"
         / "app"
         / "contracts.py"
     )
     try:
-        spec = importlib.util.spec_from_file_location("fara_eval_contracts", contracts_path)
+        spec = importlib.util.spec_from_file_location("brotto_eval_contracts", contracts_path)
         if spec is None or spec.loader is None:
             return None
         module = importlib.util.module_from_spec(spec)
@@ -234,7 +234,7 @@ def _load_contract_models() -> tuple[Any, Any] | None:
         spec.loader.exec_module(module)
         return module.PlanningRequest, module.PlanningResponseEnvelope
     except Exception:
-        sys.modules.pop("fara_eval_contracts", None)
+        sys.modules.pop("brotto_eval_contracts", None)
         return None
 
 
@@ -747,11 +747,11 @@ def _http_url(value: Any) -> bool:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Evaluate the isolated Fara planning contract")
+    parser = argparse.ArgumentParser(description="Evaluate the isolated Brotto planning contract")
     parser.add_argument(
         "--tasks",
         type=Path,
-        default=Path(__file__).with_name("fixtures") / "fara-eval-cases.json",
+        default=Path(__file__).with_name("fixtures") / "brotto-eval-cases.json",
         help="JSON corpus containing cases or faraEvalCases",
     )
     parser.add_argument("--mode", choices=("fixture", "live"), default="fixture")

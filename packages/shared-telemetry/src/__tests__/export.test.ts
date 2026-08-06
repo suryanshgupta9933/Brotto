@@ -177,7 +177,7 @@ describe('export', () => {
     it('should return development config', () => {
       const config = getDefaultConfig('development');
 
-      expect(config.serviceName).toBe('fara-platform');
+      expect(config.serviceName).toBe('fara');
       expect(config.traceExporter?.type).toBe('console');
       expect(config.metricExporter?.type).toBe('console');
       expect(config.enabledInstrumentations).toBe(true);
@@ -186,7 +186,7 @@ describe('export', () => {
     it('should return production config', () => {
       const config = getDefaultConfig('production');
 
-      expect(config.serviceName).toBe('fara-platform');
+      expect(config.serviceName).toBe('fara');
       expect(config.traceExporter?.type).toBe('otlp');
       expect(config.metricExporter?.type).toBe('otlp');
       expect(config.enabledInstrumentations).toBe(true);
@@ -195,7 +195,7 @@ describe('export', () => {
     it('should return testing config', () => {
       const config = getDefaultConfig('testing');
 
-      expect(config.serviceName).toBe('fara-platform-test');
+      expect(config.serviceName).toBe('brotto-test');
       expect(config.traceExporter?.type).toBe('none');
       expect(config.metricExporter?.type).toBe('none');
       expect(config.enabledInstrumentations).toBe(false);

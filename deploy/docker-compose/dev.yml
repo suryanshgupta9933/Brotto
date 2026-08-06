@@ -1,4 +1,4 @@
-# Fara1.5 Platform - Development Docker Compose
+# Brotto Platform - Development Docker Compose
 # Local development with hot reload and debugging enabled
 
 version: '3.8'
@@ -48,7 +48,7 @@ services:
   # Agent Orchestrator
   orchestrator:
     build:
-      context: ../services/agent-orchestrator
+      context: ../services/brotto-orchestrator
       dockerfile: Dockerfile
       target: development
     ports:
@@ -60,7 +60,7 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/fara15_control_plane
       - REDIS_URL=redis://redis:6379
       - CONTROL_PLANE_URL=http://control-plane:3000
-      - FARA_INFERENCE_URL=http://fara-inference:8080
+      - FARA_INFERENCE_URL=http://brotto-inference:8080
       - BROWSER_MCP_GATEWAY_URL=http://browser-mcp-gateway:8080
       - CDP_RELAY_URL=ws://cdp-relay:8080
       - LOG_LEVEL=debug
@@ -72,7 +72,7 @@ services:
       control-plane:
         condition: service_started
     volumes:
-      - ../services/agent-orchestrator/src:/app/src:ro
+      - ../services/brotto-orchestrator/src:/app/src:ro
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
       interval: 30s
@@ -83,10 +83,10 @@ services:
     profiles:
       - core
 
-  # Fara Inference Service (vLLM)
-  fara-inference:
+  # Brotto Inference Service (vLLM)
+  brotto-inference:
     build:
-      context: ../services/fara-inference
+      context: ../services/brotto-inference
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
@@ -102,8 +102,8 @@ services:
       - VLLM_MAX_NUM_SEQS=256
       - VLLM_MAX_NUM_CONCURRENT_LIMIT=256
     volumes:
-      - fara-model-cache:/root/.cache/vllm
-      - fara-model-cache:/root/.cache/huggingface
+      - brotto-model-cache:/root/.cache/vllm
+      - brotto-model-cache:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
@@ -316,6 +316,6 @@ volumes:
   postgres_data:
   redis_data:
   artifact-storage:
-  fara-model-cache:
+  brotto-model-cache:
   prometheus_data:
   grafana_data:

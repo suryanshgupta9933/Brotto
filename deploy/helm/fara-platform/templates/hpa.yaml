@@ -3,15 +3,15 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-control-plane
+  name: {{ include "fara.fullname" . }}-control-plane
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "fara-platform.fullname" . }}-control-plane
+    name: {{ include "fara.fullname" . }}-control-plane
   minReplicas: {{ .Values.controlPlane.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.controlPlane.autoscaling.maxReplicas }}
   metrics:
@@ -34,15 +34,15 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-orchestrator
+  name: {{ include "fara.fullname" . }}-orchestrator
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: orchestrator
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "fara-platform.fullname" . }}-orchestrator
+    name: {{ include "fara.fullname" . }}-orchestrator
   minReplicas: {{ .Values.orchestrator.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.orchestrator.autoscaling.maxReplicas }}
   metrics:
@@ -65,15 +65,15 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-playwright-mcp-gateway
+  name: {{ include "fara.fullname" . }}-playwright-mcp-gateway
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: playwright-mcp-gateway
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "fara-platform.fullname" . }}-playwright-mcp-gateway
+    name: {{ include "fara.fullname" . }}-playwright-mcp-gateway
   minReplicas: {{ .Values.playwrightMcpGateway.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.playwrightMcpGateway.autoscaling.maxReplicas }}
   metrics:
@@ -96,15 +96,15 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-cdp-relay
+  name: {{ include "fara.fullname" . }}-cdp-relay
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: cdp-relay
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "fara-platform.fullname" . }}-cdp-relay
+    name: {{ include "fara.fullname" . }}-cdp-relay
   minReplicas: {{ .Values.cdpRelay.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.cdpRelay.autoscaling.maxReplicas }}
   metrics:
@@ -127,15 +127,15 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-artifact-service
+  name: {{ include "fara.fullname" . }}-artifact-service
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: artifact-service
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "fara-platform.fullname" . }}-artifact-service
+    name: {{ include "fara.fullname" . }}-artifact-service
   minReplicas: {{ .Values.artifactService.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.artifactService.autoscaling.maxReplicas }}
   metrics:
@@ -158,15 +158,15 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-audit-service
+  name: {{ include "fara.fullname" . }}-audit-service
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: audit-service
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "fara-platform.fullname" . }}-audit-service
+    name: {{ include "fara.fullname" . }}-audit-service
   minReplicas: {{ .Values.auditService.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.auditService.autoscaling.maxReplicas }}
   metrics:

@@ -1,5 +1,5 @@
 """
-Authentication helpers for the Fara1.5 Platform SDK
+Authentication helpers for the Brotto Platform SDK
 """
 import base64
 import hashlib

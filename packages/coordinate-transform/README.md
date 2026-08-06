@@ -37,5 +37,5 @@ Actions are rejected when:
 
 ## Related
 
-- [Fara Action Schema](../fara-action-schema/README.md)
+- [Brotto Action Schema](../brotto-action-schema/README.md)
 - [Browser MCP Gateway](../../services/browser-mcp-gateway/README.md)

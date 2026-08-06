@@ -1,6 +1,6 @@
 # Deployment Documentation
 
-Deployment guides and operational documentation for the Fara1.5 Browser Automation Platform.
+Deployment guides and operational documentation for the Brotto Browser Automation Platform.
 
 ## Contents
 
@@ -25,7 +25,7 @@ docker compose up
 
 1. **Kubernetes (Recommended)**
    ```bash
-   helm install fara-platform fara/platform -n fara --create-namespace
+   helm install fara fara/platform -n fara --create-namespace
    ```
 
 2. **Terraform (AWS/GCP/Azure)**

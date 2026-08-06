@@ -1,5 +1,5 @@
 """
-Python types for the Fara1.5 Platform SDK
+Python types for the Brotto Platform SDK
 """
 from enum import Enum
 from typing import Any, Generic, List, Literal, Optional, TypeVar, Dict
@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 
 class ActionType(str, Enum):
-    """Enum of all Fara action types."""
+    """Enum of all Brotto action types."""
     LEFT_CLICK = "left_click"
     DOUBLE_CLICK = "double_click"
     RIGHT_CLICK = "right_click"
@@ -58,7 +58,7 @@ class KeyModifiers(BaseModel):
 
 
 class BaseAction(BaseModel):
-    """Base interface for all Fara actions."""
+    """Base interface for all Brotto actions."""
     id: str
     type: ActionType
     observation_id: str

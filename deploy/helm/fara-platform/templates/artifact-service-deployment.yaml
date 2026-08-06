@@ -2,15 +2,15 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-artifact-service
+  name: {{ include "fara.fullname" . }}-artifact-service
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: artifact-service
 spec:
   replicas: {{ .Values.artifactService.replicaCount }}
   selector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      {{- include "fara.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: artifact-service
   template:
     metadata:
@@ -19,10 +19,10 @@ spec:
         prometheus.io/port: "3001"
         prometheus.io/path: "/metrics"
       labels:
-        {{- include "fara-platform.selectorLabels" . | nindent 8 }}
+        {{- include "fara.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: artifact-service
     spec:
-      serviceAccountName: {{ include "fara-platform.serviceAccountName" . }}
+      serviceAccountName: {{ include "fara.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -75,7 +75,7 @@ spec:
         - name: artifact-storage
           {{- if .Values.artifactService.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ include "fara-platform.fullname" . }}-artifact-service
+            claimName: {{ include "fara.fullname" . }}-artifact-service
           {{- else }}
           emptyDir: {}
           {{- end }}
@@ -95,9 +95,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-artifact-service
+  name: {{ include "fara.fullname" . }}-artifact-service
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: artifact-service
 spec:
   type: {{ .Values.artifactService.service.type }}
@@ -107,16 +107,16 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "fara-platform.selectorLabels" . | nindent 4 }}
+    {{- include "fara.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: artifact-service
 {{- if .Values.artifactService.persistence.enabled }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-artifact-service
+  name: {{ include "fara.fullname" . }}-artifact-service
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: artifact-service
 spec:
   accessModes:

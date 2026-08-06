@@ -1,6 +1,6 @@
 # Shared Telemetry
 
-Shared OpenTelemetry instrumentation for the Fara1.5 platform. Contains common trace/span attributes, exporters configuration, and telemetry utilities.
+Shared OpenTelemetry instrumentation for the Brotto platform. Contains common trace/span attributes, exporters configuration, and telemetry utilities.
 
 ## Purpose
 
@@ -23,7 +23,7 @@ The shared-telemetry package provides:
 All platform services should use shared telemetry to ensure consistent trace context across service boundaries.
 
 ```typescript
-import { createTelemetry, trace, metrics } from '@fara/platform/shared-telemetry';
+import { createTelemetry, trace, metrics } from '@brotto/platform/shared-telemetry';
 
 const { tracer, meter } = createTelemetry({
   serviceName: 'agent-orchestrator',

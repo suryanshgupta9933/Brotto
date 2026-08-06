@@ -2,7 +2,7 @@
   "name": "control-plane-web",
   "version": "0.1.0",
   "private": true,
-  "description": "Web-based control interface for the Fara1.5 Browser Automation Platform",
+  "description": "Web-based control interface for the Brotto Browser Automation Platform",
   "license": "Apache-2.0",
   "scripts": {
     "dev": "vite",

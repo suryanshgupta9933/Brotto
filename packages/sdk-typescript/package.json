@@ -1,7 +1,7 @@
 {
-  "name": "@fara/platform-sdk",
+  "name": "@brotto/platform-sdk",
   "version": "1.0.0",
-  "description": "Official TypeScript SDK for the Fara1.5 Browser Automation Platform",
+  "description": "Official TypeScript SDK for the Brotto Browser Automation Platform",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

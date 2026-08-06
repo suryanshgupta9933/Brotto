@@ -91,9 +91,9 @@ Both run in parallel on observation. Controller receives unified `Observation` w
 
 ## Files to Modify
 
-- `clients/browser-extension/src/canonical/observation.ts` — ~300 new lines
-- `clients/browser-extension/src/canonical/action-executor.ts` — update target matching
-- `clients/browser-extension/src/canonical/types.ts` — add `AccessibilityNode`, `StableRef`
+- `clients/brotto-extension/src/canonical/observation.ts` — ~300 new lines
+- `clients/brotto-extension/src/canonical/action-executor.ts` — update target matching
+- `clients/brotto-extension/src/canonical/types.ts` — add `AccessibilityNode`, `StableRef`
 
 ## Verification
 

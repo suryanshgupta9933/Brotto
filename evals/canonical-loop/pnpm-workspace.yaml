@@ -1,8 +1,8 @@
 packages:
   - .
-  - ../../services/agent-orchestrator
-  - ../../packages/fara-action-schema
-  - ../../packages/relay-protocol
+  - ../../services/brotto-orchestrator
+  - ../../packages/brotto-action-schema
+  - ../../packages/brotto-relay-protocol
   - ../../packages/policy-engine
 
 allowBuilds:

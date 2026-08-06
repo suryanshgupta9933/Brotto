@@ -4,7 +4,7 @@
 
 **Goal:** Prove the MVP loop works end-to-end on a real task — headless Chrome → orchestrator → local Ollama → action → Playwright executes — with one real login task and perf metrics captured.
 
-**Architecture:** Three slices. Slice A: refactor `AgentOrchestrator.plan()` to route through the new `InferencePort`-based planner (Fara + OpenAI share one path). Slice B: build validation + smoke script + README updates + extension packaging script. Slice C: real E2E test with Ollama subprocess + Playwright Chromium + the-internet login flow + GitHub Actions CI.
+**Architecture:** Three slices. Slice A: refactor `AgentOrchestrator.plan()` to route through the new `InferencePort`-based planner (Brotto + OpenAI share one path). Slice B: build validation + smoke script + README updates + extension packaging script. Slice C: real E2E test with Ollama subprocess + Playwright Chromium + the-internet login flow + GitHub Actions CI.
 
 **Tech Stack:** TypeScript, Node 20, Playwright (Chromium), Ollama (`qwen2.5:3b`), Jest (split unit + e2e configs), GitHub Actions.
 
@@ -16,17 +16,17 @@
 
 | File | Status | Responsibility |
 |---|---|---|
-| `services/agent-orchestrator/src/server.ts` | MODIFY | Refactor `plan()` to use `planner.plan()`; remove `FaraInferenceClient` from active path |
-| `services/agent-orchestrator/scripts/smoke.ts` | CREATE | Local Ollama smoke (~80 lines) |
-| `services/agent-orchestrator/__e2e__/fixtures/ollama.ts` | CREATE | Start/stop Ollama subprocess + model pull (~60 lines) |
-| `services/agent-orchestrator/__e2e__/fixtures/playwright-observation.ts` | CREATE | Build `ObservationV1` from Playwright page (~80 lines) |
-| `services/agent-orchestrator/__e2e__/helpers/metrics.ts` | CREATE | Capture + print perf metrics (~40 lines) |
-| `services/agent-orchestrator/__e2e__/mvp.test.ts` | CREATE | Real form-login E2E test (~280 lines) |
-| `services/agent-orchestrator/jest.e2e.config.js` | CREATE | Separate Jest config for E2E |
-| `services/agent-orchestrator/package.json` | MODIFY | Add `smoke` + `test:e2e` scripts; add `playwright` devDep |
-| `services/agent-orchestrator/README.md` | MODIFY | "Run with Ollama" section |
-| `clients/browser-extension/scripts/build-extension.sh` | CREATE | Package extension as `.zip` |
-| `clients/browser-extension/README.md` | MODIFY | Manual install steps |
+| `services/brotto-orchestrator/src/server.ts` | MODIFY | Refactor `plan()` to use `planner.plan()`; remove `FaraInferenceClient` from active path |
+| `services/brotto-orchestrator/scripts/smoke.ts` | CREATE | Local Ollama smoke (~80 lines) |
+| `services/brotto-orchestrator/__e2e__/fixtures/ollama.ts` | CREATE | Start/stop Ollama subprocess + model pull (~60 lines) |
+| `services/brotto-orchestrator/__e2e__/fixtures/playwright-observation.ts` | CREATE | Build `ObservationV1` from Playwright page (~80 lines) |
+| `services/brotto-orchestrator/__e2e__/helpers/metrics.ts` | CREATE | Capture + print perf metrics (~40 lines) |
+| `services/brotto-orchestrator/__e2e__/mvp.test.ts` | CREATE | Real form-login E2E test (~280 lines) |
+| `services/brotto-orchestrator/jest.e2e.config.js` | CREATE | Separate Jest config for E2E |
+| `services/brotto-orchestrator/package.json` | MODIFY | Add `smoke` + `test:e2e` scripts; add `playwright` devDep |
+| `services/brotto-orchestrator/README.md` | MODIFY | "Run with Ollama" section |
+| `clients/brotto-extension/scripts/build-extension.sh` | CREATE | Package extension as `.zip` |
+| `clients/brotto-extension/README.md` | MODIFY | Manual install steps |
 | `.github/workflows/build.yml` | CREATE | Node + pnpm + `pnpm build` + `pnpm test` |
 | `.github/workflows/e2e.yml` | CREATE | Ollama install + Playwright + E2E |
 
@@ -37,12 +37,12 @@
 ## Task 1: Wire `planner.plan()` into `AgentOrchestrator.plan()`
 
 **Files:**
-- Modify: `services/agent-orchestrator/src/server.ts` (~lines 285-340 — the `plan()` method)
-- Modify: `services/agent-orchestrator/src/server.ts` (constructor and `OrchestratorConfig`)
+- Modify: `services/brotto-orchestrator/src/server.ts` (~lines 285-340 — the `plan()` method)
+- Modify: `services/brotto-orchestrator/src/server.ts` (constructor and `OrchestratorConfig`)
 
 - [ ] **Step 1: Read the relevant slices**
 
-Open `services/agent-orchestrator/src/server.ts`:
+Open `services/brotto-orchestrator/src/server.ts`:
 - Line ~47: `OrchestratorConfig` interface
 - Line ~85: `private inference: FaraInferenceClient;`
 - Line ~120: `this.inference = new FaraInferenceClient(config.inference);`
@@ -153,7 +153,7 @@ Add `captureObservation()` method (placeholder for now; real impl comes later in
 
 - [ ] **Step 4: Add regression test for planner invocation**
 
-Create `services/agent-orchestrator/src/__tests__/planner-wiring.test.ts`:
+Create `services/brotto-orchestrator/src/__tests__/planner-wiring.test.ts`:
 
 ```typescript
 import { jest } from '@jest/globals';
@@ -210,21 +210,21 @@ To make the test work, add a `setPlannerForTesting(planner: InferencePort)` meth
 
 - [ ] **Step 5: Run tests**
 
-Run: `cd services/agent-orchestrator && npx jest --testPathPattern planner-wiring`
+Run: `cd services/brotto-orchestrator && npx jest --testPathPattern planner-wiring`
 Expected: PASS, 1 test.
 
-Run full suite: `cd services/agent-orchestrator && npx jest`
+Run full suite: `cd services/brotto-orchestrator && npx jest`
 Expected: PASS — all 30 existing tests + 1 new.
 
 - [ ] **Step 6: Typecheck**
 
-Run: `cd services/agent-orchestrator && npx tsc --noEmit`
+Run: `cd services/brotto-orchestrator && npx tsc --noEmit`
 Expected: clean (pre-existing `terminalId` error in `session-engine.ts:1256` is unrelated).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add services/agent-orchestrator/src/server.ts services/agent-orchestrator/src/__tests__/planner-wiring.test.ts
+git add services/brotto-orchestrator/src/server.ts services/brotto-orchestrator/src/__tests__/planner-wiring.test.ts
 git commit -m "refactor(orchestrator): route plan() through InferencePort planner"
 ```
 
@@ -233,14 +233,14 @@ git commit -m "refactor(orchestrator): route plan() through InferencePort planne
 ## Task 2: Local Smoke Script
 
 **Files:**
-- Create: `services/agent-orchestrator/scripts/smoke.ts` (~80 lines)
-- Modify: `services/agent-orchestrator/package.json` (add `smoke` script)
+- Create: `services/brotto-orchestrator/scripts/smoke.ts` (~80 lines)
+- Modify: `services/brotto-orchestrator/package.json` (add `smoke` script)
 
 - [ ] **Step 1: Create scripts directory and smoke.ts**
 
-Create directory: `services/agent-orchestrator/scripts/`
+Create directory: `services/brotto-orchestrator/scripts/`
 
-Create `services/agent-orchestrator/scripts/smoke.ts`:
+Create `services/brotto-orchestrator/scripts/smoke.ts`:
 
 ```typescript
 #!/usr/bin/env tsx
@@ -314,7 +314,7 @@ main().catch((err) => {
 
 - [ ] **Step 2: Add `smoke` script to package.json**
 
-In `services/agent-orchestrator/package.json`, add to `"scripts"`:
+In `services/brotto-orchestrator/package.json`, add to `"scripts"`:
 
 ```json
 "smoke": "tsx scripts/smoke.ts"
@@ -324,7 +324,7 @@ In `services/agent-orchestrator/package.json`, add to `"scripts"`:
 
 If Ollama is running:
 ```bash
-cd services/agent-orchestrator && OLLAMA_HOST=http://127.0.0.1:11434 SMOKE_MODEL=qwen2.5:3b pnpm smoke
+cd services/brotto-orchestrator && OLLAMA_HOST=http://127.0.0.1:11434 SMOKE_MODEL=qwen2.5:3b pnpm smoke
 ```
 
 Expected: prints `[smoke] family=openai-compatible ... responded in <Xms>` with outcome JSON.
@@ -334,7 +334,7 @@ If Ollama is not running, expect connection error.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add services/agent-orchestrator/scripts/smoke.ts services/agent-orchestrator/package.json
+git add services/brotto-orchestrator/scripts/smoke.ts services/brotto-orchestrator/package.json
 git commit -m "feat(orchestrator): add local smoke script for planner validation"
 ```
 
@@ -343,13 +343,13 @@ git commit -m "feat(orchestrator): add local smoke script for planner validation
 ## Task 3: Extension Packaging Script
 
 **Files:**
-- Create: `clients/browser-extension/scripts/build-extension.sh` (~30 lines)
+- Create: `clients/brotto-extension/scripts/build-extension.sh` (~30 lines)
 
 - [ ] **Step 1: Create scripts directory and build script**
 
-Create directory: `clients/browser-extension/scripts/`
+Create directory: `clients/brotto-extension/scripts/`
 
-Create `clients/browser-extension/scripts/build-extension.sh`:
+Create `clients/brotto-extension/scripts/build-extension.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -379,12 +379,12 @@ ls -lh "$ZIP"
 
 - [ ] **Step 2: Make it executable**
 
-Run: `chmod +x clients/browser-extension/scripts/build-extension.sh`
+Run: `chmod +x clients/brotto-extension/scripts/build-extension.sh`
 
 - [ ] **Step 3: Verify the script runs (without errors)**
 
 ```bash
-cd clients/browser-extension && bash scripts/build-extension.sh
+cd clients/brotto-extension && bash scripts/build-extension.sh
 ```
 
 Expected: ends with `Built .../build/browser-extension-1.0.0.zip`. If the existing `build.mjs` fails (e.g., missing node_modules in fresh checkout), that's a pre-existing issue — note it and continue.
@@ -392,7 +392,7 @@ Expected: ends with `Built .../build/browser-extension-1.0.0.zip`. If the existi
 - [ ] **Step 4: Commit**
 
 ```bash
-git add clients/browser-extension/scripts/build-extension.sh
+git add clients/brotto-extension/scripts/build-extension.sh
 git commit -m "feat(extension): add build-extension.sh packaging script"
 ```
 
@@ -401,11 +401,11 @@ git commit -m "feat(extension): add build-extension.sh packaging script"
 ## Task 4: Orchestrator README Update
 
 **Files:**
-- Modify: `services/agent-orchestrator/README.md`
+- Modify: `services/brotto-orchestrator/README.md`
 
 - [ ] **Step 1: Read existing README**
 
-Open `services/agent-orchestrator/README.md` to find the existing structure.
+Open `services/brotto-orchestrator/README.md` to find the existing structure.
 
 - [ ] **Step 2: Add "Run with Ollama" section**
 
@@ -442,7 +442,7 @@ For OpenAI / Azure OpenAI, set `OPENAI_API_KEY` or `AZURE_OPENAI_API_KEY` + `AZU
 - [ ] **Step 3: Commit**
 
 ```bash
-git add services/agent-orchestrator/README.md
+git add services/brotto-orchestrator/README.md
 git commit -m "docs(orchestrator): add Run with Ollama section"
 ```
 
@@ -451,11 +451,11 @@ git commit -m "docs(orchestrator): add Run with Ollama section"
 ## Task 5: Extension README Update
 
 **Files:**
-- Modify: `clients/browser-extension/README.md`
+- Modify: `clients/brotto-extension/README.md`
 
 - [ ] **Step 1: Read existing README**
 
-Open `clients/browser-extension/README.md` to find existing structure.
+Open `clients/brotto-extension/README.md` to find existing structure.
 
 - [ ] **Step 2: Add "Manual Install" section**
 
@@ -471,8 +471,8 @@ Add (or extend) an "Install in Chrome" section:
    ```
 2. Open `chrome://extensions/` in Chrome
 3. Enable "Developer mode" (top right)
-4. Click "Load unpacked" and select `clients/browser-extension/dist/`
-5. Or drag `clients/browser-extension/build/browser-extension-<version>.zip` onto the extensions page
+4. Click "Load unpacked" and select `clients/brotto-extension/dist/`
+5. Or drag `clients/brotto-extension/build/browser-extension-<version>.zip` onto the extensions page
 
 The extension connects to the orchestrator via WSS. Configure the server URL in the extension's options page.
 ```
@@ -480,7 +480,7 @@ The extension connects to the orchestrator via WSS. Configure the server URL in 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add clients/browser-extension/README.md
+git add clients/brotto-extension/README.md
 git commit -m "docs(extension): add manual Chrome install steps"
 ```
 
@@ -489,13 +489,13 @@ git commit -m "docs(extension): add manual Chrome install steps"
 ## Task 6: Ollama Fixture for E2E
 
 **Files:**
-- Create: `services/agent-orchestrator/__e2e__/fixtures/ollama.ts`
+- Create: `services/brotto-orchestrator/__e2e__/fixtures/ollama.ts`
 
 - [ ] **Step 1: Create __e2e__ directory and fixture**
 
-Create directory: `services/agent-orchestrator/__e2e__/fixtures/`
+Create directory: `services/brotto-orchestrator/__e2e__/fixtures/`
 
-Create `services/agent-orchestrator/__e2e__/fixtures/ollama.ts`:
+Create `services/brotto-orchestrator/__e2e__/fixtures/ollama.ts`:
 
 ```typescript
 import { spawn, exec as execCb } from "node:child_process";
@@ -564,13 +564,13 @@ export async function isOllamaAvailable(): Promise<boolean> {
 
 - [ ] **Step 2: Sanity-check the file compiles**
 
-Run: `cd services/agent-orchestrator && npx tsc --noEmit`
+Run: `cd services/brotto-orchestrator && npx tsc --noEmit`
 Expected: clean.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add services/agent-orchestrator/__e2e__/fixtures/ollama.ts
+git add services/brotto-orchestrator/__e2e__/fixtures/ollama.ts
 git commit -m "test(orchestrator): add Ollama subprocess fixture for E2E"
 ```
 
@@ -579,25 +579,25 @@ git commit -m "test(orchestrator): add Ollama subprocess fixture for E2E"
 ## Task 7: Playwright Observation Builder
 
 **Files:**
-- Create: `services/agent-orchestrator/__e2e__/fixtures/playwright-observation.ts`
+- Create: `services/brotto-orchestrator/__e2e__/fixtures/playwright-observation.ts`
 
 - [ ] **Step 1: Add Playwright devDep**
 
-In `services/agent-orchestrator/package.json` `devDependencies`, add:
+In `services/brotto-orchestrator/package.json` `devDependencies`, add:
 
 ```json
 "playwright": "^1.45.0"
 ```
 
-Run: `cd services/agent-orchestrator && pnpm install`
+Run: `cd services/brotto-orchestrator && pnpm install`
 
 - [ ] **Step 2: Create observation builder**
 
-Create `services/agent-orchestrator/__e2e__/fixtures/playwright-observation.ts`:
+Create `services/brotto-orchestrator/__e2e__/fixtures/playwright-observation.ts`:
 
 ```typescript
 import type { Page } from "playwright";
-import type { ObservationV1, SemanticTarget, AccessibilityNode } from "@fara-platform/fara-action-schema";
+import type { ObservationV1, SemanticTarget, AccessibilityNode } from "@brotto/brotto-action-schema";
 
 const VALID_HASH = "a".repeat(64);
 
@@ -704,13 +704,13 @@ export async function captureObservation(page: Page): Promise<ObservationV1> {
 
 - [ ] **Step 3: Typecheck**
 
-Run: `cd services/agent-orchestrator && npx tsc --noEmit`
+Run: `cd services/brotto-orchestrator && npx tsc --noEmit`
 Expected: clean.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add services/agent-orchestrator/__e2e__/fixtures/playwright-observation.ts services/agent-orchestrator/package.json pnpm-lock.yaml
+git add services/brotto-orchestrator/__e2e__/fixtures/playwright-observation.ts services/brotto-orchestrator/package.json pnpm-lock.yaml
 git commit -m "test(orchestrator): add Playwright observation builder for E2E"
 ```
 
@@ -719,11 +719,11 @@ git commit -m "test(orchestrator): add Playwright observation builder for E2E"
 ## Task 8: Metrics Helper
 
 **Files:**
-- Create: `services/agent-orchestrator/__e2e__/helpers/metrics.ts`
+- Create: `services/brotto-orchestrator/__e2e__/helpers/metrics.ts`
 
 - [ ] **Step 1: Create helper**
 
-Create `services/agent-orchestrator/__e2e__/helpers/metrics.ts`:
+Create `services/brotto-orchestrator/__e2e__/helpers/metrics.ts`:
 
 ```typescript
 interface StepRecord {
@@ -775,12 +775,12 @@ export class MetricsCollector {
 
 - [ ] **Step 2: Typecheck**
 
-Run: `cd services/agent-orchestrator && npx tsc --noEmit`
+Run: `cd services/brotto-orchestrator && npx tsc --noEmit`
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add services/agent-orchestrator/__e2e__/helpers/metrics.ts
+git add services/brotto-orchestrator/__e2e__/helpers/metrics.ts
 git commit -m "test(orchestrator): add metrics collector for E2E"
 ```
 
@@ -789,12 +789,12 @@ git commit -m "test(orchestrator): add metrics collector for E2E"
 ## Task 9: E2E Test (the real one)
 
 **Files:**
-- Create: `services/agent-orchestrator/__e2e__/mvp.test.ts` (~280 lines)
-- Create: `services/agent-orchestrator/jest.e2e.config.js`
+- Create: `services/brotto-orchestrator/__e2e__/mvp.test.ts` (~280 lines)
+- Create: `services/brotto-orchestrator/jest.e2e.config.js`
 
 - [ ] **Step 1: Create Jest E2E config**
 
-Create `services/agent-orchestrator/jest.e2e.config.js`:
+Create `services/brotto-orchestrator/jest.e2e.config.js`:
 
 ```javascript
 export default {
@@ -814,7 +814,7 @@ export default {
 
 - [ ] **Step 2: Add `test:e2e` script**
 
-In `services/agent-orchestrator/package.json` `scripts`:
+In `services/brotto-orchestrator/package.json` `scripts`:
 
 ```json
 "test:e2e": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.e2e.config.js --runInBand"
@@ -822,12 +822,12 @@ In `services/agent-orchestrator/package.json` `scripts`:
 
 - [ ] **Step 3: Create orchestrator fixture**
 
-Create `services/agent-orchestrator/__e2e__/fixtures/orchestrator.ts`:
+Create `services/brotto-orchestrator/__e2e__/fixtures/orchestrator.ts`:
 
 ```typescript
 import { AgentOrchestrator, type OrchestratorConfig } from "../../src/server.js";
 import type { PlanningInput, PlanningOutcome } from "../../src/engine/types.js";
-import type { ObservationV1 } from "@fara-platform/fara-action-schema";
+import type { ObservationV1 } from "@brotto/brotto-action-schema";
 
 export interface OrchestratorFixture {
   planStep: (observation: ObservationV1) => Promise<PlanningOutcome>;
@@ -899,7 +899,7 @@ In `plan()`, after `this.planner.plan(...)` returns:
 
 - [ ] **Step 4: Create the E2E test**
 
-Create `services/agent-orchestrator/__e2e__/mvp.test.ts`:
+Create `services/brotto-orchestrator/__e2e__/mvp.test.ts`:
 
 ```typescript
 import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
@@ -998,13 +998,13 @@ describe("MVP E2E (Ollama + Playwright)", () => {
 
 - [ ] **Step 5: Verify test compiles**
 
-Run: `cd services/agent-orchestrator && npx tsc --noEmit`
+Run: `cd services/brotto-orchestrator && npx tsc --noEmit`
 Expected: clean.
 
 - [ ] **Step 6: Run E2E locally (requires Ollama)**
 
 ```bash
-cd services/agent-orchestrator && ollama serve &
+cd services/brotto-orchestrator && ollama serve &
 ollama pull qwen2.5:3b
 pnpm test:e2e
 ```
@@ -1016,7 +1016,7 @@ If the test fails because the model is too weak for the form-login task, switch 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add services/agent-orchestrator/__e2e__ services/agent-orchestrator/jest.e2e.config.js services/agent-orchestrator/package.json
+git add services/brotto-orchestrator/__e2e__ services/brotto-orchestrator/jest.e2e.config.js services/brotto-orchestrator/package.json
 git commit -m "test(orchestrator): add E2E test for form-login with Ollama+Playwright"
 ```
 
@@ -1074,8 +1074,8 @@ name: e2e
 on:
   pull_request:
     paths:
-      - "services/agent-orchestrator/**"
-      - "packages/fara-action-schema/**"
+      - "services/brotto-orchestrator/**"
+      - "packages/brotto-action-schema/**"
       - ".github/workflows/e2e.yml"
   workflow_dispatch:
 
@@ -1121,17 +1121,17 @@ jobs:
           restore-keys: ollama-
 
       - name: Install Playwright Chromium
-        run: cd services/agent-orchestrator && pnpm exec playwright install chromium
+        run: cd services/brotto-orchestrator && pnpm exec playwright install chromium
 
       - name: Run E2E test
-        run: cd services/agent-orchestrator && pnpm test:e2e
+        run: cd services/brotto-orchestrator && pnpm test:e2e
 
       - name: Upload metrics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-metrics
-          path: services/agent-orchestrator/__e2e__/metrics.log
+          path: services/brotto-orchestrator/__e2e__/metrics.log
           if-no-files-found: ignore
 ```
 

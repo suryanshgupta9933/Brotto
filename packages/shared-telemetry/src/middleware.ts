@@ -1,5 +1,5 @@
 /**
- * Server middleware for Fara1.5 Browser Automation Platform
+ * Server middleware for Brotto Browser Automation Platform
  *
  * Provides easy integration with Fastify and Express servers.
  * Automatically propagates trace context and adds standard headers.

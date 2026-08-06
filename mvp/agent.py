@@ -1,9 +1,9 @@
 """
-MVP Browser Agent using Fara via Ollama
+MVP Browser Agent using Brotto via Ollama
 
 A simple implementation demonstrating the core loop:
 1. Take screenshot
-2. Send to Fara (Ollama)
+2. Send to Brotto (Ollama)
 3. Parse action
 4. Execute in browser
 """
@@ -44,7 +44,7 @@ class Action:
 
 
 class MVPAgent:
-    """MVP Browser Agent using Fara + Playwright"""
+    """MVP Browser Agent using Brotto + Playwright"""
 
     def __init__(self, config: AgentConfig = None):
         self.config = config or AgentConfig()
@@ -87,14 +87,14 @@ class MVPAgent:
         return base64.b64encode(screenshot_bytes).decode()
 
     def query_fara(self, goal: str, screenshot_base64: str, history: list[dict] = None) -> dict:
-        """Query Fara model via Ollama API"""
+        """Query Brotto model via Ollama API"""
         history = history or []
 
         # Build messages
         messages = [
             {
                 "role": "system",
-                "content": """You are Fara, a browser automation agent. You see screenshots and decide actions.
+                "content": """You are Brotto, a browser automation agent. You see screenshots and decide actions.
 
 Actions available:
 - visit_url(url): Navigate to URL
@@ -292,8 +292,8 @@ Respond ONLY with a JSON object:
                 screenshot = self.take_screenshot()
                 screenshot_b64 = self.encode_image(screenshot)
 
-                # Query Fara
-                print(f"Querying Fara...")
+                # Query Brotto
+                print(f"Querying Brotto...")
                 response = self.query_fara(goal, screenshot_b64, history)
 
                 action_type = response.get("action", "done")

@@ -3,9 +3,9 @@
 apiVersion: 1
 
 providers:
-  - name: 'Fara1.5 Dashboards'
+  - name: 'Brotto Dashboards'
     orgId: 1
-    folder: 'Fara1.5'
+    folder: 'Brotto'
     folderUid: 'fara15'
     type: file
     disableDeletion: false

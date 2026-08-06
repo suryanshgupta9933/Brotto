@@ -1,6 +1,6 @@
-# Fara1.5 Evaluation Suite
+# Brotto Evaluation Suite
 
-Comprehensive test suite for the Fara1.5 Browser Automation Platform.
+Comprehensive test suite for the Brotto Browser Automation Platform.
 
 ## Directory Structure
 
@@ -21,7 +21,7 @@ evals/
 
 Unit tests for core packages:
 - `coordinate-transform` - Coordinate transformation and validation
-- `fara-action-schema` - Action parsing and validation
+- `brotto-action-schema` - Action parsing and validation
 - `policy-engine` - Policy evaluation and approval
 - `relay-protocol` - Protocol serialization and session management
 
@@ -35,7 +35,7 @@ npm test
 
 Contract tests ensuring protocol compatibility:
 - `relay-protocol.test.ts` - Connector-to-relay and extension-to-relay protocols
-- `mcp-mapping.test.ts` - Fara action to MCP tool mapping
+- `mcp-mapping.test.ts` - Brotto action to MCP tool mapping
 - `model-prompt.test.ts` - Model prompt version compatibility
 
 Run contract tests:

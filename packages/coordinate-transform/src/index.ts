@@ -13,7 +13,7 @@
  *   validateAction,
  *   getDefaultStore,
  *   InMemoryTransformStore,
- * } from '@fara-platform/coordinate-transform';
+ * } from '@brotto/coordinate-transform';
  *
  * // Create a transform store
  * const store = new InMemoryTransformStore();

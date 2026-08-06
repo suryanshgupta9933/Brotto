@@ -1,7 +1,7 @@
 /**
  * Contract tests for MCP mapping
  *
- * Tests Fara action to MCP tool parameter mapping
+ * Tests Brotto action to MCP tool parameter mapping
  * and version compatibility.
  */
 
@@ -14,7 +14,7 @@ import {
   ActionExecutionType,
   McpToolName,
   FARA_ACTION_TO_MCP_TOOL,
-} from '@fara-platform/fara-action-schema';
+} from '@brotto/brotto-action-schema';
 
 describe('MCP Mapping Contract Tests', () => {
   describe('Action to MCP Tool Mapping', () => {

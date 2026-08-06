@@ -3,12 +3,12 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "fara-platform.fullname" . }}
+  name: {{ include "fara.fullname" . }}
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
 spec:
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 4 }}
+      {{- include "fara.selectorLabels" . | nindent 4 }}
 {{- end }}

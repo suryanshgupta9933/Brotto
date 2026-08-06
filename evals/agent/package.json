@@ -1,8 +1,8 @@
 {
-  "name": "@fara-platform/evals-agent",
+  "name": "@brotto/evals-agent",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent evaluation suite for Fara1.5",
+  "description": "Agent evaluation suite for Brotto",
   "type": "module",
   "scripts": {
     "test": "playwright test",

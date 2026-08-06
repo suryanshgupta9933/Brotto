@@ -1,6 +1,6 @@
 # Terraform Examples
 
-Infrastructure as Code examples for deploying the Fara1.5 platform to cloud providers.
+Infrastructure as Code examples for deploying the Brotto platform to cloud providers.
 
 ## Purpose
 

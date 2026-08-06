@@ -1,4 +1,4 @@
-# Fara1.5 Platform - Production Docker Compose
+# Brotto Platform - Production Docker Compose
 # Production-like setup with resource limits and security hardening
 
 version: '3.8'
@@ -63,7 +63,7 @@ services:
   orchestrator:
     image: ghcr.io/inventic/fara15/orchestrator:${IMAGE_TAG:-latest}
     build:
-      context: ../services/agent-orchestrator
+      context: ../services/brotto-orchestrator
       dockerfile: Dockerfile
     ports:
       - "3002:3000"
@@ -74,7 +74,7 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - REDIS_URL=redis://${REDIS_PASSWORD}@redis:6379
       - CONTROL_PLANE_URL=http://control-plane:3000
-      - FARA_INFERENCE_URL=http://fara-inference:8080
+      - FARA_INFERENCE_URL=http://brotto-inference:8080
       - BROWSER_MCP_GATEWAY_URL=http://browser-mcp-gateway:8080
       - CDP_RELAY_URL=ws://cdp-relay:8080
       - LOG_LEVEL=info
@@ -113,11 +113,11 @@ services:
     profiles:
       - core
 
-  # Fara Inference Service (vLLM) - GPU Required
-  fara-inference:
-    image: ghcr.io/inventic/fara15/fara-inference:${IMAGE_TAG:-latest}
+  # Brotto Inference Service (vLLM) - GPU Required
+  brotto-inference:
+    image: ghcr.io/inventic/fara15/brotto-inference:${IMAGE_TAG:-latest}
     build:
-      context: ../services/fara-inference
+      context: ../services/brotto-inference
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
@@ -133,10 +133,10 @@ services:
       - VLLM_MAX_NUM_SEQS=256
       - VLLM_MAX_NUM_CONCURRENT_LIMIT=256
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
-      - OTEL_SERVICE_NAME=fara-inference
+      - OTEL_SERVICE_NAME=brotto-inference
     volumes:
-      - fara-model-cache:/root/.cache/vllm
-      - fara-model-cache:/root/.cache/huggingface
+      - brotto-model-cache:/root/.cache/vllm
+      - brotto-model-cache:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
@@ -394,7 +394,7 @@ volumes:
     driver: local
   artifact-storage:
     driver: local
-  fara-model-cache:
+  brotto-model-cache:
     driver: local
 
 networks:

@@ -41,7 +41,7 @@ import {
   createClientTLSConfig,
   requiresClientCert,
   getSecureCipherSuites,
-} from '@fara/platform/relay-protocol';
+} from '@brotto/platform/relay-protocol';
 
 describe('Relay Protocol Package', () => {
   describe('Message Serialization', () => {

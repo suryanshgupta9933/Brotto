@@ -12,14 +12,14 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "fara-eval.py"
-FIXTURE_PATH = ROOT / "fixtures" / "fara-eval-cases.json"
+MODULE_PATH = ROOT / "brotto-eval.py"
+FIXTURE_PATH = ROOT / "fixtures" / "brotto-eval-cases.json"
 
 
 def load_module():
-    spec = importlib.util.spec_from_file_location("fara_eval", MODULE_PATH)
+    spec = importlib.util.spec_from_file_location("brotto_eval", MODULE_PATH)
     if spec is None or spec.loader is None:
-        raise RuntimeError("unable to load fara-eval.py")
+        raise RuntimeError("unable to load brotto-eval.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -28,7 +28,7 @@ def load_module():
 
 class FaraEvalTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.assertTrue(MODULE_PATH.is_file(), "fara-eval.py must exist")
+        self.assertTrue(MODULE_PATH.is_file(), "brotto-eval.py must exist")
         self.module = load_module()
 
     def test_fixture_corpus_scores_contract_failures_and_representative_tasks(self) -> None:
@@ -184,7 +184,7 @@ class FaraEvalTests(unittest.TestCase):
 
         class Response:
             status = 200
-            headers = {"x-fara-repair-count": "2"}
+            headers = {"x-brotto-repair-count": "2"}
 
             def __enter__(self):
                 return self

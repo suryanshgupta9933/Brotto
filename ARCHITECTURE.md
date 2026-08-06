@@ -1,4 +1,4 @@
-# Fara1.5 Browser Automation Platform
+# Brotto Browser Automation Platform
 
 ## Architecture and Implementation Plan
 
@@ -22,7 +22,7 @@ Build the platform around a **server-hosted agent harness** and two thin client 
 
 The server should run:
 
-* Fara1.5 inference.
+* Brotto inference.
 * The complete agent loop and memory.
 * Playwright MCP.
 * CDP relay and session routing.
@@ -33,11 +33,11 @@ The server should run:
 
 The preferred model configuration is:
 
-* **Fara1.5-9B:** default production model.
-* **Fara1.5-4B:** economical or self-hosted profile.
-* **Fara1.5-27B:** optional quality-focused deployment.
+* **Brotto-9B:** default production model.
+* **Brotto-4B:** economical or self-hosted profile.
+* **Brotto-27B:** optional quality-focused deployment.
 
-Fara1.5 is a screenshot-based computer-use model. It sees screenshots rather than the DOM or accessibility tree and produces coordinate-grounded actions such as clicks, typing, scrolling, and URL navigation. Therefore, Playwright MCP should be treated as the **browser execution layer**, not as the interface directly exposed to the model.
+Brotto is a screenshot-based computer-use model. It sees screenshots rather than the DOM or accessibility tree and produces coordinate-grounded actions such as clicks, typing, scrolling, and URL navigation. Therefore, Playwright MCP should be treated as the **browser execution layer**, not as the interface directly exposed to the model.
 
 ---
 
@@ -53,14 +53,14 @@ Fara1.5 is a screenshot-based computer-use model. It sees screenshots rather tha
 │                     Agent Orchestrator                      │
 │                                                             │
 │  Session State Machine                                      │
-│  Fara Prompt and History Manager                            │
+│  Brotto Prompt and History Manager                            │
 │  Action Parser and Validator                                │
 │  Policy and Critical-Action Engine                          │
 │  Retry, Budget and Failure Management                       │
 └───────────────┬───────────────────────────┬─────────────────┘
                 │                           │
 ┌───────────────▼─────────────┐  ┌─────────▼─────────────────┐
-│     Fara Inference API      │  │   Browser MCP Gateway     │
+│     Brotto Inference API      │  │   Browser MCP Gateway     │
 │  vLLM · 4B/9B/27B models   │  │ Playwright MCP per session│
 └─────────────────────────────┘  └─────────┬─────────────────┘
                                           │ Internal CDP
@@ -138,8 +138,8 @@ Responsibilities:
 
 * Maintain the task goal.
 * Maintain bounded action and screenshot history.
-* Request inference from Fara.
-* Parse Fara tool calls.
+* Request inference from Brotto.
+* Parse Brotto tool calls.
 * Validate all model arguments.
 * Request policy approval.
 * Execute approved actions through MCP.
@@ -157,7 +157,7 @@ Do not let the model directly control:
 * System commands.
 * Policy settings.
 
-## 3.3 Fara inference service
+## 3.3 Brotto inference service
 
 Use an OpenAI-compatible inference endpoint behind the orchestrator. The official 4B model card supports serving through vLLM and identifies the model as MIT-licensed.
 
@@ -165,20 +165,20 @@ Recommended deployment profiles:
 
 ### Standard profile
 
-* Fara1.5-9B.
+* Brotto-9B.
 * GPU-backed vLLM deployment.
 * Continuous batching.
 * Separate inference autoscaling from orchestration autoscaling.
 
 ### Economy profile
 
-* Fara1.5-4B.
+* Brotto-4B.
 * Lower GPU memory requirement.
 * Suitable for development, private installations, and less complex flows.
 
 ### Quality profile
 
-* Fara1.5-27B.
+* Brotto-27B.
 * Used selectively for difficult or long-tail tasks.
 * Optional routing after repeated 9B failures.
 
@@ -202,13 +202,13 @@ The MCP server should be accessed through local IPC, STDIO, or a private interna
 
 Playwright MCP explicitly states that it is not itself a security boundary. Its allowed-origin and blocked-origin options are useful controls, but they do not protect redirects and must not replace network-level enforcement.
 
-## 3.5 Fara action adapter
+## 3.5 Brotto action adapter
 
-This is a critical component because Fara's native action format and Playwright MCP's tools do not align perfectly.
+This is a critical component because Brotto's native action format and Playwright MCP's tools do not align perfectly.
 
 Suggested mappings:
 
-| Fara action               | Execution tool                               |
+| Brotto action               | Execution tool                               |
 | ------------------------- | -------------------------------------------- |
 | `left_click`              | `browser_mouse_click_xy`                     |
 | `double_click`            | `browser_mouse_click_xy` with `clickCount=2` |
@@ -227,7 +227,7 @@ Suggested mappings:
 
 ### Typing nuance
 
-Fara expects to type into the currently focused field. Standard Playwright MCP typing normally expects an identified element.
+Brotto expects to type into the currently focused field. Standard Playwright MCP typing normally expects an identified element.
 
 Add a small, audited MCP tool such as:
 
@@ -241,7 +241,7 @@ Do not expose `browser_run_code_unsafe`. Playwright describes this tool as arbit
 
 ## 3.6 Observation and verification layer
 
-Fara should receive:
+Brotto should receive:
 
 * The current screenshot.
 * The user's original goal.
@@ -252,7 +252,7 @@ Fara should receive:
 
 Keep only a limited number of screenshots in the active prompt and store the full trajectory separately.
 
-Playwright's accessibility snapshot can be used as an **out-of-band verifier**, even though it should not replace screenshots in Fara's perception loop. For example:
+Playwright's accessibility snapshot can be used as an **out-of-band verifier**, even though it should not replace screenshots in Brotto's perception loop. For example:
 
 * Confirm that a button click opened the expected dialog.
 * Confirm that text appeared.
@@ -260,7 +260,7 @@ Playwright's accessibility snapshot can be used as an **out-of-band verifier**, 
 * Detect that the browser navigated to an unexpected domain.
 * Validate success before declaring a task complete.
 
-This hybrid design preserves Fara's trained visual behavior while using deterministic browser information for safety and reliability.
+This hybrid design preserves Brotto's trained visual behavior while using deterministic browser information for safety and reliability.
 
 ---
 
@@ -272,7 +272,7 @@ Create a small native connector in **Rust or Go** rather than bundling an entire
 
 The server still contains:
 
-* Fara.
+* Brotto.
 * Agent logic.
 * Playwright MCP.
 * Policies.
@@ -515,7 +515,7 @@ MCP security guidance recommends securely generated state handles, binding handl
 
 # 7. Coordinate and screenshot handling
 
-Fara makes coordinate-based decisions, so screenshot consistency is fundamental.
+Brotto makes coordinate-based decisions, so screenshot consistency is fundamental.
 
 ## Required controls
 
@@ -617,7 +617,7 @@ Require user approval before:
 * Changing payment details.
 * Completing a CAPTCHA.
 
-Fara itself is trained around critical-point pauses for personal information, submissions, sign-ins, payments, messages, and irreversible actions, but this model behavior should be reinforced through deterministic server policies.
+Brotto itself is trained around critical-point pauses for personal information, submissions, sign-ins, payments, messages, and irreversible actions, but this model behavior should be reinforced through deterministic server policies.
 
 The approval screen should show:
 
@@ -824,7 +824,7 @@ Do not add stealth, fingerprint evasion, CAPTCHA bypassing, or anti-bot circumve
 /services
   /api-gateway
   /agent-orchestrator
-  /fara-inference
+  /brotto-inference
   /browser-mcp-gateway
   /cdp-relay
   /artifact-service
@@ -832,11 +832,10 @@ Do not add stealth, fingerprint evasion, CAPTCHA bypassing, or anti-bot circumve
 
 /clients
   /desktop-connector
-  /browser-extension
-
+  ...
 /packages
   /relay-protocol
-  /fara-action-schema
+  /brotto-action-schema
   /policy-engine
   /coordinate-transform
   /sdk-typescript
@@ -875,7 +874,7 @@ Reasons:
 * Playwright MCP is Apache-2.0.
 * Apache-2.0 contains an explicit patent grant.
 * It is appropriate for commercial and open-source adoption.
-* Fara1.5 model weights are MIT-licensed and can remain an external dependency rather than being included directly in the repository.
+* Brotto model weights are MIT-licensed and can remain an external dependency rather than being included directly in the repository.
 
 Include:
 
@@ -921,7 +920,7 @@ Suggested images:
 ```text
 project/control-plane
 project/orchestrator
-project/fara-inference
+project/brotto-inference
 project/playwright-mcp-gateway
 project/cdp-relay
 project/artifact-service
@@ -963,7 +962,7 @@ Publish:
 * Scan containers and ZIP packages.
 * Use protected release workflows.
 * Require two-person approval for releases.
-* Fuzz the relay parser and Fara action parser.
+* Fuzz the relay parser and Brotto action parser.
 
 ---
 
@@ -975,7 +974,7 @@ Deliverables:
 
 * Architecture decision records.
 * Threat model.
-* Fara 4B versus 9B evaluation.
+* Brotto 4B versus 9B evaluation.
 * Playwright MCP vision test.
 * CDP connection test.
 * Extension relay proof of concept.
@@ -984,7 +983,7 @@ Deliverables:
 Acceptance criteria:
 
 * Model output can be parsed reliably.
-* All required Fara actions have an execution mapping.
+* All required Brotto actions have an execution mapping.
 * Screenshots and coordinates remain aligned.
 * Server-side MCP controls a remote client browser.
 * Disconnecting the relay immediately stops browser control.
@@ -1010,12 +1009,12 @@ Acceptance criteria:
 * Connector safely recovers from temporary network loss.
 * Debugging shuts down after session revocation.
 
-## Phase 2 — Core Fara agent loop
+## Phase 2 — Core Brotto agent loop
 
 Deliverables:
 
 * vLLM inference service.
-* Fara prompt manager.
+* Brotto prompt manager.
 * Tool-call parser.
 * MCP action adapter.
 * Screenshot normalization.
@@ -1161,7 +1160,7 @@ Acceptance criteria:
 
 ## Unit tests
 
-* Fara action parsing.
+* Brotto action parsing.
 * Action validation.
 * Coordinate transforms.
 * Policy evaluation.
@@ -1175,7 +1174,7 @@ Acceptance criteria:
 * Connector-to-relay protocol.
 * Extension-to-relay protocol.
 * Relay-to-CDP mapping.
-* Fara action-to-MCP mapping.
+* Brotto action-to-MCP mapping.
 * MCP version compatibility.
 * Model prompt version compatibility.
 
@@ -1277,9 +1276,9 @@ Track:
 
 ## Model
 
-* Fara1.5-9B as default.
-* Fara1.5-4B as economical profile.
-* Fara1.5-27B as optional escalation profile.
+* Brotto-9B as default.
+* Brotto-4B as economical profile.
+* Brotto-27B as optional escalation profile.
 
 ## Browser transport
 
@@ -1294,12 +1293,12 @@ Track:
 The recommended defaults are:
 
 1. Apache-2.0 source-code license.
-2. Fara1.5-9B as the standard model.
+2. Brotto-9B as the standard model.
 3. Dedicated browser profile for the desktop connector.
 4. Existing browser profile only through explicit extension attachment.
 5. Outbound WSS relay rather than inbound public CDP.
 6. Server-only Playwright MCP and agent harness.
-7. Fixed Fara action schema with a controlled MCP adapter.
+7. Fixed Brotto action schema with a controlled MCP adapter.
 8. Mandatory approval for irreversible actions.
 9. No arbitrary Playwright code execution.
 10. Screenshot retention disabled by default.

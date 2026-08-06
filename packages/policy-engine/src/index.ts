@@ -1,7 +1,7 @@
 /**
  * Policy Engine Package
  *
- * A comprehensive policy enforcement library for the Fara1.5 Browser Automation Platform.
+ * A comprehensive policy enforcement library for the Brotto Browser Automation Platform.
  * Provides critical action classification, domain allowlisting, policy evaluation,
  * approval management, consequence description, budget tracking, and session state checking.
  *

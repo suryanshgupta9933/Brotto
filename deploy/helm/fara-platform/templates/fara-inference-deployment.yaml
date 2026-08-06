@@ -2,16 +2,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-fara-inference
+  name: {{ include "fara.fullname" . }}-brotto-inference
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
-    app.kubernetes.io/component: fara-inference
+    {{- include "fara.labels" . | nindent 4 }}
+    app.kubernetes.io/component: brotto-inference
 spec:
   replicas: {{ .Values.faraInference.replicaCount }}
   selector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: fara-inference
+      {{- include "fara.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: brotto-inference
   template:
     metadata:
       annotations:
@@ -19,14 +19,14 @@ spec:
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
       labels:
-        {{- include "fara-platform.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: fara-inference
+        {{- include "fara.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: brotto-inference
     spec:
-      serviceAccountName: {{ include "fara-platform.serviceAccountName" . }}
+      serviceAccountName: {{ include "fara.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-        - name: fara-inference
+        - name: brotto-inference
           image: "{{ .Values.global.imageRegistry }}/{{ .Values.faraInference.image.repository }}:{{ .Values.imageTag }}"
           imagePullPolicy: {{ .Values.faraInference.image.pullPolicy }}
           ports:
@@ -48,7 +48,7 @@ spec:
             - name: VLLM_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "fara-platform.fullname" . }}-secrets
+                  name: {{ include "fara.fullname" . }}-secrets
                   key: vllm-api-key
             - name: VLLM_MAX_MODEL_LEN
               value: {{ .Values.faraInference.env.VLLM_MAX_MODEL_LEN | quote }}
@@ -61,7 +61,7 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.opentelemetry.exporterEndpoint | quote }}
             - name: OTEL_SERVICE_NAME
-              value: "fara-inference"
+              value: "brotto-inference"
           livenessProbe:
             httpGet:
               path: /health
@@ -91,7 +91,7 @@ spec:
         {{- if .Values.faraInference.persistence.modelCache.enabled }}
         - name: model-cache
           persistentVolumeClaim:
-            claimName: {{ include "fara-platform.fullname" . }}-fara-inference-model-cache
+            claimName: {{ include "fara.fullname" . }}-brotto-inference-model-cache
         {{- end }}
       {{- with .Values.faraInference.nodeSelector }}
       nodeSelector:
@@ -109,10 +109,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-fara-inference
+  name: {{ include "fara.fullname" . }}-brotto-inference
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
-    app.kubernetes.io/component: fara-inference
+    {{- include "fara.labels" . | nindent 4 }}
+    app.kubernetes.io/component: brotto-inference
 spec:
   type: {{ .Values.faraInference.service.type }}
   ports:
@@ -125,17 +125,17 @@ spec:
       targetPort: api
       protocol: TCP
   selector:
-    {{- include "fara-platform.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: fara-inference
+    {{- include "fara.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: brotto-inference
 {{- if .Values.faraInference.persistence.modelCache.enabled }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-fara-inference-model-cache
+  name: {{ include "fara.fullname" . }}-brotto-inference-model-cache
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
-    app.kubernetes.io/component: fara-inference
+    {{- include "fara.labels" . | nindent 4 }}
+    app.kubernetes.io/component: brotto-inference
 spec:
   accessModes:
     - ReadWriteMany

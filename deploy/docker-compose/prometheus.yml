@@ -24,9 +24,9 @@ scrape_configs:
       - targets: ['orchestrator:3000']
     metrics_path: /metrics
 
-  - job_name: 'fara-inference'
+  - job_name: 'brotto-inference'
     static_configs:
-      - targets: ['fara-inference:8080']
+      - targets: ['brotto-inference:8080']
     metrics_path: /metrics
 
   - job_name: 'playwright-mcp-gateway'

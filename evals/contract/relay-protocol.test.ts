@@ -2,7 +2,7 @@ import {
   AgentEnvelopeV1Schema,
   AgentMessageV1Schema,
   createEnvelope,
-} from '@fara-platform/relay-protocol';
+} from '@brotto/relay-protocol';
 
 const envelope = createEnvelope({
   sessionId: '11111111-1111-4111-8111-111111111111',

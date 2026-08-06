@@ -4,6 +4,8 @@ packages:
   - "clients/*"
   - "packages/*"
   - "evals/*"
+allowBuilds:
+  esbuild: set this to true or false
 onlyBuiltDependencies:
   - esbuild
   - protobufjs

@@ -2,15 +2,15 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-control-plane
+  name: {{ include "fara.fullname" . }}-control-plane
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 spec:
   replicas: {{ .Values.controlPlane.replicaCount }}
   selector:
     matchLabels:
-      {{- include "fara-platform.selectorLabels" . | nindent 6 }}
+      {{- include "fara.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: control-plane
   template:
     metadata:
@@ -19,10 +19,10 @@ spec:
         prometheus.io/port: "3000"
         prometheus.io/path: "/metrics"
       labels:
-        {{- include "fara-platform.selectorLabels" . | nindent 8 }}
+        {{- include "fara.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: control-plane
     spec:
-      serviceAccountName: {{ include "fara-platform.serviceAccountName" . }}
+      serviceAccountName: {{ include "fara.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -43,12 +43,12 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "fara-platform.fullname" . }}-secrets
+                  name: {{ include "fara.fullname" . }}-secrets
                   key: database-url
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "fara-platform.fullname" . }}-secrets
+                  name: {{ include "fara.fullname" . }}-secrets
                   key: redis-url
             - name: OIDC_ISSUER
               value: {{ .Values.controlPlane.env.OIDC_ISSUER | default "" | quote }}
@@ -57,7 +57,7 @@ spec:
             - name: OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "fara-platform.fullname" . }}-secrets
+                  name: {{ include "fara.fullname" . }}-secrets
                   key: oidc-client-secret
             - name: OIDC_AUDIENCE
               value: {{ .Values.controlPlane.env.OIDC_AUDIENCE | default "api://fara15" | quote }}
@@ -105,9 +105,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "fara-platform.fullname" . }}-control-plane
+  name: {{ include "fara.fullname" . }}-control-plane
   labels:
-    {{- include "fara-platform.labels" . | nindent 4 }}
+    {{- include "fara.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 spec:
   type: {{ .Values.controlPlane.service.type }}
@@ -117,6 +117,6 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "fara-platform.selectorLabels" . | nindent 4 }}
+    {{- include "fara.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 {{- end }}

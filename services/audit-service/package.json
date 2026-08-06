@@ -2,7 +2,7 @@
   "name": "audit-service",
   "version": "0.1.0",
   "private": true,
-  "description": "Audit service for recording security events in the Fara1.5 Browser Automation Platform",
+  "description": "Audit service for recording security events in the Brotto Browser Automation Platform",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/server.js",

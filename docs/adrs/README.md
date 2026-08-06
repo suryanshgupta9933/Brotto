@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This directory contains Architecture Decision Records (ADRs) documenting significant technical decisions for the Fara1.5 platform.
+This directory contains Architecture Decision Records (ADRs) documenting significant technical decisions for the Brotto platform.
 
 ## Format
 
@@ -16,7 +16,7 @@ ADRs follow the format:
 | ADR-001 | Apache-2.0 License Choice |
 | ADR-002 | Server-Hosted Agent Architecture |
 | ADR-003 | Outbound WSS Relay Pattern |
-| ADR-004 | Fara1.5-9B as Default Model |
+| ADR-004 | Brotto-9B as Default Model |
 | ADR-005 | Dedicated Browser Profile |
 | ADR-006 | Critical-Action Approval Requirements |
 | ADR-007 | Fixed Action Schema with MCP Adapter |

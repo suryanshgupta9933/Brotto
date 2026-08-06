@@ -1,5 +1,5 @@
 /**
- * Shared Telemetry Package for Fara1.5 Browser Automation Platform
+ * Shared Telemetry Package for Brotto Browser Automation Platform
  *
  * Provides consistent observability across all services with OpenTelemetry integration.
  *
@@ -10,7 +10,7 @@
  *   trace,
  *   metrics,
  *   logger
- * } from '@fara-platform/shared-telemetry';
+ * } from '@brotto/shared-telemetry';
  *
  * const { tracer, meter, shutdown } = await createTelemetry({
  *   serviceName: 'agent-orchestrator',

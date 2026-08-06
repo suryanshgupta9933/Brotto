@@ -36,4 +36,4 @@ The artifact service provides:
 ## Related
 
 - [Agent Orchestrator](../agent-orchestrator/README.md)
-- [Desktop Connector](../../clients/desktop-connector/README.md)
+- [Desktop Connector](../../...

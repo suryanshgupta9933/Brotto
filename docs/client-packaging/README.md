@@ -5,7 +5,7 @@ Documentation for packaging and distributing desktop connectors and browser exte
 ## Contents
 
 - [Desktop Connector](./desktop-connector.md) - Native connector packaging
-- [Browser Extension](./browser-extension.md) - Extension packaging
+- [Browser Extension](....md) - Extension packaging
 - [Signing](./signing.md) - Code signing procedures
 - [SBOM](./sbom.md) - Software Bill of Materials generation
 - [Release Process](./release.md) - Release workflow
@@ -48,5 +48,4 @@ Chrome Web Store review may scrutinize `<all_urls>` and debugger permissions. Pr
 
 ## Related
 
-- [Desktop Connector Client](../../clients/desktop-connector/README.md)
-- [Browser Extension Client](../../clients/browser-extension/README.md)
+- [Desktop Connector Client](../../...- [Browser Extension Client](../../clients/brotto-extension/README.md)

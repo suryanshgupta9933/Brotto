@@ -1,7 +1,7 @@
 /**
- * Unit tests for fara-action-schema package
+ * Unit tests for brotto-action-schema package
  *
- * Tests Fara action parsing, validation, MCP mapping,
+ * Tests Brotto action parsing, validation, MCP mapping,
  * and coordinate handling.
  */
 
@@ -25,9 +25,9 @@ import {
   ActionErrorCode,
   isViewportAction,
   isNavigationAction,
-} from '@fara-platform/fara-action-schema';
+} from '@brotto/brotto-action-schema';
 
-describe('Fara Action Schema Package', () => {
+describe('Brotto Action Schema Package', () => {
   describe('Action Types', () => {
     it('should define all action types', () => {
       expect(ActionType.LEFT_CLICK).toBe('left_click');

@@ -1,4 +1,4 @@
-import { ObservationV1Schema, AccessibilityNodeSchema } from '@fara-platform/fara-action-schema';
+import { ObservationV1Schema, AccessibilityNodeSchema } from '@brotto/brotto-action-schema';
 
 const VALID_HASH = 'a'.repeat(64);
 const VALID_HASH_B = 'b'.repeat(64);

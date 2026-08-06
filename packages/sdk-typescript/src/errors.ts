@@ -1,5 +1,5 @@
 /**
- * Error types for the Fara1.5 Platform SDK
+ * Error types for the Brotto Platform SDK
  */
 
 /**

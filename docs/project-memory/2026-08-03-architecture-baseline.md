@@ -1,11 +1,11 @@
-# Architecture Baseline: Fara 1.5 Browser Automation MVP
+# Architecture Baseline: Brotto 1.5 Browser Automation MVP
 
 **Recorded:** 2026-08-03
 **Status:** Verified repository baseline before canonical-loop implementation
 
 ## Product intent
 
-The product is a self-hosted browser automation platform using Fara 1.5 for computer-use decisions and a thin browser client for execution in an existing authenticated browser session. The client may transmit screenshots and deliberately selected, sanitized observation metadata to the customer's self-hosted server. It must never transmit cookies, authorization headers, local storage, session storage, credentials, password values, or raw browser-profile data.
+The product is a self-hosted browser automation platform using Brotto 1.5 for computer-use decisions and a thin browser client for execution in an existing authenticated browser session. The client may transmit screenshots and deliberately selected, sanitized observation metadata to the customer's self-hosted server. It must never transmit cookies, authorization headers, local storage, session storage, credentials, password values, or raw browser-profile data.
 
 The longer-term product records complete action trajectories. When recipe recording is enabled, a successful trajectory can later be compiled into a deterministic Playwright workflow that runs without model inference and consumes zero model tokens.
 
@@ -21,7 +21,7 @@ Each item must produce a working vertical slice and pass its acceptance tests be
 ## Approved architecture decisions
 
 - TypeScript owns the control plane and canonical agent loop.
-- Python is restricted to the Fara inference service.
+- Python is restricted to the Brotto inference service.
 - The committed shared schema packages become the only protocol and action contracts.
 - The client connects outbound over authenticated WSS.
 - Exactly one action may be in flight per session.
@@ -34,7 +34,7 @@ Each item must produce a working vertical slice and pass its acceptance tests be
 
 ## Verified current-state findings
 
-The active demonstration does not use the intended platform architecture. The browser extension talks to an ad-hoc Python HTTP/SSE relay in `services/playwright-relay/fara-relay.py`. That relay calls the Fara-compatible endpoint directly and maintains process-local history. The committed TypeScript orchestrator, shared relay protocol, shared Fara action schema, policy engine, audit service, and structured extension relay are not connected to this runtime path.
+The active demonstration does not use the intended platform architecture. The browser extension talks to an ad-hoc Python HTTP/SSE relay in `services/playwright-relay/brotto-relay.py`. That relay calls the Brotto-compatible endpoint directly and maintains process-local history. The committed TypeScript orchestrator, shared relay protocol, shared Brotto action schema, policy engine, audit service, and structured extension relay are not connected to this runtime path.
 
 The observed premature completion has deterministic causes:
 
@@ -51,11 +51,11 @@ There are three incompatible action contracts in the repository: the active Pyth
 
 ## Existing components worth retaining selectively
 
-- `packages/fara-action-schema`: useful action and observation concepts, but it needs reconciliation and versioning.
-- `packages/relay-protocol`: useful sequencing, heartbeat, and session concepts, but it is not wired into the active path and conflicts with some eval expectations.
-- `services/agent-orchestrator`: useful state-machine, history, retry, budget, executor, and completion abstractions, but the server runtime is a scaffold and does not execute the loop.
-- `clients/browser-extension/src/relay.ts`: useful WebSocket/reconnect concepts, but it is unused by the active background service worker.
-- `clients/browser-extension/src/action-executor.ts`: useful structured executor concepts, but it is duplicated by the active background action switch.
+- `packages/brotto-action-schema`: useful action and observation concepts, but it needs reconciliation and versioning.
+- `packages/brotto-relay-protocol`: useful sequencing, heartbeat, and session concepts, but it is not wired into the active path and conflicts with some eval expectations.
+- `services/brotto-orchestrator`: useful state-machine, history, retry, budget, executor, and completion abstractions, but the server runtime is a scaffold and does not execute the loop.
+- `clients/brotto-extension/src/relay.ts`: useful WebSocket/reconnect concepts, but it is unused by the active background service worker.
+- `clients/brotto-extension/src/action-executor.ts`: useful structured executor concepts, but it is duplicated by the active background action switch.
 - `services/audit-service`: substantial schema, persistence, privacy, export, and retention work; it is disconnected from the active loop and has causal-linkage/session-caching defects.
 - `services/artifact-service`: useful encrypted artifact primitives; it is not trajectory storage and needs durable metadata/key-management hardening before production use.
 
@@ -93,5 +93,5 @@ The linked implementation worktree contains extensive pre-existing modified file
 - Every terminal success contains structured findings and verifier evidence.
 - No duplicate completion events.
 - Cancellation reaches a terminal state and detaches the client within five seconds.
-- At least 90% success on the controlled multi-step browser-task suite for the selected Fara deployment.
+- At least 90% success on the controlled multi-step browser-task suite for the selected Brotto deployment.
 - Every executed action links its pre-observation, proposal, policy decision, result, and post-observation.

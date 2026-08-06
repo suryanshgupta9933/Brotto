@@ -1,6 +1,6 @@
 # Security Documentation
 
-Security architecture and best practices for the Fara1.5 Browser Automation Platform.
+Security architecture and best practices for the Brotto Browser Automation Platform.
 
 ## Contents
 

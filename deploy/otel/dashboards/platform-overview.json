@@ -576,8 +576,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Fara1.5 Platform Overview",
-  "uid": "fara15-platform-overview",
+  "title": "Brotto Platform Overview",
+  "uid": "fara15-overview",
   "version": 1,
   "weekStart": ""
 }

@@ -25,7 +25,7 @@ export interface User {
 export interface ModelDeployment {
   id: string
   name: string
-  model: 'fara-4b' | 'fara-9b' | 'fara-27b'
+  model: 'brotto-4b' | 'brotto-9b' | 'brotto-27b'
   status: 'running' | 'stopped' | 'deploying' | 'failed'
   replicas: number
   gpuType: string

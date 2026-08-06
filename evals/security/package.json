@@ -1,8 +1,8 @@
 {
-  "name": "@fara-platform/evals-security",
+  "name": "@brotto/evals-security",
   "version": "0.1.0",
   "private": true,
-  "description": "Security test suite for Fara1.5 platform",
+  "description": "Security test suite for Brotto platform",
   "type": "module",
   "scripts": {
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest",

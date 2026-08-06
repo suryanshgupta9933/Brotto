@@ -1,8 +1,8 @@
 {
-  "name": "@fara-platform/evals-contract",
+  "name": "@brotto/evals-contract",
   "version": "0.1.0",
   "private": true,
-  "description": "Contract test suite for Fara1.5 protocol compatibility",
+  "description": "Contract test suite for Brotto protocol compatibility",
   "type": "module",
   "scripts": {
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest",
@@ -18,7 +18,7 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
-    "@fara-platform/fara-action-schema": "workspace:*",
-    "@fara-platform/relay-protocol": "workspace:*"
+    "@brotto/brotto-action-schema": "workspace:*",
+    "@brotto/relay-protocol": "workspace:*"
   }
 }

@@ -1,6 +1,6 @@
 # SDK TypeScript
 
-Official TypeScript SDK for interacting with the Fara1.5 Browser Automation Platform. Provides typed clients for task creation, session management, and real-time events.
+Official TypeScript SDK for interacting with the Brotto Browser Automation Platform. Provides typed clients for task creation, session management, and real-time events.
 
 ## Purpose
 
@@ -15,7 +15,7 @@ The TypeScript SDK provides:
 ## Installation
 
 ```bash
-npm install @fara/platform-sdk
+npm install @brotto/platform-sdk
 ```
 
 ## Usage
@@ -23,7 +23,7 @@ npm install @fara/platform-sdk
 ### API Client
 
 ```typescript
-import { FaraClient, createClientWithAPIKey } from '@fara/platform-sdk';
+import { FaraClient, createClientWithAPIKey } from '@brotto/platform-sdk';
 
 // With API key
 const client = createClientWithAPIKey(
@@ -77,7 +77,7 @@ await client.sessions.terminate(session.id, 'user_requested');
 ### WebSocket Real-time Events
 
 ```typescript
-import { WebSocketClient, createWebSocketUrl } from '@fara/platform-sdk';
+import { WebSocketClient, createWebSocketUrl } from '@brotto/platform-sdk';
 
 const wsUrl = createWebSocketUrl('https://api.fara.example.com', session.id);
 
@@ -136,7 +136,7 @@ import {
   getStateDescription,
   calculateSessionMetrics,
   SessionReplay,
-} from '@fara/platform-sdk';
+} from '@brotto/platform-sdk';
 
 // Check if session is in a terminal state
 if (isTerminalState(session.state)) {
@@ -169,7 +169,7 @@ import {
   generateState,
   generateCodeVerifier,
   generateCodeChallenge,
-} from '@fara/platform-sdk';
+} from '@brotto/platform-sdk';
 
 // OIDC discovery
 const discovery = await fetchOIDCDiscovery('https://auth.fara.example.com');
@@ -224,7 +224,7 @@ import {
   RateLimitError,
   isSDKError,
   isAuthenticationError,
-} from '@fara/platform-sdk';
+} from '@brotto/platform-sdk';
 
 try {
   const { task } = await client.tasks.get('non-existent-id');
@@ -252,7 +252,7 @@ try {
 
 ### FaraClient
 
-Main API client for interacting with the Fara1.5 Platform.
+Main API client for interacting with the Brotto Platform.
 
 #### Constructor Options
 
@@ -309,4 +309,4 @@ interface WebSocketClientConfig {
 
 - [SDK Python](../sdk-python/README.md)
 - [API Gateway](../../services/api-gateway/README.md)
-- [Fara Action Schema](../fara-action-schema/README.md)
+- [Brotto Action Schema](../brotto-action-schema/README.md)

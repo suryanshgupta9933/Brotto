@@ -1,7 +1,7 @@
-"""Tests for fara_sdk.session"""
+"""Tests for brotto_sdk.session"""
 import pytest
 from datetime import datetime, timedelta
-from fara_sdk.session import (
+from brotto_sdk.session import (
     is_terminal_state,
     is_active_state,
     is_waiting_state,
@@ -12,7 +12,7 @@ from fara_sdk.session import (
     format_approval_summary,
     SESSION_STATE_DESCRIPTIONS,
 )
-from fara_sdk.types import SessionState, ApprovalStatus, SessionEvent
+from brotto_sdk.types import SessionState, ApprovalStatus, SessionEvent
 
 
 class TestSessionStateHelpers:

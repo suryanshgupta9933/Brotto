@@ -38,7 +38,7 @@ The policy engine provides:
 ## Usage
 
 ```typescript
-import { PolicyEngine, PolicyContext } from '@fara/platform/policy-engine';
+import { PolicyEngine, PolicyContext } from '@brotto/platform/policy-engine';
 
 const engine = new PolicyEngine(policyRules);
 const decision = engine.evaluate({
@@ -50,5 +50,5 @@ const decision = engine.evaluate({
 
 ## Related
 
-- [Agent Orchestrator](../../services/agent-orchestrator/README.md)
+- [Agent Orchestrator](../../services/brotto-orchestrator/README.md)
 - [Audit Service](../../services/audit-service/README.md)

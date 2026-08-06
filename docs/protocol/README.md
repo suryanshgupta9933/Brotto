@@ -1,12 +1,12 @@
 # Protocol Documentation
 
-Technical documentation for the Fara1.5 platform protocols.
+Technical documentation for the Brotto platform protocols.
 
 ## Contents
 
 - [Relay Protocol](./relay-protocol.md) - CDP relay wire protocol
 - [Session Lifecycle](./session-lifecycle.md) - Session state machine
-- [Action Schema](./action-schema.md) - Fara action definitions
+- [Action Schema](./action-schema.md) - Brotto action definitions
 - [MCP Integration](./mcp-integration.md) - Playwright MCP integration
 - [Coordinate System](./coordinates.md) - Screenshot and coordinate handling
 
@@ -37,5 +37,5 @@ Every message includes:
 
 ## Related
 
-- [Relay Protocol Package](../../packages/relay-protocol/README.md)
+- [Relay Protocol Package](../../packages/brotto-relay-protocol/README.md)
 - [CDP Relay Service](../../services/cdp-relay/README.md)

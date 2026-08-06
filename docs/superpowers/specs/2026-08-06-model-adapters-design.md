@@ -2,11 +2,11 @@
 
 **Date:** 2026-08-06
 **Status:** Draft for review
-**Scope:** Phase A only. Multi-model inference (Fara + OpenAI-compatible). No workflow recording, no plan 2.
+**Scope:** Phase A only. Multi-model inference (Brotto + OpenAI-compatible). No workflow recording, no plan 2.
 
 ## Goal
 
-Make the agent orchestrator work with any OpenAI-compatible model (OpenAI, Azure OpenAI, Ollama, vLLM, LM Studio) in addition to the existing Fara adapter. Single-server, env-var config. Streaming support with cancellation.
+Make the agent orchestrator work with any OpenAI-compatible model (OpenAI, Azure OpenAI, Ollama, vLLM, LM Studio) in addition to the existing Brotto adapter. Single-server, env-var config. Streaming support with cancellation.
 
 ## Non-Goals
 
@@ -33,9 +33,9 @@ The `InferencePort` interface already exists in `engine/types.ts`. We add one ad
 ## Module Layout
 
 ```
-services/agent-orchestrator/src/
+services/brotto-orchestrator/src/
 ├── adapters/
-│   ├── fara-planner.ts                EXISTING — unchanged
+│   ├── brotto-planner.ts                EXISTING — unchanged
 │   └── openai-compatible-planner.ts   NEW  — ~180 lines
 ├── prompts/
 │   └── tool-schemas.ts                NEW  — ~50 lines
@@ -49,11 +49,11 @@ services/agent-orchestrator/src/
 
 **Why one adapter for OpenAI/Azure/Ollama/vLLM/LM Studio.** All speak OpenAI-compatible `/v1/chat/completions` with tool-call support. Azure uses different `baseUrl` + `api-key` header. Ollama ignores auth. vLLM and LM Studio are drop-in. Single adapter class with config; per-family quirks handled via headers/URL.
 
-**Why separate `tool-schemas.ts`.** Tool definitions must be identical across all models so a model swap doesn't change the action surface. Centralizing prevents drift between Fara and OpenAI prompts.
+**Why separate `tool-schemas.ts`.** Tool definitions must be identical across all models so a model swap doesn't change the action surface. Centralizing prevents drift between Brotto and OpenAI prompts.
 
 ## Components
 
-### 1. `services/agent-orchestrator/src/adapters/openai-compatible-planner.ts` (NEW, ~180 lines)
+### 1. `services/brotto-orchestrator/src/adapters/openai-compatible-planner.ts` (NEW, ~180 lines)
 
 ```typescript
 import type {
@@ -158,10 +158,10 @@ export class OpenAICompatiblePlanner implements InferencePort {
 }
 ```
 
-### 2. `services/agent-orchestrator/src/prompts/tool-schemas.ts` (NEW, ~50 lines)
+### 2. `services/brotto-orchestrator/src/prompts/tool-schemas.ts` (NEW, ~50 lines)
 
 ```typescript
-// Tool definitions for OpenAI tool-calling API. Derived from fara-action-schema
+// Tool definitions for OpenAI tool-calling API. Derived from brotto-action-schema
 // action types so all models see the same surface.
 export function buildToolSchemas(): ToolSchema[] {
   return [
@@ -210,10 +210,10 @@ export function buildToolSchemas(): ToolSchema[] {
 }
 ```
 
-### 3. `services/agent-orchestrator/src/inference-registry.ts` (NEW, ~80 lines)
+### 3. `services/brotto-orchestrator/src/inference-registry.ts` (NEW, ~80 lines)
 
 ```typescript
-import { FaraPlanner, type FaraPlannerConfig } from "./adapters/fara-planner.js";
+import { FaraPlanner, type FaraPlannerConfig } from "./adapters/brotto-planner.js";
 import { OpenAICompatiblePlanner, type OpenAICompatibleConfig } from "./adapters/openai-compatible-planner.js";
 import type { InferencePort } from "./engine/types.js";
 
@@ -241,7 +241,7 @@ export function inferFamilyFromEnv(): InferenceFamily {
 }
 ```
 
-### 4. `services/agent-orchestrator/src/server.ts` (MODIFY, +~25 lines)
+### 4. `services/brotto-orchestrator/src/server.ts` (MODIFY, +~25 lines)
 
 Change `OrchestratorConfig.inference` from `InferenceConfig` to `InferenceConfig` (now a discriminated union from registry). Build planner via `createPlanner(config.inference)` and pass to `SessionEngine`. Update `OrchestratorConfig` type definition only.
 
@@ -258,7 +258,7 @@ this.inference = createPlanner(config.inference);  // type: InferencePort
 1. Server boot reads env vars. `inferFamilyFromEnv()` picks family; `createPlanner(config)` returns `InferencePort`.
 2. Session opens → `SessionEngine.plan()` calls `inferencePort.plan(input, signal)`.
 3. For OpenAI-compatible: planner sends SSE streaming POST, accumulates chunks, assembles full completion, parses tool_calls via `ToolCallParser`.
-4. Returns same `PlanningOutcome` shape as Fara (engine, policy, executor layers unchanged).
+4. Returns same `PlanningOutcome` shape as Brotto (engine, policy, executor layers unchanged).
 5. `AbortSignal` (cancellation): propagates to fetch, killing stream mid-flight.
 
 ## Error Handling
@@ -272,7 +272,7 @@ this.inference = createPlanner(config.inference);  // type: InferencePort
 | HTTP 5xx | `retryable: true` |
 | Empty `choices` array | `InferenceContractError`, retryable=true |
 | Malformed SSE chunk | Skip line, continue (defensive) |
-| Tool-call parse failure | Same as Fara: triggers existing repair loop in `parser.ts` |
+| Tool-call parse failure | Same as Brotto: triggers existing repair loop in `parser.ts` |
 | `AbortSignal` triggered | Stream reader aborts; throws abort error |
 
 ## Streaming Notes
@@ -280,7 +280,7 @@ this.inference = createPlanner(config.inference);  // type: InferencePort
 - All OpenAI-compatible APIs (OpenAI, Azure, Ollama, vLLM) support SSE `stream: true`.
 - We buffer the full response then parse. Streaming is for **cancellation savings**, not partial parsing. Simpler invariants, identical external behavior to non-streaming.
 - `AbortSignal` from `InferencePort.plan(input, signal)` propagates to `fetch(url, {signal})`; stream reader aborts cleanly.
-- FaraPlanner keeps non-streaming (Fara vLLM endpoint doesn't support streaming tool-calls cleanly; revisit if needed).
+- FaraPlanner keeps non-streaming (Brotto vLLM endpoint doesn't support streaming tool-calls cleanly; revisit if needed).
 
 ## Code Hygiene Standards
 
@@ -289,7 +289,7 @@ this.inference = createPlanner(config.inference);  // type: InferencePort
 - **No new abstractions.** No factory-with-one-product, no interface-with-one-impl.
 - **Constants named, not magic.** `DEFAULT_MAX_TOKENS = 1024`, `DEFAULT_TEMPERATURE = 0`.
 - **JSDoc on every exported symbol.** Match the existing `FaraPlanner` style.
-- **Tests colocation.** New test files at `services/agent-orchestrator/src/__tests__/`.
+- **Tests colocation.** New test files at `services/brotto-orchestrator/src/__tests__/`.
 - **Reuse existing patterns.** `OpenAICompatiblePlannerRequestError` mirrors `FaraPlannerRequestError`.
 - **No premature generalization.** Anthropic adapter is `family: 'anthropic'` in the union; no AnthropicPlanner yet.
 
@@ -310,15 +310,15 @@ this.inference = createPlanner(config.inference);  // type: InferencePort
 | Empty choices array | `InferenceContractError` |
 | Tool-call parse failure | Bubbles through `ToolCallParser` |
 | `InferenceRegistry` returns correct planner per family | Type-narrowed check |
-| `inferFamilyFromEnv` picks correct family | Env var precedence: FARA > OPENAI > AZURE > OLLAMA |
+| `inferFamilyFromEnv` picks correct family | Env var precedence: BROTTO > OPENAI > AZURE > OLLAMA |
 | Existing FaraPlanner tests | Unchanged, still pass |
 
 ## Ponytail Cuts (deliberate simplifications)
 
 - **No incremental SSE parsing.** Buffer full response, parse once. `# ponytail: full-buffer SSE, switch to delta parsing when TTFT matters`
-- **No streaming for FaraPlanner.** Fara endpoint has separate streaming concerns. `# ponytail: FaraPlanner non-streaming, revisit when Fara endpoint supports it`
+- **No streaming for FaraPlanner.** Brotto endpoint has separate streaming concerns. `# ponytail: FaraPlanner non-streaming, revisit when Brotto endpoint supports it`
 - **No per-request model family override.** Env var only. `# ponytail: env-var family selection, per-request header in plan 2`
-- **No tool schema versioning.** Single version from fara-action-schema. `# ponytail: no tool schema versioning, add when schema breaks compat`
+- **No tool schema versioning.** Single version from brotto-action-schema. `# ponytail: no tool schema versioning, add when schema breaks compat`
 - **No retry/backoff inside planner.** ResilientExecutor handles it. `# ponytail: planner throws, executor retries`
 - **No usage/cost tracking beyond token counts.** `# ponytail: token counts only, add cost tracking when billing lands`
 - **One prompt per family.** No A/B, no per-tenant prompts. `# ponytail: one prompt per family, A/B when eval infra exists`
@@ -327,13 +327,13 @@ this.inference = createPlanner(config.inference);  // type: InferencePort
 
 | File | Lines |
 |---|---|
-| `services/agent-orchestrator/src/adapters/openai-compatible-planner.ts` | +180 (new) |
-| `services/agent-orchestrator/src/prompts/tool-schemas.ts` | +50 (new) |
-| `services/agent-orchestrator/src/inference-registry.ts` | +80 (new) |
-| `services/agent-orchestrator/src/server.ts` | +25 (modified) |
-| `services/agent-orchestrator/src/__tests__/openai-compatible-planner.test.ts` | +100 (new) |
-| `services/agent-orchestrator/src/__tests__/inference-registry.test.ts` | +50 (new) |
-| `services/agent-orchestrator/src/index.ts` | +5 (re-export new types) |
+| `services/brotto-orchestrator/src/adapters/openai-compatible-planner.ts` | +180 (new) |
+| `services/brotto-orchestrator/src/prompts/tool-schemas.ts` | +50 (new) |
+| `services/brotto-orchestrator/src/inference-registry.ts` | +80 (new) |
+| `services/brotto-orchestrator/src/server.ts` | +25 (modified) |
+| `services/brotto-orchestrator/src/__tests__/openai-compatible-planner.test.ts` | +100 (new) |
+| `services/brotto-orchestrator/src/__tests__/inference-registry.test.ts` | +50 (new) |
+| `services/brotto-orchestrator/src/index.ts` | +5 (re-export new types) |
 
 ## Verification Checklist
 
@@ -351,5 +351,5 @@ this.inference = createPlanner(config.inference);  // type: InferencePort
 ## Open Questions
 
 1. **Anthropic day 1?** Spec defers; registry pattern supports future `family: 'anthropic'`. When added, ~150 lines (different tool-use format). **Decision: deferred.**
-2. **Streaming exposure to engine?** Buffer-and-parse keeps engine API identical to Fara. Incremental deltas would require `PlanningOutcome | AsyncIterable<PlanningDelta>` change. **Decision: buffered. Revisit when TTFT > 2s is measurable.**
+2. **Streaming exposure to engine?** Buffer-and-parse keeps engine API identical to Brotto. Incremental deltas would require `PlanningOutcome | AsyncIterable<PlanningDelta>` change. **Decision: buffered. Revisit when TTFT > 2s is measurable.**
 3. **Where do prompts live?** `prompts/tool-schemas.ts` is structural (tool defs only). System prompt content stays in FaraPlanner (existing). OpenAI-compatible uses inline system message construction. **Decision: structural prompts in `prompts/`, system content co-located with planner for now.**

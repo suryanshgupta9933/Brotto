@@ -1,6 +1,6 @@
 # Docker Compose
 
-Docker Compose configurations for local development and community deployments of the Fara1.5 platform.
+Docker Compose configurations for local development and community deployments of the Brotto platform.
 
 ## Quick Start
 
@@ -23,7 +23,7 @@ The compose stack includes:
 |---------|------|-------------|
 | control-plane | 3000 | Web UI and API Gateway |
 | orchestrator | 3002 | Agent orchestration service |
-| fara-inference | 8000/8080 | Model inference service (vLLM) |
+| brotto-inference | 8000/8080 | Model inference service (vLLM) |
 | playwright-mcp-gateway | 8080 | Playwright MCP gateway |
 | cdp-relay | 8081 | CDP relay broker |
 | artifact-service | 3003 | File transfer service |

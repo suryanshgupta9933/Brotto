@@ -1,6 +1,6 @@
 # Threat Model
 
-This document describes the threat model for the Fara1.5 Browser Automation Platform. It identifies key threats and the controls in place to mitigate them.
+This document describes the threat model for the Brotto Browser Automation Platform. It identifies key threats and the controls in place to mitigate them.
 
 ## Asset Classification
 

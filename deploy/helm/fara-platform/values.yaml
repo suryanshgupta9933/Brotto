@@ -1,4 +1,4 @@
-# Fara1.5 Platform Helm Chart Values
+# Brotto Platform Helm Chart Values
 # Full deployment configuration
 
 ## Global settings
@@ -109,13 +109,13 @@ orchestrator:
 
   affinity: {}
 
-## Fara Inference (vLLM)
+## Brotto Inference (vLLM)
 faraInference:
   enabled: true
   replicaCount: 1
 
   image:
-    repository: fara-inference
+    repository: brotto-inference
     pullPolicy: IfNotPresent
 
   service:
@@ -430,7 +430,7 @@ networkPolicies:
       - to:
           - podSelector:
               matchLabels:
-                app.kubernetes.io/name: fara-inference
+                app.kubernetes.io/name: brotto-inference
         ports:
           - protocol: TCP
             port: 8080
@@ -477,7 +477,7 @@ networkPolicies:
 opentelemetry:
   enabled: true
   exporterEndpoint: ""
-  serviceName: fara-platform
+  serviceName: fara
   samplingRate: "1.0"
 
 ## Monitoring
@@ -521,7 +521,7 @@ podDisruptionBudget:
 ## Service Account
 serviceAccount:
   create: true
-  name: fara-platform
+  name: fara
   annotations: {}
 
 ## RBAC

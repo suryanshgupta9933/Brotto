@@ -1,15 +1,15 @@
-"""Setup script for fara-platform-sdk."""
+"""Setup script for brotto-sdk."""
 from setuptools import setup, find_packages
 
 if __name__ == "__main__":
     setup(
-        name="fara-platform-sdk",
+        name="brotto-sdk",
         version="1.0.0",
-        description="Official Python SDK for the Fara1.5 Browser Automation Platform",
-        author="Fara Team",
+        description="Official Python SDK for the Brotto Browser Automation Platform",
+        author="Brotto Team",
         author_email="sdk@fara.example.com",
-        url="https://github.com/fara-platform/fara15",
-        packages=find_packages(include=["fara_sdk", "fara_sdk.*"]),
+        url="https://github.com/fara/fara15",
+        packages=find_packages(include=["brotto_sdk", "brotto_sdk.*"]),
         python_requires=">=3.11",
         install_requires=[
             "httpx>=0.25.0",

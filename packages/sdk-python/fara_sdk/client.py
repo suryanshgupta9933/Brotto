@@ -1,5 +1,5 @@
 """
-Main API client for the Fara1.5 Platform SDK
+Main API client for the Brotto Platform SDK
 """
 import asyncio
 from dataclasses import dataclass
@@ -58,7 +58,7 @@ from dataclasses import dataclass
 
 
 class FaraClient:
-    """Main API client for interacting with the Fara1.5 Platform."""
+    """Main API client for interacting with the Brotto Platform."""
 
     def __init__(self, config: FaraClientConfig):
         self.base_url = config.base_url.rstrip("/")  # Remove trailing slash

@@ -1,5 +1,5 @@
 /**
- * Export configurations for Fara1.5 Browser Automation Platform
+ * Export configurations for Brotto Browser Automation Platform
  *
  * Supports OTLP, Prometheus, and Jaeger exporters.
  * Per ARCHITECTURE.md section 11, publish OpenTelemetry dashboards.
@@ -219,14 +219,14 @@ export function getDefaultConfig(environment: 'development' | 'production' | 'te
   switch (environment) {
     case 'development':
       return {
-        serviceName: 'fara-platform',
+        serviceName: 'fara',
         traceExporter: { type: 'console' },
         metricExporter: { type: 'console' },
         enabledInstrumentations: true,
       };
     case 'production':
       return {
-        serviceName: 'fara-platform',
+        serviceName: 'fara',
         traceExporter: {
           type: 'otlp',
           endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? 'http://localhost:4318',
@@ -239,7 +239,7 @@ export function getDefaultConfig(environment: 'development' | 'production' | 'te
       };
     case 'testing':
       return {
-        serviceName: 'fara-platform-test',
+        serviceName: 'brotto-test',
         traceExporter: { type: 'none' },
         metricExporter: { type: 'none' },
         enabledInstrumentations: false,

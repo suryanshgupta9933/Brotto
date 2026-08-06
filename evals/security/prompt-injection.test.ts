@@ -72,14 +72,14 @@ test.describe('Prompt Injection Security', () => {
       const hasAccess = await page.evaluate(() => {
         try {
           // Try to access localStorage with credentials
-          localStorage.setItem('fara_credentials', 'secret');
+          localStorage.setItem('brotto_credentials', 'secret');
           return true;
         } catch {
           return false;
         }
       });
 
-      // Website scripts should not have access to Fara credential storage
+      // Website scripts should not have access to Brotto credential storage
       // This would be enforced by the browser extension isolation
       expect(hasAccess).toBe(true); // Attack vector exists
     });

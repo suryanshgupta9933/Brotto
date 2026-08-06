@@ -1,5 +1,5 @@
 /**
- * Session management helpers for the Fara1.5 Platform SDK
+ * Session management helpers for the Brotto Platform SDK
  */
 
 import type {

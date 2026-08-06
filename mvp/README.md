@@ -1,11 +1,11 @@
-# Fara1.5 MVP - Browser Agent
+# Brotto MVP - Browser Agent
 
-Simple MVP demonstrating Fara-based browser automation.
+Simple MVP demonstrating Brotto-based browser automation.
 
 ## Prerequisites
 
 1. **Ollama** - Install from https://ollama.ai
-2. **Fara Model** - Pull with: `ollama pull maternion/fara`
+2. **Brotto Model** - Pull with: `ollama pull maternion/fara`
 
 ## Quick Start
 
@@ -37,8 +37,8 @@ python agent.py "Go to wikipedia.org and find the article about AI"
 ## How it Works
 
 1. **Screenshot** - Takes a screenshot of the current browser page
-2. **Fara Query** - Sends the screenshot + goal to Fara (Ollama)
-3. **Parse Action** - Extracts the action from Fara's response
+2. **Brotto Query** - Sends the screenshot + goal to Brotto (Ollama)
+3. **Parse Action** - Extracts the action from Brotto's response
 4. **Execute** - Runs the action in the browser
 5. **Loop** - Repeats until task is done
 
@@ -46,7 +46,7 @@ python agent.py "Go to wikipedia.org and find the article about AI"
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Playwright  │────▶│    Fara     │◀────│   Ollama    │
+│  Playwright  │────▶│    Brotto     │◀────│   Ollama    │
 │  (Browser)  │     │  (LLM)      │     │  (Local)    │
 └─────────────┘     └─────────────┘     └─────────────┘
       │                    ▲

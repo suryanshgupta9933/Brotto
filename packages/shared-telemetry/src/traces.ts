@@ -1,5 +1,5 @@
 /**
- * Trace and Span types for Fara1.5 Browser Automation Platform
+ * Trace and Span types for Brotto Browser Automation Platform
  *
  * Defines standard trace/span attributes for session lifecycle monitoring.
  * Per ARCHITECTURE.md section 8.9, keep sensitive agent traces separate from
@@ -27,7 +27,7 @@ export enum SessionState {
 }
 
 /**
- * Action types that Fara can perform
+ * Action types that Brotto can perform
  */
 export enum ActionType {
   LEFT_CLICK = 'left_click',
@@ -59,7 +59,7 @@ export enum PolicyResult {
 }
 
 /**
- * Standard span attribute names for Fara platform
+ * Standard span attribute names for Brotto platform
  */
 export const FARA_SPAN_ATTRIBUTES = {
   // Service identification
@@ -190,7 +190,7 @@ export interface ApprovalSpanData {
 }
 
 /**
- * Create a tracer instance for the Fara platform
+ * Create a tracer instance for the Brotto platform
  */
 export function createFaraTracer(name: string) {
   return trace.getTracer(name, '0.1.0');
@@ -211,7 +211,7 @@ export function isTracing(): boolean {
 }
 
 /**
- * Common span kinds used in Fara platform
+ * Common span kinds used in Brotto platform
  */
 export const SPAN_KINDS = {
   SERVER: SpanKind.SERVER,

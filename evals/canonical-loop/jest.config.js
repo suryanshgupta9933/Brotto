@@ -4,9 +4,9 @@ export default {
   testEnvironment: 'node',
   extensionsToTreatAsEsm: ['.ts'],
   moduleNameMapper: {
-    '^@fara/agent-orchestrator$': '<rootDir>/../../services/agent-orchestrator/src/index.ts',
-    '^@fara-platform/fara-action-schema$': '<rootDir>/../../packages/fara-action-schema/src/index.ts',
-    '^@fara-platform/relay-protocol$': '<rootDir>/../../packages/relay-protocol/src/index.ts',
+    '^@brotto/agent-orchestrator$': '<rootDir>/../../services/brotto-orchestrator/src/index.ts',
+    '^@brotto/brotto-action-schema$': '<rootDir>/../../packages/brotto-action-schema/src/index.ts',
+    '^@brotto/relay-protocol$': '<rootDir>/../../packages/brotto-relay-protocol/src/index.ts',
     '^(\\.{1,2}/.*)\\.js$': '$1'
   },
   transform: {
@@ -19,14 +19,14 @@ export default {
         lib: ['ES2022', 'DOM'],
         types: ['jest', 'node', 'chrome'],
         typeRoots: [
-          '../../services/agent-orchestrator/node_modules/.pnpm/node_modules/@types',
-          '../../clients/browser-extension/node_modules/@types'
+          '../../services/brotto-orchestrator/node_modules/.pnpm/node_modules/@types',
+          '../../clients/brotto-extension/node_modules/@types'
         ],
         baseUrl: '.',
         paths: {
-          '@fara/agent-orchestrator': ['../../services/agent-orchestrator/src/index.ts'],
-          '@fara-platform/fara-action-schema': ['../../packages/fara-action-schema/src/index.ts'],
-          '@fara-platform/relay-protocol': ['../../packages/relay-protocol/src/index.ts']
+          '@brotto/agent-orchestrator': ['../../services/brotto-orchestrator/src/index.ts'],
+          '@brotto/brotto-action-schema': ['../../packages/brotto-action-schema/src/index.ts'],
+          '@brotto/relay-protocol': ['../../packages/brotto-relay-protocol/src/index.ts']
         },
         strict: true,
         esModuleInterop: true,

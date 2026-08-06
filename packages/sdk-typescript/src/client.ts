@@ -1,5 +1,5 @@
 /**
- * Main API client for the Fara1.5 Platform SDK
+ * Main API client for the Brotto Platform SDK
  */
 
 import type {
@@ -63,7 +63,7 @@ interface APIErrorResponse {
 }
 
 /**
- * Main API client for interacting with the Fara1.5 Platform
+ * Main API client for interacting with the Brotto Platform
  */
 export class FaraClient {
   private baseUrl: string;

@@ -8,7 +8,7 @@ import type {
   SessionId,
   TaskId,
   TrajectoryEventV1,
-} from '@fara-platform/fara-action-schema';
+} from '@brotto/brotto-action-schema';
 import {
   InMemorySessionStore,
   SessionEngine,
@@ -20,7 +20,7 @@ import {
   type TerminalNotification,
   type TerminalSink,
   type TrajectorySink,
-} from '@fara/agent-orchestrator';
+} from '@brotto/agent-orchestrator';
 
 export const IDS = {
   session: '10000000-0000-4000-8000-000000000001' as SessionId,

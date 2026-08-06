@@ -8,7 +8,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability within the Fara1.5 Browser Automation Platform, please report it responsibly.
+If you discover a security vulnerability within the Brotto Browser Automation Platform, please report it responsibly.
 
 ### How to Report
 
