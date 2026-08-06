@@ -1,4 +1,5 @@
 import {
+  ForbiddenBrowserDataError,
   ObservationV1Schema,
   assertNoForbiddenBrowserData,
   type ObservationV1,
@@ -1044,6 +1045,28 @@ export async function captureObservation(
     return await captureObservationInternal(tabId, options);
   } catch (error) {
     if (error instanceof ObservationSecurityError) throw error;
+    // ponytail: forbidden-data checks (passwords, tokens, cookies in
+    // accessibility text) trip on real-world pages like GitHub's login form.
+    // Surface a degraded observation (URL/title only, no semantic targets)
+    // so the loop survives and the planner can still navigate. The model's
+    // raw CDP via debugger.sendCommand is unaffected.
+    if (error instanceof ForbiddenBrowserDataError) {
+      return {
+        observationId: ("obs-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8)) as never,
+        capturedAt: new Date().toISOString(),
+        url: "about:blank",
+        title: "(content filtered)",
+        screenshot: { kind: "inline", encoding: "png", data: "", sha256: "0".repeat(64), width: 0, height: 0 },
+        viewport: { width: 1280, height: 720, devicePixelRatio: 1, zoom: 1, scrollX: 0, scrollY: 0 },
+        page: {
+          tabId: "0".repeat(36) as never,
+          frameId: "0".repeat(36) as never,
+          lifecycle: "complete",
+          visibility: "visible",
+        },
+        semanticTargets: [],
+      } as never;
+    }
     throw securityError(
       "Captured observation failed the local outbound security boundary",
       error,

@@ -4,127 +4,718 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Brotto</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
-    /* ponytail: minimal dark UI. Three sections — header (status + connect),
-       composer (task input + run controls), activity (live stream of step
-       cards + timer). Cards are modular boxes with screenshot, action,
-       result, timestamp. */
+    /* ─── Design tokens ───────────────────────────────────────────────────── */
     :root {
-      --bg: #0e1116;
-      --surface: #161b22;
-      --surface-2: #1c2230;
-      --border: #2a3140;
-      --border-strong: #3a4252;
-      --text: #e6edf3;
-      --text-mute: #8b95a5;
-      --accent: #6366f1;
-      --accent-strong: #818cf8;
-      --green: #22c55e;
-      --amber: #f59e0b;
-      --red: #ef4444;
-      --blue: #38bdf8;
-      --radius: 8px;
+      --bg:            #FAF9F7;
+      --surface:       #FFFFFF;
+      --surface-2:     #F3F2EF;
+      --surface-3:     #ECEAE5;
+      --border:        #E4E2DC;
+      --border-soft:   #F0EEE9;
+      --text:          #1A1A1A;
+      --text-muted:    #6B6B6B;
+      --text-faint:    #AEAEAE;
+      --accent:        #D97706;
+      --accent-soft:   rgba(217,119,6,0.10);
+      --accent-hover:  #B45309;
+      --green:         #16A34A;
+      --green-soft:    rgba(22,163,74,0.10);
+      --red:           #DC2626;
+      --red-soft:      rgba(220,38,38,0.10);
+      --blue:          #2563EB;
+      --blue-soft:     rgba(37,99,235,0.10);
+      --amber:         #D97706;
+      --amber-soft:    rgba(217,119,6,0.10);
+      --radius-sm:     6px;
+      --radius:        14px;
+      --radius-lg:     18px;
+      --radius-xl:     24px;
+      --shadow-sm:     0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+      --shadow:        0 4px 12px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.05);
+      --shadow-lg:     0 8px 24px rgba(0,0,0,0.10), 0 2px 6px rgba(0,0,0,0.06);
+      --transition:    all 0.15s cubic-bezier(0.16,1,0.3,1);
     }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
-    body { display: flex; flex-direction: column; min-width: 360px; }
-    header { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
-    .header-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
-    .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
-    .brand-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-mute); transition: background 0.2s ease, box-shadow 0.2s ease; }
-    .brand-dot.connected { background: var(--green); box-shadow: 0 0 8px var(--green); }
-    .brand-dot.executing { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.5s ease-in-out infinite; }
-    .brand-dot.error { background: var(--red); }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-    .status-pill { font-size: 11px; color: var(--text-mute); padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500; }
-    .status-pill.idle { color: var(--text-mute); }
-    .status-pill.connected { color: var(--green); border-color: var(--green); }
-    .status-pill.executing { color: var(--accent); border-color: var(--accent); }
-    .status-pill.paused { color: var(--amber); border-color: var(--amber); }
-    .status-pill.done { color: var(--blue); border-color: var(--blue); }
-    .status-pill.error { color: var(--red); border-color: var(--red); }
-    .btn { padding: 8px 14px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text); font: inherit; cursor: pointer; transition: all 0.15s ease; font-weight: 500; }
-    .btn:hover { background: var(--border-strong); }
-    .btn:disabled { opacity: 0.4; cursor: default; }
-    .btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
-    .btn.primary:hover { background: var(--accent-strong); }
-    .btn.danger { background: var(--red); border-color: var(--red); color: white; }
-    .btn.danger:hover { background: #f87171; }
-    .btn.ghost { background: transparent; border-color: var(--border); }
-    .composer { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--surface); display: grid; gap: 8px; }
-    .input { width: 100%; padding: 8px 10px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); font: inherit; outline: none; }
-    .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
-    textarea.input { min-height: 56px; max-height: 120px; resize: vertical; font-family: inherit; }
-    .input-meta { font-size: 11px; color: var(--text-mute); }
-    .row { display: flex; gap: 8px; }
-    .row > * { flex: 1; }
-    .row > .btn { flex: 0 0 auto; }
-    main { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
-    .empty { color: var(--text-mute); text-align: center; padding: 40px 16px; font-size: 12px; }
-    .empty-icon { font-size: 36px; opacity: 0.25; margin-bottom: 10px; }
-    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 8px; animation: slide-in 0.18s ease; }
-    @keyframes slide-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-    .card.live { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-    .card.prompt { border-color: var(--amber); background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%); }
-    .card.error { border-color: var(--red); background: rgba(239, 68, 68, 0.06); }
-    .card.done { border-color: var(--blue); }
-    .card-head { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-    .icon { width: 22px; height: 22px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
-    .icon.click { background: var(--accent); color: white; }
-    .icon.text { background: var(--blue); color: white; }
-    .icon.nav { background: var(--text-mute); color: var(--bg); }
-    .icon.key { background: var(--amber); color: white; }
-    .icon.term { background: var(--green); color: white; }
-    .icon.err { background: var(--red); color: white; }
-    .icon.qu { background: var(--amber); color: white; }
-    .icon.sys { background: var(--border-strong); color: var(--text); }
-    .card-title { font-weight: 500; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .card-meta { font-size: 11px; color: var(--text-mute); font-family: ui-monospace, "SF Mono", Menlo, monospace; flex-shrink: 0; }
-    .card-url { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--accent-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .screenshot { width: 100%; max-height: 200px; object-fit: contain; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); display: block; }
-    .screenshot.placeholder { min-height: 80px; display: flex; align-items: center; justify-content: center; color: var(--text-mute); font-size: 11px; font-style: italic; }
-    .prompt-body { font-size: 13px; color: var(--text); }
-    .prompt-actions { display: flex; gap: 6px; margin-top: 6px; }
-    footer { padding: 10px 16px; border-top: 1px solid var(--border); background: var(--surface); display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-mute); }
-    footer .timer { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; color: var(--text); font-weight: 500; }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      min-width: 320px;
+      max-width: 480px;
+      overflow: hidden;
+    }
+
+    /* ─── Hidden elements (kept for background.ts DOM-id compatibility) ─────── */
+    #plannerUrl, #startingUrl, #connectBtn, #disconnectBtn,
+    #refreshBtn, #statusPill, #brandDot, #stepCount, #timer,
+    #connectionMeta { display: none !important; }
+
+    /* ─── Header ─────────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      height: 52px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-weight: 600;
+      font-size: 15px;
+      color: var(--text);
+      flex: 1;
+    }
+
+    .brand-icon {
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      background: var(--accent);
+      display: grid;
+      place-items: center;
+      font-size: 13px;
+      font-weight: 700;
+      color: white;
+      flex-shrink: 0;
+      letter-spacing: -0.02em;
+    }
+
+    #modelSelector {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 3px 10px;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+    #modelSelector:hover { background: var(--surface-3); color: var(--text); }
+
+    /* Working spinner */
+    #workingIndicator {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    #workingIndicator.active { display: flex; }
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Header actions */
+    .hdr-actions { display: flex; gap: 4px; align-items: center; }
+
+    .btn-icon {
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      border-radius: var(--radius-sm);
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: var(--transition);
+      flex-shrink: 0;
+    }
+    .btn-icon:hover { background: var(--surface-2); color: var(--text); }
+    .btn-icon svg { width: 15px; height: 15px; pointer-events: none; }
+
+    .btn-icon.btn-stop {
+      color: var(--red);
+      width: 26px;
+      height: 26px;
+    }
+    .btn-icon.btn-stop:hover { background: var(--red-soft); }
+
+    /* ─── Settings overlay ───────────────────────────────────────────────── */
+    #settingsOverlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      z-index: 100;
+      align-items: flex-start;
+      justify-content: flex-end;
+    }
+    #settingsOverlay.open { display: flex; }
+
+    #settingsPanel {
+      width: 300px;
+      height: 100%;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      padding: 20px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      animation: slide-in-right 0.2s cubic-bezier(0.16,1,0.3,1);
+      overflow-y: auto;
+    }
+    @keyframes slide-in-right {
+      from { transform: translateX(20px); opacity: 0; }
+      to   { transform: translateX(0);    opacity: 1; }
+    }
+
+    .settings-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .settings-section { display: flex; flex-direction: column; gap: 6px; }
+
+    label {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .input {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+      outline: none;
+      transition: var(--transition);
+    }
+    .input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+
+    #settingsClose {
+      align-self: flex-end;
+      width: 28px;
+      height: 28px;
+      border-radius: var(--radius-sm);
+      display: grid;
+      place-items: center;
+    }
+
+    /* ─── Chat / message area ────────────────────────────────────────────── */
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      scroll-behavior: smooth;
+    }
+    #messages::-webkit-scrollbar { width: 4px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    /* Empty state */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      padding: 40px 20px;
+      color: var(--text-muted);
+      text-align: center;
+      gap: 10px;
+    }
+    .empty-logo {
+      font-family: 'Instrument Serif', Georgia, serif;
+      font-size: 36px;
+      color: var(--accent);
+      opacity: 0.7;
+      line-height: 1;
+    }
+    .empty-title { font-size: 15px; font-weight: 600; color: var(--text); margin-top: 4px; }
+    .empty-sub { font-size: 13px; color: var(--text-muted); max-width: 260px; line-height: 1.5; }
+
+    /* ─── Message bubbles ────────────────────────────────────────────────── */
+    .message {
+      display: flex;
+      flex-direction: column;
+      max-width: 88%;
+      animation: msg-enter 0.22s cubic-bezier(0.16,1,0.3,1);
+    }
+    @keyframes msg-enter {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .message.user  { align-self: flex-end; }
+    .message.assistant { align-self: flex-start; }
+
+    .bubble {
+      padding: 10px 14px;
+      border-radius: var(--radius-lg);
+      font-size: 14px;
+      line-height: 1.55;
+      word-break: break-word;
+    }
+
+    .message.user .bubble {
+      background: var(--surface-3);
+      color: var(--text);
+      border-bottom-right-radius: var(--radius-sm);
+    }
+
+    .message.assistant .bubble {
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: var(--shadow-sm);
+      border-bottom-left-radius: var(--radius-sm);
+    }
+
+    /* Assistant name */
+    .msg-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 3px;
+      padding: 0 4px;
+    }
+    .msg-meta.assistant-meta { }
+    .msg-name {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: 0.01em;
+    }
+
+    /* System / inline log messages */
+    .message.system {
+      align-self: center;
+      max-width: 95%;
+    }
+    .message.system .bubble {
+      background: transparent;
+      color: var(--text-faint);
+      font-size: 12px;
+      font-style: italic;
+      padding: 3px 8px;
+      box-shadow: none;
+      text-align: center;
+    }
+
+    /* Done message */
+    .message.done { }
+    .message.done .bubble {
+      background: var(--green-soft);
+      color: var(--green);
+      border: 1px solid rgba(22,163,74,0.15);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+    }
+    .done-header {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-weight: 600;
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    .done-icon { font-size: 16px; }
+    .done-summary { font-size: 13px; opacity: 0.85; }
+
+    /* Error message */
+    .message.error .bubble {
+      background: var(--red-soft);
+      color: var(--red);
+      border: 1px solid rgba(220,38,38,0.15);
+    }
+
+    /* ─── Plan preview card ─────────────────────────────────────────────── */
+    .plan-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      max-width: 88%;
+      align-self: flex-start;
+      animation: msg-enter 0.22s cubic-bezier(0.16,1,0.3,1);
+    }
+    .plan-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .plan-badge {
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: 20px;
+    }
+    .plan-sites {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+      padding: 0 2px;
+    }
+    .plan-sites strong { color: var(--text); font-weight: 600; }
+    .plan-approach-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin-bottom: 6px;
+      padding: 0 2px;
+    }
+    .plan-steps {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-bottom: 12px;
+    }
+    .plan-steps li {
+      display: flex;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.45;
+      padding: 0 2px;
+    }
+    .plan-step-num {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--accent);
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .plan-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    /* ─── Approval request card ─────────────────────────────────────────── */
+    .approval-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      max-width: 88%;
+      align-self: flex-start;
+      animation: msg-enter 0.22s cubic-bezier(0.16,1,0.3,1);
+    }
+    .approval-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .approval-badge {
+      background: var(--amber-soft);
+      color: var(--amber);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: 20px;
+    }
+    .approval-body {
+      font-size: 13px;
+      color: var(--text);
+      margin-bottom: 8px;
+      line-height: 1.5;
+    }
+    .approval-preview {
+      font-size: 12px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      color: var(--text-muted);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 6px 10px;
+      margin-bottom: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .approval-actions { display: flex; gap: 8px; }
+
+    /* ─── Clarify request card ─────────────────────────────────────────── */
+    .clarify-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      max-width: 88%;
+      align-self: flex-start;
+      animation: msg-enter 0.22s cubic-bezier(0.16,1,0.3,1);
+    }
+    .clarify-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .clarify-badge {
+      background: var(--blue-soft);
+      color: var(--blue);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: 20px;
+    }
+    .clarify-body {
+      font-size: 13px;
+      color: var(--text);
+      margin-bottom: 12px;
+      line-height: 1.5;
+      font-family: 'Instrument Serif', Georgia, serif;
+      font-style: italic;
+    }
+    .clarify-actions { display: flex; gap: 8px; }
+
+    /* ─── Inline log lines inside assistant bubble ───────────────────────── */
+    .inline-log {
+      font-size: 12px;
+      color: var(--text-faint);
+      font-style: italic;
+      margin-top: 4px;
+      padding-top: 4px;
+      border-top: 1px solid var(--border-soft);
+    }
+
+    /* ─── Action buttons ─────────────────────────────────────────────────── */
+    .btn {
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+      white-space: nowrap;
+    }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { background: var(--surface-3); }
+
+    .btn-sm { padding: 6px 12px; }
+
+    .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+    .btn-danger {
+      background: var(--red-soft);
+      border-color: rgba(220,38,38,0.2);
+      color: var(--red);
+    }
+    .btn-danger:hover:not(:disabled) { background: var(--red); color: #fff; }
+
+    .btn-ghost { background: transparent; border-color: transparent; }
+
+    /* ─── Input area (bottom) ────────────────────────────────────────────── */
+    #inputArea {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 10px 14px 14px;
+      flex-shrink: 0;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+
+    #goal {
+      flex: 1;
+      min-height: 42px;
+      max-height: 120px;
+      padding: 9px 12px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      font-size: 14px;
+      resize: none;
+      outline: none;
+      line-height: 1.5;
+      transition: var(--transition);
+    }
+    #goal:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    #goal::placeholder { color: var(--text-faint); }
+
+    #sendBtn {
+      width: 40px;
+      height: 40px;
+      border-radius: var(--radius);
+      border: none;
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      flex-shrink: 0;
+      transition: var(--transition);
+    }
+    #sendBtn:hover:not(:disabled) { background: var(--accent-hover); transform: scale(1.04); }
+    #sendBtn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+    #sendBtn svg { width: 16px; height: 16px; pointer-events: none; }
+
+    /* Input hint */
+    .input-hint {
+      font-size: 11px;
+      color: var(--text-faint);
+      margin-top: 5px;
+      padding: 0 2px;
+    }
   </style>
 </head>
 <body>
-  <header>
-    <div class="header-row">
-      <div class="brand"><span id="brandDot" class="brand-dot"></span>Brotto</div>
-      <div id="statusPill" class="status-pill idle">Idle</div>
-    </div>
-    <div class="row">
-      <input id="plannerUrl" class="input" type="url" placeholder="Planner URL (default http://127.0.0.1:3001)" value="http://127.0.0.1:3001">
-      <button id="connectBtn" class="btn primary">Connect</button>
-      <button id="disconnectBtn" class="btn ghost" disabled>Disconnect</button>
-    </div>
-  </header>
 
-  <section class="composer">
-    <textarea id="goal" class="input" placeholder="Describe the task — e.g. Log in to the page using the credentials shown, stop on Welcome" maxlength="2000"></textarea>
-    <input id="startingUrl" class="input" type="url" placeholder="Starting URL (optional)">
-    <div class="input-meta" id="connectionMeta">Not connected</div>
-    <div class="row">
-      <button id="startBtn" class="btn primary" disabled>Start task</button>
-      <button id="stopBtn" class="btn danger" disabled>Stop</button>
-      <button id="refreshBtn" class="btn ghost" disabled>Refresh</button>
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<header>
+  <div class="brand">
+    <div class="brand-icon">B</div>
+    <span>Brotto</span>
+  </div>
+
+  <select id="modelSelector" title="Model selector">
+    <option>Brotto Haiku 4.5</option>
+  </select>
+
+  <div id="workingIndicator" aria-live="polite">
+    <div class="spinner"></div>
+    <span>Working</span>
+  </div>
+
+  <div class="hdr-actions">
+    <!-- Stop button (visible when running) -->
+    <button id="stopBtn" class="btn-icon btn-stop" title="Stop" style="display:none" aria-label="Stop task">
+      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+    </button>
+    <!-- Settings gear -->
+    <button id="settingsBtn" class="btn-icon" title="Settings" aria-label="Open settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<!-- ── Hidden placeholders (preserved for sidepanel.js DOM-id compatibility) ── -->
+<input id="plannerUrl" type="hidden" value="http://127.0.0.1:3001">
+<input id="startingUrl" type="hidden">
+<button id="startBtn" style="display:none">Start task</button>
+<button id="refreshBtn" style="display:none">Refresh</button>
+<span id="connectionMeta" style="display:none">Not connected</span>
+<span id="statusPill" style="display:none"></span>
+<span id="brandDot" style="display:none"></span>
+<span id="stepCount" style="display:none">0 steps</span>
+<span id="timer" style="display:none"></span>
+
+<!-- ── Chat messages ───────────────────────────────────────────────────── -->
+<main id="messages" aria-live="polite">
+  <div class="empty-state" id="emptyState">
+    <div class="empty-logo">B</div>
+    <div class="empty-title">Brotto</div>
+    <div class="empty-sub">Describe what you'd like to do and Brotto will help you get it done in the browser.</div>
+  </div>
+</main>
+
+<!-- ── Input area ──────────────────────────────────────────────────────── -->
+<section id="inputArea">
+  <div class="input-row">
+    <textarea id="goal" placeholder="What would you like Brotto to do?" rows="1" maxlength="2000" aria-label="Task description"></textarea>
+    <button id="sendBtn" title="Send" aria-label="Send">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="22" y1="2" x2="11" y2="13"></line>
+        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+      </svg>
+    </button>
+  </div>
+  <div class="input-hint">Press Enter to send &nbsp;·&nbsp; Shift+Enter for newline</div>
+</section>
+
+<!-- ── Settings overlay ───────────────────────────────────────────────── -->
+<div id="settingsOverlay" role="dialog" aria-modal="true" aria-label="Settings">
+  <div id="settingsPanel">
+    <button id="settingsClose" class="btn-icon" aria-label="Close settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+    <div class="settings-title">Settings</div>
+    <div class="settings-section">
+      <label for="plannerUrlSetting">Planner URL</label>
+      <input id="plannerUrlSetting" class="input" type="url" placeholder="http://127.0.0.1:3001">
     </div>
-  </section>
-
-  <main id="stream" aria-live="polite">
-    <div class="empty">
-      <div class="empty-icon">⌖</div>
-      <div>No active task. Connect, then enter a goal and press Start.</div>
+    <div class="settings-section">
+      <label for="startingUrlSetting">Starting URL (optional)</label>
+      <input id="startingUrlSetting" class="input" type="url" placeholder="https://example.com">
     </div>
-  </main>
+    <div class="settings-section">
+      <label>Connection</label>
+      <div style="display:flex;gap:8px;">
+        <button id="connectBtn" class="btn btn-primary btn-sm" disabled style="flex:1">Connect</button>
+        <button id="disconnectBtn" class="btn btn-sm" disabled style="flex:1">Disconnect</button>
+      </div>
+    </div>
+  </div>
+</div>
 
-  <footer>
-    <span id="stepCount">0 steps</span>
-    <span class="timer" id="timer">0.0s</span>
-  </footer>
-
-  <script src="sidepanel.js"></script>
+<script src="sidepanel.js"></script>
 </body>
 </html>

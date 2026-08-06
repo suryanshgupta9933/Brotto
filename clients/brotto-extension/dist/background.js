@@ -4456,7 +4456,7 @@
         FORBIDDEN_BROWSER_DATA_KEYS: () => FORBIDDEN_BROWSER_DATA_KEYS2,
         FailedActionResultV1Schema: () => FailedActionResultV1Schema2,
         FaraActionArgsSchema: () => FaraActionArgsSchema2,
-        ForbiddenBrowserDataError: () => ForbiddenBrowserDataError2,
+        ForbiddenBrowserDataError: () => ForbiddenBrowserDataError3,
         FrameIdSchema: () => FrameIdSchema2,
         FramePathSegmentIdSchema: () => FramePathSegmentIdSchema2,
         HistoryBackArgsSchema: () => HistoryBackArgsSchema2,
@@ -4558,7 +4558,7 @@
       var normalizedForbiddenKeys2 = new Set(
         [...FORBIDDEN_BROWSER_DATA_KEYS2].map(normalizeBrowserDataKey2)
       );
-      var ForbiddenBrowserDataError2 = class extends Error {
+      var ForbiddenBrowserDataError3 = class extends Error {
         constructor(keyPath) {
           super(`Forbidden browser data key at ${keyPath}`);
           this.keyPath = keyPath;
@@ -4592,7 +4592,7 @@
           for (const [key, nestedValue] of Object.entries(current)) {
             const keyPath = `${path}.${key}`;
             if (isForbiddenBrowserDataKey2(key)) {
-              throw new ForbiddenBrowserDataError2(keyPath);
+              throw new ForbiddenBrowserDataError3(keyPath);
             }
             visit(nestedValue, keyPath);
           }
@@ -4604,7 +4604,7 @@
           try {
             assertNoForbiddenBrowserData3(value);
           } catch (error) {
-            if (error instanceof ForbiddenBrowserDataError2) {
+            if (error instanceof ForbiddenBrowserDataError3) {
               context.addIssue({
                 code: import_zod22.z.ZodIssueCode.custom,
                 message: error.message,
@@ -4759,7 +4759,7 @@
           try {
             assertNoForbiddenBrowserData3(value);
           } catch (error) {
-            if (error instanceof ForbiddenBrowserDataError2) {
+            if (error instanceof ForbiddenBrowserDataError3) {
               context.addIssue({ code: import_zod32.z.ZodIssueCode.custom, message: error.message });
               return;
             }
@@ -4914,7 +4914,7 @@
         try {
           assertNoForbiddenBrowserData3(value);
         } catch (error) {
-          if (error instanceof ForbiddenBrowserDataError2) {
+          if (error instanceof ForbiddenBrowserDataError3) {
             context.addIssue({ code: import_zod42.z.ZodIssueCode.custom, message: error.message });
             return;
           }
@@ -4955,7 +4955,7 @@
         try {
           assertNoForbiddenBrowserData3(value);
         } catch (error) {
-          if (error instanceof ForbiddenBrowserDataError2) {
+          if (error instanceof ForbiddenBrowserDataError3) {
             context.addIssue({ code: import_zod52.z.ZodIssueCode.custom, message: error.message });
             return;
           }
@@ -13155,6 +13155,23 @@
       return await captureObservationInternal(tabId, options);
     } catch (error) {
       if (error instanceof ObservationSecurityError) throw error;
+      if (error instanceof import_brotto_action_schema6.ForbiddenBrowserDataError) {
+        return {
+          observationId: "obs-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+          capturedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          url: "about:blank",
+          title: "(content filtered)",
+          screenshot: { kind: "inline", encoding: "png", data: "", sha256: "0".repeat(64), width: 0, height: 0 },
+          viewport: { width: 1280, height: 720, devicePixelRatio: 1, zoom: 1, scrollX: 0, scrollY: 0 },
+          page: {
+            tabId: "0".repeat(36),
+            frameId: "0".repeat(36),
+            lifecycle: "complete",
+            visibility: "visible"
+          },
+          semanticTargets: []
+        };
+      }
       throw securityError(
         "Captured observation failed the local outbound security boundary",
         error

@@ -1,26 +1,47 @@
-// ponytail: side panel controller. State machine: idle → connecting →
-// connected → executing → (paused | done | error). Renders a live activity
-// stream of step cards with screenshots, action descriptions, and elapsed
-// timer. Mid-task prompts (login, question, decision) are inline amber
-// cards that interleave the stream chronologically.
+// sidepanel.js — chat UI rewrite for the Brotto side panel.
+// Preserves all event handlers, state machine, and message listeners.
+// Only rendering functions are updated to produce the Claude-in-Chrome chat interface.
 
-const stream = document.getElementById('stream');
-const statusPill = document.getElementById('statusPill');
-const brandDot = document.getElementById('brandDot');
-const goalEl = document.getElementById('goal');
-const startingUrlEl = document.getElementById('startingUrl');
-const plannerUrlEl = document.getElementById('plannerUrl');
-const connectBtn = document.getElementById('connectBtn');
-const disconnectBtn = document.getElementById('disconnectBtn');
-const startBtn = document.getElementById('startBtn');
-const stopBtn = document.getElementById('stopBtn');
-const refreshBtn = document.getElementById('refreshBtn');
-const connectionMeta = document.getElementById('connectionMeta');
-const stepCountEl = document.getElementById('stepCount');
-const timerEl = document.getElementById('timer');
+const messagesEl  = document.getElementById('messages');
+const emptyState   = document.getElementById('emptyState');
+const goalEl       = document.getElementById('goal');
+const sendBtn      = document.getElementById('sendBtn');
+const stopBtn      = document.getElementById('stopBtn');
+const workingInd   = document.getElementById('workingIndicator');
+const settingsBtn  = document.getElementById('settingsBtn');
+const settingsOverlay = document.getElementById('settingsOverlay');
+const settingsPanel   = document.getElementById('settingsPanel');
+const settingsClose   = document.getElementById('settingsClose');
+const plannerUrlSetting = document.getElementById('plannerUrlSetting');
 
+// Preserved DOM IDs for background.ts compatibility
+const plannerUrlEl    = document.getElementById('plannerUrl');
+const startingUrlEl   = document.getElementById('startingUrl');
+const connectBtn      = document.getElementById('connectBtn');
+const disconnectBtn   = document.getElementById('disconnectBtn');
+const refreshBtn      = document.getElementById('refreshBtn');
+const statusPill      = document.getElementById('statusPill');
+const brandDot        = document.getElementById('brandDot');
+const stepCountEl     = document.getElementById('stepCount');
+const timerEl         = document.getElementById('timer');
+const connectionMeta  = document.getElementById('connectionMeta');
+
+// ── Settings panel ────────────────────────────────────────────────────────
+settingsBtn.addEventListener('click', () => {
+  plannerUrlSetting.value = plannerUrlEl.value || 'http://127.0.0.1:3001';
+  settingsOverlay.classList.add('open');
+});
+settingsClose.addEventListener('click', () => settingsOverlay.classList.remove('open'));
+settingsOverlay.addEventListener('click', (e) => {
+  if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');
+});
+plannerUrlSetting.addEventListener('input', () => {
+  plannerUrlEl.value = plannerUrlSetting.value;
+});
+
+// ── State ─────────────────────────────────────────────────────────────────
 const state = {
-  phase: 'idle',           // idle | connecting | connected | executing | paused | done | error
+  phase: 'idle',
   plannerUrl: '',
   sessionId: null,
   startTime: 0,
@@ -28,36 +49,56 @@ const state = {
 };
 
 let timerInterval = null;
-let lastLiveCard = null;
 
+// ── Button handlers (preserved verbatim) ─────────────────────────────────
 connectBtn.addEventListener('click', () => void connect());
 disconnectBtn.addEventListener('click', () => void disconnect());
 startBtn.addEventListener('click', () => void startTask());
 stopBtn.addEventListener('click', () => void stopTask());
 refreshBtn.addEventListener('click', () => void refresh());
+
+// ── Input + send ─────────────────────────────────────────────────────────
+sendBtn.addEventListener('click', () => void sendUserMessage());
 goalEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void startTask();
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    void sendUserMessage();
+  }
+});
+goalEl.addEventListener('input', () => {
+  goalEl.style.height = 'auto';
+  goalEl.style.height = Math.min(goalEl.scrollHeight, 120) + 'px';
 });
 
+function sendUserMessage() {
+  const text = goalEl.value.trim();
+  if (!text || state.phase === 'executing') return;
+  appendMessage({ role: 'user', text });
+  goalEl.value = '';
+  goalEl.style.height = 'auto';
+}
+
+function appendUserMessage(text) {
+  appendMessage({ role: 'user', text });
+}
+
+// ── Phase / UI helpers ────────────────────────────────────────────────────
 function setPhase(phase, message) {
   state.phase = phase;
+  const running = phase === 'executing' || phase === 'paused';
+  workingInd.classList.toggle('active', running);
+  stopBtn.style.display = running ? '' : 'none';
+  sendBtn.disabled = running || phase === 'connecting';
+  // compatibility
   const labels = {
-    idle: 'Idle',
-    connecting: 'Connecting',
-    connected: 'Connected',
-    executing: 'Running',
-    paused: 'Paused',
-    done: 'Done',
-    error: 'Error',
+    idle: 'Idle', connecting: 'Connecting', connected: 'Connected',
+    executing: 'Running', paused: 'Paused', done: 'Done', error: 'Error',
   };
   statusPill.textContent = labels[phase] || 'Idle';
-  statusPill.className = 'status-pill ' + phase;
-  brandDot.className = 'brand-dot' + (phase === 'executing' ? ' executing' : phase === 'connected' ? ' connected' : phase === 'error' ? ' error' : '');
+  statusPill.className = 'statusPill ' + phase;
+  brandDot.className = 'brandDot' + (phase === 'executing' ? ' executing' : phase === 'connected' ? ' connected' : phase === 'error' ? ' error' : '');
   connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
   disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
-  // ponytail: start is always enabled (except during connecting — start clicks
-  // trigger implicit connect from idle). Lets the user click Start from any
-  // state without first hunting for the Connect button.
   startBtn.disabled = phase === 'connecting';
   stopBtn.disabled = !(phase === 'executing' || phase === 'paused');
   refreshBtn.disabled = phase === 'connecting';
@@ -65,10 +106,7 @@ function setPhase(phase, message) {
 }
 
 function clearTimer() {
-  if (timerInterval !== null) {
-    clearInterval(timerInterval);
-    timerInterval = null;
-  }
+  if (timerInterval !== null) { clearInterval(timerInterval); timerInterval = null; }
   state.startTime = 0;
   timerEl.textContent = '0.0s';
 }
@@ -77,8 +115,7 @@ function startTimer() {
   clearTimer();
   state.startTime = Date.now();
   timerInterval = setInterval(() => {
-    const elapsed = (Date.now() - state.startTime) / 1000;
-    timerEl.textContent = elapsed.toFixed(1) + 's';
+    timerEl.textContent = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
   }, 100);
 }
 
@@ -86,8 +123,7 @@ function stopTimer() {
   if (timerInterval !== null) {
     clearInterval(timerInterval);
     timerInterval = null;
-    const elapsed = (Date.now() - state.startTime) / 1000;
-    timerEl.textContent = elapsed.toFixed(1) + 's';
+    timerEl.textContent = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
   }
 }
 
@@ -95,13 +131,7 @@ function updateStepCount() {
   stepCountEl.textContent = state.stepCount + (state.stepCount === 1 ? ' step' : ' steps');
 }
 
-function clearStream() {
-  stream.replaceChildren();
-  state.stepCount = 0;
-  lastLiveCard = null;
-  updateStepCount();
-}
-
+// ── Core logic (preserved verbatim) ───────────────────────────────────────
 async function connect() {
   const url = plannerUrlEl.value.trim() || 'http://127.0.0.1:3001';
   setPhase('connecting', `Probing ${url}...`);
@@ -113,48 +143,38 @@ async function connect() {
     plannerUrlEl.value = url;
     const label = info.model ? `${info.family} · ${info.model}` : info.family || 'planner';
     setPhase('connected', `Connected · ${label}`);
-    appendCard({ kind: 'system', icon: 'icon.sys', title: 'Connected to planner', meta: `${url} · ${label}`, ts: Date.now() });
+    appendMessage({ role: 'system', text: `Connected to planner at ${url} (${label})` });
   } catch (err) {
-    // ponytail: clear the cached planner URL on failure so refresh goes
-    // back to idle and the user can try a different URL.
     state.plannerUrl = '';
     setPhase('error', `Connect failed: ${err instanceof Error ? err.message : String(err)}`);
-    appendCard({ kind: 'error', icon: 'icon.err', title: 'Connect failed', meta: err instanceof Error ? err.message : String(err), ts: Date.now() });
+    appendMessage({ role: 'error', text: `Connect failed: ${err instanceof Error ? err.message : String(err)}` });
   }
 }
 
 function disconnect() {
-  if (state.phase === 'executing' || state.phase === 'paused') {
-    void stopTask();
-  }
+  if (state.phase === 'executing' || state.phase === 'paused') void stopTask();
   state.plannerUrl = '';
   setPhase('idle', 'Disconnected');
-  appendCard({ kind: 'system', icon: 'icon.sys', title: 'Disconnected', meta: '', ts: Date.now() });
+  appendMessage({ role: 'system', text: 'Disconnected' });
 }
 
 async function startTask() {
   if (state.phase === 'executing' || state.phase === 'paused') return;
   const goal = goalEl.value.trim();
   if (!goal) {
-    appendCard({ kind: 'error', icon: 'icon.err', title: 'Empty goal', meta: 'Enter a task description first', ts: Date.now() });
+    appendMessage({ role: 'error', text: 'Enter a task description first.' });
     return;
   }
   if (!state.plannerUrl) {
-    // ponytail: implicit connect if user skipped. Better than blocking on a
-    // connect step they may not realize they need.
     await connect();
     if (state.phase !== 'connected') return;
   }
-  clearStream();
+  clearMessages();
   state.sessionId = 'session-' + Date.now();
   setPhase('executing', 'Starting...');
   startTimer();
-  appendCard({ kind: 'system', icon: 'icon.sys', title: 'Starting task', meta: goal.slice(0, 80), ts: Date.now() });
-  const message = {
-    type: 'run_local_task',
-    task: goal,
-    sessionId: state.sessionId,
-  };
+  appendMessage({ role: 'system', text: `Starting task: ${goal.slice(0, 80)}${goal.length > 80 ? '…' : ''}` });
+  const message = { type: 'run_local_task', task: goal, sessionId: state.sessionId };
   const startUrl = startingUrlEl.value.trim();
   const plannerUrl = plannerUrlEl.value.trim();
   if (startUrl) message.startingUrl = startUrl;
@@ -163,170 +183,26 @@ async function startTask() {
   if (!response.success) {
     stopTimer();
     setPhase('error', `Start failed: ${response.error || 'unknown'}`);
-    appendCard({ kind: 'error', icon: 'icon.err', title: 'Failed to start', meta: response.error || 'unknown error', ts: Date.now() });
+    appendMessage({ role: 'error', text: `Failed to start: ${response.error || 'unknown error'}` });
   }
 }
 
 async function stopTask() {
   stopBtn.disabled = true;
   const response = await sendMessage({ type: 'cancel_local_task' });
-  if (!response.success) appendCard({ kind: 'error', icon: 'icon.err', title: 'Cancel failed', meta: response.error || 'unknown error', ts: Date.now() });
+  if (!response.success) appendMessage({ role: 'error', text: `Cancel failed: ${response.error || 'unknown error'}` });
 }
 
 async function refresh() {
-  // ponytail: hard reset. Aborts any active loop, detaches debugger, clears
-  // pending UI requests, clears the stream. Doesn't close the tab — the user
-  // may want to keep the page open. After reset, return to idle (or connected
-  // if the cached planner URL is healthy).
   stopTimer();
-  clearStream();
+  clearMessages();
   const response = await sendMessage({ type: 'reset_session' });
-  if (!response.success) appendCard({ kind: 'error', icon: 'icon.err', title: 'Reset failed', meta: response.error || 'unknown error', ts: Date.now() });
-  // ponytail: clear stale planner URL on refresh. If the URL is good the user
-  // can hit Connect again; if it was bad we don't want to keep "knowing" it.
+  if (!response.success) appendMessage({ role: 'error', text: `Reset failed: ${response.error || 'unknown error'}` });
   state.plannerUrl = '';
   setPhase('idle', 'Ready');
 }
 
-function iconFor(kind) {
-  switch (kind) {
-    case 'left_click':
-    case 'double_click':
-    case 'right_click':
-    case 'mouse_move':
-      return 'click';
-    case 'insert_text':
-      return 'text';
-    case 'visit_url':
-    case 'history_back':
-      return 'nav';
-    case 'key':
-      return 'key';
-    case 'terminate':
-      return 'term';
-    case 'wait':
-      return 'sys';
-    case 'error':
-      return 'err';
-    case 'prompt':
-      return 'qu';
-    default:
-      return 'nav';
-  }
-}
-
-function describeAction(action) {
-  if (!action) return '';
-  switch (action.type) {
-    case 'left_click':
-    case 'double_click':
-    case 'right_click':
-      return `${action.type.replace('_', ' ')} (${action.x}, ${action.y})`;
-    case 'insert_text':
-      return `Type "${(action.text || '').slice(0, 60)}"`;
-    case 'key':
-      return `Press ${action.key}`;
-    case 'visit_url':
-      return `Navigate to ${action.url}`;
-    case 'history_back':
-      return `Go back`;
-    case 'scroll':
-      return `Scroll`;
-    case 'wait':
-      return `Wait`;
-    case 'terminate':
-      return `Task done`;
-    default:
-      return action.type || 'Action';
-  }
-}
-
-function fmtTime(ts) {
-  if (!ts) return '';
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
-
-function appendCard(opts) {
-  if (lastLiveCard && opts.live) lastLiveCard.classList.remove('live');
-  const empty = stream.querySelector('.empty');
-  if (empty) empty.remove();
-
-  const card = document.createElement('article');
-  card.className = 'card' + (opts.live ? ' live' : '') + (opts.kind === 'error' ? ' error' : '') + (opts.kind === 'done' ? ' done' : '') + (opts.kind === 'prompt' ? ' prompt' : '');
-
-  const head = document.createElement('div');
-  head.className = 'card-head';
-  const icon = document.createElement('span');
-  icon.className = 'icon ' + (opts.icon || 'icon.nav');
-  icon.textContent = (opts.iconLabel || opts.title || '?').charAt(0).toUpperCase();
-  const title = document.createElement('span');
-  title.className = 'card-title';
-  title.textContent = opts.title || '';
-  const meta = document.createElement('span');
-  meta.className = 'card-meta';
-  meta.textContent = fmtTime(opts.ts) + (opts.meta ? ' · ' + opts.meta : '');
-  head.append(icon, title, meta);
-  card.appendChild(head);
-
-  if (opts.url) {
-    const url = document.createElement('div');
-    url.className = 'card-url';
-    url.textContent = opts.url;
-    card.appendChild(url);
-  }
-
-  if (opts.screenshot) {
-    const img = document.createElement('img');
-    img.className = 'screenshot';
-    img.src = `data:image/png;base64,${opts.screenshot}`;
-    img.alt = opts.url || 'screenshot';
-    img.loading = 'lazy';
-    card.appendChild(img);
-  } else if (opts.placeholder) {
-    const ph = document.createElement('div');
-    ph.className = 'screenshot placeholder';
-    ph.textContent = opts.placeholder;
-    card.appendChild(ph);
-  }
-
-  if (opts.body) {
-    const body = document.createElement('div');
-    body.className = 'prompt-body';
-    body.textContent = opts.body;
-    card.appendChild(body);
-  }
-
-  if (opts.actions) {
-    const actions = document.createElement('div');
-    actions.className = 'prompt-actions';
-    for (const a of opts.actions) {
-      const btn = document.createElement('button');
-      btn.className = 'btn ' + (a.kind || '');
-      btn.textContent = a.label;
-      btn.addEventListener('click', () => a.onClick(btn));
-      actions.appendChild(btn);
-    }
-    card.appendChild(actions);
-  }
-
-  if (opts.input) {
-    const input = document.createElement('input');
-    input.className = 'input';
-    input.placeholder = opts.input.placeholder || '';
-    card.appendChild(input);
-    if (opts.actions && opts.actions.length > 0) {
-      const last = opts.actions[opts.actions.length - 1];
-      const original = last.onClick;
-      last.onClick = () => original(input.value);
-    }
-  }
-
-  stream.appendChild(card);
-  stream.scrollTop = stream.scrollHeight;
-  if (opts.live) lastLiveCard = card;
-  return card;
-}
-
+// ── Message sender (preserved verbatim) ────────────────────────────────────
 function sendMessage(message) {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(message, (response) => {
@@ -336,116 +212,487 @@ function sendMessage(message) {
   });
 }
 
+// ── Chat rendering ────────────────────────────────────────────────────────
+function clearMessages() {
+  messagesEl.replaceChildren();
+  state.stepCount = 0;
+  updateStepCount();
+  appendEmptyState();
+}
+
+function appendEmptyState() {
+  messagesEl.appendChild(createEmptyState());
+}
+
+function createEmptyState() {
+  const div = document.createElement('div');
+  div.className = 'empty-state';
+  div.innerHTML = `
+    <div class="empty-logo">B</div>
+    <div class="empty-title">Brotto</div>
+    <div class="empty-sub">Describe what you'd like to do and Brotto will help you get it done in the browser.</div>
+  `;
+  return div;
+}
+
+function appendMessage({ role, text, inlineLogs }) {
+  // Remove empty state on first real message
+  const empty = messagesEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const msg = document.createElement('div');
+  msg.className = 'message ' + role;
+
+  if (role === 'assistant' || role === 'user') {
+    // Bubble wrapper
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    msg.appendChild(bubble);
+
+    // Inline logs appended inside assistant bubble
+    if (inlineLogs && inlineLogs.length > 0) {
+      const logsDiv = document.createElement('div');
+      logsDiv.className = 'inline-log';
+      logsDiv.textContent = inlineLogs.join(' · ');
+      bubble.appendChild(logsDiv);
+    }
+  } else if (role === 'system') {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    msg.appendChild(bubble);
+  } else if (role === 'error') {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.innerHTML = `<strong>Error:</strong> ${text}`;
+    msg.appendChild(bubble);
+  } else if (role === 'done') {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.innerHTML = `
+      <div class="done-header"><span class="done-icon">&#10003;</span> Task completed</div>
+      <div class="done-summary">${text}</div>
+    `;
+    msg.appendChild(bubble);
+  }
+
+  messagesEl.appendChild(msg);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return msg;
+}
+
+// ── Plan preview card ─────────────────────────────────────────────────────
+function appendPlanCard({ title, sites, steps }) {
+  const empty = messagesEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const card = document.createElement('div');
+  card.className = 'plan-card';
+
+  const header = document.createElement('div');
+  header.className = 'plan-header';
+  header.innerHTML = `<span class="plan-badge">${title || "Brotto's plan"}</span>`;
+  card.appendChild(header);
+
+  if (sites && sites.length > 0) {
+    const sitesDiv = document.createElement('div');
+    sitesDiv.className = 'plan-sites';
+    sitesDiv.innerHTML = `Allow actions on: <strong>${sites.join(', ')}</strong>`;
+    card.appendChild(sitesDiv);
+  }
+
+  if (steps && steps.length > 0) {
+    const approachTitle = document.createElement('div');
+    approachTitle.className = 'plan-approach-title';
+    approachTitle.textContent = 'Approach to follow:';
+    card.appendChild(approachTitle);
+
+    const ol = document.createElement('ol');
+    ol.className = 'plan-steps';
+    for (const step of steps) {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="plan-step-num">${step.index}.</span><span>${step.text}</span>`;
+      ol.appendChild(li);
+    }
+    card.appendChild(ol);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'plan-actions';
+
+  const approveBtn = document.createElement('button');
+  approveBtn.className = 'btn btn-primary btn-sm';
+  approveBtn.textContent = 'Approve plan';
+  approveBtn.addEventListener('click', () => {
+    appendMessage({ role: 'assistant', text: 'Approved the plan. Proceeding…' });
+    card.remove();
+  });
+  actions.appendChild(approveBtn);
+
+  const changeBtn = document.createElement('button');
+  changeBtn.className = 'btn btn-sm';
+  changeBtn.textContent = 'Make changes';
+  changeBtn.addEventListener('click', () => {
+    goalEl.focus();
+  });
+  actions.appendChild(changeBtn);
+
+  card.appendChild(actions);
+  messagesEl.appendChild(card);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// ── Approval request card ─────────────────────────────────────────────────
+function appendApprovalCard({ id, reason, action }) {
+  const empty = messagesEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const card = document.createElement('div');
+  card.className = 'approval-card';
+
+  const header = document.createElement('div');
+  header.className = 'approval-header';
+  header.innerHTML = `<span class="approval-badge">Approval needed</span>`;
+  card.appendChild(header);
+
+  if (reason) {
+    const body = document.createElement('div');
+    body.className = 'approval-body';
+    body.textContent = reason;
+    card.appendChild(body);
+  }
+
+  const preview = document.createElement('div');
+  preview.className = 'approval-preview';
+  const previewText = action?.url ? `${action.type ?? 'action'} → ${action.url}` : (action?.type ?? 'action');
+  preview.textContent = previewText;
+  preview.title = previewText;
+  card.appendChild(preview);
+
+  const actions = document.createElement('div');
+  actions.className = 'approval-actions';
+
+  const denyBtn = document.createElement('button');
+  denyBtn.className = 'btn btn-danger btn-sm';
+  denyBtn.textContent = 'Deny';
+  denyBtn.addEventListener('click', () => {
+    appendMessage({ role: 'assistant', text: 'Action denied.' });
+    card.remove();
+    void sendMessage({ type: 'submit_approval', id, approved: false });
+  });
+  actions.appendChild(denyBtn);
+
+  const approveBtn = document.createElement('button');
+  approveBtn.className = 'btn btn-primary btn-sm';
+  approveBtn.textContent = 'Approve';
+  approveBtn.addEventListener('click', () => {
+    appendMessage({ role: 'assistant', text: 'Action approved.' });
+    card.remove();
+    void sendMessage({ type: 'submit_approval', id, approved: true });
+  });
+  actions.appendChild(approveBtn);
+
+  card.appendChild(actions);
+  messagesEl.appendChild(card);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// ── Clarify request card ─────────────────────────────────────────────────
+function appendClarifyCard({ id, question, reason }) {
+  const empty = messagesEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const card = document.createElement('div');
+  card.className = 'clarify-card';
+
+  const header = document.createElement('div');
+  header.className = 'clarify-header';
+  header.innerHTML = `<span class="clarify-badge">Your input</span>`;
+  card.appendChild(header);
+
+  if (question) {
+    const body = document.createElement('div');
+    body.className = 'clarify-body';
+    body.textContent = question;
+    card.appendChild(body);
+  }
+
+  // Hint text directing user to type below
+  const hint = document.createElement('div');
+  hint.className = 'input-hint';
+  hint.style.marginBottom = '10px';
+  hint.textContent = 'Type your answer in the field below, then press Enter to send.';
+  card.appendChild(hint);
+
+  const actions = document.createElement('div');
+  actions.className = 'clarify-actions';
+
+  const skipBtn = document.createElement('button');
+  skipBtn.className = 'btn btn-sm';
+  skipBtn.textContent = 'Skip';
+  skipBtn.addEventListener('click', () => {
+    appendMessage({ role: 'system', text: 'Skipped clarifying question.' });
+    card.remove();
+    void sendMessage({ type: 'submit_clarification', id, answer: '' });
+  });
+  actions.appendChild(skipBtn);
+
+  card.appendChild(actions);
+  messagesEl.appendChild(card);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  // Focus the input area
+  goalEl.focus();
+}
+
+// ── Icon helpers (for step cards rendered as assistant messages) ───────────
+function iconFor(kind) {
+  switch (kind) {
+    case 'left_click': case 'double_click': case 'right_click': case 'mouse_move': return '&#9654;';
+    case 'insert_text': return '&#9998;';
+    case 'visit_url': case 'history_back': return '&#8594;';
+    case 'key': return '&#9251;';
+    case 'terminate': return '&#10003;';
+    case 'wait': case 'scroll': return '&#8226;';
+    case 'error': return '&#10007;';
+    case 'prompt': return '?';
+    default: return '&#8594;';
+  }
+}
+
+// ── Live assistant message (current "working" message being updated) ───────
+let currentAssistantMsg = null;
+let currentAssistantLogs = [];
+
+function startAssistantMessage({ icon, title, meta }) {
+  currentAssistantMsg = null;
+  currentAssistantLogs = [];
+
+  const empty = messagesEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const msg = document.createElement('div');
+  msg.className = 'message assistant';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  const iconEl = document.createElement('span');
+  iconEl.style.marginRight = '5px';
+  iconEl.style.opacity = '0.6';
+  iconEl.innerHTML = icon || '&#8594;';
+
+  const textNode = document.createTextNode(title || 'Working…');
+  bubble.appendChild(iconEl);
+  bubble.appendChild(textNode);
+
+  msg.appendChild(bubble);
+  messagesEl.appendChild(msg);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  currentAssistantMsg = { el: msg, bubble, textNode };
+  return currentAssistantMsg;
+}
+
+function appendLogToAssistant(logText) {
+  if (!currentAssistantMsg) return;
+  const existing = currentAssistantMsg.bubble.querySelector('.inline-log');
+  if (existing) {
+    existing.textContent += ' · ' + logText;
+  } else {
+    const logsDiv = document.createElement('div');
+    logsDiv.className = 'inline-log';
+    logsDiv.textContent = logText;
+    currentAssistantMsg.bubble.appendChild(logsDiv);
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function finishAssistantMessage({ icon, title, meta }) {
+  if (!currentAssistantMsg) {
+    // Fallback: just append as a regular message
+    appendMessage({ role: 'assistant', text: `${icon} ${title}${meta ? ' · ' + meta : ''}` });
+    return;
+  }
+  // Finalize the bubble
+  currentAssistantMsg.bubble.innerHTML = '';
+  const iconEl = document.createElement('span');
+  iconEl.style.marginRight = '6px';
+  iconEl.style.opacity = '0.5';
+  iconEl.innerHTML = icon || '&#8594;';
+  const titleText = document.createTextNode(title || '');
+  currentAssistantMsg.bubble.appendChild(iconEl);
+  currentAssistantMsg.bubble.appendChild(titleText);
+
+  if (meta) {
+    const metaEl = document.createElement('div');
+    metaEl.className = 'inline-log';
+    metaEl.textContent = meta;
+    currentAssistantMsg.bubble.appendChild(metaEl);
+  }
+
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  currentAssistantMsg = null;
+  currentAssistantLogs = [];
+}
+
+// ── Message listener (all event types from background.ts) ──────────────────
 chrome.runtime.onMessage.addListener((message) => {
   switch (message.type) {
+
     case 'session_started':
       state.sessionId = message.sessionId || state.sessionId;
       break;
+
+    case 'canonical_status':
+      setPhase(message.status, message.reconnectAttempt !== undefined ? `Reconnecting (${message.reconnectAttempt})…` : null);
+      break;
+
     case 'step_card': {
       state.stepCount = Math.max(state.stepCount, message.index !== undefined ? message.index + 1 : state.stepCount + 1);
       updateStepCount();
-      appendCard({
-        kind: 'step',
-        icon: iconFor(message.iconKind),
-        iconLabel: message.title || '',
-        title: message.title || 'Step',
-        meta: message.result || '',
-        url: message.url,
-        screenshot: message.screenshot,
-        placeholder: message.screenshotPlaceholder,
-        ts: message.ts || Date.now(),
-        live: true,
-      });
+      const icon = iconFor(message.iconKind || '');
+      if (!currentAssistantMsg) {
+        startAssistantMessage({ icon, title: message.title || 'Step', meta: message.result || '' });
+      }
+      // Update the assistant message with action info
+      if (currentAssistantMsg) {
+        currentAssistantMsg.bubble.innerHTML = '';
+        const iconEl = document.createElement('span');
+        iconEl.style.marginRight = '6px';
+        iconEl.style.opacity = '0.5';
+        iconEl.innerHTML = icon;
+        const textEl = document.createElement('span');
+        textEl.textContent = message.title || 'Step';
+        currentAssistantMsg.bubble.appendChild(iconEl);
+        currentAssistantMsg.bubble.appendChild(textEl);
+        if (message.result) {
+          const metaEl = document.createElement('div');
+          metaEl.className = 'inline-log';
+          metaEl.textContent = message.result;
+          currentAssistantMsg.bubble.appendChild(metaEl);
+        }
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
       break;
     }
+
+    case 'log':
+      if (currentAssistantMsg) {
+        appendLogToAssistant(message.message || '');
+      } else {
+        appendMessage({ role: 'system', text: message.message || '' });
+      }
+      break;
+
     case 'login_required':
       setPhase('paused', `Login required at ${message.domain || 'site'}`);
-      appendCard({
-        kind: 'prompt',
-        icon: 'icon.qu',
-        iconLabel: 'L',
-        title: `Login required: ${message.domain || 'site'}`,
-        body: `Sign in to ${message.domain || 'this site'} in the browser tab, then click Continue. The agent will resume from where it paused.`,
-        url: message.url,
-        ts: Date.now(),
-        actions: [
-          { label: 'Continue', kind: 'primary', onClick: () => { void sendMessage({ type: 'local_login_complete' }); } },
-          { label: 'Skip task', kind: 'danger', onClick: () => { void sendMessage({ type: 'cancel_local_task' }); } },
-        ],
+      appendMessage({
+        role: 'assistant',
+        text: `Login required on ${message.domain || 'this site'}. Please sign in manually in the browser tab, then the task will continue.`,
       });
       break;
+
     case 'task_completed':
       stopTimer();
       setPhase('done', message.summary ? message.summary.slice(0, 60) : 'Task complete');
       state.stepCount = message.steps || state.stepCount;
       updateStepCount();
-      appendCard({
-        kind: 'done',
-        icon: 'icon.term',
-        iconLabel: '✓',
-        title: `Completed in ${message.steps || state.stepCount} steps`,
-        meta: message.summary || '',
-        ts: Date.now(),
+      appendMessage({
+        role: 'done',
+        text: `${message.steps || state.stepCount} steps · ${message.summary || ''}`,
       });
       break;
+
     case 'task_failed':
       stopTimer();
       setPhase('error', message.message || 'Task failed');
-      appendCard({
-        kind: 'error',
-        icon: 'icon.err',
-        iconLabel: '✕',
-        title: message.code || 'Task failed',
-        meta: message.message || '',
-        ts: Date.now(),
+      appendMessage({
+        role: 'error',
+        text: `${message.code || 'Error'}: ${message.message || 'Task failed'}`,
       });
       break;
+
     case 'clarify_request': {
       setPhase('paused', 'Clarifying question from agent');
-      appendCard({
-        kind: 'prompt',
-        icon: 'icon.qu',
-        iconLabel: '?',
-        title: 'Agent needs a nudge',
-        body: message.question || 'The agent is stuck and needs your input.',
-        url: message.reason ? `Reason: ${message.reason}` : '',
-        ts: Date.now(),
-        input: { placeholder: 'Type a hint for the agent (e.g. try the other button)…' },
-        actions: [
-          { label: 'Skip', kind: 'danger', onClick: (v) => { void sendMessage({ type: 'cancel_local_task' }); void v; } },
-          { label: 'Send hint', kind: 'primary', onClick: (v) => { void sendMessage({ type: 'submit_clarification', id: message.id, answer: v || '' }); } },
-        ],
+      appendClarifyCard({
+        id: message.id,
+        question: message.question || 'The agent needs your guidance.',
+        reason: message.reason || '',
       });
       break;
     }
+
     case 'approval_request': {
       setPhase('paused', 'Agent wants approval for a critical action');
       const a = message.action || {};
       const preview = a.url ? `${a.type ?? 'action'} → ${a.url}` : (a.type ?? 'action');
-      appendCard({
-        kind: 'prompt',
-        icon: 'icon.qu',
-        iconLabel: '!',
-        title: 'Approve before continuing',
-        body: message.reason || 'The agent wants to perform an action that needs your approval.',
-        url: preview,
-        ts: Date.now(),
-        actions: [
-          { label: 'Deny', kind: 'danger', onClick: () => { void sendMessage({ type: 'submit_approval', id: message.id, approved: false }); } },
-          { label: 'Approve', kind: 'primary', onClick: () => { void sendMessage({ type: 'submit_approval', id: message.id, approved: true }); } },
-        ],
+      appendApprovalCard({
+        id: message.id,
+        reason: message.reason || 'The agent wants to perform an action that needs your approval.',
+        action: { type: a.type, url: a.url },
       });
       break;
     }
-    case 'log':
-      appendCard({
-        kind: 'system',
-        icon: 'icon.sys',
-        iconLabel: '·',
-        title: message.message || '',
-        meta: '',
-        ts: Date.now(),
+
+    // ── Canonical events ─────────────────────────────────────────────────
+    case 'canonical_step': {
+      const icon = message.kind === 'action' ? '&#9654;' : message.kind === 'observation' ? '&#128065;' : '&#10003;';
+      if (!currentAssistantMsg) {
+        startAssistantMessage({ icon, title: message.summary || 'Working…' });
+      }
+      break;
+    }
+
+    case 'canonical_approval': {
+      const req = message.request || {};
+      setPhase('paused', 'Agent is requesting approval');
+      appendApprovalCard({
+        id: req.actionId || 'unknown',
+        reason: 'The agent is requesting approval for a sensitive action.',
+        action: { type: req.action?.type },
       });
       break;
+    }
+
+    case 'canonical_terminal': {
+      stopTimer();
+      const m = message.message || {};
+      if (m.type === 'task.completed') {
+        setPhase('done', m.summary || 'Task complete');
+        appendMessage({ role: 'done', text: m.summary || 'Task completed successfully.' });
+      } else if (m.type === 'task.failed') {
+        setPhase('error', m.message || 'Task failed');
+        appendMessage({ role: 'error', text: m.message || 'Task failed.' });
+      } else {
+        setPhase('done', 'Task ended');
+        appendMessage({ role: 'done', text: 'Task ended.' });
+      }
+      break;
+    }
+
+    case 'canonical_error':
+      appendMessage({ role: 'error', text: `${message.code}: ${message.message}` });
+      break;
+
+    case 'canonical_reconnect':
+      setPhase('reconnecting', `Reconnecting (attempt ${message.attempt})…`);
+      break;
+
+    // ── Plan preview (from orchestrator) ─────────────────────────────────
+    // Side panel receives a plan event when the orchestrator emits a plan.
+    // Background does not currently emit this; the handler is ready.
+    case 'plan': {
+      appendPlanCard({
+        title: message.title || "Brotto's plan",
+        sites: message.sites || [],
+        steps: message.steps || [],
+      });
+      break;
+    }
   }
 });
+
+// ── Initial state ────────────────────────────────────────────────────────
+setPhase('idle', 'Ready');
