@@ -140,6 +140,50 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* ponytail: 2-column status bar — step counter + timer. Hidden
+       until the agent actually starts a task. */
+    #statusBar {
+      display: none;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: var(--border);
+      border-bottom: 1px solid var(--border);
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    #statusBar.active { display: grid; }
+    #statusBar .cell {
+      background: var(--surface);
+      padding: 8px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    #statusBar .label { font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; font-size: 9px; color: var(--text-faint); }
+    #statusBar .value { font-weight: 600; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+    /* ponytail: New Task button (shown after a task completes or errors,
+       lets the user reset and start fresh) */
+    .new-task-btn {
+      align-self: center;
+      padding: 8px 16px;
+      border-radius: 999px;
+      border: 1px solid var(--accent);
+      background: transparent;
+      color: var(--accent);
+      font: inherit;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      transition: var(--transition);
+      margin: 16px auto;
+      display: none;
+    }
+    .new-task-btn:hover { background: var(--accent-soft); }
+    .new-task-btn.visible { display: block; }
+
     /* Header actions */
     .hdr-actions { display: flex; gap: 4px; align-items: center; }
 
@@ -673,6 +717,18 @@
 <span id="stepCount" style="display:none">0 steps</span>
 <span id="timer" style="display:none"></span>
 
+<!-- ── Status bar (step counter + timer) ─────────────────────────────────── -->
+<div id="statusBar" aria-live="polite">
+  <div class="cell">
+    <span class="label">Steps</span>
+    <span class="value" id="stepCountActive">0</span>
+  </div>
+  <div class="cell">
+    <span class="label">Time</span>
+    <span class="value" id="timerActive">0.0s</span>
+  </div>
+</div>
+
 <!-- ── Chat messages ───────────────────────────────────────────────────── -->
 <main id="messages" aria-live="polite">
   <div class="empty-state" id="emptyState">
@@ -681,6 +737,11 @@
     <div class="empty-sub">Describe what you'd like to do and Brotto will help you get it done in the browser.</div>
   </div>
 </main>
+
+<!-- ── New task button (shown after task completes or errors) ─────────── -->
+<button class="new-task-btn" id="newTaskBtn" title="Start a new task">
+  + New task
+</button>
 
 <!-- ── Input area ──────────────────────────────────────────────────────── -->
 <section id="inputArea">
@@ -709,17 +770,6 @@
     <div class="settings-section">
       <label for="plannerUrlSetting">Planner URL</label>
       <input id="plannerUrlSetting" class="input" type="url" placeholder="http://127.0.0.1:3001">
-    </div>
-    <div class="settings-section">
-      <label for="startingUrlSetting">Starting URL (optional)</label>
-      <input id="startingUrlSetting" class="input" type="url" placeholder="https://example.com">
-    </div>
-    <div class="settings-section">
-      <label>Connection</label>
-      <div style="display:flex;gap:8px;">
-        <button id="connectBtn" class="btn btn-primary btn-sm" disabled style="flex:1">Connect</button>
-        <button id="disconnectBtn" class="btn btn-sm" disabled style="flex:1">Disconnect</button>
-      </div>
     </div>
   </div>
 </div>

@@ -24,6 +24,10 @@ const statusPill      = document.getElementById('statusPill');
 const brandDot        = document.getElementById('brandDot');
 const stepCountEl     = document.getElementById('stepCount');
 const timerEl         = document.getElementById('timer');
+const statusBarEl     = document.getElementById('statusBar');
+const stepCountActive = document.getElementById('stepCountActive');
+const timerActiveEl   = document.getElementById('timerActive');
+const newTaskBtn      = document.getElementById('newTaskBtn');
 const connectionMeta  = document.getElementById('connectionMeta');
 
 // ── Settings panel ────────────────────────────────────────────────────────
@@ -59,6 +63,7 @@ refreshBtn.addEventListener('click', () => void refresh());
 
 // ── Input + send ─────────────────────────────────────────────────────────
 sendBtn.addEventListener('click', () => void sendUserMessage());
+if (newTaskBtn) newTaskBtn.addEventListener('click', () => void resetForNewTask());
 goalEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -70,12 +75,67 @@ goalEl.addEventListener('input', () => {
   goalEl.style.height = Math.min(goalEl.scrollHeight, 120) + 'px';
 });
 
-function sendUserMessage() {
+async function sendUserMessage() {
   const text = goalEl.value.trim();
-  if (!text || state.phase === 'executing') return;
+  if (!text) return;
+  if (state.phase === 'executing') {
+    // ponytail: queue as a clarifying nudge? For demo just ignore extra sends.
+    return;
+  }
+  // ponytail: clear prior conversation so each task starts fresh.
+  clearMessages();
   appendMessage({ role: 'user', text });
+  state.lastGoal = text;
   goalEl.value = '';
   goalEl.style.height = 'auto';
+
+  // ponytail: auto-connect on first send. User doesn't need a separate
+  // "Connect" step. setPhase('connecting') shows the spinner briefly,
+  // then we move to 'connected' and kick off the task.
+  setPhase('connecting', `Connecting to ${state.plannerUrl || 'planner'}…`);
+  try {
+    await ensureConnected();
+  } catch (err) {
+    setPhase('error', `Connect failed: ${err instanceof Error ? err.message : String(err)}`);
+    appendMessage({ role: 'error', text: `Connect failed: ${err instanceof Error ? err.message : String(err)}` });
+    return;
+  }
+
+  // ponytail: send the goal to the background. The background opens a
+  // new tab, captures observations, calls the planner, dispatches actions
+  // via chrome.debugger. The side panel just renders events.
+  const response = await sendMessage({ type: 'run_local_task', task: text });
+  if (!response.success) {
+    setPhase('error', `Failed to start: ${response.error || 'unknown error'}`);
+    appendMessage({ role: 'error', text: `Failed to start: ${response.error || 'unknown error'}` });
+  }
+}
+
+async function ensureConnected() {
+  // ponytail: reuses the plannerUrl from settings (default :3001). Probes
+  // /health; sets phase to 'connected' on success. Throws on failure.
+  const url = plannerUrlEl.value.trim() || 'http://127.0.0.1:3001';
+  state.plannerUrl = url;
+  plannerUrlEl.value = url;
+  const response = await fetch(url + '/health', { method: 'GET' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const info = await response.json();
+  const label = info.model ? `${info.family} · ${info.model}` : info.family || 'planner';
+  const modelNameEl = document.getElementById('modelName');
+  if (modelNameEl) modelNameEl.textContent = info.model || info.family || 'connected';
+  setPhase('connected', `Connected · ${label}`);
+  appendMessage({ role: 'system', text: `Connected to planner at ${url} (${label})` });
+}
+
+async function resetForNewTask() {
+  // ponytail: clear chat stream, reset counters, reset task state.
+  // Used by "New task" button and by sendUserMessage to clear before
+  // posting a new goal.
+  state.lastGoal = '';
+  state.stepCount = 0;
+  clearMessages();
+  stopTimer();
+  setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Ready' : 'Ready');
 }
 
 function appendUserMessage(text) {
@@ -102,6 +162,14 @@ function setPhase(phase, message) {
   startBtn.disabled = phase === 'connecting';
   stopBtn.disabled = !(phase === 'executing' || phase === 'paused');
   refreshBtn.disabled = phase === 'connecting';
+  // ponytail: status bar (steps + timer) shows during running/paused/done.
+  // Hidden in idle/connected/error so the panel stays clean.
+  const showBar = phase === 'executing' || phase === 'paused' || phase === 'done';
+  if (statusBarEl) statusBarEl.classList.toggle('active', showBar);
+  // ponytail: New Task button shows after done or error so the user can
+  // start fresh without reloading.
+  const showNewTask = phase === 'done' || phase === 'error';
+  if (newTaskBtn) newTaskBtn.classList.toggle('visible', showNewTask);
   if (message) connectionMeta.textContent = message;
 }
 
@@ -109,13 +177,16 @@ function clearTimer() {
   if (timerInterval !== null) { clearInterval(timerInterval); timerInterval = null; }
   state.startTime = 0;
   timerEl.textContent = '0.0s';
+  if (timerActiveEl) timerActiveEl.textContent = '0.0s';
 }
 
 function startTimer() {
   clearTimer();
   state.startTime = Date.now();
   timerInterval = setInterval(() => {
-    timerEl.textContent = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
+    const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
+    if (timerEl) timerEl.textContent = elapsed;
+    if (timerActiveEl) timerActiveEl.textContent = elapsed;
   }, 100);
 }
 
@@ -128,7 +199,28 @@ function stopTimer() {
 }
 
 function updateStepCount() {
-  stepCountEl.textContent = state.stepCount + (state.stepCount === 1 ? ' step' : ' steps');
+  const label = state.stepCount + (state.stepCount === 1 ? ' step' : ' steps');
+  stepCountEl.textContent = label;
+  if (stepCountActive) stepCountActive.textContent = String(state.stepCount);
+}
+
+function clearMessages() {
+  messagesEl.replaceChildren();
+  state.stepCount = 0;
+  updateStepCount();
+  stopTimer();
+  // ponytail: reset to initial empty-state by adding the empty-state
+  // placeholder back so the panel doesn't look empty.
+  if (!document.getElementById('emptyState')) {
+    const empty = document.createElement('div');
+    empty.id = 'emptyState';
+    empty.className = 'empty-state';
+    empty.innerHTML =
+      '<div class="empty-logo">B</div>' +
+      '<div class="empty-title">Brotto</div>' +
+      '<div class="empty-sub">Describe what you\'d like to do and Brotto will help you get it done in the browser.</div>';
+    messagesEl.appendChild(empty);
+  }
 }
 
 // ── Core logic (preserved verbatim) ───────────────────────────────────────
