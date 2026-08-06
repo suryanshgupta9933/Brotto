@@ -16,22 +16,21 @@ describe("buildToolSchemas", () => {
     }
   });
 
-  it("includes a browser_action tool with action enum", () => {
+  it("includes left_click with x and y required", () => {
     const schemas = buildToolSchemas();
-    const browser = schemas.find((s) => s.function.name === "browser_action");
-    expect(browser).toBeDefined();
-    const actionProp = browser!.function.parameters.properties.action as { enum: string[] };
-    expect(actionProp.enum).toEqual(expect.arrayContaining(["left_click", "type", "scroll"]));
+    const tool = schemas.find((s) => s.function.name === "left_click");
+    expect(tool).toBeDefined();
+    expect(tool!.function.parameters.required).toEqual(expect.arrayContaining(["x", "y"]));
   });
 
-  it("includes a finish tool requiring answer string", () => {
+  it("includes terminate requiring answer string", () => {
     const schemas = buildToolSchemas();
-    const finish = schemas.find((s) => s.function.name === "finish");
+    const finish = schemas.find((s) => s.function.name === "terminate");
     expect(finish).toBeDefined();
     expect(finish!.function.parameters.required).toContain("answer");
   });
 
-  it("includes an ask_user_question tool requiring question", () => {
+  it("includes ask_user_question requiring question", () => {
     const schemas = buildToolSchemas();
     const ask = schemas.find((s) => s.function.name === "ask_user_question");
     expect(ask).toBeDefined();

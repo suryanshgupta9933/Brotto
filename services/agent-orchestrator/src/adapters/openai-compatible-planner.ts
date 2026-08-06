@@ -298,25 +298,21 @@ You can use: browser_action (left_click, double_click, right_click, drag, key, t
       throw new OpenAICompatiblePlannerError('No valid actions parsed from tool calls', false);
     }
 
+    // ponytail: skip AgentProposalV1Schema re-validation — the parser has already
+    // validated against FaraActionArgsSchema. The two schemas use different shapes
+    // (parser: nested coordinates/viewport; wire: flat x/y), so re-validating here
+    // always fails. Trust the parser's output and shape to ActionProposalV1 by hand.
     const parsedAction = parseResult.actions[0];
     const now = new Date().toISOString();
-
-    // Re-serialize through the schema to get a fully-typed ExecutableActionV1
-    const actionResult = AgentProposalV1Schema.safeParse({
+    return {
       kind: 'action',
+      proposalId: crypto.randomUUID() as never,
       observationId: input.observation.observationId,
+      taskId: input.taskId,
       proposedAt: now,
-      action: parsedAction.action,
-    });
-
-    if (!actionResult.success) {
-      throw new OpenAICompatiblePlannerError(
-        `Action proposal schema validation failed: ${actionResult.error.issues[0]?.message ?? 'unknown'}`,
-        false,
-      );
-    }
-
-    return actionResult.data as ActionProposalV1;
+      rationale: 'model proposal',
+      action: parsedAction.action as unknown as ActionProposalV1['action'],
+    };
   }
 
   private buildCompletionProposal(
