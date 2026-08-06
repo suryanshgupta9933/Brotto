@@ -39,15 +39,15 @@ jobs:
             sleep 1
           done
 
-      - name: Pull model
-        run: ollama pull qwen2.5:3b
-
-      - name: Cache Ollama model
+      - name: Restore Ollama model cache
         uses: actions/cache@v4
         with:
           path: ~/.ollama
           key: ollama-qwen2.5-3b
           restore-keys: ollama-
+
+      - name: Pull model
+        run: ollama pull qwen2.5:3b
 
       - name: Install Playwright Chromium
         run: cd services/agent-orchestrator && pnpm exec playwright install chromium
@@ -55,10 +55,10 @@ jobs:
       - name: Run E2E test
         run: cd services/agent-orchestrator && pnpm test:e2e
 
-      - name: Upload metrics
+      - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-metrics
-          path: services/agent-orchestrator/__e2e__/metrics.log
+          name: e2e-logs
+          path: services/agent-orchestrator/__e2e__/
           if-no-files-found: ignore

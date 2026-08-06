@@ -11,20 +11,19 @@ import type { InferencePort, PlanningInput, PlanningOutcome } from '../engine/ty
 import type { ActionProposalV1 } from '@fara-platform/fara-action-schema';
 
 const fakeOutcome: PlanningOutcome = {
-  kind: 'action_proposal',
-  proposal: {
-    actionId: '00000000-0000-4000-8000-000000000010' as never,
-    observationId: '00000000-0000-4000-8000-000000000011' as never,
-    taskId: '00000000-0000-4000-8000-000000000012' as never,
-    proposedAt: '2026-08-06T00:00:00.000Z',
-    action: {
-      kind: 'left_click',
-      x: 0,
-      y: 0,
-      targetId: '00000000-0000-4000-8000-000000000013' as never,
-    },
-  } as ActionProposalV1,
-};
+  kind: 'action',
+  proposalId: '00000000-0000-4000-8000-000000000010' as never,
+  observationId: '00000000-0000-4000-8000-000000000011' as never,
+  taskId: '00000000-0000-4000-8000-000000000012' as never,
+  proposedAt: '2026-08-06T00:00:00.000Z',
+  rationale: 'test stub',
+  action: {
+    type: 'left_click',
+    x: 0,
+    y: 0,
+    targetId: '00000000-0000-4000-8000-000000000013' as never,
+  },
+} as ActionProposalV1;
 
 const stubPlanner: InferencePort = {
   plan: jest.fn(async (_input: PlanningInput, _signal: AbortSignal) => fakeOutcome) as InferencePort['plan'],
