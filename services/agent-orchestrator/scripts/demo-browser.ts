@@ -9,7 +9,11 @@ import type { PlanningOutcome } from "../src/engine/types.js";
 
 const SERVER_URL = process.env.DEMO_SERVER ?? "http://127.0.0.1:3001";
 const TARGET_URL = process.env.DEMO_TARGET_URL ?? "https://the-internet.herokuapp.com/login";
-const GOAL = process.env.DEMO_GOAL ?? "Fill in the login form: username 'tomsmith', password 'SuperSecretPassword!'. Click the Login button. Verify 'Welcome to the Secure Area' appears.";
+// ponytail: abstract goal. The harness provides page text + element details —
+// the model must extract credentials from the page itself, not from the goal.
+// That's how browser-use works in production: one short goal string, all
+// concrete values come from the live page.
+const GOAL = process.env.DEMO_GOAL ?? "Log in to the site. The page tells you what credentials to use. Stop when you see a 'Welcome' or 'Secure Area' indicator.";
 const MAX_STEPS = Number(process.env.DEMO_MAX_STEPS ?? "15");
 const HEADLESS = process.env.DEMO_HEADLESS !== "1";
 
