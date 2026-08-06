@@ -11,6 +11,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest --runInBand --testPathPattern='.*'",
+    "test:e2e": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.e2e.config.js --runInBand",
     "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
     "lint": "eslint src/**/*.ts",
     "smoke": "tsx scripts/smoke.ts"
