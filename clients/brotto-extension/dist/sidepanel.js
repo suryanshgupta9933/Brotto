@@ -54,6 +54,13 @@ const state = {
 
 let timerInterval = null;
 
+// ponytail: tiny XSS guard for any user/model-supplied text we put in innerHTML.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+
 // ── Button handlers (preserved verbatim) ─────────────────────────────────
 if (connectBtn) connectBtn.addEventListener('click', () => void connect());
 if (disconnectBtn) disconnectBtn.addEventListener('click', () => void disconnect());
@@ -333,7 +340,7 @@ function createEmptyState() {
   return div;
 }
 
-function appendMessage({ role, text, inlineLogs }) {
+function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   // Remove empty state on first real message
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
@@ -368,7 +375,11 @@ function appendMessage({ role, text, inlineLogs }) {
   } else if (role === 'done') {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
+    const finalAnswerHtml = message.finalAnswer
+      ? `<div class="final-answer"><div class="final-answer-text">${escapeHtml(message.finalAnswer)}</div></div>`
+      : '';
     bubble.innerHTML = `
+      ${finalAnswerHtml}
       <div class="done-header"><span class="done-icon">&#10003;</span> Task completed</div>
       <div class="done-summary">${text}</div>
     `;
@@ -651,25 +662,35 @@ chrome.runtime.onMessage.addListener((message) => {
       state.stepCount = Math.max(state.stepCount, message.index !== undefined ? message.index + 1 : state.stepCount + 1);
       updateStepCount();
       const icon = iconFor(message.iconKind || '');
+      const reasoningText = message.reasoning || `Step ${message.index || ''} — working on it`;
       if (!currentAssistantMsg) {
-        startAssistantMessage({ icon, title: message.title || 'Step', meta: message.result || '' });
+        startAssistantMessage({ icon, title: reasoningText });
       }
-      // Update the assistant message with action info
+      // Update the assistant message with reasoning; tuck raw action+result
+      // behind a 'details' expander so the user sees a sentence, not CDP junk.
       if (currentAssistantMsg) {
         currentAssistantMsg.bubble.innerHTML = '';
         const iconEl = document.createElement('span');
         iconEl.style.marginRight = '6px';
         iconEl.style.opacity = '0.5';
         iconEl.innerHTML = icon;
-        const textEl = document.createElement('span');
-        textEl.textContent = message.title || 'Step';
+        const titleEl = document.createElement('span');
+        titleEl.textContent = reasoningText;
         currentAssistantMsg.bubble.appendChild(iconEl);
-        currentAssistantMsg.bubble.appendChild(textEl);
-        if (message.result) {
-          const metaEl = document.createElement('div');
-          metaEl.className = 'inline-log';
-          metaEl.textContent = message.result;
-          currentAssistantMsg.bubble.appendChild(metaEl);
+        currentAssistantMsg.bubble.appendChild(titleEl);
+
+        // Hidden raw tool details behind a small 'details' toggle
+        const rawDetail = `${message.title || ''}${message.result ? ' → ' + message.result : ''}`.trim();
+        if (rawDetail) {
+          const toggle = document.createElement('span');
+          toggle.className = 'tool-details-toggle';
+          toggle.textContent = 'details';
+          const details = document.createElement('div');
+          details.className = 'tool-details';
+          details.textContent = rawDetail;
+          toggle.addEventListener('click', () => details.classList.toggle('expanded'));
+          currentAssistantMsg.bubble.appendChild(toggle);
+          currentAssistantMsg.bubble.appendChild(details);
         }
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
@@ -700,6 +721,7 @@ chrome.runtime.onMessage.addListener((message) => {
       appendMessage({
         role: 'done',
         text: `${message.steps || state.stepCount} steps · ${message.summary || ''}`,
+        finalAnswer: message.finalAnswer,
       });
       break;
 
@@ -737,8 +759,9 @@ chrome.runtime.onMessage.addListener((message) => {
     // ── Canonical events ─────────────────────────────────────────────────
     case 'canonical_step': {
       const icon = message.kind === 'action' ? '&#9654;' : message.kind === 'observation' ? '&#128065;' : '&#10003;';
+      const titleText = message.reasoning || message.summary || 'Working on it…';
       if (!currentAssistantMsg) {
-        startAssistantMessage({ icon, title: message.summary || 'Working…' });
+        startAssistantMessage({ icon, title: titleText });
       }
       break;
     }
@@ -759,7 +782,7 @@ chrome.runtime.onMessage.addListener((message) => {
       const m = message.message || {};
       if (m.type === 'task.completed') {
         setPhase('done', m.summary || 'Task complete');
-        appendMessage({ role: 'done', text: m.summary || 'Task completed successfully.' });
+        appendMessage({ role: 'done', text: m.summary || 'Task completed successfully.', finalAnswer: m.finalAnswer });
       } else if (m.type === 'task.failed') {
         setPhase('error', m.message || 'Task failed');
         appendMessage({ role: 'error', text: m.message || 'Task failed.' });
