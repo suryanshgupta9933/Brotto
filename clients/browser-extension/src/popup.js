@@ -13,6 +13,15 @@ const resultPanel = document.getElementById('resultPanel');
 const resultContent = document.getElementById('resultContent');
 const loginPrompt = document.getElementById('loginPrompt');
 const loginDoneBtn = document.getElementById('loginDoneBtn');
+const localTaskInput = document.getElementById('localTaskInput');
+const localStartingUrl = document.getElementById('localStartingUrl');
+const localPlannerUrl = document.getElementById('localPlannerUrl');
+const runLocalBtn = document.getElementById('runLocalBtn');
+const cancelLocalBtn = document.getElementById('cancelLocalBtn');
+
+// ponytail: track which mode is awaiting the login-pause click so the same
+// "Interaction complete" button can serve either the canonical or local flow.
+let localLoginMode = false;
 
 document.addEventListener('DOMContentLoaded', () => { void initialize(); });
 
@@ -22,9 +31,14 @@ async function initialize() {
   clearLogBtn.addEventListener('click', () => { void clearTrajectory(); });
   approveBtn.addEventListener('click', () => { void resolveApproval(true); });
   denyBtn.addEventListener('click', () => { void resolveApproval(false); });
+  runLocalBtn.addEventListener('click', () => { void runLocalTask(); });
+  cancelLocalBtn.addEventListener('click', () => { void cancelLocalTask(); });
   loginDoneBtn.addEventListener('click', () => { void loginComplete(); });
   taskInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) void sendTask();
+  });
+  localTaskInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) void runLocalTask();
   });
   await refreshState();
 }
@@ -84,9 +98,46 @@ async function resolveApproval(approved) {
 }
 
 async function loginComplete() {
-  const response = await sendMessage({ type: 'login_complete' });
-  if (!response.success) appendLog(response.error || 'Fresh observation failed', 'error');
-  else loginPrompt.hidden = true;
+  // ponytail: dispatch to whichever mode is awaiting the click. localLoginMode
+  // is set true when the local-driver emits login_required.
+  if (localLoginMode) {
+    const response = await sendMessage({ type: 'local_login_complete' });
+    if (!response.success) appendLog(response.error || 'Local login complete failed', 'error');
+    localLoginMode = false;
+  } else {
+    const response = await sendMessage({ type: 'login_complete' });
+    if (!response.success) appendLog(response.error || 'Fresh observation failed', 'error');
+  }
+  loginPrompt.hidden = true;
+}
+
+async function runLocalTask() {
+  const goal = (localTaskInput.value || '').trim();
+  if (goal.length === 0) {
+    appendLog('Local task is empty', 'error');
+    return;
+  }
+  const startingUrl = (localStartingUrl.value || '').trim();
+  const plannerUrl = (localPlannerUrl.value || '').trim();
+  const message = { type: 'run_local_task', task: goal };
+  if (startingUrl) message.startingUrl = startingUrl;
+  if (plannerUrl) message.plannerUrl = plannerUrl;
+  const response = await sendMessage(message);
+  if (!response.success) {
+    appendLog(response.error || 'run_local_task failed', 'error');
+    return;
+  }
+  runLocalBtn.hidden = true;
+  cancelLocalBtn.hidden = false;
+  resultPanel.hidden = true;
+  updateStatus('executing');
+}
+
+async function cancelLocalTask() {
+  const response = await sendMessage({ type: 'cancel_local_task' });
+  if (!response.success) appendLog(response.error || 'cancel_local_task failed', 'error');
+  cancelLocalBtn.hidden = true;
+  runLocalBtn.hidden = false;
 }
 
 async function clearTrajectory() {
@@ -219,6 +270,29 @@ chrome.runtime.onMessage.addListener((message) => {
       break;
     case 'canonical_user_input':
       loginPrompt.hidden = false;
+      break;
+    case 'login_required':
+      // ponytail: local-driver hit a login page. Flip the flag so the next
+      // loginDoneBtn click dispatches local_login_complete instead of the
+      // canonical login_complete message.
+      localLoginMode = true;
+      loginPrompt.hidden = false;
+      approvalReason.textContent = `Please log in to ${message.domain || 'the site'} in the attached tab, then click Continue.`;
+      approvalPanel.hidden = false;
+      updateStatus('waiting_for_approval');
+      break;
+    case 'task_completed':
+      cancelLocalBtn.hidden = true;
+      runLocalBtn.hidden = false;
+      updateStatus('completed');
+      resultContent.innerHTML = '';
+      const heading = document.createElement('h2');
+      heading.textContent = `Completed in ${message.steps} steps`;
+      resultContent.appendChild(heading);
+      const summary = document.createElement('p');
+      summary.textContent = message.summary || '';
+      resultContent.appendChild(summary);
+      resultPanel.hidden = false;
       break;
   }
 });

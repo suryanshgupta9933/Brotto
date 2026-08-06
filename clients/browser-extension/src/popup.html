@@ -55,6 +55,18 @@
       <p class="subtle">Ctrl/⌘ + Enter starts the task. No visited-site credentials or storage values are collected.</p>
     </section>
 
+    <section class="card">
+      <h2>Local task (demo)</h2>
+      <textarea id="localTaskInput" maxlength="4000" placeholder="Describe a task for the agent to run against demo-server"></textarea>
+      <input id="localStartingUrl" type="url" placeholder="Starting URL (optional, e.g. https://the-internet.herokuapp.com/login)" />
+      <input id="localPlannerUrl" type="url" placeholder="Planner URL (default http://127.0.0.1:3001)" />
+      <div class="actions">
+        <button id="runLocalBtn" class="primary">Run local task</button>
+        <button id="cancelLocalBtn" class="danger" hidden>Cancel</button>
+      </div>
+      <p class="subtle">Drives a fresh tab in your real Chrome via the local planner. Pauses if a login page appears.</p>
+    </section>
+
     <section id="approvalPanel" class="card approval" hidden>
       <h2>Approval required</h2>
       <p id="approvalReason"></p>

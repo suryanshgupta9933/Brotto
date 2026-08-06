@@ -11,10 +11,17 @@ import { PageSettler } from "./canonical/page-settler";
 import { CanonicalSessionStore, type StorageAreaPort } from "./canonical/session-store";
 import { CanonicalTransport } from "./canonical/transport";
 import * as debuggerModule from "./debugger";
+import { resolveLoginPause, runLocalLoop } from "./local-driver";
 
 const BADGE_ACTIVE_COLOR = "#22c55e";
 const BADGE_INACTIVE_COLOR = "#6b7280";
 const BOOTSTRAP_PATH = "/v1/browser-extension/sessions";
+
+// ponytail: local-driver state. One active loop at a time. The planner URL
+// defaults to demo-server on localhost; override via storage.local if needed.
+let localAbortController: AbortController | null = null;
+let localTabId: number | null = null;
+const DEFAULT_PLANNER_URL = "http://127.0.0.1:3001";
 
 let managedHostnames = new Set<string>();
 let managedOrigins: string[] = [];
@@ -158,6 +165,81 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
       return { success: true };
     case "connect_relay":
       return { success: false, error: "Sending a task starts its authenticated canonical session" };
+    case "run_local_task": {
+      // ponytail: extension runs the agent loop locally against the demo-server.
+      // Used for the demo path where the user installs the extension and watches
+      // actions take place in their real Chrome without a remote orchestrator.
+      if (localAbortController !== null) {
+        return { success: false, error: "A local task is already running" };
+      }
+      const goal = String(message.task ?? "").trim();
+      if (goal.length === 0) return { success: false, error: "task is empty" };
+      const startingUrl = typeof message.startingUrl === "string" ? message.startingUrl : undefined;
+      const plannerUrl = typeof message.plannerUrl === "string" ? message.plannerUrl : DEFAULT_PLANNER_URL;
+      const controller_ac = new AbortController();
+      localAbortController = controller_ac;
+      notifyUi({ type: "canonical_status", status: "executing" });
+      void runLocalLoop({
+        goal,
+        startingUrl,
+        plannerUrl,
+        signal: controller_ac.signal,
+        onTabOpened: (tabId) => {
+          localTabId = tabId;
+        },
+        onStep: ({ index, action, result }) => {
+          notifyUi({ type: "canonical_step", kind: "action", summary: `step ${index + 1}: ${action} → ${result}` });
+        },
+        // ponytail: log events surface as 'observation' kind so the existing
+        // popup log handler picks them up without a new message type.
+        onLoginRequired: ({ url, domain }) => {
+          notifyUi({ type: "login_required", url, domain });
+        },
+        onComplete: ({ summary, steps }) => {
+          notifyUi({ type: "task_completed", summary, steps });
+        },
+        onError: ({ code, message }) => {
+          notifyUi({ type: "canonical_error", code, message });
+        },
+        onLog: (message) => {
+          // ponytail: surface as observation-kind step so the popup log renders it.
+          notifyUi({ type: "canonical_step", kind: "observation", summary: message });
+        },
+      }).then(() => {
+        localAbortController = null;
+        localTabId = null;
+        notifyUi({ type: "canonical_status", status: "completed" });
+      }).catch((err: unknown) => {
+        localAbortController = null;
+        localTabId = null;
+        notifyUi({ type: "canonical_error", code: "LOCAL_LOOP_THREW", message: err instanceof Error ? err.message : String(err) });
+      });
+      return { success: true };
+    }
+    case "cancel_local_task": {
+      if (localAbortController === null) return { success: false, error: "No local task is running" };
+      localAbortController.abort();
+      localAbortController = null;
+      if (localTabId !== null) {
+        await debuggerModule.detachFromTab(localTabId).catch(() => undefined);
+        localTabId = null;
+      }
+      return { success: true };
+    }
+    case "local_login_complete": {
+      // ponytail: the user clicked Continue in the popup. Resume the loop by
+      // resolving the pending login-pause promise for the active tab.
+      if (localTabId === null) return { success: false, error: "No local task is paused" };
+      const resolved = resolveLoginPause(localTabId);
+      return { success: resolved, error: resolved ? undefined : "No pending login pause" };
+    }
+    case "local_login_skip": {
+      // ponytail: the user dismissed the login prompt. Abort the loop cleanly.
+      if (localAbortController === null) return { success: false, error: "No local task is running" };
+      localAbortController.abort();
+      localAbortController = null;
+      return { success: true };
+    }
     default:
       return { success: false, error: "Unknown message type" };
   }

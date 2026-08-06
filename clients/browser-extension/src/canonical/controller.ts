@@ -86,7 +86,11 @@ export type ControllerUiEvent =
   | { readonly type: "canonical_approval"; readonly request: Extract<AgentMessageV1, { type: "approval.requested" }> }
   | { readonly type: "canonical_terminal"; readonly message: Extract<AgentMessageV1, { type: "task.completed" | "task.failed" | "task.cancelled" }> }
   | { readonly type: "canonical_error"; readonly code: string; readonly message: string }
-  | { readonly type: "canonical_reconnect"; readonly status: TransportSnapshot["status"]; readonly attempt: number };
+  | { readonly type: "canonical_reconnect"; readonly status: TransportSnapshot["status"]; readonly attempt: number }
+  // ponytail: events emitted by the local-driver demo loop. Coexist with the
+  // canonical ones so the same popup listener can handle both paths.
+  | { readonly type: "login_required"; readonly url: string; readonly domain: string }
+  | { readonly type: "task_completed"; readonly summary: string; readonly steps: number };
 
 export interface CanonicalExtensionControllerOptions {
   readonly bootstrap: ConnectionBootstrapPort;
