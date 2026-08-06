@@ -137,6 +137,46 @@ await orchestrator.start();
 npm test
 ```
 
+## Run with Ollama (local development)
+
+Prerequisites: [Ollama](https://ollama.ai) installed, a small model pulled.
+
+```bash
+# Install Ollama (Linux)
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Start the Ollama server
+ollama serve &
+
+# Pull a small model (3B; first run downloads ~2GB)
+ollama pull qwen2.5:3b
+
+# Install dependencies and build
+pnpm install
+pnpm build
+
+# Run smoke (canned observation → model → action)
+OLLAMA_HOST=http://127.0.0.1:11434 SMOKE_MODEL=qwen2.5:3b pnpm smoke
+```
+
+Expected output: `[smoke] family=openai-compatible ... responded in <X>ms` followed by a `PlanningOutcome` JSON.
+
+### Other providers
+
+- **OpenAI**: `OPENAI_API_KEY=sk-... pnpm smoke`
+- **Azure OpenAI**: `AZURE_OPENAI_API_KEY=... AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com AZURE_OPENAI_DEPLOYMENT=<deployment> pnpm smoke`
+- **Fara**: `FARA_ENDPOINT=https://<fara-host> pnpm smoke`
+
+The smoke script reads `OLLAMA_HOST`, `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `FARA_ENDPOINT`, and `SMOKE_MODEL` from the environment and picks the right family automatically.
+
+### Running the full E2E test
+
+```bash
+pnpm test:e2e
+```
+
+Requires Ollama running locally (the test starts its own server subprocess in CI; locally it uses whatever's on port 11434).
+
 ## Docker
 
 ```bash
