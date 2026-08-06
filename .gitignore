@@ -1,2 +1,11 @@
 .worktrees/
 worktrees/
+.DS_Store
+.pnpm-store/
+.turbo/cache/
+**/dist/
+**/build/
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/*.tsbuildinfo
