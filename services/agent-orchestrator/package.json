@@ -15,8 +15,7 @@
     "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
     "lint": "eslint src/**/*.ts",
     "smoke": "tsx scripts/smoke.ts",
-    "demo:server": "tsx scripts/demo-server.ts",
-    "demo:browser": "tsx scripts/demo-browser.ts"
+    "demo:server": "tsx scripts/demo-server.ts"
   },
   "dependencies": {
     "@fara-platform/fara-action-schema": "workspace:*",

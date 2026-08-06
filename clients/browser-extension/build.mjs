@@ -26,8 +26,8 @@ mkdirSync(distDir, { recursive: true });
 
 // Every declared static runtime asset is required. A missing file aborts the build.
 const requiredRuntimeFiles = [
-  [join(srcDir, 'popup.js'), join(distDir, 'popup.js')],
-  [join(srcDir, 'popup.html'), join(distDir, 'popup.html')],
+  [join(srcDir, 'sidepanel.html'), join(distDir, 'sidepanel.html')],
+  [join(srcDir, 'sidepanel.js'), join(distDir, 'sidepanel.js')],
 ];
 for (const [source, destination] of requiredRuntimeFiles) copyFileSync(source, destination);
 

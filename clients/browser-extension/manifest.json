@@ -7,13 +7,16 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "Agentic Browser Automation (ABA)"
+    "default_title": "Fara Browser Agent"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "permissions": [
     "debugger",
     "tabs",
-    "storage"
+    "storage",
+    "sidePanel"
   ],
   "host_permissions": [
     "<all_urls>"

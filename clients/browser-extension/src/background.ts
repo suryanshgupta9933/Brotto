@@ -240,6 +240,13 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
       localAbortController = null;
       return { success: true };
     }
+    case "submit_user_input": {
+      // ponytail: side panel surfaced a clarifying question. The local-driver
+      // doesn't currently emit questions — this hook is reserved for the next
+      // slice where the planner returns QuestionProposal and we want the
+      // user to type an answer. For now, just acknowledge.
+      return { success: true, acknowledged: typeof message.value === "string" ? message.value : "" };
+    }
     default:
       return { success: false, error: "Unknown message type" };
   }
@@ -248,6 +255,16 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
 async function initialize(): Promise<void> {
   chrome.runtime.onMessage.addListener(handleMessage);
   chrome.runtime.onInstalled.addListener(() => { void setBadge(false); });
+  // ponytail: open the side panel when the user clicks the action icon. This
+  // replaces the old popup behavior — the side panel is the live activity
+  // stream, login prompts, and approval surface.
+  try {
+    if (chrome.sidePanel?.setPanelBehavior) {
+      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    }
+  } catch (err) {
+    console.warn("sidePanel.setPanelBehavior failed:", err);
+  }
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status !== undefined || changeInfo.url !== undefined) controller.invalidateObservation(tabId);
   });

@@ -5,26 +5,30 @@ const root = join(__dirname, "..");
 const read = (path: string) => readFileSync(join(root, path), "utf8");
 
 describe("canonical extension distribution surface", () => {
-  it("declares no legacy options page, redundant activeTab, content script, or missing icon assets", () => {
+  it("declares no legacy popup, side panel is the primary surface, debugger permission granted", () => {
     const manifest = JSON.parse(read("manifest.json")) as Record<string, unknown>;
     expect(manifest).not.toHaveProperty("options_page");
     expect(manifest).not.toHaveProperty("content_scripts");
     expect(manifest).not.toHaveProperty("icons");
     expect(manifest.action).not.toHaveProperty("default_icon");
-    expect(manifest.permissions).toEqual(["debugger", "tabs", "storage"]);
+    expect(manifest.action).not.toHaveProperty("default_popup");
+    expect(manifest).toHaveProperty("side_panel");
+    expect(manifest.permissions).toContain("debugger");
+    expect(manifest.permissions).toContain("sidePanel");
   });
 
-  it("exposes only canonical runtime state and durable complete terminal details", () => {
+  it("side panel renders live activity stream with login + approval prompts", () => {
     const background = read("src/background.ts");
-    const popup = read("src/popup.js");
-    expect(background).not.toMatch(/EventSource|\/connect|\/task|ActionExecutor|from ["']\.\/relay/);
-    expect(background).toContain("terminal: state.terminal");
-    expect(background).toContain("approval: state.approval");
-    expect(popup).toContain("response.status?.terminal");
-    expect(popup).toContain("response.status?.approval");
-    expect(popup).toContain("Confidence");
-    expect(popup).toContain("Evidence observations");
-    expect(popup).toContain("Observation");
+    const sidepanel = read("src/sidepanel.js");
+    expect(background).not.toMatch(/EventSource|\/connect|from ["']\.\/relay/);
+    expect(background).toContain("run_local_task");
+    expect(background).toContain("login_required");
+    expect(background).toContain("sidePanel.setPanelBehavior");
+    expect(background).toContain("openPanelOnActionClick");
+    expect(sidepanel).toContain("canonical_step");
+    expect(sidepanel).toContain("login_required");
+    expect(sidepanel).toContain("canonical_approval");
+    expect(sidepanel).toContain("task_completed");
   });
 
   it("uses a test runner that normalizes pnpm forwarded arguments and a strict asset build", () => {
