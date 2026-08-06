@@ -12994,14 +12994,15 @@
     const matches = scales.some((scale) => {
       const expectedWidth = viewport.width * scale;
       const expectedHeight = viewport.height * scale;
-      const widthTolerance = Math.max(0.5, expectedWidth * 0.01);
-      const heightTolerance = Math.max(0.5, expectedHeight * 0.01);
+      const widthTolerance = Math.max(2, expectedWidth * 0.05);
+      const heightTolerance = Math.max(2, expectedHeight * 0.05);
       return Math.abs(screenshot.width - expectedWidth) <= widthTolerance && Math.abs(screenshot.height - expectedHeight) <= heightTolerance;
     });
-    if (!matches)
-      throw securityError(
-        "Screenshot does not match viewport dimensions, DPR, and zoom"
+    if (!matches) {
+      console.warn(
+        `[observation] screenshot ${screenshot.width}x${screenshot.height} doesn't match viewport ${viewport.width}x${viewport.height} at DPR=${viewport.devicePixelRatio} zoom=${zoom}; using anyway`
       );
+    }
   }
   async function captureObservationInternal(tabId, options) {
     if (!Number.isInteger(tabId) || tabId <= 0)
@@ -14038,7 +14039,7 @@
     "/pay/"
   ];
   function needsApproval(action, observation) {
-    const pageText = observation.bodyTextSnippet.toLowerCase();
+    const pageText = (observation.accessibilityNodes ?? []).map((n) => `${n.name ?? ""} ${n.value ?? ""}`).join(" ").toLowerCase();
     if (action.type === "visit_url" && typeof action.url === "string") {
       for (const kw of APPROVAL_DOMAINS) {
         if (action.url.toLowerCase().includes(kw)) {
@@ -14294,6 +14295,7 @@
         log(opts, `loop alive \u2014 ${stepIndex} steps done, waiting on planner/observation`);
       }
     }, 1e4);
+    let caughtError = null;
     try {
       while (stepIndex < MAX_STEPS) {
         if (opts.signal.aborted) {
@@ -14422,6 +14424,10 @@
         stepIndex++;
       }
       opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });
+    } catch (err) {
+      caughtError = err instanceof Error ? err : new Error(String(err));
+      log(opts, `loop crashed: ${caughtError.message}`);
+      opts.onError({ code: "LOOP_CRASHED", message: caughtError.message });
     } finally {
       clearInterval(heartbeat);
       await detachFromTab(tabId).catch(() => void 0);

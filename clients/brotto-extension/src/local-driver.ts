@@ -91,9 +91,14 @@ const APPROVAL_DOMAINS = [
 
 export function needsApproval(
   action: { type?: string; url?: string; text?: string },
-  observation: { url: string; bodyTextSnippet: string },
+  observation: { url: string; accessibilityNodes?: Array<{ name?: string; value?: string; role?: string }> },
 ): { needs: boolean; reason: string } {
-  const pageText = observation.bodyTextSnippet.toLowerCase();
+  // ponytail: ObservationV1 doesn't have bodyTextSnippet — extract page text
+  // from accessibilityNodes instead.
+  const pageText = (observation.accessibilityNodes ?? [])
+    .map((n) => `${n.name ?? ""} ${n.value ?? ""}`)
+    .join(" ")
+    .toLowerCase();
   if (action.type === "visit_url" && typeof action.url === "string") {
     for (const kw of APPROVAL_DOMAINS) {
       if (action.url.toLowerCase().includes(kw)) {
@@ -399,6 +404,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       log(opts, `loop alive — ${stepIndex} steps done, waiting on planner/observation`);
     }
   }, 10_000);
+  let caughtError: Error | null = null;
   try {
     while (stepIndex < MAX_STEPS) {
       if (opts.signal.aborted) {
@@ -542,6 +548,13 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       stepIndex++;
     }
     opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });
+  } catch (err) {
+    // ponytail: captureObservation timeout or any other loop error would
+    // otherwise become an unhandled rejection and silently leave the
+    // side panel in RUNNING. Surface as task_failed so the user sees it.
+    caughtError = err instanceof Error ? err : new Error(String(err));
+    log(opts, `loop crashed: ${caughtError.message}`);
+    opts.onError({ code: "LOOP_CRASHED", message: caughtError.message });
   } finally {
     clearInterval(heartbeat);
     await debuggerModule.detachFromTab(tabId).catch(() => undefined);

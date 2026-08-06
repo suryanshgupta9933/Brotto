@@ -76,7 +76,7 @@ describe("detectStuckFailures", () => {
 });
 
 describe("needsApproval", () => {
-  const obs = { url: "https://example.com/", bodyTextSnippet: "Sign up or login" };
+  const obs = { url: "https://example.com/", accessibilityNodes: [{ name: "Sign up" }, { name: "or login" }] };
 
   it("approves safe actions on benign pages", () => {
     expect(needsApproval({ type: "left_click" }, obs).needs).toBe(false);
@@ -84,7 +84,7 @@ describe("needsApproval", () => {
   });
 
   it("requires approval when page mentions destructive keywords", () => {
-    const evilPage = { url: "https://example.com/", bodyTextSnippet: "Delete account permanently" };
+    const evilPage = { url: "https://example.com/", accessibilityNodes: [{ name: "Delete account permanently" }] };
     const r = needsApproval({ type: "left_click" }, evilPage);
     expect(r.needs).toBe(true);
     expect(r.reason).toContain("delete");
@@ -97,7 +97,7 @@ describe("needsApproval", () => {
   });
 
   it("requires approval for insert_text when both text and page contain destructive keyword", () => {
-    const evilPage = { url: "https://example.com/", bodyTextSnippet: "Send money to friend" };
+    const evilPage = { url: "https://example.com/", accessibilityNodes: [{ name: "Send money to friend" }] };
     const r = needsApproval({ type: "insert_text", text: "send money 100" }, evilPage);
     expect(r.needs).toBe(true);
   });
@@ -107,5 +107,9 @@ describe("needsApproval", () => {
     // context also matches. Prevents false positives on every form fill.
     const r = needsApproval({ type: "insert_text", text: "delete" }, obs);
     expect(r.needs).toBe(false);
+  });
+
+  it("handles missing accessibilityNodes gracefully", () => {
+    expect(needsApproval({ type: "left_click" }, { url: "https://example.com/" }).needs).toBe(false);
   });
 });
