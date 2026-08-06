@@ -933,7 +933,10 @@ var KeyModifiersSchema2 = import_zod6.z.object({
 var BaseActionArgsSchema = import_zod6.z.object({
   id: import_zod6.z.string().min(1),
   observationId: import_zod6.z.number().int().min(0),
-  timestamp: import_zod6.z.number().int().positive()
+  timestamp: import_zod6.z.number().int().positive(),
+  // ponytail: optional in the schema so older payloads still parse. The model
+  // is told to always provide it; the parser falls back to "" when missing.
+  reasoning: import_zod6.z.string().optional()
 });
 var LeftClickArgsSchema = BaseActionArgsSchema.extend({
   type: import_zod6.z.literal("left_click" /* LEFT_CLICK */),
@@ -996,7 +999,7 @@ var AskUserQuestionArgsSchema = BaseActionArgsSchema.extend({
 });
 var TerminateArgsSchema = BaseActionArgsSchema.extend({
   type: import_zod6.z.literal("terminate" /* TERMINATE */),
-  reason: import_zod6.z.string().optional()
+  finalAnswer: import_zod6.z.string().optional()
 });
 var PauseAndMemorizeFactArgsSchema = BaseActionArgsSchema.extend({
   type: import_zod6.z.literal("pause_and_memorize_fact" /* PAUSE_AND_MEMORIZE_FACT */),

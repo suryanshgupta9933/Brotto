@@ -5368,7 +5368,10 @@
       var BaseActionArgsSchema2 = import_zod62.z.object({
         id: import_zod62.z.string().min(1),
         observationId: import_zod62.z.number().int().min(0),
-        timestamp: import_zod62.z.number().int().positive()
+        timestamp: import_zod62.z.number().int().positive(),
+        // ponytail: optional in the schema so older payloads still parse. The model
+        // is told to always provide it; the parser falls back to "" when missing.
+        reasoning: import_zod62.z.string().optional()
       });
       var LeftClickArgsSchema2 = BaseActionArgsSchema2.extend({
         type: import_zod62.z.literal(
@@ -5470,7 +5473,7 @@
           "terminate"
           /* TERMINATE */
         ),
-        reason: import_zod62.z.string().optional()
+        finalAnswer: import_zod62.z.string().optional()
       });
       var PauseAndMemorizeFactArgsSchema2 = BaseActionArgsSchema2.extend({
         type: import_zod62.z.literal(
@@ -11168,7 +11171,10 @@
   var BaseActionArgsSchema = external_exports.object({
     id: external_exports.string().min(1),
     observationId: external_exports.number().int().min(0),
-    timestamp: external_exports.number().int().positive()
+    timestamp: external_exports.number().int().positive(),
+    // ponytail: optional in the schema so older payloads still parse. The model
+    // is told to always provide it; the parser falls back to "" when missing.
+    reasoning: external_exports.string().optional()
   });
   var LeftClickArgsSchema = BaseActionArgsSchema.extend({
     type: external_exports.literal(
@@ -11270,7 +11276,7 @@
       "terminate"
       /* TERMINATE */
     ),
-    reason: external_exports.string().optional()
+    finalAnswer: external_exports.string().optional()
   });
   var PauseAndMemorizeFactArgsSchema = BaseActionArgsSchema.extend({
     type: external_exports.literal(
@@ -12593,7 +12599,7 @@
     const hex = bytesToHex(bytes);
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
-  function collectPageSnapshot(maxCandidates, maxDomElements) {
+  function collectPageSnapshot(maxCandidates, maxDomElements, maxSensitiveRegions) {
     const sensitivePattern = /\b(?:account|api[\s_-]*key|auth|bearer|credential|one[\s_-]*time[\s_-]*(?:code|password)|otp|passcode|password|secret|token)\b/i;
     const sensitiveValuePattern = /(?:\b\d{6}\b|\b\d{8,20}\b|\beyJ[a-z0-9_-]{10,}\.[a-z0-9_-]+|\b(?:ghp_|sk-|pk_live_)[a-z0-9_-]{8,})/i;
     const isVisible = (element) => {
@@ -12674,7 +12680,7 @@
         if (tag === "input" && type.toLowerCase() === "password" || tag === "canvas" || tag === "video" || sensitivePattern.test(metadata) || sensitiveValuePattern.test(metadata) || sensitiveLeafText) {
           const maskElement = sensitiveLeafText && element.parentElement ? element.parentElement : element;
           const maskRect = maskElement.getBoundingClientRect();
-          if (sensitiveRegions.length < MAX_SENSITIVE_REGIONS) {
+          if (sensitiveRegions.length < maxSensitiveRegions) {
             sensitiveRegions.push({
               x: maskRect.x,
               y: maskRect.y,
@@ -12934,12 +12940,14 @@
   }
   async function capturePageSnapshot(tabId, sendCdpCommand, maxSemanticTargets, maxDomElements) {
     const runtimeResult = await sendCdpCommand(tabId, "Runtime.evaluate", {
-      expression: `(${collectPageSnapshot.toString()})(${maxSemanticTargets}, ${maxDomElements})`,
+      expression: `(${collectPageSnapshot.toString()})(${maxSemanticTargets}, ${maxDomElements}, ${MAX_SENSITIVE_REGIONS})`,
       returnByValue: true,
       awaitPromise: false
     });
-    if (runtimeResult.exceptionDetails)
-      throw securityError("Page snapshot evaluation failed");
+    if (runtimeResult.exceptionDetails) {
+      const detail = JSON.stringify(runtimeResult.exceptionDetails).slice(0, 300);
+      throw securityError(`Page snapshot evaluation failed: ${detail}`);
+    }
     return validatePageSnapshot(runtimeResult.result?.value);
   }
   function validateFrameTopology(value) {
@@ -13003,7 +13011,7 @@
     return actual;
   }
   function pageSnapshotsMatch(before, after) {
-    return JSON.stringify(before) === JSON.stringify(after);
+    return before.url === after.url && before.documentToken === after.documentToken;
   }
   function validateScreenshotViewport(screenshot, viewport, zoom) {
     const scales = [viewport.devicePixelRatio, viewport.devicePixelRatio * zoom];
@@ -14369,7 +14377,7 @@
           return;
         }
         if (outcome.kind === "completion") {
-          opts.onComplete({ summary: outcome.summary ?? "task completed", steps: stepIndex + 1 });
+          opts.onComplete({ summary: outcome.summary ?? "task completed", steps: stepIndex + 1, finalAnswer: outcome.summary });
           return;
         }
         if (outcome.kind === "question") {
@@ -14386,7 +14394,8 @@
         const action = outcome.action ?? { type: "unknown" };
         if (action.type === "terminate") {
           log(opts, `model called terminate at step ${stepIndex + 1}`);
-          opts.onComplete({ summary: typeof action.answer === "string" ? action.answer : "Task done", steps: stepIndex + 1 });
+          const finalAnswer = typeof action.finalAnswer === "string" && action.finalAnswer.length > 0 ? action.finalAnswer : typeof action.answer === "string" && action.answer.length > 0 ? action.answer : "Task done";
+          opts.onComplete({ summary: finalAnswer, steps: stepIndex + 1, finalAnswer });
           return;
         }
         const approval = needsApproval(action, obs);
@@ -14442,7 +14451,7 @@
         }
         history.push({ action: desc, result });
         failures.length = 0;
-        opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind });
+        opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind, reasoning: action.reasoning });
         const loop = detectLoop(history);
         if (loop.loop) {
           log(opts, `loop detected: ${loop.action} repeated ${history.length} times`);
@@ -14640,7 +14649,7 @@
           onTabOpened: (tabId) => {
             localTabId = tabId;
           },
-          onStep: ({ index, action, result, url, screenshot, iconKind }) => {
+          onStep: ({ index, action, result, url, screenshot, iconKind, reasoning }) => {
             notifyUi({
               type: "step_card",
               index,
@@ -14650,7 +14659,10 @@
               screenshot: screenshot ?? void 0,
               screenshotPlaceholder: screenshot ? void 0 : "Screenshot unavailable (chrome:// page or capture blocked)",
               iconKind,
-              ts: Date.now()
+              ts: Date.now(),
+              // ponytail: planner's one-sentence reasoning surfaces as the
+              // assistant bubble title in the side panel.
+              reasoning
             });
           },
           // ponytail: log events surface as 'observation' kind so the existing
@@ -14658,8 +14670,8 @@
           onLoginRequired: ({ url, domain }) => {
             notifyUi({ type: "login_required", url, domain });
           },
-          onComplete: ({ summary, steps }) => {
-            notifyUi({ type: "task_completed", summary, steps });
+          onComplete: ({ summary, steps, finalAnswer }) => {
+            notifyUi({ type: "task_completed", summary, steps, finalAnswer });
           },
           onError: ({ code, message: message2 }) => {
             notifyUi({ type: "task_failed", code, message: message2 });

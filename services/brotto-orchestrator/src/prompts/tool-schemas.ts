@@ -41,11 +41,15 @@ const TARGET_ID_PROP = {
   },
 } as const;
 
+// ponytail: every tool's required array must include "reasoning". gpt-4o-mini
+// silently drops optional fields — making reasoning required forces the model
+// to produce the one-sentence user-facing description. Terminate additionally
+// requires "finalAnswer" so the user actually gets their answer.
+function withReasoning(required: string[] = []): string[] {
+  return Array.from(new Set([...required, "reasoning"]));
+}
+
 export function buildToolSchemas(): ToolSchema[] {
-  // ponytail: every tool gets a `reasoning` property. The model is told in the
-  // system prompt to populate it before each tool call. We don't make it
-  // required in the JSON schema so old prompts that skip it still parse; the
-  // parser falls back to "".
   return [
     {
       type: "function",
@@ -55,7 +59,7 @@ export function buildToolSchemas(): ToolSchema[] {
         parameters: {
           type: "object",
           properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP },
-          required: ["x", "y"],
+          required: withReasoning(["x", "y"]),
         },
       },
     },
@@ -67,7 +71,7 @@ export function buildToolSchemas(): ToolSchema[] {
         parameters: {
           type: "object",
           properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP },
-          required: ["x", "y"],
+          required: withReasoning(["x", "y"]),
         },
       },
     },
@@ -79,7 +83,7 @@ export function buildToolSchemas(): ToolSchema[] {
         parameters: {
           type: "object",
           properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP },
-          required: ["x", "y"],
+          required: withReasoning(["x", "y"]),
         },
       },
     },
@@ -97,7 +101,7 @@ export function buildToolSchemas(): ToolSchema[] {
             endY: { type: "number" },
             ...REASONING_PROP,
           },
-          required: ["startX", "startY", "endX", "endY"],
+          required: withReasoning(["startX", "startY", "endX", "endY"]),
         },
       },
     },
@@ -109,7 +113,7 @@ export function buildToolSchemas(): ToolSchema[] {
         parameters: {
           type: "object",
           properties: { ...COORDINATE_PROPS, ...REASONING_PROP },
-          required: ["x", "y"],
+          required: withReasoning(["x", "y"]),
         },
       },
     },
@@ -125,7 +129,7 @@ export function buildToolSchemas(): ToolSchema[] {
             deltaY: { type: "number", description: "Vertical scroll delta" },
             ...REASONING_PROP,
           },
-          required: ["deltaX", "deltaY"],
+          required: withReasoning(["deltaX", "deltaY"]),
         },
       },
     },
@@ -145,7 +149,7 @@ export function buildToolSchemas(): ToolSchema[] {
             },
             ...REASONING_PROP,
           },
-          required: ["key"],
+          required: withReasoning(["key"]),
         },
       },
     },
@@ -161,7 +165,7 @@ export function buildToolSchemas(): ToolSchema[] {
             ...TARGET_ID_PROP,
             ...REASONING_PROP,
           },
-          required: ["text"],
+          required: withReasoning(["text"]),
         },
       },
     },
@@ -176,7 +180,7 @@ export function buildToolSchemas(): ToolSchema[] {
             url: { type: "string", format: "uri", description: "Absolute HTTP(S) URL" },
             ...REASONING_PROP,
           },
-          required: ["url"],
+          required: withReasoning(["url"]),
         },
       },
     },
@@ -191,6 +195,7 @@ export function buildToolSchemas(): ToolSchema[] {
             steps: { type: "number", description: "Number of steps back (default 1, max 20)" },
             ...REASONING_PROP,
           },
+          required: withReasoning(),
         },
       },
     },
@@ -199,7 +204,7 @@ export function buildToolSchemas(): ToolSchema[] {
       function: {
         name: "screenshot",
         description: "Capture a screenshot of the current viewport.",
-        parameters: { type: "object", properties: { ...REASONING_PROP } },
+        parameters: { type: "object", properties: { ...REASONING_PROP }, required: withReasoning() },
       },
     },
     {
@@ -213,7 +218,7 @@ export function buildToolSchemas(): ToolSchema[] {
             durationMs: { type: "number", description: "Duration to wait in ms (max 60000)" },
             ...REASONING_PROP,
           },
-          required: ["durationMs"],
+          required: withReasoning(["durationMs"]),
         },
       },
     },
@@ -229,7 +234,7 @@ export function buildToolSchemas(): ToolSchema[] {
             choices: { type: "array", items: { type: "string" } },
             ...REASONING_PROP,
           },
-          required: ["question"],
+          required: withReasoning(["question"]),
         },
       },
     },
@@ -245,7 +250,7 @@ export function buildToolSchemas(): ToolSchema[] {
             category: { type: "string" },
             ...REASONING_PROP,
           },
-          required: ["fact"],
+          required: withReasoning(["fact"]),
         },
       },
     },
@@ -257,10 +262,11 @@ export function buildToolSchemas(): ToolSchema[] {
         parameters: {
           type: "object",
           properties: {
-            finalAnswer: { type: "string", description: "The user's answer in plain English (their actual question, e.g. 'You have 12 followers.')" },
+            finalAnswer: { type: "string", description: "The user's answer in plain English (their actual question, e.g. 'You have 12 followers.'). REQUIRED — this is what the user sees." },
             answer: { type: "string", description: "Legacy alias for finalAnswer; prefer finalAnswer." },
             ...REASONING_PROP,
           },
+          required: withReasoning(["finalAnswer"]),
         },
       },
     },

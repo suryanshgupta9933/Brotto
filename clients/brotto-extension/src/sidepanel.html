@@ -672,14 +672,40 @@
       padding: 0 2px;
     }
 
-    /* Tool details — hidden by default, expands on click */
-    .tool-details { display: none; margin-top: 6px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; opacity: 0.7; }
-    .tool-details.expanded { display: block; }
-    .tool-details-toggle { font-size: 11px; opacity: 0.6; cursor: pointer; user-select: none; margin-top: 4px; }
-    .tool-details-toggle:hover { opacity: 1; }
+    /* Status pill — visible in header. Default "Idle", updates with phase. */
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+      background: var(--surface-3);
+      color: var(--text-muted);
+      border: 1px solid var(--border-soft);
+      white-space: nowrap;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .status-pill.connecting { background: #fff5e0; color: #8a6500; border-color: #f0d8a0; }
+    .status-pill.connected { background: #e7f7ee; color: #1f7a3a; border-color: #b8e6c8; }
+    .status-pill.executing { background: #eaf2ff; color: #2452b8; border-color: #c2d8f5; }
+    .status-pill.paused { background: #fdecec; color: #a8332e; border-color: #f3c4c0; }
+    .status-pill.done { background: #e7f7ee; color: #1f7a3a; border-color: #b8e6c8; }
+    .status-pill.error { background: #fdecec; color: #a8332e; border-color: #f3c4c0; }
+    .status-pill.reconnecting { background: #fff5e0; color: #8a6500; border-color: #f0d8a0; }
+
+    /* Tool subtitle — always-visible small mono line under the bubble title. */
+    .tool-subtitle {
+      margin-top: 6px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 11px;
+      color: var(--text-faint);
+      word-break: break-all;
+    }
 
     /* Final answer — prominent card */
-    .final-answer { font-size: 14px; line-height: 1.5; padding: 4px 0 12px; }
+    .final-answer { font-size: 14px; line-height: 1.5; padding: 4px 0 12px; color: var(--text); }
     .final-answer-text { font-weight: 500; }
   </style>
 </head>
@@ -695,6 +721,8 @@
   <div id="modelDisplay" title="Active model">
     <span class="dot"></span><span id="modelName">—</span>
   </div>
+
+  <span id="statusPill" class="status-pill" aria-live="polite">Idle</span>
 
   <div id="workingIndicator" aria-live="polite">
     <div class="spinner"></div>
@@ -722,7 +750,6 @@
 <button id="startBtn" style="display:none">Start task</button>
 <button id="refreshBtn" style="display:none">Refresh</button>
 <span id="connectionMeta" style="display:none">Not connected</span>
-<span id="statusPill" style="display:none"></span>
 <span id="brandDot" style="display:none"></span>
 <span id="stepCount" style="display:none">0 steps</span>
 <span id="timer" style="display:none"></span>

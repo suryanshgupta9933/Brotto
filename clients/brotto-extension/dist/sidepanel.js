@@ -61,6 +61,35 @@ function escapeHtml(s) {
   })[c]);
 }
 
+// ponytail: if the model skipped `reasoning` (gpt-4o-mini occasionally drops
+// optional fields), derive a sentence from the raw action string the local
+// driver produced. Keeps the bubble readable even when the model is lazy.
+function deriveReasoningFromAction(title, iconKind) {
+  const t = (title || '').trim();
+  if (!t) return iconKind ? `Working (${iconKind})…` : 'Working on it…';
+  if (t.startsWith('visit_url ')) {
+    const url = t.slice('visit_url '.length).trim();
+    return url ? `Navigating to ${url}…` : 'Navigating…';
+  }
+  if (t.startsWith('left_click ')) return 'Clicking on the page…';
+  if (t.startsWith('double_click ')) return 'Double-clicking…';
+  if (t.startsWith('right_click ')) return 'Right-clicking…';
+  if (t.startsWith('drag ')) return 'Dragging…';
+  if (t.startsWith('scroll ')) return 'Scrolling…';
+  if (t.startsWith('key ')) return 'Pressing a key…';
+  if (t.startsWith('insert_text ')) {
+    const text = t.slice('insert_text '.length).trim();
+    return text ? `Typing "${text.slice(0, 40)}${text.length > 40 ? '…' : ''}"…` : 'Typing…';
+  }
+  if (t.startsWith('history_back')) return 'Going back…';
+  if (t.startsWith('screenshot')) return 'Taking a screenshot…';
+  if (t.startsWith('wait')) return 'Pausing…';
+  if (t.startsWith('memorize_fact')) return 'Storing a note…';
+  if (t.startsWith('ask_user_question')) return 'Asking you a question…';
+  if (t.startsWith('terminate')) return 'Wrapping up…';
+  return t.length > 80 ? `${t.slice(0, 77)}…` : `${t}…`;
+}
+
 // ── Button handlers (preserved verbatim) ─────────────────────────────────
 if (connectBtn) connectBtn.addEventListener('click', () => void connect());
 if (disconnectBtn) disconnectBtn.addEventListener('click', () => void disconnect());
@@ -156,13 +185,17 @@ function setPhase(phase, message) {
   workingInd.classList.toggle('active', running);
   stopBtn.style.display = running ? '' : 'none';
   sendBtn.disabled = running || phase === 'connecting';
-  // compatibility
+  // ponytail: status pill is visible in the header. Updates text + color
+  // class so the user can read connection state at a glance (Idle by default).
   const labels = {
     idle: 'Idle', connecting: 'Connecting', connected: 'Connected',
     executing: 'Running', paused: 'Paused', done: 'Done', error: 'Error',
+    reconnecting: 'Reconnecting',
   };
-  statusPill.textContent = labels[phase] || 'Idle';
-  statusPill.className = 'statusPill ' + phase;
+  if (statusPill) {
+    statusPill.textContent = labels[phase] || 'Idle';
+    statusPill.className = `status-pill ${phase}`;
+  }
   if (brandDot) brandDot.className = 'brandDot' + (phase === 'executing' ? ' executing' : phase === 'connected' ? ' connected' : phase === 'error' ? ' error' : '');
   if (connectBtn) connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
   if (disconnectBtn) disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
@@ -662,12 +695,15 @@ chrome.runtime.onMessage.addListener((message) => {
       state.stepCount = Math.max(state.stepCount, message.index !== undefined ? message.index + 1 : state.stepCount + 1);
       updateStepCount();
       const icon = iconFor(message.iconKind || '');
-      const reasoningText = message.reasoning || `Step ${message.index || ''} — working on it`;
+      // ponytail: prefer the model's `reasoning`. If the model skipped it
+      // (gpt-4o-mini occasionally drops optional fields), derive a sensible
+      // sentence from the raw action so the bubble still reads naturally.
+      const reasoningText = (message.reasoning && message.reasoning.trim())
+        || deriveReasoningFromAction(message.title || '', message.iconKind);
+      const toolSubtitle = `${message.title || ''}${message.result ? ' → ' + message.result : ''}`.trim();
       if (!currentAssistantMsg) {
         startAssistantMessage({ icon, title: reasoningText });
       }
-      // Update the assistant message with reasoning; tuck raw action+result
-      // behind a 'details' expander so the user sees a sentence, not CDP junk.
       if (currentAssistantMsg) {
         currentAssistantMsg.bubble.innerHTML = '';
         const iconEl = document.createElement('span');
@@ -678,19 +714,11 @@ chrome.runtime.onMessage.addListener((message) => {
         titleEl.textContent = reasoningText;
         currentAssistantMsg.bubble.appendChild(iconEl);
         currentAssistantMsg.bubble.appendChild(titleEl);
-
-        // Hidden raw tool details behind a small 'details' toggle
-        const rawDetail = `${message.title || ''}${message.result ? ' → ' + message.result : ''}`.trim();
-        if (rawDetail) {
-          const toggle = document.createElement('span');
-          toggle.className = 'tool-details-toggle';
-          toggle.textContent = 'details';
-          const details = document.createElement('div');
-          details.className = 'tool-details';
-          details.textContent = rawDetail;
-          toggle.addEventListener('click', () => details.classList.toggle('expanded'));
-          currentAssistantMsg.bubble.appendChild(toggle);
-          currentAssistantMsg.bubble.appendChild(details);
+        if (toolSubtitle) {
+          const subEl = document.createElement('div');
+          subEl.className = 'tool-subtitle';
+          subEl.textContent = toolSubtitle;
+          currentAssistantMsg.bubble.appendChild(subEl);
         }
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
@@ -759,7 +787,9 @@ chrome.runtime.onMessage.addListener((message) => {
     // ── Canonical events ─────────────────────────────────────────────────
     case 'canonical_step': {
       const icon = message.kind === 'action' ? '&#9654;' : message.kind === 'observation' ? '&#128065;' : '&#10003;';
-      const titleText = message.reasoning || message.summary || 'Working on it…';
+      const titleText = (message.reasoning && message.reasoning.trim())
+        || deriveReasoningFromAction(message.summary || '', message.kind)
+        || 'Working on it…';
       if (!currentAssistantMsg) {
         startAssistantMessage({ icon, title: titleText });
       }

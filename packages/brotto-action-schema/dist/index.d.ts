@@ -13499,6 +13499,13 @@ interface BaseAction<T extends ActionType> {
     readonly observationId: ObservationId;
     /** Timestamp when action was created (Unix epoch ms) */
     readonly timestamp: number;
+    /**
+     * One-sentence plain-English description of what the agent is doing and why
+     * (e.g. "Navigating to the GitHub profile to find the follower count.").
+     * Surfaced to the user as the assistant bubble title. Model-required but
+     * parsers fall back gracefully when omitted.
+     */
+    readonly reasoning: string;
 }
 /**
  * Action arguments that include viewport context.
@@ -13628,8 +13635,11 @@ interface AskUserQuestionAction extends BaseAction<ActionType.ASK_USER_QUESTION>
  * Terminate action - ends the automation session.
  */
 interface TerminateAction extends BaseAction<ActionType.TERMINATE> {
-    /** Optional reason for termination */
-    reason?: string;
+    /**
+     * The user's actual answer in plain English. Surfaced as the prominent
+     * "final answer" card in the UI. Optional so older payloads still parse.
+     */
+    finalAnswer?: string;
 }
 /**
  * Pause and memorize fact action - stores information in session memory.
@@ -14039,6 +14049,7 @@ declare const LeftClickArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.LEFT_CLICK>;
     coordinates: z.ZodObject<{
@@ -14074,6 +14085,7 @@ declare const LeftClickArgsSchema: z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.LEFT_CLICK;
     observationId: number;
@@ -14087,6 +14099,7 @@ declare const LeftClickArgsSchema: z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }>;
 /**
  * Double click action arguments schema.
@@ -14095,6 +14108,7 @@ declare const DoubleClickArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.DOUBLE_CLICK>;
     coordinates: z.ZodObject<{
@@ -14130,6 +14144,7 @@ declare const DoubleClickArgsSchema: z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.DOUBLE_CLICK;
     observationId: number;
@@ -14143,6 +14158,7 @@ declare const DoubleClickArgsSchema: z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }>;
 /**
  * Right click action arguments schema.
@@ -14151,6 +14167,7 @@ declare const RightClickArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.RIGHT_CLICK>;
     coordinates: z.ZodObject<{
@@ -14186,6 +14203,7 @@ declare const RightClickArgsSchema: z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.RIGHT_CLICK;
     observationId: number;
@@ -14199,6 +14217,7 @@ declare const RightClickArgsSchema: z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }>;
 /**
  * Drag action arguments schema.
@@ -14207,6 +14226,7 @@ declare const DragArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.DRAG>;
     coordinates: z.ZodObject<{
@@ -14278,6 +14298,7 @@ declare const DragArgsSchema: z.ZodObject<{
             y: number;
         };
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.DRAG;
     observationId: number;
@@ -14297,6 +14318,7 @@ declare const DragArgsSchema: z.ZodObject<{
             y: number;
         };
     };
+    reasoning?: string | undefined;
 }>;
 /**
  * Mouse move action arguments schema.
@@ -14305,6 +14327,7 @@ declare const MouseMoveArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.MOUSE_MOVE>;
     coordinates: z.ZodObject<{
@@ -14340,6 +14363,7 @@ declare const MouseMoveArgsSchema: z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.MOUSE_MOVE;
     observationId: number;
@@ -14353,6 +14377,7 @@ declare const MouseMoveArgsSchema: z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }>;
 /**
  * Scroll action arguments schema.
@@ -14361,6 +14386,7 @@ declare const ScrollArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.SCROLL>;
     coordinates: z.ZodObject<{
@@ -14410,6 +14436,7 @@ declare const ScrollArgsSchema: z.ZodObject<{
         deltaX: number;
         deltaY: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.SCROLL;
     observationId: number;
@@ -14427,6 +14454,7 @@ declare const ScrollArgsSchema: z.ZodObject<{
         deltaX: number;
         deltaY: number;
     };
+    reasoning?: string | undefined;
 }>;
 /**
  * Key action arguments schema.
@@ -14435,6 +14463,7 @@ declare const KeyArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.KEY>;
     key: z.ZodString;
@@ -14466,6 +14495,7 @@ declare const KeyArgsSchema: z.ZodObject<{
         alt?: boolean | undefined;
         meta?: boolean | undefined;
     } | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.KEY;
     observationId: number;
@@ -14478,6 +14508,7 @@ declare const KeyArgsSchema: z.ZodObject<{
         alt?: boolean | undefined;
         meta?: boolean | undefined;
     } | undefined;
+    reasoning?: string | undefined;
 }>;
 /**
  * Visit URL action arguments schema.
@@ -14486,6 +14517,7 @@ declare const VisitUrlArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.VISIT_URL>;
     url: z.ZodString;
@@ -14497,6 +14529,7 @@ declare const VisitUrlArgsSchema: z.ZodObject<{
     id: string;
     timestamp: number;
     timeout?: number | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.VISIT_URL;
     url: string;
@@ -14504,6 +14537,7 @@ declare const VisitUrlArgsSchema: z.ZodObject<{
     id: string;
     timestamp: number;
     timeout?: number | undefined;
+    reasoning?: string | undefined;
 }>;
 /**
  * History back action arguments schema.
@@ -14512,6 +14546,7 @@ declare const HistoryBackArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.HISTORY_BACK>;
     steps: z.ZodOptional<z.ZodNumber>;
@@ -14521,12 +14556,14 @@ declare const HistoryBackArgsSchema: z.ZodObject<{
     id: string;
     timestamp: number;
     steps?: number | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.HISTORY_BACK;
     observationId: number;
     id: string;
     timestamp: number;
     steps?: number | undefined;
+    reasoning?: string | undefined;
 }>;
 /**
  * Screenshot action arguments schema.
@@ -14535,6 +14572,7 @@ declare const ScreenshotArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.SCREENSHOT>;
     fullPage: z.ZodOptional<z.ZodBoolean>;
@@ -14544,12 +14582,14 @@ declare const ScreenshotArgsSchema: z.ZodObject<{
     id: string;
     timestamp: number;
     fullPage?: boolean | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.SCREENSHOT;
     observationId: number;
     id: string;
     timestamp: number;
     fullPage?: boolean | undefined;
+    reasoning?: string | undefined;
 }>;
 /**
  * Wait action arguments schema.
@@ -14558,6 +14598,7 @@ declare const WaitArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.WAIT>;
     durationMs: z.ZodNumber;
@@ -14567,12 +14608,14 @@ declare const WaitArgsSchema: z.ZodObject<{
     durationMs: number;
     id: string;
     timestamp: number;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.WAIT;
     observationId: number;
     durationMs: number;
     id: string;
     timestamp: number;
+    reasoning?: string | undefined;
 }>;
 /**
  * Ask user question action arguments schema.
@@ -14581,6 +14624,7 @@ declare const AskUserQuestionArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.ASK_USER_QUESTION>;
     question: z.ZodString;
@@ -14593,6 +14637,7 @@ declare const AskUserQuestionArgsSchema: z.ZodObject<{
     id: string;
     timestamp: number;
     choices?: string[] | undefined;
+    reasoning?: string | undefined;
     context?: string | undefined;
 }, {
     type: ActionType.ASK_USER_QUESTION;
@@ -14601,6 +14646,7 @@ declare const AskUserQuestionArgsSchema: z.ZodObject<{
     id: string;
     timestamp: number;
     choices?: string[] | undefined;
+    reasoning?: string | undefined;
     context?: string | undefined;
 }>;
 /**
@@ -14610,21 +14656,24 @@ declare const TerminateArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.TERMINATE>;
-    reason: z.ZodOptional<z.ZodString>;
+    finalAnswer: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     type: ActionType.TERMINATE;
     observationId: number;
     id: string;
     timestamp: number;
-    reason?: string | undefined;
+    reasoning?: string | undefined;
+    finalAnswer?: string | undefined;
 }, {
     type: ActionType.TERMINATE;
     observationId: number;
     id: string;
     timestamp: number;
-    reason?: string | undefined;
+    reasoning?: string | undefined;
+    finalAnswer?: string | undefined;
 }>;
 /**
  * Pause and memorize fact action arguments schema.
@@ -14633,6 +14682,7 @@ declare const PauseAndMemorizeFactArgsSchema: z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.PAUSE_AND_MEMORIZE_FACT>;
     fact: z.ZodString;
@@ -14644,6 +14694,7 @@ declare const PauseAndMemorizeFactArgsSchema: z.ZodObject<{
     id: string;
     timestamp: number;
     category?: string | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.PAUSE_AND_MEMORIZE_FACT;
     observationId: number;
@@ -14651,6 +14702,7 @@ declare const PauseAndMemorizeFactArgsSchema: z.ZodObject<{
     id: string;
     timestamp: number;
     category?: string | undefined;
+    reasoning?: string | undefined;
 }>;
 /**
  * Union of all action argument schemas.
@@ -14659,6 +14711,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.LEFT_CLICK>;
     coordinates: z.ZodObject<{
@@ -14694,6 +14747,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.LEFT_CLICK;
     observationId: number;
@@ -14707,10 +14761,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.DOUBLE_CLICK>;
     coordinates: z.ZodObject<{
@@ -14746,6 +14802,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.DOUBLE_CLICK;
     observationId: number;
@@ -14759,10 +14816,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.RIGHT_CLICK>;
     coordinates: z.ZodObject<{
@@ -14798,6 +14857,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.RIGHT_CLICK;
     observationId: number;
@@ -14811,10 +14871,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.DRAG>;
     coordinates: z.ZodObject<{
@@ -14886,6 +14948,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
             y: number;
         };
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.DRAG;
     observationId: number;
@@ -14905,10 +14968,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
             y: number;
         };
     };
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.MOUSE_MOVE>;
     coordinates: z.ZodObject<{
@@ -14944,6 +15009,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.MOUSE_MOVE;
     observationId: number;
@@ -14957,10 +15023,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         x: number;
         y: number;
     };
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.SCROLL>;
     coordinates: z.ZodObject<{
@@ -15010,6 +15078,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         deltaX: number;
         deltaY: number;
     };
+    reasoning?: string | undefined;
 }, {
     type: ActionType.SCROLL;
     observationId: number;
@@ -15027,10 +15096,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         deltaX: number;
         deltaY: number;
     };
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.KEY>;
     key: z.ZodString;
@@ -15062,6 +15133,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         alt?: boolean | undefined;
         meta?: boolean | undefined;
     } | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.KEY;
     observationId: number;
@@ -15074,10 +15146,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
         alt?: boolean | undefined;
         meta?: boolean | undefined;
     } | undefined;
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.INSERT_TEXT>;
     text: z.ZodString;
@@ -15089,6 +15163,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     targetId?: string | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.INSERT_TEXT;
     text: string;
@@ -15096,10 +15171,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     targetId?: string | undefined;
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.VISIT_URL>;
     url: z.ZodString;
@@ -15111,6 +15188,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     timeout?: number | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.VISIT_URL;
     url: string;
@@ -15118,10 +15196,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     timeout?: number | undefined;
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.HISTORY_BACK>;
     steps: z.ZodOptional<z.ZodNumber>;
@@ -15131,16 +15211,19 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     steps?: number | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.HISTORY_BACK;
     observationId: number;
     id: string;
     timestamp: number;
     steps?: number | undefined;
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.SCREENSHOT>;
     fullPage: z.ZodOptional<z.ZodBoolean>;
@@ -15150,16 +15233,19 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     fullPage?: boolean | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.SCREENSHOT;
     observationId: number;
     id: string;
     timestamp: number;
     fullPage?: boolean | undefined;
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.WAIT>;
     durationMs: z.ZodNumber;
@@ -15169,16 +15255,19 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     durationMs: number;
     id: string;
     timestamp: number;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.WAIT;
     observationId: number;
     durationMs: number;
     id: string;
     timestamp: number;
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.ASK_USER_QUESTION>;
     question: z.ZodString;
@@ -15191,6 +15280,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     choices?: string[] | undefined;
+    reasoning?: string | undefined;
     context?: string | undefined;
 }, {
     type: ActionType.ASK_USER_QUESTION;
@@ -15199,30 +15289,35 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     choices?: string[] | undefined;
+    reasoning?: string | undefined;
     context?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.TERMINATE>;
-    reason: z.ZodOptional<z.ZodString>;
+    finalAnswer: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     type: ActionType.TERMINATE;
     observationId: number;
     id: string;
     timestamp: number;
-    reason?: string | undefined;
+    reasoning?: string | undefined;
+    finalAnswer?: string | undefined;
 }, {
     type: ActionType.TERMINATE;
     observationId: number;
     id: string;
     timestamp: number;
-    reason?: string | undefined;
+    reasoning?: string | undefined;
+    finalAnswer?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.PAUSE_AND_MEMORIZE_FACT>;
     fact: z.ZodString;
@@ -15234,6 +15329,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     category?: string | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.PAUSE_AND_MEMORIZE_FACT;
     observationId: number;
@@ -15241,10 +15337,12 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     category?: string | undefined;
+    reasoning?: string | undefined;
 }>, z.ZodObject<{
     id: z.ZodString;
     observationId: z.ZodNumber;
     timestamp: z.ZodNumber;
+    reasoning: z.ZodOptional<z.ZodString>;
 } & {
     type: z.ZodLiteral<ActionType.MEMORIZE_FACT>;
     fact: z.ZodString;
@@ -15256,6 +15354,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     category?: string | undefined;
+    reasoning?: string | undefined;
 }, {
     type: ActionType.MEMORIZE_FACT;
     observationId: number;
@@ -15263,6 +15362,7 @@ declare const FaraActionArgsSchema: z.ZodUnion<[z.ZodObject<{
     id: string;
     timestamp: number;
     category?: string | undefined;
+    reasoning?: string | undefined;
 }>]>;
 /**
  * TypeScript type inferred from the action arguments schema.
