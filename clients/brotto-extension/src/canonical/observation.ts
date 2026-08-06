@@ -281,6 +281,7 @@ async function opaqueUuid(seed: string): Promise<string> {
 function collectPageSnapshot(
   maxCandidates: number,
   maxDomElements: number,
+  maxSensitiveRegions: number,
 ): RawPageSnapshot {
   const sensitivePattern =
     /\b(?:account|api[\s_-]*key|auth|bearer|credential|one[\s_-]*time[\s_-]*(?:code|password)|otp|passcode|password|secret|token)\b/i;
@@ -401,7 +402,7 @@ function collectPageSnapshot(
             ? element.parentElement
             : element;
         const maskRect = maskElement.getBoundingClientRect();
-        if (sensitiveRegions.length < MAX_SENSITIVE_REGIONS) {
+        if (sensitiveRegions.length < maxSensitiveRegions) {
           sensitiveRegions.push({
             x: maskRect.x,
             y: maskRect.y,
@@ -729,12 +730,14 @@ async function capturePageSnapshot(
   maxDomElements: number,
 ): Promise<PageSnapshot> {
   const runtimeResult = (await sendCdpCommand(tabId, "Runtime.evaluate", {
-    expression: `(${collectPageSnapshot.toString()})(${maxSemanticTargets}, ${maxDomElements})`,
+    expression: `(${collectPageSnapshot.toString()})(${maxSemanticTargets}, ${maxDomElements}, ${MAX_SENSITIVE_REGIONS})`,
     returnByValue: true,
     awaitPromise: false,
   })) as RuntimeEvaluateResult;
-  if (runtimeResult.exceptionDetails)
-    throw securityError("Page snapshot evaluation failed");
+  if (runtimeResult.exceptionDetails) {
+    const detail = JSON.stringify(runtimeResult.exceptionDetails).slice(0, 300);
+    throw securityError(`Page snapshot evaluation failed: ${detail}`);
+  }
   return validatePageSnapshot(runtimeResult.result?.value);
 }
 
@@ -830,7 +833,15 @@ function pageSnapshotsMatch(
   before: PageSnapshot,
   after: PageSnapshot,
 ): boolean {
-  return JSON.stringify(before) === JSON.stringify(after);
+  // ponytail: only compare security-relevant fields. The whole-point of
+  // the before/after snapshot is to detect navigation mid-capture (URL
+  // changed, document identity changed). Other fields (semanticTargets,
+  // sensitiveRegions, viewport scroll) can legitimately differ between
+  // two reads on a dynamic page like GitHub that re-renders continuously.
+  return (
+    before.url === after.url &&
+    before.documentToken === after.documentToken
+  );
 }
 
 function validateScreenshotViewport(

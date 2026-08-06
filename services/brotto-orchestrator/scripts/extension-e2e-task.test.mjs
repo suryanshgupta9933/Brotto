@@ -76,7 +76,7 @@ async function main() {
 
   // ponytail: send the task. sendUserMessage() auto-connects, then submits
   // via run_local_task. Connection + task kickoff happen in one shot.
-  await sidePanel.locator("#goal").fill("Navigate to https://example.com and report the page title.");
+  await sidePanel.locator("#goal").fill("Navigate to https://github.com/suryanshgupta9933 and report the follower count.");
   await sidePanel.locator("#sendBtn").click();
 
   // ponytail: poll the messages area for at most 60s. The redesigned UI
@@ -87,7 +87,7 @@ async function main() {
   //   - a final "Completed" or error bubble
   const seen = { messages: [], completed: false, errored: false };
   const t0 = Date.now();
-  while (Date.now() - t0 < 60_000) {
+  while (Date.now() - t0 < 90_000) {
     const cards = await sidePanel.locator("#messages .message, #messages .bubble, #messages .plan-card, #messages > *").allTextContents();
     const newTexts = cards.filter((t) => t.trim().length > 0 && !seen.messages.includes(t));
     if (newTexts.length > 0) {
