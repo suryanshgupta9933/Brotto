@@ -1,0 +1,9 @@
+packages:
+  - "apps/*"
+  - "services/*"
+  - "clients/*"
+  - "packages/*"
+  - "evals/*"
+onlyBuiltDependencies:
+  - esbuild
+  - protobufjs
