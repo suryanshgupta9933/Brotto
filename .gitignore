@@ -9,3 +9,5 @@ worktrees/
 **/__pycache__/
 **/*.pyc
 **/*.tsbuildinfo
+.e2e-task-user-data/
+.e2e-screenshots/
