@@ -324,6 +324,29 @@ async function executeAction(tabId: number, action: { type?: string; x?: number;
     case "wait":
       await new Promise((r) => setTimeout(r, 1000));
       return "waited 1s";
+    case "history_back": {
+      const steps = typeof (action as { steps?: number }).steps === "number" ? (action as { steps: number }).steps : 1;
+      await debuggerModule.sendCommand(tabId, { method: "Page.navigateToHistoryEntry", params: {} }).catch(() => undefined);
+      // chrome.debugger lacks a direct "back" — use Page.navigate with referrer reset via Runtime.evaluate.
+      await debuggerModule.sendCommand(tabId, { method: "Runtime.evaluate", params: { expression: "history.back()" } });
+      return `went back ${steps}`;
+    }
+    case "mouse_move": {
+      await debuggerModule.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", x: action.x ?? 0, y: action.y ?? 0 } });
+      return `moved to (${action.x}, ${action.y})`;
+    }
+    case "screenshot":
+      // ponytail: harness already captures a screenshot per step via captureVisibleTab.
+      // Acknowledge so the model can use this as a no-op "let me look" beat.
+      return "screenshot captured";
+    case "memorize_fact":
+      // ponytail: model-only working memory. The fact is carried via the next
+      // step's context (renderHistory). Acknowledge so the loop doesn't crash.
+      return `memorized: ${(action as { fact?: string }).fact ?? "(no fact)"}`;
+    case "ask_user_question":
+      // ponytail: in a real desktop/extension UI this would pop a prompt. The
+      // demo loop just treats it as a question beat and continues.
+      return `asked: ${(action as { question?: string }).question ?? "(no question)"}`;
     case "terminate":
       return "terminate";
     default:

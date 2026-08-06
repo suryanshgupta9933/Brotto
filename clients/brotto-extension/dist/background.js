@@ -14363,6 +14363,22 @@
       case "wait":
         await new Promise((r) => setTimeout(r, 1e3));
         return "waited 1s";
+      case "history_back": {
+        const steps = typeof action.steps === "number" ? action.steps : 1;
+        await sendCommand(tabId, { method: "Page.navigateToHistoryEntry", params: {} }).catch(() => void 0);
+        await sendCommand(tabId, { method: "Runtime.evaluate", params: { expression: "history.back()" } });
+        return `went back ${steps}`;
+      }
+      case "mouse_move": {
+        await sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", x: action.x ?? 0, y: action.y ?? 0 } });
+        return `moved to (${action.x}, ${action.y})`;
+      }
+      case "screenshot":
+        return "screenshot captured";
+      case "memorize_fact":
+        return `memorized: ${action.fact ?? "(no fact)"}`;
+      case "ask_user_question":
+        return `asked: ${action.question ?? "(no question)"}`;
       case "terminate":
         return "terminate";
       default:
