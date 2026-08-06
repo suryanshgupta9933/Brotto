@@ -12,7 +12,8 @@
     "start": "node dist/server.js",
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest --runInBand --testPathPattern='.*'",
     "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
-    "lint": "eslint src/**/*.ts"
+    "lint": "eslint src/**/*.ts",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@fara-platform/fara-action-schema": "workspace:*",
