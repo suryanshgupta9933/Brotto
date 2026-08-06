@@ -29,6 +29,9 @@ import {
 import {
   type FaraAction,
   type ObservationId,
+  type ObservationV1,
+  type SessionId,
+  type TaskId,
   createObservationId,
 } from '@fara-platform/fara-action-schema';
 import { ActionExecutor, createActionExecutor } from './executor.js';
@@ -46,16 +49,16 @@ export interface OrchestratorConfig {
     tenantId: string;
     userId: string;
   };
-  /** Legacy inference config for FaraInferenceClient path */
-  inference: LegacyInferenceConfig;
+  /** @deprecated Legacy FaraInferenceClient path. Use plannerConfig. */
+  inference?: LegacyInferenceConfig;
+  /** Multi-model planner via InferencePort (Fara + OpenAI-compatible). */
+  plannerConfig: InferenceConfig;
   mcpGateway: McpGatewayClient;
   budget?: {
     maxSteps?: number;
     maxSessionDurationMs?: number;
     maxConsecutiveFailedActions?: number;
   };
-  /** Optional multi-model planner via InferencePort */
-  plannerConfig?: InferenceConfig;
 }
 
 /**
@@ -84,19 +87,23 @@ export type OrchestratorEventListener = (event: OrchestratorEvents[keyof Orchest
 export class AgentOrchestrator {
   private session: SessionStateMachine;
   private history: HistoryManager;
-  private inference: FaraInferenceClient;
+  private legacyInference: FaraInferenceClient | null = null;
   private parser: ToolCallParser;
   private policy: PolicyIntegrator;
   private completion: CompletionDetector;
   private budget: AgentBudgetTracker;
   private resilient: ResilientExecutor;
   private executor: ActionExecutor;
-  private planner: InferencePort | null = null;
+  private planner: InferencePort;
   private listeners: Map<string, Set<OrchestratorEventListener>>;
   private isRunning = false;
   private shouldStop = false;
   private observationSequence = 0;
   private pendingAction: FaraAction | null = null;
+  private lastPromptTokens = 0;
+  private lastCompletionTokens = 0;
+  private abortController = new AbortController();
+  private lastObservation: import('@fara-platform/fara-action-schema').ObservationV1 | null = null;
 
   constructor(config: OrchestratorConfig) {
     this.listeners = new Map();
@@ -117,11 +124,11 @@ export class AgentOrchestrator {
       maxRecentActionsForPrompt: 5,
     });
 
-    this.inference = new FaraInferenceClient(config.inference);
-
-    if (config.plannerConfig) {
-      this.planner = createPlanner(config.plannerConfig);
+    if (!config.plannerConfig) {
+      throw new Error("plannerConfig is required on OrchestratorConfig");
     }
+    this.planner = createPlanner(config.plannerConfig);
+    this.legacyInference = config.inference ? new FaraInferenceClient(config.inference) : null;
 
     this.parser = createToolCallParser();
 
@@ -199,7 +206,8 @@ export class AgentOrchestrator {
   stop(reason?: string): void {
     this.shouldStop = true;
     this.isRunning = false;
-    this.inference.cancel();
+    this.abortController.abort();
+    this.legacyInference?.cancel();
 
     if (this.session.isActive()) {
       this.session.cancel(reason ?? 'Stopped by user');
@@ -292,70 +300,65 @@ export class AgentOrchestrator {
   }
 
   /**
-   * Request inference from Fara
+   * Request inference via InferencePort planner
    */
   private async plan(): Promise<void> {
     const context = this.session.getContext();
     const goal = context.goal;
 
-    // Build prompt context
-    const promptContext = this.history.buildPromptContext({
+    const planningInput: PlanningInput = {
+      workId: this.session.getSessionId(),
+      sessionId: this.session.getSessionId() as SessionId,
+      taskId: this.session.getSessionId() as TaskId,
       goal,
-      includeActionsCount: 5,
-      includeMemories: true,
-    });
+      completionCriteria: [],
+      observation: await this.captureObservation(),
+      recentResults: [], // TODO: bridge HistoryEntry[] -> ActionResultV1[] (Task 7)
+      trajectory: [] as import('@fara-platform/fara-action-schema').TrajectoryEventV1[], // TODO: bridge FullTrajectoryEntry[] -> TrajectoryEventV1[] (Task 7)
+    };
 
-    // Get current screenshot
-    const screenshot = context.currentScreenshot;
-
-    // Build messages for inference
-    const systemMessage = this.inference.buildSystemPrompt();
-    const userMessage = this.inference.buildUserMessage(promptContext);
-
-    // Request inference
-    const result = await this.resilient.execute(
+    const outcome = await this.resilient.execute(
       'inference',
-      async () =>
-        this.inference.infer(
-          [
-            { role: 'system', content: systemMessage },
-            { role: 'user', content: userMessage },
-          ],
-          {
-            imageBase64: screenshot?.toString('base64'),
-          }
-        )
+      async () => this.planner.plan(planningInput, this.abortController.signal),
     );
 
-    // Record token usage
-    this.budget.recordTokens(result.usage.promptTokens, result.usage.completionTokens);
+    this.handlePlanningOutcome(outcome);
+  }
 
-    this.emit('inferenceCompleted', {
-      toolCalls: result.toolCalls.length,
-      tokens: result.usage.totalTokens,
-    });
-
-    // Parse tool calls
-    const parseResult = this.parser.parse(result.toolCalls);
-
-    if (parseResult.errors.length > 0) {
-      // Log parse errors but continue
-      for (const error of parseResult.errors) {
-        console.error('Parse error:', error);
-      }
+  private handlePlanningOutcome(outcome: PlanningOutcome): void {
+    if (outcome.kind === 'completion') {
+      const completion = outcome as import('@fara-platform/fara-action-schema').CompletionProposalV1;
+      this.session.complete(completion.summary);
+      this.emit('completed', completion.summary);
+      return;
     }
-
-    if (parseResult.actions.length === 0) {
-      // No valid actions, go back to observing
+    if (outcome.kind === 'question') {
+      // TODO: wire up user question flow (session.askUser not implemented yet)
+      console.warn('User question pending implementation:', (outcome as import('./engine/types.js').QuestionProposal).question);
       this.session.startObserving();
       return;
     }
-
-    // Store the first action for execution
-    this.pendingAction = parseResult.actions[0].action;
-
-    // Move to policy check with first action
+    // action_proposal (kind === 'action')
+    const actionProposal = outcome as import('@fara-platform/fara-action-schema').ActionProposalV1;
+    this.pendingAction = actionProposal.action;
     this.session.checkPolicy();
+  }
+
+  protected async captureObservation(): Promise<ObservationV1> {
+    return this.lastObservation ?? this.buildEmptyObservation();
+  }
+
+  private buildEmptyObservation(): ObservationV1 {
+    return {
+      observationId: crypto.randomUUID() as ObservationV1['observationId'],
+      capturedAt: new Date().toISOString(),
+      url: '',
+      title: '',
+      page: { tabId: '00000000-0000-4000-8000-000000000001' as never, frameId: '00000000-0000-4000-8000-000000000002' as never, lifecycle: 'complete', visibility: 'visible' },
+      viewport: { width: 1280, height: 720, devicePixelRatio: 1, zoom: 1, scrollX: 0, scrollY: 0 },
+      screenshot: { kind: 'inline', encoding: 'base64', data: '', sha256: 'a'.repeat(64), width: 0, height: 0 },
+      semanticTargets: [],
+    };
   }
 
   /**
@@ -586,6 +589,35 @@ export class AgentOrchestrator {
 
   hasPlanner(): boolean {
     return this.planner !== null;
+  }
+
+  // Test-only methods
+  setPlannerForTesting(planner: InferencePort): void {
+    this.planner = planner;
+  }
+
+  async triggerPlan(): Promise<void> {
+    await this.plan();
+  }
+
+  sessionIdForTesting(): string {
+    return this.session.getSessionId();
+  }
+
+  taskIdForTesting(): string {
+    return this.session.getSessionId();
+  }
+
+  lastPromptTokensForTesting(): number {
+    return this.lastPromptTokens;
+  }
+
+  lastCompletionTokensForTesting(): number {
+    return this.lastCompletionTokens;
+  }
+
+  async runPlannerForTesting(input: PlanningInput): Promise<PlanningOutcome> {
+    return this.planner.plan(input, new AbortController().signal);
   }
 }
 
