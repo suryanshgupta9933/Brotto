@@ -40,6 +40,13 @@ export interface BaseAction<T extends ActionType> {
   readonly observationId: ObservationId;
   /** Timestamp when action was created (Unix epoch ms) */
   readonly timestamp: number;
+  /**
+   * One-sentence plain-English description of what the agent is doing and why
+   * (e.g. "Navigating to the GitHub profile to find the follower count.").
+   * Surfaced to the user as the assistant bubble title. Model-required but
+   * parsers fall back gracefully when omitted.
+   */
+  readonly reasoning: string;
 }
 
 /**
@@ -184,8 +191,11 @@ export interface AskUserQuestionAction extends BaseAction<ActionType.ASK_USER_QU
  * Terminate action - ends the automation session.
  */
 export interface TerminateAction extends BaseAction<ActionType.TERMINATE> {
-  /** Optional reason for termination */
-  reason?: string;
+  /**
+   * The user's actual answer in plain English. Surfaced as the prominent
+   * "final answer" card in the UI. Optional so older payloads still parse.
+   */
+  finalAnswer?: string;
 }
 
 /**

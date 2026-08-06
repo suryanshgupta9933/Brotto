@@ -23,11 +23,16 @@ describe("buildToolSchemas", () => {
     expect(tool!.function.parameters.required).toEqual(expect.arrayContaining(["x", "y"]));
   });
 
-  it("includes terminate requiring answer string", () => {
+  it("includes terminate with finalAnswer property", () => {
+    // ponytail: Slice C — terminate now exposes `finalAnswer` (the user's
+    // plain-English answer). The model is told to populate it; we no longer
+    // mark it required so old prompts that omit it still parse.
     const schemas = buildToolSchemas();
     const finish = schemas.find((s) => s.function.name === "terminate");
     expect(finish).toBeDefined();
-    expect(finish!.function.parameters.required).toContain("answer");
+    expect(finish!.function.parameters.properties).toHaveProperty("finalAnswer");
+    // legacy `answer` is also accepted as an alias
+    expect(finish!.function.parameters.properties).toHaveProperty("answer");
   });
 
   it("includes ask_user_question requiring question", () => {

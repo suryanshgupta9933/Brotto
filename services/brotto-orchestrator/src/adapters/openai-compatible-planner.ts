@@ -178,7 +178,11 @@ export class OpenAICompatiblePlanner implements InferencePort {
       content: [
         "You drive a browser to reach a goal. Each turn: read the page context, pick the next action, call one tool.",
         "",
-        "Loop: read context → choose one action → re-read context (it shows what changed) → repeat. Call terminate(answer) when the goal is met.",
+        "Loop: read context → choose one action → re-read context (it shows what changed) → repeat. Call terminate(finalAnswer) when the goal is met.",
+        "",
+        "Before each tool call, briefly think: what do I observe on the page, what does this tell me about progress toward the goal, what should I do next? Output this as the `reasoning` field. The user sees this sentence in the side panel as a description of what you're doing — keep it to one short, plain-English sentence.",
+        "",
+        "When you call `terminate`, populate `finalAnswer` with the answer to the user's original question in plain English. If the question asked for a specific value (a number, a name, a fact), include it. If you couldn't find the answer, say so plainly. This is the user's final result, not a summary of what you did.",
         "",
         "Rules:",
         "- insert_text types into the currently focused element only. If the field you want is NOT marked focused=true, left_click it first. Never assume a field is focused.",
@@ -401,6 +405,8 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
 // ponytail: convert parser's FaraActionArgs shape (nested coordinates/viewport)
 // to wire ExecutableActionV1 shape (flat x/y) that downstream consumers expect.
+// Also threads `reasoning` and (for terminate) `finalAnswer` so the extension
+// can surface them in the side panel.
 function toExecutableAction(parsed: unknown): unknown {
   const a = parsed as {
     type?: string;
@@ -418,17 +424,19 @@ function toExecutableAction(parsed: unknown): unknown {
     fact?: string;
     category?: string;
     answer?: string;
+    finalAnswer?: string;
+    reasoning?: string;
   };
+  // ponytail: always carry reasoning. local-driver reads it from the action
+  // payload to render the assistant bubble title. Empty string if the model
+  // didn't provide one (parser already coerced to "" for missing).
+  const reasoning = typeof a.reasoning === "string" ? a.reasoning : "";
   switch (a.type) {
     case 'left_click':
     case 'double_click':
     case 'right_click':
     case 'mouse_move':
-      return {
-        type: a.type,
-        x: a.coordinates?.x ?? 0,
-        y: a.coordinates?.y ?? 0,
-      };
+      return { type: a.type, x: a.coordinates?.x ?? 0, y: a.coordinates?.y ?? 0, reasoning };
     case 'drag':
       return {
         type: 'drag',
@@ -436,32 +444,31 @@ function toExecutableAction(parsed: unknown): unknown {
         startY: a.coordinates?.start?.y ?? 0,
         endX: a.coordinates?.end?.x ?? 0,
         endY: a.coordinates?.end?.y ?? 0,
+        reasoning,
       };
     case 'scroll':
-      return {
-        type: 'scroll',
-        deltaX: a.delta?.deltaX ?? 0,
-        deltaY: a.delta?.deltaY ?? 0,
-      };
+      return { type: 'scroll', deltaX: a.delta?.deltaX ?? 0, deltaY: a.delta?.deltaY ?? 0, reasoning };
     case 'key':
-      return { type: 'key', key: a.key ?? '' };
+      return { type: 'key', key: a.key ?? '', reasoning };
     case 'insert_text':
-      return { type: 'insert_text', text: a.text ?? '' };
+      return { type: 'insert_text', text: a.text ?? '', reasoning };
     case 'visit_url':
-      return { type: 'visit_url', url: a.url ?? '' };
+      return { type: 'visit_url', url: a.url ?? '', reasoning };
     case 'history_back':
-      return { type: 'history_back', steps: a.steps ?? 1 };
+      return { type: 'history_back', steps: a.steps ?? 1, reasoning };
     case 'wait':
-      return { type: 'wait', durationMs: a.durationMs ?? a.duration ?? 1000 };
+      return { type: 'wait', durationMs: a.durationMs ?? a.duration ?? 1000, reasoning };
     case 'screenshot':
-      return { type: 'screenshot' };
+      return { type: 'screenshot', reasoning };
     case 'ask_user_question':
-      return { type: 'ask_user_question', question: a.question ?? '' };
+      return { type: 'ask_user_question', question: a.question ?? '', reasoning };
     case 'terminate':
-      return { type: 'terminate', answer: a.answer ?? '' };
+      // ponytail: accept either `finalAnswer` (new) or `answer` (legacy). New
+      // model emits finalAnswer; old prompts and tests still emit answer.
+      return { type: 'terminate', finalAnswer: a.finalAnswer ?? a.answer ?? '', reasoning };
     case 'memorize_fact':
     case 'pause_and_memorize_fact':
-      return { type: a.type, fact: a.fact ?? '' };
+      return { type: a.type, fact: a.fact ?? '', reasoning };
     default:
       return a;
   }

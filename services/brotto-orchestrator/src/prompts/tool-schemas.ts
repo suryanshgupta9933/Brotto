@@ -24,6 +24,16 @@ const COORDINATE_PROPS = {
   y: { type: "number", description: "Y coordinate in CSS pixels" },
 } as const;
 
+// ponytail: every tool call carries a one-sentence `reasoning` field. The
+// model is told to populate it before each tool call; the parser falls back
+// to "" if missing so older prompts / models that omit it still parse.
+const REASONING_PROP = {
+  reasoning: {
+    type: "string",
+    description: "One sentence in plain English describing what you observe and what this action is doing (e.g. 'Navigating to the GitHub profile to find the follower count.').",
+  },
+} as const;
+
 const TARGET_ID_PROP = {
   targetId: {
     type: "string",
@@ -32,6 +42,10 @@ const TARGET_ID_PROP = {
 } as const;
 
 export function buildToolSchemas(): ToolSchema[] {
+  // ponytail: every tool gets a `reasoning` property. The model is told in the
+  // system prompt to populate it before each tool call. We don't make it
+  // required in the JSON schema so old prompts that skip it still parse; the
+  // parser falls back to "".
   return [
     {
       type: "function",
@@ -40,7 +54,7 @@ export function buildToolSchemas(): ToolSchema[] {
         description: "Left-click at the given viewport coordinate.",
         parameters: {
           type: "object",
-          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP },
+          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP },
           required: ["x", "y"],
         },
       },
@@ -52,7 +66,7 @@ export function buildToolSchemas(): ToolSchema[] {
         description: "Double-click at the given viewport coordinate.",
         parameters: {
           type: "object",
-          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP },
+          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP },
           required: ["x", "y"],
         },
       },
@@ -64,7 +78,7 @@ export function buildToolSchemas(): ToolSchema[] {
         description: "Right-click at the given viewport coordinate.",
         parameters: {
           type: "object",
-          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP },
+          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP },
           required: ["x", "y"],
         },
       },
@@ -81,6 +95,7 @@ export function buildToolSchemas(): ToolSchema[] {
             startY: { type: "number" },
             endX: { type: "number" },
             endY: { type: "number" },
+            ...REASONING_PROP,
           },
           required: ["startX", "startY", "endX", "endY"],
         },
@@ -93,7 +108,7 @@ export function buildToolSchemas(): ToolSchema[] {
         description: "Move the mouse to the given viewport coordinate.",
         parameters: {
           type: "object",
-          properties: { ...COORDINATE_PROPS },
+          properties: { ...COORDINATE_PROPS, ...REASONING_PROP },
           required: ["x", "y"],
         },
       },
@@ -108,6 +123,7 @@ export function buildToolSchemas(): ToolSchema[] {
           properties: {
             deltaX: { type: "number", description: "Horizontal scroll delta" },
             deltaY: { type: "number", description: "Vertical scroll delta" },
+            ...REASONING_PROP,
           },
           required: ["deltaX", "deltaY"],
         },
@@ -127,6 +143,7 @@ export function buildToolSchemas(): ToolSchema[] {
               items: { type: "string", enum: ["ctrl", "shift", "alt", "meta"] },
               description: "Optional key modifiers",
             },
+            ...REASONING_PROP,
           },
           required: ["key"],
         },
@@ -142,6 +159,7 @@ export function buildToolSchemas(): ToolSchema[] {
           properties: {
             text: { type: "string", description: "Text to type" },
             ...TARGET_ID_PROP,
+            ...REASONING_PROP,
           },
           required: ["text"],
         },
@@ -156,6 +174,7 @@ export function buildToolSchemas(): ToolSchema[] {
           type: "object",
           properties: {
             url: { type: "string", format: "uri", description: "Absolute HTTP(S) URL" },
+            ...REASONING_PROP,
           },
           required: ["url"],
         },
@@ -170,6 +189,7 @@ export function buildToolSchemas(): ToolSchema[] {
           type: "object",
           properties: {
             steps: { type: "number", description: "Number of steps back (default 1, max 20)" },
+            ...REASONING_PROP,
           },
         },
       },
@@ -179,7 +199,7 @@ export function buildToolSchemas(): ToolSchema[] {
       function: {
         name: "screenshot",
         description: "Capture a screenshot of the current viewport.",
-        parameters: { type: "object", properties: {} },
+        parameters: { type: "object", properties: { ...REASONING_PROP } },
       },
     },
     {
@@ -191,6 +211,7 @@ export function buildToolSchemas(): ToolSchema[] {
           type: "object",
           properties: {
             durationMs: { type: "number", description: "Duration to wait in ms (max 60000)" },
+            ...REASONING_PROP,
           },
           required: ["durationMs"],
         },
@@ -206,6 +227,7 @@ export function buildToolSchemas(): ToolSchema[] {
           properties: {
             question: { type: "string" },
             choices: { type: "array", items: { type: "string" } },
+            ...REASONING_PROP,
           },
           required: ["question"],
         },
@@ -221,6 +243,7 @@ export function buildToolSchemas(): ToolSchema[] {
           properties: {
             fact: { type: "string" },
             category: { type: "string" },
+            ...REASONING_PROP,
           },
           required: ["fact"],
         },
@@ -234,9 +257,10 @@ export function buildToolSchemas(): ToolSchema[] {
         parameters: {
           type: "object",
           properties: {
-            answer: { type: "string", description: "Final answer or task summary" },
+            finalAnswer: { type: "string", description: "The user's answer in plain English (their actual question, e.g. 'You have 12 followers.')" },
+            answer: { type: "string", description: "Legacy alias for finalAnswer; prefer finalAnswer." },
+            ...REASONING_PROP,
           },
-          required: ["answer"],
         },
       },
     },

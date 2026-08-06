@@ -1,4 +1,4 @@
-import type { PageSnapshot, HistoryEntry } from "./types.js";
+import type { PageSnapshot, HistoryEntry, HistoryEntryV1 } from "./types.js";
 
 // ponytail: stable element IDs + hierarchical tree + state per element + diff.
 // Same DOM node → same ID across observations. Tree is small enough for any
@@ -68,9 +68,25 @@ export function describeDiff(prev: PageSnapshot | null, next: PageSnapshot): str
 export function renderHistory(history: HistoryEntry[]): string {
   if (history.length === 0) return "";
   const tail = history.slice(-HISTORY_LIMIT);
-  const lines = tail.map((h, i) => `  ${i + 1}. ${h.action} → ${h.result}`);
+  // ponytail: HistoryEntryV1 carries memory (observation/verdict/next). When
+  // present, render a "memory" section (model-only, internal) ahead of the
+  // "what happened" section. Falls back to the legacy single-line format for
+  // older callers that only have HistoryEntry.
+  const memory = tail
+    .map((h, i) => {
+      const m = h as Partial<HistoryEntryV1>;
+      if (!m.observation && !m.verdict && !m.nextActionPrediction) return null;
+      return `  Step ${i + 1}: observation="${m.observation ?? ""}" verdict="${m.verdict ?? ""}" nextActionPrediction="${m.nextActionPrediction ?? ""}"`;
+    })
+    .filter((l): l is string => l !== null);
+  const actionLines = tail.map((h, i) => `  Step ${i + 1}: action="${h.action}" result="${h.result}"`);
   const truncated = history.length > HISTORY_LIMIT ? `  (showing last ${HISTORY_LIMIT} of ${history.length})\n` : "";
-  return `Previous steps (most recent last):\n${truncated}${lines.join("\n")}\n`;
+  const blocks: string[] = [];
+  if (memory.length > 0) {
+    blocks.push(`Memory (carry this forward):\n${memory.join("\n")}`);
+  }
+  blocks.push(`What happened (last ${tail.length} steps):\n${actionLines.join("\n")}`);
+  return `${truncated}${blocks.join("\n\n")}\n`;
 }
 
 export function diffSnapshots(prev: PageSnapshot | null, next: PageSnapshot): string {

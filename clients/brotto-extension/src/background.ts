@@ -199,7 +199,7 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
         onTabOpened: (tabId) => {
           localTabId = tabId;
         },
-        onStep: ({ index, action, result, url, screenshot, iconKind }) => {
+        onStep: ({ index, action, result, url, screenshot, iconKind, reasoning }) => {
           notifyUi({
             type: "step_card",
             index,
@@ -210,6 +210,9 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
             screenshotPlaceholder: screenshot ? undefined : "Screenshot unavailable (chrome:// page or capture blocked)",
             iconKind,
             ts: Date.now(),
+            // ponytail: planner's one-sentence reasoning surfaces as the
+            // assistant bubble title in the side panel.
+            reasoning,
           });
         },
         // ponytail: log events surface as 'observation' kind so the existing
@@ -217,8 +220,8 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
         onLoginRequired: ({ url, domain }) => {
           notifyUi({ type: "login_required", url, domain });
         },
-        onComplete: ({ summary, steps }) => {
-          notifyUi({ type: "task_completed", summary, steps });
+        onComplete: ({ summary, steps, finalAnswer }) => {
+          notifyUi({ type: "task_completed", summary, steps, finalAnswer });
         },
         onError: ({ code, message }) => {
           // ponytail: emit as task_failed so the side panel renders the error

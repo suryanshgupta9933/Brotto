@@ -90,9 +90,9 @@ export type ControllerUiEvent =
   // ponytail: events emitted by the local-driver demo loop. Coexist with the
   // canonical ones so the same popup listener can handle both paths.
   | { readonly type: "login_required"; readonly url: string; readonly domain: string }
-  | { readonly type: "task_completed"; readonly summary: string; readonly steps: number }
+  | { readonly type: "task_completed"; readonly summary: string; readonly steps: number; readonly finalAnswer?: string }
   | { readonly type: "task_failed"; readonly code: string; readonly message: string }
-  | { readonly type: "step_card"; readonly index: number; readonly title: string; readonly result: string; readonly url?: string; readonly screenshot?: string; readonly screenshotPlaceholder?: string; readonly iconKind?: string; readonly ts?: number }
+  | { readonly type: "step_card"; readonly index: number; readonly title: string; readonly result: string; readonly url?: string; readonly screenshot?: string; readonly screenshotPlaceholder?: string; readonly iconKind?: string; readonly ts?: number; readonly reasoning?: string }
   | { readonly type: "session_started"; readonly sessionId?: string }
   | { readonly type: "log"; readonly message: string }
   | { readonly type: "clarify_request"; readonly id: string; readonly reason: string; readonly question: string; readonly context: string }

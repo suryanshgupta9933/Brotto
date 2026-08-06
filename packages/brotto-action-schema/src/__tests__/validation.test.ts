@@ -506,10 +506,12 @@ describe('TerminateArgsSchema', () => {
     expect(result).toEqual(validArgs);
   });
 
-  it('should accept with reason', () => {
-    const argsWithReason = { ...validArgs, reason: 'Task completed' };
-    const result = TerminateArgsSchema.parse(argsWithReason);
-    expect(result).toEqual(argsWithReason);
+  it('should accept with finalAnswer', () => {
+    // ponytail: legacy `reason` field replaced with `finalAnswer` for the
+    // user-facing answer (Slice C — agent-feel UX).
+    const argsWithAnswer = { ...validArgs, finalAnswer: 'Task completed' };
+    const result = TerminateArgsSchema.parse(argsWithAnswer);
+    expect(result).toEqual(argsWithAnswer);
   });
 });
 

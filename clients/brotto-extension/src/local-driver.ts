@@ -14,9 +14,12 @@ export interface LocalDriverOptions {
   startingUrl?: string;
   signal: AbortSignal;
   onTabOpened: (tabId: number) => void;
-  onStep: (step: { index: number; action: string; result: string; url: string; screenshot: string | null; iconKind: string }) => void;
+  onStep: (step: { index: number; action: string; result: string; url: string; screenshot: string | null; iconKind: string; reasoning?: string }) => void;
   onLoginRequired: (info: { url: string; domain: string }) => void;
-  onComplete: (info: { summary: string; steps: number }) => void;
+  // ponytail: finalAnswer is the user's actual answer in plain English. Comes
+  // from the planner's terminate.finalAnswer; older planners emit a generic
+  // summary instead and we fall back to it.
+  onComplete: (info: { summary: string; steps: number; finalAnswer?: string }) => void;
   onError: (error: { code: string; message: string }) => void;
   onLog?: (message: string) => void;
   // ponytail: emit when the agent detects it can't make progress (same action
@@ -36,7 +39,10 @@ export interface LocalDriverOptions {
 
 interface PlanningOutcome {
   kind: "action" | "question" | "completion";
-  action?: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string; deltaX?: number; deltaY?: number; answer?: string };
+  // ponytail: per-step reasoning + finalAnswer. Planner emits `reasoning` on
+  // every action; terminate actions also carry `finalAnswer`. Legacy field
+  // `answer` is still accepted (mapped to finalAnswer by the planner).
+  action?: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string; deltaX?: number; deltaY?: number; answer?: string; finalAnswer?: string; reasoning?: string };
   question?: string;
   summary?: string;
 }
@@ -450,7 +456,10 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         return;
       }
       if (outcome.kind === "completion") {
-        opts.onComplete({ summary: outcome.summary ?? "task completed", steps: stepIndex + 1 });
+        // ponytail: completion path doesn't carry finalAnswer (the planner
+        // signals termination via action:terminate in this codebase). Fall
+        // back to the summary so the UI still has something to show.
+        opts.onComplete({ summary: outcome.summary ?? "task completed", steps: stepIndex + 1, finalAnswer: outcome.summary });
         return;
       }
       if (outcome.kind === "question") {
@@ -470,7 +479,14 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       // ponytail: model emits terminate as an action (not a completion).
       if (action.type === "terminate") {
         log(opts, `model called terminate at step ${stepIndex + 1}`);
-        opts.onComplete({ summary: typeof action.answer === "string" ? action.answer : "Task done", steps: stepIndex + 1 });
+        // ponytail: prefer the planner's finalAnswer (the user's actual answer
+        // in plain English). Fall back to legacy `answer` or generic message.
+        const finalAnswer = typeof action.finalAnswer === "string" && action.finalAnswer.length > 0
+          ? action.finalAnswer
+          : typeof action.answer === "string" && action.answer.length > 0
+            ? action.answer
+            : "Task done";
+        opts.onComplete({ summary: finalAnswer, steps: stepIndex + 1, finalAnswer });
         return;
       }
       // ponytail: pause before destructive actions. The user sees the action
@@ -531,7 +547,10 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       }
       history.push({ action: desc, result });
       failures.length = 0;
-      opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind });
+      // ponytail: pass the planner's one-sentence reasoning to the UI. The
+      // side panel uses it as the assistant bubble title instead of the raw
+      // `desc` (which is the tool call like "visit_url ...").
+      opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind, reasoning: action.reasoning });
       // ponytail: loop detection. Same action 3+ times in a row = stuck.
       // Surface a clarifying question so the user can redirect.
       const loop = detectLoop(history);

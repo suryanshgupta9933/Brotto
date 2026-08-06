@@ -276,6 +276,9 @@ export class ToolCallParser {
       id: this.generateActionId(),
       observationId: this.currentObservationId ?? 0,
       timestamp: Date.now(),
+      // ponytail: per-step reasoning. Model is told to always provide it; we
+      // coerce to string and fall back to "" if missing so old prompts parse.
+      reasoning: typeof args.reasoning === "string" ? args.reasoning : "",
     };
 
     switch (actionType) {
@@ -399,7 +402,10 @@ export class ToolCallParser {
         return {
           ...baseArgs,
           type: ActionType.TERMINATE,
-          reason: args.reason as string | undefined,
+          // ponytail: accept either `finalAnswer` (new) or `answer` (legacy
+          // demo-server / local-driver). The planner now emits finalAnswer
+          // but we don't want to break old prompts that still say `answer`.
+          finalAnswer: (args.finalAnswer as string | undefined) ?? (args.answer as string | undefined),
         };
 
       case ActionType.PAUSE_AND_MEMORIZE_FACT:

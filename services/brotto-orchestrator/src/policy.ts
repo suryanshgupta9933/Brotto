@@ -280,7 +280,10 @@ export class PolicyIntegrator {
       case ActionType.ASK_USER_QUESTION:
         return `Ask user: ${action.question}`;
       case ActionType.TERMINATE:
-        return `Terminate session${action.reason ? `: ${action.reason}` : ''}`;
+        // ponytail: terminate now carries `finalAnswer` instead of `reason`.
+        // The policy summary still needs SOMETHING to show in the audit log
+        // so we use the first 80 chars of the final answer (or fall back).
+        return `Terminate session${action.finalAnswer ? `: ${action.finalAnswer.slice(0, 80)}` : ''}`;
       case ActionType.PAUSE_AND_MEMORIZE_FACT:
         return `Memorize: ${action.fact}`;
       default:

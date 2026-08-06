@@ -33,3 +33,15 @@ export interface HistoryEntry {
   action: string;
   result: string;
 }
+
+// ponytail: extended history shape carrying internal memory (observation,
+// verdict, next-step prediction) the model uses to reason across steps.
+// The UI never sees these — only the planner. The legacy HistoryEntry stays
+// the default for callers that don't track memory yet; this is the v1 shape
+// the orchestrator loop should migrate to.
+export interface HistoryEntryV1 extends HistoryEntry {
+  reasoning: string;
+  observation: string;
+  verdict: string;
+  nextActionPrediction: string;
+}

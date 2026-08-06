@@ -54,6 +54,9 @@ const BaseActionArgsSchema = z.object({
   id: z.string().min(1),
   observationId: z.number().int().min(0),
   timestamp: z.number().int().positive(),
+  // ponytail: optional in the schema so older payloads still parse. The model
+  // is told to always provide it; the parser falls back to "" when missing.
+  reasoning: z.string().optional(),
 });
 
 /**
@@ -168,7 +171,7 @@ export const AskUserQuestionArgsSchema = BaseActionArgsSchema.extend({
  */
 export const TerminateArgsSchema = BaseActionArgsSchema.extend({
   type: z.literal(ActionType.TERMINATE),
-  reason: z.string().optional(),
+  finalAnswer: z.string().optional(),
 });
 
 /**
