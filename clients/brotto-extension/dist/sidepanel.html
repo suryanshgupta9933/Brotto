@@ -99,18 +99,26 @@
       letter-spacing: -0.02em;
     }
 
-    #modelSelector {
+    /* ponytail: model display (current model label, not a dropdown) */
+    #modelDisplay {
       font-size: 12px;
       font-weight: 500;
       color: var(--text-muted);
       background: var(--surface-2);
       border: 1px solid var(--border);
       border-radius: 20px;
-      padding: 3px 10px;
-      cursor: pointer;
-      transition: var(--transition);
+      padding: 4px 12px;
+      letter-spacing: -0.005em;
     }
-    #modelSelector:hover { background: var(--surface-3); color: var(--text); }
+    #modelDisplay .dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      margin-right: 6px;
+      vertical-align: middle;
+    }
 
     /* Working spinner */
     #workingIndicator {
@@ -630,9 +638,9 @@
     <span>Brotto</span>
   </div>
 
-  <select id="modelSelector" title="Model selector">
-    <option>Brotto Haiku 4.5</option>
-  </select>
+  <div id="modelDisplay" title="Active model">
+    <span class="dot"></span><span id="modelName">Connecting…</span>
+  </div>
 
   <div id="workingIndicator" aria-live="polite">
     <div class="spinner"></div>

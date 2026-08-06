@@ -142,10 +142,16 @@ async function connect() {
     state.plannerUrl = url;
     plannerUrlEl.value = url;
     const label = info.model ? `${info.family} · ${info.model}` : info.family || 'planner';
+    // ponytail: show the active model in the header as a text label, not
+    // a dropdown. Dropdown can come back later if needed.
+    const modelNameEl = document.getElementById("modelName");
+    if (modelNameEl) modelNameEl.textContent = info.model || info.family || 'connected';
     setPhase('connected', `Connected · ${label}`);
     appendMessage({ role: 'system', text: `Connected to planner at ${url} (${label})` });
   } catch (err) {
     state.plannerUrl = '';
+    const modelNameEl = document.getElementById("modelName");
+    if (modelNameEl) modelNameEl.textContent = 'Not connected';
     setPhase('error', `Connect failed: ${err instanceof Error ? err.message : String(err)}`);
     appendMessage({ role: 'error', text: `Connect failed: ${err instanceof Error ? err.message : String(err)}` });
   }
