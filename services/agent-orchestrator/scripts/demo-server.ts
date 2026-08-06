@@ -1,13 +1,21 @@
 #!/usr/bin/env tsx
 // Minimal HTTP server exposing POST /plan.
-// Takes PlanningInput JSON, returns PlanningOutcome JSON.
-// Wraps the same planner the orchestrator uses.
+// Takes { workId, goal, context, recentResults, trajectory } — context is
+// pre-rendered text (from context-builder.renderSnapshot). Returns a
+// PlanningOutcome. Wraps the same planner the orchestrator uses.
 
 import Fastify from "fastify";
 import { createPlanner, inferFamilyFromEnv, type InferenceConfig } from "../src/inference-registry.js";
-import type { PlanningInput, PlanningOutcome } from "../src/engine/types.js";
 
 const PORT = Number(process.env.DEMO_PORT ?? "3001");
+
+interface PlanRequest {
+  workId: string;
+  goal: string;
+  context: string;
+  recentResults?: unknown[];
+  trajectory?: unknown[];
+}
 
 function buildConfigFromEnv(family: ReturnType<typeof inferFamilyFromEnv>): InferenceConfig {
   if (family === "fara") {
@@ -43,10 +51,23 @@ async function main() {
 
   const app = Fastify({ logger: false });
   app.get("/health", async () => ({ status: "ok", family, model: config.model }));
-  app.post<{ Body: PlanningInput }>("/plan", async (req) => {
+  app.post<{ Body: PlanRequest }>("/plan", async (req) => {
     const t0 = Date.now();
     try {
-      const outcome = await planner.plan(req.body, new AbortController().signal);
+      // ponytail: pass the rendered context directly as the user message text;
+      // the planner uses it verbatim. This lets the demo control the harness
+      // shape (IDs, diffs, inline coords) without touching planner internals.
+      const outcome = await planner.plan({
+        workId: req.body.workId,
+        sessionId: "00000000-0000-4000-8000-000000000001" as never,
+        taskId: "00000000-0000-4000-8000-000000000002" as never,
+        goal: req.body.goal,
+        completionCriteria: [],
+        observation: { url: "", title: "", page: { tabId: "x" as never, frameId: "x" as never, lifecycle: "complete", visibility: "visible" }, viewport: { width: 0, height: 0, devicePixelRatio: 0, zoom: 0, scrollX: 0, scrollY: 0 }, screenshot: { kind: "inline", encoding: "base64", data: "", sha256: "a".repeat(64), width: 0, height: 0 }, semanticTargets: [] },
+        recentResults: (req.body.recentResults ?? []) as never,
+        trajectory: (req.body.trajectory ?? []) as never,
+        context: req.body.context,
+      } as never, new AbortController().signal);
       const elapsed = Date.now() - t0;
       console.log(`[demo-server] /plan responded in ${elapsed}ms kind=${outcome.kind}`);
       if (outcome.kind === "action") {
@@ -65,7 +86,7 @@ async function main() {
 
   await app.listen({ port: PORT, host: "127.0.0.1" });
   console.log(`[demo-server] listening on http://127.0.0.1:${PORT}`);
-  console.log(`[demo-server] POST /plan with PlanningInput JSON to get PlanningOutcome`);
+  console.log(`[demo-server] POST /plan with { goal, context } to get PlanningOutcome`);
 }
 
 main().catch((err) => {

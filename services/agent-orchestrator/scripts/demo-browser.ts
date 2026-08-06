@@ -1,20 +1,19 @@
 #!/usr/bin/env tsx
 // Playwright headful demo driver.
-// Launches a visible Chrome window, runs a real task against a real website,
-// captures observation, sends to demo-server, executes returned action, loops.
-// You watch Chrome take actions in real time.
+// Uses the context-builder harness for stable element IDs, diff, and inline
+// click coordinates. Model sees a structured tree, not a raw JSON dump.
 
 import { chromium, type Browser, type Page } from "playwright";
-import { captureObservation } from "../__e2e__/fixtures/playwright-observation.js";
+import { snapshotPage, renderSnapshot, type PageSnapshot } from "./context-builder.js";
 import type { PlanningOutcome } from "../src/engine/types.js";
 
 const SERVER_URL = process.env.DEMO_SERVER ?? "http://127.0.0.1:3001";
 const TARGET_URL = process.env.DEMO_TARGET_URL ?? "https://the-internet.herokuapp.com/login";
-const GOAL = process.env.DEMO_GOAL ?? "Fill in the login form (username 'tomsmith', password 'SuperSecretPassword!'), click Login, and verify the page shows 'Welcome to the Secure Area'. Use click + type per field. Don't navigate to other URLs.";
-const MAX_STEPS = Number(process.env.DEMO_MAX_STEPS ?? "10");
+const GOAL = process.env.DEMO_GOAL ?? "Fill in the login form: username 'tomsmith', password 'SuperSecretPassword!'. Click the Login button. Verify 'Welcome to the Secure Area' appears.";
+const MAX_STEPS = Number(process.env.DEMO_MAX_STEPS ?? "15");
 const HEADLESS = process.env.DEMO_HEADLESS !== "1";
 
-async function plan(observation: unknown): Promise<PlanningOutcome> {
+async function plan(renderedContext: string): Promise<PlanningOutcome> {
   const res = await fetch(`${SERVER_URL}/plan`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -23,8 +22,8 @@ async function plan(observation: unknown): Promise<PlanningOutcome> {
       sessionId: "00000000-0000-4000-8000-000000000001",
       taskId: "00000000-0000-4000-8000-000000000002",
       goal: GOAL,
-      completionCriteria: ["Welcome to the Secure Area visible"],
-      observation,
+      completionCriteria: ["Welcome to the Secure Area visible in page text"],
+      context: renderedContext,
       recentResults: [],
       trajectory: [],
     }),
@@ -84,8 +83,8 @@ async function executeAction(page: Page, outcome: PlanningOutcome): Promise<void
       await page.waitForTimeout(a.durationMs ?? 1000);
       break;
     }
-    case "screenshot": {
-      console.log(`  → screenshot (skipped in demo)`);
+    case "terminate": {
+      console.log(`  → terminate (model says done)`);
       break;
     }
     default:
@@ -111,32 +110,19 @@ async function main() {
   await page.goto(TARGET_URL, { waitUntil: "domcontentloaded" });
 
   const t0 = Date.now();
+  let prev: PageSnapshot | null = null;
   let stepCount = 0;
   while (stepCount < MAX_STEPS) {
     console.log(`\n[demo-browser] step ${stepCount + 1}/${MAX_STEPS}`);
-    const observation = await captureObservation(page);
-    const focused = await page.evaluate(() => {
-      const el = document.activeElement as HTMLElement | null;
-      if (!el || el === document.body) return null;
-      const r = el.getBoundingClientRect();
-      return {
-        tag: el.tagName.toLowerCase(),
-        name: ((el as HTMLInputElement).value ?? el.textContent ?? "").slice(0, 60),
-        cx: Math.round(r.x + r.width / 2),
-        cy: Math.round(r.y + r.height / 2),
-      };
-    }).catch(() => null);
-    (observation as { focusedElement?: unknown }).focusedElement = focused;
-    console.log(`  observed: url=${observation.url} title=${observation.title} targets=${observation.semanticTargets.length} ax=${observation.accessibilityNodes?.length ?? 0} focused=${focused?.tag ?? "none"}`);
+    const snap = await snapshotPage(page);
+    const rendered = renderSnapshot(snap, prev);
     if (process.env.DEMO_VERBOSE === "1") {
-      console.log("  semanticTargets:");
-      for (const t of observation.semanticTargets) {
-        const bb = t.boundingBox;
-        console.log(`    ${t.tag} "${(t.accessibleName?.text ?? "").slice(0, 30)}" id=${t.attributes?.id ?? ""} bbox=${bb.x},${bb.y} ${bb.width}x${bb.height}`);
-      }
+      console.log("---- context ----");
+      console.log(rendered);
+      console.log("-----------------");
     }
 
-    const outcome = await plan(observation);
+    const outcome = await plan(rendered);
     if (outcome.kind === "action") {
       const a = (outcome as { action: { type?: string; x?: number; y?: number; text?: string; key?: string } }).action;
       console.log(`  action: type=${a.type} ${a.x !== undefined ? `at (${a.x}, ${a.y})` : ""} ${a.text ? `text="${a.text.slice(0, 40)}"` : ""} ${a.key ? `key="${a.key}"` : ""}`);
@@ -157,6 +143,7 @@ async function main() {
 
     await executeAction(page, outcome);
     await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+    prev = snap;
     stepCount++;
   }
 

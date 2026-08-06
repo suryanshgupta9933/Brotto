@@ -168,27 +168,35 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
     messages.push({
       role: 'system',
-      content: "You drive a browser to reach a goal. Each turn: look at the page elements + the currently-focused element, pick the next action, call one tool.\n\nFor forms, the pattern is per-field: left_click(field1) → insert_text → left_click(field2) → insert_text → left_click(submit). Don't re-type into a field that already has the value you want.\n\nIf 'Currently focused' shows a tag with text already in it (like 'input \"tomsmith\"'), that field is done — move to the next one.\n\nCall terminate(answer) when the goal is met.",
+      content: "You drive a browser to reach a goal. Each turn: read the page context, pick the next action, call one tool.\n\nForms: per-field sequence — left_click(field) → insert_text → left_click(next field) → insert_text → left_click(submit). Don't re-type into a field whose 'value=' already shows the text you want.\n\nAfter each action, re-read the context — it shows what changed. Call terminate(answer) when the goal is met.",
     });
 
-    const targets = (input.observation.semanticTargets ?? []).filter((t) => {
-      const bb = t.boundingBox;
-      return bb && bb.width > 0 && bb.height > 0;
-    });
-    const elements = targets.map((t) => {
-      const bb = t.boundingBox;
-      const cx = Math.round(bb.x + bb.width / 2);
-      const cy = Math.round(bb.y + bb.height / 2);
-      const label = (t.accessibleName?.text ?? "").trim() || t.attributes?.id || t.attributes?.name || t.tag;
-      return `  (${cx}, ${cy})  ${t.tag} "${label}"`;
-    }).join("\n");
-
-    messages.push({
-      role: 'user',
-      content: `Goal: ${input.goal}\n\nURL: ${input.observation.url}\nTitle: ${input.observation.title}\n\nClickable elements (use coordinates as-is):\n${elements || "  (none visible)"}\n\nCurrently focused: ${(input.observation as { focusedElement?: { tag: string; name: string; cx: number; cy: number } | null }).focusedElement
-        ? `${(input.observation as { focusedElement: { tag: string; name: string; cx: number; cy: number } }).focusedElement.tag} "${(input.observation as { focusedElement: { name: string } }).focusedElement.name}" at (${(input.observation as { focusedElement: { cx: number } }).focusedElement.cx}, ${(input.observation as { focusedElement: { cy: number } }).focusedElement.cy})`
-        : "(nothing)"}`,
-    });
+    // ponytail: harness provides pre-rendered context (stable IDs, diff, inline
+    // coords). Use it verbatim. Fall back to building from raw observation if no
+    // harness context provided (e.g. when called from orchestrator directly).
+    const ctx = (input as { context?: string }).context;
+    if (ctx) {
+      messages.push({
+        role: 'user',
+        content: `Goal: ${input.goal}\n\n${ctx}`,
+      });
+    } else {
+      const targets = (input.observation.semanticTargets ?? []).filter((t) => {
+        const bb = t.boundingBox;
+        return bb && bb.width > 0 && bb.height > 0;
+      });
+      const elements = targets.map((t) => {
+        const bb = t.boundingBox;
+        const cx = Math.round(bb.x + bb.width / 2);
+        const cy = Math.round(bb.y + bb.height / 2);
+        const label = (t.accessibleName?.text ?? "").trim() || t.attributes?.id || t.attributes?.name || t.tag;
+        return `  (${cx}, ${cy})  ${t.tag} "${label}"`;
+      }).join("\n");
+      messages.push({
+        role: 'user',
+        content: `Goal: ${input.goal}\n\nURL: ${input.observation.url}\nTitle: ${input.observation.title}\n\nClickable elements:\n${elements || "  (none visible)"}`,
+      });
+    }
 
     return messages;
   }
