@@ -32,6 +32,7 @@ const TOOL_NAME_TO_ACTION_TYPE: Record<string, ActionType> = {
   mouse_move: ActionType.MOUSE_MOVE,
   scroll: ActionType.SCROLL,
   key: ActionType.KEY,
+  insert_text: ActionType.INSERT_TEXT,
   visit_url: ActionType.VISIT_URL,
   history_back: ActionType.HISTORY_BACK,
   screenshot: ActionType.SCREENSHOT,
@@ -39,6 +40,7 @@ const TOOL_NAME_TO_ACTION_TYPE: Record<string, ActionType> = {
   ask_user_question: ActionType.ASK_USER_QUESTION,
   terminate: ActionType.TERMINATE,
   pause_and_memorize_fact: ActionType.PAUSE_AND_MEMORIZE_FACT,
+  memorize_fact: ActionType.MEMORIZE_FACT,
 };
 
 /**
@@ -340,6 +342,21 @@ export class ToolCallParser {
           modifiers: args.modifiers as { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean } | undefined,
         };
 
+      case ActionType.INSERT_TEXT:
+        return {
+          ...baseArgs,
+          type: ActionType.INSERT_TEXT,
+          text: this.stringArg(args.text, 'text', toolCall),
+        };
+
+      case ActionType.MEMORIZE_FACT:
+        return {
+          ...baseArgs,
+          type: ActionType.MEMORIZE_FACT,
+          fact: this.stringArg(args.fact, 'fact', toolCall),
+          category: args.category ? this.stringArg(args.category, 'category', toolCall) : undefined,
+        };
+
       case ActionType.VISIT_URL:
         return {
           ...baseArgs,
@@ -366,7 +383,7 @@ export class ToolCallParser {
         return {
           ...baseArgs,
           type: ActionType.WAIT,
-          duration: this.numberArg(args.duration, 'duration', toolCall),
+          duration: this.numberArg(args.durationMs, 'durationMs', toolCall),
         };
 
       case ActionType.ASK_USER_QUESTION:

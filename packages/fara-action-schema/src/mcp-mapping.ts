@@ -117,6 +117,7 @@ export const FARA_ACTION_TO_MCP_TOOL: Record<ActionType, McpToolName | null> = {
   [ActionType.MOUSE_MOVE]: McpToolName.BROWSER_MOUSE_MOVE_XY,
   [ActionType.SCROLL]: McpToolName.BROWSER_MOUSE_WHEEL,
   [ActionType.KEY]: McpToolName.BROWSER_PRESS_KEY,
+  [ActionType.INSERT_TEXT]: null, // Handled by client via keyboard.type
   [ActionType.VISIT_URL]: McpToolName.BROWSER_NAVIGATE,
   [ActionType.HISTORY_BACK]: McpToolName.BROWSER_NAVIGATE_BACK,
   [ActionType.SCREENSHOT]: McpToolName.BROWSER_TAKE_SCREENSHOT,
@@ -124,6 +125,7 @@ export const FARA_ACTION_TO_MCP_TOOL: Record<ActionType, McpToolName | null> = {
   [ActionType.ASK_USER_QUESTION]: null, // Control-plane approval request
   [ActionType.TERMINATE]: null, // Orchestrator session completion
   [ActionType.PAUSE_AND_MEMORIZE_FACT]: null, // Server-side session memory
+  [ActionType.MEMORIZE_FACT]: null, // Server-side session memory
 };
 
 /**

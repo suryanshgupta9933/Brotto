@@ -150,7 +150,7 @@ export const ScreenshotArgsSchema = BaseActionArgsSchema.extend({
  */
 export const WaitArgsSchema = BaseActionArgsSchema.extend({
   type: z.literal(ActionType.WAIT),
-  duration: z.number().int().positive(),
+  durationMs: z.number().int().positive(),
 });
 
 /**
@@ -181,6 +181,24 @@ export const PauseAndMemorizeFactArgsSchema = BaseActionArgsSchema.extend({
 });
 
 /**
+ * Insert text action arguments schema.
+ */
+export const InsertTextArgsSchema = BaseActionArgsSchema.extend({
+  type: z.literal(ActionType.INSERT_TEXT),
+  text: z.string().min(1),
+  targetId: z.string().optional(),
+});
+
+/**
+ * Memorize fact action arguments schema.
+ */
+export const MemorizeFactArgsSchema = BaseActionArgsSchema.extend({
+  type: z.literal(ActionType.MEMORIZE_FACT),
+  fact: z.string().min(1),
+  category: z.string().optional(),
+});
+
+/**
  * Union of all action argument schemas.
  */
 export const FaraActionArgsSchema = z.union([
@@ -191,6 +209,7 @@ export const FaraActionArgsSchema = z.union([
   MouseMoveArgsSchema,
   ScrollArgsSchema,
   KeyArgsSchema,
+  InsertTextArgsSchema,
   VisitUrlArgsSchema,
   HistoryBackArgsSchema,
   ScreenshotArgsSchema,
@@ -198,6 +217,7 @@ export const FaraActionArgsSchema = z.union([
   AskUserQuestionArgsSchema,
   TerminateArgsSchema,
   PauseAndMemorizeFactArgsSchema,
+  MemorizeFactArgsSchema,
 ]);
 
 /**

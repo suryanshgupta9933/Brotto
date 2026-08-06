@@ -140,7 +140,14 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
     const content = choice.delta?.content ?? '';
     if (!content) {
-      throw new OpenAICompatiblePlannerError('Response has no content and no tool calls', false);
+      // ponytail: model returned nothing actionable. Treat as a question so the
+      // loop continues instead of crashing the demo. Better fix: stronger model.
+      return {
+        kind: 'question',
+        observationId: input.observation.observationId,
+        question: 'I need to think about this. Please provide the next observation so I can decide.',
+        choices: undefined,
+      };
     }
     return this.buildCompletionProposal(input, content);
   }
@@ -150,8 +157,27 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
     messages.push({
       role: 'system',
-      content: `You are Fara, a browser automation assistant. You must use tool calls to perform actions.
-You can use: browser_action (left_click, double_click, right_click, drag, key, type, scroll, wait, visit_url, history_back, screenshot), finish, ask_user_question.`,
+      content: `You are a browser automation assistant. Use the provided tools to act on the page.
+
+Available tools (each is a separate tool call):
+- left_click(x, y) — left-click at viewport coordinate
+- double_click(x, y) — double-click at coordinate
+- right_click(x, y) — right-click at coordinate
+- mouse_move(x, y) — move mouse to coordinate
+- drag(startX, startY, endX, endY) — drag from start to end
+- scroll(deltaX, deltaY) — scroll by pixel deltas
+- key(key) — press a keyboard key (Enter, Tab, Escape, etc.)
+- insert_text(text) — type text into the focused input
+- visit_url(url) — navigate to an HTTP(S) URL
+- history_back(steps?) — go back in history
+- screenshot() — capture viewport screenshot
+- wait(durationMs) — pause for given milliseconds
+- ask_user_question(question) — ask the user a clarifying question
+- memorize_fact(fact) — store a fact for later steps
+- terminate(answer) — mark task complete with a final answer
+
+You must call at least one tool on every turn. If the page is unclear, use ask_user_question.
+The page contains interactive elements with bounding boxes; click near their centers.`,
     });
 
     messages.push({

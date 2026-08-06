@@ -17,6 +17,7 @@ export enum ActionType {
   MOUSE_MOVE = 'mouse_move',
   SCROLL = 'scroll',
   KEY = 'key',
+  INSERT_TEXT = 'insert_text',
   VISIT_URL = 'visit_url',
   HISTORY_BACK = 'history_back',
   SCREENSHOT = 'screenshot',
@@ -24,6 +25,7 @@ export enum ActionType {
   ASK_USER_QUESTION = 'ask_user_question',
   TERMINATE = 'terminate',
   PAUSE_AND_MEMORIZE_FACT = 'pause_and_memorize_fact',
+  MEMORIZE_FACT = 'memorize_fact',
 }
 
 /**

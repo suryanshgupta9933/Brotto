@@ -44,8 +44,33 @@ interface FlatAxNode {
 }
 
 async function extractAxSnapshot(page: Page): Promise<FlatAxNode[]> {
-  const snapshot = await page.accessibility.snapshot({ interestingOnly: true });
-  if (!snapshot) return [];
+  // ponytail: Playwright's page.accessibility.snapshot isn't available across all
+  // versions; fall back to a DOM-derived AX list (each interactive element as a
+  // node) when the native API is missing. Less rich than the browser AX tree,
+  // but enough for the demo.
+  let snapshot: { role?: string; name?: string; children?: unknown[] } | null = null;
+  try {
+    if (typeof (page as unknown as { accessibility?: { snapshot?: unknown } }).accessibility?.snapshot === "function") {
+      snapshot = await (page as unknown as { accessibility: { snapshot: (opts: { interestingOnly: boolean }) => Promise<typeof snapshot> } }).accessibility.snapshot({ interestingOnly: true });
+    }
+  } catch {
+    snapshot = null;
+  }
+  if (!snapshot) {
+    return await page.evaluate(() => {
+      const interactives = Array.from(document.querySelectorAll("input, button, a, select, textarea, [role=button], [role=link], h1, h2, h3, label"));
+      return interactives.slice(0, 100).map((el, i) => {
+        const rect = el.getBoundingClientRect();
+        const text = (el.textContent ?? "").trim().slice(0, 100);
+        return {
+          role: el.getAttribute("role") ?? el.tagName.toLowerCase(),
+          name: text || undefined,
+          axNodeId: `dom-${i}`,
+          axPath: [{ role: el.tagName.toLowerCase(), index: i, name: text || undefined }],
+        };
+      });
+    });
+  }
 
   const flat: FlatAxNode[] = [];
   let idx = 0;
