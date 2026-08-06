@@ -4758,7 +4758,11 @@
         viewport: ViewportSchema2,
         page: PageStateSchema2,
         semanticTargets: import_zod22.z.array(SemanticTargetSchema2).max(200),
-        accessibilityNodes: import_zod22.z.array(AccessibilityNodeSchema2).optional()
+        accessibilityNodes: import_zod22.z.array(AccessibilityNodeSchema2).optional(),
+        // ponytail: structured page text (HEADINGS / STATS / LABELS / TEXT blocks).
+        // Optional so older payloads still validate. Replaces the lazy
+        // accessibilityNodes.slice(0, 400) cap in the planner context builder.
+        bodyText: import_zod22.z.string().max(5e4).optional()
       }).strict());
       var import_zod32 = require_zod();
       function guardedStrictObject2(schema) {
@@ -10874,7 +10878,11 @@
     viewport: ViewportSchema,
     page: PageStateSchema,
     semanticTargets: external_exports.array(SemanticTargetSchema).max(200),
-    accessibilityNodes: external_exports.array(AccessibilityNodeSchema).optional()
+    accessibilityNodes: external_exports.array(AccessibilityNodeSchema).optional(),
+    // ponytail: structured page text (HEADINGS / STATS / LABELS / TEXT blocks).
+    // Optional so older payloads still validate. Replaces the lazy
+    // accessibilityNodes.slice(0, 400) cap in the planner context builder.
+    bodyText: external_exports.string().max(5e4).optional()
   }).strict());
   function guardedStrictObject(schema) {
     return schema.superRefine((value, context) => {
@@ -12746,6 +12754,82 @@
       }
       node = walker.nextNode();
     }
+    const bodyTextSnippet = (() => {
+      const SKIP_TAGS = {
+        script: 1,
+        style: 1,
+        meta: 1,
+        link: 1,
+        noscript: 1,
+        svg: 1,
+        path: 1
+      };
+      const HIDDEN_ROLES = {
+        navigation: 1,
+        banner: 1,
+        contentinfo: 1
+      };
+      const NAV_LINE_RE = /^(sign in|sign up|log in|log out|menu|search|skip to|home|about|contact|privacy|terms|cookie|copyright|©)/i;
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const vis = (el) => {
+        if (!el) return false;
+        const t = el.tagName.toLowerCase();
+        if (SKIP_TAGS[t]) return false;
+        const cs = getComputedStyle(el);
+        return cs.display !== "none" && cs.visibility !== "hidden" && parseFloat(cs.opacity) > 0;
+      };
+      const parts = [];
+      const heads = [];
+      document.querySelectorAll("h1, h2, h3, h4, h5, h6").forEach((h) => {
+        if (!vis(h)) return;
+        const t = clean(h.textContent);
+        if (t && t.length < 200) heads.push(`H${h.tagName[1]}: ${t}`);
+      });
+      if (heads.length) parts.push("=== HEADINGS ===\n" + heads.join("\n"));
+      const stats = [];
+      document.querySelectorAll("a, span, strong, b, div").forEach((el) => {
+        if (!vis(el)) return;
+        const own = clean(el.textContent);
+        if (!/^\d{1,4}(,\d{3})*(\.\d+)?[KMBkmb]?$/.test(own)) return;
+        const p = el.parentElement;
+        if (!p) return;
+        const pt = clean(p.textContent);
+        if (pt.length > 80 || pt.length < own.length + 2) return;
+        const label = pt.replace(own, "").trim();
+        if (label && label.length < 40) stats.push(`${label}: ${own}`);
+      });
+      if (stats.length) parts.push("=== STATS ===\n" + stats.join("\n"));
+      const lbls = [];
+      document.querySelectorAll("label").forEach((l) => {
+        if (!vis(l)) return;
+        const t = clean(l.textContent);
+        if (t && t.length < 80) lbls.push(t);
+      });
+      if (lbls.length) parts.push("=== LABELS ===\n" + lbls.join("\n"));
+      const seen = {};
+      const lines = [];
+      const walkText = (el, depth) => {
+        if (depth > 60 || !el) return;
+        if (el.nodeType === Node.TEXT_NODE) {
+          const t = clean(el.textContent);
+          if (t.length < 3) return;
+          if (NAV_LINE_RE.test(t)) return;
+          if (seen[t]) return;
+          seen[t] = 1;
+          lines.push(t);
+          return;
+        }
+        if (el.nodeType !== Node.ELEMENT_NODE) return;
+        const elEl = el;
+        if (!vis(elEl)) return;
+        const role = elEl.getAttribute && elEl.getAttribute("role");
+        if (role && HIDDEN_ROLES[role]) return;
+        elEl.childNodes.forEach((c) => walkText(c, depth + 1));
+      };
+      walkText(document.body, 0);
+      if (lines.length) parts.push("=== TEXT ===\n" + lines.join("\n"));
+      return parts.join("\n\n");
+    })();
     return {
       url: location.href,
       title: document.title,
@@ -12762,7 +12846,8 @@
       domScanComplete: node === null,
       sensitiveRegionOverflow,
       sensitiveRegions,
-      semanticTargets
+      semanticTargets,
+      bodyTextSnippet
     };
   }
   async function defaultSendCdpCommand(tabId, method, params) {
@@ -12925,6 +13010,8 @@
       throw securityError("Sensitive region limit reached");
     if (!Array.isArray(raw.semanticTargets))
       throw securityError("Semantic targets are invalid");
+    if (typeof raw.bodyTextSnippet !== "string")
+      throw securityError("Page body text is missing");
     return {
       url: raw.url,
       title: raw.title,
@@ -12935,7 +13022,8 @@
       domScanComplete: true,
       sensitiveRegionOverflow: false,
       sensitiveRegions: validateSensitiveRegions(raw.sensitiveRegions, viewport),
-      semanticTargets: raw.semanticTargets
+      semanticTargets: raw.semanticTargets,
+      bodyTextSnippet: raw.bodyTextSnippet
     };
   }
   async function capturePageSnapshot(tabId, sendCdpCommand, maxSemanticTargets, maxDomElements) {
@@ -13169,7 +13257,10 @@
         visibility: after.visibility
       },
       semanticTargets: canonicalTargets,
-      accessibilityNodes: accessibilityNodes.length > 0 ? accessibilityNodes : void 0
+      accessibilityNodes: accessibilityNodes.length > 0 ? accessibilityNodes : void 0,
+      // ponytail: structured page text from smart DOM extractor. Sensitive
+      // content (passwords, tokens, etc.) is redacted via sanitizeBrowserText.
+      bodyText: sanitizeBrowserText(after.bodyTextSnippet)
     };
     (0, import_brotto_action_schema6.assertNoForbiddenBrowserData)(observation);
     return import_brotto_action_schema6.ObservationV1Schema.parse(observation);
@@ -14080,7 +14171,7 @@
     "/pay/"
   ];
   function needsApproval(action, observation) {
-    const pageText = (observation.accessibilityNodes ?? []).map((n) => `${n.name ?? ""} ${n.value ?? ""}`).join(" ").toLowerCase();
+    const pageText = (observation.bodyText ?? (observation.accessibilityNodes ?? []).map((n) => `${n.name ?? ""} ${n.value ?? ""}`).join(" ")).toLowerCase();
     if (action.type === "visit_url" && typeof action.url === "string") {
       for (const kw of APPROVAL_DOMAINS) {
         if (action.url.toLowerCase().includes(kw)) {
@@ -14161,7 +14252,12 @@
       lines.push("Previous steps (most recent last):");
       tail.forEach((h, i) => lines.push(`  ${i + 1}. ${h.action} \u2192 ${h.result}`));
     }
-    if (obs.accessibilityNodes && obs.accessibilityNodes.length > 0) {
+    if (obs.bodyText && obs.bodyText.length > 0) {
+      lines.push("");
+      lines.push("=== PAGE TEXT (HEADINGS + STATS + LABELS + TEXT \u2014 STATS contains the data the user asked for) ===");
+      lines.push(obs.bodyText);
+      lines.push("=== END PAGE TEXT ===");
+    } else if (obs.accessibilityNodes && obs.accessibilityNodes.length > 0) {
       const text = obs.accessibilityNodes.map((n) => n.name ?? n.value ?? "").filter((s) => s.length > 0).join(" ").slice(0, 400);
       if (text) {
         lines.push("");

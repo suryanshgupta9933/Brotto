@@ -251,6 +251,10 @@ export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({
   page: PageStateSchema,
   semanticTargets: z.array(SemanticTargetSchema).max(200),
   accessibilityNodes: z.array(AccessibilityNodeSchema).optional(),
+  // ponytail: structured page text (HEADINGS / STATS / LABELS / TEXT blocks).
+  // Optional so older payloads still validate. Replaces the lazy
+  // accessibilityNodes.slice(0, 400) cap in the planner context builder.
+  bodyText: z.string().max(50_000).optional(),
 }).strict());
 
 export type Screenshot = z.infer<typeof ScreenshotSchema>;

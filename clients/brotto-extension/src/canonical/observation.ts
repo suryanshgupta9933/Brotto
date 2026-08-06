@@ -72,6 +72,7 @@ interface RawPageSnapshot {
   sensitiveRegionOverflow?: unknown;
   sensitiveRegions?: unknown;
   semanticTargets?: unknown;
+  bodyTextSnippet?: unknown;
 }
 
 interface PageSnapshot {
@@ -91,6 +92,7 @@ interface PageSnapshot {
   sensitiveRegionOverflow: false;
   sensitiveRegions: SensitiveRegion[];
   semanticTargets: RawSemanticTarget[];
+  bodyTextSnippet: string;
 }
 
 interface RuntimeEvaluateResult {
@@ -488,6 +490,87 @@ function collectPageSnapshot(
     node = walker.nextNode();
   }
 
+  // ponytail: smart structured page extraction — replaces the lazy
+  // textContent.slice(N) cap. Walks DOM with structure awareness so the
+  // planner sees HEADINGS, STATS (number + label, e.g. "12 followers"),
+  // LABELS, and deduplicated TEXT. No arbitrary cap; scales with page
+  // complexity. The orchestrator's SNAPSHOT_FN_SRC does the same shape so
+  // Playwright and extension paths produce equivalent context.
+  const bodyTextSnippet = (() => {
+    const SKIP_TAGS: Record<string, number> = {
+      script: 1, style: 1, meta: 1, link: 1, noscript: 1, svg: 1, path: 1,
+    };
+    const HIDDEN_ROLES: Record<string, number> = {
+      navigation: 1, banner: 1, contentinfo: 1,
+    };
+    const NAV_LINE_RE = /^(sign in|sign up|log in|log out|menu|search|skip to|home|about|contact|privacy|terms|cookie|copyright|©)/i;
+    const clean = (s: string | null | undefined): string =>
+      (s || "").replace(/\s+/g, " ").trim();
+    const vis = (el: Element | null): boolean => {
+      if (!el) return false;
+      const t = el.tagName.toLowerCase();
+      if (SKIP_TAGS[t]) return false;
+      const cs = getComputedStyle(el);
+      return cs.display !== "none" && cs.visibility !== "hidden" && parseFloat(cs.opacity) > 0;
+    };
+    const parts: string[] = [];
+
+    const heads: string[] = [];
+    document.querySelectorAll("h1, h2, h3, h4, h5, h6").forEach((h) => {
+      if (!vis(h)) return;
+      const t = clean(h.textContent);
+      if (t && t.length < 200) heads.push(`H${h.tagName[1]}: ${t}`);
+    });
+    if (heads.length) parts.push("=== HEADINGS ===\n" + heads.join("\n"));
+
+    const stats: string[] = [];
+    document.querySelectorAll("a, span, strong, b, div").forEach((el) => {
+      if (!vis(el)) return;
+      const own = clean(el.textContent);
+      if (!/^\d{1,4}(,\d{3})*(\.\d+)?[KMBkmb]?$/.test(own)) return;
+      const p = el.parentElement;
+      if (!p) return;
+      const pt = clean(p.textContent);
+      if (pt.length > 80 || pt.length < own.length + 2) return;
+      const label = pt.replace(own, "").trim();
+      if (label && label.length < 40) stats.push(`${label}: ${own}`);
+    });
+    if (stats.length) parts.push("=== STATS ===\n" + stats.join("\n"));
+
+    const lbls: string[] = [];
+    document.querySelectorAll("label").forEach((l) => {
+      if (!vis(l)) return;
+      const t = clean(l.textContent);
+      if (t && t.length < 80) lbls.push(t);
+    });
+    if (lbls.length) parts.push("=== LABELS ===\n" + lbls.join("\n"));
+
+    const seen: Record<string, number> = {};
+    const lines: string[] = [];
+    const walkText = (el: Node | null, depth: number): void => {
+      if (depth > 60 || !el) return;
+      if (el.nodeType === Node.TEXT_NODE) {
+        const t = clean(el.textContent);
+        if (t.length < 3) return;
+        if (NAV_LINE_RE.test(t)) return;
+        if (seen[t]) return;
+        seen[t] = 1;
+        lines.push(t);
+        return;
+      }
+      if (el.nodeType !== Node.ELEMENT_NODE) return;
+      const elEl = el as Element;
+      if (!vis(elEl)) return;
+      const role = elEl.getAttribute && elEl.getAttribute("role");
+      if (role && HIDDEN_ROLES[role]) return;
+      elEl.childNodes.forEach((c) => walkText(c, depth + 1));
+    };
+    walkText(document.body, 0);
+    if (lines.length) parts.push("=== TEXT ===\n" + lines.join("\n"));
+
+    return parts.join("\n\n");
+  })();
+
   return {
     url: location.href,
     title: document.title,
@@ -505,6 +588,7 @@ function collectPageSnapshot(
     sensitiveRegionOverflow,
     sensitiveRegions,
     semanticTargets,
+    bodyTextSnippet,
   };
 }
 
@@ -708,6 +792,8 @@ function validatePageSnapshot(value: unknown): PageSnapshot {
     throw securityError("Sensitive region limit reached");
   if (!Array.isArray(raw.semanticTargets))
     throw securityError("Semantic targets are invalid");
+  if (typeof raw.bodyTextSnippet !== "string")
+    throw securityError("Page body text is missing");
 
   return {
     url: raw.url,
@@ -720,6 +806,7 @@ function validatePageSnapshot(value: unknown): PageSnapshot {
     sensitiveRegionOverflow: false,
     sensitiveRegions: validateSensitiveRegions(raw.sensitiveRegions, viewport),
     semanticTargets: raw.semanticTargets as RawSemanticTarget[],
+    bodyTextSnippet: raw.bodyTextSnippet,
   };
 }
 
@@ -1041,6 +1128,9 @@ async function captureObservationInternal(
     },
     semanticTargets: canonicalTargets,
     accessibilityNodes: accessibilityNodes.length > 0 ? accessibilityNodes : undefined,
+    // ponytail: structured page text from smart DOM extractor. Sensitive
+    // content (passwords, tokens, etc.) is redacted via sanitizeBrowserText.
+    bodyText: sanitizeBrowserText(after.bodyTextSnippet),
   };
 
   assertNoForbiddenBrowserData(observation);

@@ -358,7 +358,11 @@ var ObservationV1Schema = withForbiddenBrowserDataGuard(import_zod2.z.object({
   viewport: ViewportSchema,
   page: PageStateSchema,
   semanticTargets: import_zod2.z.array(SemanticTargetSchema).max(200),
-  accessibilityNodes: import_zod2.z.array(AccessibilityNodeSchema).optional()
+  accessibilityNodes: import_zod2.z.array(AccessibilityNodeSchema).optional(),
+  // ponytail: structured page text (HEADINGS / STATS / LABELS / TEXT blocks).
+  // Optional so older payloads still validate. Replaces the lazy
+  // accessibilityNodes.slice(0, 400) cap in the planner context builder.
+  bodyText: import_zod2.z.string().max(5e4).optional()
 }).strict());
 
 // src/v1/actions.ts

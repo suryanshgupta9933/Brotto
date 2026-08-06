@@ -97,14 +97,16 @@ const APPROVAL_DOMAINS = [
 
 export function needsApproval(
   action: { type?: string; url?: string; text?: string },
-  observation: { url: string; accessibilityNodes?: Array<{ name?: string; value?: string; role?: string }> },
+  observation: { url: string; bodyText?: string; accessibilityNodes?: Array<{ name?: string; value?: string; role?: string }> },
 ): { needs: boolean; reason: string } {
-  // ponytail: ObservationV1 doesn't have bodyTextSnippet — extract page text
-  // from accessibilityNodes instead.
-  const pageText = (observation.accessibilityNodes ?? [])
-    .map((n) => `${n.name ?? ""} ${n.value ?? ""}`)
-    .join(" ")
-    .toLowerCase();
+  // ponytail: prefer bodyText (smart-extracted structured text) over
+  // accessibilityNodes. Falls back to accessibilityNodes for older builds.
+  const pageText = (
+    observation.bodyText ??
+    (observation.accessibilityNodes ?? [])
+      .map((n) => `${n.name ?? ""} ${n.value ?? ""}`)
+      .join(" ")
+  ).toLowerCase();
   if (action.type === "visit_url" && typeof action.url === "string") {
     for (const kw of APPROVAL_DOMAINS) {
       if (action.url.toLowerCase().includes(kw)) {
@@ -195,7 +197,14 @@ export function renderObservationForPlanner(
     lines.push("Previous steps (most recent last):");
     tail.forEach((h, i) => lines.push(`  ${i + 1}. ${h.action} → ${h.result}`));
   }
-  if (obs.accessibilityNodes && obs.accessibilityNodes.length > 0) {
+  if (obs.bodyText && obs.bodyText.length > 0) {
+    lines.push("");
+    lines.push("=== PAGE TEXT (HEADINGS + STATS + LABELS + TEXT — STATS contains the data the user asked for) ===");
+    lines.push(obs.bodyText);
+    lines.push("=== END PAGE TEXT ===");
+  } else if (obs.accessibilityNodes && obs.accessibilityNodes.length > 0) {
+    // ponytail: legacy fallback when bodyText isn't present (older extension
+    // builds). Caps at 400 chars — keep until every build emits bodyText.
     const text = obs.accessibilityNodes
       .map((n: { name?: string; value?: string }) => n.name ?? n.value ?? "")
       .filter((s: string) => s.length > 0)

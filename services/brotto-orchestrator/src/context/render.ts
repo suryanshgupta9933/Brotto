@@ -120,6 +120,14 @@ export function renderSnapshot(snap: PageSnapshot, prev: PageSnapshot | null): s
   lines.push(`URL: ${snap.url}`);
   lines.push(`Title: ${snap.title}`);
   lines.push("");
+  // ponytail: smart-structured page text comes FIRST so the model can't miss it.
+  // The walker produces HEADINGS / STATS / LABELS / TEXT blocks — STATS catches
+  // patterns like "12 followers" automatically, which is exactly what the user
+  // asked about. Anything fact-finding depends on lives here.
+  lines.push("=== PAGE TEXT (structured: HEADINGS, STATS, LABELS, then full TEXT — STATS contains the data the user asked for) ===");
+  lines.push(snap.bodyTextSnippet || "(empty)");
+  lines.push("=== END PAGE TEXT ===");
+  lines.push("");
   lines.push("Elements (use IDs, click coords inline):");
   for (const el of snap.elements) {
     const tags: string[] = [];
@@ -145,8 +153,6 @@ export function renderSnapshot(snap: PageSnapshot, prev: PageSnapshot | null): s
     lines.push("Changes since last step:");
     lines.push(diffSnapshots(prev, snap).split("\n").map((l) => `  ${l}`).join("\n"));
   }
-  lines.push("");
-  lines.push(`Page text (first 200 chars): "${snap.bodyTextSnippet}"`);
   return lines.join("\n");
 }
 
@@ -223,12 +229,103 @@ export const SNAPSHOT_FN_SRC = `(function () {
   var out = [];
   walk(document.body, [], out);
   var focused = document.activeElement;
+
+  // ponytail: smart structured page extraction — replaces the lazy
+  // textContent.slice(N) cap. Walks DOM with structure awareness:
+  //   - HEADINGS (h1-h6) always kept (page outline)
+  //   - STATS (number with nearby label, e.g. "12 followers") — this is the
+  //     exact pattern that catches GitHub's follower count, repo counts, etc.
+  //   - LABELS (form <label>s) kept
+  //   - TEXT (visible, deduped, filtered for navigation/footer chrome)
+  // Output scales with page complexity. No character cap — the model gets
+  // the structured view it needs to answer fact-finding questions.
+  function smartExtractText() {
+    var SKIP_TAGS = { script:1, style:1, meta:1, link:1, noscript:1, svg:1, path:1 };
+    var HIDDEN_ROLES = { navigation:1, banner:1, contentinfo:1 };
+    var NAV_LINE_RE = /^(sign in|sign up|log in|log out|menu|search|skip to|home|about|contact|privacy|terms|cookie|copyright|©)/i;
+    function vis(el) {
+      if (!el || el.nodeType !== 1) return false;
+      var t = el.tagName.toLowerCase();
+      if (SKIP_TAGS[t]) return false;
+      var cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+      if (parseFloat(cs.opacity) === 0) return false;
+      return true;
+    }
+    function clean(s) { return (s || '').replace(/\\s+/g, ' ').trim(); }
+    var parts = [];
+
+    // Headings
+    var heads = [];
+    var hs = document.querySelectorAll('h1, h2, h3, h4, h5, h6');
+    for (var i = 0; i < hs.length; i++) {
+      var h = hs[i];
+      if (!vis(h)) continue;
+      var ht = clean(h.textContent);
+      if (ht && ht.length < 200) heads.push('H' + h.tagName[1] + ': ' + ht);
+    }
+    if (heads.length) parts.push('=== HEADINGS ===\\n' + heads.join('\\n'));
+
+    // Stats: element with numeric-only text, parent contains a short label.
+    var stats = [];
+    var nums = document.querySelectorAll('a, span, strong, b, div');
+    for (var j = 0; j < nums.length; j++) {
+      var el = nums[j];
+      if (!vis(el)) continue;
+      var own = clean(el.textContent);
+      if (!/^\\d{1,4}(,\\d{3})*(\\.\\d+)?[KMBkmb]?$/.test(own)) continue;
+      var p = el.parentElement;
+      if (!p) continue;
+      var pt = clean(p.textContent);
+      if (pt.length > 80 || pt.length < own.length + 2) continue;
+      var label = pt.replace(own, '').trim();
+      if (label && label.length < 40) stats.push(label + ': ' + own);
+    }
+    if (stats.length) parts.push('=== STATS ===\\n' + stats.join('\\n'));
+
+    // Form labels
+    var lbls = [];
+    var ls = document.querySelectorAll('label');
+    for (var k = 0; k < ls.length; k++) {
+      var l = ls[k];
+      if (!vis(l)) continue;
+      var lt = clean(l.textContent);
+      if (lt && lt.length < 80) lbls.push(lt);
+    }
+    if (lbls.length) parts.push('=== LABELS ===\\n' + lbls.join('\\n'));
+
+    // Visible text: walk + dedupe, filter nav/footer
+    var seen = {};
+    var lines = [];
+    function walkText(el, depth) {
+      if (depth > 60) return;
+      if (el.nodeType === 3) {
+        var t = clean(el.textContent);
+        if (t.length < 3) return;
+        if (NAV_LINE_RE.test(t)) return;
+        if (seen[t]) return;
+        seen[t] = 1;
+        lines.push(t);
+        return;
+      }
+      if (!vis(el)) return;
+      var role = el.getAttribute && el.getAttribute('role');
+      if (HIDDEN_ROLES[role]) return;
+      var cn = el.childNodes;
+      for (var n = 0; n < cn.length; n++) walkText(cn[n], depth + 1);
+    }
+    walkText(document.body, 0);
+    if (lines.length) parts.push('=== TEXT ===\\n' + lines.join('\\n'));
+
+    return parts.join('\\n\\n');
+  }
+
   return {
     url: location.href,
     title: document.title,
     elements: out,
     focusedId: (focused && focused !== document.body) ? stableId(focused, []) : null,
-    bodyTextSnippet: (document.body.textContent || '').trim().slice(0, 200),
+    bodyTextSnippet: smartExtractText(),
   };
 })()`;
 

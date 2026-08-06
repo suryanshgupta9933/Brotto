@@ -1016,6 +1016,7 @@ declare const ObservationV1Schema: z.ZodEffects<z.ZodObject<{
             y: number;
         } | undefined;
     }>, "many">>;
+    bodyText: z.ZodOptional<z.ZodString>;
 }, "strict", z.ZodTypeAny, {
     page: {
         tabId: string & z.BRAND<"TabId">;
@@ -1057,6 +1058,7 @@ declare const ObservationV1Schema: z.ZodEffects<z.ZodObject<{
             y: number;
         } | undefined;
     }[] | undefined;
+    bodyText?: string | undefined;
 }, {
     page: {
         tabId: string;
@@ -1098,6 +1100,7 @@ declare const ObservationV1Schema: z.ZodEffects<z.ZodObject<{
             y: number;
         } | undefined;
     }[] | undefined;
+    bodyText?: string | undefined;
 }>, any, any>;
 type Screenshot = z.infer<typeof ScreenshotSchema>;
 type PageState = z.infer<typeof PageStateSchema>;
@@ -3245,6 +3248,7 @@ declare const SucceededActionResultV1Schema: z.ZodObject<{
                 y: number;
             } | undefined;
         }>, "many">>;
+        bodyText: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -3286,6 +3290,7 @@ declare const SucceededActionResultV1Schema: z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }, {
         page: {
             tabId: string;
@@ -3327,6 +3332,7 @@ declare const SucceededActionResultV1Schema: z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "succeeded";
@@ -4096,6 +4102,7 @@ declare const FailedActionResultV1Schema: z.ZodObject<{
                 y: number;
             } | undefined;
         }>, "many">>;
+        bodyText: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -4137,6 +4144,7 @@ declare const FailedActionResultV1Schema: z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }, {
         page: {
             tabId: string;
@@ -4178,6 +4186,7 @@ declare const FailedActionResultV1Schema: z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "failed_recoverable" | "failed_terminal";
@@ -5303,6 +5312,7 @@ declare const CancelledActionResultV1Schema: z.ZodObject<{
                 y: number;
             } | undefined;
         }>, "many">>;
+        bodyText: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -5344,6 +5354,7 @@ declare const CancelledActionResultV1Schema: z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }, {
         page: {
             tabId: string;
@@ -5385,6 +5396,7 @@ declare const CancelledActionResultV1Schema: z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "cancelled";
@@ -6147,6 +6159,7 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
                 y: number;
             } | undefined;
         }>, "many">>;
+        bodyText: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -6188,6 +6201,7 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }, {
         page: {
             tabId: string;
@@ -6229,6 +6243,7 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "succeeded";
@@ -6997,6 +7012,7 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
                 y: number;
             } | undefined;
         }>, "many">>;
+        bodyText: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -7038,6 +7054,7 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }, {
         page: {
             tabId: string;
@@ -7079,6 +7096,7 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "failed_recoverable" | "failed_terminal";
@@ -8202,6 +8220,7 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
                 y: number;
             } | undefined;
         }>, "many">>;
+        bodyText: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -8243,6 +8262,7 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }, {
         page: {
             tabId: string;
@@ -8284,6 +8304,7 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "cancelled";
@@ -9005,6 +9026,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 y: number;
             } | undefined;
         }>, "many">>;
+        bodyText: z.ZodOptional<z.ZodString>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -9046,6 +9068,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }, {
         page: {
             tabId: string;
@@ -9087,6 +9110,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 y: number;
             } | undefined;
         }[] | undefined;
+        bodyText?: string | undefined;
     }>, any, any>;
     proposal: z.ZodEffects<z.ZodObject<{
         kind: z.ZodLiteral<"action">;
@@ -10540,6 +10564,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                     y: number;
                 } | undefined;
             }>, "many">>;
+            bodyText: z.ZodOptional<z.ZodString>;
         }, "strict", z.ZodTypeAny, {
             page: {
                 tabId: string & z.BRAND<"TabId">;
@@ -10581,6 +10606,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                     y: number;
                 } | undefined;
             }[] | undefined;
+            bodyText?: string | undefined;
         }, {
             page: {
                 tabId: string;
@@ -10622,6 +10648,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                     y: number;
                 } | undefined;
             }[] | undefined;
+            bodyText?: string | undefined;
         }>, any, any>;
     }, "strict", z.ZodTypeAny, {
         status: "succeeded";
@@ -11390,6 +11417,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                     y: number;
                 } | undefined;
             }>, "many">>;
+            bodyText: z.ZodOptional<z.ZodString>;
         }, "strict", z.ZodTypeAny, {
             page: {
                 tabId: string & z.BRAND<"TabId">;
@@ -11431,6 +11459,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                     y: number;
                 } | undefined;
             }[] | undefined;
+            bodyText?: string | undefined;
         }, {
             page: {
                 tabId: string;
@@ -11472,6 +11501,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                     y: number;
                 } | undefined;
             }[] | undefined;
+            bodyText?: string | undefined;
         }>, any, any>;
     }, "strict", z.ZodTypeAny, {
         status: "failed_recoverable" | "failed_terminal";
@@ -12595,6 +12625,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                     y: number;
                 } | undefined;
             }>, "many">>;
+            bodyText: z.ZodOptional<z.ZodString>;
         }, "strict", z.ZodTypeAny, {
             page: {
                 tabId: string & z.BRAND<"TabId">;
@@ -12636,6 +12667,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                     y: number;
                 } | undefined;
             }[] | undefined;
+            bodyText?: string | undefined;
         }, {
             page: {
                 tabId: string;
@@ -12677,6 +12709,7 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                     y: number;
                 } | undefined;
             }[] | undefined;
+            bodyText?: string | undefined;
         }>, any, any>;
     }, "strict", z.ZodTypeAny, {
         status: "cancelled";
