@@ -34,6 +34,24 @@ The browser extension provides:
    - Click "Load unpacked"
    - Select the `dist` folder
 
+### Manual Install in Chrome (development)
+
+1. Build the extension:
+   ```bash
+   pnpm install
+   bash scripts/build-extension.sh
+   ```
+   This produces `build/browser-extension-1.0.0.zip` and a `dist/` folder.
+
+2. Open `chrome://extensions/` in Chrome
+
+3. Enable **Developer mode** (toggle top right)
+
+4. Click **Load unpacked** and select `clients/browser-extension/dist/`
+   - Or drag `clients/browser-extension/build/browser-extension-1.0.0.zip` onto the extensions page
+
+5. Click the extension icon in the Chrome toolbar to open the popup. Configure the orchestrator server URL (WSS) in the options page.
+
 ### From Chrome Web Store (when published)
 
 1. Install from the Chrome Web Store
