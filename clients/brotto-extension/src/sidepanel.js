@@ -408,13 +408,13 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   } else if (role === 'done') {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    const finalAnswerHtml = message.finalAnswer
-      ? `<div class="final-answer"><div class="final-answer-text">${escapeHtml(message.finalAnswer)}</div></div>`
+    const finalAnswerHtml = finalAnswer
+      ? `<div class="final-answer"><div class="final-answer-text">${escapeHtml(finalAnswer)}</div></div>`
       : '';
     bubble.innerHTML = `
       ${finalAnswerHtml}
       <div class="done-header"><span class="done-icon">&#10003;</span> Task completed</div>
-      <div class="done-summary">${text}</div>
+      <div class="done-summary">${escapeHtml(text || '')}</div>
     `;
     msg.appendChild(bubble);
   }
