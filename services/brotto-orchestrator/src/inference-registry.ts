@@ -1,17 +1,17 @@
-import { FaraPlanner, type FaraPlannerConfig } from "./adapters/brotto-planner.js";
+import { BrottoPlanner, type BrottoPlannerConfig } from "./adapters/brotto-planner.js";
 import { OpenAICompatiblePlanner, type OpenAICompatibleConfig } from "./adapters/openai-compatible-planner.js";
 import type { InferencePort } from "./engine/types.js";
 
-export type InferenceFamily = "fara" | "openai-compatible";
+export type InferenceFamily = "brotto" | "openai-compatible";
 
 export type InferenceConfig =
-  | ({ family: "fara" } & FaraPlannerConfig)
+  | ({ family: "brotto" } & BrottoPlannerConfig)
   | ({ family: "openai-compatible" } & OpenAICompatibleConfig);
 
 export function createPlanner(config: InferenceConfig): InferencePort {
   switch (config.family) {
-    case "fara":
-      return new FaraPlanner(config);
+    case "brotto":
+      return new BrottoPlanner(config);
     case "openai-compatible":
       return new OpenAICompatiblePlanner(config);
     default:
@@ -21,12 +21,12 @@ export function createPlanner(config: InferenceConfig): InferencePort {
 }
 
 export function inferFamilyFromEnv(): InferenceFamily {
-  if (process.env.FARA_ENDPOINT) return "fara";
+  if (process.env.BROTTO_ENDPOINT) return "brotto";
   if (process.env.OPENAI_API_KEY) return "openai-compatible";
   if (process.env.AZURE_OPENAI_API_KEY) return "openai-compatible";
   if (process.env.OLLAMA_HOST) return "openai-compatible";
   throw new Error(
-    "No inference family configured. Set FARA_ENDPOINT, OPENAI_API_KEY, AZURE_OPENAI_API_KEY, or OLLAMA_HOST.",
+    "No inference family configured. Set BROTTO_ENDPOINT, OPENAI_API_KEY, AZURE_OPENAI_API_KEY, or OLLAMA_HOST.",
   );
 }
 
@@ -34,8 +34,8 @@ export function inferFamilyFromEnv(): InferenceFamily {
 // up the same config without callers having to re-implement env parsing.
 export function buildPlannerConfigFromEnv(): InferenceConfig {
   const family = inferFamilyFromEnv();
-  if (family === "fara") {
-    return { family: "fara", endpoint: process.env.FARA_ENDPOINT ?? "" };
+  if (family === "brotto") {
+    return { family: "brotto", endpoint: process.env.BROTTO_ENDPOINT ?? "" };
   }
   const isAzure = !!process.env.AZURE_OPENAI_API_KEY;
   const baseUrl = process.env.OLLAMA_HOST

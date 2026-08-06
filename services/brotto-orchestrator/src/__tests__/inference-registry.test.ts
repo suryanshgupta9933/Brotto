@@ -1,9 +1,9 @@
 import { createPlanner, inferFamilyFromEnv, type InferenceConfig } from "../inference-registry";
 
 describe("createPlanner", () => {
-  it("returns a FaraPlanner for family=fara", () => {
+  it("returns a BrottoPlanner for family=fara", () => {
     const config: InferenceConfig = {
-      family: "fara",
+      family: "brotto",
       endpoint: "http://localhost:8000",
     };
     const planner = createPlanner(config);
@@ -31,16 +31,16 @@ describe("inferFamilyFromEnv", () => {
     process.env = { ...originalEnv };
   });
 
-  it("returns 'fara' when FARA_ENDPOINT is set", () => {
+  it("returns 'fara' when BROTTO_ENDPOINT is set", () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.AZURE_OPENAI_API_KEY;
     delete process.env.OLLAMA_HOST;
-    process.env.FARA_ENDPOINT = "http://localhost:8000";
+    process.env.BROTTO_ENDPOINT = "http://localhost:8000";
     expect(inferFamilyFromEnv()).toBe("fara");
   });
 
   it("returns 'openai-compatible' when OPENAI_API_KEY is set", () => {
-    delete process.env.FARA_ENDPOINT;
+    delete process.env.BROTTO_ENDPOINT;
     delete process.env.AZURE_OPENAI_API_KEY;
     delete process.env.OLLAMA_HOST;
     process.env.OPENAI_API_KEY = "sk-test";
@@ -48,21 +48,21 @@ describe("inferFamilyFromEnv", () => {
   });
 
   it("returns 'openai-compatible' when OLLAMA_HOST is set", () => {
-    delete process.env.FARA_ENDPOINT;
+    delete process.env.BROTTO_ENDPOINT;
     delete process.env.OPENAI_API_KEY;
     delete process.env.AZURE_OPENAI_API_KEY;
     process.env.OLLAMA_HOST = "http://localhost:11434";
     expect(inferFamilyFromEnv()).toBe("openai-compatible");
   });
 
-  it("FARA_ENDPOINT takes precedence over OPENAI_API_KEY", () => {
-    process.env.FARA_ENDPOINT = "http://localhost:8000";
+  it("BROTTO_ENDPOINT takes precedence over OPENAI_API_KEY", () => {
+    process.env.BROTTO_ENDPOINT = "http://localhost:8000";
     process.env.OPENAI_API_KEY = "sk-test";
     expect(inferFamilyFromEnv()).toBe("fara");
   });
 
   it("throws when no inference env vars are set", () => {
-    delete process.env.FARA_ENDPOINT;
+    delete process.env.BROTTO_ENDPOINT;
     delete process.env.OPENAI_API_KEY;
     delete process.env.AZURE_OPENAI_API_KEY;
     delete process.env.OLLAMA_HOST;

@@ -84,7 +84,7 @@ describe('InferenceRegistry wiring for AgentOrchestrator', () => {
 
     it('creates an InferencePort for fara family', async () => {
       const config: InferenceConfig = {
-        family: 'fara',
+        family: "brotto",
         endpoint: 'https://inference.example/v1/plan',
         transport: jest.fn(async () => new Response(JSON.stringify({
           kind: 'action',
@@ -118,16 +118,16 @@ describe('InferenceRegistry wiring for AgentOrchestrator', () => {
       process.env = { ...originalEnv };
     });
 
-    it('returns fara when FARA_ENDPOINT is set', () => {
+    it('returns fara when BROTTO_ENDPOINT is set', () => {
       delete process.env.OPENAI_API_KEY;
       delete process.env.AZURE_OPENAI_API_KEY;
       delete process.env.OLLAMA_HOST;
-      process.env.FARA_ENDPOINT = 'http://localhost:8000';
+      process.env.BROTTO_ENDPOINT = 'http://localhost:8000';
       expect(inferFamilyFromEnv()).toBe('fara');
     });
 
     it('returns openai-compatible when OPENAI_API_KEY is set', () => {
-      delete process.env.FARA_ENDPOINT;
+      delete process.env.BROTTO_ENDPOINT;
       delete process.env.AZURE_OPENAI_API_KEY;
       delete process.env.OLLAMA_HOST;
       process.env.OPENAI_API_KEY = 'sk-test';
@@ -135,7 +135,7 @@ describe('InferenceRegistry wiring for AgentOrchestrator', () => {
     });
 
     it('throws when no inference env vars are set', () => {
-      delete process.env.FARA_ENDPOINT;
+      delete process.env.BROTTO_ENDPOINT;
       delete process.env.OPENAI_API_KEY;
       delete process.env.AZURE_OPENAI_API_KEY;
       delete process.env.OLLAMA_HOST;
@@ -156,7 +156,7 @@ describe('InferenceRegistry wiring for AgentOrchestrator', () => {
 
     it('accepts fara config with all required fields', () => {
       const config: InferenceConfig = {
-        family: 'fara',
+        family: "brotto",
         endpoint: 'https://inference.example/v1/plan',
       };
       expect(config.family).toBe('fara');

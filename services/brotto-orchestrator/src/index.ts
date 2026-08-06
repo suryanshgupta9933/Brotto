@@ -50,12 +50,12 @@ export {
 
 // Canonical stateless planner adapter
 export {
-  FaraPlanner,
-  FaraPlannerError,
-  FaraPlannerRequestError,
-  type FaraPlannerConfig,
-  type FaraPlannerDiagnostic,
-  type FaraPlannerUsage,
+  BrottoPlanner,
+  BrottoPlannerError,
+  BrottoPlannerRequestError,
+  type BrottoPlannerConfig,
+  type BrottoPlannerDiagnostic,
+  type BrottoPlannerUsage,
 } from './adapters/brotto-planner';
 
 // Tool call parser

@@ -340,38 +340,13 @@ async function captureForDriver(tabId: number): Promise<ObservationV1> {
   return captureObservation(tabId);
 }
 
-async function waitForNetworkIdle(tabId: number, timeoutMs = 5000): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const start = Date.now();
-    let pendingRequests = 0;
-    const off: Array<() => void> = [];
-    const onRequest = () => {
-      pendingRequests++;
-    };
-    const onComplete = () => {
-      pendingRequests = Math.max(0, pendingRequests - 1);
-    };
-    // ponytail: best-effort — we can't hook chrome.debugger events from outside
-    // the debuggee easily, so just sleep a fixed budget. The planner's
-    // description of the new page is usually accurate enough after 500ms.
-    void onRequest;
-    void onComplete;
-    const timer = setTimeout(() => {
-      off.forEach((fn) => fn());
-      resolve();
-    }, timeoutMs);
-    const elapsed = () => Date.now() - start;
-    const interval = setInterval(() => {
-      if (pendingRequests === 0 && elapsed() > 500) {
-        clearInterval(interval);
-        clearTimeout(timer);
-        off.forEach((fn) => fn());
-        resolve();
-      }
-    }, 200);
-    off.push(() => clearInterval(interval));
-    off.push(() => clearTimeout(timer));
-  });
+// ponytail: budgeted wait. We can't hook Network.requestWillBeSent without
+// keeping a long-lived debugger session, and the existing Page lifecycle
+// hooks are good enough — the planner's description of the new page is
+// usually accurate after a short pause. Sleep for `timeoutMs` (default
+// 500ms) and proceed.
+async function waitForNetworkIdle(_tabId: number, timeoutMs = 500): Promise<void> {
+  await new Promise((r) => setTimeout(r, timeoutMs));
 }
 
 export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {

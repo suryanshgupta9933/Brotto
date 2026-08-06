@@ -58,7 +58,7 @@ export function describeDiff(prev: PageSnapshot | null, next: PageSnapshot): str
     if (!p.disabled && n.disabled) parts.push(`${id} disabled`);
     if (p.disabled && !n.disabled) parts.push(`${id} enabled`);
   }
-  for (const [id, p] of prevById) {
+  for (const [id] of prevById) {
     if (!nextById.has(id)) parts.push(`${id} disappeared`);
   }
   if (prev.url !== next.url) parts.push(`url→${next.url}`);

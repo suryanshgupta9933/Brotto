@@ -1,9 +1,9 @@
 import { jest } from '@jest/globals';
 import type { ObservationV1, TrajectoryEventV1 } from '@brotto/brotto-action-schema';
 import {
-  FaraPlanner,
-  FaraPlannerError,
-  FaraPlannerRequestError,
+  BrottoPlanner,
+  BrottoPlannerError,
+  BrottoPlannerRequestError,
 } from '../adapters/brotto-planner.js';
 import type { PlanningInput } from '../engine/types.js';
 
@@ -58,7 +58,7 @@ function planningInputWithWorkId(workId: string): PlanningInput {
   return { ...planningInput(), workId };
 }
 
-describe('FaraPlanner', () => {
+describe('BrottoPlanner', () => {
   it('sends only the v1 planning contract and retains response provenance', async () => {
     let request: { input: string; init?: RequestInit } | undefined;
     const transport = jest.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -79,7 +79,7 @@ describe('FaraPlanner', () => {
         },
       });
     });
-    const planner = new FaraPlanner({ endpoint: 'https://inference.example/v1/plan', transport });
+    const planner = new BrottoPlanner({ endpoint: 'https://inference.example/v1/plan', transport });
 
     const proposal = await planner.plan(planningInput(), new AbortController().signal);
 
@@ -102,7 +102,7 @@ describe('FaraPlanner', () => {
   });
 
   it('maps contract errors without synthesizing an action', async () => {
-    const planner = new FaraPlanner({
+    const planner = new BrottoPlanner({
       endpoint: 'https://inference.example/v1/plan',
       transport: async () => new Response(JSON.stringify({
         kind: 'contract_error',
@@ -113,7 +113,7 @@ describe('FaraPlanner', () => {
     });
 
     await expect(planner.plan(planningInput(), new AbortController().signal)).rejects.toEqual(
-      expect.objectContaining<FaraPlannerError>({
+      expect.objectContaining<BrottoPlannerError>({
         code: 'INFERENCE_CONTRACT_ERROR',
         retryable: false,
         message: 'Model output remained invalid after repairs',
@@ -122,13 +122,13 @@ describe('FaraPlanner', () => {
   });
 
   it('does not misclassify a transient HTTP failure as a model contract failure', async () => {
-    const planner = new FaraPlanner({
+    const planner = new BrottoPlanner({
       endpoint: 'https://inference.example/v1/plan',
       transport: async () => new Response('unavailable', { status: 503 }),
     });
 
     await expect(planner.plan(planningInput(), new AbortController().signal)).rejects.toEqual(
-      expect.objectContaining<FaraPlannerRequestError>({
+      expect.objectContaining<BrottoPlannerRequestError>({
         code: 'INFERENCE_HTTP_ERROR',
         retryable: true,
       }),
@@ -136,7 +136,7 @@ describe('FaraPlanner', () => {
   });
 
   it('returns a valid question proposal as a typed planning outcome', async () => {
-    const planner = new FaraPlanner({
+    const planner = new BrottoPlanner({
       endpoint: 'https://inference.example/v1/plan',
       transport: async () => new Response(JSON.stringify({
         kind: 'question',
@@ -170,7 +170,7 @@ describe('FaraPlanner', () => {
         },
       });
     });
-    const planner = new FaraPlanner({
+    const planner = new BrottoPlanner({
       endpoint: 'https://inference.example/v1/plan',
       transport,
       maxDiagnosticEntries: 2,
@@ -188,7 +188,7 @@ describe('FaraPlanner', () => {
   });
 
   it('does not invent provenance from legacy or absent response headers', async () => {
-    const planner = new FaraPlanner({
+    const planner = new BrottoPlanner({
       endpoint: 'https://inference.example/v1/plan',
       transport: async () => new Response(JSON.stringify({
         kind: 'action',
@@ -210,7 +210,7 @@ describe('FaraPlanner', () => {
 
   it('passes cancellation to the planning request', async () => {
     let receivedSignal: AbortSignal | undefined;
-    const planner = new FaraPlanner({
+    const planner = new BrottoPlanner({
       endpoint: 'https://inference.example/v1/plan',
       transport: async (_input, init) => {
         receivedSignal = init?.signal ?? undefined;

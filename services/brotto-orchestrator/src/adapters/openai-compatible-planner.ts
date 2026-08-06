@@ -171,7 +171,7 @@ export class OpenAICompatiblePlanner implements InferencePort {
   }
 
   private buildMessages(input: PlanningInput): Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> {
-    const messages: Array<{ role: string; content: string }> = [];
+    const messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [];
 
     messages.push({
       role: 'system',
@@ -202,22 +202,20 @@ export class OpenAICompatiblePlanner implements InferencePort {
         // ponytail: multi-content message for vision-capable models. Screenshot
         // comes AFTER the text so the model reads the structured context first,
         // then grounds coords against the image. Default OFF — set DEMO_VISION=1.
-        messages.push({
-          role: 'user',
-          content: [
-            { type: 'text', text },
-            { type: 'image_url', image_url: { url: `data:image/png;base64,${screenshot}` } },
-          ],
-        });
+        const content = [
+          { type: 'text', text },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${screenshot}` } },
+        ] as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+        messages.push({ role: 'user', content });
       } else {
         messages.push({ role: 'user', content: text });
       }
     } else {
-      const targets = (input.observation.semanticTargets ?? []).filter((t) => {
+      const targets = (input.observation.semanticTargets ?? []).filter((t: { boundingBox: { width: number; height: number } }) => {
         const bb = t.boundingBox;
         return bb && bb.width > 0 && bb.height > 0;
       });
-      const elements = targets.map((t) => {
+      const elements = targets.map((t: { tag: string; boundingBox: { x: number; y: number; width: number; height: number }; accessibleName?: { text?: string }; attributes?: { id?: string; name?: string } }) => {
         const bb = t.boundingBox;
         const cx = Math.round(bb.x + bb.width / 2);
         const cy = Math.round(bb.y + bb.height / 2);

@@ -14255,35 +14255,8 @@
   async function captureForDriver(tabId) {
     return captureObservation(tabId);
   }
-  async function waitForNetworkIdle(tabId, timeoutMs = 5e3) {
-    await new Promise((resolve) => {
-      const start = Date.now();
-      let pendingRequests = 0;
-      const off = [];
-      const onRequest = () => {
-        pendingRequests++;
-      };
-      const onComplete = () => {
-        pendingRequests = Math.max(0, pendingRequests - 1);
-      };
-      void onRequest;
-      void onComplete;
-      const timer = setTimeout(() => {
-        off.forEach((fn) => fn());
-        resolve();
-      }, timeoutMs);
-      const elapsed = () => Date.now() - start;
-      const interval = setInterval(() => {
-        if (pendingRequests === 0 && elapsed() > 500) {
-          clearInterval(interval);
-          clearTimeout(timer);
-          off.forEach((fn) => fn());
-          resolve();
-        }
-      }, 200);
-      off.push(() => clearInterval(interval));
-      off.push(() => clearTimeout(timer));
-    });
+  async function waitForNetworkIdle(_tabId, timeoutMs = 500) {
+    await new Promise((r) => setTimeout(r, timeoutMs));
   }
   async function runLocalLoop(opts) {
     log(opts, `opening new tab${opts.startingUrl ? ` at ${opts.startingUrl}` : ""}`);
