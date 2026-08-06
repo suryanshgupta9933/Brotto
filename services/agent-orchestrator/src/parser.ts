@@ -383,7 +383,7 @@ export class ToolCallParser {
         return {
           ...baseArgs,
           type: ActionType.WAIT,
-          duration: this.numberArg(args.durationMs, 'durationMs', toolCall),
+          durationMs: this.numberArg(args.durationMs, 'durationMs', toolCall, 1000),
         };
 
       case ActionType.ASK_USER_QUESTION:

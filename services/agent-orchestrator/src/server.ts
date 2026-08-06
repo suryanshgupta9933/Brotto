@@ -14,7 +14,7 @@ import {
 } from './session.js';
 import { HistoryManager } from './history.js';
 import { FaraInferenceClient, type LegacyInferenceConfig } from './inference.js';
-import { createPlanner, type InferenceConfig } from './inference-registry.js';
+import { buildPlannerConfigFromEnv, createPlanner, type InferenceConfig } from './inference-registry.js';
 import type { InferencePort, PlanningInput, PlanningOutcome } from './engine/types.js';
 import { ToolCallParser, createToolCallParser } from './parser.js';
 import { PolicyIntegrator, createPolicyIntegrator } from './policy.js';
@@ -125,9 +125,13 @@ export class AgentOrchestrator {
     });
 
     if (!config.plannerConfig) {
-      throw new Error("plannerConfig is required on OrchestratorConfig");
+      // ponytail: default to env-derived config so callers can omit it. Tests
+      // pass explicit mocks; production callers either pass plannerConfig or
+      // rely on env.
+      this.planner = createPlanner(buildPlannerConfigFromEnv());
+    } else {
+      this.planner = createPlanner(config.plannerConfig);
     }
-    this.planner = createPlanner(config.plannerConfig);
     this.legacyInference = config.inference ? new FaraInferenceClient(config.inference) : null;
 
     this.parser = createToolCallParser();

@@ -15,6 +15,7 @@ interface PlanRequest {
   context: string;
   recentResults?: unknown[];
   trajectory?: unknown[];
+  screenshot?: string;
 }
 
 function buildConfigFromEnv(family: ReturnType<typeof inferFamilyFromEnv>): InferenceConfig {
@@ -53,11 +54,13 @@ async function main() {
   app.get("/health", async () => ({ status: "ok", family, model: config.model }));
   app.post<{ Body: PlanRequest }>("/plan", async (req) => {
     const t0 = Date.now();
-    try {
-      // ponytail: pass the rendered context directly as the user message text;
-      // the planner uses it verbatim. This lets the demo control the harness
-      // shape (IDs, diffs, inline coords) without touching planner internals.
-      const outcome = await planner.plan({
+    // ponytail: short retry/backoff for transient 429s. Vision mode sends
+    // heavier payloads and can blow past OpenAI's per-minute token limit; a
+    // 1-2s wait usually clears it. Cap at 3 retries so the demo doesn't hang.
+    let outcome;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        outcome = await planner.plan({
         workId: req.body.workId,
         sessionId: "00000000-0000-4000-8000-000000000001" as never,
         taskId: "00000000-0000-4000-8000-000000000002" as never,
@@ -67,7 +70,23 @@ async function main() {
         recentResults: (req.body.recentResults ?? []) as never,
         trajectory: (req.body.trajectory ?? []) as never,
         context: req.body.context,
+        ...(req.body.screenshot ? { screenshot: req.body.screenshot } : {}),
       } as never, new AbortController().signal);
+        break;
+      } catch (err) {
+        const e = err as { retryable?: boolean; retryAfterMs?: number };
+        const retryable = e.retryable === true;
+        if (!retryable || attempt === 2) throw err;
+        // ponytail: prefer the planner's retryAfterMs hint (from Retry-After
+        // header); fall back to exponential backoff. Min 1s so the TPM window
+        // has a chance to clear before we burn another request.
+        const hint = e.retryAfterMs;
+        const backoffMs = Math.max(hint ?? 0, 1000 * 2 ** attempt);
+        console.warn(`[demo-server] retryable error, backing off ${backoffMs}ms (attempt ${attempt + 1}/3): ${err instanceof Error ? err.message : String(err)}`);
+        await new Promise((r) => setTimeout(r, backoffMs));
+      }
+    }
+    try {
       const elapsed = Date.now() - t0;
       console.log(`[demo-server] /plan responded in ${elapsed}ms kind=${outcome.kind}`);
       if (outcome.kind === "action") {

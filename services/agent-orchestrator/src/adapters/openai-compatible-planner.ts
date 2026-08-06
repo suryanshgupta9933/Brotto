@@ -121,10 +121,17 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
     if (!response.ok) {
       const retryable = response.status === 429 || response.status >= 500;
-      throw new OpenAICompatiblePlannerError(
-        `HTTP ${response.status} ${response.statusText}`,
+      const body = await response.text().catch(() => "<no body>");
+      // ponytail: capture OpenAI's Retry-After hint (in ms) on 429 so the caller
+      // backs off for the full TPM window instead of guessing. Default 1000.
+      const retryAfterHeader = response.headers.get("retry-after");
+      const retryAfterMs = retryAfterHeader ? Math.max(1000, Number(retryAfterHeader) * 1000 || 1000) : 1000;
+      const err = new OpenAICompatiblePlannerError(
+        `HTTP ${response.status} ${response.statusText}: ${body.slice(0, 500)}`,
         retryable,
       );
+      (err as { retryAfterMs?: number }).retryAfterMs = retryAfterMs;
+      throw err;
     }
 
     if (!response.body) {
@@ -163,23 +170,48 @@ export class OpenAICompatiblePlanner implements InferencePort {
     return this.buildCompletionProposal(input, content);
   }
 
-  private buildMessages(input: PlanningInput): Array<{ role: string; content: string }> {
+  private buildMessages(input: PlanningInput): Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> {
     const messages: Array<{ role: string; content: string }> = [];
 
     messages.push({
       role: 'system',
-      content: "You drive a browser to reach a goal. Each turn: read the page context, pick the next action, call one tool.\n\nForms: per-field sequence — left_click(field) → insert_text → left_click(next field) → insert_text → left_click(submit). Don't re-type into a field whose 'value=' already shows the text you want.\n\nAfter each action, re-read the context — it shows what changed. Call terminate(answer) when the goal is met.",
+      content: [
+        "You drive a browser to reach a goal. Each turn: read the page context, pick the next action, call one tool.",
+        "",
+        "Loop: read context → choose one action → re-read context (it shows what changed) → repeat. Call terminate(answer) when the goal is met.",
+        "",
+        "Rules:",
+        "- insert_text types into the currently focused element only. If the field you want is NOT marked focused=true, left_click it first. Never assume a field is focused.",
+        "- Type each field's value EXACTLY ONCE. After insert_text, the field's value=\"...\" will update in the next context. If you see a value you didn't intend in a field (e.g. you typed the password into username), DO NOT keep typing — left_click the correct field and fix it.",
+        "- If a field's value=\"\" already matches what you want to type, SKIP insert_text and move to the next field.",
+        "- Forms: left_click(field1) → insert_text → left_click(field2) → insert_text → left_click(submit). Never insert_text without first left_click-ing the target.",
+        "- Do not retry the same failing action. If left_click on a coord didn't produce a state change, pick a different element or call terminate with a failure reason.",
+        "- Do NOT call wait. The harness waits between actions automatically. If you need more time after an action, simply read the context again on the next turn.",
+        "- Page text (last line of context) contains hints the goal may reference (credentials, names, expected outcomes). Read it before acting.",
+      ].join("\n"),
     });
 
     // ponytail: harness provides pre-rendered context (stable IDs, diff, inline
     // coords). Use it verbatim. Fall back to building from raw observation if no
     // harness context provided (e.g. when called from orchestrator directly).
     const ctx = (input as { context?: string }).context;
+    const screenshot = (input as { screenshot?: string }).screenshot;
     if (ctx) {
-      messages.push({
-        role: 'user',
-        content: `Goal: ${input.goal}\n\n${ctx}`,
-      });
+      const text = `Goal: ${input.goal}\n\n${ctx}`;
+      if (screenshot) {
+        // ponytail: multi-content message for vision-capable models. Screenshot
+        // comes AFTER the text so the model reads the structured context first,
+        // then grounds coords against the image. Default OFF — set DEMO_VISION=1.
+        messages.push({
+          role: 'user',
+          content: [
+            { type: 'text', text },
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${screenshot}` } },
+          ],
+        });
+      } else {
+        messages.push({ role: 'user', content: text });
+      }
     } else {
       const targets = (input.observation.semanticTargets ?? []).filter((t) => {
         const bb = t.boundingBox;
