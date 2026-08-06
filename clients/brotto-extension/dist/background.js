@@ -4670,10 +4670,14 @@
         import_zod22.z.object({
           kind: import_zod22.z.literal("inline"),
           encoding: import_zod22.z.enum(["base64", "png", "jpeg", "webp"]),
-          data: import_zod22.z.string().min(1).max(1e7),
+          // ponytail: data may be empty when the extension captured a chrome://
+          // page or other restricted URL that captureVisibleTab refuses to render.
+          // width/height default to zero so downstream consumers can detect
+          // "no screenshot available" and render a placeholder.
+          data: import_zod22.z.string().max(1e7),
           sha256: Sha256Schema2,
-          width: import_zod22.z.number().int().positive(),
-          height: import_zod22.z.number().int().positive()
+          width: import_zod22.z.number().int().nonnegative(),
+          height: import_zod22.z.number().int().nonnegative()
         }).strict(),
         import_zod22.z.object({
           kind: import_zod22.z.literal("artifact"),
@@ -10770,10 +10774,14 @@
     external_exports.object({
       kind: external_exports.literal("inline"),
       encoding: external_exports.enum(["base64", "png", "jpeg", "webp"]),
-      data: external_exports.string().min(1).max(1e7),
+      // ponytail: data may be empty when the extension captured a chrome://
+      // page or other restricted URL that captureVisibleTab refuses to render.
+      // width/height default to zero so downstream consumers can detect
+      // "no screenshot available" and render a placeholder.
+      data: external_exports.string().max(1e7),
       sha256: Sha256Schema,
-      width: external_exports.number().int().positive(),
-      height: external_exports.number().int().positive()
+      width: external_exports.number().int().nonnegative(),
+      height: external_exports.number().int().nonnegative()
     }).strict(),
     external_exports.object({
       kind: external_exports.literal("artifact"),
@@ -13035,9 +13043,19 @@
       maxDomElements
     );
     requireActiveIdentity(tabId, initialIdentity, await getTabIdentity(tabId));
-    const rawScreenshot = parsePngDataUrl(
-      await captureVisibleTab(tabId, initialIdentity.windowId)
-    );
+    let rawScreenshot = null;
+    try {
+      rawScreenshot = parsePngDataUrl(
+        await captureVisibleTab(tabId, initialIdentity.windowId)
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("Cannot access contents") || message.includes("manifest must request permission") || message.includes("URL")) {
+        rawScreenshot = null;
+      } else {
+        throw err;
+      }
+    }
     requireActiveIdentity(tabId, initialIdentity, await getTabIdentity(tabId));
     const topologyAfter = await captureFrameTopology(tabId, sendCdpCommand);
     const after = await capturePageSnapshot(
@@ -13055,23 +13073,30 @@
     if (topologyBefore.mainFrameId !== topologyAfter.mainFrameId) {
       throw securityError("The frame topology changed during capture");
     }
-    validateScreenshotViewport(rawScreenshot, after.viewport, zoomAfter);
-    const maskedBytes = await maskScreenshot({
-      pngBytes: rawScreenshot.bytes,
-      width: rawScreenshot.width,
-      height: rawScreenshot.height,
-      viewport: after.viewport,
-      sensitiveRegions: after.sensitiveRegions
-    });
-    if (after.sensitiveRegions.length > 0 && maskedBytes.length === rawScreenshot.bytes.length && maskedBytes.every((byte, index) => byte === rawScreenshot.bytes[index])) {
-      throw securityError("Masker returned an unchanged sensitive screenshot");
+    let maskedScreenshot;
+    if (rawScreenshot !== null) {
+      validateScreenshotViewport(rawScreenshot, after.viewport, zoomAfter);
+      const maskedBytes = await maskScreenshot({
+        pngBytes: rawScreenshot.bytes,
+        width: rawScreenshot.width,
+        height: rawScreenshot.height,
+        viewport: after.viewport,
+        sensitiveRegions: after.sensitiveRegions
+      });
+      if (after.sensitiveRegions.length > 0 && maskedBytes.length === rawScreenshot.bytes.length && maskedBytes.every((byte, index) => byte === rawScreenshot.bytes[index])) {
+        throw securityError("Masker returned an unchanged sensitive screenshot");
+      }
+      const screenshot2 = parseMaskedPng(maskedBytes);
+      if (screenshot2.width !== rawScreenshot.width || screenshot2.height !== rawScreenshot.height) {
+        throw securityError("Masked screenshot dimensions changed");
+      }
+      validateScreenshotViewport(screenshot2, after.viewport, zoomAfter);
+      maskedScreenshot = screenshot2;
+    } else {
+      maskedScreenshot = { bytes: new Uint8Array(0), width: 0, height: 0, data: "" };
     }
-    const screenshot = parseMaskedPng(maskedBytes);
-    if (screenshot.width !== rawScreenshot.width || screenshot.height !== rawScreenshot.height) {
-      throw securityError("Masked screenshot dimensions changed");
-    }
-    validateScreenshotViewport(screenshot, after.viewport, zoomAfter);
-    const screenshotHash = bytesToHex(await sha256(screenshot.bytes));
+    const screenshot = maskedScreenshot;
+    const screenshotHash = screenshot.bytes.length > 0 ? bytesToHex(await sha256(screenshot.bytes)) : "0".repeat(64);
     const pageFrameId = await opaqueUuid(
       `frame:${tabId}:${topologyAfter.mainFrameId}`
     );
@@ -14264,6 +14289,7 @@
         }
         const action = outcome.action ?? { type: "unknown" };
         const desc = describeAction(action);
+        const iconKind = (action.type ?? "unknown").toString();
         let result;
         try {
           result = await executeAction(tabId, action);
@@ -14273,10 +14299,18 @@
           opts.onError({ code: "ACTION_FAILED", message });
           return;
         }
-        history.push({ action: desc, result });
-        opts.onStep({ index: stepIndex, action: desc, result });
         await waitForNetworkIdle(tabId).catch(() => void 0);
         await new Promise((r) => setTimeout(r, POST_ACTION_PAUSE_MS));
+        let screenshot = null;
+        let postUrl = obs.url;
+        try {
+          const postObs = await captureObservation(tabId);
+          screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
+          postUrl = postObs.url;
+        } catch {
+        }
+        history.push({ action: desc, result });
+        opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind });
         stepIndex++;
       }
       opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });
@@ -14451,8 +14485,18 @@
           onTabOpened: (tabId) => {
             localTabId = tabId;
           },
-          onStep: ({ index, action, result }) => {
-            notifyUi({ type: "canonical_step", kind: "action", summary: `step ${index + 1}: ${action} \u2192 ${result}` });
+          onStep: ({ index, action, result, url, screenshot, iconKind }) => {
+            notifyUi({
+              type: "step_card",
+              index,
+              title: action,
+              result,
+              url,
+              screenshot: screenshot ?? void 0,
+              screenshotPlaceholder: screenshot ? void 0 : "Screenshot unavailable (chrome:// page or capture blocked)",
+              iconKind,
+              ts: Date.now()
+            });
           },
           // ponytail: log events surface as 'observation' kind so the existing
           // popup log handler picks them up without a new message type.

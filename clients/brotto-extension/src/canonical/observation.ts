@@ -899,9 +899,27 @@ async function captureObservationInternal(
     maxDomElements,
   );
   requireActiveIdentity(tabId, initialIdentity, await getTabIdentity(tabId));
-  const rawScreenshot = parsePngDataUrl(
-    await captureVisibleTab(tabId, initialIdentity.windowId),
-  );
+  // ponytail: chrome.tabs.captureVisibleTab fails on chrome://, about:,
+  // devtools://, and other restricted URLs. Catch only those permission-
+  // related errors; let other failures (oversized PNG, parse errors) propagate
+  // so the security boundary stays strict.
+  let rawScreenshot: { bytes: Uint8Array; width: number; height: number } | null = null;
+  try {
+    rawScreenshot = parsePngDataUrl(
+      await captureVisibleTab(tabId, initialIdentity.windowId),
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (
+      message.includes("Cannot access contents") ||
+      message.includes("manifest must request permission") ||
+      message.includes("URL")
+    ) {
+      rawScreenshot = null;
+    } else {
+      throw err;
+    }
+  }
   requireActiveIdentity(tabId, initialIdentity, await getTabIdentity(tabId));
 
   const topologyAfter = await captureFrameTopology(tabId, sendCdpCommand);
@@ -920,31 +938,41 @@ async function captureObservationInternal(
   if (topologyBefore.mainFrameId !== topologyAfter.mainFrameId) {
     throw securityError("The frame topology changed during capture");
   }
-  validateScreenshotViewport(rawScreenshot, after.viewport, zoomAfter);
 
-  const maskedBytes = await maskScreenshot({
-    pngBytes: rawScreenshot.bytes,
-    width: rawScreenshot.width,
-    height: rawScreenshot.height,
-    viewport: after.viewport,
-    sensitiveRegions: after.sensitiveRegions,
-  });
-  if (
-    after.sensitiveRegions.length > 0 &&
-    maskedBytes.length === rawScreenshot.bytes.length &&
-    maskedBytes.every((byte, index) => byte === rawScreenshot.bytes[index])
-  ) {
-    throw securityError("Masker returned an unchanged sensitive screenshot");
+  let maskedScreenshot: { bytes: Uint8Array; width: number; height: number; data: string };
+  if (rawScreenshot !== null) {
+    validateScreenshotViewport(rawScreenshot, after.viewport, zoomAfter);
+    const maskedBytes = await maskScreenshot({
+      pngBytes: rawScreenshot.bytes,
+      width: rawScreenshot.width,
+      height: rawScreenshot.height,
+      viewport: after.viewport,
+      sensitiveRegions: after.sensitiveRegions,
+    });
+    if (
+      after.sensitiveRegions.length > 0 &&
+      maskedBytes.length === rawScreenshot.bytes.length &&
+      maskedBytes.every((byte, index) => byte === rawScreenshot.bytes[index])
+    ) {
+      throw securityError("Masker returned an unchanged sensitive screenshot");
+    }
+    const screenshot = parseMaskedPng(maskedBytes);
+    if (
+      screenshot.width !== rawScreenshot.width ||
+      screenshot.height !== rawScreenshot.height
+    ) {
+      throw securityError("Masked screenshot dimensions changed");
+    }
+    validateScreenshotViewport(screenshot, after.viewport, zoomAfter);
+    maskedScreenshot = screenshot;
+  } else {
+    // ponytail: no screenshot available (captureVisibleTab failed). Surface
+    // empty data so the schema validates and downstream consumers can show
+    // a placeholder thumbnail.
+    maskedScreenshot = { bytes: new Uint8Array(0), width: 0, height: 0, data: "" };
   }
-  const screenshot = parseMaskedPng(maskedBytes);
-  if (
-    screenshot.width !== rawScreenshot.width ||
-    screenshot.height !== rawScreenshot.height
-  ) {
-    throw securityError("Masked screenshot dimensions changed");
-  }
-  validateScreenshotViewport(screenshot, after.viewport, zoomAfter);
-  const screenshotHash = bytesToHex(await sha256(screenshot.bytes));
+  const screenshot = maskedScreenshot;
+  const screenshotHash = screenshot.bytes.length > 0 ? bytesToHex(await sha256(screenshot.bytes)) : "0".repeat(64);
   const pageFrameId = await opaqueUuid(
     `frame:${tabId}:${topologyAfter.mainFrameId}`,
   );

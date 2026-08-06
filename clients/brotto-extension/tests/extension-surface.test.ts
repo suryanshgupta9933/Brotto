@@ -20,15 +20,19 @@ describe("canonical extension distribution surface", () => {
   it("side panel renders live activity stream with login + approval prompts", () => {
     const background = read("src/background.ts");
     const sidepanel = read("src/sidepanel.js");
+    const sidepanelHtml = read("src/sidepanel.html");
     expect(background).not.toMatch(/EventSource|\/connect|from ["']\.\/relay/);
     expect(background).toContain("run_local_task");
     expect(background).toContain("login_required");
     expect(background).toContain("sidePanel.setPanelBehavior");
     expect(background).toContain("openPanelOnActionClick");
-    expect(sidepanel).toContain("canonical_step");
+    expect(sidepanel).toContain("step_card");
     expect(sidepanel).toContain("login_required");
-    expect(sidepanel).toContain("canonical_approval");
     expect(sidepanel).toContain("task_completed");
+    expect(sidepanel).toContain("task_failed");
+    expect(sidepanelHtml).toContain("Connect");
+    expect(sidepanelHtml).toContain("Start task");
+    expect(sidepanelHtml).toContain("Stop");
   });
 
   it("uses a test runner that normalizes pnpm forwarded arguments and a strict asset build", () => {

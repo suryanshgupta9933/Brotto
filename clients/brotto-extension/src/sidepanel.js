@@ -1,86 +1,193 @@
-// ponytail: side panel controller. Subscribes to canonical_* events from
-// background.ts and renders a Claude-in-Chrome-style live activity stream.
-// Each step is a card; mid-task prompts (login, question, decision) are
-// inline cards that interleave the stream chronologically.
+// ponytail: side panel controller. State machine: idle → connecting →
+// connected → executing → (paused | done | error). Renders a live activity
+// stream of step cards with screenshots, action descriptions, and elapsed
+// timer. Mid-task prompts (login, question, decision) are inline amber
+// cards that interleave the stream chronologically.
 
 const stream = document.getElementById('stream');
-const statusEl = document.getElementById('status');
+const statusPill = document.getElementById('statusPill');
+const brandDot = document.getElementById('brandDot');
 const goalEl = document.getElementById('goal');
 const startingUrlEl = document.getElementById('startingUrl');
 const plannerUrlEl = document.getElementById('plannerUrl');
-const runBtn = document.getElementById('run');
-const cancelBtn = document.getElementById('cancel');
+const connectBtn = document.getElementById('connectBtn');
+const disconnectBtn = document.getElementById('disconnectBtn');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const connectionMeta = document.getElementById('connectionMeta');
 const stepCountEl = document.getElementById('stepCount');
+const timerEl = document.getElementById('timer');
 
-let activeSession = false;
-let stepCounter = 0;
+const state = {
+  phase: 'idle',           // idle | connecting | connected | executing | paused | done | error
+  plannerUrl: '',
+  sessionId: null,
+  startTime: 0,
+  stepCount: 0,
+};
 
-runBtn.addEventListener('click', () => { void runTask(); });
-cancelBtn.addEventListener('click', () => { void cancelTask(); });
+let timerInterval = null;
+let lastLiveCard = null;
+
+connectBtn.addEventListener('click', () => void connect());
+disconnectBtn.addEventListener('click', () => void disconnect());
+startBtn.addEventListener('click', () => void startTask());
+stopBtn.addEventListener('click', () => void stopTask());
 goalEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void runTask();
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void startTask();
 });
 
-async function runTask() {
-  const goal = goalEl.value.trim();
-  if (!goal) return;
-  const message = { type: 'run_local_task', task: goal };
-  const startUrl = startingUrlEl.value.trim();
-  const plannerUrl = plannerUrlEl.value.trim();
-  if (startUrl) message.startingUrl = startUrl;
-  if (plannerUrl) message.plannerUrl = plannerUrl;
-  clearStream();
-  appendCard({ kind: 'system', icon: 'icon-nav', title: 'Starting task', meta: goal.slice(0, 80) });
-  const response = await sendMessage(message);
-  if (!response.success) {
-    appendCard({ kind: 'error', icon: 'icon-err', title: 'Failed to start', meta: response.error || 'unknown error' });
-    return;
+function setPhase(phase, message) {
+  state.phase = phase;
+  const labels = {
+    idle: 'Idle',
+    connecting: 'Connecting',
+    connected: 'Connected',
+    executing: 'Running',
+    paused: 'Paused',
+    done: 'Done',
+    error: 'Error',
+  };
+  statusPill.textContent = labels[phase] || 'Idle';
+  statusPill.className = 'status-pill ' + phase;
+  brandDot.className = 'brand-dot' + (phase === 'executing' ? ' executing' : phase === 'connected' ? ' connected' : phase === 'error' ? ' error' : '');
+  connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
+  disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
+  startBtn.disabled = !(phase === 'connected' || phase === 'done' || phase === 'error');
+  stopBtn.disabled = !(phase === 'executing' || phase === 'paused');
+  if (message) connectionMeta.textContent = message;
+}
+
+function clearTimer() {
+  if (timerInterval !== null) {
+    clearInterval(timerInterval);
+    timerInterval = null;
   }
-  activeSession = true;
-  runBtn.hidden = true;
-  cancelBtn.hidden = false;
-  updateStatus('Running');
+  state.startTime = 0;
+  timerEl.textContent = '0.0s';
 }
 
-async function cancelTask() {
-  const response = await sendMessage({ type: 'cancel_local_task' });
-  if (!response.success) appendCard({ kind: 'error', icon: 'icon-err', title: 'Cancel failed', meta: response.error || 'unknown error' });
+function startTimer() {
+  clearTimer();
+  state.startTime = Date.now();
+  timerInterval = setInterval(() => {
+    const elapsed = (Date.now() - state.startTime) / 1000;
+    timerEl.textContent = elapsed.toFixed(1) + 's';
+  }, 100);
 }
 
-async function loginContinue() {
-  const response = await sendMessage({ type: 'local_login_complete' });
-  if (!response.success) appendCard({ kind: 'error', icon: 'icon-err', title: 'Resume failed', meta: response.error || 'unknown error' });
+function stopTimer() {
+  if (timerInterval !== null) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+    const elapsed = (Date.now() - state.startTime) / 1000;
+    timerEl.textContent = elapsed.toFixed(1) + 's';
+  }
+}
+
+function updateStepCount() {
+  stepCountEl.textContent = state.stepCount + (state.stepCount === 1 ? ' step' : ' steps');
 }
 
 function clearStream() {
   stream.replaceChildren();
-  stepCounter = 0;
+  state.stepCount = 0;
+  lastLiveCard = null;
   updateStepCount();
 }
 
-function updateStatus(text, kind) {
-  statusEl.textContent = text;
-  statusEl.className = 'status' + (kind ? ' ' + kind : '');
+async function connect() {
+  const url = plannerUrlEl.value.trim() || 'http://127.0.0.1:3001';
+  setPhase('connecting', `Probing ${url}...`);
+  try {
+    const response = await fetch(url + '/health', { method: 'GET' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const info = await response.json();
+    state.plannerUrl = url;
+    plannerUrlEl.value = url;
+    const label = info.model ? `${info.family} · ${info.model}` : info.family || 'planner';
+    setPhase('connected', `Connected · ${label}`);
+    appendCard({ kind: 'system', icon: 'icon.sys', title: 'Connected to planner', meta: `${url} · ${label}`, ts: Date.now() });
+  } catch (err) {
+    setPhase('error', `Connect failed: ${err instanceof Error ? err.message : String(err)}`);
+    appendCard({ kind: 'error', icon: 'icon.err', title: 'Connect failed', meta: err instanceof Error ? err.message : String(err), ts: Date.now() });
+  }
 }
 
-function updateStepCount() {
-  stepCountEl.textContent = `${stepCounter} step${stepCounter === 1 ? '' : 's'}`;
+function disconnect() {
+  if (state.phase === 'executing' || state.phase === 'paused') {
+    void stopTask();
+  }
+  state.plannerUrl = '';
+  setPhase('idle', 'Disconnected');
+  appendCard({ kind: 'system', icon: 'icon.sys', title: 'Disconnected', meta: '', ts: Date.now() });
+}
+
+async function startTask() {
+  if (state.phase === 'executing' || state.phase === 'paused') return;
+  const goal = goalEl.value.trim();
+  if (!goal) {
+    appendCard({ kind: 'error', icon: 'icon.err', title: 'Empty goal', meta: 'Enter a task description first', ts: Date.now() });
+    return;
+  }
+  if (!state.plannerUrl) {
+    // ponytail: implicit connect if user skipped. Better than blocking on a
+    // connect step they may not realize they need.
+    await connect();
+    if (state.phase !== 'connected') return;
+  }
+  clearStream();
+  state.sessionId = 'session-' + Date.now();
+  setPhase('executing', 'Starting...');
+  startTimer();
+  appendCard({ kind: 'system', icon: 'icon.sys', title: 'Starting task', meta: goal.slice(0, 80), ts: Date.now() });
+  const message = {
+    type: 'run_local_task',
+    task: goal,
+    sessionId: state.sessionId,
+  };
+  const startUrl = startingUrlEl.value.trim();
+  const plannerUrl = plannerUrlEl.value.trim();
+  if (startUrl) message.startingUrl = startUrl;
+  if (plannerUrl) message.plannerUrl = plannerUrl;
+  const response = await sendMessage(message);
+  if (!response.success) {
+    stopTimer();
+    setPhase('error', `Start failed: ${response.error || 'unknown'}`);
+    appendCard({ kind: 'error', icon: 'icon.err', title: 'Failed to start', meta: response.error || 'unknown error', ts: Date.now() });
+  }
+}
+
+async function stopTask() {
+  stopBtn.disabled = true;
+  const response = await sendMessage({ type: 'cancel_local_task' });
+  if (!response.success) appendCard({ kind: 'error', icon: 'icon.err', title: 'Cancel failed', meta: response.error || 'unknown error', ts: Date.now() });
 }
 
 function iconFor(kind) {
   switch (kind) {
     case 'left_click':
     case 'double_click':
-    case 'right_click': return 'icon-click';
-    case 'insert_text': return 'icon-text';
+    case 'right_click':
+    case 'mouse_move':
+      return 'click';
+    case 'insert_text':
+      return 'text';
     case 'visit_url':
-    case 'history_back': return 'icon-nav';
-    case 'key': return 'icon-key';
-    case 'terminate': return 'icon-term';
-    case 'error': return 'icon-err';
-    case 'prompt': return 'icon-qu';
-    case 'system': return 'icon-nav';
-    default: return 'icon-nav';
+    case 'history_back':
+      return 'nav';
+    case 'key':
+      return 'key';
+    case 'terminate':
+      return 'term';
+    case 'wait':
+      return 'sys';
+    case 'error':
+      return 'err';
+    case 'prompt':
+      return 'qu';
+    default:
+      return 'nav';
   }
 }
 
@@ -90,29 +197,35 @@ function describeAction(action) {
     case 'left_click':
     case 'double_click':
     case 'right_click':
-      return `${action.type.replace('_', ' ')} at (${action.x}, ${action.y})`;
+      return `${action.type.replace('_', ' ')} (${action.x}, ${action.y})`;
     case 'insert_text':
       return `Type "${(action.text || '').slice(0, 60)}"`;
     case 'key':
-      return `Press key ${action.key}`;
+      return `Press ${action.key}`;
     case 'visit_url':
       return `Navigate to ${action.url}`;
+    case 'history_back':
+      return `Go back`;
     case 'scroll':
-      return `Scroll ${action.deltaX || 0},${action.deltaY || 0}`;
+      return `Scroll`;
     case 'wait':
       return `Wait`;
     case 'terminate':
-      return `Done`;
+      return `Task done`;
     default:
-      return action.type || 'Unknown action';
+      return action.type || 'Action';
   }
 }
 
+function fmtTime(ts) {
+  if (!ts) return '';
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
 function appendCard(opts) {
-  // ponytail: most recent card is always at the bottom. The 'live' marker is
-  // moved off any prior card when a new one is added.
-  const priorLive = stream.querySelector('.card.live');
-  if (priorLive) priorLive.classList.remove('live');
+  if (lastLiveCard && opts.live) lastLiveCard.classList.remove('live');
+  const empty = stream.querySelector('.empty');
+  if (empty) empty.remove();
 
   const card = document.createElement('article');
   card.className = 'card' + (opts.live ? ' live' : '') + (opts.kind === 'error' ? ' error' : '') + (opts.kind === 'done' ? ' done' : '') + (opts.kind === 'prompt' ? ' prompt' : '');
@@ -120,14 +233,14 @@ function appendCard(opts) {
   const head = document.createElement('div');
   head.className = 'card-head';
   const icon = document.createElement('span');
-  icon.className = 'card-icon ' + (opts.icon || 'icon-nav');
-  icon.textContent = (opts.title || '?').charAt(0).toUpperCase();
+  icon.className = 'icon ' + (opts.icon || 'icon.nav');
+  icon.textContent = (opts.iconLabel || opts.title || '?').charAt(0).toUpperCase();
   const title = document.createElement('span');
   title.className = 'card-title';
   title.textContent = opts.title || '';
   const meta = document.createElement('span');
   meta.className = 'card-meta';
-  meta.textContent = opts.meta || '';
+  meta.textContent = fmtTime(opts.ts) + (opts.meta ? ' · ' + opts.meta : '');
   head.append(icon, title, meta);
   card.appendChild(head);
 
@@ -141,9 +254,15 @@ function appendCard(opts) {
   if (opts.screenshot) {
     const img = document.createElement('img');
     img.className = 'screenshot';
-    img.src = opts.screenshot;
-    img.alt = '';
+    img.src = `data:image/png;base64,${opts.screenshot}`;
+    img.alt = opts.url || 'screenshot';
+    img.loading = 'lazy';
     card.appendChild(img);
+  } else if (opts.placeholder) {
+    const ph = document.createElement('div');
+    ph.className = 'screenshot placeholder';
+    ph.textContent = opts.placeholder;
+    card.appendChild(ph);
   }
 
   if (opts.body) {
@@ -158,9 +277,9 @@ function appendCard(opts) {
     actions.className = 'prompt-actions';
     for (const a of opts.actions) {
       const btn = document.createElement('button');
-      btn.className = a.kind || '';
+      btn.className = 'btn ' + (a.kind || '');
       btn.textContent = a.label;
-      btn.addEventListener('click', a.onClick);
+      btn.addEventListener('click', () => a.onClick(btn));
       actions.appendChild(btn);
     }
     card.appendChild(actions);
@@ -168,122 +287,20 @@ function appendCard(opts) {
 
   if (opts.input) {
     const input = document.createElement('input');
-    input.className = 'prompt-input';
+    input.className = 'input';
     input.placeholder = opts.input.placeholder || '';
-    if (opts.input.value) input.value = opts.input.value;
     card.appendChild(input);
-    if (opts.actions) {
+    if (opts.actions && opts.actions.length > 0) {
       const last = opts.actions[opts.actions.length - 1];
-      if (last) last.onClick = () => last.onClick(input.value);
+      const original = last.onClick;
+      last.onClick = () => original(input.value);
     }
   }
 
   stream.appendChild(card);
   stream.scrollTop = stream.scrollHeight;
-
-  if (opts.live) {
-    const empty = stream.querySelector('.empty');
-    if (empty) empty.remove();
-  }
-
+  if (opts.live) lastLiveCard = card;
   return card;
-}
-
-chrome.runtime.onMessage.addListener((message) => {
-  switch (message.type) {
-    case 'canonical_status':
-      if (message.status === 'executing') updateStatus('Running', 'active');
-      else if (message.status === 'connected') updateStatus('Connected', 'active');
-      else if (message.status === 'waiting_for_approval') updateStatus('Paused', 'paused');
-      else if (message.status === 'completed') { updateStatus('Done', 'done'); activeSession = false; runBtn.hidden = false; cancelBtn.hidden = true; }
-      else if (message.status === 'failed' || message.status === 'cancelled') { updateStatus(message.status, 'error'); activeSession = false; runBtn.hidden = false; cancelBtn.hidden = true; }
-      else updateStatus(message.status);
-      break;
-    case 'canonical_step': {
-      const summary = message.summary || '';
-      const m = summary.match(/^step (\d+):\s+(.*?)\s+→\s+(.*)$/);
-      if (m) {
-        stepCounter = Math.max(stepCounter, Number(m[1]));
-        appendCard({
-          kind: 'action',
-          icon: iconFor(actionKind(m[2])),
-          title: m[2],
-          meta: m[3],
-          live: true,
-        });
-        updateStepCount();
-      } else {
-        appendCard({ kind: 'log', icon: 'icon-nav', title: summary, meta: '', live: true });
-      }
-      break;
-    }
-    case 'canonical_error':
-      appendCard({ kind: 'error', icon: 'icon-err', title: message.code || 'Error', meta: message.message || '' });
-      break;
-    case 'canonical_approval':
-      appendCard({
-        kind: 'prompt',
-        icon: 'icon-qu',
-        title: 'Approval required',
-        body: message.request?.reason || 'The agent wants to take an action that requires your approval.',
-        actions: [
-          { label: 'Approve', kind: 'primary', onClick: () => sendMessage({ type: 'approve_action' }) },
-          { label: 'Deny', kind: 'danger', onClick: () => sendMessage({ type: 'deny_action' }) },
-        ],
-      });
-      updateStatus('Paused', 'paused');
-      break;
-    case 'canonical_user_input':
-      appendCard({
-        kind: 'prompt',
-        icon: 'icon-qu',
-        title: 'Clarifying question',
-        body: message.question || 'The agent needs more information.',
-        input: { placeholder: 'Your answer…' },
-        actions: [
-          { label: 'Submit', kind: 'primary', onClick: (value) => sendMessage({ type: 'submit_user_input', value: value || '' }) },
-        ],
-      });
-      break;
-    case 'login_required':
-      appendCard({
-        kind: 'prompt',
-        icon: 'icon-qu',
-        title: `Login required: ${message.domain || 'site'}`,
-        body: `Please sign in to ${message.domain || 'this site'} directly in the browser tab, then click Continue.`,
-        url: message.url,
-        actions: [
-          { label: 'Continue', kind: 'primary', onClick: () => void loginContinue() },
-          { label: 'Skip task', kind: 'danger', onClick: () => sendMessage({ type: 'cancel_local_task' }) },
-        ],
-      });
-      updateStatus('Paused', 'paused');
-      break;
-    case 'task_completed':
-      stepCounter = Math.max(stepCounter, message.steps || stepCounter);
-      appendCard({
-        kind: 'done',
-        icon: 'icon-term',
-        title: `Completed in ${message.steps || stepCounter} steps`,
-        meta: message.summary || '',
-      });
-      updateStatus('Done', 'done');
-      updateStepCount();
-      runBtn.hidden = false;
-      cancelBtn.hidden = true;
-      break;
-  }
-});
-
-function actionKind(s) {
-  if (s.startsWith('left_click') || s.startsWith('double_click') || s.startsWith('right_click')) return s.split(' ')[0];
-  if (s.startsWith('insert_text')) return 'insert_text';
-  if (s.startsWith('key')) return 'key';
-  if (s.startsWith('visit_url') || s.startsWith('history_back')) return 'visit_url';
-  if (s.startsWith('scroll')) return 'scroll';
-  if (s.startsWith('wait')) return 'wait';
-  if (s.startsWith('terminate')) return 'terminate';
-  return s;
 }
 
 function sendMessage(message) {
@@ -294,3 +311,80 @@ function sendMessage(message) {
     });
   });
 }
+
+chrome.runtime.onMessage.addListener((message) => {
+  switch (message.type) {
+    case 'session_started':
+      state.sessionId = message.sessionId || state.sessionId;
+      break;
+    case 'step_card': {
+      state.stepCount = Math.max(state.stepCount, message.index !== undefined ? message.index + 1 : state.stepCount + 1);
+      updateStepCount();
+      appendCard({
+        kind: 'step',
+        icon: iconFor(message.iconKind),
+        iconLabel: message.title || '',
+        title: message.title || 'Step',
+        meta: message.result || '',
+        url: message.url,
+        screenshot: message.screenshot,
+        placeholder: message.screenshotPlaceholder,
+        ts: message.ts || Date.now(),
+        live: true,
+      });
+      break;
+    }
+    case 'login_required':
+      setPhase('paused', `Login required at ${message.domain || 'site'}`);
+      appendCard({
+        kind: 'prompt',
+        icon: 'icon.qu',
+        iconLabel: 'L',
+        title: `Login required: ${message.domain || 'site'}`,
+        body: `Sign in to ${message.domain || 'this site'} in the browser tab, then click Continue. The agent will resume from where it paused.`,
+        url: message.url,
+        ts: Date.now(),
+        actions: [
+          { label: 'Continue', kind: 'primary', onClick: () => { void sendMessage({ type: 'local_login_complete' }); } },
+          { label: 'Skip task', kind: 'danger', onClick: () => { void sendMessage({ type: 'cancel_local_task' }); } },
+        ],
+      });
+      break;
+    case 'task_completed':
+      stopTimer();
+      setPhase('done', message.summary ? message.summary.slice(0, 60) : 'Task complete');
+      state.stepCount = message.steps || state.stepCount;
+      updateStepCount();
+      appendCard({
+        kind: 'done',
+        icon: 'icon.term',
+        iconLabel: '✓',
+        title: `Completed in ${message.steps || state.stepCount} steps`,
+        meta: message.summary || '',
+        ts: Date.now(),
+      });
+      break;
+    case 'task_failed':
+      stopTimer();
+      setPhase('error', message.message || 'Task failed');
+      appendCard({
+        kind: 'error',
+        icon: 'icon.err',
+        iconLabel: '✕',
+        title: message.code || 'Task failed',
+        meta: message.message || '',
+        ts: Date.now(),
+      });
+      break;
+    case 'log':
+      appendCard({
+        kind: 'system',
+        icon: 'icon.sys',
+        iconLabel: '·',
+        title: message.message || '',
+        meta: '',
+        ts: Date.now(),
+      });
+      break;
+  }
+});

@@ -3,10 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Brotto Browser Agent</title>
+  <title>Brotto</title>
   <style>
-    /* ponytail: Claude-in-Chrome-inspired side panel. Compact, card-based, no
-       chrome around the stream. Single column, scroll inside #stream. */
+    /* ponytail: minimal dark UI. Three sections — header (status + connect),
+       composer (task input + run controls), activity (live stream of step
+       cards + timer). Cards are modular boxes with screenshot, action,
+       result, timestamp. */
     :root {
       --bg: #0e1116;
       --surface: #161b22;
@@ -21,90 +23,105 @@
       --amber: #f59e0b;
       --red: #ef4444;
       --blue: #38bdf8;
+      --radius: 8px;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
     body { display: flex; flex-direction: column; min-width: 360px; }
-    header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--surface); position: sticky; top: 0; z-index: 2; }
+    header { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+    .header-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
     .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
-    .brand-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
-    .status { font-size: 11px; color: var(--text-mute); padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.05em; }
-    .status.active { color: var(--green); border-color: var(--green); }
-    .status.paused { color: var(--amber); border-color: var(--amber); }
-    .status.error { color: var(--red); border-color: var(--red); }
-    .status.done { color: var(--blue); border-color: var(--blue); }
-    .composer { padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface); display: grid; gap: 8px; }
-    textarea { width: 100%; min-height: 64px; max-height: 160px; resize: vertical; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); font: inherit; outline: none; }
-    textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
-    .row { display: flex; gap: 8px; align-items: center; }
+    .brand-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-mute); transition: background 0.2s ease, box-shadow 0.2s ease; }
+    .brand-dot.connected { background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .brand-dot.executing { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.5s ease-in-out infinite; }
+    .brand-dot.error { background: var(--red); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .status-pill { font-size: 11px; color: var(--text-mute); padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500; }
+    .status-pill.idle { color: var(--text-mute); }
+    .status-pill.connected { color: var(--green); border-color: var(--green); }
+    .status-pill.executing { color: var(--accent); border-color: var(--accent); }
+    .status-pill.paused { color: var(--amber); border-color: var(--amber); }
+    .status-pill.done { color: var(--blue); border-color: var(--blue); }
+    .status-pill.error { color: var(--red); border-color: var(--red); }
+    .btn { padding: 8px 14px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text); font: inherit; cursor: pointer; transition: all 0.15s ease; font-weight: 500; }
+    .btn:hover { background: var(--border-strong); }
+    .btn:disabled { opacity: 0.4; cursor: default; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    .btn.primary:hover { background: var(--accent-strong); }
+    .btn.danger { background: var(--red); border-color: var(--red); color: white; }
+    .btn.danger:hover { background: #f87171; }
+    .btn.ghost { background: transparent; border-color: var(--border); }
+    .composer { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--surface); display: grid; gap: 8px; }
+    .input { width: 100%; padding: 8px 10px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); font: inherit; outline: none; }
+    .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
+    textarea.input { min-height: 56px; max-height: 120px; resize: vertical; font-family: inherit; }
+    .input-meta { font-size: 11px; color: var(--text-mute); }
+    .row { display: flex; gap: 8px; }
     .row > * { flex: 1; }
-    input[type="url"] { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); font: 12px ui-monospace, monospace; outline: none; }
-    input[type="url"]:focus { border-color: var(--accent); }
-    button { padding: 8px 14px; border-radius: 6px; border: 0; background: var(--border-strong); color: var(--text); font: inherit; cursor: pointer; transition: background 0.15s ease; }
-    button:hover { background: var(--accent); }
-    button.primary { background: var(--accent); color: white; font-weight: 500; }
-    button.primary:hover { background: var(--accent-strong); }
-    button.danger { background: var(--red); color: white; }
-    button.danger:hover { background: #f87171; }
-    button:disabled { opacity: 0.4; cursor: default; }
-    #stream { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
-    .empty { color: var(--text-mute); text-align: center; padding: 32px 16px; font-size: 12px; }
-    .empty-icon { font-size: 32px; opacity: 0.3; margin-bottom: 8px; }
-    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; animation: slide-in 0.2s ease; }
+    .row > .btn { flex: 0 0 auto; }
+    main { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+    .empty { color: var(--text-mute); text-align: center; padding: 40px 16px; font-size: 12px; }
+    .empty-icon { font-size: 36px; opacity: 0.25; margin-bottom: 10px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: grid; gap: 8px; animation: slide-in 0.18s ease; }
     @keyframes slide-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
     .card.live { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-    .card.prompt { border-color: var(--amber); background: var(--surface-2); }
+    .card.prompt { border-color: var(--amber); background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%); }
+    .card.error { border-color: var(--red); background: rgba(239, 68, 68, 0.06); }
     .card.done { border-color: var(--blue); }
-    .card.error { border-color: var(--red); background: rgba(239, 68, 68, 0.08); }
-    .card-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-mute); }
-    .card-icon { width: 18px; height: 18px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; flex-shrink: 0; }
-    .icon-click { background: var(--accent); color: white; }
-    .icon-text { background: var(--blue); color: white; }
-    .icon-nav { background: var(--text-mute); color: var(--bg); }
-    .icon-key { background: var(--amber); color: white; }
-    .icon-term { background: var(--green); color: white; }
-    .icon-err { background: var(--red); color: white; }
-    .icon-qu { background: var(--amber); color: white; }
-    .card-title { font-weight: 500; color: var(--text); }
-    .card-meta { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--text-mute); }
+    .card-head { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .icon { width: 22px; height: 22px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
+    .icon.click { background: var(--accent); color: white; }
+    .icon.text { background: var(--blue); color: white; }
+    .icon.nav { background: var(--text-mute); color: var(--bg); }
+    .icon.key { background: var(--amber); color: white; }
+    .icon.term { background: var(--green); color: white; }
+    .icon.err { background: var(--red); color: white; }
+    .icon.qu { background: var(--amber); color: white; }
+    .icon.sys { background: var(--border-strong); color: var(--text); }
+    .card-title { font-weight: 500; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card-meta { font-size: 11px; color: var(--text-mute); font-family: ui-monospace, "SF Mono", Menlo, monospace; flex-shrink: 0; }
     .card-url { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--accent-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .screenshot { width: 100%; border-radius: 6px; border: 1px solid var(--border); margin-top: 6px; display: block; }
+    .screenshot { width: 100%; max-height: 200px; object-fit: contain; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); display: block; }
+    .screenshot.placeholder { min-height: 80px; display: flex; align-items: center; justify-content: center; color: var(--text-mute); font-size: 11px; font-style: italic; }
     .prompt-body { font-size: 13px; color: var(--text); }
-    .prompt-actions { display: flex; gap: 6px; margin-top: 8px; }
-    .prompt-input { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); font: inherit; outline: none; }
-    .prompt-input:focus { border-color: var(--accent); }
+    .prompt-actions { display: flex; gap: 6px; margin-top: 6px; }
     footer { padding: 10px 16px; border-top: 1px solid var(--border); background: var(--surface); display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-mute); }
-    footer .step-count { font-family: ui-monospace, monospace; }
+    footer .timer { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; color: var(--text); font-weight: 500; }
   </style>
 </head>
 <body>
   <header>
-    <div class="brand"><span class="brand-dot"></span>Brotto</div>
-    <div id="status" class="status">Idle</div>
+    <div class="header-row">
+      <div class="brand"><span id="brandDot" class="brand-dot"></span>Brotto</div>
+      <div id="statusPill" class="status-pill idle">Idle</div>
+    </div>
+    <div class="row">
+      <input id="plannerUrl" class="input" type="url" placeholder="Planner URL (default http://127.0.0.1:3001)" value="http://127.0.0.1:3001">
+      <button id="connectBtn" class="btn primary">Connect</button>
+      <button id="disconnectBtn" class="btn ghost" disabled>Disconnect</button>
+    </div>
   </header>
 
   <section class="composer">
-    <textarea id="goal" placeholder="Tell Brotto what to do in this tab…" maxlength="2000"></textarea>
+    <textarea id="goal" class="input" placeholder="Describe the task — e.g. Log in to the page using the credentials shown, stop on Welcome" maxlength="2000"></textarea>
+    <input id="startingUrl" class="input" type="url" placeholder="Starting URL (optional)">
+    <div class="input-meta" id="connectionMeta">Not connected</div>
     <div class="row">
-      <input id="startingUrl" type="url" placeholder="Start URL (optional)">
-    </div>
-    <div class="row">
-      <input id="plannerUrl" type="url" placeholder="Planner URL (default http://127.0.0.1:3001)">
-      <button id="run" class="primary">Run</button>
-      <button id="cancel" class="danger" hidden>Stop</button>
+      <button id="startBtn" class="btn primary" disabled>Start task</button>
+      <button id="stopBtn" class="btn danger" disabled>Stop</button>
     </div>
   </section>
 
   <main id="stream" aria-live="polite">
     <div class="empty">
       <div class="empty-icon">⌖</div>
-      <div>No active task. Enter a goal above to start.</div>
+      <div>No active task. Connect, then enter a goal and press Start.</div>
     </div>
   </main>
 
   <footer>
-    <span>Driver: local · gpt-4o-mini</span>
-    <span class="step-count" id="stepCount">0 steps</span>
+    <span id="stepCount">0 steps</span>
+    <span class="timer" id="timer">0.0s</span>
   </footer>
 
   <script src="sidepanel.js"></script>

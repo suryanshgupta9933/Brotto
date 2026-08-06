@@ -14,7 +14,7 @@ export interface LocalDriverOptions {
   startingUrl?: string;
   signal: AbortSignal;
   onTabOpened: (tabId: number) => void;
-  onStep: (step: { index: number; action: string; result: string }) => void;
+  onStep: (step: { index: number; action: string; result: string; url: string; screenshot: string | null; iconKind: string }) => void;
   onLoginRequired: (info: { url: string; domain: string }) => void;
   onComplete: (info: { summary: string; steps: number }) => void;
   onError: (error: { code: string; message: string }) => void;
@@ -357,6 +357,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       }
       const action = outcome.action ?? { type: "unknown" };
       const desc = describeAction(action);
+      const iconKind = (action.type ?? "unknown").toString();
       let result: string;
       try {
         result = await executeAction(tabId, action);
@@ -366,10 +367,21 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         opts.onError({ code: "ACTION_FAILED", message });
         return;
       }
-      history.push({ action: desc, result });
-      opts.onStep({ index: stepIndex, action: desc, result });
       await waitForNetworkIdle(tabId).catch(() => undefined);
       await new Promise((r) => setTimeout(r, POST_ACTION_PAUSE_MS));
+      // ponytail: capture the post-action observation so the side panel card
+      // can show the screenshot of where the agent landed, not where it started.
+      let screenshot: string | null = null;
+      let postUrl = obs.url;
+      try {
+        const postObs = await captureObservation(tabId);
+        screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
+        postUrl = postObs.url;
+      } catch {
+        // ignore — empty screenshot is fine
+      }
+      history.push({ action: desc, result });
+      opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind });
       stepIndex++;
     }
     opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });

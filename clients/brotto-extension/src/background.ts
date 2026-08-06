@@ -187,8 +187,18 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
         onTabOpened: (tabId) => {
           localTabId = tabId;
         },
-        onStep: ({ index, action, result }) => {
-          notifyUi({ type: "canonical_step", kind: "action", summary: `step ${index + 1}: ${action} → ${result}` });
+        onStep: ({ index, action, result, url, screenshot, iconKind }) => {
+          notifyUi({
+            type: "step_card",
+            index,
+            title: action,
+            result,
+            url,
+            screenshot: screenshot ?? undefined,
+            screenshotPlaceholder: screenshot ? undefined : "Screenshot unavailable (chrome:// page or capture blocked)",
+            iconKind,
+            ts: Date.now(),
+          });
         },
         // ponytail: log events surface as 'observation' kind so the existing
         // popup log handler picks them up without a new message type.

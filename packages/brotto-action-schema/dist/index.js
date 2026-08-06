@@ -270,10 +270,14 @@ var ScreenshotSchema = withForbiddenBrowserDataGuard(import_zod2.z.discriminated
   import_zod2.z.object({
     kind: import_zod2.z.literal("inline"),
     encoding: import_zod2.z.enum(["base64", "png", "jpeg", "webp"]),
-    data: import_zod2.z.string().min(1).max(1e7),
+    // ponytail: data may be empty when the extension captured a chrome://
+    // page or other restricted URL that captureVisibleTab refuses to render.
+    // width/height default to zero so downstream consumers can detect
+    // "no screenshot available" and render a placeholder.
+    data: import_zod2.z.string().max(1e7),
     sha256: Sha256Schema,
-    width: import_zod2.z.number().int().positive(),
-    height: import_zod2.z.number().int().positive()
+    width: import_zod2.z.number().int().nonnegative(),
+    height: import_zod2.z.number().int().nonnegative()
   }).strict(),
   import_zod2.z.object({
     kind: import_zod2.z.literal("artifact"),
