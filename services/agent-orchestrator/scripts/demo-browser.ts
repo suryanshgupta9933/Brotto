@@ -10,7 +10,7 @@ import type { PlanningOutcome } from "../src/engine/types.js";
 
 const SERVER_URL = process.env.DEMO_SERVER ?? "http://127.0.0.1:3001";
 const TARGET_URL = process.env.DEMO_TARGET_URL ?? "https://the-internet.herokuapp.com/login";
-const GOAL = process.env.DEMO_GOAL ?? "Log in with username 'tomsmith' and password 'SuperSecretPassword!' and verify the page contains 'Welcome to the Secure Area'";
+const GOAL = process.env.DEMO_GOAL ?? "Fill in the login form (username 'tomsmith', password 'SuperSecretPassword!'), click Login, and verify the page shows 'Welcome to the Secure Area'. Use click + type per field. Don't navigate to other URLs.";
 const MAX_STEPS = Number(process.env.DEMO_MAX_STEPS ?? "10");
 const HEADLESS = process.env.DEMO_HEADLESS !== "1";
 
@@ -54,7 +54,7 @@ async function executeAction(page: Page, outcome: PlanningOutcome): Promise<void
     case "insert_text": {
       if (typeof action.text === "string") {
         console.log(`  → insert_text "${action.text.slice(0, 40)}${action.text.length > 40 ? "…" : ""}"`);
-        await page.keyboard.type(action.text);
+        await page.keyboard.type(action.text, { delay: 35 });
       }
       break;
     }
@@ -115,12 +115,34 @@ async function main() {
   while (stepCount < MAX_STEPS) {
     console.log(`\n[demo-browser] step ${stepCount + 1}/${MAX_STEPS}`);
     const observation = await captureObservation(page);
-    console.log(`  observed: url=${observation.url} title=${observation.title} targets=${observation.semanticTargets.length} ax=${observation.accessibilityNodes?.length ?? 0}`);
+    const focused = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === document.body) return null;
+      const r = el.getBoundingClientRect();
+      return {
+        tag: el.tagName.toLowerCase(),
+        name: ((el as HTMLInputElement).value ?? el.textContent ?? "").slice(0, 60),
+        cx: Math.round(r.x + r.width / 2),
+        cy: Math.round(r.y + r.height / 2),
+      };
+    }).catch(() => null);
+    (observation as { focusedElement?: unknown }).focusedElement = focused;
+    console.log(`  observed: url=${observation.url} title=${observation.title} targets=${observation.semanticTargets.length} ax=${observation.accessibilityNodes?.length ?? 0} focused=${focused?.tag ?? "none"}`);
+    if (process.env.DEMO_VERBOSE === "1") {
+      console.log("  semanticTargets:");
+      for (const t of observation.semanticTargets) {
+        const bb = t.boundingBox;
+        console.log(`    ${t.tag} "${(t.accessibleName?.text ?? "").slice(0, 30)}" id=${t.attributes?.id ?? ""} bbox=${bb.x},${bb.y} ${bb.width}x${bb.height}`);
+      }
+    }
 
     const outcome = await plan(observation);
-    console.log(`  outcome: kind=${outcome.kind} action.type=${(outcome as { action?: { type?: string } }).action?.type ?? "n/a"}`);
-
-    if (outcome.kind === "completion") {
+    if (outcome.kind === "action") {
+      const a = (outcome as { action: { type?: string; x?: number; y?: number; text?: string; key?: string } }).action;
+      console.log(`  action: type=${a.type} ${a.x !== undefined ? `at (${a.x}, ${a.y})` : ""} ${a.text ? `text="${a.text.slice(0, 40)}"` : ""} ${a.key ? `key="${a.key}"` : ""}`);
+    } else if (outcome.kind === "question") {
+      console.log(`  question: "${(outcome as { question: string }).question}"`);
+    } else if (outcome.kind === "completion") {
       const summary = (outcome as { summary?: string }).summary ?? "";
       const bodyText = (await page.textContent("body")) ?? "";
       const success = bodyText.includes("Welcome to the Secure Area");
@@ -129,6 +151,8 @@ async function main() {
       console.log(`[demo-browser] total time ${Date.now() - t0}ms, ${stepCount + 1} steps`);
       await browser.close();
       process.exit(success ? 0 : 1);
+    } else {
+      console.log(`  outcome: kind=${outcome.kind}`);
     }
 
     await executeAction(page, outcome);

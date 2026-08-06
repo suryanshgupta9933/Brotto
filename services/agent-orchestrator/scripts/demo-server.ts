@@ -45,10 +45,22 @@ async function main() {
   app.get("/health", async () => ({ status: "ok", family, model: config.model }));
   app.post<{ Body: PlanningInput }>("/plan", async (req) => {
     const t0 = Date.now();
-    const outcome = await planner.plan(req.body, new AbortController().signal);
-    const elapsed = Date.now() - t0;
-    console.log(`[demo-server] /plan responded in ${elapsed}ms`);
-    return outcome;
+    try {
+      const outcome = await planner.plan(req.body, new AbortController().signal);
+      const elapsed = Date.now() - t0;
+      console.log(`[demo-server] /plan responded in ${elapsed}ms kind=${outcome.kind}`);
+      if (outcome.kind === "action") {
+        const a = (outcome as { action: { type?: string; x?: number; y?: number; text?: string } }).action;
+        console.log(`[demo-server]   action: ${a.type} ${a.x !== undefined ? `(${a.x}, ${a.y})` : ""} ${a.text ? `"${a.text.slice(0, 30)}"` : ""}`);
+      } else if (outcome.kind === "question") {
+        console.log(`[demo-server]   question: ${(outcome as { question: string }).question.slice(0, 80)}`);
+      }
+      return outcome;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[demo-server] /plan error: ${message}`);
+      throw err;
+    }
   });
 
   await app.listen({ port: PORT, host: "127.0.0.1" });

@@ -140,6 +140,7 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
     const choice = choices[0];
     const raw_tool_calls = choice.delta?.tool_calls ?? [];
+    console.log(`[planner] assembled tool_calls:`, JSON.stringify(raw_tool_calls));
     // ponytail: filter empty-named tool calls. Streaming assembly can leave
     // the name blank if no chunk supplied one (rare but seen with gpt-4o-mini).
     const tool_calls = raw_tool_calls.filter((tc) => (tc.function?.name ?? "").length > 0);
@@ -167,41 +168,27 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
     messages.push({
       role: 'system',
-      content: `You are a browser automation assistant. Use the provided tools to act on the page.
-
-Available tools (each is a separate tool call):
-- left_click(x, y) — left-click at viewport coordinate
-- double_click(x, y) — double-click at coordinate
-- right_click(x, y) — right-click at coordinate
-- mouse_move(x, y) — move mouse to coordinate
-- drag(startX, startY, endX, endY) — drag from start to end
-- scroll(deltaX, deltaY) — scroll by pixel deltas
-- key(key) — press a keyboard key (Enter, Tab, Escape, etc.)
-- insert_text(text) — type text into the focused input
-- visit_url(url) — navigate to an HTTP(S) URL
-- history_back(steps?) — go back in history
-- screenshot() — capture viewport screenshot
-- wait(durationMs) — pause for given milliseconds
-- ask_user_question(question) — ask the user a clarifying question
-- memorize_fact(fact) — store a fact for later steps
-- terminate(answer) — mark task complete with a final answer
-
-You must call at least one tool on every turn. If the page is unclear, use ask_user_question.
-The page contains interactive elements with bounding boxes; click near their centers.`,
+      content: "You drive a browser to reach a goal. Each turn: look at the page elements + the currently-focused element, pick the next action, call one tool.\n\nFor forms, the pattern is per-field: left_click(field1) → insert_text → left_click(field2) → insert_text → left_click(submit). Don't re-type into a field that already has the value you want.\n\nIf 'Currently focused' shows a tag with text already in it (like 'input \"tomsmith\"'), that field is done — move to the next one.\n\nCall terminate(answer) when the goal is met.",
     });
+
+    const targets = (input.observation.semanticTargets ?? []).filter((t) => {
+      const bb = t.boundingBox;
+      return bb && bb.width > 0 && bb.height > 0;
+    });
+    const elements = targets.map((t) => {
+      const bb = t.boundingBox;
+      const cx = Math.round(bb.x + bb.width / 2);
+      const cy = Math.round(bb.y + bb.height / 2);
+      const label = (t.accessibleName?.text ?? "").trim() || t.attributes?.id || t.attributes?.name || t.tag;
+      return `  (${cx}, ${cy})  ${t.tag} "${label}"`;
+    }).join("\n");
 
     messages.push({
       role: 'user',
-      content: `Goal: ${input.goal}\n\nCompletion criteria:\n${input.completionCriteria.map((c) => `- ${c}`).join('\n')}`,
+      content: `Goal: ${input.goal}\n\nURL: ${input.observation.url}\nTitle: ${input.observation.title}\n\nClickable elements (use coordinates as-is):\n${elements || "  (none visible)"}\n\nCurrently focused: ${(input.observation as { focusedElement?: { tag: string; name: string; cx: number; cy: number } | null }).focusedElement
+        ? `${(input.observation as { focusedElement: { tag: string; name: string; cx: number; cy: number } }).focusedElement.tag} "${(input.observation as { focusedElement: { name: string } }).focusedElement.name}" at (${(input.observation as { focusedElement: { cx: number } }).focusedElement.cx}, ${(input.observation as { focusedElement: { cy: number } }).focusedElement.cy})`
+        : "(nothing)"}`,
     });
-
-    if (input.trajectory.length > 0) {
-      const recent = input.trajectory.slice(-10);
-      messages.push({
-        role: 'assistant',
-        content: recent.map((e) => JSON.stringify(e)).join('\n'),
-      });
-    }
 
     return messages;
   }
@@ -217,63 +204,45 @@ The page contains interactive elements with bounding boxes; click near their cen
     const decoder = new TextDecoder();
     let buffer = '';
 
-    // Accumulators for streamed tool_calls (index -> { name, arguments })
     const toolCallsMap = new Map<number, { name: string; arguments: string }>();
     let contentAcc = '';
     let done = false;
+    let processedUpTo = 0; // ponytail: offset into buffer to avoid re-processing lines on each read
 
-    const readChunk = (chunk: string): void => {
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') {
-          done = true;
-          return;
-        }
-        let parsed: SseChunk | undefined;
-        try {
-          parsed = JSON.parse(data) as SseChunk;
-        } catch {
-          // skip malformed chunk
-          continue;
-        }
-        if (!parsed.choices || parsed.choices.length === 0) continue;
-        const delta = parsed.choices[0]?.delta;
-        if (!delta) continue;
-
-        if (delta.content) {
-          contentAcc += delta.content;
-        }
-
-        if (delta.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            const idx = tc.index;
-            const existing = toolCallsMap.get(idx) ?? { name: '', arguments: '' };
-            if (tc.function.name) existing.name += tc.function.name;
-            if (tc.function.arguments) existing.arguments += tc.function.arguments;
-            toolCallsMap.set(idx, existing);
-          }
+    const processLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return;
+      const data = trimmed.slice(5).trim();
+      if (data === '[DONE]') { done = true; return; }
+      let parsed: SseChunk | undefined;
+      try { parsed = JSON.parse(data) as SseChunk; } catch { return; }
+      if (!parsed.choices || parsed.choices.length === 0) return;
+      const delta = parsed.choices[0]?.delta;
+      if (!delta) return;
+      if (delta.content) contentAcc += delta.content;
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index;
+          const existing = toolCallsMap.get(idx) ?? { name: '', arguments: '' };
+          if (tc.function.name) existing.name += tc.function.name;
+          if (tc.function.arguments) existing.arguments += tc.function.arguments;
+          toolCallsMap.set(idx, existing);
         }
       }
     };
 
     try {
       while (!done) {
-        if (signal.aborted) {
-          throw new DOMException('Aborted', 'AbortError');
-        }
+        if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
         const { value, done: readerDone } = await reader.read();
         if (readerDone) break;
         buffer += decoder.decode(value, { stream: true });
-        readChunk(buffer);
-        // Keep unprocessed tail in buffer
+        // Only process NEW lines since last iteration (up to last newline)
         const lastNewline = buffer.lastIndexOf('\n');
-        if (lastNewline >= 0) {
-          buffer = buffer.slice(lastNewline + 1);
-        } else {
-          buffer = '';
+        if (lastNewline > processedUpTo) {
+          const newPart = buffer.slice(processedUpTo, lastNewline);
+          for (const line of newPart.split('\n')) processLine(line);
+          processedUpTo = lastNewline + 1;
         }
       }
     } finally {
@@ -350,10 +319,9 @@ The page contains interactive elements with bounding boxes; click near their cen
       throw new OpenAICompatiblePlannerError('No valid actions parsed from tool calls', false);
     }
 
-    // ponytail: skip AgentProposalV1Schema re-validation — the parser has already
-    // validated against FaraActionArgsSchema. The two schemas use different shapes
-    // (parser: nested coordinates/viewport; wire: flat x/y), so re-validating here
-    // always fails. Trust the parser's output and shape to ActionProposalV1 by hand.
+    // ponytail: parser produces FaraActionArgs shape (nested coordinates/viewport),
+    // wire format is ExecutableActionV1 (flat x/y). Transform so downstream sees
+    // the shape it expects.
     const parsedAction = parseResult.actions[0];
     const now = new Date().toISOString();
     return {
@@ -363,7 +331,7 @@ The page contains interactive elements with bounding boxes; click near their cen
       taskId: input.taskId,
       proposedAt: now,
       rationale: 'model proposal',
-      action: parsedAction.action as unknown as ActionProposalV1['action'],
+      action: toExecutableAction(parsedAction.action),
     };
   }
 
@@ -390,5 +358,73 @@ The page contains interactive elements with bounding boxes; click near their cen
     }
 
     return completionResult.data as CompletionProposalV1;
+  }
+}
+
+// ponytail: convert parser's FaraActionArgs shape (nested coordinates/viewport)
+// to wire ExecutableActionV1 shape (flat x/y) that downstream consumers expect.
+function toExecutableAction(parsed: unknown): unknown {
+  const a = parsed as {
+    type?: string;
+    coordinates?: { x?: number; y?: number; start?: { x?: number; y?: number }; end?: { x?: number; y?: number } };
+    viewport?: { viewportWidth?: number; viewportHeight?: number };
+    delta?: { deltaX?: number; deltaY?: number };
+    text?: string;
+    key?: string;
+    url?: string;
+    steps?: number;
+    duration?: number;
+    durationMs?: number;
+    question?: string;
+    choices?: string[];
+    fact?: string;
+    category?: string;
+    answer?: string;
+  };
+  switch (a.type) {
+    case 'left_click':
+    case 'double_click':
+    case 'right_click':
+    case 'mouse_move':
+      return {
+        type: a.type,
+        x: a.coordinates?.x ?? 0,
+        y: a.coordinates?.y ?? 0,
+      };
+    case 'drag':
+      return {
+        type: 'drag',
+        startX: a.coordinates?.start?.x ?? 0,
+        startY: a.coordinates?.start?.y ?? 0,
+        endX: a.coordinates?.end?.x ?? 0,
+        endY: a.coordinates?.end?.y ?? 0,
+      };
+    case 'scroll':
+      return {
+        type: 'scroll',
+        deltaX: a.delta?.deltaX ?? 0,
+        deltaY: a.delta?.deltaY ?? 0,
+      };
+    case 'key':
+      return { type: 'key', key: a.key ?? '' };
+    case 'insert_text':
+      return { type: 'insert_text', text: a.text ?? '' };
+    case 'visit_url':
+      return { type: 'visit_url', url: a.url ?? '' };
+    case 'history_back':
+      return { type: 'history_back', steps: a.steps ?? 1 };
+    case 'wait':
+      return { type: 'wait', durationMs: a.durationMs ?? a.duration ?? 1000 };
+    case 'screenshot':
+      return { type: 'screenshot' };
+    case 'ask_user_question':
+      return { type: 'ask_user_question', question: a.question ?? '' };
+    case 'terminate':
+      return { type: 'terminate', answer: a.answer ?? '' };
+    case 'memorize_fact':
+    case 'pause_and_memorize_fact':
+      return { type: a.type, fact: a.fact ?? '' };
+    default:
+      return a;
   }
 }
