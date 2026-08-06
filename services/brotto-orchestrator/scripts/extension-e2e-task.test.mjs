@@ -66,36 +66,17 @@ async function main() {
   await sidePanel.waitForTimeout(500);
 
   // ponytail: the redesigned UI hides the planner URL behind a Settings gear.
-  // Open settings, the connect button lives there now.
+  // The extension auto-connects when the user sends a task — no separate
+  // Connect button. Set planner URL via the settings panel.
   await sidePanel.locator("#settingsBtn").click();
   await sidePanel.waitForSelector("#settingsOverlay.open", { timeout: 3000 });
   await sidePanel.locator("#plannerUrlSetting").fill("http://127.0.0.1:3001");
-  // ponytail: dispatch click via JS to bypass the visibility check.
-  // The Connect button is in a slide-in overlay; the playwright click
-  // action races with the slide-in animation and reports "not visible".
-  // Programmatic click works reliably.
-  await sidePanel.evaluate(() => {
-    const btn = document.querySelector("#connectBtn");
-    btn && btn.click();
-  });
-  await sidePanel.waitForFunction(() => {
-    const pill = document.querySelector("#statusPill");
-    return pill && (pill.textContent ?? "").toLowerCase().includes("connected");
-  }, { timeout: 8000 });
   await sidePanel.locator("#settingsClose").click();
-  console.log("[e2e-task] connected to planner");
+  console.log("[e2e-task] planner URL configured");
 
-  // run a real task against a real test page
+  // ponytail: send the task. sendUserMessage() auto-connects, then submits
+  // via run_local_task. Connection + task kickoff happen in one shot.
   await sidePanel.locator("#goal").fill("Navigate to https://example.com and report the page title.");
-  // ponytail: startingUrl moved into settings panel; set via JS to avoid
-  // a second round of "not visible" click races.
-  await sidePanel.evaluate(() => {
-    const inp = document.querySelector("#startingUrlSetting");
-    if (inp) {
-      inp.value = "https://example.com";
-      inp.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-  });
   await sidePanel.locator("#sendBtn").click();
 
   // ponytail: poll the messages area for at most 60s. The redesigned UI
@@ -111,20 +92,24 @@ async function main() {
     const newTexts = cards.filter((t) => t.trim().length > 0 && !seen.messages.includes(t));
     if (newTexts.length > 0) {
       for (const t of newTexts) {
-        console.log(`[e2e-task] msg: ${t.slice(0, 100)}`);
+        console.log(`[e2e-task] msg: ${t}`);
         seen.messages.push(t);
       }
     }
     const status = await sidePanel.locator("#statusPill").textContent().catch(() => "");
     if ((status ?? "").toLowerCase().includes("done")) seen.completed = true;
     if ((status ?? "").toLowerCase().includes("error")) seen.errored = true;
+    // ponytail: also recognize the "Task completed" card text as success —
+    // the status pill sometimes lags the actual completion event.
+    if (seen.messages.some((t) => /Task completed/i.test(t))) seen.completed = true;
+    if (seen.messages.some((t) => /loop crashed|task_failed|Error:/i.test(t))) seen.errored = true;
     if (seen.completed || seen.errored) break;
     await sidePanel.waitForTimeout(500);
   }
 
   console.log(`\n[e2e-task] === summary ===`);
   console.log(`  elapsed: ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  console.log(`  cards seen: ${seen.logs.length}`);
+  console.log(`  messages seen: ${seen.messages.length}`);
   console.log(`  completed: ${seen.completed}`);
   console.log(`  errored: ${seen.errored}`);
   console.log(`  console errors: ${errors.length}`);
@@ -137,8 +122,8 @@ async function main() {
   if (!seen.completed && !seen.errored) {
     console.log("[e2e-task] FAIL: loop did not complete or error within 45s");
     process.exitCode = 1;
-  } else if (seen.logs.length < 3) {
-    console.log(`[e2e-task] FAIL: only ${seen.logs.length} cards seen, expected at least 3 (start, step, done/error)`);
+  } else if (seen.messages.length < 3) {
+    console.log(`[e2e-task] FAIL: only ${seen.messages.length} messages seen, expected at least 3 (start, step, done/error)`);
     process.exitCode = 1;
   } else {
     console.log("[e2e-task] PASS");

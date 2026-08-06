@@ -463,6 +463,19 @@ export function containsSensitiveBrowserData(value: unknown): boolean {
 export function sanitizeObservationUrl(value: unknown): string {
   if (typeof value !== "string") throw new Error("Observation URL is missing");
 
+  // ponytail: about:blank / chrome:// / chrome-extension:// tabs are valid
+  // for early observations (initial tab before planner navigates). Return
+  // the raw string so the planner sees the actual page state. The HTTP(S)
+  // redaction still applies below once we have a real URL.
+  if (
+    value === "about:blank" ||
+    value.startsWith("chrome://") ||
+    value.startsWith("chrome-extension://") ||
+    value.startsWith("devtools://")
+  ) {
+    return value;
+  }
+
   const url = new URL(value);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("Observation URL must use HTTP(S)");

@@ -55,11 +55,11 @@ const state = {
 let timerInterval = null;
 
 // ── Button handlers (preserved verbatim) ─────────────────────────────────
-connectBtn.addEventListener('click', () => void connect());
-disconnectBtn.addEventListener('click', () => void disconnect());
-startBtn.addEventListener('click', () => void startTask());
+if (connectBtn) connectBtn.addEventListener('click', () => void connect());
+if (disconnectBtn) disconnectBtn.addEventListener('click', () => void disconnect());
+if (startBtn) startBtn.addEventListener('click', () => void startTask());
 stopBtn.addEventListener('click', () => void stopTask());
-refreshBtn.addEventListener('click', () => void refresh());
+if (refreshBtn) refreshBtn.addEventListener('click', () => void refresh());
 
 // ── Input + send ─────────────────────────────────────────────────────────
 sendBtn.addEventListener('click', () => void sendUserMessage());
@@ -156,12 +156,12 @@ function setPhase(phase, message) {
   };
   statusPill.textContent = labels[phase] || 'Idle';
   statusPill.className = 'statusPill ' + phase;
-  brandDot.className = 'brandDot' + (phase === 'executing' ? ' executing' : phase === 'connected' ? ' connected' : phase === 'error' ? ' error' : '');
-  connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
-  disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
-  startBtn.disabled = phase === 'connecting';
+  if (brandDot) brandDot.className = 'brandDot' + (phase === 'executing' ? ' executing' : phase === 'connected' ? ' connected' : phase === 'error' ? ' error' : '');
+  if (connectBtn) connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
+  if (disconnectBtn) disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
+  if (startBtn) startBtn.disabled = phase === 'connecting';
   stopBtn.disabled = !(phase === 'executing' || phase === 'paused');
-  refreshBtn.disabled = phase === 'connecting';
+  if (refreshBtn) refreshBtn.disabled = phase === 'connecting';
   // ponytail: status bar (steps + timer) shows during running/paused/done.
   // Hidden in idle/connected/error so the panel stays clean.
   const showBar = phase === 'executing' || phase === 'paused' || phase === 'done';

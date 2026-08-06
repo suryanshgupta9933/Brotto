@@ -56,6 +56,12 @@ function isHttpUrl(url) {
     return false;
   }
 }
+function isObservationUrl(url) {
+  if (url === "about:blank" || url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url.startsWith("devtools://")) {
+    return true;
+  }
+  return isHttpUrl(url);
+}
 function assertNoForbiddenBrowserData(value) {
   const visited = /* @__PURE__ */ new Set();
   const visit = (current, path) => {
@@ -222,7 +228,7 @@ var AccessibilityNodeSchema = z2.object({
 var ObservationV1Schema = withForbiddenBrowserDataGuard(z2.object({
   observationId: ObservationIdSchema,
   capturedAt: z2.string().datetime(),
-  url: z2.string().url().refine(isHttpUrl, "Only HTTP(S) observation URLs are allowed"),
+  url: z2.string().refine(isObservationUrl, "Observation URL must be HTTP(S) or an internal page (about:blank, chrome://)"),
   title: z2.string().max(512),
   screenshot: ScreenshotSchema,
   viewport: ViewportSchema,
@@ -1010,6 +1016,7 @@ export {
   isHttpUrl,
   isMcpAction,
   isNavigationAction,
+  isObservationUrl,
   isValidObservationId,
   isViewportAction,
   mapActionToMcpParams,

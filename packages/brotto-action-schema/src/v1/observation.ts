@@ -42,6 +42,21 @@ export function isHttpUrl(url: string): boolean {
   }
 }
 
+// ponytail: observation URLs may also be internal Chrome pages (about:blank,
+// chrome://, chrome-extension://) when the tab hasn't navigated yet.
+// Returns true for any of these so the planner can issue a visit_url.
+export function isObservationUrl(url: string): boolean {
+  if (
+    url === 'about:blank' ||
+    url.startsWith('chrome://') ||
+    url.startsWith('chrome-extension://') ||
+    url.startsWith('devtools://')
+  ) {
+    return true;
+  }
+  return isHttpUrl(url);
+}
+
 /** Rejects browser-secret shaped keys anywhere in a value before serialization. */
 export function assertNoForbiddenBrowserData(value: unknown): void {
   const visited = new Set<unknown>();
@@ -229,7 +244,7 @@ export const AccessibilityNodeSchema = z.object({
 export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({
   observationId: ObservationIdSchema,
   capturedAt: z.string().datetime(),
-  url: z.string().url().refine(isHttpUrl, 'Only HTTP(S) observation URLs are allowed'),
+  url: z.string().refine(isObservationUrl, 'Observation URL must be HTTP(S) or an internal page (about:blank, chrome://)'),
   title: z.string().max(512),
   screenshot: ScreenshotSchema,
   viewport: ViewportSchema,

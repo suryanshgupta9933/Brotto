@@ -4516,6 +4516,7 @@
         isHttpUrl: () => isHttpUrl2,
         isMcpAction: () => isMcpAction,
         isNavigationAction: () => isNavigationAction,
+        isObservationUrl: () => isObservationUrl2,
         isValidObservationId: () => isValidObservationId,
         isViewportAction: () => isViewportAction,
         mapActionToMcpParams: () => mapActionToMcpParams,
@@ -4578,6 +4579,12 @@
         } catch {
           return false;
         }
+      }
+      function isObservationUrl2(url) {
+        if (url === "about:blank" || url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url.startsWith("devtools://")) {
+          return true;
+        }
+        return isHttpUrl2(url);
       }
       function assertNoForbiddenBrowserData3(value) {
         const visited = /* @__PURE__ */ new Set();
@@ -4745,7 +4752,7 @@
       var ObservationV1Schema3 = withForbiddenBrowserDataGuard2(import_zod22.z.object({
         observationId: ObservationIdSchema2,
         capturedAt: import_zod22.z.string().datetime(),
-        url: import_zod22.z.string().url().refine(isHttpUrl2, "Only HTTP(S) observation URLs are allowed"),
+        url: import_zod22.z.string().refine(isObservationUrl2, "Observation URL must be HTTP(S) or an internal page (about:blank, chrome://)"),
         title: import_zod22.z.string().max(512),
         screenshot: ScreenshotSchema2,
         viewport: ViewportSchema2,
@@ -5831,6 +5838,9 @@
   }
   function sanitizeObservationUrl(value) {
     if (typeof value !== "string") throw new Error("Observation URL is missing");
+    if (value === "about:blank" || value.startsWith("chrome://") || value.startsWith("chrome-extension://") || value.startsWith("devtools://")) {
+      return value;
+    }
     const url = new URL(value);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       throw new Error("Observation URL must use HTTP(S)");
@@ -10683,6 +10693,12 @@
       return false;
     }
   }
+  function isObservationUrl(url) {
+    if (url === "about:blank" || url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url.startsWith("devtools://")) {
+      return true;
+    }
+    return isHttpUrl(url);
+  }
   function assertNoForbiddenBrowserData(value) {
     const visited = /* @__PURE__ */ new Set();
     const visit = (current, path) => {
@@ -10849,7 +10865,7 @@
   var ObservationV1Schema = withForbiddenBrowserDataGuard(external_exports.object({
     observationId: ObservationIdSchema,
     capturedAt: external_exports.string().datetime(),
-    url: external_exports.string().url().refine(isHttpUrl, "Only HTTP(S) observation URLs are allowed"),
+    url: external_exports.string().refine(isObservationUrl, "Observation URL must be HTTP(S) or an internal page (about:blank, chrome://)"),
     title: external_exports.string().max(512),
     screenshot: ScreenshotSchema,
     viewport: ViewportSchema,
@@ -13173,7 +13189,7 @@
         };
       }
       throw securityError(
-        "Captured observation failed the local outbound security boundary",
+        `Captured observation failed the local outbound security boundary: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`,
         error
       );
     }

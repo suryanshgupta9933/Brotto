@@ -112,6 +112,7 @@ __export(index_exports, {
   isHttpUrl: () => isHttpUrl,
   isMcpAction: () => isMcpAction,
   isNavigationAction: () => isNavigationAction,
+  isObservationUrl: () => isObservationUrl,
   isValidObservationId: () => isValidObservationId,
   isViewportAction: () => isViewportAction,
   mapActionToMcpParams: () => mapActionToMcpParams,
@@ -178,6 +179,12 @@ function isHttpUrl(url) {
   } catch {
     return false;
   }
+}
+function isObservationUrl(url) {
+  if (url === "about:blank" || url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url.startsWith("devtools://")) {
+    return true;
+  }
+  return isHttpUrl(url);
 }
 function assertNoForbiddenBrowserData(value) {
   const visited = /* @__PURE__ */ new Set();
@@ -345,7 +352,7 @@ var AccessibilityNodeSchema = import_zod2.z.object({
 var ObservationV1Schema = withForbiddenBrowserDataGuard(import_zod2.z.object({
   observationId: ObservationIdSchema,
   capturedAt: import_zod2.z.string().datetime(),
-  url: import_zod2.z.string().url().refine(isHttpUrl, "Only HTTP(S) observation URLs are allowed"),
+  url: import_zod2.z.string().refine(isObservationUrl, "Observation URL must be HTTP(S) or an internal page (about:blank, chrome://)"),
   title: import_zod2.z.string().max(512),
   screenshot: ScreenshotSchema,
   viewport: ViewportSchema,
@@ -1134,6 +1141,7 @@ function assertCoordinatesInBounds(x, y, viewportWidth, viewportHeight) {
   isHttpUrl,
   isMcpAction,
   isNavigationAction,
+  isObservationUrl,
   isValidObservationId,
   isViewportAction,
   mapActionToMcpParams,

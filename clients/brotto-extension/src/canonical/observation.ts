@@ -1068,7 +1068,7 @@ export async function captureObservation(
       } as never;
     }
     throw securityError(
-      "Captured observation failed the local outbound security boundary",
+      `Captured observation failed the local outbound security boundary: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`,
       error,
     );
   }
