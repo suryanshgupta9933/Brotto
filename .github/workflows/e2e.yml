@@ -1,0 +1,64 @@
+name: e2e
+
+on:
+  pull_request:
+    paths:
+      - "services/agent-orchestrator/**"
+      - "packages/fara-action-schema/**"
+      - ".github/workflows/e2e.yml"
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.ai/install.sh | sh
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Start Ollama
+        run: |
+          ollama serve &
+          for i in {1..30}; do
+            if curl -sf http://127.0.0.1:11434/api/tags > /dev/null; then break; fi
+            sleep 1
+          done
+
+      - name: Pull model
+        run: ollama pull qwen2.5:3b
+
+      - name: Cache Ollama model
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama
+          key: ollama-qwen2.5-3b
+          restore-keys: ollama-
+
+      - name: Install Playwright Chromium
+        run: cd services/agent-orchestrator && pnpm exec playwright install chromium
+
+      - name: Run E2E test
+        run: cd services/agent-orchestrator && pnpm test:e2e
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-metrics
+          path: services/agent-orchestrator/__e2e__/metrics.log
+          if-no-files-found: ignore
