@@ -14288,6 +14288,11 @@
           continue;
         }
         const action = outcome.action ?? { type: "unknown" };
+        if (action.type === "terminate") {
+          log(opts, `model called terminate at step ${stepIndex + 1}`);
+          opts.onComplete({ summary: typeof action.answer === "string" ? action.answer : "Task done", steps: stepIndex + 1 });
+          return;
+        }
         const desc = describeAction(action);
         const iconKind = (action.type ?? "unknown").toString();
         let result;

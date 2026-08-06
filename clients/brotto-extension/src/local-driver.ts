@@ -23,7 +23,7 @@ export interface LocalDriverOptions {
 
 interface PlanningOutcome {
   kind: "action" | "question" | "completion";
-  action?: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string; deltaX?: number; deltaY?: number };
+  action?: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string; deltaX?: number; deltaY?: number; answer?: string };
   question?: string;
   summary?: string;
 }
@@ -356,6 +356,13 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         continue;
       }
       const action = outcome.action ?? { type: "unknown" };
+      // ponytail: model emits terminate as an action (not a completion).
+      // Detect it here and surface as completion so the loop exits cleanly.
+      if (action.type === "terminate") {
+        log(opts, `model called terminate at step ${stepIndex + 1}`);
+        opts.onComplete({ summary: typeof action.answer === "string" ? action.answer : "Task done", steps: stepIndex + 1 });
+        return;
+      }
       const desc = describeAction(action);
       const iconKind = (action.type ?? "unknown").toString();
       let result: string;
