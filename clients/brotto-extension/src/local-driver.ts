@@ -340,6 +340,21 @@ async function captureForDriver(tabId: number): Promise<ObservationV1> {
   return captureObservation(tabId);
 }
 
+// ponytail: capture with a hard timeout. Real Chrome's debugger.sendCommand
+// can hang indefinitely if the tab is in a weird state (loading, crashed,
+// detached). The race in captureVisibleTab is the usual culprit. Cap at
+// 15s so the loop survives and surfaces the timeout as a recoverable
+// error.
+async function captureObservationWithTimeout(tabId: number, timeoutMs: number): Promise<ObservationV1> {
+  return Promise.race([
+    captureObservation(tabId),
+    new Promise<ObservationV1>((_, reject) => {
+      setTimeout(() => reject(new Error(`captureObservation timed out after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]);
+}
+const captureForDriverWithTimeout = (tabId: number, timeoutMs: number) => captureObservationWithTimeout(tabId, timeoutMs);
+
 // ponytail: budgeted wait. We can't hook Network.requestWillBeSent without
 // keeping a long-lived debugger session, and the existing Page lifecycle
 // hooks are good enough — the planner's description of the new page is
@@ -372,6 +387,18 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
   let stepIndex = 0;
   const failures: FailureRecord[] = [];
   let injectedGuidance: string | undefined;
+  // ponytail: heartbeat so a hung capture or planner call doesn't look
+  // like a frozen loop. Every 10s we emit a heartbeat log so the user
+  // sees the loop is still alive even if no step has completed.
+  let lastBeat = Date.now();
+  const heartbeat = setInterval(() => {
+    if (opts.signal.aborted) return;
+    const now = Date.now();
+    if (now - lastBeat >= 10_000) {
+      lastBeat = now;
+      log(opts, `loop alive — ${stepIndex} steps done, waiting on planner/observation`);
+    }
+  }, 10_000);
   try {
     while (stepIndex < MAX_STEPS) {
       if (opts.signal.aborted) {
@@ -379,7 +406,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         return;
       }
       log(opts, `step ${stepIndex + 1}/${MAX_STEPS}`);
-      const obs = await captureForDriver(tabId);
+      const obs = await captureForDriverWithTimeout(tabId, 15_000);
       // ponytail: detect login page BEFORE calling the planner so we don't burn
       // a plan step on "click this invisible login form". The model will see
       // the post-login observation on the next iteration.
@@ -490,11 +517,11 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       let screenshot: string | null = null;
       let postUrl = obs.url;
       try {
-        const postObs = await captureObservation(tabId);
+        const postObs = await captureObservationWithTimeout(tabId, 15_000);
         screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
         postUrl = postObs.url;
-      } catch {
-        // ignore
+      } catch (err) {
+        log(opts, `post-action observation failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       history.push({ action: desc, result });
       failures.length = 0;
@@ -516,6 +543,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
     }
     opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });
   } finally {
+    clearInterval(heartbeat);
     await debuggerModule.detachFromTab(tabId).catch(() => undefined);
   }
 }

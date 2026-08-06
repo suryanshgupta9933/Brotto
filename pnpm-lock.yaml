@@ -150,6 +150,52 @@ importers:
         specifier: ^5.3.3
         version: 5.9.3
 
+  clients/browser-extension:
+    dependencies:
+      '@brotto/brotto-action-schema':
+        specifier: workspace:*
+        version: link:../../packages/brotto-action-schema
+      '@brotto/relay-protocol':
+        specifier: workspace:*
+        version: link:../../packages/brotto-relay-protocol
+      react:
+        specifier: ^18.2.0
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.2.0
+        version: 18.3.1(react@18.3.1)
+    devDependencies:
+      '@types/chrome':
+        specifier: ^0.0.268
+        version: 0.0.268
+      '@types/jest':
+        specifier: ^29.5.12
+        version: 29.5.14
+      '@types/node':
+        specifier: ^20.11.0
+        version: 20.19.43
+      '@types/react':
+        specifier: ^18.2.48
+        version: 18.3.31
+      '@types/react-dom':
+        specifier: ^18.2.18
+        version: 18.3.7(@types/react@18.3.31)
+      esbuild:
+        specifier: ^0.28.1
+        version: 0.28.1
+      jest:
+        specifier: ^29.7.0
+        version: 29.7.0(@types/node@20.19.43)(supports-color@8.1.1)
+      prettier:
+        specifier: ^3.2.4
+        version: 3.9.6
+      ts-jest:
+        specifier: ^29.1.2
+        version: 29.4.12(@babel/core@7.29.7(supports-color@8.1.1))(@jest/transform@29.7.0(supports-color@8.1.1))(@jest/types@29.6.3)(babel-jest@29.7.0(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(esbuild@0.28.1)(jest-util@29.7.0)(jest@29.7.0(supports-color@8.1.1))(typescript@5.9.3)
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+
   evals/agent:
     devDependencies:
       '@playwright/test':

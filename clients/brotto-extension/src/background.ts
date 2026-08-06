@@ -221,11 +221,15 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
           notifyUi({ type: "task_completed", summary, steps });
         },
         onError: ({ code, message }) => {
-          notifyUi({ type: "canonical_error", code, message });
+          // ponytail: emit as task_failed so the side panel renders the error
+          // card. (canonical_error used to be ignored by the new UI.)
+          notifyUi({ type: "task_failed", code, message });
         },
         onLog: (message) => {
-          // ponytail: surface as observation-kind step so the popup log renders it.
-          notifyUi({ type: "canonical_step", kind: "observation", summary: message });
+          // ponytail: emit as 'log' event so the side panel renders a small
+          // activity card. (canonical_step used to write to a deleted DOM
+          // element.)
+          notifyUi({ type: "log", message });
         },
         onClarify: ({ reason, question, context }) => {
           // ponytail: send a clarify event to the side panel and wait for

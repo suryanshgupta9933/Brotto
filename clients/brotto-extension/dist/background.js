@@ -14252,9 +14252,15 @@
     }
     return tab.id;
   }
-  async function captureForDriver(tabId) {
-    return captureObservation(tabId);
+  async function captureObservationWithTimeout(tabId, timeoutMs) {
+    return Promise.race([
+      captureObservation(tabId),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`captureObservation timed out after ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
   }
+  var captureForDriverWithTimeout = (tabId, timeoutMs) => captureObservationWithTimeout(tabId, timeoutMs);
   async function waitForNetworkIdle(_tabId, timeoutMs = 500) {
     await new Promise((r) => setTimeout(r, timeoutMs));
   }
@@ -14279,6 +14285,15 @@
     let stepIndex = 0;
     const failures = [];
     let injectedGuidance;
+    let lastBeat = Date.now();
+    const heartbeat = setInterval(() => {
+      if (opts.signal.aborted) return;
+      const now = Date.now();
+      if (now - lastBeat >= 1e4) {
+        lastBeat = now;
+        log(opts, `loop alive \u2014 ${stepIndex} steps done, waiting on planner/observation`);
+      }
+    }, 1e4);
     try {
       while (stepIndex < MAX_STEPS) {
         if (opts.signal.aborted) {
@@ -14286,7 +14301,7 @@
           return;
         }
         log(opts, `step ${stepIndex + 1}/${MAX_STEPS}`);
-        const obs = await captureForDriver(tabId);
+        const obs = await captureForDriverWithTimeout(tabId, 15e3);
         const login = looksLikeLoginPage(obs);
         if (login.login) {
           log(opts, `login page detected at ${login.domain} \u2014 pausing for user`);
@@ -14384,10 +14399,11 @@
         let screenshot = null;
         let postUrl = obs.url;
         try {
-          const postObs = await captureObservation(tabId);
+          const postObs = await captureObservationWithTimeout(tabId, 15e3);
           screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
           postUrl = postObs.url;
-        } catch {
+        } catch (err) {
+          log(opts, `post-action observation failed: ${err instanceof Error ? err.message : String(err)}`);
         }
         history.push({ action: desc, result });
         failures.length = 0;
@@ -14407,6 +14423,7 @@
       }
       opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });
     } finally {
+      clearInterval(heartbeat);
       await detachFromTab(tabId).catch(() => void 0);
     }
   }
@@ -14606,10 +14623,10 @@
             notifyUi({ type: "task_completed", summary, steps });
           },
           onError: ({ code, message: message2 }) => {
-            notifyUi({ type: "canonical_error", code, message: message2 });
+            notifyUi({ type: "task_failed", code, message: message2 });
           },
           onLog: (message2) => {
-            notifyUi({ type: "canonical_step", kind: "observation", summary: message2 });
+            notifyUi({ type: "log", message: message2 });
           },
           onClarify: ({ reason, question, context }) => {
             const id = newRequestId("clarify");
