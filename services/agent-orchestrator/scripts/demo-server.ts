@@ -13,19 +13,24 @@ function buildConfigFromEnv(family: ReturnType<typeof inferFamilyFromEnv>): Infe
   if (family === "fara") {
     return { family: "fara", endpoint: process.env.FARA_ENDPOINT ?? "" };
   }
+  const isAzure = !!process.env.AZURE_OPENAI_API_KEY;
   const baseUrl = process.env.OLLAMA_HOST
     ? `${process.env.OLLAMA_HOST.replace(/\/$/, "")}/v1`
-    : process.env.AZURE_OPENAI_ENDPOINT
-      ? `${process.env.AZURE_OPENAI_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT}`
+    : isAzure
+      ? `${process.env.AZURE_OPENAI_ENDPOINT?.replace(/\/$/, "") ?? ""}/openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT ?? ""}`
       : "https://api.openai.com/v1";
+  const apiVersion = process.env.AZURE_OPENAI_API_VERSION;
+  const baseUrlWithVersion = isAzure && apiVersion
+    ? `${baseUrl}?api-version=${encodeURIComponent(apiVersion)}`
+    : baseUrl;
   const hasOllama = !!process.env.OLLAMA_HOST;
   return {
     family: "openai-compatible",
-    baseUrl,
+    baseUrl: baseUrlWithVersion,
     apiKey: process.env.OPENAI_API_KEY ?? process.env.AZURE_OPENAI_API_KEY ?? (hasOllama ? undefined : "missing"),
-    apiKeyHeader: process.env.AZURE_OPENAI_API_KEY ? "api-key" : "authorization",
-    apiKeyPrefix: process.env.AZURE_OPENAI_API_KEY ? "" : "Bearer ",
-    model: process.env.SMOKE_MODEL ?? "qwen2.5:3b",
+    apiKeyHeader: isAzure ? "api-key" : "authorization",
+    apiKeyPrefix: isAzure ? "" : "Bearer ",
+    model: process.env.SMOKE_MODEL ?? process.env.AZURE_OPENAI_MODEL_NAME ?? "qwen2.5:3b",
   };
 }
 

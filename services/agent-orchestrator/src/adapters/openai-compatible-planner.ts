@@ -67,7 +67,14 @@ export class OpenAICompatiblePlanner implements InferencePort {
   }
 
   async plan(input: PlanningInput, signal: AbortSignal): Promise<PlanningOutcome> {
-    const url = `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`;
+    // ponytail: insert /chat/completions BEFORE any query string so Azure's
+    // api-version param doesn't get clobbered. (baseUrl might already end in
+    // ?api-version=...)
+    const base = this.config.baseUrl.replace(/\/$/, "");
+    const qIdx = base.indexOf("?");
+    const url = qIdx >= 0
+      ? `${base.slice(0, qIdx)}/chat/completions${base.slice(qIdx)}`
+      : `${base}/chat/completions`;
 
     const headers: Record<string, string> = {
       'content-type': 'application/json',
@@ -132,9 +139,12 @@ export class OpenAICompatiblePlanner implements InferencePort {
     }
 
     const choice = choices[0];
-    const tool_calls = choice.delta?.tool_calls;
+    const raw_tool_calls = choice.delta?.tool_calls ?? [];
+    // ponytail: filter empty-named tool calls. Streaming assembly can leave
+    // the name blank if no chunk supplied one (rare but seen with gpt-4o-mini).
+    const tool_calls = raw_tool_calls.filter((tc) => (tc.function?.name ?? "").length > 0);
 
-    if (tool_calls && tool_calls.length > 0) {
+    if (tool_calls.length > 0) {
       return this.buildActionProposal(input, tool_calls);
     }
 
@@ -309,15 +319,31 @@ The page contains interactive elements with bounding boxes; click near their cen
     }));
 
     const parser = new ToolCallParser();
-    const parseResult = parser.parse(faraToolCalls);
+    let parseResult;
+    try {
+      parseResult = parser.parse(faraToolCalls);
+    } catch (err) {
+      // ponytail: parser throws on missing/invalid required fields instead of
+      // appending to errors. Convert to a question so the loop survives.
+      const message = (err as { error?: string })?.error ?? String(err);
+      return {
+        kind: 'question',
+        observationId: input.observation.observationId,
+        question: `The previous tool call had invalid arguments: ${message}. Please try a different action.`,
+        choices: undefined,
+      };
+    }
 
     if (parseResult.errors.length > 0) {
-      // retryable=false: a model consistently producing malformed tool calls
-      // won't fix itself; hammering it just wastes the retry budget.
-      throw new OpenAICompatiblePlannerError(
-        `Tool call parsing failed: ${parseResult.errors[0].error}`,
-        false,
-      );
+      // ponytail: model produced a tool call with bad/missing arguments (common
+      // with smaller models). Instead of crashing the loop, treat as a
+      // question so the next observation re-orients the model.
+      return {
+        kind: 'question',
+        observationId: input.observation.observationId,
+        question: `The previous tool call had invalid arguments: ${parseResult.errors[0].error}. Please try a different action.`,
+        choices: undefined,
+      };
     }
 
     if (parseResult.actions.length === 0) {
