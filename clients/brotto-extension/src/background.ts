@@ -23,6 +23,18 @@ let localAbortController: AbortController | null = null;
 let localTabId: number | null = null;
 const DEFAULT_PLANNER_URL = "http://127.0.0.1:3001";
 
+// ponytail: pending-clarify and pending-approval resolvers keyed by request id.
+// The side panel responds by sending `submit_clarification` / `submit_approval`
+// with the same id. Resolved value is whatever the user typed/clicked.
+const pendingClarifyResolvers = new Map<string, (answer: string) => void>();
+const pendingApprovalResolvers = new Map<string, (approved: boolean) => void>();
+let requestIdCounter = 0;
+
+function newRequestId(prefix: string): string {
+  requestIdCounter += 1;
+  return `${prefix}-${Date.now().toString(36)}-${requestIdCounter}`;
+}
+
 let managedHostnames = new Set<string>();
 let managedOrigins: string[] = [];
 let managedControlPlaneUrl: string | null = null;
@@ -215,6 +227,30 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
           // ponytail: surface as observation-kind step so the popup log renders it.
           notifyUi({ type: "canonical_step", kind: "observation", summary: message });
         },
+        onClarify: ({ reason, question, context }) => {
+          // ponytail: send a clarify event to the side panel and wait for
+          // submit_clarification. Returns the user's answer string.
+          const id = newRequestId("clarify");
+          return new Promise<string>((resolve) => {
+            pendingClarifyResolvers.set(id, resolve);
+            notifyUi({ type: "clarify_request", id, reason, question, context });
+          });
+        },
+        onApprovalRequired: ({ reason, action, url }) => {
+          // ponytail: send an approval_request event and wait for the user's
+          // approve/deny click in the side panel.
+          const id = newRequestId("approval");
+          return new Promise<boolean>((resolve) => {
+            pendingApprovalResolvers.set(id, resolve);
+            notifyUi({ type: "approval_request", id, reason, action, url });
+          });
+        },
+        onAnswered: ({ question, answer }) => {
+          notifyUi({ type: "log", message: `User answered: ${answer.slice(0, 60)}` });
+        },
+        onApprovalResolved: ({ approved, action }) => {
+          notifyUi({ type: "log", message: approved ? `Approved ${action.type ?? "action"}` : `Denied ${action.type ?? "action"}` });
+        },
       }).then(() => {
         localAbortController = null;
         localTabId = null;
@@ -248,6 +284,41 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
       if (localAbortController === null) return { success: false, error: "No local task is running" };
       localAbortController.abort();
       localAbortController = null;
+      return { success: true };
+    }
+    case "submit_clarification": {
+      // ponytail: side panel returns the user's answer to a clarify request.
+      const id = typeof message.id === "string" ? message.id : "";
+      const resolve = pendingClarifyResolvers.get(id);
+      if (!resolve) return { success: false, error: "No pending clarification" };
+      pendingClarifyResolvers.delete(id);
+      resolve(typeof message.answer === "string" ? message.answer : "");
+      return { success: true };
+    }
+    case "submit_approval": {
+      // ponytail: side panel returns the user's approve/deny click.
+      const id = typeof message.id === "string" ? message.id : "";
+      const resolve = pendingApprovalResolvers.get(id);
+      if (!resolve) return { success: false, error: "No pending approval" };
+      pendingApprovalResolvers.delete(id);
+      resolve(message.approved === true);
+      return { success: true };
+    }
+    case "reset_session": {
+      // ponytail: Refresh button handler. Aborts loop, detaches debugger,
+      // clears state, persists nothing. Doesn't close the tab — the user
+      // may want to keep the page open.
+      if (localAbortController !== null) {
+        localAbortController.abort();
+        localAbortController = null;
+      }
+      if (localTabId !== null) {
+        await debuggerModule.detachFromTab(localTabId).catch(() => undefined);
+        localTabId = null;
+      }
+      pendingClarifyResolvers.clear();
+      pendingApprovalResolvers.clear();
+      notifyUi({ type: "log", message: "Session reset" });
       return { success: true };
     }
     case "submit_user_input": {

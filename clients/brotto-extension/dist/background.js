@@ -14003,6 +14003,66 @@
   function log(opts, message) {
     opts.onLog?.(message);
   }
+  function detectLoop(history, threshold = 3) {
+    if (history.length < threshold) return { loop: false, action: "" };
+    const tail = history.slice(-threshold).map((h) => h.action);
+    if (tail.every((a) => a === tail[0])) return { loop: true, action: tail[0] };
+    return { loop: false, action: "" };
+  }
+  function detectStuckFailures(failures, threshold = 3) {
+    if (failures.length < threshold) return { stuck: false, action: "", error: "" };
+    const tail = failures.slice(-threshold);
+    if (tail.every((f) => f.action === tail[0].action)) {
+      return { stuck: true, action: tail[0].action, error: tail[0].error };
+    }
+    return { stuck: false, action: "", error: "" };
+  }
+  var APPROVAL_KEYWORDS = [
+    "delete",
+    "remove",
+    "pay",
+    "checkout",
+    "purchase",
+    "confirm purchase",
+    "send money",
+    "transfer",
+    "wire",
+    "subscription"
+  ];
+  var APPROVAL_DOMAINS = [
+    "checkout",
+    "pay.",
+    "payments.",
+    "stripe.com",
+    "banking",
+    "/pay/"
+  ];
+  function needsApproval(action, observation) {
+    const pageText = observation.bodyTextSnippet.toLowerCase();
+    if (action.type === "visit_url" && typeof action.url === "string") {
+      for (const kw of APPROVAL_DOMAINS) {
+        if (action.url.toLowerCase().includes(kw)) {
+          return { needs: true, reason: `Navigate to "${action.url}" matches approval pattern "${kw}"` };
+        }
+      }
+    }
+    if (action.type === "left_click" || action.type === "double_click") {
+      for (const kw of APPROVAL_KEYWORDS) {
+        if (pageText.includes(kw)) {
+          return { needs: true, reason: `Page contains "${kw}" \u2014 clicking may be destructive` };
+        }
+      }
+    }
+    if (action.type === "insert_text" && typeof action.text === "string") {
+      const lcText = action.text.toLowerCase();
+      for (const kw of APPROVAL_KEYWORDS) {
+        if (lcText.includes(kw) && pageText.includes(kw)) {
+          return { needs: true, reason: `Typing "${action.text}" on a page mentioning "${kw}" may be destructive` };
+        }
+      }
+    }
+    return { needs: false, reason: "" };
+  }
   function describeAction(a) {
     switch (a.type) {
       case "left_click":
@@ -14025,11 +14085,15 @@
         return a.type ?? "unknown";
     }
   }
-  function renderObservationForPlanner(obs, history) {
+  function renderObservationForPlanner(obs, history, guidance) {
     const lines = [];
     lines.push(`URL: ${obs.url}`);
     lines.push(`Title: ${obs.title}`);
     lines.push("");
+    if (guidance && guidance.length > 0) {
+      lines.push(`User guidance: ${guidance}`);
+      lines.push("");
+    }
     lines.push("Elements (use IDs, click coords inline):");
     for (const t of obs.semanticTargets) {
       if (!t.visible) continue;
@@ -14240,6 +14304,8 @@
     }
     const history = [];
     let stepIndex = 0;
+    const failures = [];
+    let injectedGuidance;
     try {
       while (stepIndex < MAX_STEPS) {
         if (opts.signal.aborted) {
@@ -14269,10 +14335,11 @@
           });
           pendingLoginResolvers.delete(tabId);
           log(opts, "user confirmed login \u2014 resuming loop");
+          injectedGuidance = void 0;
           await waitForNetworkIdle(tabId).catch(() => void 0);
           continue;
         }
-        const context = renderObservationForPlanner(obs, history);
+        const context = renderObservationForPlanner(obs, history, injectedGuidance);
         const outcome = await callPlanner(opts, context);
         if (opts.signal.aborted) {
           opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
@@ -14283,8 +14350,14 @@
           return;
         }
         if (outcome.kind === "question") {
-          log(opts, `planner returned a question, treating as no-op: ${outcome.question?.slice(0, 80)}`);
-          await new Promise((r) => setTimeout(r, 500));
+          const question = outcome.question ?? "The agent needs more information.";
+          const answer = await opts.onClarify({
+            reason: "The planner asked a question",
+            question,
+            context: question
+          });
+          injectedGuidance = answer;
+          opts.onAnswered?.({ question, answer });
           continue;
         }
         const action = outcome.action ?? { type: "unknown" };
@@ -14293,6 +14366,22 @@
           opts.onComplete({ summary: typeof action.answer === "string" ? action.answer : "Task done", steps: stepIndex + 1 });
           return;
         }
+        const approval = needsApproval(action, obs);
+        if (approval.needs && opts.onApprovalRequired) {
+          log(opts, `approval required: ${approval.reason}`);
+          const approved = await opts.onApprovalRequired({
+            reason: approval.reason,
+            action: { type: action.type, url: action.url },
+            url: obs.url
+          });
+          opts.onApprovalResolved?.({ approved, action: { type: action.type } });
+          if (!approved) {
+            log(opts, "user denied approval \u2014 aborting task");
+            opts.onError({ code: "APPROVAL_DENIED", message: `User denied: ${approval.reason}` });
+            return;
+          }
+          log(opts, "user approved \u2014 proceeding");
+        }
         const desc = describeAction(action);
         const iconKind = (action.type ?? "unknown").toString();
         let result;
@@ -14300,7 +14389,20 @@
           result = await executeAction(tabId, action);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          log(opts, `action failed: ${message}`);
+          log(opts, `action failed (${failures.length + 1} in a row): ${message}`);
+          failures.push({ action: desc, error: message, ts: Date.now() });
+          const stuck = detectStuckFailures(failures);
+          if (stuck.stuck) {
+            const answer = await opts.onClarify({
+              reason: `Action "${stuck.action}" has failed ${failures.length} times in a row`,
+              question: `The agent can't get "${stuck.action}" to work. The last error was: ${stuck.error}. What should it do instead?`,
+              context: stuck.error
+            });
+            injectedGuidance = answer;
+            opts.onAnswered?.({ question: stuck.error, answer });
+            failures.length = 0;
+            continue;
+          }
           opts.onError({ code: "ACTION_FAILED", message });
           return;
         }
@@ -14315,7 +14417,19 @@
         } catch {
         }
         history.push({ action: desc, result });
+        failures.length = 0;
         opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind });
+        const loop = detectLoop(history);
+        if (loop.loop) {
+          log(opts, `loop detected: ${loop.action} repeated ${history.length} times`);
+          const answer = await opts.onClarify({
+            reason: `Action "${loop.action}" repeated ${history.length} times in a row`,
+            question: `The agent keeps doing "${loop.action}" without progress. How should it proceed?`,
+            context: loop.action
+          });
+          injectedGuidance = answer;
+          opts.onAnswered?.({ question: loop.action, answer });
+        }
         stepIndex++;
       }
       opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });
@@ -14338,6 +14452,13 @@
   var localAbortController = null;
   var localTabId = null;
   var DEFAULT_PLANNER_URL = "http://127.0.0.1:3001";
+  var pendingClarifyResolvers = /* @__PURE__ */ new Map();
+  var pendingApprovalResolvers = /* @__PURE__ */ new Map();
+  var requestIdCounter = 0;
+  function newRequestId(prefix) {
+    requestIdCounter += 1;
+    return `${prefix}-${Date.now().toString(36)}-${requestIdCounter}`;
+  }
   var managedHostnames = /* @__PURE__ */ new Set();
   var managedOrigins = [];
   var managedControlPlaneUrl = null;
@@ -14516,6 +14637,26 @@
           },
           onLog: (message2) => {
             notifyUi({ type: "canonical_step", kind: "observation", summary: message2 });
+          },
+          onClarify: ({ reason, question, context }) => {
+            const id = newRequestId("clarify");
+            return new Promise((resolve) => {
+              pendingClarifyResolvers.set(id, resolve);
+              notifyUi({ type: "clarify_request", id, reason, question, context });
+            });
+          },
+          onApprovalRequired: ({ reason, action, url }) => {
+            const id = newRequestId("approval");
+            return new Promise((resolve) => {
+              pendingApprovalResolvers.set(id, resolve);
+              notifyUi({ type: "approval_request", id, reason, action, url });
+            });
+          },
+          onAnswered: ({ question, answer }) => {
+            notifyUi({ type: "log", message: `User answered: ${answer.slice(0, 60)}` });
+          },
+          onApprovalResolved: ({ approved, action }) => {
+            notifyUi({ type: "log", message: approved ? `Approved ${action.type ?? "action"}` : `Denied ${action.type ?? "action"}` });
           }
         }).then(() => {
           localAbortController = null;
@@ -14547,6 +14688,36 @@
         if (localAbortController === null) return { success: false, error: "No local task is running" };
         localAbortController.abort();
         localAbortController = null;
+        return { success: true };
+      }
+      case "submit_clarification": {
+        const id = typeof message.id === "string" ? message.id : "";
+        const resolve = pendingClarifyResolvers.get(id);
+        if (!resolve) return { success: false, error: "No pending clarification" };
+        pendingClarifyResolvers.delete(id);
+        resolve(typeof message.answer === "string" ? message.answer : "");
+        return { success: true };
+      }
+      case "submit_approval": {
+        const id = typeof message.id === "string" ? message.id : "";
+        const resolve = pendingApprovalResolvers.get(id);
+        if (!resolve) return { success: false, error: "No pending approval" };
+        pendingApprovalResolvers.delete(id);
+        resolve(message.approved === true);
+        return { success: true };
+      }
+      case "reset_session": {
+        if (localAbortController !== null) {
+          localAbortController.abort();
+          localAbortController = null;
+        }
+        if (localTabId !== null) {
+          await detachFromTab(localTabId).catch(() => void 0);
+          localTabId = null;
+        }
+        pendingClarifyResolvers.clear();
+        pendingApprovalResolvers.clear();
+        notifyUi({ type: "log", message: "Session reset" });
         return { success: true };
       }
       case "submit_user_input": {

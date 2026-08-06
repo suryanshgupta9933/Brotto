@@ -94,7 +94,9 @@ export type ControllerUiEvent =
   | { readonly type: "task_failed"; readonly code: string; readonly message: string }
   | { readonly type: "step_card"; readonly index: number; readonly title: string; readonly result: string; readonly url?: string; readonly screenshot?: string; readonly screenshotPlaceholder?: string; readonly iconKind?: string; readonly ts?: number }
   | { readonly type: "session_started"; readonly sessionId?: string }
-  | { readonly type: "log"; readonly message: string };
+  | { readonly type: "log"; readonly message: string }
+  | { readonly type: "clarify_request"; readonly id: string; readonly reason: string; readonly question: string; readonly context: string }
+  | { readonly type: "approval_request"; readonly id: string; readonly reason: string; readonly action: { readonly type?: string; readonly url?: string }; readonly url: string };
 
 export interface CanonicalExtensionControllerOptions {
   readonly bootstrap: ConnectionBootstrapPort;

@@ -14,6 +14,7 @@ const connectBtn = document.getElementById('connectBtn');
 const disconnectBtn = document.getElementById('disconnectBtn');
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
+const refreshBtn = document.getElementById('refreshBtn');
 const connectionMeta = document.getElementById('connectionMeta');
 const stepCountEl = document.getElementById('stepCount');
 const timerEl = document.getElementById('timer');
@@ -33,6 +34,7 @@ connectBtn.addEventListener('click', () => void connect());
 disconnectBtn.addEventListener('click', () => void disconnect());
 startBtn.addEventListener('click', () => void startTask());
 stopBtn.addEventListener('click', () => void stopTask());
+refreshBtn.addEventListener('click', () => void refresh());
 goalEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void startTask();
 });
@@ -53,8 +55,12 @@ function setPhase(phase, message) {
   brandDot.className = 'brand-dot' + (phase === 'executing' ? ' executing' : phase === 'connected' ? ' connected' : phase === 'error' ? ' error' : '');
   connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
   disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
-  startBtn.disabled = !(phase === 'connected' || phase === 'done' || phase === 'error');
+  // ponytail: start is always enabled (except during connecting — start clicks
+  // trigger implicit connect from idle). Lets the user click Start from any
+  // state without first hunting for the Connect button.
+  startBtn.disabled = phase === 'connecting';
   stopBtn.disabled = !(phase === 'executing' || phase === 'paused');
+  refreshBtn.disabled = phase === 'connecting';
   if (message) connectionMeta.textContent = message;
 }
 
@@ -109,6 +115,9 @@ async function connect() {
     setPhase('connected', `Connected · ${label}`);
     appendCard({ kind: 'system', icon: 'icon.sys', title: 'Connected to planner', meta: `${url} · ${label}`, ts: Date.now() });
   } catch (err) {
+    // ponytail: clear the cached planner URL on failure so refresh goes
+    // back to idle and the user can try a different URL.
+    state.plannerUrl = '';
     setPhase('error', `Connect failed: ${err instanceof Error ? err.message : String(err)}`);
     appendCard({ kind: 'error', icon: 'icon.err', title: 'Connect failed', meta: err instanceof Error ? err.message : String(err), ts: Date.now() });
   }
@@ -162,6 +171,21 @@ async function stopTask() {
   stopBtn.disabled = true;
   const response = await sendMessage({ type: 'cancel_local_task' });
   if (!response.success) appendCard({ kind: 'error', icon: 'icon.err', title: 'Cancel failed', meta: response.error || 'unknown error', ts: Date.now() });
+}
+
+async function refresh() {
+  // ponytail: hard reset. Aborts any active loop, detaches debugger, clears
+  // pending UI requests, clears the stream. Doesn't close the tab — the user
+  // may want to keep the page open. After reset, return to idle (or connected
+  // if the cached planner URL is healthy).
+  stopTimer();
+  clearStream();
+  const response = await sendMessage({ type: 'reset_session' });
+  if (!response.success) appendCard({ kind: 'error', icon: 'icon.err', title: 'Reset failed', meta: response.error || 'unknown error', ts: Date.now() });
+  // ponytail: clear stale planner URL on refresh. If the URL is good the user
+  // can hit Connect again; if it was bad we don't want to keep "knowing" it.
+  state.plannerUrl = '';
+  setPhase('idle', 'Ready');
 }
 
 function iconFor(kind) {
@@ -376,6 +400,43 @@ chrome.runtime.onMessage.addListener((message) => {
         ts: Date.now(),
       });
       break;
+    case 'clarify_request': {
+      setPhase('paused', 'Clarifying question from agent');
+      appendCard({
+        kind: 'prompt',
+        icon: 'icon.qu',
+        iconLabel: '?',
+        title: 'Agent needs a nudge',
+        body: message.question || 'The agent is stuck and needs your input.',
+        url: message.reason ? `Reason: ${message.reason}` : '',
+        ts: Date.now(),
+        input: { placeholder: 'Type a hint for the agent (e.g. try the other button)…' },
+        actions: [
+          { label: 'Skip', kind: 'danger', onClick: (v) => { void sendMessage({ type: 'cancel_local_task' }); void v; } },
+          { label: 'Send hint', kind: 'primary', onClick: (v) => { void sendMessage({ type: 'submit_clarification', id: message.id, answer: v || '' }); } },
+        ],
+      });
+      break;
+    }
+    case 'approval_request': {
+      setPhase('paused', 'Agent wants approval for a critical action');
+      const a = message.action || {};
+      const preview = a.url ? `${a.type ?? 'action'} → ${a.url}` : (a.type ?? 'action');
+      appendCard({
+        kind: 'prompt',
+        icon: 'icon.qu',
+        iconLabel: '!',
+        title: 'Approve before continuing',
+        body: message.reason || 'The agent wants to perform an action that needs your approval.',
+        url: preview,
+        ts: Date.now(),
+        actions: [
+          { label: 'Deny', kind: 'danger', onClick: () => { void sendMessage({ type: 'submit_approval', id: message.id, approved: false }); } },
+          { label: 'Approve', kind: 'primary', onClick: () => { void sendMessage({ type: 'submit_approval', id: message.id, approved: true }); } },
+        ],
+      });
+      break;
+    }
     case 'log':
       appendCard({
         kind: 'system',

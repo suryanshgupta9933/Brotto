@@ -19,6 +19,19 @@ export interface LocalDriverOptions {
   onComplete: (info: { summary: string; steps: number }) => void;
   onError: (error: { code: string; message: string }) => void;
   onLog?: (message: string) => void;
+  // ponytail: emit when the agent detects it can't make progress (same action
+  // repeated, repeated failures, etc.). Side panel surfaces an input box so the
+  // user can inject guidance. The next planner call gets the answer appended
+  // to the goal.
+  onClarify: (info: { reason: string; question: string; context: string }) => Promise<string>;
+  // ponytail: emit when an action might be destructive. Side panel surfaces
+  // an Approve/Deny prompt. Resolves to true if user approves.
+  onApprovalRequired: (info: { reason: string; action: { type?: string; url?: string }; url: string }) => Promise<boolean>;
+  // ponytail: optional callback invoked when a clarifying question is
+  // answered, so the caller can log it back through the planner history.
+  onAnswered?: (info: { question: string; answer: string }) => void;
+  // ponytail: optional callback when approval is granted or denied.
+  onApprovalResolved?: (info: { approved: boolean; action: { type?: string } }) => void;
 }
 
 interface PlanningOutcome {
@@ -30,6 +43,80 @@ interface PlanningOutcome {
 
 function log(opts: LocalDriverOptions, message: string): void {
   opts.onLog?.(message);
+}
+
+// ponytail: detect when the model is repeating the same action without state
+// change. Three identical consecutive actions (same type + same target signature)
+// = stuck. Surfacing as a clarifying question gives the user a chance to
+// redirect.
+export function detectLoop(history: Array<{ action: string; result: string }>, threshold = 3): { loop: boolean; action: string } {
+  if (history.length < threshold) return { loop: false, action: "" };
+  const tail = history.slice(-threshold).map((h) => h.action);
+  if (tail.every((a) => a === tail[0])) return { loop: true, action: tail[0] };
+  return { loop: false, action: "" };
+}
+
+// ponytail: detect when the same action has failed consecutively. Three
+// failures on the same action = likely a broken page state, not a planning
+// problem. Convert to clarifying question.
+export interface FailureRecord {
+  action: string;
+  error: string;
+  ts: number;
+}
+
+export function detectStuckFailures(
+  failures: FailureRecord[],
+  threshold = 3,
+): { stuck: boolean; action: string; error: string } {
+  if (failures.length < threshold) return { stuck: false, action: "", error: "" };
+  const tail = failures.slice(-threshold);
+  if (tail.every((f) => f.action === tail[0].action)) {
+    return { stuck: true, action: tail[0].action, error: tail[0].error };
+  }
+  return { stuck: false, action: "", error: "" };
+}
+
+// ponytail: heuristic for "destructive" actions that should require approval.
+// Click + insert_text on a page mentioning payment/checkout/delete/etc = pause.
+// Visit_url to a banking or payment domain = pause.
+const APPROVAL_KEYWORDS = [
+  "delete", "remove", "pay", "checkout", "purchase", "confirm purchase",
+  "send money", "transfer", "wire", "subscription",
+];
+
+const APPROVAL_DOMAINS = [
+  "checkout", "pay.", "payments.", "stripe.com", "banking", "/pay/",
+];
+
+export function needsApproval(
+  action: { type?: string; url?: string; text?: string },
+  observation: { url: string; bodyTextSnippet: string },
+): { needs: boolean; reason: string } {
+  const pageText = observation.bodyTextSnippet.toLowerCase();
+  if (action.type === "visit_url" && typeof action.url === "string") {
+    for (const kw of APPROVAL_DOMAINS) {
+      if (action.url.toLowerCase().includes(kw)) {
+        return { needs: true, reason: `Navigate to "${action.url}" matches approval pattern "${kw}"` };
+      }
+    }
+  }
+  if (action.type === "left_click" || action.type === "double_click") {
+    for (const kw of APPROVAL_KEYWORDS) {
+      if (pageText.includes(kw)) {
+        return { needs: true, reason: `Page contains "${kw}" — clicking may be destructive` };
+      }
+    }
+  }
+  if (action.type === "insert_text" && typeof action.text === "string") {
+    const lcText = action.text.toLowerCase();
+    for (const kw of APPROVAL_KEYWORDS) {
+      if (lcText.includes(kw) && pageText.includes(kw)) {
+        return { needs: true, reason: `Typing "${action.text}" on a page mentioning "${kw}" may be destructive` };
+      }
+    }
+  }
+  return { needs: false, reason: "" };
 }
 
 function describeAction(a: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string }): string {
@@ -59,11 +146,19 @@ function describeAction(a: { type?: string; x?: number; y?: number; text?: strin
 // OpenAI-compatible planner expects. Mirrors scripts/context-builder.ts so the
 // model sees the same shape whether the observation came from Playwright or the
 // extension.
-export function renderObservationForPlanner(obs: ObservationV1, history: Array<{ action: string; result: string }>): string {
+export function renderObservationForPlanner(
+  obs: ObservationV1,
+  history: Array<{ action: string; result: string }>,
+  guidance?: string,
+): string {
   const lines: string[] = [];
   lines.push(`URL: ${obs.url}`);
   lines.push(`Title: ${obs.title}`);
   lines.push("");
+  if (guidance && guidance.length > 0) {
+    lines.push(`User guidance: ${guidance}`);
+    lines.push("");
+  }
   lines.push("Elements (use IDs, click coords inline):");
   for (const t of obs.semanticTargets) {
     if (!t.visible) continue;
@@ -300,6 +395,8 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
 
   const history: Array<{ action: string; result: string }> = [];
   let stepIndex = 0;
+  const failures: FailureRecord[] = [];
+  let injectedGuidance: string | undefined;
   try {
     while (stepIndex < MAX_STEPS) {
       if (opts.signal.aborted) {
@@ -326,9 +423,6 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
               resolve();
             }
           }, 500);
-          // ponytail: the background handler resolves this when login_complete
-          // arrives. We expose the resolve via a one-shot listener on a
-          // module-level map keyed by tabId.
           pendingLoginResolvers.set(tabId, () => {
             clearInterval(interval);
             opts.signal.removeEventListener("abort", onAbort);
@@ -337,10 +431,11 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         });
         pendingLoginResolvers.delete(tabId);
         log(opts, "user confirmed login — resuming loop");
+        injectedGuidance = undefined;
         await waitForNetworkIdle(tabId).catch(() => undefined);
         continue;
       }
-      const context = renderObservationForPlanner(obs, history);
+      const context = renderObservationForPlanner(obs, history, injectedGuidance);
       const outcome = await callPlanner(opts, context);
       if (opts.signal.aborted) {
         opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
@@ -351,17 +446,43 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         return;
       }
       if (outcome.kind === "question") {
-        log(opts, `planner returned a question, treating as no-op: ${outcome.question?.slice(0, 80)}`);
-        await new Promise((r) => setTimeout(r, 500));
+        // ponytail: planner can also emit a question. Surface it to the user,
+        // append their answer to the goal as guidance for the next iteration.
+        const question = outcome.question ?? "The agent needs more information.";
+        const answer = await opts.onClarify({
+          reason: "The planner asked a question",
+          question,
+          context: question,
+        });
+        injectedGuidance = answer;
+        opts.onAnswered?.({ question, answer });
         continue;
       }
       const action = outcome.action ?? { type: "unknown" };
       // ponytail: model emits terminate as an action (not a completion).
-      // Detect it here and surface as completion so the loop exits cleanly.
       if (action.type === "terminate") {
         log(opts, `model called terminate at step ${stepIndex + 1}`);
         opts.onComplete({ summary: typeof action.answer === "string" ? action.answer : "Task done", steps: stepIndex + 1 });
         return;
+      }
+      // ponytail: pause before destructive actions. The user sees the action
+      // preview and approves or denies. Without this the agent could click
+      // through a payment confirmation without checking.
+      const approval = needsApproval(action, obs);
+      if (approval.needs && opts.onApprovalRequired) {
+        log(opts, `approval required: ${approval.reason}`);
+        const approved = await opts.onApprovalRequired({
+          reason: approval.reason,
+          action: { type: action.type, url: action.url },
+          url: obs.url,
+        });
+        opts.onApprovalResolved?.({ approved, action: { type: action.type } });
+        if (!approved) {
+          log(opts, "user denied approval — aborting task");
+          opts.onError({ code: "APPROVAL_DENIED", message: `User denied: ${approval.reason}` });
+          return;
+        }
+        log(opts, "user approved — proceeding");
       }
       const desc = describeAction(action);
       const iconKind = (action.type ?? "unknown").toString();
@@ -370,14 +491,27 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         result = await executeAction(tabId, action);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        log(opts, `action failed: ${message}`);
+        log(opts, `action failed (${failures.length + 1} in a row): ${message}`);
+        failures.push({ action: desc, error: message, ts: Date.now() });
+        // ponytail: same action failing 3+ times in a row = stuck. Surface a
+        // clarifying question instead of crashing the loop.
+        const stuck = detectStuckFailures(failures);
+        if (stuck.stuck) {
+          const answer = await opts.onClarify({
+            reason: `Action "${stuck.action}" has failed ${failures.length} times in a row`,
+            question: `The agent can't get "${stuck.action}" to work. The last error was: ${stuck.error}. What should it do instead?`,
+            context: stuck.error,
+          });
+          injectedGuidance = answer;
+          opts.onAnswered?.({ question: stuck.error, answer });
+          failures.length = 0;
+          continue;
+        }
         opts.onError({ code: "ACTION_FAILED", message });
         return;
       }
       await waitForNetworkIdle(tabId).catch(() => undefined);
       await new Promise((r) => setTimeout(r, POST_ACTION_PAUSE_MS));
-      // ponytail: capture the post-action observation so the side panel card
-      // can show the screenshot of where the agent landed, not where it started.
       let screenshot: string | null = null;
       let postUrl = obs.url;
       try {
@@ -385,10 +519,24 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
         postUrl = postObs.url;
       } catch {
-        // ignore — empty screenshot is fine
+        // ignore
       }
       history.push({ action: desc, result });
+      failures.length = 0;
       opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind });
+      // ponytail: loop detection. Same action 3+ times in a row = stuck.
+      // Surface a clarifying question so the user can redirect.
+      const loop = detectLoop(history);
+      if (loop.loop) {
+        log(opts, `loop detected: ${loop.action} repeated ${history.length} times`);
+        const answer = await opts.onClarify({
+          reason: `Action "${loop.action}" repeated ${history.length} times in a row`,
+          question: `The agent keeps doing "${loop.action}" without progress. How should it proceed?`,
+          context: loop.action,
+        });
+        injectedGuidance = answer;
+        opts.onAnswered?.({ question: loop.action, answer });
+      }
       stepIndex++;
     }
     opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });
