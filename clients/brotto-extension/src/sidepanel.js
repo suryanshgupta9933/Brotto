@@ -114,10 +114,11 @@ goalEl.addEventListener('input', () => {
 async function sendUserMessage() {
   const text = goalEl.value.trim();
   if (!text) return;
-  if (state.phase === 'executing') {
-    // ponytail: queue as a clarifying nudge? For demo just ignore extra sends.
-    return;
-  }
+  // ponytail: any non-terminal phase means a send is in flight. Guard against
+  // double-clicks during the connecting/connected window before the loop sets
+  // 'executing'. Without this, two parallel run_local_task messages race and
+  // the second hits "A local task is already running" in background.
+  if (state.phase !== 'idle' && state.phase !== 'done' && state.phase !== 'error') return;
   // ponytail: clear prior conversation so each task starts fresh.
   clearMessages();
   appendMessage({ role: 'user', text });
