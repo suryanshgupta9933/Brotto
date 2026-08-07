@@ -258,10 +258,43 @@ export function detectStuckFailures(
 ): { stuck: boolean; action: string; error: string } {
   if (failures.length < threshold) return { stuck: false, action: "", error: "" };
   const tail = failures.slice(-threshold);
-  if (tail.every((f) => f.action === tail[0].action)) {
-    return { stuck: true, action: tail[0].action, error: tail[0].error };
+  const firstAction = tail[0]?.action ?? "";
+  if (tail.every((f) => f.action === firstAction)) {
+    return {
+      stuck: true,
+      action: firstAction,
+      error: tail[0]?.error ?? "",
+
+    };
   }
   return { stuck: false, action: "", error: "" };
+}
+
+// ponytail: auto-extract structured findings from observation URL, title, and body text
+// into WorkingMemory so the agent continuously retains context even if the planner model
+// forgets to emit explicit memoryUpdates.
+export function autoExtractWorkingMemory(obs: ObservationV1, memory: WorkingMemory): void {
+  if (!obs.url || obs.url === "about:blank") return;
+  try {
+    const u = new URL(obs.url);
+    if (u.hostname.includes("github.com")) {
+      const parts = u.pathname.split("/").filter(Boolean);
+      if (parts.length === 1 && !["settings", "notifications", "explore", "orgs", "login"].includes(parts[0]!)) {
+        memory.merge([{ key: "profile_username", value: parts[0]!, evidence: obs.url }]);
+      } else if (parts.length >= 2 && !["orgs", "settings", "login"].includes(parts[0]!)) {
+        memory.merge([{ key: "viewed_repo", value: `${parts[0]}/${parts[1]}`, evidence: obs.url }]);
+      }
+    }
+  } catch { /* invalid URL */ }
+
+  if (obs.bodyText) {
+    const cardMatches = obs.bodyText.match(/•\s*([A-Za-z0-9_.-]+)\s+[^•\n]*(?:★|⭐|stars?)\s*(\d+)/gi);
+    if (cardMatches && cardMatches.length > 0) {
+      const parsed = cardMatches.slice(0, 5).map((m: string) => m.replace(/•\s*/, "").trim());
+      memory.merge([{ key: "detected_repos_stars", value: parsed.join("; "), evidence: obs.url }]);
+    }
+  }
+
 }
 
 // ponytail: heuristic for "destructive" actions that should require approval.
@@ -1106,6 +1139,9 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           : ` Look for a "${signIn.label}" link/button and click it.`;
         injectedGuidance = `This page is a logged-out landing page. Click the Sign in / Log in link to authenticate — never type credentials.${targetHint}`;
       }
+      // ponytail: auto-extract working memory from obs so key entities (username, repo, stars, prices)
+      // are continuously preserved in working memory even if the planner model omits memoryUpdates.
+      autoExtractWorkingMemory(obs, memory);
       const context = renderObservationForPlanner(obs, history, injectedGuidance, memory.toView());
       const outcome = await callPlanner(opts, context);
       if (opts.signal.aborted) {
@@ -1226,8 +1262,40 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       }
       const desc = describeAction(action);
       const iconKind = (action.type ?? "unknown").toString();
+
+      // ponytail: HARD ACTION REJECTION — if the model proposes an action signature
+      // that already resulted in [Unchanged: ...] in history, do NOT execute it again!
+      // Instantly reject execution, record the rejection in history, inject strict guidance,
+      // and loop to the next turn so the model is forced to pivot without wasting time/CDP.
+      const actionSig = actionSignature(action);
+      const isRepeatUnchanged = history.some(
+        (h) => (h.action === desc || actionSigs.includes(actionSig)) && h.result.includes("[Unchanged"),
+      );
+
+      if (isRepeatUnchanged) {
+        log(opts, `action hard-rejected by harness: "${desc}" already resulted in [Unchanged]`);
+        const rejectMsg = `[REJECTED BY HARNESS]: Action "${desc}" was ALREADY attempted and had NO effect [Unchanged: URL and page state remained identical]. Repeating this action is FORBIDDEN. You MUST pick a DIFFERENT strategy (e.g. direct visit_url to a specific URL with query parameters like ?sort=stargazers, scroll down, or click a different element ID).`;
+        history.push({ action: desc, result: rejectMsg });
+        injectedGuidance = rejectMsg;
+        opts.onStep({ index: stepIndex, action: desc, result: rejectMsg, url: obs.url, screenshot: null, iconKind, reasoning: action.reasoning });
+        actionSigs.push(actionSig);
+        const currentTitle = obs.title;
+        obsSigs.push(observationSignature({ url: obs.url, title: currentTitle, elements: obs.semanticTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
+        pageIdentities.push(obs.pageIdentity || `${obs.url}|${currentTitle}`);
+        stagnationHits++;
+        if (stagnationHits >= STAGNATION_LIMIT) {
+          const findings = memory.toView();
+          const blockedMessage = `STOP — repeated invalid actions rejected by harness.\n\nFindings so far:\n${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
+          terminal = { kind: "error", error: { code: "STAGNATION", message: blockedMessage } };
+          return;
+        }
+        stepIndex++;
+        continue;
+      }
+
       let result: string;
       const actionTs = Date.now();
+
       try {
         result = await executeAction(tabId, action);
       } catch (err) {
