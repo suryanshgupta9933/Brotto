@@ -650,6 +650,55 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       /* tab might be gone — let captureObservation surface the real error */
     }
   }
+  // ponytail: detect whether the click opened a new tab to an external origin
+  // (e.g. Gmail's "Track package" link → amazon.in) and follow it. Without
+  // this the loop keeps capturing the original tab while the answer sits in
+  // a tab the planner never sees. Returns null when no followable tab opened
+  // — same-origin tabs (popups from the same site) are skipped deliberately.
+  async function followNewTabIfExternal(
+    currentTabId: number,
+    sinceMs: number,
+  ): Promise<{ id: number; url: string; title: string } | null> {
+    try {
+      let currentOrigin = "";
+      try {
+        const t = await chrome.tabs.get(currentTabId);
+        currentOrigin = new URL(t.url ?? "").origin;
+      } catch {
+        /* current tab went away */
+      }
+      // ponytail: pick the most recently opened tab whose openedAt is
+      // after `sinceMs`. Filter out the current tab (impossible but safe),
+      // unparseable URLs (about:blank chrome:// pages), and the baseline
+      // tabs the user already had open before the loop started.
+      let candidate: { id: number; url: string; title: string; openedAt: number } | null = null;
+      for (const [id, info] of tabJournal.entries()) {
+        if (id === currentTabId) continue;
+        if (typeof id !== "number") continue;
+        if (info.openedAt <= sinceMs) continue;
+        if (initialTabIds.has(id)) continue;
+        if (candidate === null || info.openedAt > candidate.openedAt) {
+          candidate = { id, url: info.url, title: info.title, openedAt: info.openedAt };
+        }
+      }
+      if (candidate === null) return null;
+      let candidateOrigin = "";
+      try { candidateOrigin = new URL(candidate.url).origin; } catch { /* leave empty */ }
+      // ponytail: same-origin tab = same-site UI panel (e.g. login popup),
+      // not what we want to follow. Different origin = the user clearly
+      // meant to navigate elsewhere; switch.
+      if (currentOrigin && candidateOrigin && currentOrigin === candidateOrigin) return null;
+      try {
+        await chrome.tabs.update(candidate.id, { active: true });
+      } catch {
+        /* tab may have closed; let the caller re-evaluate */
+        return null;
+      }
+      return { id: candidate.id, url: candidate.url, title: candidate.title };
+    } catch {
+      return null;
+    }
+  }
   let caughtError: Error | null = null;
   try {
     while (stepIndex < MAX_STEPS) {
@@ -746,7 +795,18 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           opts.onAnswered?.({ question: "terminate without finalAnswer", answer });
           continue;
         }
-        opts.onComplete({ summary: finalAnswer, steps: stepIndex + 1, finalAnswer });
+        // ponytail: append the recorded memory as a "Notes recorded during
+        // run" block so the user always sees structured findings even if the
+        // model's finalAnswer is terse. The model's answer takes priority;
+        // we add facts the harness collected independently. Memory entries
+        // with key starting with "_" are skipped (internal markers).
+        const findings = memory.toView().filter((f) => !f.key.startsWith("_"));
+        let richAnswer = finalAnswer;
+        if (findings.length > 0) {
+          const lines = findings.map((f) => `  • ${f.key} = ${f.value}${f.evidence ? `  (${f.evidence})` : ""}`);
+          richAnswer = `${finalAnswer}\n\nNotes recorded during run:\n${lines.join("\n")}`;
+        }
+        opts.onComplete({ summary: richAnswer, steps: stepIndex + 1, finalAnswer: richAnswer });
         return;
       }
       // ponytail: pause before destructive actions. The user sees the action
@@ -771,6 +831,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       const desc = describeAction(action);
       const iconKind = (action.type ?? "unknown").toString();
       let result: string;
+      const actionTs = Date.now();
       try {
         result = await executeAction(tabId, action);
       } catch (err) {
@@ -796,6 +857,27 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       }
       await waitForNetworkIdle(tabId).catch(() => undefined);
       await new Promise((r) => setTimeout(r, POST_ACTION_PAUSE_MS));
+      // ponytail: check for tabs that opened during the click (e.g.
+      // Gmail's "Track package" link → amazon.in opens in a new tab). The
+      // CDP click dispatches the synthetic event but doesn't update our
+      // active tabId, so without this the loop keeps capturing the Gmail
+      // tab and stagnation fires before the planner sees the answer that
+      // is already loaded in the new tab. We follow external-origin tabs
+      // (different origin = new window-like context the user clearly
+      // intended to open).
+      const followed = await followNewTabIfExternal(tabId, actionTs);
+      if (followed !== null) {
+        const oldTabId = tabId;
+        tabId = followed.id;
+        log(opts, `following click into new tab ${tabId} (${followed.url.slice(0, 80)})`);
+        await debuggerModule.detachFromTab(oldTabId).catch(() => undefined);
+        try {
+          await debuggerModule.attachToTab(tabId);
+        } catch (err) {
+          log(opts, `failed to attach to new tab ${tabId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        await waitForNetworkIdle(tabId).catch(() => undefined);
+      }
       let screenshot: string | null = null;
       let postUrl = obs.url;
       try {

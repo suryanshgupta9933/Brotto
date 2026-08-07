@@ -590,7 +590,10 @@ function appendPlanCard({ title, sites, steps }) {
 // ponytail: step bubble that tucks the raw tool call behind a "details"
 // toggle so the chat reads naturally while still letting the operator
 // drill in when debugging. Reasoning stays as the bubble title.
-function appendStepWithDetails({ text, details }) {
+// ponytail: icon is set via innerHTML on its own <span> so HTML entities
+// (&#8594;, &#9654;, &#10003;) decode to glyphs. The reasoning text uses
+// textContent so any user/model-supplied HTML stays literal and safe.
+function appendStepWithDetails({ icon, text, details }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
@@ -602,7 +605,14 @@ function appendStepWithDetails({ text, details }) {
 
   const head = document.createElement('div');
   head.className = 'step-head';
-  head.textContent = text || 'Working…';
+  if (icon) {
+    const iconEl = document.createElement('span');
+    iconEl.className = 'step-head-icon';
+    iconEl.innerHTML = icon;
+    head.appendChild(iconEl);
+    head.appendChild(document.createTextNode(' '));
+  }
+  head.appendChild(document.createTextNode(text || 'Working…'));
   bubble.appendChild(head);
 
   if (details && details.length > 0) {
@@ -922,9 +932,9 @@ chrome.runtime.onMessage.addListener((message) => {
       // ponytail: each step gets its OWN persistent bubble. Reasoning is the
       // bubble title; raw tool call ("visit_url https://... → navigated to...")
       // lives behind a "details" toggle so the chat reads naturally and the
-      // operator can drill in when debugging.
-      const stepText = (icon ? icon + ' ' : '') + reasoningText;
-      appendStepWithDetails({ text: stepText, details: toolSubtitle, ts: message.ts });
+      // operator can drill in when debugging. Icon is passed separately so
+      // HTML entities decode instead of rendering as literal `&#8594;`.
+      appendStepWithDetails({ icon, text: reasoningText, details: toolSubtitle, ts: message.ts });
       break;
     }
 

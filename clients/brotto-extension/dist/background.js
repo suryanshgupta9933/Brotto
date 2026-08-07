@@ -14608,6 +14608,41 @@ ${lines.join("\n")}
       } catch {
       }
     }
+    async function followNewTabIfExternal(currentTabId, sinceMs) {
+      try {
+        let currentOrigin = "";
+        try {
+          const t = await chrome.tabs.get(currentTabId);
+          currentOrigin = new URL(t.url ?? "").origin;
+        } catch {
+        }
+        let candidate = null;
+        for (const [id, info] of tabJournal.entries()) {
+          if (id === currentTabId) continue;
+          if (typeof id !== "number") continue;
+          if (info.openedAt <= sinceMs) continue;
+          if (initialTabIds.has(id)) continue;
+          if (candidate === null || info.openedAt > candidate.openedAt) {
+            candidate = { id, url: info.url, title: info.title, openedAt: info.openedAt };
+          }
+        }
+        if (candidate === null) return null;
+        let candidateOrigin = "";
+        try {
+          candidateOrigin = new URL(candidate.url).origin;
+        } catch {
+        }
+        if (currentOrigin && candidateOrigin && currentOrigin === candidateOrigin) return null;
+        try {
+          await chrome.tabs.update(candidate.id, { active: true });
+        } catch {
+          return null;
+        }
+        return { id: candidate.id, url: candidate.url, title: candidate.title };
+      } catch {
+        return null;
+      }
+    }
     let caughtError = null;
     try {
       while (stepIndex < MAX_STEPS) {
@@ -14680,7 +14715,16 @@ ${lines.join("\n")}
             opts.onAnswered?.({ question: "terminate without finalAnswer", answer });
             continue;
           }
-          opts.onComplete({ summary: finalAnswer, steps: stepIndex + 1, finalAnswer });
+          const findings = memory.toView().filter((f) => !f.key.startsWith("_"));
+          let richAnswer = finalAnswer;
+          if (findings.length > 0) {
+            const lines = findings.map((f) => `  \u2022 ${f.key} = ${f.value}${f.evidence ? `  (${f.evidence})` : ""}`);
+            richAnswer = `${finalAnswer}
+
+Notes recorded during run:
+${lines.join("\n")}`;
+          }
+          opts.onComplete({ summary: richAnswer, steps: stepIndex + 1, finalAnswer: richAnswer });
           return;
         }
         const approval = needsApproval(action, obs);
@@ -14702,6 +14746,7 @@ ${lines.join("\n")}
         const desc = describeAction(action);
         const iconKind = (action.type ?? "unknown").toString();
         let result;
+        const actionTs = Date.now();
         try {
           result = await executeAction(tabId, action);
         } catch (err) {
@@ -14725,6 +14770,19 @@ ${lines.join("\n")}
         }
         await waitForNetworkIdle(tabId).catch(() => void 0);
         await new Promise((r) => setTimeout(r, POST_ACTION_PAUSE_MS));
+        const followed = await followNewTabIfExternal(tabId, actionTs);
+        if (followed !== null) {
+          const oldTabId = tabId;
+          tabId = followed.id;
+          log(opts, `following click into new tab ${tabId} (${followed.url.slice(0, 80)})`);
+          await detachFromTab(oldTabId).catch(() => void 0);
+          try {
+            await attachToTab(tabId);
+          } catch (err) {
+            log(opts, `failed to attach to new tab ${tabId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          await waitForNetworkIdle(tabId).catch(() => void 0);
+        }
         let screenshot = null;
         let postUrl = obs.url;
         try {
