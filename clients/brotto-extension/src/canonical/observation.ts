@@ -627,17 +627,27 @@ function collectPageSnapshot(
   // was the actual root cause of the 25s capture timeout. Replace with
   // a cheap 3-signal hash that captures page identity for stagnation
   // detection without walking the DOM:
-  //   1. URL pathname + search (changes on navigation)
-  //   2. First <h1> text (changes on content change)
-  //   3. Body element child count (changes on DOM growth)
-  // These three signals together detect navigation AND meaningful
-  // content updates without the cost of a full-DOM walk.
+  // ponytail: page-identity fingerprint. Cheap signals that capture
+  // navigation AND popups/modals without walking the full DOM tree:
+  //   1. URL pathname + search + hash
+  //   2. First <h1> text
+  //   3. Body element child count
+  //   4. Open popovers/modals/dropdowns ([aria-expanded='true'], details[open], role=menu/dialog)
+  //   5. Interactive semantic targets count
   const pageIdentity = (() => {
-    const pathname = location.pathname + location.search;
+    const loc = location.pathname + location.search + location.hash;
     const h1 = document.querySelector("h1");
     const h1Text = h1 ? (h1.textContent || "").trim().slice(0, 80) : "";
     const childCount = document.body ? document.body.children.length : 0;
-    const text = `${pathname}\n${h1Text}\n${childCount}`;
+    const popups = Array.from(
+      document.querySelectorAll(
+        "[aria-expanded='true'], details[open], [role='dialog'], [role='menu'], [role='listbox']",
+      ),
+    )
+      .slice(0, 10)
+      .map((el) => (el.textContent || "").trim().slice(0, 40) || el.tagName)
+      .join("|");
+    const text = `${loc}\n${h1Text}\n${childCount}\n${popups}\n${semanticTargets.length}`;
     let h = 0xcbf29ce484222325n;
     const prime = 0x100000001b3n;
     const mask = (1n << 64n) - 1n;

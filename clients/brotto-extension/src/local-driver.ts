@@ -780,13 +780,20 @@ async function captureObservationWithTimeout(tabId: number, timeoutMs: number): 
 }
 const captureForDriverWithTimeout = (tabId: number, timeoutMs: number) => captureObservationWithTimeout(tabId, timeoutMs);
 
-// ponytail: budgeted wait. We can't hook Network.requestWillBeSent without
-// keeping a long-lived debugger session, and the existing Page lifecycle
-// hooks are good enough — the planner's description of the new page is
-// usually accurate after a short pause. Sleep for `timeoutMs` (default
-// 500ms) and proceed.
-async function waitForNetworkIdle(_tabId: number, timeoutMs = 500): Promise<void> {
-  await new Promise((r) => setTimeout(r, timeoutMs));
+// ponytail: real page settlement wait. Polls chrome.tabs.get until status === "complete"
+// (capped at 1500ms), followed by a 350ms quiet UI stability window for CSS/DOM popovers to settle.
+async function waitForNetworkIdle(tabId: number, _timeoutMs = 800): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < 1500) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete") break;
+    } catch {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  await new Promise((r) => setTimeout(r, 350));
 }
 
 export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {

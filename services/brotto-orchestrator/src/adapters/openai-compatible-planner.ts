@@ -237,6 +237,8 @@ export class OpenAICompatiblePlanner implements InferencePort {
         "",
         "Rules:",
         "- NEVER ask the user for credentials (passwords, 2FA codes, OAuth tokens, API keys, etc.). If a page requires sign-in, click the visible Sign in / Log in link (never type credentials yourself). The harness detects the auth wall, pauses, and resumes automatically once the post-login page loads. Prose-only responses do not end the task — always call terminate(finalAnswer=...) to commit a final report, or call a real action.",
+        "- Dropdowns & Menus: Left-clicking an element marked `(haspopup=...)` or `(expanded=false)` opens a menu/popover. After clicking it, read the NEW interactive elements list in the next context to select the menu item.",
+        "- Navigating to User Profiles / Repositories: If you need to access a specific site section (e.g. GitHub repositories or profile) and UI clicks aren't navigating, use direct URL navigation (e.g. `visit_url('https://github.com/<username>?tab=repositories')` or `visit_url('https://github.com/<username>')`). Direct URL navigation is always fast and reliable.",
         "- To open a website you can either visit_url(direct_url) or visit_url(google.com/search?q=...) then click the result. Either is fine.",
         "- insert_text types into the currently focused element only. If the field you want is NOT marked focused=true, left_click it first. Never assume a field is focused.",
         "- Type each field's value EXACTLY ONCE. After insert_text, the field's value=\"...\" will update in the next context.",

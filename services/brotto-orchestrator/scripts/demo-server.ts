@@ -86,7 +86,7 @@ async function main() {
       ? ctx.slice(textStart, Math.min(textStart + 240, textEnd > 0 ? textEnd : textStart + 240)).replace(/\n/g, " ").trim()
       : "(no page text)";
     const memLines = ctx.match(/Working memory[^\n]*\n((?:\s+- [^\n]+\n?)+)/)?.[1]?.trim().split("\n").filter(Boolean) ?? [];
-    const historyLines = ctx.match(/Previous steps[^\n]*\n((?:\s+\d+\.[^\n]+\n?)+)/)?.[1]?.trim().split("\n").filter(Boolean) ?? [];
+    const historyLines = ctx.match(/(?:Previous steps|=== RECENT STEPS & VERIFIED OUTCOMES ===)[^\n]*\n((?:\s+\d+\.[^\n]+\n?)+)/)?.[1]?.trim().split("\n").filter(Boolean) ?? [];
     const elementCount = (ctx.match(/click=\(\d+, \d+\)/g) ?? []).length;
     const sep = `── /plan turn #${myTurn} ${"─".repeat(Math.max(0, 50 - String(myTurn).length))}`;
     console.log("");
