@@ -1,5 +1,5 @@
 import type { ObservationV1, SemanticTarget } from "@brotto/brotto-action-schema";
-import { captureObservation } from "./canonical/observation";
+import { captureSnapshotForDriver } from "./canonical/observation";
 import * as debuggerModule from "./debugger";
 
 // ponytail: high enough that realistic multi-step research completes. The
@@ -644,7 +644,7 @@ async function openNewTab(startingUrl: string | undefined): Promise<number> {
 }
 
 async function captureForDriver(tabId: number): Promise<ObservationV1> {
-  return captureObservation(tabId);
+  return captureSnapshotForDriver(tabId);
 }
 
 // ponytail: capture with a hard timeout. Real Chrome's debugger.sendCommand
@@ -654,7 +654,7 @@ async function captureForDriver(tabId: number): Promise<ObservationV1> {
 // error.
 async function captureObservationWithTimeout(tabId: number, timeoutMs: number): Promise<ObservationV1> {
   return Promise.race([
-    captureObservation(tabId),
+    captureSnapshotForDriver(tabId),
     new Promise<ObservationV1>((_, reject) => {
       setTimeout(() => reject(new Error(`captureObservation timed out after ${timeoutMs}ms`)), timeoutMs);
     }),

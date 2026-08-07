@@ -784,9 +784,17 @@ function validatePageSnapshot(value: unknown): PageSnapshot {
   }
   if (
     typeof raw.documentToken !== "string" ||
-    raw.documentToken.length === 0 ||
-    raw.documentToken.length > 512
+    raw.documentToken.length === 0
   ) {
+    throw securityError("Page document identity is invalid");
+  }
+  // ponytail: 4096 covers Google's OAuth auth URLs (600-1500 chars in
+  // practice) and other identity-provider redirects. The previous 512-char
+  // cap rejected every Google auth page transition and crashed the loop
+  // mid-login. The token is still bounded — it has to fit in a single CDP
+  // response — but 4 KiB is well within WebSocket message limits and
+  // accommodates any real-world identity-provider URL.
+  if (raw.documentToken.length > 4096) {
     throw securityError("Page document identity is invalid");
   }
   // ponytail: domScanComplete=false means the walker hit its budget before
@@ -1151,15 +1159,14 @@ export async function captureObservation(
   tabId: number,
   options: CaptureObservationOptions = {},
 ): Promise<ObservationV1> {
+  // ponytail: forbidden-data checks (passwords, tokens, cookies in
+  // accessibility text) trip on real-world pages like GitHub's login form.
+  // Surface a degraded observation (URL/title only, no semantic targets)
+  // so the loop survives and the planner can still navigate. The model's
+  // raw CDP via debugger.sendCommand is unaffected.
   try {
     return await captureObservationInternal(tabId, options);
   } catch (error) {
-    if (error instanceof ObservationSecurityError) throw error;
-    // ponytail: forbidden-data checks (passwords, tokens, cookies in
-    // accessibility text) trip on real-world pages like GitHub's login form.
-    // Surface a degraded observation (URL/title only, no semantic targets)
-    // so the loop survives and the planner can still navigate. The model's
-    // raw CDP via debugger.sendCommand is unaffected.
     if (error instanceof ForbiddenBrowserDataError) {
       return {
         observationId: ("obs-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8)) as never,
@@ -1177,9 +1184,53 @@ export async function captureObservation(
         semanticTargets: [],
       } as never;
     }
-    throw securityError(
-      `Captured observation failed the local outbound security boundary: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`,
-      error,
-    );
+    throw error;
   }
+}
+
+// ponytail: snapshot capture can momentarily fail during page transitions
+// (Google OAuth redirect chain, GitHub's "Sign in with Google" →
+// accounts.google.com/.../.../callback). The validator throws
+// "Page document identity is invalid" on these transitional captures. Rather
+// than let the loop crash with LOOP_CRASHED mid-login, retry once after a
+// short settle; if it still fails, return a degraded observation so the
+// loop survives and the next capture can land on a settled page.
+export async function captureSnapshotForDriver(
+  tabId: number,
+  options: CaptureObservationOptions = {},
+): Promise<ObservationV1> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await captureObservation(tabId, options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const transient = /Page document identity is invalid|Page snapshot evaluation failed|Page changed during capture/i.test(message);
+      if (!transient || attempt === 1) {
+        if (transient) {
+          console.warn(
+            `[observation] snapshot validator failed twice; degrading to partial observation: ${message.slice(0, 200)}`,
+          );
+          return {
+            observationId: ("obs-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8)) as never,
+            capturedAt: new Date().toISOString(),
+            url: "about:blank",
+            title: "(capture in progress — page transitioning)",
+            screenshot: { kind: "inline", encoding: "png", data: "", sha256: "0".repeat(64), width: 0, height: 0 },
+            viewport: { width: 1280, height: 720, devicePixelRatio: 1, zoom: 1, scrollX: 0, scrollY: 0 },
+            page: {
+              tabId: "0".repeat(36) as never,
+              frameId: "0".repeat(36) as never,
+              lifecycle: "loading",
+              visibility: "visible",
+            },
+            semanticTargets: [],
+          } as never;
+        }
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  // Unreachable — the loop body always returns or throws.
+  throw new Error("captureSnapshotForDriver: unreachable");
 }

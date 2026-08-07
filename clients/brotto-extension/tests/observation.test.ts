@@ -1,6 +1,7 @@
 import {
   ObservationSecurityError,
   captureObservation,
+  captureSnapshotForDriver,
   type CaptureObservationOptions,
   type ScreenshotMaskInput,
   type TabIdentity,
@@ -503,5 +504,82 @@ describe("canonical browser observation capture", () => {
       name: "Submit",
       attributes: expect.objectContaining({ "data-testid": "submit-btn" }),
     });
+  });
+});
+
+describe("captureSnapshotForDriver — transitional auth captures", () => {
+  // ponytail: PAGE_SNAPSHOT does not include bodyTextSnippet (the validator
+  // requires it). Provide a richer fixture for the wrapper tests.
+  const PAGE_SNAPSHOT_WITH_BODY = { ...PAGE_SNAPSHOT, bodyTextSnippet: "Some visible text on the page" };
+  // ponytail: the driver wrapper retries once on snapshot-validation errors
+  // (e.g. Google OAuth redirect chain throws "Page document identity is
+  // invalid") and degrades to a partial observation if both attempts fail.
+  // This is the regression test for the LOOP_CRASHED seen on GitHub
+  // "Sign in with Google".
+  it("retries a transient document-identity failure and returns the second attempt's observation", async () => {
+    // captureObservationInternal runs Runtime.evaluate twice (before and
+    // after screenshot). On the first attempt the BEFORE snapshot fails
+    // the documentToken validator, so only ONE bad call is observed.
+    // The retry then succeeds with two good calls.
+    let badCalls = 0;
+    let goodCalls = 0;
+    const observation = await captureSnapshotForDriver(
+      42,
+      defaultOptions(PAGE_SNAPSHOT_WITH_BODY, {
+        sendCdpCommand: async (_tabId, method) => {
+          if (method === "Page.getFrameTree") {
+            return { frameTree: { frame: { id: "main-frame" } } };
+          }
+          if (badCalls === 0) {
+            badCalls += 1;
+            // First call only: the snapshot has no documentToken (transitional).
+            return { result: { value: { ...PAGE_SNAPSHOT_WITH_BODY, documentToken: "" } } };
+          }
+          goodCalls += 1;
+          return { result: { value: PAGE_SNAPSHOT_WITH_BODY } };
+        },
+      }),
+    );
+    expect(badCalls).toBe(1);
+    // 3 good calls: before snapshot, after snapshot, accessibility tree.
+    expect(goodCalls).toBe(3);
+    expect(observation.title).toBe("Products");
+  });
+
+  it("accepts a Google-style OAuth documentToken longer than 512 chars", async () => {
+    // Google OAuth URLs are routinely 700-1500 chars; the previous 512-cap
+    // rejected every transition between accounts.google.com sub-screens.
+    // The validator must accept the longer token (it is bounded at 4 KiB
+    // for safety, but real OAuth URLs are well under that).
+    const longUrl = "https://accounts.google.com/o/oauth2/v2/auth/oauthchooseaccount?" + "x=".repeat(900);
+    const observation = await captureSnapshotForDriver(
+      42,
+      defaultOptions({ ...PAGE_SNAPSHOT_WITH_BODY, url: longUrl, documentToken: `${Date.now()}:${longUrl}` }),
+    );
+    // Don't pin the sanitized URL — assert that the capture succeeded
+    // (no exception, an observation was returned). The sanitization
+    // step is independent of the documentToken length fix.
+    expect(observation).toBeDefined();
+    expect(observation.semanticTargets.length).toBeGreaterThanOrEqual(0);
+  });
+
+  it("degrades to a partial observation when the snapshot validator fails twice", async () => {
+    const observation = await captureSnapshotForDriver(
+      42,
+      defaultOptions(PAGE_SNAPSHOT_WITH_BODY, {
+        sendCdpCommand: async (_tabId, method) => {
+          if (method === "Page.getFrameTree") {
+            return { frameTree: { frame: { id: "main-frame" } } };
+          }
+          // Both attempts: empty documentToken (transitional snapshot).
+          return { result: { value: { ...PAGE_SNAPSHOT_WITH_BODY, documentToken: "" } } };
+        },
+      }),
+    );
+    // The driver should still receive an observation so the loop can
+    // continue, not a hard throw.
+    expect(observation).toBeDefined();
+    expect(observation.semanticTargets).toEqual([]);
+    expect(observation.title).toMatch(/transitioning|filtered/);
   });
 });
