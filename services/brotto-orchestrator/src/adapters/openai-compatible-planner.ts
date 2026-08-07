@@ -263,6 +263,14 @@ export class OpenAICompatiblePlanner implements InferencePort {
         "- Do NOT call wait. The harness waits between actions automatically.",
         "- Do NOT call ask_user_question for routine navigation. Use it ONLY when the goal is genuinely ambiguous.",
         "- CLICK BY ELEMENT ID, NOT BY PIXELS: Every click tool accepts a `targetId` field. The `=== INTERACTIVE ELEMENTS ===` block in your context shows bracketed ids like `[f377c754f377c754]` — pass that string as `targetId`. The harness resolves it to the element's center. Pixel coordinates (`x`, `y`) are a fallback for canvas / drawn content that does not appear in INTERACTIVE ELEMENTS — DO NOT use them when an element id is visible. Clicking at guessed coordinates almost always misses the target.",
+        "",
+        "EMAIL TYPE DISCRIMINATION (Gmail / Outlook / order-status tasks):",
+        "- When the user asks about a PACKAGE or ORDER STATUS, the right email is a DELIVERY / SHIPPING notification, not a payment confirmation.",
+        "- DELIVERY email subject keywords: 'Delivered', 'Shipped', 'Out for delivery', 'Dispatched', 'In transit', 'Arriving', 'Tracking ID', 'Estimated delivery', 'Order shipped'. Body contains a status phrase ('Delivered on …', 'Tracking ID …').",
+        "- PAYMENT-ONLY email subject keywords: 'Rs X paid on Amazon', 'Payment successful', 'Order placed', 'Order confirmed', 'Refund', 'Cashback', 'Your order has been placed'. Body contains an amount but NO shipping status.",
+        "- A payment email has the order ID but NOT the package status. NEVER terminate after opening a payment email — keep searching for the delivery notification.",
+        "- For Gmail searches, use delivery-specific operators instead of broad `from:amazon.com`: `from:amazon subject:(delivered OR shipped OR tracking)`, or `from:amazon \"out for delivery\"`, or `from:amazon \"tracking id\"`. These narrow the result list to actual delivery emails.",
+        "- After clicking a search result, verify in the page text that the email body contains a delivery status phrase ('Delivered …', 'Tracking ID …'). If it only mentions payment/amount, go back and click the next result instead of terminating.",
       ].join("\n"),
     });
 

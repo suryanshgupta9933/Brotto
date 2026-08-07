@@ -58,20 +58,22 @@ export interface GoalMatchResult {
 
 const TRACKING_ID_RE = /\b[A-Z0-9]{3,}[-]?[A-Z0-9]{3,}[-]?[A-Z0-9]{3,}\b/g;
 const ORDER_ID_RE = /#\s*[A-Z0-9][-A-Z0-9]{5,}/g;
-const LONG_DIGIT_RE = /\b\d{6,}\b/g;
-const SENDER_RE = /[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 
 function hasStructuredFact(text: string): boolean {
+  // ponytail: only DELIVERY-STATUS facts count. A bare sender email
+  // ("no-reply@amazonpay.in") or a 6+ digit number alone does not prove
+  // the answer to "status of my package" — those appear on the Gmail
+  // inbox before the agent has read any actual email, and counting them
+  // makes the GOAL MATCH banner fire prematurely and push the agent to
+  // terminate with payment / cashback data instead of searching for a
+  // real delivery notification.
   const checks = [
     TRACKING_ID_RE.test(text),
     ORDER_ID_RE.test(text),
-    LONG_DIGIT_RE.test(text),
-    SENDER_RE.test(text),
     STATUS_KEYWORDS.some((kw) => text.toLowerCase().includes(kw)),
   ];
   TRACKING_ID_RE.lastIndex = 0;
   ORDER_ID_RE.lastIndex = 0;
-  LONG_DIGIT_RE.lastIndex = 0;
   return checks.some(Boolean);
 }
 
