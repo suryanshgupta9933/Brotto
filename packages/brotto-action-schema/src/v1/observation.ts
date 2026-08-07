@@ -102,6 +102,14 @@ function withForbiddenBrowserDataGuard<T extends z.ZodTypeAny>(schema: T) {
 }
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/i);
+// ponytail: 128-bit FNV-1a fingerprint, 32 hex chars. Used for
+// attributeHash on page links/buttons and for pageIdentity — both
+// hash bounded inputs (a single element's attributes, or a single
+// page's AX subtree) and are never compared across trust boundaries,
+// so 128 bits is sufficient collision resistance. The page-context
+// walker can't use WebCrypto without significant friction, so FNV-1a
+// is the right tradeoff.
+const AttributeHashSchema = z.string().regex(/^[a-f0-9]{32}$/i);
 const sensitiveSemanticContent = /\b(?:authorization|cookie|credentials?|localstorage|password|passcode|profile|proxy|secret|sessionstorage|token)\b/i;
 
 function isSafeSemanticContent(value: string): boolean {
@@ -249,23 +257,27 @@ export const PageLinkSchema = z.object({
   text: SafeSemanticTextSchema,
   href: z.string().max(2048),
   axPath: z.array(AXTupleSchema).max(64),
-  attributeHash: Sha256Schema,
+  attributeHash: AttributeHashSchema,
   bbox: BoundingBoxSchema,
 }).strict();
 
 export const PageButtonSchema = z.object({
   text: SafeSemanticTextSchema,
   axPath: z.array(AXTupleSchema).max(64),
-  attributeHash: Sha256Schema,
+  attributeHash: AttributeHashSchema,
   bbox: BoundingBoxSchema,
 }).strict();
 
-// ponytail: page identity fingerprint. SHA-256 over a normalized AX-subtree
-// dump. Stable across renders when the page is semantically the same;
-// different when navigation actually happened. Replaces the unreliable
-// obs-sig (which used only the first semanticTarget's stableRef and drifted
-// whenever the page re-rendered).
-export const PageIdentitySchema = z.string().regex(/^[a-f0-9]{64}$/i);
+// ponytail: page identity fingerprint. 128-bit FNV-1a hash over a normalized
+// AX-subtree dump (role|indexInParentByRole|name). Stable across renders
+// when the page is semantically the same; different when navigation
+// actually happened. Replaces the unreliable obs-sig (which used only
+// the first semanticTarget's stableRef and drifted whenever the page
+// re-rendered). 128 bits = 32 hex chars is sufficient collision
+// resistance for page-identity comparison — we don't need the crypto
+// strength of SHA-256 because the input is bounded (a single page's
+// AX subtree) and we never compare across trust boundaries.
+export const PageIdentitySchema = z.string().regex(/^[a-f0-9]{32}$/i);
 
 export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({
   observationId: ObservationIdSchema,
