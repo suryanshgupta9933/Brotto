@@ -5,7 +5,7 @@ import * as debuggerModule from "./debugger";
 // ponytail: high enough that realistic multi-step research completes. The
 // bound is a safety net, not a target — earlier 12 made the agent feel rushed.
 const MAX_STEPS = 50;
-const HISTORY_LIMIT = 6;
+const HISTORY_LIMIT = 10;
 // ponytail: capture timeout bumped to 25s after slice E added replay-ready
 // fields (pageIdentity, links, buttons, pagePurpose). The page-context
 // script now does significantly more DOM walking — on heavy SPAs
@@ -221,14 +221,26 @@ function lastNIdentical(arr: string[]): string | null {
 }
 
 // ponytail: detect when the model is repeating the same action without state
-// change. Three identical consecutive actions (same type + same target signature)
-// = stuck. Surfacing as a clarifying question gives the user a chance to
-// redirect.
+// ponytail: detect when the same action string repeats in history. Three
+// identical consecutive actions (same description, e.g. "scroll") = stuck.
+// NOTE: pure scroll repetition is intentional on long pages, so the loop
+// threshold is 5 for scroll-only patterns (agent may need to scroll several
+// times). For other actions (click coord, visit_url) 3 is fine.
 export function detectLoop(history: Array<{ action: string; result: string }>, threshold = 3): { loop: boolean; action: string } {
   if (history.length < threshold) return { loop: false, action: "" };
   const tail = history.slice(-threshold).map((h) => h.action);
-  if (tail.every((a) => a === tail[0])) return { loop: true, action: tail[0] };
-  return { loop: false, action: "" };
+  const ref = tail[0];
+  if (!tail.every((a) => a === ref)) return { loop: false, action: "" };
+  // ponytail: pure scroll loops get extra rope — scrolling multiple times is
+  // often intentional on paginated or long-scroll pages like GitHub repos.
+  // Only raise the alarm if scroll has looped threshold+2 times.
+  if (ref === "scroll") {
+    const scrollThreshold = threshold + 2;
+    if (history.length < scrollThreshold) return { loop: false, action: "" };
+    const scrollTail = history.slice(-scrollThreshold).map((h) => h.action);
+    if (!scrollTail.every((a) => a === "scroll")) return { loop: false, action: "" };
+  }
+  return { loop: true, action: ref };
 }
 
 // ponytail: detect when the same action has failed consecutively. Three
@@ -783,8 +795,9 @@ async function captureObservationWithTimeout(tabId: number, timeoutMs: number): 
 }
 const captureForDriverWithTimeout = (tabId: number, timeoutMs: number) => captureObservationWithTimeout(tabId, timeoutMs);
 
-// ponytail: real page settlement wait. Polls chrome.tabs.get until status === "complete"
-// (capped at 1500ms), followed by a 350ms quiet UI stability window for CSS/DOM popovers to settle.
+// ponytail: real page settlement wait. Polls tab status === "complete" and runs an
+// in-page MutationObserver to wait until DOM mutations quiet down for 200ms (max 1500ms).
+// Critical for React/Vue SPAs where status === "complete" fires before hydration/re-renders.
 async function waitForNetworkIdle(tabId: number, _timeoutMs = 800): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < 1500) {
@@ -796,8 +809,38 @@ async function waitForNetworkIdle(tabId: number, _timeoutMs = 800): Promise<void
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  await new Promise((r) => setTimeout(r, 350));
+
+  // ponytail: MutationObserver quiet check — waits up to 800ms for 200ms of DOM quietness.
+  try {
+    await debuggerModule.sendCommand(tabId, {
+      method: "Runtime.evaluate",
+      params: {
+        expression: `new Promise((resolve) => {
+          let timer = setTimeout(finish, 200);
+          const observer = new MutationObserver(() => {
+            clearTimeout(timer);
+            timer = setTimeout(finish, 200);
+          });
+          function finish() {
+            observer.disconnect();
+            resolve(true);
+          }
+          if (document.documentElement) {
+            observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+          }
+          setTimeout(() => { observer.disconnect(); resolve(false); }, 800);
+        })`,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+    });
+  } catch {
+    // fallback sleep if CDP or script fails
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
 }
+
 
 export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
   log(opts, `opening new tab${opts.startingUrl ? ` at ${opts.startingUrl}` : ""}`);
@@ -1330,9 +1373,13 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           context: loop.action,
         });
         injectedGuidance = answer;
-        // ponytail: reset history and stagnation after loop recovery so the
-        // same loop.action doesn't immediately re-trigger on the next step.
-        history.length = 0;
+        // ponytail: do NOT reset history on loop recovery — history is the
+        // model's working memory of what it has tried. Wiping it causes the
+        // model to repeat the same path from scratch, re-triggering the loop.
+        // Instead, reset only the action/obs/page signature arrays (those
+        // exist purely for stagnation detection, not for model context) and
+        // keep history intact so the model can see what failed and pick a
+        // genuinely different strategy.
         actionSigs.length = 0;
         obsSigs.length = 0;
         pageIdentities.length = 0;

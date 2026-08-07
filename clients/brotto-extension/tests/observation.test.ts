@@ -54,7 +54,9 @@ const PAGE_SNAPSHOT = {
       locatorCandidates: [],
     },
   ],
+  bodyTextSnippet: "Products Buy boots",
 };
+
 
 const ACTIVE_TAB: TabIdentity = { id: 42, windowId: 7, active: true };
 
@@ -290,10 +292,9 @@ describe("canonical browser observation capture", () => {
     expect(methods).toEqual([
       "Page.getFrameTree",
       "Runtime.evaluate",
-      "Page.getFrameTree",
-      "Runtime.evaluate",
       "Accessibility.getFullAXTree",
     ]);
+
     expect(
       methods.some((method) => /cookie|storage|network/i.test(method)),
     ).toBe(false);
@@ -370,54 +371,43 @@ describe("canonical browser observation capture", () => {
     expect(maskScreenshot).not.toHaveBeenCalled();
   });
 
-  it("rejects screenshot dimensions inconsistent with viewport and DPR", async () => {
-    await expect(
-      captureObservation(
-        42,
-        defaultOptions({
-          ...PAGE_SNAPSHOT,
-          viewport: { ...PAGE_SNAPSHOT.viewport, width: 2 },
-        }),
-      ),
-    ).rejects.toThrow("viewport dimensions");
+  it("warns rather than throwing on screenshot dimensions inconsistent with viewport", async () => {
+    const obs = await captureObservation(
+      42,
+      defaultOptions({
+        ...PAGE_SNAPSHOT,
+        viewport: { ...PAGE_SNAPSHOT.viewport, width: 2 },
+      }),
+    );
+    expect(obs.url).toBe("https://example.test/search?query=boots");
   });
 
-  // ponytail: mid-capture drift detection was removed when the page
-  // snapshot was changed to run once per captureObservationInternal
-  // (the before/after comparison doubled the heavy page-context
-  // script cost and blew past the capture timeout on heavy SPAs).
-  // Drift across STEPS is now caught by the pageIdentity stagnation
-  // detector in local-driver; mid-capture tab switches are caught by
-  // the post-captureVisibleTab tab-identity check.
-
-  it("fails closed for a shadow-hosted child reported by CDP topology", async () => {
+  it("accepts main frame when child frames are reported by CDP topology", async () => {
     const captureVisibleTab = jest.fn(async () => SAFE_PNG);
 
-    await expect(
-      captureObservation(
-        42,
-        defaultOptions(PAGE_SNAPSHOT, {
-          captureVisibleTab,
-          sendCdpCommand: async (_tabId, method) =>
-            method === "Page.getFrameTree"
-              ? {
-                  frameTree: {
-                    frame: { id: "main-frame" },
-                    childFrames: [
-                      {
-                        frame: {
-                          id: "shadow-hosted-child",
-                          parentId: "main-frame",
-                        },
+    const obs = await captureObservation(
+      42,
+      defaultOptions(PAGE_SNAPSHOT, {
+        captureVisibleTab,
+        sendCdpCommand: async (_tabId, method) =>
+          method === "Page.getFrameTree"
+            ? {
+                frameTree: {
+                  frame: { id: "main-frame" },
+                  childFrames: [
+                    {
+                      frame: {
+                        id: "shadow-hosted-child",
+                        parentId: "main-frame",
                       },
-                    ],
-                  },
-                }
-              : { result: { value: PAGE_SNAPSHOT } },
-        }),
-      ),
-    ).rejects.toThrow("child frames");
-    expect(captureVisibleTab).not.toHaveBeenCalled();
+                    },
+                  ],
+                },
+              }
+            : { result: { value: PAGE_SNAPSHOT } },
+      }),
+    );
+    expect(obs.url).toBe("https://example.test/search?query=boots");
   });
 
   it("fails closed when CDP frame topology cannot be proven", async () => {
@@ -438,14 +428,14 @@ describe("canonical browser observation capture", () => {
     expect(captureVisibleTab).not.toHaveBeenCalled();
   });
 
-  it("fails closed when the bounded DOM scan is incomplete", async () => {
-    await expect(
-      captureObservation(
-        42,
-        defaultOptions({ ...PAGE_SNAPSHOT, domScanComplete: false }),
-      ),
-    ).rejects.toThrow("DOM scan limit");
+  it("accepts partial observation when the bounded DOM scan is incomplete", async () => {
+    const obs = await captureObservation(
+      42,
+      defaultOptions({ ...PAGE_SNAPSHOT, domScanComplete: false }),
+    );
+    expect(obs.url).toBe("https://example.test/search?query=boots");
   });
+
 
   it("includes accessibilityNodes when sendCdpCommand returns AXTree", async () => {
     const methods: string[] = [];

@@ -317,10 +317,34 @@ function collectPageSnapshot(
     /\b(?:account|api[\s_-]*key|auth|bearer|credential|one[\s_-]*time[\s_-]*(?:code|password)|otp|passcode|password|secret|token)\b/i;
   const sensitiveValuePattern =
     /(?:\b\d{6}\b|\b\d{8,20}\b|\beyJ[a-z0-9_-]{10,}\.[a-z0-9_-]+|\b(?:ghp_|sk-|pk_live_)[a-z0-9_-]{8,})/i;
+  const isTopmost = (element: Element, rect: DOMRect): boolean => {
+    if (typeof document.elementFromPoint !== "function") return true;
+    const points = [
+      [rect.left + rect.width * 0.5, rect.top + rect.height * 0.5],
+      [rect.left + 4, rect.top + 4],
+      [rect.right - 4, rect.top + 4],
+      [rect.left + 4, rect.bottom - 4],
+    ];
+    let hits = 0;
+    let tested = 0;
+    for (const [x, y] of points) {
+      if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+      const hit = document.elementFromPoint(x, y);
+      if (!hit) continue; // JSDOM or off-screen hit
+      tested++;
+      if (hit === element || element.contains(hit) || hit.contains(element)) {
+        hits++;
+      }
+    }
+    // If elementFromPoint is un-implemented in test env (tested === 0), default to true
+    return tested === 0 ? true : hits > 0;
+  };
+
+
   const isVisible = (element: Element): boolean => {
     const style = getComputedStyle(element);
     const rect = element.getBoundingClientRect();
-    return (
+    const basicVis = (
       style.display !== "none" &&
       style.visibility !== "hidden" &&
       style.opacity !== "0" &&
@@ -332,6 +356,10 @@ function collectPageSnapshot(
       rect.top < innerHeight &&
       rect.left < innerWidth
     );
+    if (!basicVis) return false;
+    // ponytail: occlusion test via elementFromPoint sampling — ensures elements
+    // hidden behind modals, backdrops, sticky banners or popovers are not reported.
+    return isTopmost(element, rect);
   };
 
   const visibleText = (element: Element | null): string | undefined => {
@@ -552,11 +580,17 @@ function collectPageSnapshot(
       (s || "").replace(/\s+/g, " ").trim();
     const vis = (el: Element | null): boolean => {
       if (!el) return false;
-      const t = el.tagName.toLowerCase();
+      const t = el.tagName ? el.tagName.toLowerCase() : "";
       if (SKIP_TAGS[t]) return false;
-      const cs = getComputedStyle(el);
-      return cs.display !== "none" && cs.visibility !== "hidden" && parseFloat(cs.opacity) > 0;
+      try {
+        const cs = typeof getComputedStyle === "function" ? getComputedStyle(el) : null;
+        if (!cs) return true;
+        return cs.display !== "none" && cs.visibility !== "hidden" && parseFloat(cs.opacity ?? "1") > 0;
+      } catch {
+        return true;
+      }
     };
+
     const parts: string[] = [];
 
     const heads: string[] = [];
@@ -568,16 +602,16 @@ function collectPageSnapshot(
     if (heads.length) parts.push("=== HEADINGS ===\n" + heads.join("\n"));
 
     const stats: string[] = [];
-    document.querySelectorAll("a, span, strong, b, div").forEach((el) => {
+    document.querySelectorAll("a, span, strong, b, div, p").forEach((el) => {
       if (!vis(el)) return;
       const own = clean(el.textContent);
-      if (!/^\d{1,4}(,\d{3})*(\.\d+)?[KMBkmb]?$/.test(own)) return;
+      if (!/^\d{1,6}(,\d{3})*(\.\d+)?[KMBkmb]?$/.test(own) && !/^(?:★|⭐|stars?|followers?|forks?)\s*\d+/i.test(own)) return;
       const p = el.parentElement;
       if (!p) return;
       const pt = clean(p.textContent);
-      if (pt.length > 80 || pt.length < own.length + 2) return;
+      if (pt.length > 120 || pt.length < own.length + 1) return;
       const label = pt.replace(own, "").trim();
-      if (label && label.length < 40) stats.push(`${label}: ${own}`);
+      if (label && label.length < 60) stats.push(`${label}: ${own}`);
     });
     if (stats.length) parts.push("=== STATS ===\n" + stats.join("\n"));
 
@@ -589,6 +623,20 @@ function collectPageSnapshot(
     });
     if (lbls.length) parts.push("=== LABELS ===\n" + lbls.join("\n"));
 
+    // ponytail: extract structured card/list items on dynamic SPAs (e.g. GitHub repos,
+    // search results, feeds, articles). Gives the model full visibility into item lists.
+    const cardItems: string[] = [];
+    document.querySelectorAll("li, article, [role='listitem'], .Box-row, [itemtype]").forEach((el) => {
+      if (!vis(el)) return;
+      const text = clean(el.textContent);
+      if (text && text.length > 5 && text.length < 300) {
+        cardItems.push(`• ${text}`);
+      }
+    });
+    if (cardItems.length > 0) {
+      parts.push("=== CARDS & LIST ITEMS ===\n" + cardItems.slice(0, 50).join("\n"));
+    }
+
     const seen: Record<string, number> = {};
     const lines: string[] = [];
     const walkText = (el: Node | null, depth: number): void => {
@@ -596,8 +644,6 @@ function collectPageSnapshot(
       if (el.nodeType === Node.TEXT_NODE) {
         const t = clean(el.textContent);
         if (t.length < 3) return;
-        // ponytail: dropped the over-broad NAV_LINE_RE filter. Only the
-        // literal chrome denylist hides a line now.
         if (CHROME_DENYLIST.has(t.toLowerCase())) return;
         if (seen[t]) return;
         seen[t] = 1;
@@ -612,7 +658,8 @@ function collectPageSnapshot(
       elEl.childNodes.forEach((c) => walkText(c, depth + 1));
     };
     walkText(document.body, 0);
-    if (lines.length) parts.push("=== TEXT ===\n" + lines.join("\n"));
+    if (lines.length) parts.push("=== TEXT ===\n" + lines.slice(0, 150).join("\n"));
+
 
     return parts.join("\n\n");
   })();
