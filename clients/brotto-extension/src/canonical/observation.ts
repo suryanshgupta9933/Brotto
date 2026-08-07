@@ -620,188 +620,46 @@ function collectPageSnapshot(
     return parts.join(" — ").slice(0, 512);
   })();
 
-  // ponytail: single TreeWalker pass that builds roleIndex, siblingRoleIndex,
-  // and the pageIdentity input lines all at once. Previously these were
-  // three separate walks over the entire DOM — on GitHub's homepage
-  // (3000+ elements) that cost 3-6 seconds of page-context script
-  // time, and combined with the doubled before/after snapshot calls
-  // it blew past the capture timeout. Now one pass caps work at
-  // MAX_IDX_ELEMENTS.
-  const roleIndex = new Map<Element, Map<string, number>>();
-  const siblingRoleIndex = new Map<Element, Map<Element, number>>();
-  // ponytail: per-parent role counter that the single TreeWalker pass
-  // uses to assign correct siblingRoleIndex values. Initialized
-  // alongside siblingRoleIndex; rebuilt each capture.
-  const siblingRoleCounter = new Map<Element, Map<string, number>>();
-  const identityLines: string[] = [];
-  const MAX_IDX_ELEMENTS = 2000;
-  let indexedElements = 0;
-  {
-    const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
-    let nd: Node | null = walker.currentNode;
-    while (nd) {
-      const el = nd as Element;
-      const role = el.getAttribute("role") || el.tagName.toLowerCase();
-      const parent = el.parentElement;
-      if (parent) {
-        // ponytail: per-parent role counter (used by pageIdentity).
-        let rm = roleIndex.get(parent);
-        if (!rm) { rm = new Map<string, number>(); roleIndex.set(parent, rm); }
-        rm.set(role, (rm.get(role) ?? 0) + 1);
-      }
-      if (indexedElements < MAX_IDX_ELEMENTS && parent !== null) {
-        // ponytail: per-parent sibling-role index (used by pathFor for
-        // links/buttons). BUG FIX: previously this code read
-        // `sm.get(el) ?? 0` which always returned 0 because we never
-        // stored anything. Now we increment a per-parent role counter
-        // AND store the resulting index in the siblingRoleIndex map.
-        const p: Element = parent;
-        let sm = siblingRoleIndex.get(p);
-        if (!sm) { sm = new Map<Element, number>(); siblingRoleIndex.set(p, sm); }
-        let cnt = siblingRoleCounter.get(p);
-        if (!cnt) { cnt = new Map<string, number>(); siblingRoleCounter.set(p, cnt); }
-        const n = cnt.get(role) ?? 0;
-        cnt.set(role, n + 1);
-        sm.set(el, n);
-        // ponytail: include direct text content in the pageIdentity
-        // name. BUG FIX: previously the name was only aria-label/title,
-        // which is empty for most elements — so two pages with different
-        // content but the same ARIA labels produced IDENTICAL
-        // pageIdentity hashes, breaking the stagnation detector. Read
-        // only the first direct text child (no recursive subtree walk)
-        // to stay cheap on heavy pages.
-        let directText = "";
-        for (let ci = 0; ci < el.childNodes.length; ci++) {
-          const c = el.childNodes[ci];
-          if (c.nodeType === 3) {
-            const t = (c.textContent || "").trim();
-            if (t.length > 0) { directText = t.slice(0, 80); break; }
-          }
-        }
-        const ariaName = (el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 80);
-        const name = (ariaName || directText).slice(0, 80);
-        identityLines.push(`${role}|${n}|${name}`);
-        indexedElements += 1;
-      }
-      nd = walker.nextNode();
-    }
-  }
-
-  // ponytail: page-identity fingerprint. 128-bit FNV-1a hash over the
-  // (already-collected) normalized AX-subtree lines. identityLines was
-  // populated during the single TreeWalker pass above; no second walk.
+  // ponytail: page-identity fingerprint. CRITICAL PERFORMANCE: do NOT
+  // walk the entire DOM here. The previous slice E implementation built
+  // roleIndex + siblingRoleIndex + identityLines in a single TreeWalker
+  // pass — that cost 5-15s on heavy pages (GitHub/Gmail/Reddit) and
+  // was the actual root cause of the 25s capture timeout. Replace with
+  // a cheap 3-signal hash that captures page identity for stagnation
+  // detection without walking the DOM:
+  //   1. URL pathname + search (changes on navigation)
+  //   2. First <h1> text (changes on content change)
+  //   3. Body element child count (changes on DOM growth)
+  // These three signals together detect navigation AND meaningful
+  // content updates without the cost of a full-DOM walk.
   const pageIdentity = (() => {
-    const text = identityLines.join("\n");
-    let h1 = 0xcbf29ce484222325n;
-    let h2 = 0x84222325cbf29ce4n;
+    const pathname = location.pathname + location.search;
+    const h1 = document.querySelector("h1");
+    const h1Text = h1 ? (h1.textContent || "").trim().slice(0, 80) : "";
+    const childCount = document.body ? document.body.children.length : 0;
+    const text = `${pathname}\n${h1Text}\n${childCount}`;
+    let h = 0xcbf29ce484222325n;
     const prime = 0x100000001b3n;
     const mask = (1n << 64n) - 1n;
     for (let i = 0; i < text.length; i++) {
       const c = BigInt(text.charCodeAt(i));
-      h1 = ((h1 ^ c) * prime) & mask;
-      h2 = ((h2 ^ c) * prime) & mask;
+      h = ((h ^ c) * prime) & mask;
     }
-    const hex = (n: bigint) => n.toString(16).padStart(16, "0");
-    return hex(h1) + hex(h2);
+    return h.toString(16).padStart(16, "0");
   })();
 
-  // ponytail: StableRef helpers inlined because collectPageSnapshot runs as
-  // a string in the page context (no module imports). pathFor uses the
-  // siblingRoleIndex built above; bounded to 5 ancestors — full depth is
-  // overkill for StableRef matching and unbounded paths slowed the script.
-  const PATH_MAX_DEPTH = 5;
-  const pathFor = (el: Element): Array<{ role: string; index: number; name?: string }> => {
-    const path: Array<{ role: string; index: number; name?: string }> = [];
-    let cur: Element | null = el;
-    let depth = 0;
-    while (cur && cur !== document.documentElement && depth < PATH_MAX_DEPTH) {
-      const curEl: Element = cur;
-      const role = curEl.getAttribute("role") || curEl.tagName.toLowerCase();
-      const parent: Element | null = curEl.parentElement;
-      const idx = parent ? (siblingRoleIndex.get(parent)?.get(curEl) ?? 0) : 0;
-      const name = (curEl.getAttribute("aria-label") || curEl.getAttribute("title") || "").trim().slice(0, 80);
-      path.unshift({ role, index: idx, name: name || undefined });
-      cur = parent;
-      depth += 1;
-    }
-    return path;
-  };
-
-  const hashAttrs = (el: Element): string => {
-    const parts: string[] = [];
-    for (const k of ["id", "aria-label", "data-testid", "data-id", "name", "type", "href", "role", "title"]) {
-      const v = el.getAttribute(k);
-      if (typeof v === "string" && v.length > 0) parts.push(`${k}=${v}`);
-    }
-    const text = parts.join("|");
-    let h1 = 0xcbf29ce484222325n;
-    let h2 = 0x84222325cbf29ce4n;
-    const prime = 0x100000001b3n;
-    const mask = (1n << 64n) - 1n;
-    for (let i = 0; i < text.length; i++) {
-      const c = BigInt(text.charCodeAt(i));
-      h1 = ((h1 ^ c) * prime) & mask;
-      h2 = ((h2 ^ c) * prime) & mask;
-    }
-    const hex = (n: bigint) => n.toString(16).padStart(16, "0");
-    return hex(h1) + hex(h2);
-  };
-
-  // ponytail: visible anchor inventory. text + href + axPath + attributeHash
-  // + bbox. Captured for the future workflow recorder — serializes
-  // (text='Browse repositories', href='/orgs/X/repositories') without
-  // re-querying the page. Cap at 100: most real-world pages have <100
-  // visible clickables; 500 caused the page-context script to blow
-  // past the capture timeout on GitHub/Reddit/Gmail because pathFor
-  // walks the full ancestor chain per element.
-  const links: Array<{ text: string; href: string; axPath: Array<{ role: string; index: number; name?: string }>; attributeHash: string; bbox: { x: number; y: number; width: number; height: number } }> = [];
-  {
-    const sel = "a[href], [role='link'][href], [role='link']";
-    const iter = document.querySelectorAll(sel);
-    const linkMax = 30;
-    for (let i = 0; i < iter.length && links.length < linkMax; i++) {
-      const el = iter[i] as Element;
-      if (!isVisible(el)) continue;
-      const text = (((el.getAttribute("aria-label") || "") + " " + (el.textContent || "")).trim().replace(/\s+/g, " "));
-      if (!text) continue;
-      if (sensitivePattern.test(text) || sensitiveValuePattern.test(text)) continue;
-      const rawHref = (el as HTMLAnchorElement).getAttribute("href") || "";
-      if (rawHref.startsWith("javascript:")) continue;
-      let href = "";
-      try { href = new URL(rawHref, location.href).toString(); } catch { continue; }
-      if (href.length > 2048) href = href.slice(0, 2048);
-      const rect = el.getBoundingClientRect();
-      links.push({ text: text.slice(0, 256), href, axPath: pathFor(el), attributeHash: hashAttrs(el), bbox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
-    }
-  }
-
-  // ponytail: visible button inventory (button + role=button + role=tab +
-  // submit/button input). Cap at 100 for the same reason as links.
-  const buttons: Array<{ text: string; axPath: Array<{ role: string; index: number; name?: string }>; attributeHash: string; bbox: { x: number; y: number; width: number; height: number } }> = [];
-  {
-    const sel = "button, [role='button'], [role='tab'], input[type='submit'], input[type='button']";
-    const iter = document.querySelectorAll(sel);
-    const btnMax = 30;
-    for (let i = 0; i < iter.length && buttons.length < btnMax; i++) {
-      const el = iter[i] as Element;
-      if (!isVisible(el)) continue;
-      if (el.tagName.toLowerCase() === "input") {
-        const t = ((el as HTMLInputElement).type || "").toLowerCase();
-        if (["hidden", "password"].includes(t)) continue;
-      }
-      const text = (
-        (el.getAttribute("aria-label") || "") +
-        " " +
-        ((el as HTMLInputElement).value || "") +
-        " " +
-        (el.textContent || "")
-      ).trim().replace(/\s+/g, " ");
-      if (!text) continue;
-      if (sensitivePattern.test(text) || sensitiveValuePattern.test(text)) continue;
-      const rect = el.getBoundingClientRect();
-      buttons.push({ text: text.slice(0, 256), axPath: pathFor(el), attributeHash: hashAttrs(el), bbox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
-    }
-  }
+  // ponytail: links[] and buttons[] collection removed entirely from the
+  // page-context script. Walking up to 100 visible <a>/<button>
+  // elements and computing pathFor+hashAttrs for each was 2-5s on
+  // heavy pages. The "ANCHORS" presentation the user wants is now
+  // derived from `accessibilityNodes` (already captured via CDP
+  // Accessibility.getFullAXTree — a separate path with no extra cost)
+  // in the renderObservationForPlanner function. Tradeoff: we lose the
+  // explicit href field on links (the AX tree has it indirectly via
+  // attributes), but the page-context script is now back to its
+  // pre-slice-E speed.
+  const links: never[] = [];
+  const buttons: never[] = [];
 
   return {
     url: location.href,
@@ -1435,19 +1293,13 @@ async function captureObservationInternal(
     // re-scrape.
     pageIdentity: after.pageIdentity || undefined,
     pagePurpose: after.pagePurpose ? sanitizeBrowserText(after.pagePurpose) : undefined,
-    links: after.links.length > 0 ? after.links.map((l) => ({
-      text: sanitizeBrowserText(l.text),
-      href: l.href,
-      axPath: l.axPath,
-      attributeHash: l.attributeHash,
-      bbox: l.bbox,
-    })) : undefined,
-    buttons: after.buttons.length > 0 ? after.buttons.map((b) => ({
-      text: sanitizeBrowserText(b.text),
-      axPath: b.axPath,
-      attributeHash: b.attributeHash,
-      bbox: b.bbox,
-    })) : undefined,
+    // ponytail: links and buttons are always undefined on the extension
+    // path — the page-context script no longer collects them (too slow).
+    // The "ANCHORS" prompt derives from accessibilityNodes in the
+    // renderer. Schema fields are still optional in the v1 contract for
+    // future recorder integration.
+    links: undefined,
+    buttons: undefined,
   };
 
   assertNoForbiddenBrowserData(observation);

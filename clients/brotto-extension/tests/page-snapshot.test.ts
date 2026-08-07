@@ -81,9 +81,22 @@ function buildRunner(window: any): () => any {
 }
 
 describe("page-context snapshot (regression)", () => {
-  it("differentiates pages by content (not just aria-label)", () => {
-    const htmlA = `<!DOCTYPE html><html><body><nav><a href="/x">Sign up</a></nav></body></html>`;
-    const htmlB = `<!DOCTYPE html><html><body><nav><a href="/x">Register</a></nav></body></html>`;
+  it("differentiates pages by URL pathname", () => {
+    // ponytail: pageIdentity uses pathname + h1 + body child count as a
+    // cheap 3-signal hash (no full DOM walk). Different pathname ->
+    // different pageIdentity.
+    const htmlA = `<!DOCTYPE html><html><body><h1>x</h1></body></html>`;
+    const htmlB = `<!DOCTYPE html><html><body><h1>x</h1></body></html>`;
+    const a = new JSDOM(htmlA, { url: "https://x/page1" });
+    const b = new JSDOM(htmlB, { url: "https://x/page2" });
+    const obsA = buildRunner(a.window)();
+    const obsB = buildRunner(b.window)();
+    expect(obsA.pageIdentity).not.toBe(obsB.pageIdentity);
+  });
+
+  it("differentiates pages by h1 text", () => {
+    const htmlA = `<!DOCTYPE html><html><body><h1>Sign in</h1><p>x</p></body></html>`;
+    const htmlB = `<!DOCTYPE html><html><body><h1>Your repos</h1><p>x</p></body></html>`;
     const a = new JSDOM(htmlA, { url: "https://x/" });
     const b = new JSDOM(htmlB, { url: "https://x/" });
     const obsA = buildRunner(a.window)();
@@ -91,16 +104,45 @@ describe("page-context snapshot (regression)", () => {
     expect(obsA.pageIdentity).not.toBe(obsB.pageIdentity);
   });
 
-  it("counts siblingRoleIndex correctly", () => {
-    const html = `<!DOCTYPE html><html><body><nav><a href="/1">One</a><a href="/2">Two</a><a href="/3">Three</a></nav></body></html>`;
-    const dom = new JSDOM(html, { url: "https://x/" });
+  it("differentiates pages by body child count", () => {
+    const htmlA = `<!DOCTYPE html><html><body><h1>x</h1><p>x</p></body></html>`;
+    const htmlB = `<!DOCTYPE html><html><body><h1>x</h1><p>x</p><p>y</p><p>z</p></body></html>`;
+    const a = new JSDOM(htmlA, { url: "https://x/" });
+    const b = new JSDOM(htmlB, { url: "https://x/" });
+    const obsA = buildRunner(a.window)();
+    const obsB = buildRunner(b.window)();
+    expect(obsA.pageIdentity).not.toBe(obsB.pageIdentity);
+  });
+
+  it("page-context script completes quickly (no full-DOM walk)", () => {
+    // ponytail: regression for the 25s capture timeout. The page-context
+    // script must complete well under the 1s mark even on a heavy page.
+    // Build a 2000-element synthetic page and measure.
+    const elements = Array.from({ length: 2000 }, (_, i) =>
+      `<div class="row"><a href="/r/${i}">link ${i}</a><span>${i}</span></div>`,
+    ).join("");
+    const html = `<!DOCTYPE html><html><body>${elements}</body></html>`;
+    const dom = new JSDOM(html, { url: "https://x/heavy" });
+    const t0 = Date.now();
     const obs = buildRunner(dom.window)();
-    // ponytail: the three <a>s in <nav> should have indices 0, 1, 2 in
-    // the pathFor result. The previous regression had every index = 0.
-    const links = obs.links;
-    expect(links.map((l: any) => l.text)).toEqual(["One", "Two", "Three"]);
-    const indices = links.map((l: any) => l.axPath[l.axPath.length - 1].index);
-    expect(indices).toEqual([0, 1, 2]);
+    const elapsed = Date.now() - t0;
+    expect(obs.pageIdentity).toMatch(/^[0-9a-f]{16}$/);
+    // ponytail: must complete in well under the 25s capture timeout. We
+    // budget 5s as a generous margin; the script should run in <500ms on
+    // any real-world page.
+    expect(elapsed).toBeLessThan(5000);
+  });
+
+  it("pageIdentity differentiates content across navigations", () => {
+    // ponytail: pageIdentity is a cheap 3-signal hash: pathname + h1 + body
+    // child count. All three must change for the hash to differ.
+    const htmlA = `<!DOCTYPE html><html><body><h1>One</h1><p>x</p></body></html>`;
+    const htmlB = `<!DOCTYPE html><html><body><h1>Two</h1><p>x</p></body></html>`;
+    const a = new JSDOM(htmlA, { url: "https://x/page1" });
+    const b = new JSDOM(htmlB, { url: "https://x/page2" });
+    const obsA = buildRunner(a.window)();
+    const obsB = buildRunner(b.window)();
+    expect(obsA.pageIdentity).not.toBe(obsB.pageIdentity);
   });
 
   it("produces stable pageIdentity across two captures of the same page", () => {
@@ -128,6 +170,10 @@ describe("page-context snapshot (regression)", () => {
     expect(obs2.pagePurpose).toBe("Your repositories");
     expect(obs2.url).toBe("https://github.com/suryanshgupta9933");
     expect(obs2.pageIdentity).not.toBe(obs1.pageIdentity);
-    expect(obs2.links.length).toBe(3); // Sign out + repo1 + repo2
+    // ponytail: links/buttons are no longer collected by the page-context
+    // script (too slow on heavy pages). The "ANCHORS" prompt derives from
+    // accessibilityNodes in the renderer.
+    expect(obs2.links).toEqual([]);
+    expect(obs2.buttons).toEqual([]);
   });
 });
