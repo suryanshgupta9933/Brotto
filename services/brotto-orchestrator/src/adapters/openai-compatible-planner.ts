@@ -374,7 +374,7 @@ export class OpenAICompatiblePlanner implements InferencePort {
   private buildActionProposal(
     input: PlanningInput,
     toolCalls: NonNullable<NonNullable<SseChunk['choices']>[0]['delta']['tool_calls']>,
-  ): ActionProposalV1 | { kind: 'question'; observationId: ObservationV1['observationId']; question: string; choices: undefined } {
+  ): ActionProposalV1 | { kind: 'question'; observationId: ObservationV1['observationId']; question: string; choices: undefined; proseOnly?: boolean; toolError?: boolean } {
     const faraToolCalls: FaraToolCall[] = toolCalls.map((tc) => ({
       name: tc.function.name ?? '',
       arguments: (() => {
@@ -403,7 +403,9 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
     // ponytail: validate terminate requires non-empty finalAnswer. Without this
     // gate, the model terminates without producing an answer and the user sees
-    // an empty result. Reject and re-prompt so the loop continues.
+    // an empty result. Reject and re-prompt so the loop continues. This is an
+    // INTERNAL harness correction — the user does not see it; the local-driver
+    // silently injects the corrective guidance.
     if (faraToolCalls[0]?.name === 'terminate') {
       const fa = typeof firstArgs.finalAnswer === 'string' ? firstArgs.finalAnswer.trim() : '';
       const ans = typeof firstArgs.answer === 'string' ? firstArgs.answer.trim() : '';
@@ -414,6 +416,8 @@ export class OpenAICompatiblePlanner implements InferencePort {
           observationId: input.observation.observationId,
           question: 'You called terminate without a non-empty finalAnswer. Populate finalAnswer with the user\'s actual answer (a value you saw in the page text), then call terminate again.',
           choices: undefined,
+          proseOnly: true,
+          toolError: true,
         };
       }
     }
@@ -423,26 +427,33 @@ export class OpenAICompatiblePlanner implements InferencePort {
     try {
       parseResult = parser.parse(faraToolCalls);
     } catch (err) {
-      // ponytail: parser throws on missing/invalid required fields instead of
-      // appending to errors. Convert to a question so the loop survives.
+      // ponytail: parser throws on missing/invalid required fields. Convert
+      // to an internal corrective QuestionProposal (proseOnly+toolError) so
+      // the local-driver injects guidance silently — the user does not see
+      // raw parser errors as questions.
       const message = (err as { error?: string })?.error ?? String(err);
+      console.warn(`[planner] tool parser threw; emitting internal corrective: ${message.slice(0, 200)}`);
       return {
         kind: 'question',
         observationId: input.observation.observationId,
-        question: `The previous tool call had invalid arguments: ${message}. Please try a different action.`,
+        question: `Your last tool call had invalid arguments: ${message}. Re-issue with valid arguments matching the schema — for example, scroll(deltaX, deltaY) only needs the deltas, no x/y.`,
         choices: undefined,
+        proseOnly: true,
+        toolError: true,
       };
     }
 
     if (parseResult.errors.length > 0) {
-      // ponytail: model produced a tool call with bad/missing arguments (common
-      // with smaller models). Instead of crashing the loop, treat as a
-      // question so the next observation re-orients the model.
+      // ponytail: model produced a tool call with bad/missing arguments
+      // (common with smaller models). Internal corrective — silent in the UI.
+      console.warn(`[planner] tool parser errors; emitting internal corrective: ${parseResult.errors[0].error.slice(0, 200)}`);
       return {
         kind: 'question',
         observationId: input.observation.observationId,
-        question: `The previous tool call had invalid arguments: ${parseResult.errors[0].error}. Please try a different action.`,
+        question: `Your last tool call had invalid arguments: ${parseResult.errors[0].error}. Re-issue with valid arguments matching the schema.`,
         choices: undefined,
+        proseOnly: true,
+        toolError: true,
       };
     }
 

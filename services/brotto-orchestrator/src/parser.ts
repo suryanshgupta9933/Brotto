@@ -320,20 +320,26 @@ export class ToolCallParser {
         };
 
       case ActionType.SCROLL:
+        // ponytail: x/y are optional on scroll — the harness scrolls at
+        // the viewport center when the model omits them. The previous
+        // implementation required both fields and threw "Missing
+        // required field: x" on legitimate scroll calls like
+        // {deltaX:0, deltaY:-300, reasoning:"..."}. Defaults: x/y → 0
+        // (center); deltaX → 0; deltaY → 100 (small downward nudge).
         return {
           ...baseArgs,
           type: ActionType.SCROLL,
           coordinates: {
-            x: this.numberArg(args.x, 'x', toolCall),
-            y: this.numberArg(args.y, 'y', toolCall),
+            x: this.numberArg(args.x, 'x', toolCall, 0),
+            y: this.numberArg(args.y, 'y', toolCall, 0),
           },
           delta: {
-            deltaX: this.numberArg(args.deltaX || args.delta_x || 0, 'deltaX', toolCall),
-            deltaY: this.numberArg(args.deltaY || args.delta_y || 100, 'deltaY', toolCall),
+            deltaX: this.numberArg(args.deltaX ?? args.delta_x, 'deltaX', toolCall, 0),
+            deltaY: this.numberArg(args.deltaY ?? args.delta_y, 'deltaY', toolCall, 100),
           },
           viewport: {
-            viewportWidth: this.numberArg(args.viewportWidth || 1920, 'viewportWidth', toolCall, 1920),
-            viewportHeight: this.numberArg(args.viewportHeight || 1080, 'viewportHeight', toolCall, 1080),
+            viewportWidth: this.numberArg(args.viewportWidth ?? args.viewport_width, 'viewportWidth', toolCall, 1920),
+            viewportHeight: this.numberArg(args.viewportHeight ?? args.viewport_height, 'viewportHeight', toolCall, 1080),
           },
         };
 

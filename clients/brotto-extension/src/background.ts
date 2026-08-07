@@ -205,6 +205,10 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
         goal,
         startingUrl,
         plannerUrl,
+        // ponytail: stable per-task uuid so the demo-server can reset its
+        // turn counter when a new task starts (otherwise the counter
+        // accumulates across all runs in the server's lifetime).
+        taskId: crypto.randomUUID(),
         signal: controller_ac.signal,
         onTabOpened: (tabId) => {
           localTabId = tabId;

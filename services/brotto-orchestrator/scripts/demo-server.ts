@@ -52,12 +52,24 @@ async function main() {
 
   // ponytail: turn counter so each request/response is easy to correlate with
   // a step in the agent loop. The local-driver fires /plan sequentially, so a
-  // bare increment is safe (no concurrent handlers).
+  // bare increment is safe (no concurrent handlers). Counter resets to 1
+  // when a new taskId arrives (different goal = fresh counter) so the
+  // operator's log doesn't accumulate across runs.
   let turnCounter = 0;
+  let lastTaskId = "";
 
   const app = Fastify({ logger: false });
   app.get("/health", async () => ({ status: "ok", family, model: config.model }));
   app.post<{ Body: PlanRequest }>("/plan", async (req) => {
+    // ponytail: reset counter on a new task. The local-driver sends a
+    // stable taskId per run_local_task; when that changes the counter
+    // restarts at 1 so each new goal has its own turn numbering.
+    const taskId = String(req.body.taskId ?? "");
+    if (taskId && taskId !== lastTaskId) {
+      turnCounter = 0;
+      lastTaskId = taskId;
+      console.log(`[demo-server] new task ${taskId} (goal: ${req.body.goal.slice(0, 60)}) — turn counter reset`);
+    }
     const myTurn = ++turnCounter;
     const t0 = Date.now();
     // ponytail: log the incoming request — goal + context size + key signals
@@ -123,13 +135,15 @@ async function main() {
         context: req.body.context,
         ...(req.body.screenshot ? { screenshot: req.body.screenshot } : {}),
       } as never, new AbortController().signal);
-        // ponytail: mark the response when the planner fell back to the
-        // corrective "prose without a tool call" question. The local-driver
-        // uses this to count consecutive prose-only responses and fail
-        // loudly after 2, so the user sees a real failure instead of the
-        // model narrating forever.
+        // ponytail: mark the response when the planner emitted an internal
+        // corrective question (prose-only OR tool-parse-error). The
+        // local-driver uses proseOnly=true to (a) silently inject guidance
+        // instead of surfacing a user input card, and (b) count consecutive
+        // prose-only responses so the model gets one corrective chance
+        // before the loop fails loudly with PLANNER_PROSE_INSTEAD_OF_TOOL.
         if (outcome && typeof outcome === "object" && outcome.kind === "question"
-            && /prose without a tool call/i.test(outcome.question ?? "")) {
+            && (/prose without a tool call/i.test(outcome.question ?? "")
+                || /invalid arguments/i.test(outcome.question ?? ""))) {
           (outcome as { proseOnly?: boolean }).proseOnly = true;
         }
         break;

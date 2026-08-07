@@ -15,6 +15,9 @@ export interface LocalDriverOptions {
   goal: string;
   startingUrl?: string;
   signal: AbortSignal;
+  // ponytail: stable per-task id so the demo-server's turn counter can
+  // reset between runs (rather than incrementing forever across tasks).
+  taskId?: string;
   onTabOpened: (tabId: number) => void;
   // ponytail: tab lifecycle events for the side-panel "tabs" row. Keeps the
   // user oriented when the agent opens/closes/follows external links. Without
@@ -62,6 +65,11 @@ interface PlanningOutcome {
   // because the model emitted prose without a tool call. The local driver
   // counts consecutive prose-only responses and fails after 2.
   proseOnly?: boolean;
+  // ponytail: true when the planner emitted a corrective QuestionProposal
+  // because the model's tool call failed validation (missing fields, bad
+  // arguments). Same UX as proseOnly — silent internal correction, never
+  // surfaced to the user as an input card.
+  toolError?: boolean;
 }
 
 // ponytail: harness-owned working memory. Merges model-proposed updates with
@@ -513,6 +521,11 @@ async function callPlanner(
 ): Promise<PlanningOutcome> {
   // ponytail: short retry with backoff for transient 429s (matches demo-server).
   let lastErr: Error | null = null;
+  // ponytail: stable per-run taskId so the demo-server can reset its turn
+  // counter when a new task starts (instead of incrementing forever across
+  // runs). sessionId is a constant placeholder for now; the local-driver
+  // owns a per-run uuid so the demo-server's logs reflect "new task" cleanly.
+  const driverTaskId = (opts as { taskId?: string }).taskId ?? "ext-task";
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetch(`${opts.plannerUrl}/plan`, {
@@ -521,7 +534,7 @@ async function callPlanner(
         body: JSON.stringify({
           workId: "ext-" + Date.now(),
           sessionId: "00000000-0000-4000-8000-000000000001",
-          taskId: "00000000-0000-4000-8000-000000000002",
+          taskId: driverTaskId,
           goal: opts.goal,
           completionCriteria: [],
           context,
@@ -942,7 +955,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         // prose-only responses; two in a row = the model is stuck narrating
         // instead of acting, so fail loudly with the prose quoted.
         const questionText = outcome.question ?? "The agent needs more information.";
-        const isProseOnly = outcome.proseOnly === true;
+        const isProseOnly = outcome.proseOnly === true || outcome.toolError === true;
         if (isProseOnly) {
           consecutiveProseOnly += 1;
         } else {
