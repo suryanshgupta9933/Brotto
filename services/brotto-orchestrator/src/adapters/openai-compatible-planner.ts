@@ -230,12 +230,15 @@ export class OpenAICompatiblePlanner implements InferencePort {
         "",
         "Rules:",
         "- NEVER ask the user for credentials (passwords, 2FA codes, OAuth tokens, API keys, etc.).",
+        "- Search Bar Directive: On search-enabled web applications (Gmail, Amazon, Outlook, GitHub, Slack, Jira, e-commerce stores), ALWAYS prioritize using the Search Bar (`left_click` search input → `insert_text` → `key('Enter')` or direct search URL). Searching directly for keywords (e.g. 'Amazon order', 'package status', 'tracking') is 10x faster and more reliable than clicking sidebar category links.",
+        "- Grounded Answers: NEVER call terminate with a guess or unverified summary. Your finalAnswer MUST cite the specific numerical facts (e.g., star count '14 stars', order tracking number, delivery date) and the URL source where you saw it. If the exact value is not yet visible in PAGE TEXT, click into the item or view its page first.",
         "- Dropdowns & Menus: Left-clicking an element marked `(haspopup=...)` or `(expanded=false)` opens a menu/popover. After clicking it, read the NEW interactive elements list in the next context to select the menu item.",
         "- insert_text types into the currently focused element only. If the field you want is NOT marked focused=true, left_click it first.",
         "- Do NOT call wait. The harness waits between actions automatically.",
         "- Do NOT call ask_user_question for routine navigation. Use it ONLY when the goal is genuinely ambiguous.",
       ].join("\n"),
     });
+
 
 
     // ponytail: harness provides pre-rendered context (stable IDs, diff, inline

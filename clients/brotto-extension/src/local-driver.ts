@@ -300,51 +300,40 @@ export function autoExtractWorkingMemory(obs: ObservationV1, memory: WorkingMemo
 // ponytail: heuristic for "destructive" actions that should require approval.
 // Click + insert_text on a page mentioning payment/checkout/delete/etc = pause.
 // Visit_url to a banking or payment domain = pause.
-const APPROVAL_KEYWORDS = [
-  "delete", "remove", "pay", "checkout", "purchase", "confirm purchase",
-  "send money", "transfer", "wire", "subscription",
+const DESTRUCTIVE_PHRASES = [
+  "confirm purchase", "place order", "confirm payment", "pay now",
+  "delete account", "wire money", "transfer funds", "cancel subscription",
 ];
 
 const APPROVAL_DOMAINS = [
-  "checkout", "pay.", "payments.", "stripe.com", "banking", "/pay/",
+  "checkout", "pay.stripe.com", "payments.amazon", "banking.",
 ];
 
 export function needsApproval(
   action: { type?: string; url?: string; text?: string },
-  observation: { url: string; bodyText?: string; accessibilityNodes?: Array<{ name?: string; value?: string; role?: string }> },
+  observation: { url: string; bodyText?: string },
 ): { needs: boolean; reason: string } {
-  // ponytail: prefer bodyText (smart-extracted structured text) over
-  // accessibilityNodes. Falls back to accessibilityNodes for older builds.
-  const pageText = (
-    observation.bodyText ??
-    (observation.accessibilityNodes ?? [])
-      .map((n) => `${n.name ?? ""} ${n.value ?? ""}`)
-      .join(" ")
-  ).toLowerCase();
   if (action.type === "visit_url" && typeof action.url === "string") {
+    const lcUrl = action.url.toLowerCase();
     for (const kw of APPROVAL_DOMAINS) {
-      if (action.url.toLowerCase().includes(kw)) {
-        return { needs: true, reason: `Navigate to "${action.url}" matches approval pattern "${kw}"` };
+      if (lcUrl.includes(kw)) {
+        return { needs: true, reason: `Navigate to "${action.url}" matches payment pattern "${kw}"` };
       }
     }
   }
-  if (action.type === "left_click" || action.type === "double_click") {
-    for (const kw of APPROVAL_KEYWORDS) {
-      if (pageText.includes(kw)) {
-        return { needs: true, reason: `Page contains "${kw}" — clicking may be destructive` };
-      }
-    }
-  }
+
   if (action.type === "insert_text" && typeof action.text === "string") {
     const lcText = action.text.toLowerCase();
-    for (const kw of APPROVAL_KEYWORDS) {
-      if (lcText.includes(kw) && pageText.includes(kw)) {
-        return { needs: true, reason: `Typing "${action.text}" on a page mentioning "${kw}" may be destructive` };
+    for (const kw of DESTRUCTIVE_PHRASES) {
+      if (lcText.includes(kw)) {
+        return { needs: true, reason: `Typing "${action.text}" matches destructive phrase "${kw}"` };
       }
     }
   }
+
   return { needs: false, reason: "" };
 }
+
 
 function describeAction(a: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string }): string {
   switch (a.type) {
