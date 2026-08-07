@@ -629,6 +629,10 @@ function collectPageSnapshot(
   // MAX_IDX_ELEMENTS.
   const roleIndex = new Map<Element, Map<string, number>>();
   const siblingRoleIndex = new Map<Element, Map<Element, number>>();
+  // ponytail: per-parent role counter that the single TreeWalker pass
+  // uses to assign correct siblingRoleIndex values. Initialized
+  // alongside siblingRoleIndex; rebuilt each capture.
+  const siblingRoleCounter = new Map<Element, Map<string, number>>();
   const identityLines: string[] = [];
   const MAX_IDX_ELEMENTS = 2000;
   let indexedElements = 0;
@@ -645,16 +649,37 @@ function collectPageSnapshot(
         if (!rm) { rm = new Map<string, number>(); roleIndex.set(parent, rm); }
         rm.set(role, (rm.get(role) ?? 0) + 1);
       }
-      if (indexedElements < MAX_IDX_ELEMENTS) {
+      if (indexedElements < MAX_IDX_ELEMENTS && parent !== null) {
         // ponytail: per-parent sibling-role index (used by pathFor for
-        // links/buttons). Built inline in the same walk via a per-parent
-        // seenRoles counter. Once we've indexed MAX_IDX_ELEMENTS parents
-        // we skip the second index entirely — the agent's links/buttons
-        // are unlikely to be in deep tail nodes.
-        let sm = siblingRoleIndex.get(parent ?? el);
-        if (!sm) { sm = new Map<Element, number>(); siblingRoleIndex.set(parent ?? el, sm); }
-        const n = sm.get(el) ?? 0;
-        const name = (el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 80);
+        // links/buttons). BUG FIX: previously this code read
+        // `sm.get(el) ?? 0` which always returned 0 because we never
+        // stored anything. Now we increment a per-parent role counter
+        // AND store the resulting index in the siblingRoleIndex map.
+        const p: Element = parent;
+        let sm = siblingRoleIndex.get(p);
+        if (!sm) { sm = new Map<Element, number>(); siblingRoleIndex.set(p, sm); }
+        let cnt = siblingRoleCounter.get(p);
+        if (!cnt) { cnt = new Map<string, number>(); siblingRoleCounter.set(p, cnt); }
+        const n = cnt.get(role) ?? 0;
+        cnt.set(role, n + 1);
+        sm.set(el, n);
+        // ponytail: include direct text content in the pageIdentity
+        // name. BUG FIX: previously the name was only aria-label/title,
+        // which is empty for most elements — so two pages with different
+        // content but the same ARIA labels produced IDENTICAL
+        // pageIdentity hashes, breaking the stagnation detector. Read
+        // only the first direct text child (no recursive subtree walk)
+        // to stay cheap on heavy pages.
+        let directText = "";
+        for (let ci = 0; ci < el.childNodes.length; ci++) {
+          const c = el.childNodes[ci];
+          if (c.nodeType === 3) {
+            const t = (c.textContent || "").trim();
+            if (t.length > 0) { directText = t.slice(0, 80); break; }
+          }
+        }
+        const ariaName = (el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 80);
+        const name = (ariaName || directText).slice(0, 80);
         identityLines.push(`${role}|${n}|${name}`);
         indexedElements += 1;
       }
