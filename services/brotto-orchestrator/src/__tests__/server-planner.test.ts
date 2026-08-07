@@ -123,7 +123,7 @@ describe('InferenceRegistry wiring for AgentOrchestrator', () => {
       delete process.env.AZURE_OPENAI_API_KEY;
       delete process.env.OLLAMA_HOST;
       process.env.BROTTO_ENDPOINT = 'http://localhost:8000';
-      expect(inferFamilyFromEnv()).toBe('fara');
+      expect(inferFamilyFromEnv()).toBe('brotto');
     });
 
     it('returns openai-compatible when OPENAI_API_KEY is set', () => {
@@ -159,7 +159,7 @@ describe('InferenceRegistry wiring for AgentOrchestrator', () => {
         family: "brotto",
         endpoint: 'https://inference.example/v1/plan',
       };
-      expect(config.family).toBe('fara');
+      expect(config.family).toBe('brotto');
     });
   });
 });

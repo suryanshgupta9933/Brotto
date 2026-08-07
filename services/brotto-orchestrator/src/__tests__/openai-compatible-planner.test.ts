@@ -219,8 +219,8 @@ describe('OpenAICompatiblePlanner', () => {
     });
 
     const result = await planner.plan(makeInput(), new AbortController().signal);
-    expect(result.kind).toBe('completion');
-    expect((result as { summary: string }).summary).toBe('Hello World');
+    expect(result.kind).toBe('question');
+    expect((result as { question: string }).question).toMatch(/Hello World/);
   });
 
   // Test 8: Aborts when AbortSignal triggers
@@ -253,8 +253,8 @@ describe('OpenAICompatiblePlanner', () => {
     await expect(planPromise).rejects.toThrow();
   }, 10000);
 
-  // Test 9: Throws when choices array is empty
-  it('throws when response choices array is empty', async () => {
+  // Test 9: Returns question when choices array is empty
+  it('returns question when response choices array is empty', async () => {
     const stream = sseStream(['{"choices":[]}']);
 
     const transport = () =>
@@ -266,8 +266,7 @@ describe('OpenAICompatiblePlanner', () => {
       transport,
     });
 
-    await expect(
-      planner.plan(makeInput(), new AbortController().signal),
-    ).rejects.toThrow(OpenAICompatiblePlannerError);
+    const result = await planner.plan(makeInput(), new AbortController().signal);
+    expect(result.kind).toBe('question');
   });
 });

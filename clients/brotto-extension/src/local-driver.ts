@@ -335,15 +335,15 @@ export function renderObservationForPlanner(
   memory?: MemoryUpdate[],
 ): string {
   const lines: string[] = [];
+
   // ponytail: structured working memory rendered FIRST so the model sees
   // findings before any navigation prose. Empty blocks skipped.
   if (memory && memory.length > 0) {
     lines.push(renderMemoryBlock(memory).trimEnd());
     lines.push("");
   }
-  // ponytail: URL/PATH/Title/PURPOSE at the top — orients the model in
-  // one glance. PATH is the URL pathname (what the user typically means
-  // by "where am I"); PURPOSE is the meta description + first h1.
+
+  // ponytail: URL/PATH/Title/PURPOSE at the top — orients the model in one glance.
   lines.push(`URL: ${obs.url}`);
   try {
     const u = new URL(obs.url);
@@ -354,76 +354,114 @@ export function renderObservationForPlanner(
   lines.push(`Title: ${obs.title}`);
   if (obs.pagePurpose) lines.push(`PURPOSE: ${obs.pagePurpose}`);
   lines.push("");
+
   if (guidance && guidance.length > 0) {
-    lines.push(`User guidance: ${guidance}`);
+    lines.push(`User guidance / harness note: ${guidance}`);
     lines.push("");
   }
-  // ponytail: replay-ready clickables inventory comes BEFORE structured
-  // page text. The model sees human-readable anchors/buttons first, then
-  // the body. These arrays are also the data the future workflow
-  // recorder consumes to serialize "(text → href)" steps.
-  const links = obs.links ?? [];
-  if (links.length > 0) {
-    lines.push("=== ANCHORS (text → href) ===");
-    for (const l of links.slice(0, 100)) {
-      try {
-        const u = new URL(l.href);
-        lines.push(`  ${l.text.padEnd(28)} → ${u.pathname}${u.search}`);
-      } catch {
-        lines.push(`  ${l.text.padEnd(28)} → ${l.href}`);
-      }
-    }
-    lines.push("");
-  }
-  const buttons = obs.buttons ?? [];
-  if (buttons.length > 0) {
-    lines.push("=== BUTTONS (text) ===");
-    for (const b of buttons.slice(0, 100)) {
-      lines.push(`  ${b.text}`);
-    }
-    lines.push("");
-  }
-  lines.push("Elements (use IDs, click coords inline; anchors include href):");
-  for (const t of obs.semanticTargets) {
-    if (!t.visible) continue;
+
+  const vpWidth = obs.viewport?.width ?? 1280;
+  const vpHeight = obs.viewport?.height ?? 720;
+
+  const inViewport: string[] = [];
+  const offScreen: string[] = [];
+
+  const formatTarget = (t: SemanticTarget): string => {
     const bb = t.boundingBox;
     const cx = Math.round(bb.x + bb.width / 2);
     const cy = Math.round(bb.y + bb.height / 2);
     const id = t.stableRef ?? t.targetId.slice(0, 8);
     const name = t.accessibleName?.text ?? t.attributes?.id ?? t.attributes?.name ?? "";
+    const role = t.role ? ` role=${t.role}` : "";
     const value = t.control.kind === "input" ? (t.control as { value?: string }).value ?? "" : "";
     const type = t.control.kind === "input" ? ` type=${(t.control as { type?: string }).type ?? ""}` : "";
     const tags: string[] = [];
     if (value) tags.push(`value="${value}"`);
     if (t.attributes?.placeholder) tags.push(`placeholder="${t.attributes.placeholder}"`);
     if (t.attributes?.href) tags.push(`href="${t.attributes.href}"`);
+    if (t.control.kind === "checkbox" || t.control.kind === "radio") {
+      const checked = (t.control as { checked?: boolean }).checked;
+      if (typeof checked === "boolean") tags.push(`checked=${checked}`);
+    }
     const tagStr = tags.length ? ` (${tags.join(", ")})` : "";
     const nameStr = name ? ` "${name}"` : "";
-    lines.push(`  [${id}] <${t.tag}>${nameStr}${type}${tagStr} click=(${cx}, ${cy})`);
+    return `  [${id}] <${t.tag}>${nameStr}${role}${type}${tagStr} click=(${cx}, ${cy})`;
+  };
+
+  const targets = (obs.semanticTargets ?? []).filter((t: SemanticTarget) => t.visible);
+
+  if (targets.length > 0) {
+    for (const t of targets) {
+      const bb = t.boundingBox;
+      const isInVp =
+        bb.x < vpWidth &&
+        bb.y < vpHeight &&
+        bb.x + bb.width > 0 &&
+        bb.y + bb.height > 0;
+      if (isInVp) {
+        inViewport.push(formatTarget(t));
+      } else {
+        offScreen.push(formatTarget(t));
+      }
+    }
+  } else if (obs.accessibilityNodes && obs.accessibilityNodes.length > 0) {
+    const INTERACTIVE_AX_ROLES = new Set([
+      "button", "link", "textbox", "checkbox", "radio", "combobox",
+      "searchbox", "tab", "menuitem", "option", "switch"
+    ]);
+    for (const node of obs.accessibilityNodes) {
+      if (node.role && INTERACTIVE_AX_ROLES.has(node.role.toLowerCase())) {
+        const nameStr = node.name ? ` "${node.name}"` : "";
+        const id = node.axNodeId.slice(-8);
+        const bb = node.bounds;
+        const cx = bb ? Math.round(bb.x + bb.width / 2) : 0;
+        const cy = bb ? Math.round(bb.y + bb.height / 2) : 0;
+        const line = `  [${id}] <ax:${node.role}>${nameStr} click=(${cx}, ${cy})`;
+        if (bb && bb.x < vpWidth && bb.y < vpHeight) {
+          inViewport.push(line);
+        } else {
+          offScreen.push(line);
+        }
+      }
+    }
   }
-  if (obs.semanticTargets.length === 0) lines.push("  (no interactive elements)");
+
+  lines.push("=== INTERACTIVE ELEMENTS (In Viewport) ===");
+  if (inViewport.length > 0) {
+    inViewport.slice(0, 80).forEach((l) => lines.push(l));
+    if (inViewport.length > 80) lines.push(`  ... (${inViewport.length - 80} additional viewport elements truncated)`);
+  } else {
+    lines.push("  (no interactive elements in current viewport)");
+  }
+
+  if (offScreen.length > 0) {
+    lines.push("");
+    lines.push(`=== OFF-SCREEN ELEMENTS (${offScreen.length} total - scroll to interact) ===`);
+    offScreen.slice(0, 20).forEach((l) => lines.push(l));
+    if (offScreen.length > 20) lines.push(`  ... (${offScreen.length - 20} additional off-screen elements omitted)`);
+  }
+
   if (history.length > 0) {
     const tail = history.slice(-HISTORY_LIMIT);
     lines.push("");
-    lines.push("Previous steps (most recent last):");
+    lines.push("=== RECENT STEPS & VERIFIED OUTCOMES ===");
     tail.forEach((h, i) => lines.push(`  ${i + 1}. ${h.action} → ${h.result}`));
   }
+
   if (obs.bodyText && obs.bodyText.length > 0) {
     lines.push("");
-    lines.push("=== PAGE TEXT (HEADINGS + STATS + LABELS + TEXT — STATS contains the data the user asked for) ===");
+    lines.push("=== PAGE TEXT (HEADINGS + STATS + LABELS + TEXT — STATS contains key data) ===");
     lines.push(obs.bodyText);
     lines.push("=== END PAGE TEXT ===");
   } else if (obs.accessibilityNodes && obs.accessibilityNodes.length > 0) {
-    // ponytail: legacy fallback when bodyText isn't present (older extension
-    // builds). Caps at 400 chars — keep until every build emits bodyText.
     const text = obs.accessibilityNodes
       .map((n: { name?: string; value?: string }) => n.name ?? n.value ?? "")
       .filter((s: string) => s.length > 0)
       .join(" ")
-      .slice(0, 400);
+      .slice(0, 600);
     if (text) {
       lines.push("");
-      lines.push(`Page text (first 400 chars): "${text}"`);
+      lines.push(`Page text (first 600 chars): "${text}"`);
     }
   }
   return lines.join("\n");
@@ -1185,15 +1223,27 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       }
       let screenshot: string | null = null;
       let postUrl = obs.url;
+      let postObs: ObservationV1 | null = null;
       try {
         await activateAgentTab();
-        const postObs = await captureObservationWithTimeout(tabId, CAPTURE_TIMEOUT_MS);
+        postObs = await captureObservationWithTimeout(tabId, CAPTURE_TIMEOUT_MS);
         screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
         postUrl = postObs.url;
       } catch (err) {
         log(opts, `post-action observation failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-      history.push({ action: desc, result });
+      let outcomeTag = "";
+      if (postObs) {
+        if (postObs.url !== obs.url) {
+          outcomeTag = ` [Verified: Navigated to ${postObs.url}]`;
+        } else if (postObs.pageIdentity && obs.pageIdentity && postObs.pageIdentity !== obs.pageIdentity) {
+          outcomeTag = ` [Verified: Page content updated]`;
+        } else {
+          outcomeTag = ` [Unchanged: URL and page state remained identical]`;
+        }
+      }
+      const verifiedResult = `${result}${outcomeTag}`;
+      history.push({ action: desc, result: verifiedResult });
       failures.length = 0;
       // ponytail: pass the planner's one-sentence reasoning to the UI. The
       // side panel uses it as the assistant bubble title instead of the raw

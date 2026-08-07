@@ -36,7 +36,7 @@ describe("inferFamilyFromEnv", () => {
     delete process.env.AZURE_OPENAI_API_KEY;
     delete process.env.OLLAMA_HOST;
     process.env.BROTTO_ENDPOINT = "http://localhost:8000";
-    expect(inferFamilyFromEnv()).toBe("fara");
+    expect(inferFamilyFromEnv()).toBe("brotto");
   });
 
   it("returns 'openai-compatible' when OPENAI_API_KEY is set", () => {
@@ -58,7 +58,7 @@ describe("inferFamilyFromEnv", () => {
   it("BROTTO_ENDPOINT takes precedence over OPENAI_API_KEY", () => {
     process.env.BROTTO_ENDPOINT = "http://localhost:8000";
     process.env.OPENAI_API_KEY = "sk-test";
-    expect(inferFamilyFromEnv()).toBe("fara");
+    expect(inferFamilyFromEnv()).toBe("brotto");
   });
 
   it("throws when no inference env vars are set", () => {
