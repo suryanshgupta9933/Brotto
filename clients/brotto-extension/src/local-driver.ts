@@ -525,8 +525,21 @@ export function renderObservationForPlanner(
 
   const targets = (obs.semanticTargets ?? []).filter((t: SemanticTarget) => t.visible);
 
-  if (targets.length > 0) {
-    for (const t of targets) {
+  // ponytail: sort semantic targets so interactive roles come FIRST in
+  // the rendered INTERACTIVE ELEMENTS list. Gmail emits role="row"
+  // containers (non-interactive — clicking the row does nothing) AND
+  // child role="link" elements (interactive — clicking opens the email).
+  // The model reads top-down, so listing links/buttons before rows
+  // steers it to the actually-clickable target.
+  const INTERACTIVE_SORT_PRIORITY = new Set([
+    "button", "link", "textbox", "checkbox", "radio", "combobox",
+    "searchbox", "tab", "menuitem", "option", "switch",
+  ]);
+  const sortKey = (t: SemanticTarget): number =>
+    INTERACTIVE_SORT_PRIORITY.has((t.role ?? "").toLowerCase()) ? 0 : 1;
+  const sortedTargets = [...targets].sort((a, b) => sortKey(a) - sortKey(b));
+  if (sortedTargets.length > 0) {
+    for (const t of sortedTargets) {
       const bb = t.boundingBox;
       const isInVp =
         bb.x < vpWidth &&

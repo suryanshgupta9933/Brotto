@@ -332,9 +332,15 @@ export class ToolCallParser {
         const finalX = resolved?.x ?? this.numberArg(args.x, "x", toolCall);
         const finalY = resolved?.y ?? this.numberArg(args.y, "y", toolCall);
         if (typeof finalX !== "number" || typeof finalY !== "number") {
+          // ponytail: error messages are now specific so the corrective
+          // tells the model exactly what to fix. "targetId X is stale" vs
+          // "no targetId AND no x/y" produce different corrective text.
+          const msg = targetId
+            ? `${actionType}: targetId "${targetId}" is not in the current INTERACTIVE ELEMENTS (it may have been re-rendered or moved). Pick a different targetId from the latest observation, or pass x/y coordinates.`
+            : `${actionType} requires either targetId (from INTERACTIVE ELEMENTS) OR x/y coordinates.`;
           return {
             toolCall,
-            error: `${actionType} requires either a targetId from INTERACTIVE ELEMENTS or x/y coordinates. Both resolved to nothing.`,
+            error: msg,
             code: ParseErrorCode.MISSING_REQUIRED_FIELD,
           };
         }
