@@ -814,24 +814,65 @@ async function defaultGetTabIdentity(tabId: number): Promise<TabIdentity> {
   };
 }
 
+// ponytail: Chrome rate-limits chrome.tabs.captureVisibleTab to ~2 calls
+// per second per extension. Without throttling, a tight loop that
+// triggers the defensive captureSnapshotForDriver retry can hit the
+// quota and crash the loop. This token-bucket-style throttle enforces
+// a minimum interval between calls; the queue ensures serialized
+// dispatch and bounded wait time.
+const CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS = 600; // ~1.6/s sustained, well under the 2/s cap
+let lastCaptureVisibleTabAt = 0;
+let captureVisibleTabWaiters: Array<() => void> = [];
+function scheduleCaptureVisibleTab(): Promise<void> {
+  return new Promise((resolve) => {
+    const tryRun = (): void => {
+      const elapsed = Date.now() - lastCaptureVisibleTabAt;
+      if (elapsed >= CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS) {
+        lastCaptureVisibleTabAt = Date.now();
+        resolve();
+        return;
+      }
+      captureVisibleTabWaiters.push(tryRun);
+    };
+    tryRun();
+  });
+}
+function releaseCaptureVisibleTab(): void {
+  const next = captureVisibleTabWaiters.shift();
+  if (next) {
+    // ponytail: bump the timestamp forward so the released call has
+    // its full quota window. Otherwise two back-to-back captures would
+    // be measured from the first one's timestamp and the throttle
+    // would over-wait on the second.
+    lastCaptureVisibleTabAt = Date.now() - CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS;
+    next();
+  }
+}
+
 async function defaultCaptureVisibleTab(
   _tabId: number,
   windowId: number,
 ): Promise<string> {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.captureVisibleTab(windowId, { format: "png" }, (dataUrl) => {
-      const error = chrome.runtime.lastError;
-      if (error) {
-        reject(securityError(`Visible-tab capture failed: ${error.message}`));
-        return;
-      }
-      if (!dataUrl) {
-        reject(securityError("Visible-tab capture returned no data"));
-        return;
-      }
-      resolve(dataUrl);
+  await scheduleCaptureVisibleTab();
+  try {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      chrome.tabs.captureVisibleTab(windowId, { format: "png" }, (dataUrl) => {
+        const error = chrome.runtime.lastError;
+        if (error) {
+          reject(securityError(`Visible-tab capture failed: ${error.message}`));
+          return;
+        }
+        if (!dataUrl) {
+          reject(securityError("Visible-tab capture returned no data"));
+          return;
+        }
+        resolve(dataUrl);
+      });
     });
-  });
+    return dataUrl;
+  } finally {
+    releaseCaptureVisibleTab();
+  }
 }
 
 async function defaultGetZoom(tabId: number): Promise<number> {
@@ -1436,6 +1477,16 @@ export async function captureObservation(
 // than let the loop crash with LOOP_CRASHED mid-login, retry once after a
 // short settle; if it still fails, return a degraded observation so the
 // loop survives and the next capture can land on a settled page.
+//
+// The retry predicate is deliberately narrow: only the three transitional
+// snapshot errors qualify. Quota errors (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND),
+// debugger detach, security violations, and screenshot-dimension errors
+// do NOT retry — they don't self-resolve and a retry just wastes quota.
+const TRANSIENT_SNAPSHOT_RE =
+  /Page document identity is invalid|Page snapshot evaluation failed|Page changed during capture/i;
+const QUOTA_RETRY_SKIP_RE =
+  /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND|Debugger is not attached|cannot access contents|manifest must request permission/i;
+
 export async function captureSnapshotForDriver(
   tabId: number,
   options: CaptureObservationOptions = {},
@@ -1445,9 +1496,10 @@ export async function captureSnapshotForDriver(
       return await captureObservation(tabId, options);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const transient = /Page document identity is invalid|Page snapshot evaluation failed|Page changed during capture/i.test(message);
-      if (!transient || attempt === 1) {
-        if (transient) {
+      const transient = TRANSIENT_SNAPSHOT_RE.test(message);
+      const skipRetry = QUOTA_RETRY_SKIP_RE.test(message);
+      if (!transient || skipRetry || attempt === 1) {
+        if (transient && !skipRetry) {
           console.warn(
             `[observation] snapshot validator failed twice; degrading to partial observation: ${message.slice(0, 200)}`,
           );
@@ -1469,7 +1521,10 @@ export async function captureSnapshotForDriver(
         }
         throw error;
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      // ponytail: wait past the next quota window before retrying. 1100ms
+      // ensures the retry lands in a fresh second-window even if the
+      // first attempt hit the cap.
+      await new Promise((resolve) => setTimeout(resolve, 1100));
     }
   }
   // Unreachable — the loop body always returns or throws.
