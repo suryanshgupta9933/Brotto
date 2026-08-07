@@ -54,4 +54,4 @@ beta, expect breaking changes."
 
 Initial open-source beta. See README.md for the feature matrix.
 
-[Unreleased]: https://github.com/inventic/brotto/compare/stable...HEAD
+[Unreleased]: https://github.com/suryanshgupta9933/brotto/compare/stable...HEAD
