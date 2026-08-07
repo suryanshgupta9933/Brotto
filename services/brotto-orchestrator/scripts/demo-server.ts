@@ -110,7 +110,14 @@ async function main() {
         taskId: "00000000-0000-4000-8000-000000000002" as never,
         goal: req.body.goal,
         completionCriteria: [],
-        observation: { url: "", title: "", page: { tabId: "x" as never, frameId: "x" as never, lifecycle: "complete", visibility: "visible" }, viewport: { width: 0, height: 0, devicePixelRatio: 0, zoom: 0, scrollX: 0, scrollY: 0 }, screenshot: { kind: "inline", encoding: "base64", data: "", sha256: "a".repeat(64), width: 0, height: 0 }, semanticTargets: [] },
+        // ponytail: placeholder observation must carry a real observationId
+        // (UUID) — CompletionProposalV1Schema requires it and the planner
+        // throws on validation failure. Without this fix the loop crashes
+        // with "Completion proposal schema validation failed: Invalid input"
+        // whenever the model returns content (no tool call) to signal
+        // termination. crypto.randomUUID() generates a fresh UUID per
+        // request; the value is opaque to the planner (just a brand token).
+        observation: { observationId: crypto.randomUUID(), url: "", title: "", page: { tabId: "x" as never, frameId: "x" as never, lifecycle: "complete", visibility: "visible" }, viewport: { width: 0, height: 0, devicePixelRatio: 0, zoom: 0, scrollX: 0, scrollY: 0 }, screenshot: { kind: "inline", encoding: "base64", data: "", sha256: "a".repeat(64), width: 0, height: 0 }, semanticTargets: [] },
         recentResults: (req.body.recentResults ?? []) as never,
         trajectory: (req.body.trajectory ?? []) as never,
         context: req.body.context,

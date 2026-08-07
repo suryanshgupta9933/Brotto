@@ -169,7 +169,24 @@ export class OpenAICompatiblePlanner implements InferencePort {
         choices: undefined,
       };
     }
-    return this.buildCompletionProposal(input, content);
+    // ponytail: defense in depth — if buildCompletionProposal throws (most
+    // commonly because the placeholder observation was missing observationId
+    // and CompletionProposalV1Schema rejects undefined), fall back to a
+    // question so the loop survives. Otherwise the demo-server returns HTTP
+    // 500, the local-driver retries 3x, and the loop crashes with
+    // LOOP_CRASHED — even though the content itself was a perfectly fine
+    // answer from the model.
+    try {
+      return this.buildCompletionProposal(input, content);
+    } catch (err) {
+      console.warn(`[planner] buildCompletionProposal threw; falling back to question: ${err instanceof Error ? err.message : String(err)}`);
+      return {
+        kind: 'question',
+        observationId: input.observation.observationId ?? (crypto.randomUUID() as never),
+        question: `Your previous answer was: "${content.slice(0, 240)}${content.length > 240 ? '…' : ''}". Confirm with terminate(finalAnswer=<answer>) to commit it as the final report, or send a tool call to keep working.`,
+        choices: undefined,
+      };
+    }
   }
 
   private buildMessages(input: PlanningInput): Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> {
@@ -455,7 +472,7 @@ export class OpenAICompatiblePlanner implements InferencePort {
     input: PlanningInput,
     content: string,
   ): CompletionProposalV1 {
-    const completionResult = AgentProposalV1Schema.safeParse({
+    const candidate = {
       kind: 'completion',
       observationId: input.observation.observationId,
       type: 'terminate',
@@ -464,11 +481,20 @@ export class OpenAICompatiblePlanner implements InferencePort {
       findings: [],
       unmetCriteria: [],
       confidence: 0.5,
-    });
+    };
+    const completionResult = AgentProposalV1Schema.safeParse(candidate);
 
     if (!completionResult.success) {
+      // ponytail: log every Zod issue (not just the first) and the constructed
+      // payload so the next regression is debugable in the server log without
+      // re-running the demo. Then throw with the same information.
+      const issueList = completionResult.error.issues
+        .map((i) => `${i.path.length > 0 ? i.path.join('.') : '<root>'}: ${i.message}`)
+        .join('; ');
+      console.error(`[planner] buildCompletionProposal validation failed: ${issueList}`);
+      console.error(`[planner] buildCompletionProposal payload:`, JSON.stringify(candidate));
       throw new OpenAICompatiblePlannerError(
-        `Completion proposal schema validation failed: ${completionResult.error.issues[0]?.message ?? 'unknown'}`,
+        `Completion proposal schema validation failed: ${issueList}`,
         false,
       );
     }
