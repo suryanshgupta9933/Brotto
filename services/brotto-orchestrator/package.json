@@ -15,7 +15,7 @@
     "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
     "lint": "eslint src/**/*.ts",
     "smoke": "tsx scripts/smoke.ts",
-    "demo:server": "tsx scripts/demo-server.ts"
+    "demo:server": "tsx --env-file=.env scripts/demo-server.ts"
   },
   "dependencies": {
     "@brotto/brotto-action-schema": "workspace:*",

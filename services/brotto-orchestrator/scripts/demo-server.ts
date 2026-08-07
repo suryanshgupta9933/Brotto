@@ -39,7 +39,7 @@ function buildConfigFromEnv(family: ReturnType<typeof inferFamilyFromEnv>): Infe
     apiKey: process.env.OPENAI_API_KEY ?? process.env.AZURE_OPENAI_API_KEY ?? (hasOllama ? undefined : "missing"),
     apiKeyHeader: isAzure ? "api-key" : "authorization",
     apiKeyPrefix: isAzure ? "" : "Bearer ",
-    model: process.env.SMOKE_MODEL ?? process.env.AZURE_OPENAI_MODEL_NAME ?? "qwen2.5:3b",
+    model: process.env.SMOKE_MODEL ?? process.env.AZURE_OPENAI_MODEL_NAME ?? "gpt-4o-mini",
   };
 }
 
