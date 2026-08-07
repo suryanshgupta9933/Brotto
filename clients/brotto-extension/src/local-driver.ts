@@ -1243,11 +1243,14 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         log(opts, `post-action observation failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       let outcomeTag = "";
+      let pageChanged = false;
       if (postObs) {
         if (postObs.url !== obs.url) {
           outcomeTag = ` [Verified: Navigated to ${postObs.url}]`;
+          pageChanged = true;
         } else if (postObs.pageIdentity && obs.pageIdentity && postObs.pageIdentity !== obs.pageIdentity) {
           outcomeTag = ` [Verified: Page content updated]`;
+          pageChanged = true;
         } else {
           outcomeTag = ` [Unchanged: URL and page state remained identical]`;
         }
@@ -1259,19 +1262,33 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       // side panel uses it as the assistant bubble title instead of the raw
       // `desc` (which is the tool call like "visit_url ...").
       opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind, reasoning: action.reasoning });
+      // ponytail: reset stagnation counters when the page actually changed.
+      // This gives the agent a fresh budget after every successful navigation,
+      // preventing false stagnation on multi-step tasks where the agent
+      // navigates several pages but then gets briefly stuck on one.
+      if (pageChanged) {
+        actionSigs.length = 0;
+        obsSigs.length = 0;
+        pageIdentities.length = 0;
+        stagnationHits = 0;
+      }
       // ponytail: signature-based stagnation. Two parallel signals:
-      //   - pageIdentities: SHA-256 over normalized AX subtree (slice E). The
-      //     primary signal — flips when navigation actually happens. Stable
-      //     across re-renders, unlike the older obs-sig.
-      //   - actionSigs / obsSigs: secondary signals from the original
-      //     detectors, kept for action-repetition cases where the page DOES
-      //     change but the agent still loops on the same coord.
+      //   - pageIdentities: post-action pageIdentity hash. MUST use postObs,
+      //     not obs (pre-action). Using obs was a bug that made every step
+      //     compare pre-action identity to itself → always identical.
+      //   - actionSigs: detect same click coord repeated.
       // Whichever fires first wins.
       actionSigs.push(actionSignature(action));
-      obsSigs.push(observationSignature({ url: postUrl, title: obs.title, elements: obs.semanticTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
-      const postObsPageIdentity = obs.pageIdentity && obs.pageIdentity.length > 0
-        ? obs.pageIdentity
-        : `${postUrl}|${obs.title}`;
+      const postTitle = postObs?.title ?? obs.title;
+      const postTargets = postObs?.semanticTargets ?? obs.semanticTargets;
+      obsSigs.push(observationSignature({ url: postUrl, title: postTitle, elements: postTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
+      // ponytail: CRITICAL — use postObs.pageIdentity (post-action), not
+      // obs.pageIdentity (pre-action). The old code pushed the pre-action
+      // identity which was always the same if the page didn't change,
+      // causing false stagnation after just 3 steps on the same page.
+      const postObsPageIdentity = postObs?.pageIdentity && postObs.pageIdentity.length > 0
+        ? postObs.pageIdentity
+        : `${postUrl}|${postTitle}`;
       pageIdentities.push(postObsPageIdentity);
       const pageStag = detectPageStagnation(pageIdentities);
       const actionStag = detectStagnation(actionSigs, obsSigs);
@@ -1287,9 +1304,19 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           terminal = { kind: "error", error: { code: "STAGNATION", message: blockedMessage } };
           return;
         }
-        // ponytail: first stagnation hit is a recovery signal — re-prompt with
-        // the corrective guidance injected into the next planner call.
-        injectedGuidance = stagnation.message;
+        // ponytail: first stagnation hit is a recovery signal. Inject
+        // corrective guidance with concrete alternative strategies.
+        const recoveryHint = `\n\nRECOVERY STRATEGIES (try one of these):\n` +
+          `1. Use visit_url with a direct URL (e.g. visit_url('https://github.com/<username>?tab=repositories')) instead of clicking UI elements.\n` +
+          `2. Scroll down to reveal more elements: scroll(direction='down').\n` +
+          `3. Click a DIFFERENT element — look at the interactive elements list for alternatives you haven't tried.\n` +
+          `4. If the answer is already in the page text, call terminate(finalAnswer='<the answer>').`;
+        injectedGuidance = stagnation.message + recoveryHint;
+        // ponytail: reset stagnation tracking after injecting guidance so
+        // the agent gets a fresh window to try the recovery strategies.
+        actionSigs.length = 0;
+        obsSigs.length = 0;
+        pageIdentities.length = 0;
         opts.onAnswered?.({ question: stagnation.kind, answer: stagnation.message });
       }
       // ponytail: loop detection. Same action 3+ times in a row = stuck.
@@ -1303,6 +1330,13 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           context: loop.action,
         });
         injectedGuidance = answer;
+        // ponytail: reset history and stagnation after loop recovery so the
+        // same loop.action doesn't immediately re-trigger on the next step.
+        history.length = 0;
+        actionSigs.length = 0;
+        obsSigs.length = 0;
+        pageIdentities.length = 0;
+        stagnationHits = 0;
         opts.onAnswered?.({ question: loop.action, answer });
       }
       // ponytail: per-iteration time budget check. If the iteration took
