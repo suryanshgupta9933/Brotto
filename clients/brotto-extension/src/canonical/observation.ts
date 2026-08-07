@@ -628,8 +628,22 @@ function collectPageSnapshot(
     const cardItems: string[] = [];
     document.querySelectorAll("li, article, [role='listitem'], .Box-row, [itemtype]").forEach((el) => {
       if (!vis(el)) return;
-      const text = clean(el.textContent);
-      if (text && text.length > 5 && text.length < 300) {
+      // Extract text content AND any aria-labels/titles from icons (like star counts)
+      let textContent = "";
+      const walk = (node: Node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          textContent += node.textContent + " ";
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+          const e = node as Element;
+          if (!vis(e)) return;
+          const label = e.getAttribute("aria-label") || e.getAttribute("title");
+          if (label && e.tagName === "SVG") textContent += `[${label}] `;
+          e.childNodes.forEach(walk);
+        }
+      };
+      walk(el);
+      const text = clean(textContent);
+      if (text && text.length > 5 && text.length < 800) {
         cardItems.push(`• ${text}`);
       }
     });

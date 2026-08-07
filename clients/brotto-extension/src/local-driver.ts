@@ -1356,8 +1356,15 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         } else if (action.type === "scroll") {
           outcomeTag = ` [Verified: Scrolled page]`;
           pageChanged = true;
+        } else if (action.type === "insert_text") {
+          outcomeTag = ` [Verified: Typed text]`;
+          pageChanged = true;
+        } else if (action.type === "key") {
+          outcomeTag = ` [Verified: Key pressed]`;
+          pageChanged = true;
         } else {
           outcomeTag = ` [Unchanged: URL and page state remained identical]`;
+
         }
       }
 
