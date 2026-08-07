@@ -628,7 +628,7 @@ function collectPageSnapshot(
     const cardItems: string[] = [];
     document.querySelectorAll("li, article, [role='listitem'], .Box-row, [itemtype]").forEach((el) => {
       if (!vis(el)) return;
-      // Extract text content AND any aria-labels/titles from icons (like star counts)
+      // Extract text content AND any aria-labels/titles/icon classes (like star counts)
       let textContent = "";
       const walk = (node: Node) => {
         if (node.nodeType === Node.TEXT_NODE) {
@@ -637,11 +637,22 @@ function collectPageSnapshot(
           const e = node as Element;
           if (!vis(e)) return;
           const label = e.getAttribute("aria-label") || e.getAttribute("title");
-          if (label && e.tagName === "SVG") textContent += `[${label}] `;
+          const cls = e.getAttribute("class") || "";
+          const href = e.getAttribute("href") || "";
+          if (label) {
+            textContent += `[${label}] `;
+          } else if (cls.includes("octicon-star") || href.includes("/stargazers") || href.includes("sort=stargazers")) {
+            textContent += `[★ star] `;
+          } else if (cls.includes("octicon-repo-forked") || href.includes("/network/members")) {
+            textContent += `[fork] `;
+          } else if (cls.includes("octicon-issue") || href.includes("/issues")) {
+            textContent += `[issues] `;
+          }
           e.childNodes.forEach(walk);
         }
       };
       walk(el);
+
       const text = clean(textContent);
       if (text && text.length > 5 && text.length < 800) {
         cardItems.push(`• ${text}`);

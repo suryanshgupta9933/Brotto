@@ -300,23 +300,37 @@ export function autoExtractWorkingMemory(obs: ObservationV1, memory: WorkingMemo
     const u = new URL(obs.url);
     if (u.hostname.includes("github.com")) {
       const parts = u.pathname.split("/").filter(Boolean);
-      if (parts.length === 1 && !["settings", "notifications", "explore", "orgs", "login"].includes(parts[0]!)) {
+      if (parts.length === 1 && !["settings", "notifications", "explore", "orgs", "login", "dashboard", "feed"].includes(parts[0]!)) {
         memory.merge([{ key: "profile_username", value: parts[0]!, evidence: obs.url }]);
       } else if (parts.length >= 2 && !["orgs", "settings", "login"].includes(parts[0]!)) {
         memory.merge([{ key: "viewed_repo", value: `${parts[0]}/${parts[1]}`, evidence: obs.url }]);
+      }
+
+      // Also scan semantic targets for user profile link / avatar in header
+      if (obs.semanticTargets) {
+        const profileTarget = obs.semanticTargets.find((t: SemanticTarget) => {
+          const href = t.attributes?.href ?? "";
+          const name = (t.accessibleName?.text ?? "").toLowerCase();
+          const isUserPath = href.startsWith("/") && /^\/[A-Za-z0-9-]+$/.test(href) && !["/settings", "/notifications", "/explore", "/orgs", "/login", "/dashboard", "/feed", "/logout", "/new"].includes(href);
+          return isUserPath && (name.includes("profile") || name.includes("your profile") || t.tag === "img" || t.attributes?.class?.includes("avatar"));
+        });
+        if (profileTarget && profileTarget.attributes?.href) {
+          const user = profileTarget.attributes.href.replace(/^\//, "");
+          memory.merge([{ key: "profile_username", value: user, evidence: "GitHub header profile avatar" }]);
+        }
       }
     }
   } catch { /* invalid URL */ }
 
   if (obs.bodyText) {
-    const cardMatches = obs.bodyText.match(/•\s*([A-Za-z0-9_.-]+)\s+[^•\n]*(?:★|⭐|stars?)\s*(\d+)/gi);
+    const cardMatches = obs.bodyText.match(/•\s*([A-Za-z0-9_.-]+)\s+[^•\n]*(?:\[★ star\]|★|⭐|stars?)\s*(\d+)/gi);
     if (cardMatches && cardMatches.length > 0) {
       const parsed = cardMatches.slice(0, 5).map((m: string) => m.replace(/•\s*/, "").trim());
       memory.merge([{ key: "detected_repos_stars", value: parsed.join("; "), evidence: obs.url }]);
     }
   }
-
 }
+
 
 // ponytail: heuristic for "destructive" actions that should require approval.
 // Click + insert_text on a page mentioning payment/checkout/delete/etc = pause.
