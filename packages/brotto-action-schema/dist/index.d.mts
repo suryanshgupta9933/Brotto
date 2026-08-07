@@ -592,6 +592,132 @@ declare const AccessibilityNodeSchema: z.ZodObject<{
         y: number;
     } | undefined;
 }>;
+declare const PageLinkSchema: z.ZodObject<{
+    text: z.ZodEffects<z.ZodString, string, string>;
+    href: z.ZodString;
+    axPath: z.ZodArray<z.ZodObject<{
+        role: z.ZodString;
+        index: z.ZodNumber;
+        name: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        role: string;
+        index: number;
+        name?: string | undefined;
+    }, {
+        role: string;
+        index: number;
+        name?: string | undefined;
+    }>, "many">;
+    attributeHash: z.ZodString;
+    bbox: z.ZodObject<{
+        x: z.ZodNumber;
+        y: z.ZodNumber;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+    }, "strict", z.ZodTypeAny, {
+        width: number;
+        height: number;
+        x: number;
+        y: number;
+    }, {
+        width: number;
+        height: number;
+        x: number;
+        y: number;
+    }>;
+}, "strict", z.ZodTypeAny, {
+    text: string;
+    axPath: {
+        role: string;
+        index: number;
+        name?: string | undefined;
+    }[];
+    attributeHash: string;
+    href: string;
+    bbox: {
+        width: number;
+        height: number;
+        x: number;
+        y: number;
+    };
+}, {
+    text: string;
+    axPath: {
+        role: string;
+        index: number;
+        name?: string | undefined;
+    }[];
+    attributeHash: string;
+    href: string;
+    bbox: {
+        width: number;
+        height: number;
+        x: number;
+        y: number;
+    };
+}>;
+declare const PageButtonSchema: z.ZodObject<{
+    text: z.ZodEffects<z.ZodString, string, string>;
+    axPath: z.ZodArray<z.ZodObject<{
+        role: z.ZodString;
+        index: z.ZodNumber;
+        name: z.ZodOptional<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        role: string;
+        index: number;
+        name?: string | undefined;
+    }, {
+        role: string;
+        index: number;
+        name?: string | undefined;
+    }>, "many">;
+    attributeHash: z.ZodString;
+    bbox: z.ZodObject<{
+        x: z.ZodNumber;
+        y: z.ZodNumber;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+    }, "strict", z.ZodTypeAny, {
+        width: number;
+        height: number;
+        x: number;
+        y: number;
+    }, {
+        width: number;
+        height: number;
+        x: number;
+        y: number;
+    }>;
+}, "strict", z.ZodTypeAny, {
+    text: string;
+    axPath: {
+        role: string;
+        index: number;
+        name?: string | undefined;
+    }[];
+    attributeHash: string;
+    bbox: {
+        width: number;
+        height: number;
+        x: number;
+        y: number;
+    };
+}, {
+    text: string;
+    axPath: {
+        role: string;
+        index: number;
+        name?: string | undefined;
+    }[];
+    attributeHash: string;
+    bbox: {
+        width: number;
+        height: number;
+        x: number;
+        y: number;
+    };
+}>;
+declare const PageIdentitySchema: z.ZodString;
 declare const ObservationV1Schema: z.ZodEffects<z.ZodObject<{
     observationId: z.ZodBranded<z.ZodString, "ObservationId">;
     capturedAt: z.ZodString;
@@ -1017,6 +1143,133 @@ declare const ObservationV1Schema: z.ZodEffects<z.ZodObject<{
         } | undefined;
     }>, "many">>;
     bodyText: z.ZodOptional<z.ZodString>;
+    pageIdentity: z.ZodOptional<z.ZodString>;
+    pagePurpose: z.ZodOptional<z.ZodString>;
+    links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        text: z.ZodEffects<z.ZodString, string, string>;
+        href: z.ZodString;
+        axPath: z.ZodArray<z.ZodObject<{
+            role: z.ZodString;
+            index: z.ZodNumber;
+            name: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }, {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }>, "many">;
+        attributeHash: z.ZodString;
+        bbox: z.ZodObject<{
+            x: z.ZodNumber;
+            y: z.ZodNumber;
+            width: z.ZodNumber;
+            height: z.ZodNumber;
+        }, "strict", z.ZodTypeAny, {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        }, {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        }>;
+    }, "strict", z.ZodTypeAny, {
+        text: string;
+        axPath: {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }[];
+        attributeHash: string;
+        href: string;
+        bbox: {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        };
+    }, {
+        text: string;
+        axPath: {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }[];
+        attributeHash: string;
+        href: string;
+        bbox: {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        };
+    }>, "many">>;
+    buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        text: z.ZodEffects<z.ZodString, string, string>;
+        axPath: z.ZodArray<z.ZodObject<{
+            role: z.ZodString;
+            index: z.ZodNumber;
+            name: z.ZodOptional<z.ZodString>;
+        }, "strip", z.ZodTypeAny, {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }, {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }>, "many">;
+        attributeHash: z.ZodString;
+        bbox: z.ZodObject<{
+            x: z.ZodNumber;
+            y: z.ZodNumber;
+            width: z.ZodNumber;
+            height: z.ZodNumber;
+        }, "strict", z.ZodTypeAny, {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        }, {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        }>;
+    }, "strict", z.ZodTypeAny, {
+        text: string;
+        axPath: {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }[];
+        attributeHash: string;
+        bbox: {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        };
+    }, {
+        text: string;
+        axPath: {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }[];
+        attributeHash: string;
+        bbox: {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        };
+    }>, "many">>;
 }, "strict", z.ZodTypeAny, {
     page: {
         tabId: string & z.BRAND<"TabId">;
@@ -1059,6 +1312,39 @@ declare const ObservationV1Schema: z.ZodEffects<z.ZodObject<{
         } | undefined;
     }[] | undefined;
     bodyText?: string | undefined;
+    pageIdentity?: string | undefined;
+    pagePurpose?: string | undefined;
+    links?: {
+        text: string;
+        axPath: {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }[];
+        attributeHash: string;
+        href: string;
+        bbox: {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        };
+    }[] | undefined;
+    buttons?: {
+        text: string;
+        axPath: {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }[];
+        attributeHash: string;
+        bbox: {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        };
+    }[] | undefined;
 }, {
     page: {
         tabId: string;
@@ -1101,6 +1387,39 @@ declare const ObservationV1Schema: z.ZodEffects<z.ZodObject<{
         } | undefined;
     }[] | undefined;
     bodyText?: string | undefined;
+    pageIdentity?: string | undefined;
+    pagePurpose?: string | undefined;
+    links?: {
+        text: string;
+        axPath: {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }[];
+        attributeHash: string;
+        href: string;
+        bbox: {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        };
+    }[] | undefined;
+    buttons?: {
+        text: string;
+        axPath: {
+            role: string;
+            index: number;
+            name?: string | undefined;
+        }[];
+        attributeHash: string;
+        bbox: {
+            width: number;
+            height: number;
+            x: number;
+            y: number;
+        };
+    }[] | undefined;
 }>, any, any>;
 type Screenshot = z.infer<typeof ScreenshotSchema>;
 type PageState = z.infer<typeof PageStateSchema>;
@@ -1111,6 +1430,9 @@ type ControlMetadata = z.infer<typeof ControlMetadataSchema>;
 type ObservationV1 = z.infer<typeof ObservationV1Schema>;
 type AXTuple = z.infer<typeof AXTupleSchema>;
 type AccessibilityNode = z.infer<typeof AccessibilityNodeSchema>;
+type PageLink = z.infer<typeof PageLinkSchema>;
+type PageButton = z.infer<typeof PageButtonSchema>;
+type PageIdentity = z.infer<typeof PageIdentitySchema>;
 
 declare const ExecutableActionV1Schema: z.ZodDiscriminatedUnion<"type", [z.ZodObject<{
     type: z.ZodLiteral<"left_click">;
@@ -3249,6 +3571,133 @@ declare const SucceededActionResultV1Schema: z.ZodObject<{
             } | undefined;
         }>, "many">>;
         bodyText: z.ZodOptional<z.ZodString>;
+        pageIdentity: z.ZodOptional<z.ZodString>;
+        pagePurpose: z.ZodOptional<z.ZodString>;
+        links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            href: z.ZodString;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
+        buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -3291,6 +3740,39 @@ declare const SucceededActionResultV1Schema: z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }, {
         page: {
             tabId: string;
@@ -3333,6 +3815,39 @@ declare const SucceededActionResultV1Schema: z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "succeeded";
@@ -4103,6 +4618,133 @@ declare const FailedActionResultV1Schema: z.ZodObject<{
             } | undefined;
         }>, "many">>;
         bodyText: z.ZodOptional<z.ZodString>;
+        pageIdentity: z.ZodOptional<z.ZodString>;
+        pagePurpose: z.ZodOptional<z.ZodString>;
+        links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            href: z.ZodString;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
+        buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -4145,6 +4787,39 @@ declare const FailedActionResultV1Schema: z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }, {
         page: {
             tabId: string;
@@ -4187,6 +4862,39 @@ declare const FailedActionResultV1Schema: z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "failed_recoverable" | "failed_terminal";
@@ -5313,6 +6021,133 @@ declare const CancelledActionResultV1Schema: z.ZodObject<{
             } | undefined;
         }>, "many">>;
         bodyText: z.ZodOptional<z.ZodString>;
+        pageIdentity: z.ZodOptional<z.ZodString>;
+        pagePurpose: z.ZodOptional<z.ZodString>;
+        links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            href: z.ZodString;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
+        buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -5355,6 +6190,39 @@ declare const CancelledActionResultV1Schema: z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }, {
         page: {
             tabId: string;
@@ -5397,6 +6265,39 @@ declare const CancelledActionResultV1Schema: z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "cancelled";
@@ -6160,6 +7061,133 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
             } | undefined;
         }>, "many">>;
         bodyText: z.ZodOptional<z.ZodString>;
+        pageIdentity: z.ZodOptional<z.ZodString>;
+        pagePurpose: z.ZodOptional<z.ZodString>;
+        links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            href: z.ZodString;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
+        buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -6202,6 +7230,39 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }, {
         page: {
             tabId: string;
@@ -6244,6 +7305,39 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "succeeded";
@@ -7013,6 +8107,133 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
             } | undefined;
         }>, "many">>;
         bodyText: z.ZodOptional<z.ZodString>;
+        pageIdentity: z.ZodOptional<z.ZodString>;
+        pagePurpose: z.ZodOptional<z.ZodString>;
+        links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            href: z.ZodString;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
+        buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -7055,6 +8276,39 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }, {
         page: {
             tabId: string;
@@ -7097,6 +8351,39 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "failed_recoverable" | "failed_terminal";
@@ -8221,6 +9508,133 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
             } | undefined;
         }>, "many">>;
         bodyText: z.ZodOptional<z.ZodString>;
+        pageIdentity: z.ZodOptional<z.ZodString>;
+        pagePurpose: z.ZodOptional<z.ZodString>;
+        links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            href: z.ZodString;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
+        buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -8263,6 +9677,39 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }, {
         page: {
             tabId: string;
@@ -8305,6 +9752,39 @@ declare const ActionResultV1Schema: z.ZodEffects<z.ZodUnion<[z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }>, any, any>;
 }, "strict", z.ZodTypeAny, {
     status: "cancelled";
@@ -9027,6 +10507,133 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
             } | undefined;
         }>, "many">>;
         bodyText: z.ZodOptional<z.ZodString>;
+        pageIdentity: z.ZodOptional<z.ZodString>;
+        pagePurpose: z.ZodOptional<z.ZodString>;
+        links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            href: z.ZodString;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
+        buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            text: z.ZodEffects<z.ZodString, string, string>;
+            axPath: z.ZodArray<z.ZodObject<{
+                role: z.ZodString;
+                index: z.ZodNumber;
+                name: z.ZodOptional<z.ZodString>;
+            }, "strip", z.ZodTypeAny, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }, {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }>, "many">;
+            attributeHash: z.ZodString;
+            bbox: z.ZodObject<{
+                x: z.ZodNumber;
+                y: z.ZodNumber;
+                width: z.ZodNumber;
+                height: z.ZodNumber;
+            }, "strict", z.ZodTypeAny, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }, {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            }>;
+        }, "strict", z.ZodTypeAny, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }, {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }>, "many">>;
     }, "strict", z.ZodTypeAny, {
         page: {
             tabId: string & z.BRAND<"TabId">;
@@ -9069,6 +10676,39 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }, {
         page: {
             tabId: string;
@@ -9111,6 +10751,39 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
             } | undefined;
         }[] | undefined;
         bodyText?: string | undefined;
+        pageIdentity?: string | undefined;
+        pagePurpose?: string | undefined;
+        links?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            href: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
+        buttons?: {
+            text: string;
+            axPath: {
+                role: string;
+                index: number;
+                name?: string | undefined;
+            }[];
+            attributeHash: string;
+            bbox: {
+                width: number;
+                height: number;
+                x: number;
+                y: number;
+            };
+        }[] | undefined;
     }>, any, any>;
     proposal: z.ZodEffects<z.ZodObject<{
         kind: z.ZodLiteral<"action">;
@@ -10565,6 +12238,133 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 } | undefined;
             }>, "many">>;
             bodyText: z.ZodOptional<z.ZodString>;
+            pageIdentity: z.ZodOptional<z.ZodString>;
+            pagePurpose: z.ZodOptional<z.ZodString>;
+            links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                text: z.ZodEffects<z.ZodString, string, string>;
+                href: z.ZodString;
+                axPath: z.ZodArray<z.ZodObject<{
+                    role: z.ZodString;
+                    index: z.ZodNumber;
+                    name: z.ZodOptional<z.ZodString>;
+                }, "strip", z.ZodTypeAny, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }>, "many">;
+                attributeHash: z.ZodString;
+                bbox: z.ZodObject<{
+                    x: z.ZodNumber;
+                    y: z.ZodNumber;
+                    width: z.ZodNumber;
+                    height: z.ZodNumber;
+                }, "strict", z.ZodTypeAny, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }>;
+            }, "strict", z.ZodTypeAny, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }>, "many">>;
+            buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                text: z.ZodEffects<z.ZodString, string, string>;
+                axPath: z.ZodArray<z.ZodObject<{
+                    role: z.ZodString;
+                    index: z.ZodNumber;
+                    name: z.ZodOptional<z.ZodString>;
+                }, "strip", z.ZodTypeAny, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }>, "many">;
+                attributeHash: z.ZodString;
+                bbox: z.ZodObject<{
+                    x: z.ZodNumber;
+                    y: z.ZodNumber;
+                    width: z.ZodNumber;
+                    height: z.ZodNumber;
+                }, "strict", z.ZodTypeAny, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }>;
+            }, "strict", z.ZodTypeAny, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }>, "many">>;
         }, "strict", z.ZodTypeAny, {
             page: {
                 tabId: string & z.BRAND<"TabId">;
@@ -10607,6 +12407,39 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 } | undefined;
             }[] | undefined;
             bodyText?: string | undefined;
+            pageIdentity?: string | undefined;
+            pagePurpose?: string | undefined;
+            links?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
+            buttons?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
         }, {
             page: {
                 tabId: string;
@@ -10649,6 +12482,39 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 } | undefined;
             }[] | undefined;
             bodyText?: string | undefined;
+            pageIdentity?: string | undefined;
+            pagePurpose?: string | undefined;
+            links?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
+            buttons?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
         }>, any, any>;
     }, "strict", z.ZodTypeAny, {
         status: "succeeded";
@@ -11418,6 +13284,133 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 } | undefined;
             }>, "many">>;
             bodyText: z.ZodOptional<z.ZodString>;
+            pageIdentity: z.ZodOptional<z.ZodString>;
+            pagePurpose: z.ZodOptional<z.ZodString>;
+            links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                text: z.ZodEffects<z.ZodString, string, string>;
+                href: z.ZodString;
+                axPath: z.ZodArray<z.ZodObject<{
+                    role: z.ZodString;
+                    index: z.ZodNumber;
+                    name: z.ZodOptional<z.ZodString>;
+                }, "strip", z.ZodTypeAny, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }>, "many">;
+                attributeHash: z.ZodString;
+                bbox: z.ZodObject<{
+                    x: z.ZodNumber;
+                    y: z.ZodNumber;
+                    width: z.ZodNumber;
+                    height: z.ZodNumber;
+                }, "strict", z.ZodTypeAny, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }>;
+            }, "strict", z.ZodTypeAny, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }>, "many">>;
+            buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                text: z.ZodEffects<z.ZodString, string, string>;
+                axPath: z.ZodArray<z.ZodObject<{
+                    role: z.ZodString;
+                    index: z.ZodNumber;
+                    name: z.ZodOptional<z.ZodString>;
+                }, "strip", z.ZodTypeAny, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }>, "many">;
+                attributeHash: z.ZodString;
+                bbox: z.ZodObject<{
+                    x: z.ZodNumber;
+                    y: z.ZodNumber;
+                    width: z.ZodNumber;
+                    height: z.ZodNumber;
+                }, "strict", z.ZodTypeAny, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }>;
+            }, "strict", z.ZodTypeAny, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }>, "many">>;
         }, "strict", z.ZodTypeAny, {
             page: {
                 tabId: string & z.BRAND<"TabId">;
@@ -11460,6 +13453,39 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 } | undefined;
             }[] | undefined;
             bodyText?: string | undefined;
+            pageIdentity?: string | undefined;
+            pagePurpose?: string | undefined;
+            links?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
+            buttons?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
         }, {
             page: {
                 tabId: string;
@@ -11502,6 +13528,39 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 } | undefined;
             }[] | undefined;
             bodyText?: string | undefined;
+            pageIdentity?: string | undefined;
+            pagePurpose?: string | undefined;
+            links?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
+            buttons?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
         }>, any, any>;
     }, "strict", z.ZodTypeAny, {
         status: "failed_recoverable" | "failed_terminal";
@@ -12626,6 +14685,133 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 } | undefined;
             }>, "many">>;
             bodyText: z.ZodOptional<z.ZodString>;
+            pageIdentity: z.ZodOptional<z.ZodString>;
+            pagePurpose: z.ZodOptional<z.ZodString>;
+            links: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                text: z.ZodEffects<z.ZodString, string, string>;
+                href: z.ZodString;
+                axPath: z.ZodArray<z.ZodObject<{
+                    role: z.ZodString;
+                    index: z.ZodNumber;
+                    name: z.ZodOptional<z.ZodString>;
+                }, "strip", z.ZodTypeAny, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }>, "many">;
+                attributeHash: z.ZodString;
+                bbox: z.ZodObject<{
+                    x: z.ZodNumber;
+                    y: z.ZodNumber;
+                    width: z.ZodNumber;
+                    height: z.ZodNumber;
+                }, "strict", z.ZodTypeAny, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }>;
+            }, "strict", z.ZodTypeAny, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }>, "many">>;
+            buttons: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                text: z.ZodEffects<z.ZodString, string, string>;
+                axPath: z.ZodArray<z.ZodObject<{
+                    role: z.ZodString;
+                    index: z.ZodNumber;
+                    name: z.ZodOptional<z.ZodString>;
+                }, "strip", z.ZodTypeAny, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }, {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }>, "many">;
+                attributeHash: z.ZodString;
+                bbox: z.ZodObject<{
+                    x: z.ZodNumber;
+                    y: z.ZodNumber;
+                    width: z.ZodNumber;
+                    height: z.ZodNumber;
+                }, "strict", z.ZodTypeAny, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }, {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                }>;
+            }, "strict", z.ZodTypeAny, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }, {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }>, "many">>;
         }, "strict", z.ZodTypeAny, {
             page: {
                 tabId: string & z.BRAND<"TabId">;
@@ -12668,6 +14854,39 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 } | undefined;
             }[] | undefined;
             bodyText?: string | undefined;
+            pageIdentity?: string | undefined;
+            pagePurpose?: string | undefined;
+            links?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
+            buttons?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
         }, {
             page: {
                 tabId: string;
@@ -12710,6 +14929,39 @@ declare const TrajectoryLinkageV1Schema: z.ZodEffects<z.ZodObject<{
                 } | undefined;
             }[] | undefined;
             bodyText?: string | undefined;
+            pageIdentity?: string | undefined;
+            pagePurpose?: string | undefined;
+            links?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                href: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
+            buttons?: {
+                text: string;
+                axPath: {
+                    role: string;
+                    index: number;
+                    name?: string | undefined;
+                }[];
+                attributeHash: string;
+                bbox: {
+                    width: number;
+                    height: number;
+                    x: number;
+                    y: number;
+                };
+            }[] | undefined;
         }>, any, any>;
     }, "strict", z.ZodTypeAny, {
         status: "cancelled";
@@ -15421,4 +17673,4 @@ declare function validateCoordinatesInBounds(x: number, y: number, viewportWidth
  */
 declare function assertCoordinatesInBounds(x: number, y: number, viewportWidth: number, viewportHeight: number): void;
 
-export { type AXTuple, AXTupleSchema, type AccessibilityNode, AccessibilityNodeSchema, type ActionCommandV1, ActionCommandV1Schema, type ActionError, ActionErrorCode, type ActionErrorV1, ActionErrorV1Schema, ActionExecutionType, type ActionFailureResult, type ActionId, ActionIdSchema, type ActionProposalV1, ActionProposalV1Schema, type ActionResult, type ActionResultStatusV1, ActionResultStatusV1Schema, type ActionResultV1, ActionResultV1Schema, type ActionSuccessData, type ActionSuccessResult, ActionType, type AgentProposalV1, AgentProposalV1Schema, type ApprovalId, ApprovalIdSchema, type ApprovalResolutionV1, ApprovalResolutionV1Schema, type ArtifactId, ArtifactIdSchema, type AskUserQuestionAction, AskUserQuestionArgsSchema, type AskUserQuestionResult, type BaseAction, type BaseActionResult, type BoundingBox, BoundingBoxSchema, CancelledActionResultV1Schema, type CompletionFindingV1, CompletionFindingV1Schema, type CompletionProposalV1, CompletionProposalV1Schema, type ControlMetadata, ControlMetadataSchema, type Coordinates, CoordinatesSchema, type DialogEffectV1, DialogEffectV1Schema, type DoubleClickAction, DoubleClickArgsSchema, type DoubleClickResult, type DragAction, DragArgsSchema, type DragCoordinates, DragCoordinatesSchema, type DragResult, type EventId, EventIdSchema, type ExecutableActionV1, ExecutableActionV1Schema, FARA_ACTION_TO_MCP_TOOL, FORBIDDEN_BROWSER_DATA_KEYS, FailedActionResultV1Schema, type FaraAction, type FaraActionArgs, FaraActionArgsSchema, ForbiddenBrowserDataError, type FrameId, FrameIdSchema, type FramePathSegmentId, FramePathSegmentIdSchema, type HistoryBackAction, HistoryBackArgsSchema, type HistoryBackResult, IdempotencyKeySchema, type KeyAction, KeyArgsSchema, type KeyModifiers, KeyModifiersSchema, type KeyResult, type LeftClickAction, LeftClickArgsSchema, type LeftClickResult, type LocatorCandidateV1, LocatorCandidateV1Schema, McpToolName, type McpToolParams, type MessageId, MessageIdSchema, type MouseClickParams, type MouseDragParams, type MouseMoveAction, MouseMoveArgsSchema, type MouseMoveParams, type MouseMoveResult, type MouseWheelParams, type NavigateBackParams, type NavigateParams, type NavigationEffectV1, NavigationEffectV1Schema, type NormalizedCoordinates, type ObservationId, ObservationIdCounter, ObservationIdSchema, type ObservationV1, type ObservationId$1 as ObservationV1Id, ObservationV1Schema, type PageState, PageStateSchema, type PauseAndMemorizeFactAction, PauseAndMemorizeFactArgsSchema, type PauseAndMemorizeFactResult, type PolicyContextV1, PolicyContextV1Schema, type PolicyDecisionId, PolicyDecisionIdSchema, type PolicyDecisionV1, PolicyDecisionV1Schema, type PressKeyParams, RejectedActionResultV1Schema, type RightClickAction, RightClickArgsSchema, type RightClickResult, type RunId, RunIdSchema, type SanitizedAccessibleName, SanitizedAccessibleNameSchema, type Screenshot, type ScreenshotAction, ScreenshotArgsSchema, type ScreenshotResult, ScreenshotSchema, type ScrollAction, ScrollArgsSchema, type ScrollDelta, ScrollDeltaSchema, type ScrollResult, type SemanticTarget, type SemanticTargetId, SemanticTargetIdSchema, SemanticTargetSchema, type Sequence, SequenceSchema, type SessionId, SessionIdSchema, type ShadowPathSegmentId, ShadowPathSegmentIdSchema, type StepId, StepIdSchema, SucceededActionResultV1Schema, type TabId, TabIdSchema, type TakeScreenshotParams, type TaskId, TaskIdSchema, type TerminateAction, TerminateArgsSchema, type TerminateResult, type TrajectoryEventKindV1, TrajectoryEventKindV1Schema, type TrajectoryEventV1, TrajectoryEventV1Schema, type TrajectoryLinkageV1, TrajectoryLinkageV1Schema, type Viewport, type ViewportBounds, type ViewportConfig, type ViewportContext, ViewportContextSchema, ViewportSchema, type VisitUrlAction, VisitUrlArgsSchema, type VisitUrlResult, type WaitAction, WaitArgsSchema, type WaitResult, assertCoordinatesInBounds, assertNoForbiddenBrowserData, compareObservationIds, createActionFailure, createActionSuccess, createDefaultViewport, createDefaultViewportConfig, createObservationId, getActionExecutionType, getMcpToolName, getNextObservationId, isHttpUrl, isMcpAction, isNavigationAction, isObservationUrl, isValidObservationId, isViewportAction, mapActionToMcpParams, tryValidateActionArgs, validateActionArgs, validateCoordinatesInBounds };
+export { type AXTuple, AXTupleSchema, type AccessibilityNode, AccessibilityNodeSchema, type ActionCommandV1, ActionCommandV1Schema, type ActionError, ActionErrorCode, type ActionErrorV1, ActionErrorV1Schema, ActionExecutionType, type ActionFailureResult, type ActionId, ActionIdSchema, type ActionProposalV1, ActionProposalV1Schema, type ActionResult, type ActionResultStatusV1, ActionResultStatusV1Schema, type ActionResultV1, ActionResultV1Schema, type ActionSuccessData, type ActionSuccessResult, ActionType, type AgentProposalV1, AgentProposalV1Schema, type ApprovalId, ApprovalIdSchema, type ApprovalResolutionV1, ApprovalResolutionV1Schema, type ArtifactId, ArtifactIdSchema, type AskUserQuestionAction, AskUserQuestionArgsSchema, type AskUserQuestionResult, type BaseAction, type BaseActionResult, type BoundingBox, BoundingBoxSchema, CancelledActionResultV1Schema, type CompletionFindingV1, CompletionFindingV1Schema, type CompletionProposalV1, CompletionProposalV1Schema, type ControlMetadata, ControlMetadataSchema, type Coordinates, CoordinatesSchema, type DialogEffectV1, DialogEffectV1Schema, type DoubleClickAction, DoubleClickArgsSchema, type DoubleClickResult, type DragAction, DragArgsSchema, type DragCoordinates, DragCoordinatesSchema, type DragResult, type EventId, EventIdSchema, type ExecutableActionV1, ExecutableActionV1Schema, FARA_ACTION_TO_MCP_TOOL, FORBIDDEN_BROWSER_DATA_KEYS, FailedActionResultV1Schema, type FaraAction, type FaraActionArgs, FaraActionArgsSchema, ForbiddenBrowserDataError, type FrameId, FrameIdSchema, type FramePathSegmentId, FramePathSegmentIdSchema, type HistoryBackAction, HistoryBackArgsSchema, type HistoryBackResult, IdempotencyKeySchema, type KeyAction, KeyArgsSchema, type KeyModifiers, KeyModifiersSchema, type KeyResult, type LeftClickAction, LeftClickArgsSchema, type LeftClickResult, type LocatorCandidateV1, LocatorCandidateV1Schema, McpToolName, type McpToolParams, type MessageId, MessageIdSchema, type MouseClickParams, type MouseDragParams, type MouseMoveAction, MouseMoveArgsSchema, type MouseMoveParams, type MouseMoveResult, type MouseWheelParams, type NavigateBackParams, type NavigateParams, type NavigationEffectV1, NavigationEffectV1Schema, type NormalizedCoordinates, type ObservationId, ObservationIdCounter, ObservationIdSchema, type ObservationV1, type ObservationId$1 as ObservationV1Id, ObservationV1Schema, type PageButton, PageButtonSchema, type PageIdentity, PageIdentitySchema, type PageLink, PageLinkSchema, type PageState, PageStateSchema, type PauseAndMemorizeFactAction, PauseAndMemorizeFactArgsSchema, type PauseAndMemorizeFactResult, type PolicyContextV1, PolicyContextV1Schema, type PolicyDecisionId, PolicyDecisionIdSchema, type PolicyDecisionV1, PolicyDecisionV1Schema, type PressKeyParams, RejectedActionResultV1Schema, type RightClickAction, RightClickArgsSchema, type RightClickResult, type RunId, RunIdSchema, type SanitizedAccessibleName, SanitizedAccessibleNameSchema, type Screenshot, type ScreenshotAction, ScreenshotArgsSchema, type ScreenshotResult, ScreenshotSchema, type ScrollAction, ScrollArgsSchema, type ScrollDelta, ScrollDeltaSchema, type ScrollResult, type SemanticTarget, type SemanticTargetId, SemanticTargetIdSchema, SemanticTargetSchema, type Sequence, SequenceSchema, type SessionId, SessionIdSchema, type ShadowPathSegmentId, ShadowPathSegmentIdSchema, type StepId, StepIdSchema, SucceededActionResultV1Schema, type TabId, TabIdSchema, type TakeScreenshotParams, type TaskId, TaskIdSchema, type TerminateAction, TerminateArgsSchema, type TerminateResult, type TrajectoryEventKindV1, TrajectoryEventKindV1Schema, type TrajectoryEventV1, TrajectoryEventV1Schema, type TrajectoryLinkageV1, TrajectoryLinkageV1Schema, type Viewport, type ViewportBounds, type ViewportConfig, type ViewportContext, ViewportContextSchema, ViewportSchema, type VisitUrlAction, VisitUrlArgsSchema, type VisitUrlResult, type WaitAction, WaitArgsSchema, type WaitResult, assertCoordinatesInBounds, assertNoForbiddenBrowserData, compareObservationIds, createActionFailure, createActionSuccess, createDefaultViewport, createDefaultViewportConfig, createObservationId, getActionExecutionType, getMcpToolName, getNextObservationId, isHttpUrl, isMcpAction, isNavigationAction, isObservationUrl, isValidObservationId, isViewportAction, mapActionToMcpParams, tryValidateActionArgs, validateActionArgs, validateCoordinatesInBounds };

@@ -18,6 +18,29 @@ const typecheck = spawnSync(process.execPath, [require.resolve('typescript/bin/t
 if (typecheck.error) throw typecheck.error;
 if (typecheck.status !== 0) process.exit(typecheck.status ?? 1);
 
+// ponytail: rebuild workspace dependencies FIRST so esbuild bundles the
+// current schema source, not the stale dist/. Without this, a schema
+// source edit silently ships an extension that fails strict-mode
+// validation with "Unrecognized key(s)" on the new fields. The previous
+// failure: pageIdentity / pagePurpose / links / buttons added to
+// ObservationV1Schema but the schema package's dist/ was stale, so the
+// extension bundled the old schema and crashed on every capture.
+const repoRoot = join(__dirname, '..', '..');
+const schemaDir = join(repoRoot, 'packages', 'brotto-action-schema');
+if (existsSync(schemaDir)) {
+  console.log('Building @brotto/brotto-action-schema (workspace dep)...');
+  const schemaBuild = spawnSync('pnpm', ['--dir', schemaDir, 'run', 'build'], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: { ...process.env, npm_config_yes: 'true' },
+  });
+  if (schemaBuild.error) throw schemaBuild.error;
+  if (schemaBuild.status !== 0) {
+    console.error(`Schema package build failed (status=${schemaBuild.status}); aborting extension build.`);
+    process.exit(schemaBuild.status ?? 1);
+  }
+}
+
 // Clean dist
 if (existsSync(distDir)) {
   rmSync(distDir, { recursive: true });

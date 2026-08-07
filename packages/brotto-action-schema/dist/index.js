@@ -68,6 +68,9 @@ __export(index_exports, {
   ObservationIdCounter: () => ObservationIdCounter,
   ObservationIdSchema: () => ObservationIdSchema,
   ObservationV1Schema: () => ObservationV1Schema,
+  PageButtonSchema: () => PageButtonSchema,
+  PageIdentitySchema: () => PageIdentitySchema,
+  PageLinkSchema: () => PageLinkSchema,
   PageStateSchema: () => PageStateSchema,
   PauseAndMemorizeFactArgsSchema: () => PauseAndMemorizeFactArgsSchema,
   PolicyContextV1Schema: () => PolicyContextV1Schema,
@@ -349,6 +352,20 @@ var AccessibilityNodeSchema = import_zod2.z.object({
   axPath: import_zod2.z.array(AXTupleSchema),
   attributeHash: Sha256Schema
 });
+var PageLinkSchema = import_zod2.z.object({
+  text: SafeSemanticTextSchema,
+  href: import_zod2.z.string().max(2048),
+  axPath: import_zod2.z.array(AXTupleSchema).max(64),
+  attributeHash: Sha256Schema,
+  bbox: BoundingBoxSchema
+}).strict();
+var PageButtonSchema = import_zod2.z.object({
+  text: SafeSemanticTextSchema,
+  axPath: import_zod2.z.array(AXTupleSchema).max(64),
+  attributeHash: Sha256Schema,
+  bbox: BoundingBoxSchema
+}).strict();
+var PageIdentitySchema = import_zod2.z.string().regex(/^[a-f0-9]{64}$/i);
 var ObservationV1Schema = withForbiddenBrowserDataGuard(import_zod2.z.object({
   observationId: ObservationIdSchema,
   capturedAt: import_zod2.z.string().datetime(),
@@ -362,7 +379,20 @@ var ObservationV1Schema = withForbiddenBrowserDataGuard(import_zod2.z.object({
   // ponytail: structured page text (HEADINGS / STATS / LABELS / TEXT blocks).
   // Optional so older payloads still validate. Replaces the lazy
   // accessibilityNodes.slice(0, 400) cap in the planner context builder.
-  bodyText: import_zod2.z.string().max(5e4).optional()
+  bodyText: import_zod2.z.string().max(5e4).optional(),
+  // ponytail: replay-ready fields — added for future workflow recorder.
+  // pageIdentity: SHA-256 over normalized AX subtree; lets the harness detect
+  // "click didn't navigate" reliably across page re-renders.
+  // pagePurpose: meta description + first h1; orients the model and labels
+  // recorded steps.
+  // links / buttons: human-readable clickables inventory (text + href + bbox
+  // + StableRef identity) — what the recorder needs to emit
+  // `(text="Browse repositories", href="/orgs/X/repositories")` without
+  // re-querying the page.
+  pageIdentity: PageIdentitySchema.optional(),
+  pagePurpose: import_zod2.z.string().max(512).optional(),
+  links: import_zod2.z.array(PageLinkSchema).max(500).optional(),
+  buttons: import_zod2.z.array(PageButtonSchema).max(500).optional()
 }).strict());
 
 // src/v1/actions.ts
@@ -1104,6 +1134,9 @@ function assertCoordinatesInBounds(x, y, viewportWidth, viewportHeight) {
   ObservationIdCounter,
   ObservationIdSchema,
   ObservationV1Schema,
+  PageButtonSchema,
+  PageIdentitySchema,
+  PageLinkSchema,
   PageStateSchema,
   PauseAndMemorizeFactArgsSchema,
   PolicyContextV1Schema,

@@ -1369,7 +1369,30 @@ async function captureObservationInternal(
   };
 
   assertNoForbiddenBrowserData(observation);
-  return ObservationV1Schema.parse(observation);
+  // ponytail: defensive parse. If the bundled schema is stale (the
+  // schema package's dist/ was not rebuilt before bundling), Zod will
+  // reject the new replay-ready fields with `unrecognized_keys`. Strip
+  // the offending keys and retry once so the loop survives a stale
+  // build instead of crashing every capture with LOOP_CRASHED. The
+  // fields are optional, so dropping them is safe — the loop just runs
+  // without pageIdentity / links / buttons until the schema is rebuilt.
+  let parsed: unknown;
+  try {
+    parsed = ObservationV1Schema.parse(observation);
+  } catch (err) {
+    const issues = (err as { issues?: Array<{ code?: string; keys?: string[]; path?: Array<string | number> }> }).issues ?? [];
+    const unknownTopLevel = issues
+      .filter((i) => i.code === "unrecognized_keys" && Array.isArray(i.path) && i.path.length === 0)
+      .flatMap((i) => i.keys ?? []);
+    if (unknownTopLevel.length === 0) throw err;
+    console.warn(
+      `[observation] bundled schema missing ${unknownTopLevel.length} replay-ready fields; stripping and retrying. Rebuild @brotto/brotto-action-schema to fix.`,
+    );
+    const stripped: Record<string, unknown> = { ...observation };
+    for (const k of unknownTopLevel) delete stripped[k];
+    parsed = ObservationV1Schema.parse(stripped);
+  }
+  return parsed as ReturnType<typeof ObservationV1Schema.parse>;
 }
 
 /** Captures, privacy-masks, and validates the only outbound browser-observation representation. */
