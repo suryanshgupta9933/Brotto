@@ -266,6 +266,13 @@ function appendUserMessage(text) {
   appendMessage({ role: 'user', text });
 }
 
+// ponytail: tiny logger for internal noise (cancel races, retry ticks)
+// that should NOT render in the chat. Service-worker console only via
+// console.log inside the page; nothing in the UI changes.
+function logSilently(message) {
+  console.log(`[sidepanel] ${message}`);
+}
+
 // ── Phase / UI helpers ────────────────────────────────────────────────────
 function setPhase(phase, message) {
   state.phase = phase;
@@ -437,14 +444,23 @@ async function startTask() {
 }
 
 async function stopTask() {
+  // ponytail: guard against double-click. The cancel handler may finish
+  // before the user releases the button, and a second click would post
+  // 'cancel_local_task' which then returns 'No local task is running'.
+  if (state.phase !== 'executing' && state.phase !== 'paused') return;
   stopBtn.disabled = true;
   // ponytail: surface immediate "Stopped" feedback so the user sees their
-  // click took effect. The background's cancel returns immediately; the loop
-  // emits task_failed (ABORTED) a few ticks later as cleanup unwinds.
+  // click took effect. The background's cancel emits a terminal event
+  // synchronously now, so the side panel exits 'Working' within ~1 tick.
   appendMessage({ role: 'system', text: 'Stopped by user — finishing current step…' });
   setPhase('paused', 'Stopping…');
   const response = await sendMessage({ type: 'cancel_local_task' });
-  if (!response.success) appendMessage({ role: 'error', text: `Cancel failed: ${response.error || 'unknown error'}` });
+  if (!response.success) {
+    // ponytail: cancel after the loop already terminated (the user's
+    // second click). The terminal event is already on the way; do not
+    // show an error bubble that contradicts it.
+    logSilently(`cancel_local_task returned: ${response.error || 'unknown'}`);
+  }
 }
 
 async function refresh() {
@@ -932,10 +948,16 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'canonical_status': {
       // ponytail: normalize canonical lifecycle (completed / failed / cancelled /
       // disconnected / cancelling / waiting_for_approval) into the side-panel
-      // phase enum so the UI doesn't get stuck in unmapped states. The local-
-      // driver emits "completed" after every run — without this normalization
-      // the pill said "completed" and the new-task Send was silently blocked.
+      // phase enum so the UI doesn't get stuck in unmapped states. Do NOT
+      // regress from a terminal phase ('error' / 'done') — the cancel
+      // handler emits its own task_failed/canonical_status pair and a
+      // late-arriving canonical_status from the loop's .then() must not
+      // overwrite the already-correct terminal pill.
       const raw = String(message.status || '');
+      if (state.phase === 'error' || state.phase === 'done') {
+        logSilently(`canonical_status ${raw} arrived after terminal phase ${state.phase}; ignored`);
+        break;
+      }
       const mapped = (raw === 'completed' || raw === 'cancelled' || raw === 'disconnected') ? 'done'
         : raw === 'failed' ? 'error'
         : raw === 'cancelling' ? 'paused'

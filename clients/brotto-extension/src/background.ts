@@ -21,6 +21,12 @@ const BOOTSTRAP_PATH = "/v1...sessions";
 // defaults to demo-server on localhost; override via storage.local if needed.
 let localAbortController: AbortController | null = null;
 let localTabId: number | null = null;
+// ponytail: true once the user pressed Stop (or the loop completed and the
+// post-loop cleanup ran). The loop reads this in its finally block to
+// decide whether to emit a follow-up terminal event — the cancel handler
+// already emits one immediately so the side panel exits 'Working' within
+// ~1 second; the loop's eventual emit would race and double-fire.
+let localTaskTerminalEmitted = false;
 const DEFAULT_PLANNER_URL = "http://127.0.0.1:3001";
 
 // ponytail: pending-clarify and pending-approval resolvers keyed by request id.
@@ -184,6 +190,10 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
       if (localAbortController !== null || localTabId !== null) {
         return { success: false, error: "A local task is already running" };
       }
+      // ponytail: reset the terminal-emitted flag so a new task can emit
+      // its own completion/error event. Without this, the first run after
+      // a cancel would silently drop its terminal emit.
+      localTaskTerminalEmitted = false;
       const goal = String(message.task ?? "").trim();
       if (goal.length === 0) return { success: false, error: "task is empty" };
       const startingUrl = typeof message.startingUrl === "string" ? message.startingUrl : undefined;
@@ -227,18 +237,18 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
           notifyUi({ type: "login_required", url, domain });
         },
         onComplete: ({ summary, steps, finalAnswer }) => {
-          // ponytail: the local-driver emits this from inside its `finally`
-          // block AFTER the debugger has been detached and tab listeners
-          // cleared. We forward the UI event but do NOT null the local
-          // state here — that has to wait until the runLocalLoop promise
-          // resolves below, so a fast-following run_local_task cannot race
-          // past the terminal emit.
+          // ponytail: skip if the cancel handler already emitted a
+          // terminal event. Otherwise we would append a duplicate
+          // 'Task complete' bubble on top of 'Task was cancelled'.
+          if (localTaskTerminalEmitted) return;
+          localTaskTerminalEmitted = true;
           notifyUi({ type: "task_completed", summary, steps, finalAnswer });
         },
         onError: ({ code, message }) => {
-          // ponytail: emit as task_failed so the side panel renders the error
-          // card. (canonical_error used to be ignored by the new UI.) State
-          // cleanup is handled in the .then()/.catch() below.
+          // ponytail: skip if the cancel handler already emitted a
+          // terminal event for the user-pressed-Stop case.
+          if (localTaskTerminalEmitted) return;
+          localTaskTerminalEmitted = true;
           notifyUi({ type: "task_failed", code, message });
         },
         onLog: (message) => {
@@ -275,7 +285,13 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
       }).then(() => {
         localAbortController = null;
         localTabId = null;
-        notifyUi({ type: "canonical_status", status: "completed" });
+        // ponytail: only emit canonical_status: completed if the task
+        // ended cleanly. If the task errored, the onError callback above
+        // already emitted task_failed (which sets phase to 'error') and
+        // a follow-up 'completed' would overwrite it back to 'done'.
+        if (!localTaskTerminalEmitted) {
+          notifyUi({ type: "canonical_status", status: "completed" });
+        }
       }).catch((err: unknown) => {
         localAbortController = null;
         localTabId = null;
@@ -285,12 +301,27 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
     }
     case "cancel_local_task": {
       if (localAbortController === null) return { success: false, error: "No local task is running" };
+      // ponytail: mark terminal-emitted BEFORE aborting so the loop's
+      // cleanup phase (which can take up to the 15s capture timeout)
+      // does not fire a duplicate terminal event that would overwrite
+      // the error phase or append a duplicate error bubble.
+      localTaskTerminalEmitted = true;
       localAbortController.abort();
       localAbortController = null;
       if (localTabId !== null) {
         await debuggerModule.detachFromTab(localTabId).catch(() => undefined);
         localTabId = null;
       }
+      // ponytail: emit the terminal event SYNCHRONOUSLY so the side
+      // panel exits 'Working' within ~1 tick. Without this the user
+      // sees the spinner continue for up to 15 seconds after pressing
+      // Stop (waiting for the in-flight capture timeout).
+      notifyUi({
+        type: "task_failed",
+        code: "CANCELLED",
+        message: "Task was cancelled by user",
+      });
+      notifyUi({ type: "canonical_status", status: "cancelled" });
       return { success: true };
     }
     case "local_login_complete": {

@@ -695,6 +695,10 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
   const failures: FailureRecord[] = [];
   let injectedGuidance: string | undefined;
   const memory = new WorkingMemory();
+  // ponytail: per-domain login cooldown. Once the loop has paused for
+  // login on a domain, do not pause again until the user navigates off
+  // that domain. Cleared on domain change (above) or on terminal exit.
+  const loginPauseDomains = new Set<string>();
   // ponytail: stagnation tracking. Signature windows catch "model is stuck on
   // the same action" or "page hasn't changed" before the action budget burns
   // out. Bounded counter ends the loop with a clear blocked result instead of
@@ -871,18 +875,40 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         const reason = login.login
           ? `password form on ${login.domain}`
           : `auth challenge (${(challenge as { reason: string }).reason})`;
-        log(opts, `login pause: ${reason}`);
-        opts.onLoginRequired({ url: obs.url, domain });
-        // ponytail: race auto-resume (URL/tab update off the login domain)
-        // against the manual Continue button. Whichever fires first unblocks
-        // the loop. Abort also resolves immediately so cancellation is clean.
-        const loginResume = await waitForLoginResume(tabId, domain, opts.signal);
-        pendingLoginResolvers.delete(tabId);
-        if (opts.signal.aborted) {
-          terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
-          return;
+        // ponytail: per-domain login cooldown. Once we have paused for
+        // login on `github.com`, do NOT pause again for the same domain
+        // until we observe a page on a DIFFERENT domain first. Without
+        // this, the Google OAuth round-trip makes the loop pause three
+        // times in a row (github.com/login → accounts.google.com/... →
+        // github.com/login/oauth/...) — the third pause is post-callback
+        // and the user has already authenticated.
+        if (loginPauseDomains.has(domain)) {
+          log(opts, `login pause skipped (already paused for ${domain})`);
+        } else {
+          log(opts, `login pause: ${reason}`);
+          loginPauseDomains.add(domain);
+          opts.onLoginRequired({ url: obs.url, domain });
+          // ponytail: race auto-resume (URL/tab update off the login domain)
+          // against the manual Continue button. Whichever fires first
+          // unblocks the loop. Abort also resolves immediately so
+          // cancellation is clean.
+          const loginResume = await waitForLoginResume(tabId, domain, opts.signal);
+          pendingLoginResolvers.delete(tabId);
+          if (opts.signal.aborted) {
+            terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
+            return;
+          }
+          log(opts, loginResume.auto ? `login resume: ${loginResume.kind}` : "user confirmed login — resuming loop");
         }
-        log(opts, loginResume.auto ? `login resume: ${loginResume.kind}` : "user confirmed login — resuming loop");
+        // ponytail: any navigation off the login domain clears the
+        // cooldown so a future visit (e.g. back to /login after signing
+        // out) can pause again.
+        try {
+          const currentHost = new URL(obs.url).hostname;
+          if (currentHost && currentHost !== domain) {
+            loginPauseDomains.delete(domain);
+          }
+        } catch { /* invalid URL */ }
         injectedGuidance = undefined;
         await waitForNetworkIdle(tabId).catch(() => undefined);
         continue;
@@ -933,10 +959,17 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           };
           return;
         }
-        // ponytail: surface the planner's correction to the user, then inject
-        // their answer (or empty) as guidance for the next planner call.
+        // ponytail: prose-only is an INTERNAL harness correction — the user
+        // does not need to see a clarify-card. Inject the corrective guidance
+        // and continue. Genuine model clarifications still go through the
+        // onClarify path so the user can answer.
+        if (isProseOnly) {
+          injectedGuidance = questionText;
+          log(opts, `prose-only response #${consecutiveProseOnly}: injecting corrective guidance`);
+          continue;
+        }
         const answer = await opts.onClarify({
-          reason: isProseOnly ? "planner returned prose instead of a tool call" : "The planner asked a question",
+          reason: "The planner asked a question",
           question: questionText,
           context: questionText,
         });

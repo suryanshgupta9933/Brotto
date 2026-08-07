@@ -198,3 +198,55 @@ describe("looksLikeSignInLink", () => {
     expect(r.link).toBe(false);
   });
 });
+
+describe("looksLikeAuthChallenge — Google OAuth round-trip", () => {
+  // ponytail: regression test for the GitHub "Sign in with Google" run.
+  // The user's tab bounces between github.com/login →
+  // accounts.google.com/o/oauth2/v2/auth?... → github.com/login/oauth/...
+  // The detector must flag the Google auth URL as a challenge so the
+  // loop pauses for the user; and once the loop has paused for github.com,
+  // the per-domain cooldown (in runLocalLoop) prevents re-pausing on
+  // the github.com post-callback URL.
+  it("flags accounts.google.com OAuth URLs", () => {
+    const r = looksLikeAuthChallenge({
+      url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=123&redirect_uri=https%3A%2F%2Fgithub.com%2Flogin%2Foauth%2Fauthorize&scope=email",
+      title: "Sign in",
+    } as never);
+    expect(r.auth).toBe(true);
+    expect(r.domain).toBe("accounts.google.com");
+  });
+
+  it("flags github.com/login as a challenge", () => {
+    const r = looksLikeAuthChallenge({
+      url: "https://github.com/login?return_to=https%3A%2F%2Fgithub.com%2F",
+      title: "Sign in to GitHub",
+    } as never);
+    expect(r.auth).toBe(true);
+    expect(r.domain).toBe("github.com");
+  });
+
+  it("flags the github.com post-callback URL as a challenge (cooldown prevents re-pause)", () => {
+    // The post-callback URL is /login/oauth/authorize?code=...&state=...
+    // — it matches AUTH_PATH_RE on /login. The detector DOES flag it,
+    // but the per-domain cooldown in runLocalLoop prevents the loop
+    // from pausing twice on the same domain. The detector's job is to
+    // catch the URL pattern; the cooldown handles deduplication.
+    const r = looksLikeAuthChallenge({
+      url: "https://github.com/login/oauth/authorize?code=abc123&state=xyz",
+      title: "GitHub",
+    } as never);
+    expect(r.auth).toBe(true);
+  });
+
+  it("does NOT flag the github.com dashboard (logged-in) URL", () => {
+    // After the callback, the user is redirected to github.com/ — this
+    // path does NOT match the regex, so the detector correctly does
+    // not pause. Combined with the per-domain cooldown, this means the
+    // loop only pauses once across the entire Google OAuth round-trip.
+    const r = looksLikeAuthChallenge({
+      url: "https://github.com/",
+      title: "GitHub",
+    } as never);
+    expect(r.auth).toBe(false);
+  });
+});
