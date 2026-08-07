@@ -523,6 +523,38 @@ function createEmptyState() {
   return div;
 }
 
+// ponytail: extract structured facts from the model's finalAnswer so
+// the side panel can show URLs / order IDs / tracking IDs as a tidy
+// list rather than buried in a wall of prose. Best-effort regex — no
+// false positives in real-world text.
+function renderFacts(finalAnswer) {
+  if (!finalAnswer) return '';
+  const urlRe = /\bhttps?:\/\/[^\s)\]'"<>]+/g;
+  const orderIdRe = /\b(?:order\s*(?:#|number|id)|tracking\s*(?:id|number))\s*[:=]?\s*([A-Z0-9][-A-Z0-9]{4,})/gi;
+  const dateRe = /\b(?:\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)\w*|\d{4}-\d{2}-\d{2})\b/gi;
+  const urls = Array.from(new Set(finalAnswer.match(urlRe) || [])).slice(0, 5);
+  const orderIds = Array.from(new Set(
+    (finalAnswer.match(orderIdRe) || []).map((m) => m.replace(/^(?:order|tracking)\s*(?:#|number|id)?\s*:?\s*/i, '').trim())
+  )).slice(0, 5);
+  const dates = Array.from(new Set(finalAnswer.match(dateRe) || [])).slice(0, 5);
+  if (urls.length === 0 && orderIds.length === 0 && dates.length === 0) return '';
+  const lines = [];
+  if (urls.length > 0) {
+    lines.push('<div class="facts-group"><span class="facts-label">Links</span>');
+    for (const u of urls) lines.push(`<a class="facts-link" href="${escapeHtml(u)}" target="_blank" rel="noreferrer">${escapeHtml(u)}</a>`);
+    lines.push('</div>');
+  }
+  if (orderIds.length > 0) {
+    lines.push('<div class="facts-group"><span class="facts-label">Identifiers</span>' +
+      orderIds.map((id) => `<code class="facts-code">${escapeHtml(id)}</code>`).join(' ') + '</div>');
+  }
+  if (dates.length > 0) {
+    lines.push('<div class="facts-group"><span class="facts-label">Dates</span>' +
+      dates.map((d) => `<span class="facts-date">${escapeHtml(d)}</span>`).join(' ') + '</div>');
+  }
+  return `<div class="facts">${lines.join('')}</div>`;
+}
+
 function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   // Remove empty state on first real message
   const empty = messagesEl.querySelector('.empty-state');
@@ -558,14 +590,22 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   } else if (role === 'done') {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
+    // ponytail: clean done-message layout. finalAnswer is the model's
+    // plain-English answer — show it as the primary content. Below it,
+    // extract structured facts (URLs, order IDs, tracking IDs, dates)
+    // as a clean list. Avoid duplicating the answer in a summary line.
+    const stepsMatch = (text || '').match(/^(\d+)\s*steps?\b/i);
+    const stepCount = stepsMatch ? stepsMatch[1] : '';
     const finalAnswerHtml = finalAnswer
       ? `<div class="final-answer"><div class="final-answer-text">${escapeHtml(finalAnswer)}</div></div>`
       : '';
-    bubble.innerHTML = `
-      ${finalAnswerHtml}
-      <div class="done-header"><span class="done-icon">&#10003;</span> Task completed</div>
-      <div class="done-summary">${escapeHtml(text || '')}</div>
-    `;
+    const factsHtml = finalAnswer ? renderFacts(finalAnswer) : '';
+    const captionHtml =
+      `<div class="done-caption">` +
+      `<span class="done-icon">&#10003;</span> Task completed` +
+      (stepCount ? ` &middot; ${stepCount} steps` : '') +
+      `</div>`;
+    bubble.innerHTML = finalAnswerHtml + factsHtml + captionHtml;
     msg.appendChild(bubble);
   }
 

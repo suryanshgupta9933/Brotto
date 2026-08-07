@@ -889,6 +889,19 @@
     /* Final answer — prominent card */
     .final-answer { font-size: 14px; line-height: 1.5; padding: 4px 0 12px; color: var(--text); }
     .final-answer-text { font-weight: 500; }
+
+    /* Structured facts extracted from finalAnswer (URLs / IDs / dates) */
+    .facts { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 10px; padding: 8px 10px; background: var(--surface-2, rgba(255,255,255,0.04)); border-radius: 8px; border: 1px solid var(--border, rgba(255,255,255,0.08)); }
+    .facts-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+    .facts-label { color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; min-width: 64px; }
+    .facts-link { color: var(--accent, #ff7a45); text-decoration: none; word-break: break-all; padding: 2px 6px; background: rgba(255,122,69,0.08); border-radius: 4px; }
+    .facts-link:hover { text-decoration: underline; }
+    .facts-code { font-family: ui-monospace, "SF Mono", Menlo, monospace; background: var(--surface, rgba(255,255,255,0.06)); padding: 2px 6px; border-radius: 4px; color: var(--text); }
+    .facts-date { padding: 2px 6px; background: rgba(255,255,255,0.06); border-radius: 4px; color: var(--text); }
+
+    /* Done caption — small status line at the bottom of the done bubble */
+    .done-caption { font-size: 11px; color: var(--text-faint); margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+    .done-icon { font-size: 14px; color: var(--success, #4caf50); }
   </style>
 </head>
 <body>
