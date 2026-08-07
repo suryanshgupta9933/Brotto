@@ -527,8 +527,8 @@ describe("captureSnapshotForDriver — transitional auth captures", () => {
       }),
     );
     expect(badCalls).toBe(1);
-    // 3 good calls: before snapshot, after snapshot, accessibility tree.
-    expect(goodCalls).toBe(3);
+    // 2 good calls: page snapshot + accessibility tree (single pass capture).
+    expect(goodCalls).toBe(2);
     expect(observation.title).toBe("Products");
   });
 
@@ -567,5 +567,28 @@ describe("captureSnapshotForDriver — transitional auth captures", () => {
     expect(observation).toBeDefined();
     expect(observation.semanticTargets).toEqual([]);
     expect(observation.title).toMatch(/transitioning|filtered/);
+  });
+
+  it("handles rapid sequential captures without deadlock in default captureVisibleTab", async () => {
+    // Mock chrome.tabs.captureVisibleTab to verify rate limiter doesn't deadlock
+    const originalCaptureVisibleTab = global.chrome.tabs.captureVisibleTab;
+    try {
+      global.chrome.tabs.captureVisibleTab = jest.fn((windowId, options, callback) => {
+        callback(SAFE_PNG);
+      }) as any;
+
+      const opts = defaultOptions(PAGE_SNAPSHOT_WITH_BODY);
+      delete opts.captureVisibleTab; // Force using defaultCaptureVisibleTab
+
+      // Execute two rapid sequential captures
+      const obs1 = await captureObservation(42, opts);
+      const obs2 = await captureObservation(42, opts);
+
+      expect(obs1).toBeDefined();
+      expect(obs2).toBeDefined();
+      expect(global.chrome.tabs.captureVisibleTab).toHaveBeenCalledTimes(2);
+    } finally {
+      global.chrome.tabs.captureVisibleTab = originalCaptureVisibleTab;
+    }
   });
 });

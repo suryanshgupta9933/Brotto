@@ -722,46 +722,29 @@ async function defaultGetTabIdentity(tabId: number): Promise<TabIdentity> {
 }
 
 // ponytail: Chrome rate-limits chrome.tabs.captureVisibleTab to ~2 calls
-// per second per extension. Without throttling, a tight loop that
-// triggers the defensive captureSnapshotForDriver retry can hit the
-// quota and crash the loop. This token-bucket-style throttle enforces
-// a minimum interval between calls; the queue ensures serialized
-// dispatch and bounded wait time.
+// per second per extension. Without throttling, rapid captures can hit the
+// quota and crash the loop. This serial queue enforces a minimum interval
+// between calls using a promise chain + setTimeout delay, preventing deadlock.
 const CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS = 600; // ~1.6/s sustained, well under the 2/s cap
 let lastCaptureVisibleTabAt = 0;
-let captureVisibleTabWaiters: Array<() => void> = [];
-function scheduleCaptureVisibleTab(): Promise<void> {
-  return new Promise((resolve) => {
-    const tryRun = (): void => {
-      const elapsed = Date.now() - lastCaptureVisibleTabAt;
-      if (elapsed >= CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS) {
-        lastCaptureVisibleTabAt = Date.now();
-        resolve();
-        return;
-      }
-      captureVisibleTabWaiters.push(tryRun);
-    };
-    tryRun();
-  });
-}
-function releaseCaptureVisibleTab(): void {
-  const next = captureVisibleTabWaiters.shift();
-  if (next) {
-    // ponytail: bump the timestamp forward so the released call has
-    // its full quota window. Otherwise two back-to-back captures would
-    // be measured from the first one's timestamp and the throttle
-    // would over-wait on the second.
-    lastCaptureVisibleTabAt = Date.now() - CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS;
-    next();
-  }
-}
+let captureVisibleTabChain: Promise<void> = Promise.resolve();
 
 async function defaultCaptureVisibleTab(
   _tabId: number,
   windowId: number,
 ): Promise<string> {
-  await scheduleCaptureVisibleTab();
+  let releaseNext: () => void;
+  const nextLock = new Promise<void>((r) => { releaseNext = r; });
+  const prevLock = captureVisibleTabChain;
+  captureVisibleTabChain = prevLock.then(() => nextLock, () => nextLock);
+
+  await prevLock;
   try {
+    const elapsed = Date.now() - lastCaptureVisibleTabAt;
+    if (elapsed < CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS) {
+      await new Promise((r) => setTimeout(r, CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS - elapsed));
+    }
+    lastCaptureVisibleTabAt = Date.now();
     const dataUrl = await new Promise<string>((resolve, reject) => {
       chrome.tabs.captureVisibleTab(windowId, { format: "png" }, (dataUrl) => {
         const error = chrome.runtime.lastError;
@@ -778,7 +761,7 @@ async function defaultCaptureVisibleTab(
     });
     return dataUrl;
   } finally {
-    releaseCaptureVisibleTab();
+    releaseNext!();
   }
 }
 
