@@ -1508,6 +1508,37 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         } else if (action.type === "key") {
           outcomeTag = ` [Verified: Key pressed]`;
           pageChanged = true;
+        } else if (action.type === "left_click" || action.type === "double_click") {
+          // ponytail: click diagnostic when the click landed but nothing
+          // changed. The model needs to know WHY: did it hit empty space,
+          // a non-interactive element, or the right element with no
+          // side effect (e.g. clicking an already-selected tab). Find
+          // the nearest interactive element so the model has a fresh
+          // candidate next turn.
+          const cx = action.x ?? 0;
+          const cy = action.y ?? 0;
+          const interactiveRoles = new Set(["button", "link", "textbox", "searchbox", "tab", "menuitem", "combobox", "switch", "option"]);
+          const ranked = (obs.semanticTargets ?? [])
+            .filter((t: { visible?: boolean; role?: string }) => t.visible && interactiveRoles.has((t.role ?? "").toLowerCase()))
+            .map((t: { boundingBox: { x: number; y: number; width: number; height: number }; accessibleName?: { text?: string }; role?: string }) => {
+              const dx = (t.boundingBox.x + t.boundingBox.width / 2) - cx;
+              const dy = (t.boundingBox.y + t.boundingBox.height / 2) - cy;
+              return { t, dist: Math.hypot(dx, dy) };
+            })
+            .sort((a: { dist: number }, b: { dist: number }) => a.dist - b.dist)
+            .slice(0, 3);
+          const nearby = ranked.map(({ t }: { t: { accessibleName?: { text?: string }; role?: string; boundingBox: { x: number; y: number; width: number; height: number } } }) => {
+            const name = t.accessibleName?.text ?? "(unnamed)";
+            const bx = Math.round(t.boundingBox.x + t.boundingBox.width / 2);
+            const by = Math.round(t.boundingBox.y + t.boundingBox.height / 2);
+            return `"${name}" (${t.role ?? "?"} at ${bx},${by})`;
+          }).join(", ");
+          if (nearby) {
+            outcomeTag = ` [Unchanged: click landed but page didn't change. Nearest interactive elements: ${nearby}. Try one of those, or scroll/visit_url.]`;
+          } else {
+            outcomeTag = ` [Unchanged: URL and page state remained identical]`;
+          }
+          pageChanged = true;
         } else {
           outcomeTag = ` [Unchanged: URL and page state remained identical]`;
         }
