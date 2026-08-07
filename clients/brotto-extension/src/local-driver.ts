@@ -1263,12 +1263,14 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       const desc = describeAction(action);
       const iconKind = (action.type ?? "unknown").toString();
 
-      // ponytail: HARD ACTION REJECTION — if the model proposes an action signature
+      // ponytail: HARD ACTION REJECTION — if the model proposes a non-scroll action signature
       // that already resulted in [Unchanged: ...] in history, do NOT execute it again!
       // Instantly reject execution, record the rejection in history, inject strict guidance,
       // and loop to the next turn so the model is forced to pivot without wasting time/CDP.
+      // NOTE: `scroll` is explicitly excluded from Hard Action Rejection because scrolling down
+      // long pages or lists is a normal multi-step action that doesn't change URL.
       const actionSig = actionSignature(action);
-      const isRepeatUnchanged = history.some(
+      const isRepeatUnchanged = action.type !== "scroll" && history.some(
         (h) => (h.action === desc || actionSigs.includes(actionSig)) && h.result.includes("[Unchanged"),
       );
 
@@ -1362,10 +1364,14 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         } else if (postObs.pageIdentity && obs.pageIdentity && postObs.pageIdentity !== obs.pageIdentity) {
           outcomeTag = ` [Verified: Page content updated]`;
           pageChanged = true;
+        } else if (action.type === "scroll") {
+          outcomeTag = ` [Verified: Scrolled page]`;
+          pageChanged = true;
         } else {
           outcomeTag = ` [Unchanged: URL and page state remained identical]`;
         }
       }
+
       const verifiedResult = `${result}${outcomeTag}`;
       history.push({ action: desc, result: verifiedResult });
       failures.length = 0;
