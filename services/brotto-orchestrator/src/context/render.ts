@@ -520,20 +520,75 @@ export function looksLikeLoginPage(snap: PageSnapshot): boolean {
 
 // ponytail: render the full context block (history + snapshot + diff) for a
 // single planner call. Single source of truth so demo script and production
-// run() loop produce identical strings.
-export function renderContext(snap: PageSnapshot, prev: PageSnapshot | null, history: HistoryEntry[], memory?: WorkingMemoryView): string {
-  const mem = memory ? renderMemoryBlock(memory) : "";
-  return mem + renderHistory(history) + renderSnapshot(snap, prev);
+// run() loop produce identical strings. Mirrors the extension's
+// renderObservationForPlanner — goal keywords + step info + goal banner up top.
+export interface RenderStepInfo {
+  index: number;
+  totalBudget: number;
+  elapsedMs: number;
+  budgetMs: number;
+  pageIdentity: string;
+}
+
+export interface RenderContextOptions {
+  goal: string;
+  goalKeywords: string[];
+  goalBanner: string;
+  stepInfo: RenderStepInfo;
+}
+
+export function renderContext(
+  snap: PageSnapshot,
+  prev: PageSnapshot | null,
+  history: HistoryEntry[],
+  memory: WorkingMemoryView | undefined,
+  opts: RenderContextOptions,
+): string {
+  const parts: string[] = [];
+  const elapsedS = Math.round(opts.stepInfo.elapsedMs / 1000);
+  const budgetS = Math.round(opts.stepInfo.budgetMs / 1000);
+  parts.push([
+    "=== STEP STATUS ===",
+    `Step ${opts.stepInfo.index} · ${elapsedS}s elapsed of ${budgetS}s budget · pageIdentity ${opts.stepInfo.pageIdentity || "?"}`,
+    "=== END STEP STATUS ===",
+    "",
+  ].join("\n"));
+  parts.push([
+    "=== GOAL ===",
+    opts.goal,
+    opts.goalKeywords.length > 0 ? `keywords: [${opts.goalKeywords.join(", ")}]` : "",
+    "=== END GOAL ===",
+    "",
+  ].filter(Boolean).join("\n"));
+  if (opts.goalBanner) {
+    parts.push(opts.goalBanner + "\n");
+  }
+  parts.push(renderMemoryBlock(memory ?? { facts: [] }));
+  parts.push(renderHistory(history));
+  parts.push(renderSnapshot(snap, prev));
+  return parts.join("\n");
 }
 
 // ponytail: structured memory block — model-only. Carries findings across
 // turns so the model doesn't re-discover facts it already recorded. Always
 // rendered above history so it's the first thing the model reads.
 export function renderMemoryBlock(memory: WorkingMemoryView): string {
-  if (!memory.facts || memory.facts.length === 0) return "";
+  if (!memory.facts || memory.facts.length === 0) {
+    return [
+      "=== WORKING MEMORY (structured findings carried across turns) ===",
+      "  (no findings recorded yet — every step should record what you observed)",
+      "=== END WORKING MEMORY ===",
+      "",
+    ].join("\n");
+  }
   const lines = memory.facts.map((f) => {
     const ev = f.evidence ? `  (evidence: ${f.evidence})` : "";
     return `  - ${f.key} = "${f.value}"${ev}`;
   });
-  return `Working memory (structured findings — do not re-record; carry these forward):\n${lines.join("\n")}\n\n`;
+  return [
+    "=== WORKING MEMORY (structured findings — do not re-record; carry these forward) ===",
+    ...lines,
+    "=== END WORKING MEMORY ===",
+    "",
+  ].join("\n");
 }

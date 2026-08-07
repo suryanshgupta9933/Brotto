@@ -1,6 +1,8 @@
 import type { ObservationV1, SemanticTarget } from "@brotto/brotto-action-schema";
 import { captureSnapshotForDriver } from "./canonical/observation";
 import * as debuggerModule from "./debugger";
+import { extractGoalKeywords, detectGoalMatch } from "./goal-detector";
+import { extractFacts } from "./fact-extractor";
 
 // ponytail: high enough that realistic multi-step research completes. The
 // bound is a safety net, not a target — earlier 12 made the agent feel rushed.
@@ -84,8 +86,20 @@ interface PlanningOutcome {
 // ponytail: harness-owned working memory. Merges model-proposed updates with
 // dedup-by-key. Renders into the planner context so the model sees findings
 // across turns without re-discovering them.
-class WorkingMemory {
+export class WorkingMemory {
   private facts = new Map<string, MemoryUpdate>();
+  // ponytail: per-fact LRU timestamp. Used by prune() to drop oldest facts
+  // when memory overflows the cap. Step-index granularity is enough — we
+  // only need to know "added before X other facts".
+  private addedAtStep = new Map<string, number>();
+  private currentStep = 0;
+  // ponytail: soft cap before prune runs; hard cap after prune. 30 is the
+  // soft cap. Prune drops oldest non-crucial facts until size ≤ 25.
+  private static readonly SOFT_CAP = 30;
+  private static readonly HARD_CAP = 25;
+
+  bumpStep(): void { this.currentStep += 1; }
+
   merge(updates: MemoryUpdate[] | undefined): void {
     if (!updates) return;
     for (const u of updates) {
@@ -97,9 +111,33 @@ class WorkingMemory {
       const existing = this.facts.get(key);
       if (!existing || (!existing.evidence && ev)) {
         this.facts.set(key, { key, value, evidence: ev });
+        this.addedAtStep.set(key, this.currentStep);
       }
     }
   }
+  // ponytail: prune oldest facts past SOFT_CAP, keeping always-crucial
+  // categories (IDs/money/dates/status/sender) until HARD_CAP. Goal-keyword
+  // relevance is computed elsewhere; here we just drop by LRU.
+  private prune(): void {
+    if (this.facts.size <= WorkingMemory.SOFT_CAP) return;
+    const alwaysCrucial = /^(tracking_id|order_id|amount_|status|event_date|delivered_date|sender|number)/;
+    const entries = Array.from(this.facts.entries()).map(([k]) => ({
+      key: k,
+      step: this.addedAtStep.get(k) ?? 0,
+      crucial: alwaysCrucial.test(k),
+    }));
+    entries.sort((a, b) => {
+      if (a.crucial !== b.crucial) return a.crucial ? 1 : -1;
+      return a.step - b.step;
+    });
+    while (this.facts.size > WorkingMemory.HARD_CAP && entries.length > 0) {
+      const victim = entries.shift();
+      if (!victim) break;
+      this.facts.delete(victim.key);
+      this.addedAtStep.delete(victim.key);
+    }
+  }
+  commitStep(): void { this.prune(); }
   toView(): MemoryUpdate[] {
     return Array.from(this.facts.values());
   }
@@ -107,12 +145,24 @@ class WorkingMemory {
 }
 
 function renderMemoryBlock(facts: MemoryUpdate[]): string {
-  if (facts.length === 0) return "";
+  // ponytail: always render — when empty, the model sees an explicit
+  // placeholder so it knows to record facts on this turn.
+  if (facts.length === 0) {
+    return [
+      "=== WORKING MEMORY (structured findings carried across turns) ===",
+      "  (no findings recorded yet — every step should record what you observed)",
+      "=== END WORKING MEMORY ===",
+    ].join("\n");
+  }
   const lines = facts.map((f) => {
     const ev = f.evidence ? `  (evidence: ${f.evidence})` : "";
     return `  - ${f.key} = "${f.value}"${ev}`;
   });
-  return `Working memory (structured findings — do not re-record; carry these forward):\n${lines.join("\n")}\n\n`;
+  return [
+    "=== WORKING MEMORY (structured findings — do not re-record; carry these forward) ===",
+    ...lines,
+    "=== END WORKING MEMORY ===",
+  ].join("\n") + "\n\n";
 }
 
 function log(opts: LocalDriverOptions, message: string): void {
@@ -291,44 +341,27 @@ export function detectStuckFailures(
   return { stuck: false, action: "", error: "" };
 }
 
-// ponytail: auto-extract structured findings from observation URL, title, and body text
-// into WorkingMemory so the agent continuously retains context even if the planner model
-// forgets to emit explicit memoryUpdates.
-export function autoExtractWorkingMemory(obs: ObservationV1, memory: WorkingMemory): void {
+// ponytail: auto-extract structured findings from observation URL, title,
+// and body text into WorkingMemory. Replaces the github-only extraction —
+// now domain-agnostic via extractFacts(). Filters by goal keywords so
+// irrelevant noise never enters memory.
+export function autoExtractWorkingMemory(
+  obs: ObservationV1,
+  memory: WorkingMemory,
+  goalKeywords: string[],
+): void {
   if (!obs.url || obs.url === "about:blank") return;
-  try {
-    const u = new URL(obs.url);
-    if (u.hostname.includes("github.com")) {
-      const parts = u.pathname.split("/").filter(Boolean);
-      if (parts.length === 1 && !["settings", "notifications", "explore", "orgs", "login", "dashboard", "feed"].includes(parts[0]!)) {
-        memory.merge([{ key: "profile_username", value: parts[0]!, evidence: obs.url }]);
-      } else if (parts.length >= 2 && !["orgs", "settings", "login"].includes(parts[0]!)) {
-        memory.merge([{ key: "viewed_repo", value: `${parts[0]}/${parts[1]}`, evidence: obs.url }]);
-      }
-
-      // Also scan semantic targets for user profile link / avatar in header
-      if (obs.semanticTargets) {
-        const profileTarget = obs.semanticTargets.find((t: SemanticTarget) => {
-          const href = t.attributes?.href ?? "";
-          const name = (t.accessibleName?.text ?? "").toLowerCase();
-          const isUserPath = href.startsWith("/") && /^\/[A-Za-z0-9-]+$/.test(href) && !["/settings", "/notifications", "/explore", "/orgs", "/login", "/dashboard", "/feed", "/logout", "/new"].includes(href);
-          return isUserPath && (name.includes("profile") || name.includes("your profile") || t.tag === "img" || t.attributes?.class?.includes("avatar"));
-        });
-        if (profileTarget && profileTarget.attributes?.href) {
-          const user = profileTarget.attributes.href.replace(/^\//, "");
-          memory.merge([{ key: "profile_username", value: user, evidence: "GitHub header profile avatar" }]);
-        }
-      }
-    }
-  } catch { /* invalid URL */ }
-
-  if (obs.bodyText) {
-    const cardMatches = obs.bodyText.match(/•\s*([A-Za-z0-9_.-]+)\s+[^•\n]*(?:\[★ star\]|★|⭐|stars?)\s*(\d+)/gi);
-    if (cardMatches && cardMatches.length > 0) {
-      const parsed = cardMatches.slice(0, 5).map((m: string) => m.replace(/•\s*/, "").trim());
-      memory.merge([{ key: "detected_repos_stars", value: parsed.join("; "), evidence: obs.url }]);
-    }
-  }
+  const facts = extractFacts(
+    {
+      url: obs.url,
+      title: obs.title,
+      pagePurpose: obs.pagePurpose,
+      bodyText: obs.bodyText ?? "",
+      semanticTargets: obs.semanticTargets,
+    },
+    goalKeywords,
+  );
+  if (facts.length > 0) memory.merge(facts);
 }
 
 
@@ -397,22 +430,52 @@ function describeAction(a: { type?: string; x?: number; y?: number; text?: strin
 // OpenAI-compatible planner expects. Mirrors scripts/context-builder.ts so the
 // model sees the same shape whether the observation came from Playwright or the
 // extension.
+export interface StepInfo {
+  index: number;
+  totalBudget: number;
+  elapsedMs: number;
+  budgetMs: number;
+  pageIdentity: string;
+}
+
 export function renderObservationForPlanner(
   obs: ObservationV1,
   history: Array<{ action: string; result: string }>,
-  guidance?: string,
-  memory?: MemoryUpdate[],
+  guidance: string | undefined,
+  memory: MemoryUpdate[] | undefined,
+  stepInfo: StepInfo,
+  goalBanner: string,
+  goalKeywords: string[],
+  goal: string,
 ): string {
   const lines: string[] = [];
 
-  // ponytail: structured working memory rendered FIRST so the model sees
-  // findings before any navigation prose. Empty blocks skipped.
-  if (memory && memory.length > 0) {
-    lines.push(renderMemoryBlock(memory).trimEnd());
+  // ponytail: STEP STATUS — orients the model on loop progress.
+  lines.push("=== STEP STATUS ===");
+  const elapsedS = Math.round(stepInfo.elapsedMs / 1000);
+  const budgetS = Math.round(stepInfo.budgetMs / 1000);
+  lines.push(`Step ${stepInfo.index} · ${elapsedS}s elapsed of ${budgetS}s budget · pageIdentity ${stepInfo.pageIdentity || "?"}`);
+  lines.push("=== END STEP STATUS ===");
+  lines.push("");
+
+  // ponytail: GOAL restated + extracted keywords so the model doesn't drift.
+  lines.push("=== GOAL ===");
+  lines.push(goal);
+  if (goalKeywords.length > 0) lines.push(`keywords: [${goalKeywords.join(", ")}]`);
+  lines.push("=== END GOAL ===");
+  lines.push("");
+
+  if (goalBanner) {
+    lines.push(goalBanner);
     lines.push("");
   }
 
-  // ponytail: URL/PATH/Title/PURPOSE at the top — orients the model in one glance.
+  // ponytail: working memory — ALWAYS rendered (empty placeholder when no
+  // facts yet) so the model treats memory as a first-class concern.
+  lines.push(renderMemoryBlock(memory ?? []).trimEnd());
+  lines.push("");
+
+  // ponytail: URL/PATH/Title/PURPOSE — orients the model in one glance.
   lines.push(`URL: ${obs.url}`);
   try {
     const u = new URL(obs.url);
@@ -920,6 +983,9 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
 
   const history: Array<{ action: string; result: string }> = [];
   let stepIndex = 0;
+  // ponytail: wall-clock for the run. Rendered into STEP STATUS so the
+  // model sees elapsed time and can self-pace against the budget.
+  const runStart = Date.now();
   const failures: FailureRecord[] = [];
   let injectedGuidance: string | undefined;
   const memory = new WorkingMemory();
@@ -1163,10 +1229,31 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           : ` Look for a "${signIn.label}" link/button and click it.`;
         injectedGuidance = `This page is a logged-out landing page. Click the Sign in / Log in link to authenticate — never type credentials.${targetHint}`;
       }
-      // ponytail: auto-extract working memory from obs so key entities (username, repo, stars, prices)
-      // are continuously preserved in working memory even if the planner model omits memoryUpdates.
-      autoExtractWorkingMemory(obs, memory);
-      const context = renderObservationForPlanner(obs, history, injectedGuidance, memory.toView());
+      // ponytail: compute goal keywords once per step (cheap; result is stable
+      // for the duration of the task unless the user injected a new goal).
+      const goalKeywords = extractGoalKeywords(opts.goal);
+      // ponytail: auto-extract working memory from obs so key entities
+      // (tracking IDs, dates, senders, money, status) are continuously
+      // preserved even if the planner model omits memoryUpdates.
+      memory.bumpStep();
+      autoExtractWorkingMemory(obs, memory, goalKeywords);
+      const goalMatch = detectGoalMatch(opts.goal, {
+        url: obs.url,
+        title: obs.title,
+        pagePurpose: obs.pagePurpose,
+        bodyText: obs.bodyText ?? "",
+      });
+      const stepInfo: StepInfo = {
+        index: stepIndex + 1,
+        totalBudget: opts.stepBudgetMs ?? 60_000,
+        elapsedMs: Date.now() - runStart,
+        budgetMs: opts.stepBudgetMs ?? 60_000,
+        pageIdentity: obs.pageIdentity ?? "",
+      };
+      const context = renderObservationForPlanner(
+        obs, history, injectedGuidance, memory.toView(),
+        stepInfo, goalMatch.banner, goalKeywords, opts.goal,
+      );
       const outcome = await callPlanner(opts, context);
       if (opts.signal.aborted) {
         terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
@@ -1226,6 +1313,8 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       // validating termination — a valid termination may rely on a finding that
       // was just recorded this turn.
       memory.merge(action.memoryUpdates);
+      // ponytail: prune oldest non-crucial facts past the soft cap.
+      memory.commitStep();
       // ponytail: model emits terminate as an action (not a completion).
       if (action.type === "terminate") {
         log(opts, `model called terminate at step ${stepIndex + 1}`);
