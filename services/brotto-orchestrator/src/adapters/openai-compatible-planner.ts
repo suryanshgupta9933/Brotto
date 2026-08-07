@@ -214,8 +214,8 @@ export class OpenAICompatiblePlanner implements InferencePort {
         "- When an action is unchanged or rejected, YOU MUST PIVOT IMMEDIATELY: try direct URL parameterization (e.g. adding `?sort=stargazers` or `?type=source`), scroll down to reveal more items, or click a completely different element ID.",
         "",
         "GENERALIZED WEB NAVIGATION & DATA EXTRACTION PATTERNS:",
-        "- Prefer Direct URL Query Parameters: On data-heavy websites (GitHub, Amazon, eBay, Reddit, Jira, Google), URL query parameters like `?sort=stars`, `?sort=stargazers`, `?type=source`, `?s=stars`, `?q=query` are 10x faster and more reliable than UI dropdown clicks.",
-        "- Account Scope Awareness (User vs Organization/Workspace): Distinguish clearly between personal user accounts (`/username`) and organization/workspace accounts (`/orgs/name`, `/w/name`). If your goal is to inspect personal assets, do NOT drift into an organization profile.",
+        "- Prefer Direct URL Query Parameters: On data-heavy websites (GitHub, Amazon, eBay, Reddit, Jira, Google), URL query parameters like `?tab=repositories&type=source&sort=stargazers`, `?sort=stars`, `?q=query` are 10x faster and more reliable than UI dropdown clicks.",
+        "- Account Scope Awareness (User vs Organization/Workspace): Distinguish clearly between personal user accounts (`/username`) and organization/workspace accounts (`/orgs/name`, `/w/name`). Personal repos are owned directly by the user (`username/reponame`). Repositories owned by an organization (`orgname/reponame`) are NOT personal repos.",
         "- Working Memory Recording: Whenever you observe key data requested by the goal (e.g. repository names, star counts, order statuses, prices, tracking numbers), YOU MUST RECORD IT via `memoryUpdates: [{ key: '...', value: '...', evidence: '...' }]` on your tool call so it is permanently preserved across turns.",
         "",
         "CRITICAL: Do NOT terminate just because you navigated somewhere. The user asked a question that requires you to FIND an answer on the page. Terminating after navigation without extracting the answer FAILS the task. Your finalAnswer must be a value you actually saw in the page text, not a guess or summary of what you did.",
@@ -230,15 +230,19 @@ export class OpenAICompatiblePlanner implements InferencePort {
         "",
         "Rules:",
         "- NEVER ask the user for credentials (passwords, 2FA codes, OAuth tokens, API keys, etc.).",
+        "- GitHub Shortcut: When asked for a user's most starred personal repo, immediately navigate to `https://github.com/<username>?tab=repositories&type=source&sort=stargazers`. Note that `type=source` filters out organization repos, and `sort=stargazers` puts the most starred personal repo at the top.",
+        "- Personal vs Org Repositories: NEVER return an organization repo (e.g. `orgname/reponame`) as a personal repo. Only repos owned directly by the user (`username/reponame`) count as personal repos.",
         "- Search Bar Directive: On search-enabled web applications (Gmail, Amazon, Outlook, GitHub, Slack, Jira, e-commerce stores), ALWAYS prioritize using the Search Bar (`left_click` search input → `insert_text` → `key('Enter')` or direct search URL). Searching directly for keywords (e.g. 'Amazon order', 'package status', 'tracking') is 10x faster and more reliable than clicking sidebar category links.",
         "- Inputs & Typing: Clicking a text input (like a search bar) only gives it focus. The page state will not change, so the outcome will say `[Unchanged: URL and page state remained identical]`. THIS IS EXPECTED. Do NOT abandon the input! On your NEXT turn, immediately call `insert_text` to type your query.",
-        "- Grounded Answers: NEVER call terminate with a guess or unverified summary. Your finalAnswer MUST cite the specific numerical facts (e.g., star count '14 stars', order tracking number, delivery date) and the URL source where you saw it. If the exact value is not yet visible in PAGE TEXT, click into the item or view its page first.",
+        "- Grounded Answers: NEVER call terminate with a guess or unverified summary. Your finalAnswer MUST cite the specific numerical star count (e.g. '14 stars') and the repository URL. Read `[star] N` from CARDS & LIST ITEMS or visit the repo page.",
+        "- Visited Links: Do NOT click a link or navigate to a repository URL that you already visited in history.",
         "- Dropdowns & Menus: Left-clicking an element marked `(haspopup=...)` or `(expanded=false)` opens a menu/popover. After clicking it, read the NEW interactive elements list in the next context to select the menu item.",
         "- insert_text types into the currently focused element only. If the field you want is NOT marked focused=true, left_click it first.",
         "- Do NOT call wait. The harness waits between actions automatically.",
         "- Do NOT call ask_user_question for routine navigation. Use it ONLY when the goal is genuinely ambiguous.",
       ].join("\n"),
     });
+
 
 
 
