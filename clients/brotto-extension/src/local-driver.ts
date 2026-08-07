@@ -379,6 +379,9 @@ export function renderObservationForPlanner(
     if (value) tags.push(`value="${value}"`);
     if (t.attributes?.placeholder) tags.push(`placeholder="${t.attributes.placeholder}"`);
     if (t.attributes?.href) tags.push(`href="${t.attributes.href}"`);
+    if (t.attributes?.title) tags.push(`title="${t.attributes.title}"`);
+    if (t.attributes?.["aria-expanded"]) tags.push(`expanded=${t.attributes["aria-expanded"]}`);
+    if (t.attributes?.["aria-haspopup"]) tags.push(`haspopup=${t.attributes["aria-haspopup"]}`);
     if (t.control.kind === "checkbox" || t.control.kind === "radio") {
       const checked = (t.control as { checked?: boolean }).checked;
       if (typeof checked === "boolean") tags.push(`checked=${checked}`);

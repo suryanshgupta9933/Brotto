@@ -368,6 +368,7 @@ function collectPageSnapshot(
   const actionableSelector = [
     "a[href]",
     "button",
+    "summary",
     "input:not([type='hidden']):not([type='password'])",
     "select",
     "textarea",
@@ -385,6 +386,9 @@ function collectPageSnapshot(
     "[role='switch']",
     "[role='tab']",
     "[role='textbox']",
+    "[role='treeitem']",
+    "[aria-haspopup]",
+    "[aria-expanded]",
     "[tabindex]:not([tabindex='-1'])",
     "[contenteditable='true']",
   ].join(",");
@@ -479,6 +483,11 @@ function collectPageSnapshot(
                 : undefined;
           const attributes: Record<string, string> = {};
           for (const attribute of [
+            "href",
+            "placeholder",
+            "title",
+            "alt",
+            "id",
             "aria-label",
             "aria-describedby",
             "aria-controls",
@@ -529,7 +538,7 @@ function collectPageSnapshot(
       script: 1, style: 1, meta: 1, link: 1, noscript: 1, svg: 1, path: 1,
     };
     const HIDDEN_ROLES: Record<string, number> = {
-      navigation: 1, banner: 1, contentinfo: 1,
+      contentinfo: 1,
     };
     // ponytail: literal chrome denylist (replaces the over-broad NAV_LINE_RE
     // regex that hid navigation labels the model actually needs, e.g.
