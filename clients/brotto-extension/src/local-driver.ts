@@ -1054,7 +1054,12 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
   // turns mean the agent's clicks aren't navigating.
   const pageIdentities: string[] = [];
   let stagnationHits = 0;
-  const STAGNATION_LIMIT = 2;
+  // ponytail: cap on consecutive stagnation NUDGES (not terminates). The
+  // loop used to terminate after the 2nd hit and surface a STAGNATION error
+  // — but the agent often already had a complete answer in memory by then
+  // and just needed a nudge to call terminate. Now both hits inject a
+  // memory-aware nudge and reset counters; the only hard exit is MAX_STEPS.
+  const STAGNATION_NUDGE_CAP = 4;
   // ponytail: track tab lifecycle (open / close / navigate / focus) for the
   // side-panel "Tabs" row. Chrome fires these globally; filter to tabs that
   // weren't around when the loop started — we don't want to surface every
@@ -1441,10 +1446,20 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         const currentTitle = obs.title;
         obsSigs.push(observationSignature({ url: obs.url, title: currentTitle, elements: obs.semanticTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
         pageIdentities.push(obs.pageIdentity || `${obs.url}|${currentTitle}`);
+        // ponytail: hard-rejection nudge. Same shape as the post-action
+        // stagnation nudge — list memory facts and tell the agent to
+        // terminate if it has the answer, otherwise pivot hard. Cap at
+        // STAGNATION_NUDGE_CAP so a model that truly ignores the nudge
+        // still eventually surfaces a clear failure to the user.
         stagnationHits++;
-        if (stagnationHits >= STAGNATION_LIMIT) {
-          const findings = memory.toView();
-          const blockedMessage = `STOP — repeated invalid actions rejected by harness.\n\nFindings so far:\n${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
+        const findings = memory.toView();
+        const factList = findings.length > 0
+          ? findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n")
+          : "  (none recorded)";
+        injectedGuidance = `${rejectMsg}\n\nYOUR WORKING MEMORY HAS THESE FINDINGS:\n${factList}\n\n` +
+          `If these facts answer the user's original question, call terminate(finalAnswer=<answer citing the facts>) NOW. Otherwise pick a fundamentally different action this turn (visit_url to a deep link, scroll, or open a new tab) — another same-coordinate click will be rejected again.`;
+        if (stagnationHits >= STAGNATION_NUDGE_CAP) {
+          const blockedMessage = `STOP — repeated invalid actions rejected by harness after ${stagnationHits} nudges.\n\nFindings so far:\n${factList}`;
           terminal = { kind: "error", error: { code: "STAGNATION", message: blockedMessage } };
           return;
         }
@@ -1575,26 +1590,41 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       const stagnation = pageStag ?? actionStag;
       if (stagnation) {
         stagnationHits++;
-        log(opts, `stagnation: ${stagnation.kind} signature="${stagnation.signature}" hit ${stagnationHits}/${STAGNATION_LIMIT}`);
-        if (stagnationHits >= STAGNATION_LIMIT) {
-          // ponytail: bounded break. Memory is preserved in the blocked result
-          // so the user can see what was recorded before the agent gave up.
-          const findings = memory.toView();
-          const blockedMessage = `${stagnation.message}\n\nFindings so far:\n${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
+        log(opts, `stagnation: ${stagnation.kind} signature="${stagnation.signature}" nudge ${stagnationHits}/${STAGNATION_NUDGE_CAP}`);
+        // ponytail: instead of terminating, list the agent's memory facts
+        // and explicitly ask it to either terminate with what it has or
+        // pivot to a fundamentally different strategy. Without this, the
+        // agent clicks around looking for one more identifier while the
+        // answer is already in memory. MAX_STEPS is the only hard cap.
+        const findings = memory.toView();
+        const factList = findings.length > 0
+          ? findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n")
+          : "  (none recorded)";
+        const nudge = `${stagnation.message}\n\n` +
+          `YOUR WORKING MEMORY HAS THESE FINDINGS:\n${factList}\n\n` +
+          `If these facts already answer the user's original question, call terminate(finalAnswer=<a one-sentence answer citing the relevant facts>) NOW. Do not click around looking for one more identifier.\n\n` +
+          `If they do NOT answer the question, you must pivot to a FUNDAMENTALLY different strategy this turn — not another nearby click:\n` +
+          `  - visit_url to a deep link (e.g. a search-results URL with a different query, or a specific order details page).\n` +
+          `  - scroll the page to reveal content below the fold.\n` +
+          `  - open a new tab and search from scratch.\n` +
+          `Repeating the same click coordinates again this turn will burn more steps without progress.`;
+        injectedGuidance = nudge;
+        // ponytail: reset all counters so the agent gets a fresh window
+        // to try the recovery strategies. The next non-stagnant step
+        // (page changed) also resets via the pageChanged branch above.
+        pageIdentities.length = 0;
+        actionSigs.length = 0;
+        obsSigs.length = 0;
+        if (stagnationHits >= STAGNATION_NUDGE_CAP) {
+          // ponytail: 4 consecutive nudges and the agent still hasn't
+          // moved on. Hard-stop now with the memory facts surfaced, so
+          // the user can see what was recorded before we give up. This
+          // is the backstop for the rare case where nudges don't work
+          // (genuinely stuck on a hostile page, broken click, etc.).
+          const blockedMessage = `${stagnation.message}\n\nFindings after ${stagnationHits} nudges:\n${factList}`;
           terminal = { kind: "error", error: { code: "STAGNATION", message: blockedMessage } };
           return;
         }
-        // ponytail: first stagnation hit is a recovery signal. Inject
-        // corrective guidance with concrete alternative strategies.
-        const recoveryHint = `\n\nRECOVERY STRATEGIES (try one of these):\n` +
-          `1. Use visit_url with a direct URL (e.g. visit_url('https://github.com/<username>?tab=repositories')) instead of clicking UI elements.\n` +
-          `2. Scroll down to reveal more elements: scroll(direction='down').\n` +
-          `3. Click a DIFFERENT element — look at the interactive elements list for alternatives you haven't tried.\n` +
-          `4. If the answer is already in the page text, call terminate(finalAnswer='<the answer>').`;
-        injectedGuidance = stagnation.message + recoveryHint;
-        // ponytail: reset stagnation tracking after injecting guidance so
-        // the agent gets a fresh window to try the recovery strategies.
-        pageIdentities.length = 0;
         opts.onAnswered?.({ question: stagnation.kind, answer: stagnation.message });
       }
       // ponytail: loop detection. Same action 3+ times in a row = stuck.
