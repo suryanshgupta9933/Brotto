@@ -199,6 +199,12 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
         onTabOpened: (tabId) => {
           localTabId = tabId;
         },
+        onTabEvent: (event) => {
+          // ponytail: forward tab lifecycle (opened/closed/navigated/focused)
+          // to the side panel so the user can see what the agent opened in
+          // their browser, with a brief context line per tab.
+          notifyUi({ type: "tab_event", event } as unknown as ControllerUiEvent);
+        },
         onStep: ({ index, action, result, url, screenshot, iconKind, reasoning }) => {
           notifyUi({
             type: "step_card",

@@ -1,4 +1,4 @@
-import type { PageSnapshot, HistoryEntry, HistoryEntryV1 } from "./types.js";
+import type { PageSnapshot, HistoryEntry, HistoryEntryV1, WorkingMemoryView } from "./types.js";
 
 // ponytail: stable element IDs + hierarchical tree + state per element + diff.
 // Same DOM node → same ID across observations. Tree is small enough for any
@@ -346,6 +346,19 @@ export function looksLikeLoginPage(snap: PageSnapshot): boolean {
 // ponytail: render the full context block (history + snapshot + diff) for a
 // single planner call. Single source of truth so demo script and production
 // run() loop produce identical strings.
-export function renderContext(snap: PageSnapshot, prev: PageSnapshot | null, history: HistoryEntry[]): string {
-  return renderHistory(history) + renderSnapshot(snap, prev);
+export function renderContext(snap: PageSnapshot, prev: PageSnapshot | null, history: HistoryEntry[], memory?: WorkingMemoryView): string {
+  const mem = memory ? renderMemoryBlock(memory) : "";
+  return mem + renderHistory(history) + renderSnapshot(snap, prev);
+}
+
+// ponytail: structured memory block — model-only. Carries findings across
+// turns so the model doesn't re-discover facts it already recorded. Always
+// rendered above history so it's the first thing the model reads.
+export function renderMemoryBlock(memory: WorkingMemoryView): string {
+  if (!memory.facts || memory.facts.length === 0) return "";
+  const lines = memory.facts.map((f) => {
+    const ev = f.evidence ? `  (evidence: ${f.evidence})` : "";
+    return `  - ${f.key} = "${f.value}"${ev}`;
+  });
+  return `Working memory (structured findings — do not re-record; carry these forward):\n${lines.join("\n")}\n\n`;
 }

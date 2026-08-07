@@ -2,7 +2,9 @@ import type { ObservationV1, SemanticTarget } from "@brotto/brotto-action-schema
 import { captureObservation } from "./canonical/observation";
 import * as debuggerModule from "./debugger";
 
-const MAX_STEPS = 12;
+// ponytail: high enough that realistic multi-step research completes. The
+// bound is a safety net, not a target — earlier 12 made the agent feel rushed.
+const MAX_STEPS = 50;
 const HISTORY_LIMIT = 6;
 // ponytail: per-action pause so the demo loop can be cancelled cleanly and
 // the model isn't given time to fly past user-visible state changes.
@@ -14,6 +16,11 @@ export interface LocalDriverOptions {
   startingUrl?: string;
   signal: AbortSignal;
   onTabOpened: (tabId: number) => void;
+  // ponytail: tab lifecycle events for the side-panel "tabs" row. Keeps the
+  // user oriented when the agent opens/closes/follows external links. Without
+  // this a stray window.open or target=_blank navigation is invisible to the
+  // user until the next observation lands.
+  onTabEvent?: (event: { kind: "opened" | "closed" | "navigated" | "focused"; tabId: number; url: string; title: string }) => void;
   onStep: (step: { index: number; action: string; result: string; url: string; screenshot: string | null; iconKind: string; reasoning?: string }) => void;
   onLoginRequired: (info: { url: string; domain: string }) => void;
   // ponytail: finalAnswer is the user's actual answer in plain English. Comes
@@ -37,18 +44,130 @@ export interface LocalDriverOptions {
   onApprovalResolved?: (info: { approved: boolean; action: { type?: string } }) => void;
 }
 
+interface MemoryUpdate {
+  key: string;
+  value: string;
+  evidence: string;
+}
+
 interface PlanningOutcome {
   kind: "action" | "question" | "completion";
   // ponytail: per-step reasoning + finalAnswer. Planner emits `reasoning` on
   // every action; terminate actions also carry `finalAnswer`. Legacy field
   // `answer` is still accepted (mapped to finalAnswer by the planner).
-  action?: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string; deltaX?: number; deltaY?: number; answer?: string; finalAnswer?: string; reasoning?: string };
+  action?: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string; deltaX?: number; deltaY?: number; answer?: string; finalAnswer?: string; reasoning?: string; memoryUpdates?: MemoryUpdate[] };
   question?: string;
   summary?: string;
 }
 
+// ponytail: harness-owned working memory. Merges model-proposed updates with
+// dedup-by-key. Renders into the planner context so the model sees findings
+// across turns without re-discovering them.
+class WorkingMemory {
+  private facts = new Map<string, MemoryUpdate>();
+  merge(updates: MemoryUpdate[] | undefined): void {
+    if (!updates) return;
+    for (const u of updates) {
+      if (!u || typeof u.key !== "string") continue;
+      const key = u.key.trim();
+      const value = typeof u.value === "string" ? u.value.trim() : "";
+      if (!key || !value) continue;
+      const ev = typeof u.evidence === "string" ? u.evidence.trim() : "";
+      const existing = this.facts.get(key);
+      if (!existing || (!existing.evidence && ev)) {
+        this.facts.set(key, { key, value, evidence: ev });
+      }
+    }
+  }
+  toView(): MemoryUpdate[] {
+    return Array.from(this.facts.values());
+  }
+  get size(): number { return this.facts.size; }
+}
+
+function renderMemoryBlock(facts: MemoryUpdate[]): string {
+  if (facts.length === 0) return "";
+  const lines = facts.map((f) => {
+    const ev = f.evidence ? `  (evidence: ${f.evidence})` : "";
+    return `  - ${f.key} = "${f.value}"${ev}`;
+  });
+  return `Working memory (structured findings — do not re-record; carry these forward):\n${lines.join("\n")}\n\n`;
+}
+
 function log(opts: LocalDriverOptions, message: string): void {
   opts.onLog?.(message);
+}
+
+// ponytail: signature-based stagnation. Normalize action and observation to
+// stable strings, then count identicals in a rolling window. Tighter than
+// the original 5-of-8 — gpt-4o-mini can click the same wrong coordinate 4
+// times without noticing the page didn't change. 3-of-6 catches the
+// "looping on one spot" pattern after just 3 repeats; observation-stuck
+// (page unchanged across multiple actions) is the most reliable signal.
+export interface StagnationSignal {
+  kind: "repeated_action" | "repeated_observation";
+  signature: string;
+  count: number;
+  message: string;
+}
+
+const STAGNATION_REPEAT_THRESHOLD = 3;
+const STAGNATION_WINDOW = 6;
+
+export function actionSignature(action: { type?: string; url?: string; x?: number; y?: number; text?: string; key?: string }): string {
+  const t = (action.type ?? "unknown").toLowerCase();
+  switch (t) {
+    case "visit_url": return `visit_url:${(action.url ?? "").trim()}`;
+    case "left_click":
+    case "double_click":
+    case "right_click":
+    case "mouse_move": return `${t}:${action.x ?? 0},${action.y ?? 0}`;
+    case "insert_text": return `insert_text:${(action.text ?? "").slice(0, 40)}`;
+    case "key": return `key:${action.key ?? ""}`;
+    case "scroll":
+    case "screenshot":
+    case "wait":
+    case "terminate":
+    case "ask_user_question":
+    case "history_back": return t;
+    default: return t;
+  }
+}
+
+export function observationSignature(obs: { url?: string; title?: string; elements?: Array<{ id?: string }> }): string {
+  const firstId = obs.elements && obs.elements.length > 0 ? obs.elements[0]?.id ?? "" : "";
+  return `${(obs.url ?? "").trim()}|${(obs.title ?? "").trim()}|${firstId}`;
+}
+
+export function detectStagnation(actionSigs: string[], obsSigs: string[]): StagnationSignal | null {
+  const actionHit = lastNIdentical(actionSigs);
+  if (actionHit) {
+    return {
+      kind: "repeated_action",
+      signature: actionHit,
+      count: STAGNATION_REPEAT_THRESHOLD,
+      message: `STOP — you've called "${actionHit}" ${STAGNATION_REPEAT_THRESHOLD}+ times in a row. Repeating the same click coordinate won't change the result. Two possibilities: (1) the page already moved (the title/URL changed in a previous step) — read the new page text and look for the answer there, do NOT click again. (2) the click missed the target — pick a DIFFERENT coordinate or element. Do NOT call the same action again on the next turn.`,
+    };
+  }
+  const obsHit = lastNIdentical(obsSigs);
+  if (obsHit) {
+    return {
+      kind: "repeated_observation",
+      signature: obsHit,
+      count: STAGNATION_REPEAT_THRESHOLD,
+      message: `STOP — the page hasn't changed for ${STAGNATION_REPEAT_THRESHOLD}+ steps. Your actions are not landing. Either (1) you've already found the answer in the current page text and should call terminate(finalAnswer='<value>'), or (2) your clicks are missing the target and you need to click a different element. Read the current page text carefully — the answer may already be there.`,
+    };
+  }
+  return null;
+}
+
+function lastNIdentical(arr: string[]): string | null {
+  if (arr.length < STAGNATION_REPEAT_THRESHOLD) return null;
+  const tail = arr.slice(-STAGNATION_WINDOW);
+  if (tail.length < STAGNATION_REPEAT_THRESHOLD) return null;
+  const recent = tail.slice(-STAGNATION_REPEAT_THRESHOLD);
+  const ref = recent[0];
+  return recent.every((s) => s === ref) ? ref : null;
 }
 
 // ponytail: detect when the model is repeating the same action without state
@@ -163,8 +282,15 @@ export function renderObservationForPlanner(
   obs: ObservationV1,
   history: Array<{ action: string; result: string }>,
   guidance?: string,
+  memory?: MemoryUpdate[],
 ): string {
   const lines: string[] = [];
+  // ponytail: structured working memory rendered FIRST so the model sees
+  // findings before any navigation prose. Empty blocks skipped.
+  if (memory && memory.length > 0) {
+    lines.push(renderMemoryBlock(memory).trimEnd());
+    lines.push("");
+  }
   lines.push(`URL: ${obs.url}`);
   lines.push(`Title: ${obs.title}`);
   lines.push("");
@@ -430,18 +556,94 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
   let stepIndex = 0;
   const failures: FailureRecord[] = [];
   let injectedGuidance: string | undefined;
-  // ponytail: heartbeat so a hung capture or planner call doesn't look
-  // like a frozen loop. Every 10s we emit a heartbeat log so the user
-  // sees the loop is still alive even if no step has completed.
-  let lastBeat = Date.now();
-  const heartbeat = setInterval(() => {
-    if (opts.signal.aborted) return;
-    const now = Date.now();
-    if (now - lastBeat >= 10_000) {
-      lastBeat = now;
-      log(opts, `loop alive — ${stepIndex} steps done, waiting on planner/observation`);
+  const memory = new WorkingMemory();
+  // ponytail: stagnation tracking. Signature windows catch "model is stuck on
+  // the same action" or "page hasn't changed" before the action budget burns
+  // out. Bounded counter ends the loop with a clear blocked result instead of
+  // burning MAX_STEPS in a tight repeat.
+  const actionSigs: string[] = [];
+  const obsSigs: string[] = [];
+  let stagnationHits = 0;
+  const STAGNATION_LIMIT = 2;
+  // ponytail: track tab lifecycle (open / close / navigate / focus) for the
+  // side-panel "Tabs" row. Chrome fires these globally; filter to tabs that
+  // weren't around when the loop started — we don't want to surface every
+  // backgrounded Gmail tab the user already had open. Detach listeners in
+  // `finally` so the side panel stops receiving events when the loop ends.
+  const initialTabIds = new Set<number>();
+  try {
+    const existing = await chrome.tabs.query({});
+    for (const t of existing) if (typeof t.id === "number") initialTabIds.add(t.id);
+  } catch {
+    /* tab query failed — proceed without baseline */
+  }
+  const tabJournal = new Map<number, { url: string; title: string; openedAt: number }>();
+  const emitTab = (
+    kind: "opened" | "closed" | "navigated" | "focused",
+    tab: chrome.tabs.Tab,
+  ) => {
+    if (typeof tab.id !== "number") return;
+    const url = tab.url ?? "";
+    const title = tab.title ?? "";
+    if (kind === "opened" || kind === "navigated") {
+      tabJournal.set(tab.id, { url, title, openedAt: Date.now() });
+    } else if (kind === "closed") {
+      tabJournal.delete(tab.id);
     }
-  }, 10_000);
+    try {
+      opts.onTabEvent?.({ kind, tabId: tab.id, url, title });
+    } catch {
+      /* listener threw — swallow, don't kill the loop */
+    }
+  };
+  const tabListeners: Array<() => void> = [];
+  if (chrome.tabs?.onCreated) {
+    const handler = (tab: chrome.tabs.Tab) => {
+      if (typeof tab.id === "number" && !initialTabIds.has(tab.id)) emitTab("opened", tab);
+    };
+    chrome.tabs.onCreated.addListener(handler);
+    tabListeners.push(() => chrome.tabs.onCreated.removeListener(handler));
+  }
+  if (chrome.tabs?.onRemoved) {
+    const handler = (tabId: number) => {
+      if (!initialTabIds.has(tabId)) {
+        const journal = tabJournal.get(tabId);
+        tabJournal.delete(tabId);
+        try { opts.onTabEvent?.({ kind: "closed", tabId, url: journal?.url ?? "", title: journal?.title ?? "" }); } catch { /* */ }
+      }
+    };
+    chrome.tabs.onRemoved.addListener(handler);
+    tabListeners.push(() => chrome.tabs.onRemoved.removeListener(handler));
+  }
+  if (chrome.tabs?.onUpdated) {
+    const handler = (tabId: number, changeInfo: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => {
+      if (initialTabIds.has(tabId)) return;
+      if (changeInfo.url !== undefined || changeInfo.title !== undefined || changeInfo.status === "complete") {
+        emitTab("navigated", tab);
+      }
+    };
+    chrome.tabs.onUpdated.addListener(handler);
+    tabListeners.push(() => chrome.tabs.onUpdated.removeListener(handler));
+  }
+  if (chrome.tabs?.onActivated) {
+    const handler = (info: chrome.tabs.TabActiveInfo) => {
+      if (!initialTabIds.has(info.tabId)) emitTab("focused", { id: info.tabId, url: "", title: "" } as chrome.tabs.Tab);
+    };
+    chrome.tabs.onActivated.addListener(handler);
+    tabListeners.push(() => chrome.tabs.onActivated.removeListener(handler));
+  }
+  // ponytail: ensure the agent tab is the active tab in its window before
+  // every observation capture. chrome.tabs.captureVisibleTab rejects when the
+  // target tab isn't the visible one — and Gmail/real sites briefly switch
+  // focus during redirects, causing "Target tab is not the active tab" errors.
+  // Cheap (just sets focus) and idempotent.
+  async function activateAgentTab(): Promise<void> {
+    try {
+      await chrome.tabs.update(tabId, { active: true });
+    } catch {
+      /* tab might be gone — let captureObservation surface the real error */
+    }
+  }
   let caughtError: Error | null = null;
   try {
     while (stepIndex < MAX_STEPS) {
@@ -449,7 +651,8 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
         return;
       }
-      log(opts, `step ${stepIndex + 1}/${MAX_STEPS}`);
+      log(opts, `step ${stepIndex + 1}`);
+      await activateAgentTab();
       const obs = await captureForDriverWithTimeout(tabId, 15_000);
       // ponytail: detect login page BEFORE calling the planner so we don't burn
       // a plan step on "click this invisible login form". The model will see
@@ -481,7 +684,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         await waitForNetworkIdle(tabId).catch(() => undefined);
         continue;
       }
-      const context = renderObservationForPlanner(obs, history, injectedGuidance);
+      const context = renderObservationForPlanner(obs, history, injectedGuidance, memory.toView());
       const outcome = await callPlanner(opts, context);
       if (opts.signal.aborted) {
         opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
@@ -508,6 +711,10 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         continue;
       }
       const action = outcome.action ?? { type: "unknown" };
+      // ponytail: merge working-memory updates proposed by the planner BEFORE
+      // validating termination — a valid termination may rely on a finding that
+      // was just recorded this turn.
+      memory.merge(action.memoryUpdates);
       // ponytail: model emits terminate as an action (not a completion).
       if (action.type === "terminate") {
         log(opts, `model called terminate at step ${stepIndex + 1}`);
@@ -517,7 +724,22 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           ? action.finalAnswer
           : typeof action.answer === "string" && action.answer.length > 0
             ? action.answer
-            : "Task done";
+            : "";
+        // ponytail: terminate without finalAnswer is the exact failure mode the
+        // planner normalizes server-side. If it slipped through (legacy
+        // endpoint, direct schema), treat as a clarifying question so the loop
+        // continues instead of presenting an empty result.
+        if (!finalAnswer) {
+          log(opts, "terminate without finalAnswer — re-prompting as a question");
+          const answer = await opts.onClarify({
+            reason: "terminate without finalAnswer",
+            question: "The agent tried to end the task without providing an answer. What should it report?",
+            context: memory.toView().map((f) => `${f.key}=${f.value}`).join("; "),
+          });
+          injectedGuidance = `Final answer to report: ${answer}. Use terminate(finalAnswer='<value>') next time.`;
+          opts.onAnswered?.({ question: "terminate without finalAnswer", answer });
+          continue;
+        }
         opts.onComplete({ summary: finalAnswer, steps: stepIndex + 1, finalAnswer });
         return;
       }
@@ -571,6 +793,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       let screenshot: string | null = null;
       let postUrl = obs.url;
       try {
+        await activateAgentTab();
         const postObs = await captureObservationWithTimeout(tabId, 15_000);
         screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
         postUrl = postObs.url;
@@ -583,6 +806,29 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       // side panel uses it as the assistant bubble title instead of the raw
       // `desc` (which is the tool call like "visit_url ...").
       opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind, reasoning: action.reasoning });
+      // ponytail: signature-based stagnation. Track normalized action+post
+      // observation signatures; when 5+ of the last 8 match, surface a
+      // corrective prompt with the exact guidance. Bounded by STAGNATION_LIMIT
+      // so a stuck loop ends with a blocked result, not a silent burn.
+      actionSigs.push(actionSignature(action));
+      obsSigs.push(observationSignature({ url: postUrl, title: obs.title, elements: obs.semanticTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
+      const stagnation = detectStagnation(actionSigs, obsSigs);
+      if (stagnation) {
+        stagnationHits++;
+        log(opts, `stagnation: ${stagnation.kind} signature="${stagnation.signature}" hit ${stagnationHits}/${STAGNATION_LIMIT}`);
+        if (stagnationHits >= STAGNATION_LIMIT) {
+          // ponytail: bounded break. Memory is preserved in the blocked result
+          // so the user can see what was recorded before the agent gave up.
+          const findings = memory.toView();
+          const blockedMessage = `${stagnation.message}\n\nFindings so far:\n${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
+          opts.onError({ code: "STAGNATION", message: blockedMessage });
+          return;
+        }
+        // ponytail: first stagnation hit is a recovery signal — re-prompt with
+        // the corrective guidance injected into the next planner call.
+        injectedGuidance = stagnation.message;
+        opts.onAnswered?.({ question: stagnation.kind, answer: stagnation.message });
+      }
       // ponytail: loop detection. Same action 3+ times in a row = stuck.
       // Surface a clarifying question so the user can redirect.
       const loop = detectLoop(history);
@@ -607,7 +853,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
     log(opts, `loop crashed: ${caughtError.message}`);
     opts.onError({ code: "LOOP_CRASHED", message: caughtError.message });
   } finally {
-    clearInterval(heartbeat);
+    for (const off of tabListeners) { try { off(); } catch { /* */ } }
     await debuggerModule.detachFromTab(tabId).catch(() => undefined);
   }
 }

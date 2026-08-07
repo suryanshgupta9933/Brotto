@@ -45,3 +45,16 @@ export interface HistoryEntryV1 extends HistoryEntry {
   verdict: string;
   nextActionPrediction: string;
 }
+
+// ponytail: structured working memory rendered in every planner prompt. Model
+// proposes updates; the harness owns merging + dedup. Always shown above the
+// page snapshot so the model can't miss findings it already recorded.
+export interface MemoryFact {
+  key: string;
+  value: string;
+  evidence: string;
+}
+
+export interface WorkingMemoryView {
+  facts: MemoryFact[];
+}

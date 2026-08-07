@@ -9,6 +9,7 @@ import { AgentProposalV1Schema } from '@brotto/brotto-action-schema';
 import type {
   ActionProposalV1,
   CompletionProposalV1,
+  ObservationV1,
 } from '@brotto/brotto-action-schema';
 import {
   InferenceContractError,
@@ -18,6 +19,7 @@ import {
 } from '../engine/types.js';
 import { buildToolSchemas } from '../prompts/tool-schemas.js';
 import { ToolCallParser, type FaraToolCall } from '../parser.js';
+import { validateMemoryUpdates } from '../context/decision.js';
 
 export interface OpenAICompatibleConfig {
   baseUrl: string;
@@ -178,27 +180,47 @@ export class OpenAICompatiblePlanner implements InferencePort {
       content: [
         "You drive a browser to reach a user's goal. You are an agent that does research — you read pages, extract facts, remember findings, and report back.",
         "",
-        "Loop: read the page context (URL + PAGE TEXT first, then elements) → identify the current stage and what to do next → call one tool → re-read context (it shows what changed) → repeat. Call terminate(finalAnswer) ONLY when you have found the answer.",
+        "Loop: read the page context (URL + PAGE TEXT first, then elements + WORKING MEMORY) → identify the current stage and what to do next → call one tool → re-read context → repeat. Call terminate(finalAnswer) ONLY when you have found the answer in the page text.",
         "",
-        "CRITICAL: Do NOT terminate just because you navigated somewhere. The user asked a question that requires you to FIND an answer on the page. Terminating after navigation without extracting the answer FAILS the task. Your finalAnswer must be a value you actually saw in the page text or elements — not a guess.",
+        "THINK BEFORE EACH ACTION (mandatory, 1 sentence in `reasoning`):",
+        "1. What am I trying to accomplish right now toward the user's goal? Which sub-step is this?",
+        "2. What does the CURRENT observation tell me — what changed, what's present, what's missing? Don't act on stale assumptions from a previous step.",
+        "3. Will this action plausibly advance the goal? If not, pick a different action or stop.",
+        "Do NOT skip this reasoning. The same reasoning field that satisfies the schema is also your scratchpad — write what you're actually thinking, not a generic 'navigating' filler.",
         "",
-        "Working memory (use it ONCE, then terminate):",
-        "- The page text contains the data the user asked for. Read it carefully. It comes first in the context.",
-        "- When you find the specific value the user asked about, call memorize_fact(category='answer', fact='the value') ONCE.",
-        "- IMMEDIATELY after the memorize_fact call, call terminate(finalAnswer='the value') with the same value. The sequence is always: find → memorize → terminate. Do NOT call memorize_fact again for the same fact — once is enough.",
-        "- Your finalAnswer MUST come from the fact you memorized (or a value directly visible in the page text).",
+        "VERIFY AFTER EACH ACTION:",
+        "- After every action, the next observation tells you what actually happened. Compare against what you expected.",
+        "- If the URL or page title CHANGED after your click → the click landed. Do NOT click the same coordinate again — read the NEW page text (the section you're now on) and look for the answer there. This is the #1 failure pattern: clicking a label like 'Purchases' once correctly loads the section, then clicking it 4 more times does nothing.",
+        "- If the click didn't change the page → you clicked the wrong element or a frame absorbed the event. Pick a different coordinate or element.",
+        "- If the page didn't navigate → the URL may have been blocked, the tab may have lost focus, or the page requires login. Don't blast the same visit_url repeatedly — pause for a real check.",
+        "- If a value didn't appear where you expected → re-read the page text. It may be under a different label or in a different section.",
+        "- If you've been on the same page for 2+ steps → either the goal is already satisfied (verify by searching the page text and working memory for the answer) or you're stuck (try a fundamentally different action).",
+        "- Never call the same left_click(x, y) two turns in a row unless you have a specific reason it should land this time. The harness will treat 3 repeats as a hard error.",
         "",
-        "MANDATORY on every tool call: include a `reasoning` field — one short plain-English sentence describing what you observe NOW (different from previous steps) and what you're doing. The user sees this sentence in the side panel. The reasoning must evolve across steps: 'Navigating to your GitHub profile.' → 'Reading the profile header to find the follower count.' → 'Recording the count of 33 followers.' → 'Reporting the answer back.' The reasoning field is REQUIRED by the tool schema and will be rejected if omitted.",
+        "CRITICAL: Do NOT terminate just because you navigated somewhere. The user asked a question that requires you to FIND an answer on the page. Terminating after navigation without extracting the answer FAILS the task. Your finalAnswer must be a value you actually saw in the page text, not a guess or summary of what you did.",
         "",
-        "MANDATORY on terminate: include `finalAnswer` — the actual answer to the user's original question in plain English. If they asked 'how many followers', give the number. If they asked 'is X true', give yes/no. If you couldn't find the answer after searching, say 'I couldn't find...' plainly. finalAnswer is the user's final result, NOT a summary of what you did. This field is REQUIRED.",
+        "Working memory (structured findings, rendered in every prompt):",
+        "- The page text contains the data the user asked for. Read it carefully. It comes first in the context, then elements, then WORKING MEMORY.",
+        "- When you find the specific value the user asked about, include it as a memoryUpdate on your NEXT tool call: memoryUpdates=[{key:'answer', value:'<the value>', evidence:'<where you saw it>'}]. The harness merges this into working memory and renders it back to you on the next turn so you don't re-discover it.",
+        "- Then call terminate(finalAnswer='<the value>'). Use the same value you memorized. Do not repeat the memorized fact in finalAnswer — it should be the user's actual answer, not a summary.",
+        "- Working memory is deduped by key. Recording the same key twice is harmless but pointless — the first non-empty value wins.",
+        "",
+        "MANDATORY on every tool call: include a `reasoning` field — one short plain-English sentence describing what you observe NOW (different from previous steps) and what you're doing. The user sees this sentence in the side panel. The reasoning must evolve across steps.",
+        "",
+        "MANDATORY on terminate: include `finalAnswer` — the actual answer to the user's original question in plain English. If they asked 'how many followers', give the number. If they asked 'is X true', give yes/no. If you couldn't find the answer, say 'I couldn't find...' plainly. terminate WITHOUT finalAnswer will be rejected and the loop will continue.",
+        "",
+        "If the context shows a stagnation warning (repeated action or unchanged page): the harness is telling you that the same action or page state has repeated 5+ times. Either pick a materially different action, or if the goal is satisfied, call terminate(finalAnswer='<the verified answer>'). Do NOT call memorize_fact — it is no longer a tool; record findings via memoryUpdates instead.",
         "",
         "Rules:",
+        "- NEVER ask the user for credentials (passwords, 2FA codes, OAuth tokens, API keys, etc.). If a page requires login, the harness detects it and PAUSES — the user logs in manually in the browser, then clicks Continue, then the loop resumes from the post-login observation. You do not need to ask.",
+        "- To open a website you can either visit_url(direct_url) or visit_url(google.com/search?q=...) then click the result. Either is fine.",
         "- insert_text types into the currently focused element only. If the field you want is NOT marked focused=true, left_click it first. Never assume a field is focused.",
-        "- Type each field's value EXACTLY ONCE. After insert_text, the field's value=\"...\" will update in the next context. If you see a value you didn't intend in a field (e.g. you typed the password into username), DO NOT keep typing — left_click the correct field and fix it.",
+        "- Type each field's value EXACTLY ONCE. After insert_text, the field's value=\"...\" will update in the next context.",
         "- If a field's value=\"\" already matches what you want to type, SKIP insert_text and move to the next field.",
         "- Forms: left_click(field1) → insert_text → left_click(field2) → insert_text → left_click(submit). Never insert_text without first left_click-ing the target.",
         "- Do not retry the same failing action. If left_click on a coord didn't produce a state change, pick a different element or call terminate with a failure reason.",
-        "- Do NOT call wait. The harness waits between actions automatically. If you need more time after an action, simply read the context again on the next turn.",
+        "- Do NOT call wait. The harness waits between actions automatically.",
+        "- Do NOT call ask_user_question for routine navigation (open URL X, search for Y). Use it ONLY when the goal is genuinely ambiguous and you cannot proceed without more info.",
         "- Page text is your source of truth for any fact-finding question. Read it before acting.",
       ].join("\n"),
     });
@@ -325,7 +347,7 @@ export class OpenAICompatiblePlanner implements InferencePort {
   private buildActionProposal(
     input: PlanningInput,
     toolCalls: NonNullable<NonNullable<SseChunk['choices']>[0]['delta']['tool_calls']>,
-  ): ActionProposalV1 {
+  ): ActionProposalV1 | { kind: 'question'; observationId: ObservationV1['observationId']; question: string; choices: undefined } {
     const faraToolCalls: FaraToolCall[] = toolCalls.map((tc) => ({
       name: tc.function.name ?? '',
       arguments: (() => {
@@ -336,6 +358,38 @@ export class OpenAICompatiblePlanner implements InferencePort {
         }
       })(),
     }));
+
+    // ponytail: extract memoryUpdates from the FIRST tool call's arguments and
+    // forward them on the proposal so the harness can merge into working memory.
+    // Also legacy-compat: if the model emits `memorize_fact`, extract `fact` into
+    // a memoryUpdate and rewrite the call to a no-op screenshot so the parser
+    // doesn't fail on a now-removed schema.
+    const firstArgs = (faraToolCalls[0]?.arguments ?? {}) as Record<string, unknown>;
+    const memoryUpdates = validateMemoryUpdates(firstArgs.memoryUpdates);
+    if (faraToolCalls[0]?.name === 'memorize_fact' || faraToolCalls[0]?.name === 'pause_and_memorize_fact') {
+      const legacyFact = typeof firstArgs.fact === 'string' ? firstArgs.fact.trim() : '';
+      if (legacyFact) {
+        memoryUpdates.push({ key: 'fact', value: legacyFact, evidence: 'legacy memorize_fact tool call' });
+      }
+      faraToolCalls[0] = { name: 'screenshot', arguments: { reasoning: typeof firstArgs.reasoning === 'string' ? firstArgs.reasoning : 'Recording a finding.' } };
+    }
+
+    // ponytail: validate terminate requires non-empty finalAnswer. Without this
+    // gate, the model terminates without producing an answer and the user sees
+    // an empty result. Reject and re-prompt so the loop continues.
+    if (faraToolCalls[0]?.name === 'terminate') {
+      const fa = typeof firstArgs.finalAnswer === 'string' ? firstArgs.finalAnswer.trim() : '';
+      const ans = typeof firstArgs.answer === 'string' ? firstArgs.answer.trim() : '';
+      const finalAnswer = fa || ans;
+      if (!finalAnswer) {
+        return {
+          kind: 'question',
+          observationId: input.observation.observationId,
+          question: 'You called terminate without a non-empty finalAnswer. Populate finalAnswer with the user\'s actual answer (a value you saw in the page text), then call terminate again.',
+          choices: undefined,
+        };
+      }
+    }
 
     const parser = new ToolCallParser();
     let parseResult;
@@ -373,6 +427,10 @@ export class OpenAICompatiblePlanner implements InferencePort {
     // wire format is ExecutableActionV1 (flat x/y). Transform so downstream sees
     // the shape it expects.
     const parsedAction = parseResult.actions[0];
+    const executableAction = toExecutableAction(parsedAction.action) as Record<string, unknown>;
+    if (memoryUpdates.length > 0) {
+      executableAction.memoryUpdates = memoryUpdates;
+    }
     const now = new Date().toISOString();
     return {
       kind: 'action',
@@ -381,7 +439,7 @@ export class OpenAICompatiblePlanner implements InferencePort {
       taskId: input.taskId,
       proposedAt: now,
       rationale: 'model proposal',
-      action: toExecutableAction(parsedAction.action),
+      action: executableAction,
     };
   }
 
@@ -413,9 +471,10 @@ export class OpenAICompatiblePlanner implements InferencePort {
 
 // ponytail: convert parser's FaraActionArgs shape (nested coordinates/viewport)
 // to wire ExecutableActionV1 shape (flat x/y) that downstream consumers expect.
-// Also threads `reasoning` and (for terminate) `finalAnswer` so the extension
-// can surface them in the side panel.
-function toExecutableAction(parsed: unknown): unknown {
+// Also threads `reasoning`, `finalAnswer` (for terminate), and `memoryUpdates`
+// (optional on every action) so the harness can surface them in the side panel
+// and merge memory.
+function toExecutableAction(parsed: unknown): Record<string, unknown> {
   const a = parsed as {
     type?: string;
     coordinates?: { x?: number; y?: number; start?: { x?: number; y?: number }; end?: { x?: number; y?: number } };
@@ -434,50 +493,52 @@ function toExecutableAction(parsed: unknown): unknown {
     answer?: string;
     finalAnswer?: string;
     reasoning?: string;
+    memoryUpdates?: unknown;
   };
-  // ponytail: always carry reasoning. local-driver reads it from the action
-  // payload to render the assistant bubble title. Empty string if the model
-  // didn't provide one (parser already coerced to "" for missing).
   const reasoning = typeof a.reasoning === "string" ? a.reasoning : "";
+  const memoryUpdates = validateMemoryUpdates(a.memoryUpdates);
+  const base = (obj: Record<string, unknown>): Record<string, unknown> =>
+    memoryUpdates.length > 0 ? { ...obj, memoryUpdates } : obj;
   switch (a.type) {
     case 'left_click':
     case 'double_click':
     case 'right_click':
     case 'mouse_move':
-      return { type: a.type, x: a.coordinates?.x ?? 0, y: a.coordinates?.y ?? 0, reasoning };
+      return base({ type: a.type, x: a.coordinates?.x ?? 0, y: a.coordinates?.y ?? 0, reasoning });
     case 'drag':
-      return {
+      return base({
         type: 'drag',
         startX: a.coordinates?.start?.x ?? 0,
         startY: a.coordinates?.start?.y ?? 0,
         endX: a.coordinates?.end?.x ?? 0,
         endY: a.coordinates?.end?.y ?? 0,
         reasoning,
-      };
+      });
     case 'scroll':
-      return { type: 'scroll', deltaX: a.delta?.deltaX ?? 0, deltaY: a.delta?.deltaY ?? 0, reasoning };
+      return base({ type: 'scroll', deltaX: a.delta?.deltaX ?? 0, deltaY: a.delta?.deltaY ?? 0, reasoning });
     case 'key':
-      return { type: 'key', key: a.key ?? '', reasoning };
+      return base({ type: 'key', key: a.key ?? '', reasoning });
     case 'insert_text':
-      return { type: 'insert_text', text: a.text ?? '', reasoning };
+      return base({ type: 'insert_text', text: a.text ?? '', reasoning });
     case 'visit_url':
-      return { type: 'visit_url', url: a.url ?? '', reasoning };
+      return base({ type: 'visit_url', url: a.url ?? '', reasoning });
     case 'history_back':
-      return { type: 'history_back', steps: a.steps ?? 1, reasoning };
+      return base({ type: 'history_back', steps: a.steps ?? 1, reasoning });
     case 'wait':
-      return { type: 'wait', durationMs: a.durationMs ?? a.duration ?? 1000, reasoning };
+      return base({ type: 'wait', durationMs: a.durationMs ?? a.duration ?? 1000, reasoning });
     case 'screenshot':
-      return { type: 'screenshot', reasoning };
+      return base({ type: 'screenshot', reasoning });
     case 'ask_user_question':
-      return { type: 'ask_user_question', question: a.question ?? '', reasoning };
+      return base({ type: 'ask_user_question', question: a.question ?? '', reasoning });
     case 'terminate':
-      // ponytail: accept either `finalAnswer` (new) or `answer` (legacy). New
-      // model emits finalAnswer; old prompts and tests still emit answer.
-      return { type: 'terminate', finalAnswer: a.finalAnswer ?? a.answer ?? '', reasoning };
+      return base({ type: 'terminate', finalAnswer: a.finalAnswer ?? a.answer ?? '', reasoning });
     case 'memorize_fact':
     case 'pause_and_memorize_fact':
-      return { type: a.type, fact: a.fact ?? '', reasoning };
+      // ponytail: legacy tool — planner rewrites these to screenshot before parsing.
+      // This branch is defensive: if a model slips one through, normalize to
+      // a no-op screenshot so the loop survives.
+      return base({ type: 'screenshot', reasoning });
     default:
-      return a;
+      return memoryUpdates.length > 0 ? { ...(a as Record<string, unknown>), memoryUpdates } : (a as Record<string, unknown>);
   }
 }

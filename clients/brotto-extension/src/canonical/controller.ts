@@ -95,6 +95,9 @@ export type ControllerUiEvent =
   | { readonly type: "step_card"; readonly index: number; readonly title: string; readonly result: string; readonly url?: string; readonly screenshot?: string; readonly screenshotPlaceholder?: string; readonly iconKind?: string; readonly ts?: number; readonly reasoning?: string }
   | { readonly type: "session_started"; readonly sessionId?: string }
   | { readonly type: "log"; readonly message: string }
+  // ponytail: tab lifecycle events from the local-driver. Side panel renders
+  // a small "tabs" row so the user can see what the agent opened/closed.
+  | { readonly type: "tab_event"; readonly event: { readonly kind: "opened" | "closed" | "navigated" | "focused"; readonly tabId: number; readonly url: string; readonly title: string } }
   | { readonly type: "clarify_request"; readonly id: string; readonly reason: string; readonly question: string; readonly context: string }
   | { readonly type: "approval_request"; readonly id: string; readonly reason: string; readonly action: { readonly type?: string; readonly url?: string }; readonly url: string };
 

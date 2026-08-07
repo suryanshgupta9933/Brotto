@@ -29,12 +29,81 @@ const stepCountActive = document.getElementById('stepCountActive');
 const timerActiveEl   = document.getElementById('timerActive');
 const newTaskBtn      = document.getElementById('newTaskBtn');
 const connectionMeta  = document.getElementById('connectionMeta');
+// ponytail: tab-bar handles — render each lifecycle event (open/close/nav/
+// focus) as a row so the user sees what the agent touched in their browser.
+const tabBar         = document.getElementById('tabBar');
+const tabBarBody     = document.getElementById('tabBarBody');
+const tabBarToggle   = document.getElementById('tabBarToggle');
 
 // ── Settings panel ────────────────────────────────────────────────────────
 settingsBtn.addEventListener('click', () => {
   plannerUrlSetting.value = plannerUrlEl.value || 'http://127.0.0.1:3001';
   settingsOverlay.classList.add('open');
 });
+
+// ponytail: tab-bar — collapsed/expanded by default. Each row shows badge
+// (kind), title (or url), and a one-line context line.
+const seenTabs = new Map(); // tabId → {kind, url, title, lastUpdate}
+let tabBarCollapsed = false;
+function renderTabBar() {
+  if (!tabBarBody) return;
+  tabBarBody.replaceChildren();
+  if (seenTabs.size === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'tab-row-empty';
+    empty.textContent = 'No tabs opened by the agent.';
+    tabBarBody.appendChild(empty);
+    tabBar.hidden = false;
+    return;
+  }
+  // ponytail: render in event order; we keep insertion order via Map. Most
+  // recent row at the bottom by appending as we iterate.
+  for (const [, row] of seenTabs) {
+    const row_el = document.createElement('div');
+    row_el.className = 'tab-row';
+    const badge = document.createElement('span');
+    badge.className = 'tab-row-badge ' + row.kind;
+    badge.textContent = row.kind;
+    row_el.appendChild(badge);
+    const info = document.createElement('div');
+    info.className = 'tab-row-info';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'tab-row-title';
+    titleEl.textContent = row.title || row.url || '(no title)';
+    titleEl.title = row.title || row.url || '';
+    info.appendChild(titleEl);
+    const urlEl = document.createElement('div');
+    urlEl.className = 'tab-row-url';
+    urlEl.textContent = row.url || '—';
+    urlEl.title = row.url || '';
+    info.appendChild(urlEl);
+    row_el.appendChild(info);
+    const idEl = document.createElement('span');
+    idEl.className = 'tab-row-url';
+    idEl.textContent = `#${row.tabId}`;
+    row_el.appendChild(idEl);
+    tabBarBody.appendChild(row_el);
+  }
+  tabBar.hidden = false;
+}
+function recordTabEvent(ev) {
+  if (!ev) return;
+  // ponytail: "closed" removes the row; everything else updates in place.
+  if (ev.kind === 'closed') {
+    seenTabs.delete(ev.tabId);
+  } else {
+    seenTabs.set(ev.tabId, { tabId: ev.tabId, kind: ev.kind, url: ev.url, title: ev.title });
+  }
+  renderTabBar();
+}
+if (tabBarToggle) {
+  tabBarToggle.addEventListener('click', () => {
+    tabBarCollapsed = !tabBarCollapsed;
+    tabBar.classList.toggle('collapsed', tabBarCollapsed);
+    tabBarToggle.textContent = tabBarCollapsed ? '+' : '−';
+    tabBarToggle.setAttribute('aria-expanded', String(!tabBarCollapsed));
+  });
+}
 settingsClose.addEventListener('click', () => settingsOverlay.classList.remove('open'));
 settingsOverlay.addEventListener('click', (e) => {
   if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');
@@ -50,6 +119,7 @@ const state = {
   sessionId: null,
   startTime: 0,
   stepCount: 0,
+  pendingClarifyId: null,
 };
 
 let timerInterval = null;
@@ -84,7 +154,7 @@ function deriveReasoningFromAction(title, iconKind) {
   if (t.startsWith('history_back')) return 'Going back…';
   if (t.startsWith('screenshot')) return 'Taking a screenshot…';
   if (t.startsWith('wait')) return 'Pausing…';
-  if (t.startsWith('memorize_fact')) return 'Storing a note…';
+  if (t.startsWith('memorize_fact')) return 'Storing a note… (legacy: planner should use memoryUpdates now)';
   if (t.startsWith('ask_user_question')) return 'Asking you a question…';
   if (t.startsWith('terminate')) return 'Wrapping up…';
   return t.length > 80 ? `${t.slice(0, 77)}…` : `${t}…`;
@@ -114,12 +184,19 @@ goalEl.addEventListener('input', () => {
 async function sendUserMessage() {
   const text = goalEl.value.trim();
   if (!text) return;
-  if (state.phase === 'executing') {
-    // ponytail: queue as a clarifying nudge? For demo just ignore extra sends.
-    return;
-  }
+  // ponytail: any non-terminal phase means a send is in flight. Guard against
+  // double-clicks during the connecting/connected window before the loop sets
+  // 'executing'. Without this, two parallel run_local_task messages race and
+  // the second hits "A local task is already running" in background.
+  if (state.phase !== 'idle' && state.phase !== 'done' && state.phase !== 'error'
+      && state.phase !== 'completed' && state.phase !== 'cancelled' && state.phase !== 'disconnected'
+      && state.phase !== 'failed') return;
   // ponytail: clear prior conversation so each task starts fresh.
   clearMessages();
+  // ponytail: clear previous task's tab-bar (the loop's tabEvent subscriptions
+  // are rebounded inside the local-driver for every run_local_task).
+  seenTabs.clear();
+  if (tabBar) tabBar.hidden = true;
   appendMessage({ role: 'user', text });
   state.lastGoal = text;
   goalEl.value = '';
@@ -169,6 +246,11 @@ async function resetForNewTask() {
   // posting a new goal.
   state.lastGoal = '';
   state.stepCount = 0;
+  // ponytail: drop the previous task's tab-bar state so each task starts
+  // with a fresh journal of what was opened.
+  seenTabs.clear();
+  renderTabBar();
+  if (tabBar) tabBar.hidden = true;
   clearMessages();
   stopTimer();
   setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Ready' : 'Ready');
@@ -234,7 +316,16 @@ function stopTimer() {
   if (timerInterval !== null) {
     clearInterval(timerInterval);
     timerInterval = null;
-    timerEl.textContent = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
+  }
+  // ponytail: write the final time to BOTH elements every call. Earlier code
+  // only updated the hidden header timer and skipped the visible status bar
+  // on stopTimer, so the user kept seeing the last interval value rather than
+  // the locked final time. Idempotent — safe to call after the interval is
+  // already cleared.
+  if (state.startTime > 0) {
+    const finalElapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
+    if (timerEl) timerEl.textContent = finalElapsed;
+    if (timerActiveEl) timerActiveEl.textContent = finalElapsed;
   }
 }
 
@@ -327,6 +418,11 @@ async function startTask() {
 
 async function stopTask() {
   stopBtn.disabled = true;
+  // ponytail: surface immediate "Stopped" feedback so the user sees their
+  // click took effect. The background's cancel returns immediately; the loop
+  // emits task_failed (ABORTED) a few ticks later as cleanup unwinds.
+  appendMessage({ role: 'system', text: 'Stopped by user — finishing current step…' });
+  setPhase('paused', 'Stopping…');
   const response = await sendMessage({ type: 'cancel_local_task' });
   if (!response.success) appendMessage({ role: 'error', text: `Cancel failed: ${response.error || 'unknown error'}` });
 }
@@ -408,13 +504,13 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   } else if (role === 'done') {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    const finalAnswerHtml = message.finalAnswer
-      ? `<div class="final-answer"><div class="final-answer-text">${escapeHtml(message.finalAnswer)}</div></div>`
+    const finalAnswerHtml = finalAnswer
+      ? `<div class="final-answer"><div class="final-answer-text">${escapeHtml(finalAnswer)}</div></div>`
       : '';
     bubble.innerHTML = `
       ${finalAnswerHtml}
       <div class="done-header"><span class="done-icon">&#10003;</span> Task completed</div>
-      <div class="done-summary">${text}</div>
+      <div class="done-summary">${escapeHtml(text || '')}</div>
     `;
     msg.appendChild(bubble);
   }
@@ -545,8 +641,13 @@ function appendClarifyCard({ id, question, reason }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
+  // Remove any prior pending clarify card so we don't end up with stacked inputs.
+  const prior = messagesEl.querySelector('.clarify-card');
+  if (prior) prior.remove();
+
   const card = document.createElement('div');
   card.className = 'clarify-card';
+  card.dataset.clarifyId = id;
 
   const header = document.createElement('div');
   header.className = 'clarify-header';
@@ -560,11 +661,38 @@ function appendClarifyCard({ id, question, reason }) {
     card.appendChild(body);
   }
 
-  // Hint text directing user to type below
+  // Real text input INSIDE the card — previous version told the user to use
+  // the bottom goalEl but that input was hard-coded to send a new task.
+  const inputRow = document.createElement('div');
+  inputRow.className = 'clarify-input-row';
+
+  const input = document.createElement('textarea');
+  input.className = 'clarify-input';
+  input.rows = 1;
+  input.placeholder = 'Type your answer…';
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 96) + 'px';
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void submit(input.value, input, card);
+    }
+  });
+
+  const sendBtn = document.createElement('button');
+  sendBtn.className = 'clarify-send-btn';
+  sendBtn.textContent = 'Send';
+  sendBtn.addEventListener('click', () => void submit(input.value, input, card));
+
+  inputRow.appendChild(input);
+  inputRow.appendChild(sendBtn);
+  card.appendChild(inputRow);
+
   const hint = document.createElement('div');
-  hint.className = 'input-hint';
-  hint.style.marginBottom = '10px';
-  hint.textContent = 'Type your answer in the field below, then press Enter to send.';
+  hint.className = 'input-hint clarify-hint';
+  hint.textContent = 'Press Enter to send · Shift+Enter for newline';
   card.appendChild(hint);
 
   const actions = document.createElement('div');
@@ -575,17 +703,32 @@ function appendClarifyCard({ id, question, reason }) {
   skipBtn.textContent = 'Skip';
   skipBtn.addEventListener('click', () => {
     appendMessage({ role: 'system', text: 'Skipped clarifying question.' });
-    card.remove();
     void sendMessage({ type: 'submit_clarification', id, answer: '' });
+    card.remove();
+    state.pendingClarifyId = null;
+    setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Resuming…' : 'Idle');
   });
   actions.appendChild(skipBtn);
 
   card.appendChild(actions);
   messagesEl.appendChild(card);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  input.focus();
 
-  // Focus the input area
-  goalEl.focus();
+  state.pendingClarifyId = id;
+
+  async function submit(value, inputEl, cardEl) {
+    const answer = value.trim();
+    if (!answer) {
+      inputEl.focus();
+      return;
+    }
+    appendMessage({ role: 'user', text: answer });
+    cardEl.remove();
+    state.pendingClarifyId = null;
+    setPhase('connected', 'Resuming…');
+    await sendMessage({ type: 'submit_clarification', id, answer });
+  }
 }
 
 // ── Icon helpers (for step cards rendered as assistant messages) ───────────
@@ -687,9 +830,27 @@ chrome.runtime.onMessage.addListener((message) => {
       state.sessionId = message.sessionId || state.sessionId;
       break;
 
-    case 'canonical_status':
-      setPhase(message.status, message.reconnectAttempt !== undefined ? `Reconnecting (${message.reconnectAttempt})…` : null);
+    case 'canonical_status': {
+      // ponytail: normalize canonical lifecycle (completed / failed / cancelled /
+      // disconnected / cancelling / waiting_for_approval) into the side-panel
+      // phase enum so the UI doesn't get stuck in unmapped states. The local-
+      // driver emits "completed" after every run — without this normalization
+      // the pill said "completed" and the new-task Send was silently blocked.
+      const raw = String(message.status || '');
+      const mapped = (raw === 'completed' || raw === 'cancelled' || raw === 'disconnected') ? 'done'
+        : raw === 'failed' ? 'error'
+        : raw === 'cancelling' ? 'paused'
+        : raw === 'waiting_for_approval' ? 'paused'
+        : raw;
+      const meta = message.reconnectAttempt !== undefined
+        ? `Reconnecting (${message.reconnectAttempt})…`
+        : raw === 'completed' ? 'Task complete'
+        : raw === 'failed' ? 'Task failed'
+        : raw === 'cancelled' ? 'Task cancelled'
+        : null;
+      setPhase(mapped, meta);
       break;
+    }
 
     case 'step_card': {
       state.stepCount = Math.max(state.stepCount, message.index !== undefined ? message.index + 1 : state.stepCount + 1);
@@ -701,27 +862,13 @@ chrome.runtime.onMessage.addListener((message) => {
       const reasoningText = (message.reasoning && message.reasoning.trim())
         || deriveReasoningFromAction(message.title || '', message.iconKind);
       const toolSubtitle = `${message.title || ''}${message.result ? ' → ' + message.result : ''}`.trim();
-      if (!currentAssistantMsg) {
-        startAssistantMessage({ icon, title: reasoningText });
-      }
-      if (currentAssistantMsg) {
-        currentAssistantMsg.bubble.innerHTML = '';
-        const iconEl = document.createElement('span');
-        iconEl.style.marginRight = '6px';
-        iconEl.style.opacity = '0.5';
-        iconEl.innerHTML = icon;
-        const titleEl = document.createElement('span');
-        titleEl.textContent = reasoningText;
-        currentAssistantMsg.bubble.appendChild(iconEl);
-        currentAssistantMsg.bubble.appendChild(titleEl);
-        if (toolSubtitle) {
-          const subEl = document.createElement('div');
-          subEl.className = 'tool-subtitle';
-          subEl.textContent = toolSubtitle;
-          currentAssistantMsg.bubble.appendChild(subEl);
-        }
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      }
+      // ponytail: each step gets its OWN persistent bubble. Earlier code
+      // reused `currentAssistantMsg` and either overwrote content in place
+      // OR called finish() with empty title, which cleared the previous
+      // bubble's text. appendMessage emits a fresh message every time so
+      // the conversation history shows every step the model took.
+      const stepText = (icon ? icon + ' ' : '') + reasoningText;
+      appendMessage({ role: 'assistant', text: stepText, inlineLogs: toolSubtitle ? [toolSubtitle] : [] });
       break;
     }
 
@@ -840,6 +987,12 @@ chrome.runtime.onMessage.addListener((message) => {
         sites: message.sites || [],
         steps: message.steps || [],
       });
+      break;
+    }
+
+    case 'tab_event': {
+      // ponytail: local-driver tab lifecycle — render to the tabs row.
+      recordTabEvent(message.event);
       break;
     }
   }

@@ -41,6 +41,27 @@ const TARGET_ID_PROP = {
   },
 } as const;
 
+// ponytail: structured working-memory updates. Optional on every action — the
+// model records durable findings (e.g. key='answer', value='33', evidence='profile header')
+// and the harness merges them, dedupes by key, and renders them in every prompt.
+// Replaces the old `memorize_fact` tool, which produced a no-op action that
+// the model kept calling forever because it didn't change loop state.
+const MEMORY_UPDATE_PROP = {
+  memoryUpdates: {
+    type: "array",
+    description: "Optional structured findings to merge into working memory. Use {key, value, evidence} — key is stable (e.g. 'answer'), value is the fact, evidence is the source.",
+    items: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Stable identifier (e.g. 'answer', 'repo_name')." },
+        value: { type: "string", description: "The fact itself (the user's answer goes here)." },
+        evidence: { type: "string", description: "Short source of where you saw this (e.g. 'GitHub profile sidebar')." },
+      },
+      required: ["key", "value"],
+    },
+  },
+} as const;
+
 // ponytail: every tool's required array must include "reasoning". gpt-4o-mini
 // silently drops optional fields — making reasoning required forces the model
 // to produce the one-sentence user-facing description. Terminate additionally
@@ -58,7 +79,7 @@ export function buildToolSchemas(): ToolSchema[] {
         description: "Left-click at the given viewport coordinate.",
         parameters: {
           type: "object",
-          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP },
+          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP, ...MEMORY_UPDATE_PROP },
           required: withReasoning(["x", "y"]),
         },
       },
@@ -70,7 +91,7 @@ export function buildToolSchemas(): ToolSchema[] {
         description: "Double-click at the given viewport coordinate.",
         parameters: {
           type: "object",
-          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP },
+          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP, ...MEMORY_UPDATE_PROP },
           required: withReasoning(["x", "y"]),
         },
       },
@@ -82,7 +103,7 @@ export function buildToolSchemas(): ToolSchema[] {
         description: "Right-click at the given viewport coordinate.",
         parameters: {
           type: "object",
-          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP },
+          properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP, ...MEMORY_UPDATE_PROP },
           required: withReasoning(["x", "y"]),
         },
       },
@@ -100,6 +121,7 @@ export function buildToolSchemas(): ToolSchema[] {
             endX: { type: "number" },
             endY: { type: "number" },
             ...REASONING_PROP,
+            ...MEMORY_UPDATE_PROP,
           },
           required: withReasoning(["startX", "startY", "endX", "endY"]),
         },
@@ -112,7 +134,7 @@ export function buildToolSchemas(): ToolSchema[] {
         description: "Move the mouse to the given viewport coordinate.",
         parameters: {
           type: "object",
-          properties: { ...COORDINATE_PROPS, ...REASONING_PROP },
+          properties: { ...COORDINATE_PROPS, ...REASONING_PROP, ...MEMORY_UPDATE_PROP },
           required: withReasoning(["x", "y"]),
         },
       },
@@ -128,6 +150,7 @@ export function buildToolSchemas(): ToolSchema[] {
             deltaX: { type: "number", description: "Horizontal scroll delta" },
             deltaY: { type: "number", description: "Vertical scroll delta" },
             ...REASONING_PROP,
+            ...MEMORY_UPDATE_PROP,
           },
           required: withReasoning(["deltaX", "deltaY"]),
         },
@@ -148,6 +171,7 @@ export function buildToolSchemas(): ToolSchema[] {
               description: "Optional key modifiers",
             },
             ...REASONING_PROP,
+            ...MEMORY_UPDATE_PROP,
           },
           required: withReasoning(["key"]),
         },
@@ -164,6 +188,7 @@ export function buildToolSchemas(): ToolSchema[] {
             text: { type: "string", description: "Text to type" },
             ...TARGET_ID_PROP,
             ...REASONING_PROP,
+            ...MEMORY_UPDATE_PROP,
           },
           required: withReasoning(["text"]),
         },
@@ -179,6 +204,7 @@ export function buildToolSchemas(): ToolSchema[] {
           properties: {
             url: { type: "string", format: "uri", description: "Absolute HTTP(S) URL" },
             ...REASONING_PROP,
+            ...MEMORY_UPDATE_PROP,
           },
           required: withReasoning(["url"]),
         },
@@ -194,6 +220,7 @@ export function buildToolSchemas(): ToolSchema[] {
           properties: {
             steps: { type: "number", description: "Number of steps back (default 1, max 20)" },
             ...REASONING_PROP,
+            ...MEMORY_UPDATE_PROP,
           },
           required: withReasoning(),
         },
@@ -204,7 +231,11 @@ export function buildToolSchemas(): ToolSchema[] {
       function: {
         name: "screenshot",
         description: "Capture a screenshot of the current viewport.",
-        parameters: { type: "object", properties: { ...REASONING_PROP }, required: withReasoning() },
+        parameters: {
+          type: "object",
+          properties: { ...REASONING_PROP, ...MEMORY_UPDATE_PROP },
+          required: withReasoning(),
+        },
       },
     },
     {
@@ -217,6 +248,7 @@ export function buildToolSchemas(): ToolSchema[] {
           properties: {
             durationMs: { type: "number", description: "Duration to wait in ms (max 60000)" },
             ...REASONING_PROP,
+            ...MEMORY_UPDATE_PROP,
           },
           required: withReasoning(["durationMs"]),
         },
@@ -233,24 +265,9 @@ export function buildToolSchemas(): ToolSchema[] {
             question: { type: "string" },
             choices: { type: "array", items: { type: "string" } },
             ...REASONING_PROP,
+            ...MEMORY_UPDATE_PROP,
           },
           required: withReasoning(["question"]),
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "memorize_fact",
-        description: "Store a fact in working memory for later steps.",
-        parameters: {
-          type: "object",
-          properties: {
-            fact: { type: "string" },
-            category: { type: "string" },
-            ...REASONING_PROP,
-          },
-          required: withReasoning(["fact"]),
         },
       },
     },
@@ -265,6 +282,7 @@ export function buildToolSchemas(): ToolSchema[] {
             finalAnswer: { type: "string", description: "The user's answer in plain English (their actual question, e.g. 'You have 12 followers.'). REQUIRED — this is what the user sees." },
             answer: { type: "string", description: "Legacy alias for finalAnswer; prefer finalAnswer." },
             ...REASONING_PROP,
+            ...MEMORY_UPDATE_PROP,
           },
           required: withReasoning(["finalAnswer"]),
         },

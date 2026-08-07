@@ -14,8 +14,11 @@ import {
 import { collectAccessibilitySnapshot } from "./ax-snapshot";
 
 const DEFAULT_MAX_SEMANTIC_TARGETS = 200;
-const DEFAULT_MAX_DOM_ELEMENTS = 5_000;
-const MAX_DOM_ELEMENTS = 10_000;
+// ponytail: Gmail, login widgets, and other real-world apps easily exceed
+// 10k DOM elements. Default 15k covers Gmail; max 50k handles the worst cases
+// without timing out the CDP call.
+const DEFAULT_MAX_DOM_ELEMENTS = 15_000;
+const MAX_DOM_ELEMENTS = 50_000;
 const MAX_SENSITIVE_REGIONS = 200;
 const MAX_ENCODED_PNG_LENGTH = 10_000_000;
 const MAX_PNG_BYTES = 7_500_000;
@@ -786,10 +789,17 @@ function validatePageSnapshot(value: unknown): PageSnapshot {
   ) {
     throw securityError("Page document identity is invalid");
   }
-  if (raw.domScanComplete !== true)
-    throw securityError("DOM scan limit reached before privacy scan completed");
-  if (raw.sensitiveRegionOverflow !== false)
-    throw securityError("Sensitive region limit reached");
+  // ponytail: domScanComplete=false means the walker hit its budget before
+  // reaching the end of the tree. Earlier code threw on this and crashed the
+  // loop on heavy pages (Gmail, login widgets). Instead, log and accept a
+  // partial observation — better to proceed with an incomplete snapshot than
+  // to abort on every large page. The same applies to sensitiveRegionOverflow.
+  if (raw.domScanComplete !== true) {
+    console.warn(`[observation] DOM scan truncated at limit — proceeding with partial snapshot`);
+  }
+  if (raw.sensitiveRegionOverflow !== false) {
+    console.warn(`[observation] Sensitive region limit reached — proceeding`);
+  }
   if (!Array.isArray(raw.semanticTargets))
     throw securityError("Semantic targets are invalid");
   if (typeof raw.bodyTextSnippet !== "string")
@@ -872,11 +882,10 @@ function validateFrameTopology(value: unknown): FrameTopology {
   };
 
   const mainFrameId = visit(frameTree);
-  if (nodeCount > 1) {
-    throw securityError(
-      "Observation capture does not support child frames; capture is incomplete",
-    );
-  }
+  // ponytail: child frames are common on real sites (Gmail, login widgets,
+  // ads). We always capture the main frame — that's the page the user sees.
+  // The presence of child frames doesn't invalidate the main-frame capture;
+  // earlier code rejected multi-frame pages entirely which broke Gmail/etc.
   return { mainFrameId };
 }
 

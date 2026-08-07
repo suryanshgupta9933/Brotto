@@ -54,6 +54,26 @@ async function main() {
   app.get("/health", async () => ({ status: "ok", family, model: config.model }));
   app.post<{ Body: PlanRequest }>("/plan", async (req) => {
     const t0 = Date.now();
+    // ponytail: log the incoming request — goal + context size + key signals
+    // (current URL, page text snippet). Verbose by design; the demo terminal
+    // is the operator's window into what the model is actually seeing.
+    const ctx = req.body.context ?? "";
+    const urlLine = ctx.match(/URL:\s*(.+)/)?.[1]?.trim() ?? "?";
+    const titleLine = ctx.match(/Title:\s*(.+)/)?.[1]?.trim() ?? "?";
+    const textStart = ctx.indexOf("=== PAGE TEXT");
+    const textSnippet = textStart >= 0
+      ? ctx.slice(textStart, textStart + 200).replace(/\n/g, " ").trim()
+      : "(no page text)";
+    const memLine = ctx.match(/Working memory[^\n]*\n((?:\s+- [^\n]+\n?)+)/)?.[1]?.trim() ?? "";
+    const historyLines = ctx.match(/Previous steps[^\n]*\n((?:\s+\d+\.[^\n]+\n?)+)/)?.[1]?.trim() ?? "";
+    console.log(`[demo-server] ── /plan req ─────────────────────────────`);
+    console.log(`[demo-server]   goal:      ${req.body.goal}`);
+    console.log(`[demo-server]   url:       ${urlLine}`);
+    console.log(`[demo-server]   title:     ${titleLine}`);
+    console.log(`[demo-server]   context:   ${ctx.length} chars`);
+    if (memLine) console.log(`[demo-server]   memory:\n${memLine.split("\n").map((l) => `               ${l}`).join("\n")}`);
+    if (historyLines) console.log(`[demo-server]   history:\n${historyLines.split("\n").map((l) => `               ${l}`).join("\n")}`);
+    console.log(`[demo-server]   page text: ${textSnippet.slice(0, 160)}…`);
     // ponytail: short retry/backoff for transient 429s. Vision mode sends
     // heavier payloads and can blow past OpenAI's per-minute token limit; a
     // 1-2s wait usually clears it. Cap at 3 retries so the demo doesn't hang.
@@ -88,12 +108,38 @@ async function main() {
     }
     try {
       const elapsed = Date.now() - t0;
-      console.log(`[demo-server] /plan responded in ${elapsed}ms kind=${outcome.kind}`);
+      console.log(`[demo-server] ── /plan resp in ${elapsed}ms ─────────────`);
       if (outcome.kind === "action") {
-        const a = (outcome as { action: { type?: string; x?: number; y?: number; text?: string } }).action;
-        console.log(`[demo-server]   action: ${a.type} ${a.x !== undefined ? `(${a.x}, ${a.y})` : ""} ${a.text ? `"${a.text.slice(0, 30)}"` : ""}`);
+        const a = (outcome as { action: Record<string, unknown> }).action;
+        const type = a.type ?? "?";
+        const reasoning = typeof a.reasoning === "string" ? a.reasoning : "";
+        const memUpdates = Array.isArray(a.memoryUpdates) ? a.memoryUpdates as Array<{ key: string; value: string; evidence: string }> : [];
+        const argParts: string[] = [];
+        if (typeof a.x === "number" && typeof a.y === "number") argParts.push(`(${a.x}, ${a.y})`);
+        if (typeof a.url === "string") argParts.push(a.url);
+        if (typeof a.text === "string") argParts.push(`"${a.text.slice(0, 60)}"`);
+        if (typeof a.key === "string") argParts.push(`key=${a.key}`);
+        if (typeof a.finalAnswer === "string" && a.finalAnswer) argParts.push(`finalAnswer="${a.finalAnswer.slice(0, 80)}"`);
+        if (typeof a.question === "string") argParts.push(`question="${a.question.slice(0, 80)}"`);
+        console.log(`[demo-server]   kind:    action`);
+        console.log(`[demo-server]   type:    ${type} ${argParts.join(" ")}`);
+        if (reasoning) console.log(`[demo-server]   reason:  ${reasoning}`);
+        if (memUpdates.length > 0) {
+          console.log(`[demo-server]   memory:`);
+          for (const m of memUpdates) {
+            console.log(`[demo-server]     - ${m.key} = "${m.value}"${m.evidence ? ` (evidence: ${m.evidence})` : ""}`);
+          }
+        }
       } else if (outcome.kind === "question") {
-        console.log(`[demo-server]   question: ${(outcome as { question: string }).question.slice(0, 80)}`);
+        const q = (outcome as { question: string }).question;
+        console.log(`[demo-server]   kind:     question`);
+        console.log(`[demo-server]   question: ${q}`);
+      } else if (outcome.kind === "completion") {
+        const c = outcome as { summary?: string };
+        console.log(`[demo-server]   kind:    completion`);
+        if (c.summary) console.log(`[demo-server]   summary: ${c.summary.slice(0, 160)}`);
+      } else {
+        console.log(`[demo-server]   kind:    ${outcome.kind}`);
       }
       return outcome;
     } catch (err) {

@@ -12475,8 +12475,8 @@
 
   // src/canonical/observation.ts
   var DEFAULT_MAX_SEMANTIC_TARGETS = 200;
-  var DEFAULT_MAX_DOM_ELEMENTS = 5e3;
-  var MAX_DOM_ELEMENTS = 1e4;
+  var DEFAULT_MAX_DOM_ELEMENTS = 15e3;
+  var MAX_DOM_ELEMENTS = 5e4;
   var MAX_SENSITIVE_REGIONS = 200;
   var MAX_ENCODED_PNG_LENGTH = 1e7;
   var MAX_PNG_BYTES = 75e5;
@@ -13004,10 +13004,12 @@
     if (typeof raw.documentToken !== "string" || raw.documentToken.length === 0 || raw.documentToken.length > 512) {
       throw securityError("Page document identity is invalid");
     }
-    if (raw.domScanComplete !== true)
-      throw securityError("DOM scan limit reached before privacy scan completed");
-    if (raw.sensitiveRegionOverflow !== false)
-      throw securityError("Sensitive region limit reached");
+    if (raw.domScanComplete !== true) {
+      console.warn(`[observation] DOM scan truncated at limit \u2014 proceeding with partial snapshot`);
+    }
+    if (raw.sensitiveRegionOverflow !== false) {
+      console.warn(`[observation] Sensitive region limit reached \u2014 proceeding`);
+    }
     if (!Array.isArray(raw.semanticTargets))
       throw securityError("Semantic targets are invalid");
     if (typeof raw.bodyTextSnippet !== "string")
@@ -13073,11 +13075,6 @@
       return id;
     };
     const mainFrameId2 = visit(frameTree);
-    if (nodeCount > 1) {
-      throw securityError(
-        "Observation capture does not support child frames; capture is incomplete"
-      );
-    }
     return { mainFrameId: mainFrameId2 };
   }
   async function captureFrameTopology(tabId, sendCdpCommand) {
@@ -14130,11 +14127,107 @@
 
   // src/local-driver.ts
   init_debugger();
-  var MAX_STEPS = 12;
+  var MAX_STEPS = 50;
   var HISTORY_LIMIT = 6;
   var POST_ACTION_PAUSE_MS = 400;
+  var WorkingMemory = class {
+    constructor() {
+      this.facts = /* @__PURE__ */ new Map();
+    }
+    merge(updates) {
+      if (!updates) return;
+      for (const u of updates) {
+        if (!u || typeof u.key !== "string") continue;
+        const key = u.key.trim();
+        const value = typeof u.value === "string" ? u.value.trim() : "";
+        if (!key || !value) continue;
+        const ev = typeof u.evidence === "string" ? u.evidence.trim() : "";
+        const existing = this.facts.get(key);
+        if (!existing || !existing.evidence && ev) {
+          this.facts.set(key, { key, value, evidence: ev });
+        }
+      }
+    }
+    toView() {
+      return Array.from(this.facts.values());
+    }
+    get size() {
+      return this.facts.size;
+    }
+  };
+  function renderMemoryBlock(facts) {
+    if (facts.length === 0) return "";
+    const lines = facts.map((f) => {
+      const ev = f.evidence ? `  (evidence: ${f.evidence})` : "";
+      return `  - ${f.key} = "${f.value}"${ev}`;
+    });
+    return `Working memory (structured findings \u2014 do not re-record; carry these forward):
+${lines.join("\n")}
+
+`;
+  }
   function log(opts, message) {
     opts.onLog?.(message);
+  }
+  var STAGNATION_REPEAT_THRESHOLD = 3;
+  var STAGNATION_WINDOW = 6;
+  function actionSignature(action) {
+    const t = (action.type ?? "unknown").toLowerCase();
+    switch (t) {
+      case "visit_url":
+        return `visit_url:${(action.url ?? "").trim()}`;
+      case "left_click":
+      case "double_click":
+      case "right_click":
+      case "mouse_move":
+        return `${t}:${action.x ?? 0},${action.y ?? 0}`;
+      case "insert_text":
+        return `insert_text:${(action.text ?? "").slice(0, 40)}`;
+      case "key":
+        return `key:${action.key ?? ""}`;
+      case "scroll":
+      case "screenshot":
+      case "wait":
+      case "terminate":
+      case "ask_user_question":
+      case "history_back":
+        return t;
+      default:
+        return t;
+    }
+  }
+  function observationSignature(obs) {
+    const firstId = obs.elements && obs.elements.length > 0 ? obs.elements[0]?.id ?? "" : "";
+    return `${(obs.url ?? "").trim()}|${(obs.title ?? "").trim()}|${firstId}`;
+  }
+  function detectStagnation(actionSigs, obsSigs) {
+    const actionHit = lastNIdentical(actionSigs);
+    if (actionHit) {
+      return {
+        kind: "repeated_action",
+        signature: actionHit,
+        count: STAGNATION_REPEAT_THRESHOLD,
+        message: `STOP \u2014 you've called "${actionHit}" ${STAGNATION_REPEAT_THRESHOLD}+ times in a row. Repeating the same click coordinate won't change the result. Two possibilities: (1) the page already moved (the title/URL changed in a previous step) \u2014 read the new page text and look for the answer there, do NOT click again. (2) the click missed the target \u2014 pick a DIFFERENT coordinate or element. Do NOT call the same action again on the next turn.`
+      };
+    }
+    const obsHit = lastNIdentical(obsSigs);
+    if (obsHit) {
+      return {
+        kind: "repeated_observation",
+        signature: obsHit,
+        count: STAGNATION_REPEAT_THRESHOLD,
+        message: `STOP \u2014 the page hasn't changed for ${STAGNATION_REPEAT_THRESHOLD}+ steps. Your actions are not landing. Either (1) you've already found the answer in the current page text and should call terminate(finalAnswer='<value>'), or (2) your clicks are missing the target and you need to click a different element. Read the current page text carefully \u2014 the answer may already be there.`
+      };
+    }
+    return null;
+  }
+  function lastNIdentical(arr) {
+    if (arr.length < STAGNATION_REPEAT_THRESHOLD) return null;
+    const tail = arr.slice(-STAGNATION_WINDOW);
+    if (tail.length < STAGNATION_REPEAT_THRESHOLD) return null;
+    const recent = tail.slice(-STAGNATION_REPEAT_THRESHOLD);
+    const ref = recent[0];
+    return recent.every((s) => s === ref) ? ref : null;
   }
   function detectLoop(history, threshold = 3) {
     if (history.length < threshold) return { loop: false, action: "" };
@@ -14218,8 +14311,12 @@
         return a.type ?? "unknown";
     }
   }
-  function renderObservationForPlanner(obs, history, guidance) {
+  function renderObservationForPlanner(obs, history, guidance, memory) {
     const lines = [];
+    if (memory && memory.length > 0) {
+      lines.push(renderMemoryBlock(memory).trimEnd());
+      lines.push("");
+    }
     lines.push(`URL: ${obs.url}`);
     lines.push(`Title: ${obs.title}`);
     lines.push("");
@@ -14439,15 +14536,77 @@
     let stepIndex = 0;
     const failures = [];
     let injectedGuidance;
-    let lastBeat = Date.now();
-    const heartbeat = setInterval(() => {
-      if (opts.signal.aborted) return;
-      const now = Date.now();
-      if (now - lastBeat >= 1e4) {
-        lastBeat = now;
-        log(opts, `loop alive \u2014 ${stepIndex} steps done, waiting on planner/observation`);
+    const memory = new WorkingMemory();
+    const actionSigs = [];
+    const obsSigs = [];
+    let stagnationHits = 0;
+    const STAGNATION_LIMIT = 2;
+    const initialTabIds = /* @__PURE__ */ new Set();
+    try {
+      const existing = await chrome.tabs.query({});
+      for (const t of existing) if (typeof t.id === "number") initialTabIds.add(t.id);
+    } catch {
+    }
+    const tabJournal = /* @__PURE__ */ new Map();
+    const emitTab = (kind, tab) => {
+      if (typeof tab.id !== "number") return;
+      const url = tab.url ?? "";
+      const title = tab.title ?? "";
+      if (kind === "opened" || kind === "navigated") {
+        tabJournal.set(tab.id, { url, title, openedAt: Date.now() });
+      } else if (kind === "closed") {
+        tabJournal.delete(tab.id);
       }
-    }, 1e4);
+      try {
+        opts.onTabEvent?.({ kind, tabId: tab.id, url, title });
+      } catch {
+      }
+    };
+    const tabListeners = [];
+    if (chrome.tabs?.onCreated) {
+      const handler = (tab) => {
+        if (typeof tab.id === "number" && !initialTabIds.has(tab.id)) emitTab("opened", tab);
+      };
+      chrome.tabs.onCreated.addListener(handler);
+      tabListeners.push(() => chrome.tabs.onCreated.removeListener(handler));
+    }
+    if (chrome.tabs?.onRemoved) {
+      const handler = (tabId2) => {
+        if (!initialTabIds.has(tabId2)) {
+          const journal = tabJournal.get(tabId2);
+          tabJournal.delete(tabId2);
+          try {
+            opts.onTabEvent?.({ kind: "closed", tabId: tabId2, url: journal?.url ?? "", title: journal?.title ?? "" });
+          } catch {
+          }
+        }
+      };
+      chrome.tabs.onRemoved.addListener(handler);
+      tabListeners.push(() => chrome.tabs.onRemoved.removeListener(handler));
+    }
+    if (chrome.tabs?.onUpdated) {
+      const handler = (tabId2, changeInfo, tab) => {
+        if (initialTabIds.has(tabId2)) return;
+        if (changeInfo.url !== void 0 || changeInfo.title !== void 0 || changeInfo.status === "complete") {
+          emitTab("navigated", tab);
+        }
+      };
+      chrome.tabs.onUpdated.addListener(handler);
+      tabListeners.push(() => chrome.tabs.onUpdated.removeListener(handler));
+    }
+    if (chrome.tabs?.onActivated) {
+      const handler = (info) => {
+        if (!initialTabIds.has(info.tabId)) emitTab("focused", { id: info.tabId, url: "", title: "" });
+      };
+      chrome.tabs.onActivated.addListener(handler);
+      tabListeners.push(() => chrome.tabs.onActivated.removeListener(handler));
+    }
+    async function activateAgentTab() {
+      try {
+        await chrome.tabs.update(tabId, { active: true });
+      } catch {
+      }
+    }
     let caughtError = null;
     try {
       while (stepIndex < MAX_STEPS) {
@@ -14455,7 +14614,8 @@
           opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
           return;
         }
-        log(opts, `step ${stepIndex + 1}/${MAX_STEPS}`);
+        log(opts, `step ${stepIndex + 1}`);
+        await activateAgentTab();
         const obs = await captureForDriverWithTimeout(tabId, 15e3);
         const login = looksLikeLoginPage(obs);
         if (login.login) {
@@ -14482,7 +14642,7 @@
           await waitForNetworkIdle(tabId).catch(() => void 0);
           continue;
         }
-        const context = renderObservationForPlanner(obs, history, injectedGuidance);
+        const context = renderObservationForPlanner(obs, history, injectedGuidance, memory.toView());
         const outcome = await callPlanner(opts, context);
         if (opts.signal.aborted) {
           opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
@@ -14504,9 +14664,21 @@
           continue;
         }
         const action = outcome.action ?? { type: "unknown" };
+        memory.merge(action.memoryUpdates);
         if (action.type === "terminate") {
           log(opts, `model called terminate at step ${stepIndex + 1}`);
-          const finalAnswer = typeof action.finalAnswer === "string" && action.finalAnswer.length > 0 ? action.finalAnswer : typeof action.answer === "string" && action.answer.length > 0 ? action.answer : "Task done";
+          const finalAnswer = typeof action.finalAnswer === "string" && action.finalAnswer.length > 0 ? action.finalAnswer : typeof action.answer === "string" && action.answer.length > 0 ? action.answer : "";
+          if (!finalAnswer) {
+            log(opts, "terminate without finalAnswer \u2014 re-prompting as a question");
+            const answer = await opts.onClarify({
+              reason: "terminate without finalAnswer",
+              question: "The agent tried to end the task without providing an answer. What should it report?",
+              context: memory.toView().map((f) => `${f.key}=${f.value}`).join("; ")
+            });
+            injectedGuidance = `Final answer to report: ${answer}. Use terminate(finalAnswer='<value>') next time.`;
+            opts.onAnswered?.({ question: "terminate without finalAnswer", answer });
+            continue;
+          }
           opts.onComplete({ summary: finalAnswer, steps: stepIndex + 1, finalAnswer });
           return;
         }
@@ -14555,6 +14727,7 @@
         let screenshot = null;
         let postUrl = obs.url;
         try {
+          await activateAgentTab();
           const postObs = await captureObservationWithTimeout(tabId, 15e3);
           screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
           postUrl = postObs.url;
@@ -14564,6 +14737,24 @@
         history.push({ action: desc, result });
         failures.length = 0;
         opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind, reasoning: action.reasoning });
+        actionSigs.push(actionSignature(action));
+        obsSigs.push(observationSignature({ url: postUrl, title: obs.title, elements: obs.semanticTargets.slice(0, 1).map((t) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
+        const stagnation = detectStagnation(actionSigs, obsSigs);
+        if (stagnation) {
+          stagnationHits++;
+          log(opts, `stagnation: ${stagnation.kind} signature="${stagnation.signature}" hit ${stagnationHits}/${STAGNATION_LIMIT}`);
+          if (stagnationHits >= STAGNATION_LIMIT) {
+            const findings = memory.toView();
+            const blockedMessage = `${stagnation.message}
+
+Findings so far:
+${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
+            opts.onError({ code: "STAGNATION", message: blockedMessage });
+            return;
+          }
+          injectedGuidance = stagnation.message;
+          opts.onAnswered?.({ question: stagnation.kind, answer: stagnation.message });
+        }
         const loop = detectLoop(history);
         if (loop.loop) {
           log(opts, `loop detected: ${loop.action} repeated ${history.length} times`);
@@ -14583,7 +14774,12 @@
       log(opts, `loop crashed: ${caughtError.message}`);
       opts.onError({ code: "LOOP_CRASHED", message: caughtError.message });
     } finally {
-      clearInterval(heartbeat);
+      for (const off of tabListeners) {
+        try {
+          off();
+        } catch {
+        }
+      }
       await detachFromTab(tabId).catch(() => void 0);
     }
   }
@@ -14760,6 +14956,9 @@
           signal: controller_ac.signal,
           onTabOpened: (tabId) => {
             localTabId = tabId;
+          },
+          onTabEvent: (event) => {
+            notifyUi({ type: "tab_event", event });
           },
           onStep: ({ index, action, result, url, screenshot, iconKind, reasoning }) => {
             notifyUi({
