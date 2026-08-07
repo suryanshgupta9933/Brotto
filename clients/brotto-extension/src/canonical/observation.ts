@@ -608,11 +608,91 @@ function collectPageSnapshot(
     return parts.join("\n\n");
   })();
 
-  // ponytail: page-identity fingerprint. SHA-256 over a normalized
-  // AX-subtree dump (role|indexInParentByRole|name). Stable across DOM
-  // re-renders; flips when navigation actually happens. Replaces the
-  // unreliable obs-sig (which used only the first semanticTarget's
-  // stableRef and drifted on every re-render).
+  // ponytail: page purpose — meta description + first h1. Stable step label
+  // for the future workflow recorder; orients the model in one glance.
+  // Built first so the role-tag index below can use documentElement as root.
+  const pagePurpose = (() => {
+    const meta = document.querySelector('meta[name="description"], meta[property="og:description"]');
+    const metaDesc = meta ? (meta.getAttribute("content") || "").trim() : "";
+    const h1 = document.querySelector("h1");
+    const h1Text = h1 ? (h1.textContent || "").trim() : "";
+    const parts = [metaDesc, h1Text].filter((s) => s.length > 0);
+    return parts.join(" — ").slice(0, 512);
+  })();
+
+  // ponytail: single-pass parent → children-by-role index. Built ONCE per
+  // capture, then reused by both pageIdentity and pathFor. Without this,
+  // every link/button's pathFor walked parent.children.filter(...) for
+  // every ancestor — O(N × depth × siblings) per element, which on
+  // GitHub's homepage blew past the 15s capture timeout. Now O(N) total.
+  const roleIndex = new Map<Element, Map<string, number>>();
+  {
+    const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
+    let nd: Node | null = walker.currentNode;
+    while (nd) {
+      const el = nd as Element;
+      const role = el.getAttribute("role") || el.tagName.toLowerCase();
+      const parent = el.parentElement;
+      if (parent) {
+        let m = roleIndex.get(parent);
+        if (!m) { m = new Map<string, number>(); roleIndex.set(parent, m); }
+        m.set(role, (m.get(role) ?? 0) + 1);
+      }
+      nd = walker.nextNode();
+    }
+  }
+  // ponytail: StableRef helpers inlined because collectPageSnapshot runs as
+  // a string in the page context (no module imports). Both use the
+  // roleIndex built above. pathFor is bounded to 5 ancestors — full
+  // depth is overkill for StableRef matching (5 levels of role+index is
+  // already unique on every real-world page) and unbounded paths made
+  // the script slow on deeply nested SPAs.
+  const PATH_MAX_DEPTH = 5;
+  const pathFor = (el: Element): Array<{ role: string; index: number; name?: string }> => {
+    const path: Array<{ role: string; index: number; name?: string }> = [];
+    let cur: Element | null = el;
+    let depth = 0;
+    while (cur && cur !== document.documentElement && depth < PATH_MAX_DEPTH) {
+      const curEl: Element = cur;
+      const role = curEl.getAttribute("role") || curEl.tagName.toLowerCase();
+      const parent: Element | null = curEl.parentElement;
+      let idx = 0;
+      if (parent) {
+        const m = roleIndex.get(parent);
+        if (m && m.has(role)) {
+          // ponytail: idx = Nth occurrence of this role among the parent's
+          // children. Looked up directly from the parallel index built in
+          // a single TreeWalker pass — O(1) per ancestor.
+          idx = siblingRoleIndex.get(parent)?.get(curEl) ?? 0;
+        }
+      }
+      const name = (curEl.getAttribute("aria-label") || curEl.getAttribute("title") || "").trim().slice(0, 80);
+      path.unshift({ role, index: idx, name: name || undefined });
+      cur = parent;
+      depth += 1;
+    }
+    return path;
+  };
+  // ponytail: parallel index mapping element → its Nth occurrence of its
+  // role among its parent's children. Built in a single per-parent
+  // pass so pathFor's per-element cost is O(1).
+  const siblingRoleIndex = new Map<Element, Map<Element, number>>();
+  for (const parent of roleIndex.keys()) {
+    const seenRoles = new Map<string, number>();
+    const m = new Map<Element, number>();
+    for (const c of Array.from(parent.children)) {
+      const cr = c.getAttribute("role") || c.tagName.toLowerCase();
+      const n = seenRoles.get(cr) ?? 0;
+      m.set(c, n);
+      seenRoles.set(cr, n + 1);
+    }
+    siblingRoleIndex.set(parent, m);
+  }
+
+  // ponytail: page-identity fingerprint. 128-bit FNV-1a hash over a normalized
+  // AX-subtree dump (role|indexInParentByRole|name). Stable across renders
+  // when the page is semantically the same; different when navigation
+  // actually happens. Reuses roleIndex from above so the cost is O(N).
   const pageIdentity = (() => {
     const lines: string[] = [];
     const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
@@ -623,12 +703,7 @@ function collectPageSnapshot(
       const parent = el.parentElement;
       let idx = 0;
       if (parent) {
-        const sameRole = Array.from(parent.children).filter((c) => {
-          const r = c.getAttribute("role") || c.tagName.toLowerCase();
-          return r === role;
-        });
-        idx = sameRole.indexOf(el);
-        if (idx < 0) idx = 0;
+        idx = siblingRoleIndex.get(parent)?.get(el) ?? 0;
       }
       const name = (el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 80);
       lines.push(`${role}|${idx}|${name}`);
@@ -648,41 +723,6 @@ function collectPageSnapshot(
     return hex(h1) + hex(h2);
   })();
 
-  // ponytail: page purpose — meta description + first h1. Stable step label
-  // for the future workflow recorder; orients the model in one glance.
-  const pagePurpose = (() => {
-    const meta = document.querySelector('meta[name="description"], meta[property="og:description"]');
-    const metaDesc = meta ? (meta.getAttribute("content") || "").trim() : "";
-    const h1 = document.querySelector("h1");
-    const h1Text = h1 ? (h1.textContent || "").trim() : "";
-    const parts = [metaDesc, h1Text].filter((s) => s.length > 0);
-    return parts.join(" — ").slice(0, 512);
-  })();
-
-  // ponytail: StableRef helpers inlined because collectPageSnapshot runs as
-  // a string in the page context (no module imports). Mirrors ax-snapshot.ts.
-  const pathFor = (el: Element): Array<{ role: string; index: number; name?: string }> => {
-    const path: Array<{ role: string; index: number; name?: string }> = [];
-    let cur: Element | null = el;
-    while (cur && cur !== document.documentElement) {
-      const curEl: Element = cur;
-      const role = curEl.getAttribute("role") || curEl.tagName.toLowerCase();
-      const parent = curEl.parentElement;
-      let idx = 0;
-      if (parent) {
-        const sameRole: Element[] = Array.from(parent.children).filter((c: Element) => {
-          const r = c.getAttribute("role") || c.tagName.toLowerCase();
-          return r === role;
-        });
-        idx = sameRole.indexOf(curEl);
-        if (idx < 0) idx = 0;
-      }
-      const name = (cur.getAttribute("aria-label") || cur.getAttribute("title") || "").trim().slice(0, 80);
-      path.unshift({ role, index: idx, name: name || undefined });
-      cur = parent;
-    }
-    return path;
-  };
   const hashAttrs = (el: Element): string => {
     const parts: string[] = [];
     for (const k of ["id", "aria-label", "data-testid", "data-id", "name", "type", "href", "role", "title"]) {
@@ -706,12 +746,16 @@ function collectPageSnapshot(
   // ponytail: visible anchor inventory. text + href + axPath + attributeHash
   // + bbox. Captured for the future workflow recorder — serializes
   // (text='Browse repositories', href='/orgs/X/repositories') without
-  // re-querying the page.
+  // re-querying the page. Cap at 100: most real-world pages have <100
+  // visible clickables; 500 caused the page-context script to blow
+  // past the capture timeout on GitHub/Reddit/Gmail because pathFor
+  // walks the full ancestor chain per element.
   const links: Array<{ text: string; href: string; axPath: Array<{ role: string; index: number; name?: string }>; attributeHash: string; bbox: { x: number; y: number; width: number; height: number } }> = [];
   {
     const sel = "a[href], [role='link'][href], [role='link']";
     const iter = document.querySelectorAll(sel);
-    for (let i = 0; i < iter.length && links.length < 500; i++) {
+    const linkMax = 100;
+    for (let i = 0; i < iter.length && links.length < linkMax; i++) {
       const el = iter[i] as Element;
       if (!isVisible(el)) continue;
       const text = (((el.getAttribute("aria-label") || "") + " " + (el.textContent || "")).trim().replace(/\s+/g, " "));
@@ -728,12 +772,13 @@ function collectPageSnapshot(
   }
 
   // ponytail: visible button inventory (button + role=button + role=tab +
-  // submit/button input).
+  // submit/button input). Cap at 100 for the same reason as links.
   const buttons: Array<{ text: string; axPath: Array<{ role: string; index: number; name?: string }>; attributeHash: string; bbox: { x: number; y: number; width: number; height: number } }> = [];
   {
     const sel = "button, [role='button'], [role='tab'], input[type='submit'], input[type='button']";
     const iter = document.querySelectorAll(sel);
-    for (let i = 0; i < iter.length && buttons.length < 500; i++) {
+    const btnMax = 100;
+    for (let i = 0; i < iter.length && buttons.length < btnMax; i++) {
       const el = iter[i] as Element;
       if (!isVisible(el)) continue;
       if (el.tagName.toLowerCase() === "input") {

@@ -6,6 +6,12 @@ import * as debuggerModule from "./debugger";
 // bound is a safety net, not a target — earlier 12 made the agent feel rushed.
 const MAX_STEPS = 50;
 const HISTORY_LIMIT = 6;
+// ponytail: capture timeout bumped to 25s after slice E added replay-ready
+// fields (pageIdentity, links, buttons, pagePurpose). The page-context
+// script now does significantly more DOM walking — on heavy SPAs
+// (GitHub, Gmail, Reddit) it can take 15-20s. The 15s ceiling caused
+// LOOP_CRASHED on the very first capture.
+const CAPTURE_TIMEOUT_MS = 25_000;
 // ponytail: per-action pause so the demo loop can be cancelled cleanly and
 // the model isn't given time to fly past user-visible state changes.
 const POST_ACTION_PAUSE_MS = 400;
@@ -711,7 +717,7 @@ async function openNewTab(startingUrl: string | undefined): Promise<number> {
       setTimeout(() => {
         chrome.tabs.onUpdated.removeListener(listener);
         resolve();
-      }, 15_000);
+      }, CAPTURE_TIMEOUT_MS);
     });
   }
   return tab.id;
@@ -946,7 +952,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       const iterationStartedAt = Date.now();
       log(opts, `step ${stepIndex + 1}`);
       await activateAgentTab();
-      const obs = await captureForDriverWithTimeout(tabId, 15_000);
+      const obs = await captureForDriverWithTimeout(tabId, CAPTURE_TIMEOUT_MS);
       // ponytail: detect login / auth challenge BEFORE calling the planner so
       // we don't burn a plan step on "click this invisible login form". Catches
       // both the password-form case (looksLikeLoginPage) and the URL/title
@@ -1181,7 +1187,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       let postUrl = obs.url;
       try {
         await activateAgentTab();
-        const postObs = await captureObservationWithTimeout(tabId, 15_000);
+        const postObs = await captureObservationWithTimeout(tabId, CAPTURE_TIMEOUT_MS);
         screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
         postUrl = postObs.url;
       } catch (err) {
