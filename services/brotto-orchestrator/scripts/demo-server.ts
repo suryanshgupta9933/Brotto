@@ -123,6 +123,15 @@ async function main() {
         context: req.body.context,
         ...(req.body.screenshot ? { screenshot: req.body.screenshot } : {}),
       } as never, new AbortController().signal);
+        // ponytail: mark the response when the planner fell back to the
+        // corrective "prose without a tool call" question. The local-driver
+        // uses this to count consecutive prose-only responses and fail
+        // loudly after 2, so the user sees a real failure instead of the
+        // model narrating forever.
+        if (outcome && typeof outcome === "object" && outcome.kind === "question"
+            && /prose without a tool call/i.test(outcome.question ?? "")) {
+          (outcome as { proseOnly?: boolean }).proseOnly = true;
+        }
         break;
       } catch (err) {
         lastErrMessage = err instanceof Error ? err.message : String(err);

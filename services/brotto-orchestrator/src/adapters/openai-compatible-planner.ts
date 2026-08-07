@@ -169,24 +169,20 @@ export class OpenAICompatiblePlanner implements InferencePort {
         choices: undefined,
       };
     }
-    // ponytail: defense in depth — if buildCompletionProposal throws (most
-    // commonly because the placeholder observation was missing observationId
-    // and CompletionProposalV1Schema rejects undefined), fall back to a
-    // question so the loop survives. Otherwise the demo-server returns HTTP
-    // 500, the local-driver retries 3x, and the loop crashes with
-    // LOOP_CRASHED — even though the content itself was a perfectly fine
-    // answer from the model.
-    try {
-      return this.buildCompletionProposal(input, content);
-    } catch (err) {
-      console.warn(`[planner] buildCompletionProposal threw; falling back to question: ${err instanceof Error ? err.message : String(err)}`);
-      return {
-        kind: 'question',
-        observationId: input.observation.observationId ?? (crypto.randomUUID() as never),
-        question: `Your previous answer was: "${content.slice(0, 240)}${content.length > 240 ? '…' : ''}". Confirm with terminate(finalAnswer=<answer>) to commit it as the final report, or send a tool call to keep working.`,
-        choices: undefined,
-      };
-    }
+    // ponytail: prose with no tool call is NOT a completion. The earlier path
+    // converted any non-empty content into CompletionProposalV1, which the
+    // local driver treats as task success — a model that narrates "I need to
+    // sign in" or "let me summarise" without calling terminate would falsely
+    // close the loop. Force a corrective question instead. The local driver
+    // counts consecutive prose-only responses and fails loudly after 2 so the
+    // user sees what the model is doing instead of a phantom success.
+    const prosePreview = content.length > 240 ? `${content.slice(0, 240)}…` : content;
+    return {
+      kind: 'question',
+      observationId: input.observation.observationId ?? (crypto.randomUUID() as never),
+      question: `Your last response was prose without a tool call ("${prosePreview}"). Either call a real action (visit_url, left_click, terminate, etc.) or call terminate(finalAnswer=<your answer>) to commit a final report. Prose-only responses do not end the task.`,
+      choices: undefined,
+    };
   }
 
   private buildMessages(input: PlanningInput): Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> {
@@ -237,7 +233,7 @@ export class OpenAICompatiblePlanner implements InferencePort {
         "If the context shows a stagnation warning (repeated action or unchanged page): the harness is telling you that the same action or page state has repeated 5+ times. Either pick a materially different action, or if the goal is satisfied, call terminate(finalAnswer='<the verified answer>'). Do NOT call memorize_fact — it is no longer a tool; record findings via memoryUpdates instead.",
         "",
         "Rules:",
-        "- NEVER ask the user for credentials (passwords, 2FA codes, OAuth tokens, API keys, etc.). If a page requires login, the harness detects it and PAUSES — the user logs in manually in the browser, then clicks Continue, then the loop resumes from the post-login observation. You do not need to ask.",
+        "- NEVER ask the user for credentials (passwords, 2FA codes, OAuth tokens, API keys, etc.). If a page requires sign-in, click the visible Sign in / Log in link (never type credentials yourself). The harness detects the auth wall, pauses, and resumes automatically once the post-login page loads. Prose-only responses do not end the task — always call terminate(finalAnswer=...) to commit a final report, or call a real action.",
         "- To open a website you can either visit_url(direct_url) or visit_url(google.com/search?q=...) then click the result. Either is fine.",
         "- insert_text types into the currently focused element only. If the field you want is NOT marked focused=true, left_click it first. Never assume a field is focused.",
         "- Type each field's value EXACTLY ONCE. After insert_text, the field's value=\"...\" will update in the next context.",

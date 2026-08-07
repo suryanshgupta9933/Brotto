@@ -278,6 +278,27 @@
     .new-task-btn:hover { background: var(--accent-soft); }
     .new-task-btn.visible { display: block; }
 
+    /* ponytail: safety-net Continue button shown on the login pause card.
+       Primary resume is automatic via webNavigation; this is the manual
+       override for SPAs and OAuth callback flows that don't trigger a
+       navigation event. */
+    .login-continue-btn {
+      align-self: flex-start;
+      margin: 6px 0 0 4px;
+      padding: 6px 14px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+    .login-continue-btn:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .login-continue-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
     /* Header actions */
     .hdr-actions { display: flex; gap: 4px; align-items: center; }
 
@@ -379,6 +400,7 @@
     /* ─── Chat / message area ────────────────────────────────────────────── */
     #messages {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
       padding: 16px 14px;
       display: flex;
@@ -976,6 +998,7 @@
     <div class="settings-section">
       <label for="plannerUrlSetting">Planner URL</label>
       <input id="plannerUrlSetting" class="input" type="url" placeholder="http://127.0.0.1:3001">
+      <p class="settings-hint">Connect to the local planner that Brotto uses for the agent loop.</p>
     </div>
   </div>
 </div>

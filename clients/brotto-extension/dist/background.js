@@ -14385,6 +14385,114 @@ ${lines.join("\n")}
     }
     return { login: true, domain };
   }
+  var AUTH_PATH_RE = /(\/|\?)(login|signin|sign-in|log-in|auth|authenticate|consent|two[-_]?factor|2fa|verify|challenge|account\/login|login\/verify|oauth\/authorize|passkey)(\/|\?|$|&)/i;
+  var AUTH_TITLE_RE = /(sign in|log in|login|continue to|verify|captcha|authenticate|authentication|2-?step|two[- ]?factor|consent|password)/i;
+  function looksLikeAuthChallenge(obs) {
+    let host = "";
+    let path = "";
+    try {
+      const u = new URL(obs.url);
+      host = u.hostname;
+      path = `${u.pathname}${u.search}`;
+    } catch {
+      return { auth: false, domain: "", reason: "" };
+    }
+    if (AUTH_PATH_RE.test(path)) {
+      return { auth: true, domain: host, reason: `url matches ${path}` };
+    }
+    if (typeof obs.title === "string" && AUTH_TITLE_RE.test(obs.title)) {
+      return { auth: true, domain: host, reason: `title="${obs.title}"` };
+    }
+    return { auth: false, domain: "", reason: "" };
+  }
+  var SIGNIN_TEXT_RE = /^(sign\s*in|log\s*in|continue\s*with\s*\w+|continue|log\s*on)$/i;
+  function looksLikeSignInLink(obs) {
+    for (const t of obs.semanticTargets) {
+      if (!t.visible) continue;
+      const tag = t.tag.toLowerCase();
+      if (tag !== "a" && tag !== "button") continue;
+      const label = (t.accessibleName?.text ?? t.attributes?.id ?? t.attributes?.name ?? "").trim();
+      if (label && SIGNIN_TEXT_RE.test(label)) {
+        return { link: true, targetId: t.stableRef ?? t.targetId, label };
+      }
+    }
+    return { link: false, targetId: "", label: "" };
+  }
+  async function waitForLoginResume(tabId, loginDomain, signal) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (auto, kind) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        if (webNavListener) {
+          try {
+            chrome.webNavigation.onCommitted.removeListener(webNavListener);
+          } catch {
+          }
+        }
+        if (tabsListener) {
+          try {
+            chrome.tabs.onUpdated.removeListener(tabsListener);
+          } catch {
+          }
+        }
+        if (interval) clearInterval(interval);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        resolve({ auto, kind });
+      };
+      const onAbort = () => settle(false, "aborted");
+      signal.addEventListener("abort", onAbort, { once: true });
+      let webNavListener = null;
+      let tabsListener = null;
+      let interval = null;
+      let timeoutHandle = null;
+      try {
+        webNavListener = (details) => {
+          if (details.tabId !== tabId) return;
+          let host = "";
+          try {
+            host = new URL(details.url).hostname;
+          } catch {
+            return;
+          }
+          if (host && host !== loginDomain) {
+            settle(true, "redirect");
+          }
+        };
+        chrome.webNavigation.onCommitted.addListener(webNavListener);
+      } catch {
+      }
+      try {
+        tabsListener = (updatedTabId, info) => {
+          if (updatedTabId !== tabId) return;
+          if (typeof info.url !== "string") return;
+          let host = "";
+          try {
+            host = new URL(info.url).hostname;
+          } catch {
+            return;
+          }
+          if (host && host !== loginDomain) {
+            settle(true, "redirect");
+          }
+        };
+        chrome.tabs.onUpdated.addListener(tabsListener);
+      } catch {
+      }
+      interval = setInterval(() => {
+        if (signal.aborted) {
+          settle(false, "aborted");
+          return;
+        }
+        if (pendingLoginResolvers.get(tabId)) {
+          pendingLoginResolvers.delete(tabId);
+          settle(false, "manual");
+        }
+      }, 200);
+      timeoutHandle = setTimeout(() => settle(false, "timeout"), 6e4);
+    });
+  }
   async function callPlanner(opts, context) {
     let lastErr = null;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -14644,62 +14752,81 @@ ${lines.join("\n")}
       }
     }
     let caughtError = null;
+    let terminal = null;
+    let consecutiveProseOnly = 0;
+    const PROSE_ONLY_LIMIT = 2;
     try {
       while (stepIndex < MAX_STEPS) {
         if (opts.signal.aborted) {
-          opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
+          terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
           return;
         }
         log(opts, `step ${stepIndex + 1}`);
         await activateAgentTab();
         const obs = await captureForDriverWithTimeout(tabId, 15e3);
         const login = looksLikeLoginPage(obs);
-        if (login.login) {
-          log(opts, `login page detected at ${login.domain} \u2014 pausing for user`);
-          opts.onLoginRequired({ url: obs.url, domain: login.domain });
-          await new Promise((resolve) => {
-            const onAbort = () => resolve();
-            opts.signal.addEventListener("abort", onAbort, { once: true });
-            const interval = setInterval(() => {
-              if (opts.signal.aborted) {
-                clearInterval(interval);
-                resolve();
-              }
-            }, 500);
-            pendingLoginResolvers.set(tabId, () => {
-              clearInterval(interval);
-              opts.signal.removeEventListener("abort", onAbort);
-              resolve();
-            });
-          });
+        const challenge = login.login ? null : looksLikeAuthChallenge(obs);
+        if (login.login || challenge && challenge.auth) {
+          const domain = login.login ? login.domain : challenge.domain;
+          const reason = login.login ? `password form on ${login.domain}` : `auth challenge (${challenge.reason})`;
+          log(opts, `login pause: ${reason}`);
+          opts.onLoginRequired({ url: obs.url, domain });
+          const loginResume = await waitForLoginResume(tabId, domain, opts.signal);
           pendingLoginResolvers.delete(tabId);
-          log(opts, "user confirmed login \u2014 resuming loop");
+          if (opts.signal.aborted) {
+            terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
+            return;
+          }
+          log(opts, loginResume.auto ? `login resume: ${loginResume.kind}` : "user confirmed login \u2014 resuming loop");
           injectedGuidance = void 0;
           await waitForNetworkIdle(tabId).catch(() => void 0);
           continue;
         }
+        const signIn = looksLikeSignInLink(obs);
+        if (signIn.link && !injectedGuidance) {
+          const targetHint = signIn.targetId ? ` Look for element [${signIn.targetId.slice(0, 8)}] "${signIn.label}" and click its center.` : ` Look for a "${signIn.label}" link/button and click it.`;
+          injectedGuidance = `This page is a logged-out landing page. Click the Sign in / Log in link to authenticate \u2014 never type credentials.${targetHint}`;
+        }
         const context = renderObservationForPlanner(obs, history, injectedGuidance, memory.toView());
         const outcome = await callPlanner(opts, context);
         if (opts.signal.aborted) {
-          opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
+          terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
           return;
         }
         if (outcome.kind === "completion") {
-          opts.onComplete({ summary: outcome.summary ?? "task completed", steps: stepIndex + 1, finalAnswer: outcome.summary });
+          terminal = { kind: "complete", complete: { summary: outcome.summary ?? "task completed", steps: stepIndex + 1, finalAnswer: outcome.summary } };
           return;
         }
         if (outcome.kind === "question") {
-          const question = outcome.question ?? "The agent needs more information.";
+          const questionText = outcome.question ?? "The agent needs more information.";
+          const isProseOnly = outcome.proseOnly === true;
+          if (isProseOnly) {
+            consecutiveProseOnly += 1;
+          } else {
+            consecutiveProseOnly = 0;
+          }
+          if (isProseOnly && consecutiveProseOnly >= PROSE_ONLY_LIMIT) {
+            log(opts, `planner returned prose ${consecutiveProseOnly} times in a row \u2014 aborting`);
+            terminal = {
+              kind: "error",
+              error: {
+                code: "PLANNER_PROSE_INSTEAD_OF_TOOL",
+                message: `The model returned plain text instead of a tool call ${consecutiveProseOnly} times in a row. Last response: "${questionText.slice(0, 240)}". Send it an explicit action (visit_url, terminate, ask_user_question) or use a stronger model.`
+              }
+            };
+            return;
+          }
           const answer = await opts.onClarify({
-            reason: "The planner asked a question",
-            question,
-            context: question
+            reason: isProseOnly ? "planner returned prose instead of a tool call" : "The planner asked a question",
+            question: questionText,
+            context: questionText
           });
           injectedGuidance = answer;
-          opts.onAnswered?.({ question, answer });
+          opts.onAnswered?.({ question: questionText, answer });
           continue;
         }
         const action = outcome.action ?? { type: "unknown" };
+        consecutiveProseOnly = 0;
         memory.merge(action.memoryUpdates);
         if (action.type === "terminate") {
           log(opts, `model called terminate at step ${stepIndex + 1}`);
@@ -14724,7 +14851,7 @@ ${lines.join("\n")}
 Notes recorded during run:
 ${lines.join("\n")}`;
           }
-          opts.onComplete({ summary: richAnswer, steps: stepIndex + 1, finalAnswer: richAnswer });
+          terminal = { kind: "complete", complete: { summary: richAnswer, steps: stepIndex + 1, finalAnswer: richAnswer } };
           return;
         }
         const approval = needsApproval(action, obs);
@@ -14738,7 +14865,7 @@ ${lines.join("\n")}`;
           opts.onApprovalResolved?.({ approved, action: { type: action.type } });
           if (!approved) {
             log(opts, "user denied approval \u2014 aborting task");
-            opts.onError({ code: "APPROVAL_DENIED", message: `User denied: ${approval.reason}` });
+            terminal = { kind: "error", error: { code: "APPROVAL_DENIED", message: `User denied: ${approval.reason}` } };
             return;
           }
           log(opts, "user approved \u2014 proceeding");
@@ -14765,7 +14892,7 @@ ${lines.join("\n")}`;
             failures.length = 0;
             continue;
           }
-          opts.onError({ code: "ACTION_FAILED", message });
+          terminal = { kind: "error", error: { code: "ACTION_FAILED", message } };
           return;
         }
         await waitForNetworkIdle(tabId).catch(() => void 0);
@@ -14808,7 +14935,7 @@ ${lines.join("\n")}`;
 
 Findings so far:
 ${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
-            opts.onError({ code: "STAGNATION", message: blockedMessage });
+            terminal = { kind: "error", error: { code: "STAGNATION", message: blockedMessage } };
             return;
           }
           injectedGuidance = stagnation.message;
@@ -14827,11 +14954,11 @@ ${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
         }
         stepIndex++;
       }
-      opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });
+      terminal = { kind: "error", error: { code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` } };
     } catch (err) {
       caughtError = err instanceof Error ? err : new Error(String(err));
       log(opts, `loop crashed: ${caughtError.message}`);
-      opts.onError({ code: "LOOP_CRASHED", message: caughtError.message });
+      terminal = { kind: "error", error: { code: "LOOP_CRASHED", message: caughtError.message } };
     } finally {
       for (const off of tabListeners) {
         try {
@@ -14840,6 +14967,19 @@ ${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
         }
       }
       await detachFromTab(tabId).catch(() => void 0);
+      if (terminal !== null) {
+        if (terminal.kind === "complete") {
+          try {
+            opts.onComplete(terminal.complete);
+          } catch {
+          }
+        } else {
+          try {
+            opts.onError(terminal.error);
+          } catch {
+          }
+        }
+      }
     }
   }
   var pendingLoginResolvers = /* @__PURE__ */ new Map();
@@ -14998,7 +15138,7 @@ ${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
       case "connect_relay":
         return { success: false, error: "Sending a task starts its authenticated canonical session" };
       case "run_local_task": {
-        if (localAbortController !== null) {
+        if (localAbortController !== null || localTabId !== null) {
           return { success: false, error: "A local task is already running" };
         }
         const goal = String(message.task ?? "").trim();
@@ -15099,6 +15239,7 @@ ${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
         if (localAbortController === null) return { success: false, error: "No local task is running" };
         localAbortController.abort();
         localAbortController = null;
+        localTabId = null;
         return { success: true };
       }
       case "submit_clarification": {

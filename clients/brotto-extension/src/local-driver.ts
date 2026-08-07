@@ -58,6 +58,10 @@ interface PlanningOutcome {
   action?: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string; deltaX?: number; deltaY?: number; answer?: string; finalAnswer?: string; reasoning?: string; memoryUpdates?: MemoryUpdate[] };
   question?: string;
   summary?: string;
+  // ponytail: true when the planner returned a corrective QuestionProposal
+  // because the model emitted prose without a tool call. The local driver
+  // counts consecutive prose-only responses and fails after 2.
+  proseOnly?: boolean;
 }
 
 // ponytail: harness-owned working memory. Merges model-proposed updates with
@@ -373,6 +377,134 @@ export function looksLikeLoginPage(obs: ObservationV1): { login: boolean; domain
     domain = "";
   }
   return { login: true, domain };
+}
+
+// ponytail: auth-challenge detector. Catches pages that demand authentication
+// even when the form is not yet rendered (e.g. GitHub's /login redirect, "verify
+// you are human" interstitials, 2FA landing pages, consent screens). URL and
+// title are the most reliable signals; semanticTargets is too sparse on the
+// initial redirect to be useful.
+const AUTH_PATH_RE = /(\/|\?)(login|signin|sign-in|log-in|auth|authenticate|consent|two[-_]?factor|2fa|verify|challenge|account\/login|login\/verify|oauth\/authorize|passkey)(\/|\?|$|&)/i;
+const AUTH_TITLE_RE = /(sign in|log in|login|continue to|verify|captcha|authenticate|authentication|2-?step|two[- ]?factor|consent|password)/i;
+
+export function looksLikeAuthChallenge(obs: ObservationV1): { auth: boolean; domain: string; reason: string } {
+  let host = "";
+  let path = "";
+  try {
+    const u = new URL(obs.url);
+    host = u.hostname;
+    path = `${u.pathname}${u.search}`;
+  } catch {
+    return { auth: false, domain: "", reason: "" };
+  }
+  if (AUTH_PATH_RE.test(path)) {
+    return { auth: true, domain: host, reason: `url matches ${path}` };
+  }
+  if (typeof obs.title === "string" && AUTH_TITLE_RE.test(obs.title)) {
+    return { auth: true, domain: host, reason: `title="${obs.title}"` };
+  }
+  return { auth: false, domain: "", reason: "" };
+}
+
+// ponytail: sign-in link detector. Catches logged-out landing pages (GitHub,
+// Twitter, Reddit) that show a "Sign in" / "Log in" anchor without rendering
+// the form yet. Returns the targetId of the first matching element so the
+// planner can click it on the next turn.
+const SIGNIN_TEXT_RE = /^(sign\s*in|log\s*in|continue\s*with\s*\w+|continue|log\s*on)$/i;
+
+export function looksLikeSignInLink(obs: ObservationV1): { link: boolean; targetId: string; label: string } {
+  for (const t of obs.semanticTargets) {
+    if (!t.visible) continue;
+    const tag = t.tag.toLowerCase();
+    if (tag !== "a" && tag !== "button") continue;
+    const label = (
+      t.accessibleName?.text ??
+      t.attributes?.id ??
+      t.attributes?.name ??
+      ""
+    ).trim();
+    if (label && SIGNIN_TEXT_RE.test(label)) {
+      return { link: true, targetId: t.stableRef ?? t.targetId, label };
+    }
+  }
+  return { link: false, targetId: "", label: "" };
+}
+
+// ponytail: race the auto-resume signal (webNavigation onCommitted off the
+// login domain, or a tab URL change) against the manual Continue button. The
+// first signal wins. A 60s ceiling matches typical sign-in timeouts.
+async function waitForLoginResume(
+  tabId: number,
+  loginDomain: string,
+  signal: AbortSignal,
+): Promise<{ auto: boolean; kind: "redirect" | "manual" | "aborted" | "timeout" }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (auto: boolean, kind: "redirect" | "manual" | "aborted" | "timeout") => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      if (webNavListener) {
+        try { chrome.webNavigation.onCommitted.removeListener(webNavListener); } catch { /* */ }
+      }
+      if (tabsListener) {
+        try { chrome.tabs.onUpdated.removeListener(tabsListener); } catch { /* */ }
+      }
+      if (interval) clearInterval(interval);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      resolve({ auto, kind });
+    };
+    const onAbort = () => settle(false, "aborted");
+    signal.addEventListener("abort", onAbort, { once: true });
+    let webNavListener: ((d: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null;
+    let tabsListener: ((updatedTabId: number, info: chrome.tabs.TabChangeInfo) => void) | null = null;
+    let interval: ReturnType<typeof setInterval> | null = null;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    // ponytail: any committed navigation off the login domain (including the
+    // first commit AFTER the user clicks "Sign in" — Google login, GitHub
+    // OAuth callbacks, etc.) unblocks the loop. Same-origin continuations
+    // (e.g. the auth provider's own subpages) are ignored deliberately.
+    try {
+      webNavListener = (details) => {
+        if (details.tabId !== tabId) return;
+        let host = "";
+        try { host = new URL(details.url).hostname; } catch { return; }
+        if (host && host !== loginDomain) {
+          settle(true, "redirect");
+        }
+      };
+      chrome.webNavigation.onCommitted.addListener(webNavListener);
+    } catch {
+      // ponytail: webNavigation permission missing in some test envs — fall
+      // through to the tabs.onUpdated watcher.
+    }
+    try {
+      tabsListener = (updatedTabId, info) => {
+        if (updatedTabId !== tabId) return;
+        if (typeof info.url !== "string") return;
+        let host = "";
+        try { host = new URL(info.url).hostname; } catch { return; }
+        if (host && host !== loginDomain) {
+          settle(true, "redirect");
+        }
+      };
+      chrome.tabs.onUpdated.addListener(tabsListener);
+    } catch { /* */ }
+    // ponytail: poll for the manual Continue path (background fires
+    // resolveLoginPause on local_login_complete) and the abort signal.
+    interval = setInterval(() => {
+      if (signal.aborted) { settle(false, "aborted"); return; }
+      if (pendingLoginResolvers.get(tabId)) {
+        // the resolver will be invoked; release on next microtask
+        pendingLoginResolvers.delete(tabId);
+        settle(false, "manual");
+      }
+    }, 200);
+    // ponytail: 60s ceiling. Real auth flows complete in <30s; longer means
+    // the user stepped away, in which case the loop ends in a normal "needs
+    // login" state via the next capture, not by waiting forever.
+    timeoutHandle = setTimeout(() => settle(false, "timeout"), 60_000);
+  });
 }
 
 async function callPlanner(
@@ -700,72 +832,121 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
     }
   }
   let caughtError: Error | null = null;
+  // ponytail: defer the terminal emit until the loop's `finally` block has
+  // detached the debugger and torn down listeners. The background layer reads
+  // `terminal` after the runLocalLoop promise resolves and only then forwards
+  // the terminal UI event. Without this, a new run_local_task message
+  // arriving in the cleanup window races with the terminal event and may be
+  // rejected as "A local task is already running" even though the panel is
+  // already in the `done` phase.
+  type LocalTerminal =
+    | { kind: "complete"; complete: { summary: string; steps: number; finalAnswer?: string } }
+    | { kind: "error"; error: { code: string; message: string } };
+  let terminal: LocalTerminal | null = null;
+  // ponytail: track consecutive prose-only responses so the model gets a single
+  // corrective chance; the second consecutive prose response surfaces a clear
+  // failure (PLANNER_PROSE_INSTEAD_OF_TOOL) instead of silently looping. Reset
+  // whenever the model emits a real tool call.
+  let consecutiveProseOnly = 0;
+  const PROSE_ONLY_LIMIT = 2;
   try {
     while (stepIndex < MAX_STEPS) {
       if (opts.signal.aborted) {
-        opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
+        terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
         return;
       }
       log(opts, `step ${stepIndex + 1}`);
       await activateAgentTab();
       const obs = await captureForDriverWithTimeout(tabId, 15_000);
-      // ponytail: detect login page BEFORE calling the planner so we don't burn
-      // a plan step on "click this invisible login form". The model will see
-      // the post-login observation on the next iteration.
+      // ponytail: detect login / auth challenge BEFORE calling the planner so
+      // we don't burn a plan step on "click this invisible login form". Catches
+      // both the password-form case (looksLikeLoginPage) and the URL/title
+      // challenge case (looksLikeAuthChallenge) — GitHub's /login redirect,
+      // consent pages, and 2FA landings hit the second path. The model will
+      // see the post-login observation on the next iteration.
       const login = looksLikeLoginPage(obs);
-      if (login.login) {
-        log(opts, `login page detected at ${login.domain} — pausing for user`);
-        opts.onLoginRequired({ url: obs.url, domain: login.domain });
-        // ponytail: pause until the user clicks Continue. We block on a
-        // shared promise controlled by the background handler.
-        await new Promise<void>((resolve) => {
-          const onAbort = () => resolve();
-          opts.signal.addEventListener("abort", onAbort, { once: true });
-          const interval = setInterval(() => {
-            if (opts.signal.aborted) {
-              clearInterval(interval);
-              resolve();
-            }
-          }, 500);
-          pendingLoginResolvers.set(tabId, () => {
-            clearInterval(interval);
-            opts.signal.removeEventListener("abort", onAbort);
-            resolve();
-          });
-        });
+      const challenge = login.login ? null : looksLikeAuthChallenge(obs);
+      if (login.login || (challenge && challenge.auth)) {
+        const domain = login.login ? login.domain : (challenge as { domain: string }).domain;
+        const reason = login.login
+          ? `password form on ${login.domain}`
+          : `auth challenge (${(challenge as { reason: string }).reason})`;
+        log(opts, `login pause: ${reason}`);
+        opts.onLoginRequired({ url: obs.url, domain });
+        // ponytail: race auto-resume (URL/tab update off the login domain)
+        // against the manual Continue button. Whichever fires first unblocks
+        // the loop. Abort also resolves immediately so cancellation is clean.
+        const loginResume = await waitForLoginResume(tabId, domain, opts.signal);
         pendingLoginResolvers.delete(tabId);
-        log(opts, "user confirmed login — resuming loop");
+        if (opts.signal.aborted) {
+          terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
+          return;
+        }
+        log(opts, loginResume.auto ? `login resume: ${loginResume.kind}` : "user confirmed login — resuming loop");
         injectedGuidance = undefined;
         await waitForNetworkIdle(tabId).catch(() => undefined);
         continue;
       }
+      // ponytail: logged-out landing page (e.g. GitHub, Reddit) shows a
+      // Sign in / Log in anchor but no auth form. Nudge the model to click
+      // it before doing anything else — without this hint the planner keeps
+      // reasoning about why it can't act and the loop burns model turns.
+      const signIn = looksLikeSignInLink(obs);
+      if (signIn.link && !injectedGuidance) {
+        const targetHint = signIn.targetId
+          ? ` Look for element [${signIn.targetId.slice(0, 8)}] "${signIn.label}" and click its center.`
+          : ` Look for a "${signIn.label}" link/button and click it.`;
+        injectedGuidance = `This page is a logged-out landing page. Click the Sign in / Log in link to authenticate — never type credentials.${targetHint}`;
+      }
       const context = renderObservationForPlanner(obs, history, injectedGuidance, memory.toView());
       const outcome = await callPlanner(opts, context);
       if (opts.signal.aborted) {
-        opts.onError({ code: "ABORTED", message: "Loop was cancelled" });
+        terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
         return;
       }
       if (outcome.kind === "completion") {
         // ponytail: completion path doesn't carry finalAnswer (the planner
         // signals termination via action:terminate in this codebase). Fall
         // back to the summary so the UI still has something to show.
-        opts.onComplete({ summary: outcome.summary ?? "task completed", steps: stepIndex + 1, finalAnswer: outcome.summary });
+        terminal = { kind: "complete", complete: { summary: outcome.summary ?? "task completed", steps: stepIndex + 1, finalAnswer: outcome.summary } };
         return;
       }
       if (outcome.kind === "question") {
-        // ponytail: planner can also emit a question. Surface it to the user,
-        // append their answer to the goal as guidance for the next iteration.
-        const question = outcome.question ?? "The agent needs more information.";
+        // ponytail: prose-only / clarification paths. Track consecutive
+        // prose-only responses; two in a row = the model is stuck narrating
+        // instead of acting, so fail loudly with the prose quoted.
+        const questionText = outcome.question ?? "The agent needs more information.";
+        const isProseOnly = outcome.proseOnly === true;
+        if (isProseOnly) {
+          consecutiveProseOnly += 1;
+        } else {
+          consecutiveProseOnly = 0;
+        }
+        if (isProseOnly && consecutiveProseOnly >= PROSE_ONLY_LIMIT) {
+          log(opts, `planner returned prose ${consecutiveProseOnly} times in a row — aborting`);
+          terminal = {
+            kind: "error",
+            error: {
+              code: "PLANNER_PROSE_INSTEAD_OF_TOOL",
+              message: `The model returned plain text instead of a tool call ${consecutiveProseOnly} times in a row. Last response: "${questionText.slice(0, 240)}". Send it an explicit action (visit_url, terminate, ask_user_question) or use a stronger model.`,
+            },
+          };
+          return;
+        }
+        // ponytail: surface the planner's correction to the user, then inject
+        // their answer (or empty) as guidance for the next planner call.
         const answer = await opts.onClarify({
-          reason: "The planner asked a question",
-          question,
-          context: question,
+          reason: isProseOnly ? "planner returned prose instead of a tool call" : "The planner asked a question",
+          question: questionText,
+          context: questionText,
         });
         injectedGuidance = answer;
-        opts.onAnswered?.({ question, answer });
+        opts.onAnswered?.({ question: questionText, answer });
         continue;
       }
       const action = outcome.action ?? { type: "unknown" };
+      // ponytail: any real tool call resets the prose-only counter.
+      consecutiveProseOnly = 0;
       // ponytail: merge working-memory updates proposed by the planner BEFORE
       // validating termination — a valid termination may rely on a finding that
       // was just recorded this turn.
@@ -806,7 +987,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           const lines = findings.map((f) => `  • ${f.key} = ${f.value}${f.evidence ? `  (${f.evidence})` : ""}`);
           richAnswer = `${finalAnswer}\n\nNotes recorded during run:\n${lines.join("\n")}`;
         }
-        opts.onComplete({ summary: richAnswer, steps: stepIndex + 1, finalAnswer: richAnswer });
+        terminal = { kind: "complete", complete: { summary: richAnswer, steps: stepIndex + 1, finalAnswer: richAnswer } };
         return;
       }
       // ponytail: pause before destructive actions. The user sees the action
@@ -823,7 +1004,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         opts.onApprovalResolved?.({ approved, action: { type: action.type } });
         if (!approved) {
           log(opts, "user denied approval — aborting task");
-          opts.onError({ code: "APPROVAL_DENIED", message: `User denied: ${approval.reason}` });
+          terminal = { kind: "error", error: { code: "APPROVAL_DENIED", message: `User denied: ${approval.reason}` } };
           return;
         }
         log(opts, "user approved — proceeding");
@@ -852,7 +1033,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           failures.length = 0;
           continue;
         }
-        opts.onError({ code: "ACTION_FAILED", message });
+        terminal = { kind: "error", error: { code: "ACTION_FAILED", message } };
         return;
       }
       await waitForNetworkIdle(tabId).catch(() => undefined);
@@ -909,7 +1090,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           // so the user can see what was recorded before the agent gave up.
           const findings = memory.toView();
           const blockedMessage = `${stagnation.message}\n\nFindings so far:\n${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
-          opts.onError({ code: "STAGNATION", message: blockedMessage });
+          terminal = { kind: "error", error: { code: "STAGNATION", message: blockedMessage } };
           return;
         }
         // ponytail: first stagnation hit is a recovery signal — re-prompt with
@@ -932,17 +1113,29 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       }
       stepIndex++;
     }
-    opts.onError({ code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` });
+    terminal = { kind: "error", error: { code: "MAX_STEPS_EXCEEDED", message: `Did not complete in ${MAX_STEPS} steps` } };
   } catch (err) {
     // ponytail: captureObservation timeout or any other loop error would
     // otherwise become an unhandled rejection and silently leave the
     // side panel in RUNNING. Surface as task_failed so the user sees it.
     caughtError = err instanceof Error ? err : new Error(String(err));
     log(opts, `loop crashed: ${caughtError.message}`);
-    opts.onError({ code: "LOOP_CRASHED", message: caughtError.message });
+    terminal = { kind: "error", error: { code: "LOOP_CRASHED", message: caughtError.message } };
   } finally {
     for (const off of tabListeners) { try { off(); } catch { /* */ } }
     await debuggerModule.detachFromTab(tabId).catch(() => undefined);
+    // ponytail: emit the terminal event AFTER cleanup completes. This is the
+    // single source of truth for the loop's terminal state — the background
+    // sees this once the runLocalLoop promise resolves, then nulls its own
+    // localAbortController / localTabId, then forwards the event to the side
+    // panel. No other path calls opts.onComplete / opts.onError.
+    if (terminal !== null) {
+      if (terminal.kind === "complete") {
+        try { opts.onComplete(terminal.complete); } catch { /* listener threw */ }
+      } else {
+        try { opts.onError(terminal.error); } catch { /* listener threw */ }
+      }
+    }
   }
 }
 

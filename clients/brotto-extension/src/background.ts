@@ -181,7 +181,7 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
       // ponytail: extension runs the agent loop locally against the demo-server.
       // Used for the demo path where the user installs the extension and watches
       // actions take place in their real Chrome without a remote orchestrator.
-      if (localAbortController !== null) {
+      if (localAbortController !== null || localTabId !== null) {
         return { success: false, error: "A local task is already running" };
       }
       const goal = String(message.task ?? "").trim();
@@ -227,11 +227,18 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
           notifyUi({ type: "login_required", url, domain });
         },
         onComplete: ({ summary, steps, finalAnswer }) => {
+          // ponytail: the local-driver emits this from inside its `finally`
+          // block AFTER the debugger has been detached and tab listeners
+          // cleared. We forward the UI event but do NOT null the local
+          // state here — that has to wait until the runLocalLoop promise
+          // resolves below, so a fast-following run_local_task cannot race
+          // past the terminal emit.
           notifyUi({ type: "task_completed", summary, steps, finalAnswer });
         },
         onError: ({ code, message }) => {
           // ponytail: emit as task_failed so the side panel renders the error
-          // card. (canonical_error used to be ignored by the new UI.)
+          // card. (canonical_error used to be ignored by the new UI.) State
+          // cleanup is handled in the .then()/.catch() below.
           notifyUi({ type: "task_failed", code, message });
         },
         onLog: (message) => {
@@ -298,6 +305,7 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
       if (localAbortController === null) return { success: false, error: "No local task is running" };
       localAbortController.abort();
       localAbortController = null;
+      localTabId = null;
       return { success: true };
     }
     case "submit_clarification": {

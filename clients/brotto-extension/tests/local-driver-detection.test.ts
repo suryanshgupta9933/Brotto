@@ -1,7 +1,7 @@
 // ponytail: unit tests for the detection helpers in local-driver.ts. These
 // are pure functions, so we exercise them directly without the runner.
 
-import { detectLoop, detectStuckFailures, needsApproval } from "../src/local-driver";
+import { detectLoop, detectStuckFailures, looksLikeAuthChallenge, looksLikeLoginPage, looksLikeSignInLink, needsApproval } from "../src/local-driver";
 
 describe("detectLoop", () => {
   it("returns false when history is shorter than threshold", () => {
@@ -111,5 +111,90 @@ describe("needsApproval", () => {
 
   it("handles missing accessibilityNodes gracefully", () => {
     expect(needsApproval({ type: "left_click" }, { url: "https://example.com/" }).needs).toBe(false);
+  });
+});
+
+describe("looksLikeLoginPage", () => {
+  function obs(elements: Array<{ tag: string; control: { kind: string; type?: string }; visible: boolean }>, url = "https://x.com/login") {
+    return { url, semanticTargets: elements };
+  }
+
+  it("returns false when no password input", () => {
+    const r = looksLikeLoginPage(obs([
+      { tag: "input", control: { kind: "input", type: "text" }, visible: true },
+    ]) as never);
+    expect(r.login).toBe(false);
+  });
+
+  it("returns true when password input and submit button present", () => {
+    const r = looksLikeLoginPage(obs([
+      { tag: "input", control: { kind: "input", type: "password" }, visible: true },
+      { tag: "input", control: { kind: "input", type: "submit" }, visible: true },
+    ]) as never);
+    expect(r.login).toBe(true);
+    expect(r.domain).toBe("x.com");
+  });
+
+  it("ignores password input when not visible", () => {
+    const r = looksLikeLoginPage(obs([
+      { tag: "input", control: { kind: "input", type: "password" }, visible: false },
+      { tag: "button", control: { kind: "button" }, visible: true },
+    ]) as never);
+    expect(r.login).toBe(false);
+  });
+});
+
+describe("looksLikeAuthChallenge", () => {
+  it("matches login-style paths", () => {
+    const r = looksLikeAuthChallenge({ url: "https://github.com/login?return_to=/", title: "Sign in" } as never);
+    expect(r.auth).toBe(true);
+    expect(r.domain).toBe("github.com");
+  });
+
+  it("matches 2FA / verify / consent", () => {
+    const cases = [
+      "https://x.com/account/login/verify",
+      "https://x.com/two-factor",
+      "https://x.com/oauth/authorize?client_id=abc",
+      "https://x.com/consent",
+    ];
+    for (const url of cases) {
+      const r = looksLikeAuthChallenge({ url, title: "" } as never);
+      expect(r.auth).toBe(true);
+    }
+  });
+
+  it("matches login-style titles", () => {
+    const r = looksLikeAuthChallenge({ url: "https://x.com/", title: "Verify you are human" } as never);
+    expect(r.auth).toBe(true);
+  });
+
+  it("returns false on a normal landing page", () => {
+    const r = looksLikeAuthChallenge({ url: "https://github.com/", title: "GitHub: Let's build from here" } as never);
+    expect(r.auth).toBe(false);
+  });
+});
+
+describe("looksLikeSignInLink", () => {
+  it("detects a visible Sign in anchor on a logged-out page", () => {
+    const r = looksLikeSignInLink({
+      url: "https://github.com/",
+      semanticTargets: [
+        { tag: "a", accessibleName: { text: "Sign in" }, visible: true, control: { kind: "link" } as never, targetId: "abc" as never, stableRef: "abc" },
+      ],
+    } as never);
+    expect(r.link).toBe(true);
+    expect(r.label.toLowerCase()).toBe("sign in");
+    expect(r.targetId).toBe("abc");
+  });
+
+  it("returns false when no sign-in / log-in / continue text", () => {
+    const r = looksLikeSignInLink({
+      url: "https://github.com/",
+      semanticTargets: [
+        { tag: "a", accessibleName: { text: "Pricing" }, visible: true, control: { kind: "link" } as never, targetId: "abc" as never, stableRef: "abc" },
+      ],
+    } as never);
+    expect(r.link).toBe(false);
   });
 });

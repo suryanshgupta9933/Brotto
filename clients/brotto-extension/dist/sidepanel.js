@@ -272,7 +272,21 @@ function setPhase(phase, message) {
   const running = phase === 'executing' || phase === 'paused';
   workingInd.classList.toggle('active', running);
   stopBtn.style.display = running ? '' : 'none';
+  // ponytail: re-enable the composer explicitly when the task ends so a
+  // "done" / "error" / "cancelled" / "disconnected" / "failed" phase
+  // always makes the goal input re-usable. setPhase is the single source
+  // of truth for the input's enabled state; other code paths must call
+  // setPhase rather than toggling sendBtn.disabled directly.
   sendBtn.disabled = running || phase === 'connecting';
+  // ponytail: surface a brief feedback message for the prose-only failure
+  // so the user knows the loop stopped on purpose, not from a network
+  // error. The actual message is rendered by the task_failed handler.
+  if (phase === 'done' || phase === 'error') {
+    // ponytail: cleanup any leftover login-pause fallback. The Continue
+    // button is only useful while the loop is waiting for sign-in; once
+    // we are post-terminal the user has moved on.
+    document.querySelectorAll(".login-continue-btn").forEach((el) => el.remove());
+  }
   // ponytail: status pill is visible in the header. Updates text + color
   // class so the user can read connection state at a glance (Idle by default).
   const labels = {
@@ -453,11 +467,29 @@ function sendMessage(message) {
 }
 
 // ── Chat rendering ────────────────────────────────────────────────────────
+// ponytail: a single clearMessages is enough — the previous second
+// declaration (lines 456-461 in the old file) shadowed this one and skipped
+// the empty-state placeholder + timer reset, leaving the panel blank after
+// the first task ended. Keep this implementation canonical; remove any
+// duplicate.
 function clearMessages() {
   messagesEl.replaceChildren();
   state.stepCount = 0;
   updateStepCount();
-  appendEmptyState();
+  stopTimer();
+  seenTabs.clear();
+  if (tabBar) tabBar.hidden = true;
+  // ponytail: clean up any lingering login-pause fallback buttons from a
+  // previous task — a leftover Continue button is confusing once the user
+  // is starting fresh.
+  if (typeof document !== "undefined") {
+    document.querySelectorAll(".login-continue-btn").forEach((el) => el.remove());
+  }
+  // ponytail: reset to initial empty-state by re-creating the placeholder so
+  // the panel doesn't look empty.
+  if (!document.getElementById("emptyState")) {
+    messagesEl.appendChild(createEmptyState());
+  }
 }
 
 function appendEmptyState() {
@@ -947,8 +979,24 @@ chrome.runtime.onMessage.addListener((message) => {
       setPhase('paused', `Login required at ${message.domain || 'site'}`);
       appendMessage({
         role: 'assistant',
-        text: `Login required on ${message.domain || 'this site'}. Please sign in manually in the browser tab, then the task will continue.`,
+        text: `Login required on ${message.domain || 'this site'}. Sign in manually in the browser tab — the task will resume automatically once the post-login page loads. Click Continue only if the auto-resume doesn't fire.`,
       });
+      // ponytail: safety-net Continue button. The primary resume path is
+      // webNavigation.onCommitted firing off the login domain, but that
+      // misses some SPAs and OAuth callback flows. The button is a manual
+      // override — clicking it sends local_login_complete, which resolves
+      // the loop's pending login pause. Cleaned up on the next task start
+      // and on terminal phase transitions.
+      const continueBtn = document.createElement('button');
+      continueBtn.type = 'button';
+      continueBtn.className = 'login-continue-btn';
+      continueBtn.textContent = 'Continue';
+      continueBtn.addEventListener('click', () => {
+        continueBtn.disabled = true;
+        void chrome.runtime.sendMessage({ type: 'local_login_complete' });
+      });
+      messagesEl.appendChild(continueBtn);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
       break;
 
     case 'task_completed':
