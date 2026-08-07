@@ -141,14 +141,34 @@ export interface StagnationSignal {
 const STAGNATION_REPEAT_THRESHOLD = 3;
 const STAGNATION_WINDOW = 6;
 
-export function actionSignature(action: { type?: string; url?: string; x?: number; y?: number; text?: string; key?: string }): string {
+export function actionSignature(
+  action: { type?: string; url?: string; x?: number; y?: number; text?: string; key?: string },
+  obs?: { semanticTargets?: Array<{ visible?: boolean; stableRef?: string; targetId: string; boundingBox: { x: number; y: number; width: number; height: number } }> },
+): string {
   const t = (action.type ?? "unknown").toLowerCase();
   switch (t) {
     case "visit_url": return `visit_url:${(action.url ?? "").trim()}`;
     case "left_click":
     case "double_click":
     case "right_click":
-    case "mouse_move": return `${t}:${action.x ?? 0},${action.y ?? 0}`;
+    case "mouse_move": {
+      if (obs?.semanticTargets && typeof action.x === "number" && typeof action.y === "number") {
+        const x = action.x;
+        const y = action.y;
+        const target = obs.semanticTargets.find((candidate) => {
+          const bb = candidate.boundingBox;
+          return bb && x >= bb.x && x <= bb.x + bb.width && y >= bb.y && y <= bb.y + bb.height && candidate.visible;
+        });
+        if (target) {
+          const id = target.stableRef ?? target.targetId;
+          return `${t}:target:${id}`;
+        }
+      }
+      // Fallback: bucket coordinates to 20px grid to catch nearby duplicate clicks
+      const rx = Math.round((action.x ?? 0) / 20) * 20;
+      const ry = Math.round((action.y ?? 0) / 20) * 20;
+      return `${t}:${rx},${ry}`;
+    }
     case "insert_text": return `insert_text:${(action.text ?? "").slice(0, 40)}`;
     case "key": return `key:${action.key ?? ""}`;
     case "scroll":
@@ -160,6 +180,7 @@ export function actionSignature(action: { type?: string; url?: string; x?: numbe
     default: return t;
   }
 }
+
 
 export function observationSignature(obs: { url?: string; title?: string; elements?: Array<{ id?: string }> }): string {
   const firstId = obs.elements && obs.elements.length > 0 ? obs.elements[0]?.id ?? "" : "";
@@ -1258,7 +1279,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       // and loop to the next turn so the model is forced to pivot without wasting time/CDP.
       // NOTE: `scroll` is explicitly excluded from Hard Action Rejection because scrolling down
       // long pages or lists is a normal multi-step action that doesn't change URL.
-      const actionSig = actionSignature(action);
+      const actionSig = actionSignature(action, obs);
       const isRepeatUnchanged = action.type !== "scroll" && history.some(
         (h) => (h.action === desc || actionSigs.includes(actionSig)) && h.result.includes("[Unchanged"),
       );
@@ -1364,7 +1385,6 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           pageChanged = true;
         } else {
           outcomeTag = ` [Unchanged: URL and page state remained identical]`;
-
         }
       }
 
@@ -1391,7 +1411,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       //     compare pre-action identity to itself → always identical.
       //   - actionSigs: detect same click coord repeated.
       // Whichever fires first wins.
-      actionSigs.push(actionSignature(action));
+      actionSigs.push(actionSignature(action, obs));
       const postTitle = postObs?.title ?? obs.title;
       const postTargets = postObs?.semanticTargets ?? obs.semanticTargets;
       obsSigs.push(observationSignature({ url: postUrl, title: postTitle, elements: postTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
