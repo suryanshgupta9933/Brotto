@@ -1408,13 +1408,33 @@ export async function captureObservation(
   tabId: number,
   options: CaptureObservationOptions = {},
 ): Promise<ObservationV1> {
+  // ponytail: settle loop. SPAs (Gmail, Reddit) sometimes render the new URL
+  // before they finish hydrating the body — capturing at that moment
+  // produces a near-empty bodyText and the agent acts on stale assumptions.
+  // Retry up to 2 more times with 400ms gaps if bodyText is suspiciously
+  // short OR the lifecycle is still loading. Cheap when content is already
+  // there (one round trip).
+  const MIN_BODY_CHARS = 80;
+  const SETTLE_RETRIES = 2;
+  const SETTLE_DELAY_MS = 400;
+  let result: ObservationV1 | null = null;
+  let attempts = 0;
   // ponytail: forbidden-data checks (passwords, tokens, cookies in
   // accessibility text) trip on real-world pages like GitHub's login form.
   // Surface a degraded observation (URL/title only, no semantic targets)
   // so the loop survives and the planner can still navigate. The model's
   // raw CDP via debugger.sendCommand is unaffected.
   try {
-    return await captureObservationInternal(tabId, options);
+    while (true) {
+      result = await captureObservationInternal(tabId, options);
+      const body = result.bodyText ?? "";
+      const lifecycle = result.page?.lifecycle ?? "complete";
+      const settled = body.length >= MIN_BODY_CHARS && lifecycle === "complete";
+      if (settled || attempts >= SETTLE_RETRIES) break;
+      attempts += 1;
+      await new Promise<void>((r) => setTimeout(r, SETTLE_DELAY_MS));
+    }
+    return result!;
   } catch (error) {
     if (error instanceof ForbiddenBrowserDataError) {
       return {

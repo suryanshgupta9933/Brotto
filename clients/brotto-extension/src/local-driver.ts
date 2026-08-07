@@ -1340,18 +1340,13 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           opts.onAnswered?.({ question: "terminate without finalAnswer", answer });
           continue;
         }
-        // ponytail: append the recorded memory as a "Notes recorded during
-        // run" block so the user always sees structured findings even if the
-        // model's finalAnswer is terse. The model's answer takes priority;
-        // we add facts the harness collected independently. Memory entries
-        // with key starting with "_" are skipped (internal markers).
-        const findings = memory.toView().filter((f) => !f.key.startsWith("_"));
-        let richAnswer = finalAnswer;
-        if (findings.length > 0) {
-          const lines = findings.map((f) => `  • ${f.key} = ${f.value}${f.evidence ? `  (${f.evidence})` : ""}`);
-          richAnswer = `${finalAnswer}\n\nNotes recorded during run:\n${lines.join("\n")}`;
-        }
-        terminal = { kind: "complete", complete: { summary: richAnswer, steps: stepIndex + 1, finalAnswer: richAnswer } };
+        // ponytail: pass the model's finalAnswer straight to the UI. Earlier
+        // we appended "Notes recorded during run" with every memory fact —
+        // users complained the answer was too cluttered with internal markers
+        // (sender domains, URL paths, repeated digits). The harness-owned
+        // facts still appear in the run log + side-panel details; the final
+        // answer should be the model's plain-English answer only.
+        terminal = { kind: "complete", complete: { summary: finalAnswer, steps: stepIndex + 1, finalAnswer } };
         return;
       }
       // ponytail: pause before destructive actions. The user sees the action

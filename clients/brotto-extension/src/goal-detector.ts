@@ -123,6 +123,7 @@ export function detectGoalMatch(goal: string, obs: GoalMatchObservation): GoalMa
     "=== GOAL MATCH DETECTED ===",
     `The current page contains keywords from your goal: ${matchedKeywords.join(", ")}.`,
     `Concrete facts visible: ${factStr}.`,
+    "If the visible facts are ONLY in subject lines / list items (not in a body or page text), CLICK the relevant item to OPEN it before terminating — list-item text is often a teaser, not the actual answer.",
     "You have likely found the answer. CALL terminate(finalAnswer=<the facts>) NOW.",
     "Do NOT navigate further. The page you are on IS the answer.",
     "=== END GOAL MATCH ===",
