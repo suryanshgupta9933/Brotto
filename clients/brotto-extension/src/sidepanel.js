@@ -160,6 +160,32 @@ function deriveReasoningFromAction(title, iconKind) {
   return t.length > 80 ? `${t.slice(0, 77)}…` : `${t}…`;
 }
 
+// ── SW keep-alive (MV3) ──────────────────────────────────────────────────
+// ponytail: open a long-lived port to the service worker so Chrome doesn't
+// terminate it between tasks. Without this, the SW is killed after ~30s of
+// inactivity, and the next sendMessage can hit a cold-start race — heavy
+// imports (CanonicalExtensionController, transport, action-executor) plus
+// controller.restore() can take long enough that the message callback
+// fires before the SW's onMessage listener is registered. Symptom: the
+// second task silently no-ops, side panel stays idle. Reconnect on
+// disconnect (SW crash, manual reload from chrome://extensions).
+let swKeepAlive = null;
+function connectSwKeepAlive() {
+  try {
+    swKeepAlive = chrome.runtime.connect({ name: "brotto-sidepanel" });
+  } catch (err) {
+    console.warn("[sidepanel] keep-alive connect failed:", err);
+    setTimeout(connectSwKeepAlive, 1000);
+    return;
+  }
+  swKeepAlive.onDisconnect.addListener(() => {
+    swKeepAlive = null;
+    // ponytail: brief delay so we don't spin if the SW is genuinely gone.
+    setTimeout(connectSwKeepAlive, 200);
+  });
+}
+connectSwKeepAlive();
+
 // ── Button handlers (preserved verbatim) ─────────────────────────────────
 if (connectBtn) connectBtn.addEventListener('click', () => void connect());
 if (disconnectBtn) disconnectBtn.addEventListener('click', () => void disconnect());

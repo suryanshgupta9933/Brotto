@@ -160,6 +160,32 @@ function deriveReasoningFromAction(title, iconKind) {
   return t.length > 80 ? `${t.slice(0, 77)}…` : `${t}…`;
 }
 
+// ── SW keep-alive (MV3) ──────────────────────────────────────────────────
+// ponytail: open a long-lived port to the service worker so Chrome doesn't
+// terminate it between tasks. Without this, the SW is killed after ~30s of
+// inactivity, and the next sendMessage can hit a cold-start race — heavy
+// imports (CanonicalExtensionController, transport, action-executor) plus
+// controller.restore() can take long enough that the message callback
+// fires before the SW's onMessage listener is registered. Symptom: the
+// second task silently no-ops, side panel stays idle. Reconnect on
+// disconnect (SW crash, manual reload from chrome://extensions).
+let swKeepAlive = null;
+function connectSwKeepAlive() {
+  try {
+    swKeepAlive = chrome.runtime.connect({ name: "brotto-sidepanel" });
+  } catch (err) {
+    console.warn("[sidepanel] keep-alive connect failed:", err);
+    setTimeout(connectSwKeepAlive, 1000);
+    return;
+  }
+  swKeepAlive.onDisconnect.addListener(() => {
+    swKeepAlive = null;
+    // ponytail: brief delay so we don't spin if the SW is genuinely gone.
+    setTimeout(connectSwKeepAlive, 200);
+  });
+}
+connectSwKeepAlive();
+
 // ── Button handlers (preserved verbatim) ─────────────────────────────────
 if (connectBtn) connectBtn.addEventListener('click', () => void connect());
 if (disconnectBtn) disconnectBtn.addEventListener('click', () => void disconnect());
@@ -264,6 +290,13 @@ async function resetForNewTask() {
 
 function appendUserMessage(text) {
   appendMessage({ role: 'user', text });
+}
+
+// ponytail: tiny logger for internal noise (cancel races, retry ticks)
+// that should NOT render in the chat. Service-worker console only via
+// console.log inside the page; nothing in the UI changes.
+function logSilently(message) {
+  console.log(`[sidepanel] ${message}`);
 }
 
 // ── Phase / UI helpers ────────────────────────────────────────────────────
@@ -437,14 +470,23 @@ async function startTask() {
 }
 
 async function stopTask() {
+  // ponytail: guard against double-click. The cancel handler may finish
+  // before the user releases the button, and a second click would post
+  // 'cancel_local_task' which then returns 'No local task is running'.
+  if (state.phase !== 'executing' && state.phase !== 'paused') return;
   stopBtn.disabled = true;
   // ponytail: surface immediate "Stopped" feedback so the user sees their
-  // click took effect. The background's cancel returns immediately; the loop
-  // emits task_failed (ABORTED) a few ticks later as cleanup unwinds.
+  // click took effect. The background's cancel emits a terminal event
+  // synchronously now, so the side panel exits 'Working' within ~1 tick.
   appendMessage({ role: 'system', text: 'Stopped by user — finishing current step…' });
   setPhase('paused', 'Stopping…');
   const response = await sendMessage({ type: 'cancel_local_task' });
-  if (!response.success) appendMessage({ role: 'error', text: `Cancel failed: ${response.error || 'unknown error'}` });
+  if (!response.success) {
+    // ponytail: cancel after the loop already terminated (the user's
+    // second click). The terminal event is already on the way; do not
+    // show an error bubble that contradicts it.
+    logSilently(`cancel_local_task returned: ${response.error || 'unknown'}`);
+  }
 }
 
 async function refresh() {
@@ -507,6 +549,38 @@ function createEmptyState() {
   return div;
 }
 
+// ponytail: extract structured facts from the model's finalAnswer so
+// the side panel can show URLs / order IDs / tracking IDs as a tidy
+// list rather than buried in a wall of prose. Best-effort regex — no
+// false positives in real-world text.
+function renderFacts(finalAnswer) {
+  if (!finalAnswer) return '';
+  const urlRe = /\bhttps?:\/\/[^\s)\]'"<>]+/g;
+  const orderIdRe = /\b(?:order\s*(?:#|number|id)|tracking\s*(?:id|number))\s*[:=]?\s*([A-Z0-9][-A-Z0-9]{4,})/gi;
+  const dateRe = /\b(?:\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)\w*|\d{4}-\d{2}-\d{2})\b/gi;
+  const urls = Array.from(new Set(finalAnswer.match(urlRe) || [])).slice(0, 5);
+  const orderIds = Array.from(new Set(
+    (finalAnswer.match(orderIdRe) || []).map((m) => m.replace(/^(?:order|tracking)\s*(?:#|number|id)?\s*:?\s*/i, '').trim())
+  )).slice(0, 5);
+  const dates = Array.from(new Set(finalAnswer.match(dateRe) || [])).slice(0, 5);
+  if (urls.length === 0 && orderIds.length === 0 && dates.length === 0) return '';
+  const lines = [];
+  if (urls.length > 0) {
+    lines.push('<div class="facts-group"><span class="facts-label">Links</span>');
+    for (const u of urls) lines.push(`<a class="facts-link" href="${escapeHtml(u)}" target="_blank" rel="noreferrer">${escapeHtml(u)}</a>`);
+    lines.push('</div>');
+  }
+  if (orderIds.length > 0) {
+    lines.push('<div class="facts-group"><span class="facts-label">Identifiers</span>' +
+      orderIds.map((id) => `<code class="facts-code">${escapeHtml(id)}</code>`).join(' ') + '</div>');
+  }
+  if (dates.length > 0) {
+    lines.push('<div class="facts-group"><span class="facts-label">Dates</span>' +
+      dates.map((d) => `<span class="facts-date">${escapeHtml(d)}</span>`).join(' ') + '</div>');
+  }
+  return `<div class="facts">${lines.join('')}</div>`;
+}
+
 function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   // Remove empty state on first real message
   const empty = messagesEl.querySelector('.empty-state');
@@ -542,14 +616,22 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   } else if (role === 'done') {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
+    // ponytail: clean done-message layout. finalAnswer is the model's
+    // plain-English answer — show it as the primary content. Below it,
+    // extract structured facts (URLs, order IDs, tracking IDs, dates)
+    // as a clean list. Avoid duplicating the answer in a summary line.
+    const stepsMatch = (text || '').match(/^(\d+)\s*steps?\b/i);
+    const stepCount = stepsMatch ? stepsMatch[1] : '';
     const finalAnswerHtml = finalAnswer
       ? `<div class="final-answer"><div class="final-answer-text">${escapeHtml(finalAnswer)}</div></div>`
       : '';
-    bubble.innerHTML = `
-      ${finalAnswerHtml}
-      <div class="done-header"><span class="done-icon">&#10003;</span> Task completed</div>
-      <div class="done-summary">${escapeHtml(text || '')}</div>
-    `;
+    const factsHtml = finalAnswer ? renderFacts(finalAnswer) : '';
+    const captionHtml =
+      `<div class="done-caption">` +
+      `<span class="done-icon">&#10003;</span> Task completed` +
+      (stepCount ? ` &middot; ${stepCount} steps` : '') +
+      `</div>`;
+    bubble.innerHTML = finalAnswerHtml + factsHtml + captionHtml;
     msg.appendChild(bubble);
   }
 
@@ -625,7 +707,7 @@ function appendPlanCard({ title, sites, steps }) {
 // ponytail: icon is set via innerHTML on its own <span> so HTML entities
 // (&#8594;, &#9654;, &#10003;) decode to glyphs. The reasoning text uses
 // textContent so any user/model-supplied HTML stays literal and safe.
-function appendStepWithDetails({ icon, text, details }) {
+function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
@@ -634,6 +716,21 @@ function appendStepWithDetails({ icon, text, details }) {
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble step-bubble';
+
+  // ponytail: page context chip — shows what the agent was looking at
+  // when it decided this action. Without this, the agent's reasoning
+  // ("the browser is on a blank page") reads as out-of-date by the time
+  // the user sees the bubble, because the page has already changed.
+  // Anchoring each step to its captured page state removes the temporal
+  // disconnect between reasoning text and visible browser tab.
+  if (pageUrl || pageTitle) {
+    const chip = document.createElement('div');
+    chip.className = 'step-page-chip';
+    const u = pageUrl ?? '';
+    const t = pageTitle ?? '';
+    chip.innerHTML = `<span class="step-page-chip-icon">&#9655;</span><span class="step-page-chip-url">${escapeHtml(u)}</span><span class="step-page-chip-title">${escapeHtml(t)}</span>`;
+    bubble.appendChild(chip);
+  }
 
   const head = document.createElement('div');
   head.className = 'step-head';
@@ -932,10 +1029,16 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'canonical_status': {
       // ponytail: normalize canonical lifecycle (completed / failed / cancelled /
       // disconnected / cancelling / waiting_for_approval) into the side-panel
-      // phase enum so the UI doesn't get stuck in unmapped states. The local-
-      // driver emits "completed" after every run — without this normalization
-      // the pill said "completed" and the new-task Send was silently blocked.
+      // phase enum so the UI doesn't get stuck in unmapped states. Do NOT
+      // regress from a terminal phase ('error' / 'done') — the cancel
+      // handler emits its own task_failed/canonical_status pair and a
+      // late-arriving canonical_status from the loop's .then() must not
+      // overwrite the already-correct terminal pill.
       const raw = String(message.status || '');
+      if (state.phase === 'error' || state.phase === 'done') {
+        logSilently(`canonical_status ${raw} arrived after terminal phase ${state.phase}; ignored`);
+        break;
+      }
       const mapped = (raw === 'completed' || raw === 'cancelled' || raw === 'disconnected') ? 'done'
         : raw === 'failed' ? 'error'
         : raw === 'cancelling' ? 'paused'
@@ -966,7 +1069,7 @@ chrome.runtime.onMessage.addListener((message) => {
       // lives behind a "details" toggle so the chat reads naturally and the
       // operator can drill in when debugging. Icon is passed separately so
       // HTML entities decode instead of rendering as literal `&#8594;`.
-      appendStepWithDetails({ icon, text: reasoningText, details: toolSubtitle, ts: message.ts });
+      appendStepWithDetails({ icon, text: reasoningText, details: toolSubtitle, ts: message.ts, pageUrl: message.url, pageTitle: message.pageTitle });
       break;
     }
 
