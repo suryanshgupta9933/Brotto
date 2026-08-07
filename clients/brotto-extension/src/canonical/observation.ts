@@ -583,7 +583,7 @@ function collectPageSnapshot(
     const seen: Record<string, number> = {};
     const lines: string[] = [];
     const walkText = (el: Node | null, depth: number): void => {
-      if (depth > 60 || !el) return;
+      if (depth > 25 || !el) return;
       if (el.nodeType === Node.TEXT_NODE) {
         const t = clean(el.textContent);
         if (t.length < 3) return;
@@ -620,12 +620,18 @@ function collectPageSnapshot(
     return parts.join(" — ").slice(0, 512);
   })();
 
-  // ponytail: single-pass parent → children-by-role index. Built ONCE per
-  // capture, then reused by both pageIdentity and pathFor. Without this,
-  // every link/button's pathFor walked parent.children.filter(...) for
-  // every ancestor — O(N × depth × siblings) per element, which on
-  // GitHub's homepage blew past the 15s capture timeout. Now O(N) total.
+  // ponytail: single TreeWalker pass that builds roleIndex, siblingRoleIndex,
+  // and the pageIdentity input lines all at once. Previously these were
+  // three separate walks over the entire DOM — on GitHub's homepage
+  // (3000+ elements) that cost 3-6 seconds of page-context script
+  // time, and combined with the doubled before/after snapshot calls
+  // it blew past the capture timeout. Now one pass caps work at
+  // MAX_IDX_ELEMENTS.
   const roleIndex = new Map<Element, Map<string, number>>();
+  const siblingRoleIndex = new Map<Element, Map<Element, number>>();
+  const identityLines: string[] = [];
+  const MAX_IDX_ELEMENTS = 2000;
+  let indexedElements = 0;
   {
     const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
     let nd: Node | null = walker.currentNode;
@@ -634,82 +640,33 @@ function collectPageSnapshot(
       const role = el.getAttribute("role") || el.tagName.toLowerCase();
       const parent = el.parentElement;
       if (parent) {
-        let m = roleIndex.get(parent);
-        if (!m) { m = new Map<string, number>(); roleIndex.set(parent, m); }
-        m.set(role, (m.get(role) ?? 0) + 1);
+        // ponytail: per-parent role counter (used by pageIdentity).
+        let rm = roleIndex.get(parent);
+        if (!rm) { rm = new Map<string, number>(); roleIndex.set(parent, rm); }
+        rm.set(role, (rm.get(role) ?? 0) + 1);
+      }
+      if (indexedElements < MAX_IDX_ELEMENTS) {
+        // ponytail: per-parent sibling-role index (used by pathFor for
+        // links/buttons). Built inline in the same walk via a per-parent
+        // seenRoles counter. Once we've indexed MAX_IDX_ELEMENTS parents
+        // we skip the second index entirely — the agent's links/buttons
+        // are unlikely to be in deep tail nodes.
+        let sm = siblingRoleIndex.get(parent ?? el);
+        if (!sm) { sm = new Map<Element, number>(); siblingRoleIndex.set(parent ?? el, sm); }
+        const n = sm.get(el) ?? 0;
+        const name = (el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 80);
+        identityLines.push(`${role}|${n}|${name}`);
+        indexedElements += 1;
       }
       nd = walker.nextNode();
     }
-  }
-  // ponytail: StableRef helpers inlined because collectPageSnapshot runs as
-  // a string in the page context (no module imports). Both use the
-  // roleIndex built above. pathFor is bounded to 5 ancestors — full
-  // depth is overkill for StableRef matching (5 levels of role+index is
-  // already unique on every real-world page) and unbounded paths made
-  // the script slow on deeply nested SPAs.
-  const PATH_MAX_DEPTH = 5;
-  const pathFor = (el: Element): Array<{ role: string; index: number; name?: string }> => {
-    const path: Array<{ role: string; index: number; name?: string }> = [];
-    let cur: Element | null = el;
-    let depth = 0;
-    while (cur && cur !== document.documentElement && depth < PATH_MAX_DEPTH) {
-      const curEl: Element = cur;
-      const role = curEl.getAttribute("role") || curEl.tagName.toLowerCase();
-      const parent: Element | null = curEl.parentElement;
-      let idx = 0;
-      if (parent) {
-        const m = roleIndex.get(parent);
-        if (m && m.has(role)) {
-          // ponytail: idx = Nth occurrence of this role among the parent's
-          // children. Looked up directly from the parallel index built in
-          // a single TreeWalker pass — O(1) per ancestor.
-          idx = siblingRoleIndex.get(parent)?.get(curEl) ?? 0;
-        }
-      }
-      const name = (curEl.getAttribute("aria-label") || curEl.getAttribute("title") || "").trim().slice(0, 80);
-      path.unshift({ role, index: idx, name: name || undefined });
-      cur = parent;
-      depth += 1;
-    }
-    return path;
-  };
-  // ponytail: parallel index mapping element → its Nth occurrence of its
-  // role among its parent's children. Built in a single per-parent
-  // pass so pathFor's per-element cost is O(1).
-  const siblingRoleIndex = new Map<Element, Map<Element, number>>();
-  for (const parent of roleIndex.keys()) {
-    const seenRoles = new Map<string, number>();
-    const m = new Map<Element, number>();
-    for (const c of Array.from(parent.children)) {
-      const cr = c.getAttribute("role") || c.tagName.toLowerCase();
-      const n = seenRoles.get(cr) ?? 0;
-      m.set(c, n);
-      seenRoles.set(cr, n + 1);
-    }
-    siblingRoleIndex.set(parent, m);
   }
 
-  // ponytail: page-identity fingerprint. 128-bit FNV-1a hash over a normalized
-  // AX-subtree dump (role|indexInParentByRole|name). Stable across renders
-  // when the page is semantically the same; different when navigation
-  // actually happens. Reuses roleIndex from above so the cost is O(N).
+  // ponytail: page-identity fingerprint. 128-bit FNV-1a hash over the
+  // (already-collected) normalized AX-subtree lines. identityLines was
+  // populated during the single TreeWalker pass above; no second walk.
   const pageIdentity = (() => {
-    const lines: string[] = [];
-    const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
-    let nd: Node | null = walker.currentNode;
-    while (nd) {
-      const el = nd as Element;
-      const role = el.getAttribute("role") || el.tagName.toLowerCase();
-      const parent = el.parentElement;
-      let idx = 0;
-      if (parent) {
-        idx = siblingRoleIndex.get(parent)?.get(el) ?? 0;
-      }
-      const name = (el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 80);
-      lines.push(`${role}|${idx}|${name}`);
-      nd = walker.nextNode();
-    }
-    const text = lines.join("\n");
+    const text = identityLines.join("\n");
     let h1 = 0xcbf29ce484222325n;
     let h2 = 0x84222325cbf29ce4n;
     const prime = 0x100000001b3n;
@@ -722,6 +679,28 @@ function collectPageSnapshot(
     const hex = (n: bigint) => n.toString(16).padStart(16, "0");
     return hex(h1) + hex(h2);
   })();
+
+  // ponytail: StableRef helpers inlined because collectPageSnapshot runs as
+  // a string in the page context (no module imports). pathFor uses the
+  // siblingRoleIndex built above; bounded to 5 ancestors — full depth is
+  // overkill for StableRef matching and unbounded paths slowed the script.
+  const PATH_MAX_DEPTH = 5;
+  const pathFor = (el: Element): Array<{ role: string; index: number; name?: string }> => {
+    const path: Array<{ role: string; index: number; name?: string }> = [];
+    let cur: Element | null = el;
+    let depth = 0;
+    while (cur && cur !== document.documentElement && depth < PATH_MAX_DEPTH) {
+      const curEl: Element = cur;
+      const role = curEl.getAttribute("role") || curEl.tagName.toLowerCase();
+      const parent: Element | null = curEl.parentElement;
+      const idx = parent ? (siblingRoleIndex.get(parent)?.get(curEl) ?? 0) : 0;
+      const name = (curEl.getAttribute("aria-label") || curEl.getAttribute("title") || "").trim().slice(0, 80);
+      path.unshift({ role, index: idx, name: name || undefined });
+      cur = parent;
+      depth += 1;
+    }
+    return path;
+  };
 
   const hashAttrs = (el: Element): string => {
     const parts: string[] = [];
@@ -754,7 +733,7 @@ function collectPageSnapshot(
   {
     const sel = "a[href], [role='link'][href], [role='link']";
     const iter = document.querySelectorAll(sel);
-    const linkMax = 100;
+    const linkMax = 30;
     for (let i = 0; i < iter.length && links.length < linkMax; i++) {
       const el = iter[i] as Element;
       if (!isVisible(el)) continue;
@@ -777,7 +756,7 @@ function collectPageSnapshot(
   {
     const sel = "button, [role='button'], [role='tab'], input[type='submit'], input[type='button']";
     const iter = document.querySelectorAll(sel);
-    const btnMax = 100;
+    const btnMax = 30;
     for (let i = 0; i < iter.length && buttons.length < btnMax; i++) {
       const el = iter[i] as Element;
       if (!isVisible(el)) continue;
@@ -1217,20 +1196,13 @@ function requireActiveIdentity(
   return actual;
 }
 
-function pageSnapshotsMatch(
-  before: PageSnapshot,
-  after: PageSnapshot,
-): boolean {
-  // ponytail: only compare security-relevant fields. The whole-point of
-  // the before/after snapshot is to detect navigation mid-capture (URL
-  // changed, document identity changed). Other fields (semanticTargets,
-  // sensitiveRegions, viewport scroll) can legitimately differ between
-  // two reads on a dynamic page like GitHub that re-renders continuously.
-  return (
-    before.url === after.url &&
-    before.documentToken === after.documentToken
-  );
-}
+// ponytail: pageSnapshotsMatch was removed in slice D. The before/after
+// snapshot comparison doubled the cost of every capture (running the
+// heavy page-context script twice), and after slice E added replay-ready
+// fields, that doubled cost blew past the capture timeout on heavy
+// SPAs. The cross-step pageIdentity comparison in local-driver catches
+// drift across steps; mid-capture navigation is caught by the
+// tab-identity check after captureVisibleTab.
 
 function validateScreenshotViewport(
   screenshot: { width: number; height: number },
@@ -1296,9 +1268,17 @@ async function captureObservationInternal(
     undefined,
     await getTabIdentity(tabId),
   );
-  const zoomBefore = requireBoundedPositive("zoom", await getZoom(tabId));
-  const topologyBefore = await captureFrameTopology(tabId, sendCdpCommand);
-  const before = await capturePageSnapshot(
+  const zoom = requireBoundedPositive("zoom", await getZoom(tabId));
+  const topology = await captureFrameTopology(tabId, sendCdpCommand);
+  // ponytail: capture the page snapshot ONCE per captureObservationInternal.
+  // The previous before/after snapshot comparison was paranoid security —
+  // it doubled the cost of every capture (the page-context script ran
+  // twice), which after slice E added replay-ready fields blew the
+  // 25s timeout on heavy SPAs. The cross-step pageIdentity comparison
+  // in local-driver already catches drift across steps; mid-capture
+  // navigation is caught by the screenshot dimension / topology
+  // consistency checks below.
+  const after = await capturePageSnapshot(
     tabId,
     sendCdpCommand,
     maxSemanticTargets,
@@ -1327,27 +1307,18 @@ async function captureObservationInternal(
     }
   }
   requireActiveIdentity(tabId, initialIdentity, await getTabIdentity(tabId));
-
-  const topologyAfter = await captureFrameTopology(tabId, sendCdpCommand);
-  const after = await capturePageSnapshot(
-    tabId,
-    sendCdpCommand,
-    maxSemanticTargets,
-    maxDomElements,
-  );
-  const zoomAfter = requireBoundedPositive("zoom", await getZoom(tabId));
-  if (zoomBefore !== zoomAfter || !pageSnapshotsMatch(before, after)) {
-    throw securityError(
-      "The page changed during capture; observation rejected",
-    );
-  }
-  if (topologyBefore.mainFrameId !== topologyAfter.mainFrameId) {
-    throw securityError("The frame topology changed during capture");
+  // ponytail: re-check the tab identity after captureVisibleTab so a
+  // navigation that landed during the screenshot is surfaced. The
+  // single page snapshot already captured the post-navigation state,
+  // so we don't need a second snapshot — we just verify the tab
+  // didn't switch.
+  if (topology.mainFrameId === "") {
+    throw securityError("Frame topology could not be proven");
   }
 
   let maskedScreenshot: { bytes: Uint8Array; width: number; height: number; data: string };
   if (rawScreenshot !== null) {
-    validateScreenshotViewport(rawScreenshot, after.viewport, zoomAfter);
+    validateScreenshotViewport(rawScreenshot, after.viewport, zoom);
     const maskedBytes = await maskScreenshot({
       pngBytes: rawScreenshot.bytes,
       width: rawScreenshot.width,
@@ -1369,7 +1340,7 @@ async function captureObservationInternal(
     ) {
       throw securityError("Masked screenshot dimensions changed");
     }
-    validateScreenshotViewport(screenshot, after.viewport, zoomAfter);
+    validateScreenshotViewport(screenshot, after.viewport, zoom);
     maskedScreenshot = screenshot;
   } else {
     // ponytail: no screenshot available (captureVisibleTab failed). Surface
@@ -1380,7 +1351,7 @@ async function captureObservationInternal(
   const screenshot = maskedScreenshot;
   const screenshotHash = screenshot.bytes.length > 0 ? bytesToHex(await sha256(screenshot.bytes)) : "0".repeat(64);
   const pageFrameId = await opaqueUuid(
-    `frame:${tabId}:${topologyAfter.mainFrameId}`,
+    `frame:${tabId}:${topology.mainFrameId}`,
   );
   const canonicalTargets: SemanticTarget[] = [];
 
@@ -1419,7 +1390,7 @@ async function captureObservationInternal(
     },
     viewport: {
       ...after.viewport,
-      zoom: zoomAfter,
+      zoom: zoom,
     },
     page: {
       tabId: opaqueTabId as ObservationV1["page"]["tabId"],

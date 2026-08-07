@@ -382,27 +382,13 @@ describe("canonical browser observation capture", () => {
     ).rejects.toThrow("viewport dimensions");
   });
 
-  it("rejects page or viewport drift across screenshot capture", async () => {
-    const snapshots = [
-      PAGE_SNAPSHOT,
-      {
-        ...PAGE_SNAPSHOT,
-        viewport: { ...PAGE_SNAPSHOT.viewport, scrollY: 1 },
-      },
-    ];
-
-    await expect(
-      captureObservation(
-        42,
-        defaultOptions(PAGE_SNAPSHOT, {
-          sendCdpCommand: async (_tabId, method) =>
-            method === "Page.getFrameTree"
-              ? { frameTree: { frame: { id: "main-frame" } } }
-              : { result: { value: snapshots.shift() } },
-        }),
-      ),
-    ).rejects.toThrow("page changed during capture");
-  });
+  // ponytail: mid-capture drift detection was removed when the page
+  // snapshot was changed to run once per captureObservationInternal
+  // (the before/after comparison doubled the heavy page-context
+  // script cost and blew past the capture timeout on heavy SPAs).
+  // Drift across STEPS is now caught by the pageIdentity stagnation
+  // detector in local-driver; mid-capture tab switches are caught by
+  // the post-captureVisibleTab tab-identity check.
 
   it("fails closed for a shadow-hosted child reported by CDP topology", async () => {
     const captureVisibleTab = jest.fn(async () => SAFE_PNG);

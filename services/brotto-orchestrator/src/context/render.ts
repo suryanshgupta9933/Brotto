@@ -341,7 +341,7 @@ export const SNAPSHOT_FN_SRC = `(function () {
     var seen = {};
     var lines = [];
     function walkText(el, depth) {
-      if (depth > 60) return;
+      if (depth > 25) return;
       if (el.nodeType === 3) {
         var t = clean(el.textContent);
         if (t.length < 3) return;
