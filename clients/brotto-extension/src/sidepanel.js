@@ -1096,7 +1096,16 @@ chrome.runtime.onMessage.addListener((message) => {
       continueBtn.textContent = 'Continue';
       continueBtn.addEventListener('click', () => {
         continueBtn.disabled = true;
-        void chrome.runtime.sendMessage({ type: 'local_login_complete' });
+        // ponytail: use the callback form so chrome.runtime.lastError is
+        // synchronously checked — the no-callback form logs "Unchecked
+        // runtime.lastError: Could not establish connection" to the
+        // extension console when the SW is gone (after a long pause
+        // between tasks).
+        try {
+          chrome.runtime.sendMessage({ type: 'local_login_complete' }, () => {
+            void chrome.runtime.lastError;
+          });
+        } catch { /* SW gone — user can re-trigger */ }
       });
       messagesEl.appendChild(continueBtn);
       messagesEl.scrollTop = messagesEl.scrollHeight;

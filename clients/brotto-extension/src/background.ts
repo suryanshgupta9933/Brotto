@@ -394,6 +394,19 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
 
 async function initialize(): Promise<void> {
   chrome.runtime.onMessage.addListener(handleMessage);
+  // ponytail: accept the side-panel keep-alive port. Without an onConnect
+  // listener the port exists client-side but Chrome doesn't treat the
+  // SW as having an open connection — it can still terminate the SW
+  // after the current event drain. Registering onConnect with a no-op
+  // handler pins the SW alive for the lifetime of the side panel.
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== "brotto-sidepanel") return;
+    port.onMessage.addListener(() => {
+      // Keep-alive port — no payload expected. Acknowledge so the
+      // sender's onMessage handler doesn't see "port closed" if it
+      // ever sends a heartbeat.
+    });
+  });
   chrome.runtime.onInstalled.addListener(() => { void setBadge(false); });
   // ponytail: open the side panel when the user clicks the action icon. This
   // replaces the old popup behavior — the side panel is the live activity
