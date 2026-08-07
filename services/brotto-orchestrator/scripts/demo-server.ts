@@ -4,10 +4,36 @@
 // pre-rendered text (from context-builder.renderSnapshot). Returns a
 // PlanningOutcome. Wraps the same planner the orchestrator uses.
 
+import { mkdirSync, appendFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import Fastify from "fastify";
 import { createPlanner, inferFamilyFromEnv, type InferenceConfig } from "../src/inference-registry.js";
 
 const PORT = Number(process.env.DEMO_PORT ?? "3001");
+
+// ponytail: per-run capture log. One file per taskId, written under
+// `runs/<taskId>-<iso>.log`. Captures the full incoming body (with the
+// rendered page context the planner forwards) and the outcome per
+// turn. Critical for debugging — without this the operator can't see
+// what the model actually saw. Set BROTTO_RUN_LOG_DIR to override.
+const RUN_LOG_DIR = process.env.BROTTO_RUN_LOG_DIR ?? join(process.cwd(), "runs");
+mkdirSync(RUN_LOG_DIR, { recursive: true });
+const runLogFiles = new Map<string, string>();
+function logPathFor(workId: string): string {
+  const safe = String(workId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "anon";
+  return join(RUN_LOG_DIR, `${safe}-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
+}
+function logToFile(workId: string, header: string, body: unknown, taskId?: string): void {
+  const sessionKey = (taskId && taskId !== "00000000-0000-4000-8000-000000000002") ? taskId : workId;
+  let path = runLogFiles.get(sessionKey);
+  if (!path) {
+    path = logPathFor(sessionKey);
+    runLogFiles.set(sessionKey, path);
+    writeFileSync(path, `# brotto demo-server run log\n# session: ${sessionKey}\n# workId: ${workId}\n# model: ${process.env.SMOKE_MODEL ?? "(default)"}\n# started: ${new Date().toISOString()}\n\n`);
+    console.log(`[demo-server] run log: ${path}`);
+  }
+  appendFileSync(path, `\n${header}\n${typeof body === "string" ? body : JSON.stringify(body, null, 2)}\n`);
+}
 
 interface PlanRequest {
   workId: string;
@@ -88,6 +114,21 @@ async function main() {
     // (current URL, page text snippet). Verbose by design; the demo terminal
     // is the operator's window into what the model is actually seeing.
     const ctx = req.body.context ?? "";
+    // ponytail: per-run file capture (full incoming body + outcome) so
+    // the operator can re-read a session without scraping the console.
+    // Cluster by taskId so each run lands in a single file.
+    const reqTaskId = String(req.body.taskId ?? "");
+    logToFile(req.body.workId ?? "anon", `=== TURN ${myTurn} INCOMING ${new Date().toISOString()} ===`, {
+      workId: req.body.workId,
+      taskId: req.body.taskId ?? reqTaskId,
+      goal: req.body.goal,
+      contextChars: ctx.length,
+      context: req.body.context,
+      recentResults: req.body.recentResults,
+      trajectory: req.body.trajectory,
+      semanticTargetCount: Array.isArray(req.body.semanticTargets) ? req.body.semanticTargets.length : 0,
+      pageIdentity: req.body.pageIdentity,
+    }, reqTaskId);
     const urlLine = ctx.match(/URL:\s*(.+)/)?.[1]?.trim() ?? "?";
     const titleLine = ctx.match(/Title:\s*(.+)/)?.[1]?.trim() ?? "?";
     const textStart = ctx.indexOf("=== PAGE TEXT");
@@ -189,6 +230,7 @@ async function main() {
     }
     try {
       const elapsed = Date.now() - t0;
+      logToFile(req.body.workId ?? "anon", `=== TURN ${myTurn} OUTCOME ${new Date().toISOString()} (${elapsed}ms) ===`, outcome, reqTaskId);
       const respSep = `── /plan turn #${myTurn} resp ${"─".repeat(Math.max(0, 44 - String(myTurn).length))}`;
       console.log(`[demo-server] ${respSep} ${elapsed}ms`);
       if (outcome.kind === "action") {

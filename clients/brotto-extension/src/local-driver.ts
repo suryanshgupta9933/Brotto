@@ -1492,6 +1492,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       }
       let outcomeTag = "";
       let pageChanged = false;
+      let autoCorrectedFrom: { x: number; y: number } | null = null;
       if (postObs) {
         if (postObs.url !== obs.url) {
           outcomeTag = ` [Verified: Navigated to ${postObs.url}]`;
@@ -1509,6 +1510,62 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           outcomeTag = ` [Verified: Key pressed]`;
           pageChanged = true;
         } else if (action.type === "left_click" || action.type === "double_click") {
+          // ponytail: AUTO-CORRECT. The model often picks raw x/y that
+          // land BETWEEN rows (Gmail search results, table cells) and
+          // miss every interactive element. If the click didn't change
+          // the page, retry once at the nearest interactive target
+          // before reporting unchanged. Saves the agent a turn and
+          // stops the click-twice-same-coords → STAGNATION spiral.
+          const acCx = action.x ?? 0;
+          const acCy = action.y ?? 0;
+          const acRoles = new Set(["button", "link", "textbox", "searchbox", "tab", "menuitem", "combobox", "switch", "option"]);
+          const acRanked = (obs.semanticTargets ?? [])
+            .filter((t: { visible?: boolean; role?: string }) => t.visible && acRoles.has((t.role ?? "").toLowerCase()))
+            .map((t: { boundingBox: { x: number; y: number; width: number; height: number } }) => {
+              const dx = (t.boundingBox.x + t.boundingBox.width / 2) - acCx;
+              const dy = (t.boundingBox.y + t.boundingBox.height / 2) - acCy;
+              return { t, dist: Math.hypot(dx, dy) };
+            })
+            .sort((a: { dist: number }, b: { dist: number }) => a.dist - b.dist);
+          const acNearest = acRanked[0];
+          if (acNearest && acNearest.dist > 5) {
+            const nb = acNearest.t.boundingBox;
+            const nx = Math.round(nb.x + nb.width / 2);
+            const ny = Math.round(nb.y + nb.height / 2);
+            try {
+              await debuggerModule.sendCommand(tabId, {
+                method: "Input.dispatchMouseEvent",
+                params: { type: "mousePressed", x: nx, y: ny, button: "left", clickCount: 1 },
+              });
+              await debuggerModule.sendCommand(tabId, {
+                method: "Input.dispatchMouseEvent",
+                params: { type: "mouseReleased", x: nx, y: ny, button: "left", clickCount: 1 },
+              });
+              autoCorrectedFrom = { x: acCx, y: acCy };
+              const retryObs = await captureObservationWithTimeout(tabId, CAPTURE_TIMEOUT_MS).catch(() => null);
+              if (retryObs && (retryObs.url !== obs.url || (retryObs.pageIdentity && obs.pageIdentity && retryObs.pageIdentity !== obs.pageIdentity))) {
+                outcomeTag = ` [Auto-corrected: original click at (${acCx}, ${acCy}) missed; re-clicked nearest interactive at (${nx}, ${ny}). Verified: navigated to ${retryObs.url}]`;
+                pageChanged = true;
+                postUrl = retryObs.url;
+                postObs = retryObs;
+              } else {
+                outcomeTag = ` [Auto-corrected: original click at (${acCx}, ${acCy}) missed; re-clicked nearest interactive at (${nx}, ${ny}) but page unchanged]`;
+              }
+            } catch { /* fall through */ }
+          }
+          if (!autoCorrectedFrom) {
+            const nearby = acRanked.slice(0, 3).map(({ t }: { t: { accessibleName?: { text?: string }; role?: string; boundingBox: { x: number; y: number; width: number; height: number } } }) => {
+              const name = t.accessibleName?.text ?? "(unnamed)";
+              const bx = Math.round(t.boundingBox.x + t.boundingBox.width / 2);
+              const by = Math.round(t.boundingBox.y + t.boundingBox.height / 2);
+              return `"${name}" (${t.role ?? "?"} at ${bx},${by})`;
+            }).join(", ");
+            if (nearby) {
+              outcomeTag = ` [Unchanged: click landed but page didn't change. Nearest interactive elements: ${nearby}. Try one of those, or scroll/visit_url.]`;
+            } else {
+              outcomeTag = ` [Unchanged: URL and page state remained identical]`;
+            }
+          }
           // ponytail: click diagnostic when the click landed but nothing
           // changed. The model needs to know WHY: did it hit empty space,
           // a non-interactive element, or the right element with no
