@@ -67,7 +67,12 @@ describe("detectGoalMatch", () => {
   it("detects tracking IDs and status keywords as structured facts", () => {
     expect(detectGoalMatch("amazon package", { ...trackPage, bodyText: "Tracking ID: 371470111139" }).hasStructuredFacts).toBe(true);
     expect(detectGoalMatch("amazon package", { ...trackPage, bodyText: "Out for delivery today" }).hasStructuredFacts).toBe(true);
-    expect(detectGoalMatch("amazon package", { ...trackPage, bodyText: "shipment-tracking@amazon.in" }).hasStructuredFacts).toBe(true);
+    // ponytail: a bare sender alone is NOT a delivery-status fact. The
+    // Gmail inbox lists `no-reply@amazonpay.in` in the sender column, and
+    // counting that as the answer made the banner fire on the inbox page
+    // before the agent had opened any actual email. The previous version
+    // of this test asserted the opposite; the assertion was wrong.
+    expect(detectGoalMatch("amazon package", { ...trackPage, bodyText: "shipment-tracking@amazon.in" }).hasStructuredFacts).toBe(false);
   });
 
   it("detects status keywords as structured facts", () => {

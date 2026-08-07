@@ -892,6 +892,30 @@ async function executeAction(tabId: number, action: { type?: string; x?: number;
   }
 }
 
+// ponytail: when the user submits a goal, the new tab defaults to about:blank
+// and the model's first observation is "browser is blank" — it then spends a
+// turn visiting the goal site before doing real work. For common goal sites
+// (gmail, github, …), infer a sensible starting URL from the goal text and open
+// directly there. Saves the wasted "open X then look at X" turn.
+const KNOWN_GOAL_SITES: ReadonlyArray<[RegExp, string]> = [
+  [/\bgmail\b|\bemail\b|\binbox\b/i, "https://mail.google.com/"],
+  [/\bgithub\b/i, "https://github.com/"],
+  [/\b(?:stackoverflow|stack\s*overflow)\b/i, "https://stackoverflow.com/"],
+  [/\b(?:youtube|youtu\.be)\b/i, "https://www.youtube.com/"],
+  [/\b(?:reddit)\b/i, "https://www.reddit.com/"],
+  [/\b(?:linkedin)\b/i, "https://www.linkedin.com/"],
+  [/\b(?:twitter|x\.com)\b/i, "https://twitter.com/"],
+  [/\b(?:amazon|amzn)\b/i, "https://www.amazon.in/"],
+  [/\b(?:flipkart)\b/i, "https://www.flipkart.com/"],
+];
+function inferStartingUrl(goal: string | undefined): string | undefined {
+  if (!goal) return undefined;
+  for (const [pattern, url] of KNOWN_GOAL_SITES) {
+    if (pattern.test(goal)) return url;
+  }
+  return undefined;
+}
+
 async function openNewTab(startingUrl: string | undefined): Promise<number> {
   const url = startingUrl && /^https?:\/\//i.test(startingUrl) ? startingUrl : "about:blank";
   const tab = await chrome.tabs.create({ url, active: true });
@@ -984,10 +1008,14 @@ async function waitForNetworkIdle(tabId: number, _timeoutMs = 800): Promise<void
 
 
 export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
-  log(opts, `opening new tab${opts.startingUrl ? ` at ${opts.startingUrl}` : ""}`);
+  // ponytail: prefer the caller-supplied startingUrl, else infer a goal site
+  // (gmail, github, …) so the first observation isn't a blank tab. Unknown
+  // goals fall through to about:blank — the model then navigates itself.
+  const effectiveStartingUrl = opts.startingUrl ?? inferStartingUrl(opts.goal);
+  log(opts, `opening new tab${effectiveStartingUrl ? ` at ${effectiveStartingUrl}` : ""}`);
   let tabId: number;
   try {
-    tabId = await openNewTab(opts.startingUrl);
+    tabId = await openNewTab(effectiveStartingUrl);
   } catch (err) {
     opts.onError({ code: "TAB_OPEN_FAILED", message: err instanceof Error ? err.message : String(err) });
     return;
