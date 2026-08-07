@@ -219,13 +219,15 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
           // their browser, with a brief context line per tab.
           notifyUi({ type: "tab_event", event } as unknown as ControllerUiEvent);
         },
-        onStep: ({ index, action, result, url, screenshot, iconKind, reasoning }) => {
+        onStep: ({ index, action, result, url, pageTitle, pagePurpose, screenshot, iconKind, reasoning }) => {
           notifyUi({
             type: "step_card",
             index,
             title: action,
             result,
             url,
+            pageTitle,
+            pagePurpose,
             screenshot: screenshot ?? undefined,
             screenshotPlaceholder: screenshot ? undefined : "Screenshot unavailable (chrome:// page or capture blocked)",
             iconKind,

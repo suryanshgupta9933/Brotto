@@ -35,7 +35,7 @@ export interface LocalDriverOptions {
   // this a stray window.open or target=_blank navigation is invisible to the
   // user until the next observation lands.
   onTabEvent?: (event: { kind: "opened" | "closed" | "navigated" | "focused"; tabId: number; url: string; title: string }) => void;
-  onStep: (step: { index: number; action: string; result: string; url: string; screenshot: string | null; iconKind: string; reasoning?: string }) => void;
+  onStep: (step: { index: number; action: string; result: string; url: string; pageTitle?: string; pagePurpose?: string; screenshot: string | null; iconKind: string; reasoning?: string }) => void;
   onLoginRequired: (info: { url: string; domain: string }) => void;
   // ponytail: finalAnswer is the user's actual answer in plain English. Comes
   // from the planner's terminate.finalAnswer; older planners emit a generic
@@ -1414,7 +1414,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         const rejectMsg = `[REJECTED BY HARNESS]: Action "${desc}" was ALREADY attempted and had NO effect [Unchanged: URL and page state remained identical]. Repeating this action is FORBIDDEN. You MUST pick a DIFFERENT strategy (e.g. direct visit_url to a specific URL with query parameters like ?sort=stargazers, scroll down, or click a different element ID).`;
         history.push({ action: desc, result: rejectMsg });
         injectedGuidance = rejectMsg;
-        opts.onStep({ index: stepIndex, action: desc, result: rejectMsg, url: obs.url, screenshot: null, iconKind, reasoning: action.reasoning });
+        opts.onStep({ index: stepIndex, action: desc, result: rejectMsg, url: obs.url, pageTitle: obs.title, pagePurpose: obs.pagePurpose, screenshot: null, iconKind, reasoning: action.reasoning });
         actionSigs.push(actionSig);
         const currentTitle = obs.title;
         obsSigs.push(observationSignature({ url: obs.url, title: currentTitle, elements: obs.semanticTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
@@ -1519,7 +1519,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       // ponytail: pass the planner's one-sentence reasoning to the UI. The
       // side panel uses it as the assistant bubble title instead of the raw
       // `desc` (which is the tool call like "visit_url ...").
-      opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind, reasoning: action.reasoning });
+      opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, pageTitle: obs.title, pagePurpose: obs.pagePurpose, screenshot, iconKind, reasoning: action.reasoning });
       // ponytail: reset stagnation counters when the page actually changed.
       // This gives the agent a fresh budget after every successful navigation,
       // preventing false stagnation on multi-step tasks where the agent

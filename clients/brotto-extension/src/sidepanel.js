@@ -681,7 +681,7 @@ function appendPlanCard({ title, sites, steps }) {
 // ponytail: icon is set via innerHTML on its own <span> so HTML entities
 // (&#8594;, &#9654;, &#10003;) decode to glyphs. The reasoning text uses
 // textContent so any user/model-supplied HTML stays literal and safe.
-function appendStepWithDetails({ icon, text, details }) {
+function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
@@ -690,6 +690,21 @@ function appendStepWithDetails({ icon, text, details }) {
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble step-bubble';
+
+  // ponytail: page context chip — shows what the agent was looking at
+  // when it decided this action. Without this, the agent's reasoning
+  // ("the browser is on a blank page") reads as out-of-date by the time
+  // the user sees the bubble, because the page has already changed.
+  // Anchoring each step to its captured page state removes the temporal
+  // disconnect between reasoning text and visible browser tab.
+  if (pageUrl || pageTitle) {
+    const chip = document.createElement('div');
+    chip.className = 'step-page-chip';
+    const u = pageUrl ?? '';
+    const t = pageTitle ?? '';
+    chip.innerHTML = `<span class="step-page-chip-icon">&#9655;</span><span class="step-page-chip-url">${escapeHtml(u)}</span><span class="step-page-chip-title">${escapeHtml(t)}</span>`;
+    bubble.appendChild(chip);
+  }
 
   const head = document.createElement('div');
   head.className = 'step-head';
@@ -1028,7 +1043,7 @@ chrome.runtime.onMessage.addListener((message) => {
       // lives behind a "details" toggle so the chat reads naturally and the
       // operator can drill in when debugging. Icon is passed separately so
       // HTML entities decode instead of rendering as literal `&#8594;`.
-      appendStepWithDetails({ icon, text: reasoningText, details: toolSubtitle, ts: message.ts });
+      appendStepWithDetails({ icon, text: reasoningText, details: toolSubtitle, ts: message.ts, pageUrl: message.url, pageTitle: message.pageTitle });
       break;
     }
 
