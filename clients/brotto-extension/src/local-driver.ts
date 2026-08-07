@@ -18,6 +18,9 @@ export interface LocalDriverOptions {
   // ponytail: stable per-task id so the demo-server's turn counter can
   // reset between runs (rather than incrementing forever across tasks).
   taskId?: string;
+  // ponytail: per-iteration wall-clock budget in ms. Default 60s. When
+  // exceeded the loop surfaces a clarifying question to the user.
+  stepBudgetMs?: number;
   onTabOpened: (tabId: number) => void;
   // ponytail: tab lifecycle events for the side-panel "tabs" row. Keeps the
   // user oriented when the agent opens/closes/follows external links. Without
@@ -155,6 +158,29 @@ export function actionSignature(action: { type?: string; url?: string; x?: numbe
 export function observationSignature(obs: { url?: string; title?: string; elements?: Array<{ id?: string }> }): string {
   const firstId = obs.elements && obs.elements.length > 0 ? obs.elements[0]?.id ?? "" : "";
   return `${(obs.url ?? "").trim()}|${(obs.title ?? "").trim()}|${firstId}`;
+}
+
+// ponytail: page-identity stagnation. The Observation's `pageIdentity` is a
+// SHA-256 over a normalized AX-subtree dump — stable across re-renders,
+// flips when navigation actually happens. 3 consecutive identical
+// identities = the agent's clicks aren't landing on a new page. This
+// replaces the older obs-sig heuristic (which used only the first
+// semanticTarget's stableRef and drifted on every render).
+export function detectPageStagnation(pageIdentities: string[]): StagnationSignal | null {
+  if (pageIdentities.length < STAGNATION_REPEAT_THRESHOLD) return null;
+  const tail = pageIdentities.slice(-STAGNATION_WINDOW);
+  if (tail.length < STAGNATION_REPEAT_THRESHOLD) return null;
+  const recent = tail.slice(-STAGNATION_REPEAT_THRESHOLD);
+  const ref = recent[0];
+  if (ref.length === 0) return null; // empty pageIdentity = uncomputable, skip
+  return recent.every((s) => s === ref)
+    ? {
+        kind: "repeated_observation",
+        signature: ref,
+        count: STAGNATION_REPEAT_THRESHOLD,
+        message: `STOP — the page hasn't changed for ${STAGNATION_REPEAT_THRESHOLD}+ steps (same page identity). Your clicks aren't navigating to a new page. Either (1) you've already found the answer in the current page text and should call terminate(finalAnswer='<value>'), or (2) your clicks are missing the target — pick a DIFFERENT element or read the page's anchors/buttons to find a different path.`,
+      }
+    : null;
 }
 
 export function detectStagnation(actionSigs: string[], obsSigs: string[]): StagnationSignal | null {
@@ -309,14 +335,49 @@ export function renderObservationForPlanner(
     lines.push(renderMemoryBlock(memory).trimEnd());
     lines.push("");
   }
+  // ponytail: URL/PATH/Title/PURPOSE at the top — orients the model in
+  // one glance. PATH is the URL pathname (what the user typically means
+  // by "where am I"); PURPOSE is the meta description + first h1.
   lines.push(`URL: ${obs.url}`);
+  try {
+    const u = new URL(obs.url);
+    lines.push(`PATH: ${u.pathname}${u.search}`);
+  } catch {
+    /* keep URL only */
+  }
   lines.push(`Title: ${obs.title}`);
+  if (obs.pagePurpose) lines.push(`PURPOSE: ${obs.pagePurpose}`);
   lines.push("");
   if (guidance && guidance.length > 0) {
     lines.push(`User guidance: ${guidance}`);
     lines.push("");
   }
-  lines.push("Elements (use IDs, click coords inline):");
+  // ponytail: replay-ready clickables inventory comes BEFORE structured
+  // page text. The model sees human-readable anchors/buttons first, then
+  // the body. These arrays are also the data the future workflow
+  // recorder consumes to serialize "(text → href)" steps.
+  const links = obs.links ?? [];
+  if (links.length > 0) {
+    lines.push("=== ANCHORS (text → href) ===");
+    for (const l of links.slice(0, 100)) {
+      try {
+        const u = new URL(l.href);
+        lines.push(`  ${l.text.padEnd(28)} → ${u.pathname}${u.search}`);
+      } catch {
+        lines.push(`  ${l.text.padEnd(28)} → ${l.href}`);
+      }
+    }
+    lines.push("");
+  }
+  const buttons = obs.buttons ?? [];
+  if (buttons.length > 0) {
+    lines.push("=== BUTTONS (text) ===");
+    for (const b of buttons.slice(0, 100)) {
+      lines.push(`  ${b.text}`);
+    }
+    lines.push("");
+  }
+  lines.push("Elements (use IDs, click coords inline; anchors include href):");
   for (const t of obs.semanticTargets) {
     if (!t.visible) continue;
     const bb = t.boundingBox;
@@ -718,6 +779,11 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
   // burning MAX_STEPS in a tight repeat.
   const actionSigs: string[] = [];
   const obsSigs: string[] = [];
+  // ponytail: page-identity signatures for the slice-E stagnation detector.
+  // Each entry is the post-action observation's pageIdentity (SHA-256 of
+  // normalized AX subtree); identical entries across STAGNATION_REPEAT_THRESHOLD
+  // turns mean the agent's clicks aren't navigating.
+  const pageIdentities: string[] = [];
   let stagnationHits = 0;
   const STAGNATION_LIMIT = 2;
   // ponytail: track tab lifecycle (open / close / navigate / focus) for the
@@ -866,12 +932,18 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
   // whenever the model emits a real tool call.
   let consecutiveProseOnly = 0;
   const PROSE_ONLY_LIMIT = 2;
+  // ponytail: per-iteration time budget. Tracks wall time INSIDE the
+  // iteration (capture + planner + execute + post-capture). 60s default
+  // — when exceeded, surface a clarifying question rather than burning
+  // more model turns on the same page. Configurable per-run.
+  const STEP_BUDGET_MS = Number(opts.stepBudgetMs ?? 60_000);
   try {
     while (stepIndex < MAX_STEPS) {
       if (opts.signal.aborted) {
         terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
         return;
       }
+      const iterationStartedAt = Date.now();
       log(opts, `step ${stepIndex + 1}`);
       await activateAgentTab();
       const obs = await captureForDriverWithTimeout(tabId, 15_000);
@@ -1121,13 +1193,23 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       // side panel uses it as the assistant bubble title instead of the raw
       // `desc` (which is the tool call like "visit_url ...").
       opts.onStep({ index: stepIndex, action: desc, result, url: postUrl, screenshot, iconKind, reasoning: action.reasoning });
-      // ponytail: signature-based stagnation. Track normalized action+post
-      // observation signatures; when 5+ of the last 8 match, surface a
-      // corrective prompt with the exact guidance. Bounded by STAGNATION_LIMIT
-      // so a stuck loop ends with a blocked result, not a silent burn.
+      // ponytail: signature-based stagnation. Two parallel signals:
+      //   - pageIdentities: SHA-256 over normalized AX subtree (slice E). The
+      //     primary signal — flips when navigation actually happens. Stable
+      //     across re-renders, unlike the older obs-sig.
+      //   - actionSigs / obsSigs: secondary signals from the original
+      //     detectors, kept for action-repetition cases where the page DOES
+      //     change but the agent still loops on the same coord.
+      // Whichever fires first wins.
       actionSigs.push(actionSignature(action));
       obsSigs.push(observationSignature({ url: postUrl, title: obs.title, elements: obs.semanticTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
-      const stagnation = detectStagnation(actionSigs, obsSigs);
+      const postObsPageIdentity = obs.pageIdentity && obs.pageIdentity.length > 0
+        ? obs.pageIdentity
+        : `${postUrl}|${obs.title}`;
+      pageIdentities.push(postObsPageIdentity);
+      const pageStag = detectPageStagnation(pageIdentities);
+      const actionStag = detectStagnation(actionSigs, obsSigs);
+      const stagnation = pageStag ?? actionStag;
       if (stagnation) {
         stagnationHits++;
         log(opts, `stagnation: ${stagnation.kind} signature="${stagnation.signature}" hit ${stagnationHits}/${STAGNATION_LIMIT}`);
@@ -1156,6 +1238,21 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         });
         injectedGuidance = answer;
         opts.onAnswered?.({ question: loop.action, answer });
+      }
+      // ponytail: per-iteration time budget check. If the iteration took
+      // longer than STEP_BUDGET_MS, surface a clarifying question so the
+      // user can redirect before the loop burns more model turns. The
+      // budget resets each iteration (it's per-step, not cumulative).
+      const iterationElapsedMs = Date.now() - iterationStartedAt;
+      if (iterationElapsedMs > STEP_BUDGET_MS) {
+        log(opts, `step budget exceeded: ${iterationElapsedMs}ms > ${STEP_BUDGET_MS}ms`);
+        const answer = await opts.onClarify({
+          reason: `Step exceeded ${Math.round(STEP_BUDGET_MS / 1000)}s budget`,
+          question: `The agent spent ${Math.round(iterationElapsedMs / 1000)}s on this step without making progress. How would you like it to proceed?`,
+          context: `Current URL: ${obs.url}. Current title: ${obs.title}. Steps so far: ${stepIndex + 1}.`,
+        });
+        injectedGuidance = answer;
+        opts.onAnswered?.({ question: `step budget exceeded`, answer });
       }
       stepIndex++;
     }

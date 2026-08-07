@@ -117,18 +117,52 @@ export function diffSnapshots(prev: PageSnapshot | null, next: PageSnapshot): st
 
 export function renderSnapshot(snap: PageSnapshot, prev: PageSnapshot | null): string {
   const lines: string[] = [];
+  // ponytail: URL/PATH/Title/PURPOSE at the top — orients the model in
+  // one glance. PATH is the URL pathname (what the user typically means
+  // by "where am I"); PURPOSE is the meta description + first h1.
   lines.push(`URL: ${snap.url}`);
+  try {
+    const u = new URL(snap.url);
+    lines.push(`PATH: ${u.pathname}${u.search}`);
+  } catch {
+    /* keep URL only */
+  }
   lines.push(`Title: ${snap.title}`);
+  if (snap.pagePurpose) lines.push(`PURPOSE: ${snap.pagePurpose}`);
   lines.push("");
-  // ponytail: smart-structured page text comes FIRST so the model can't miss it.
-  // The walker produces HEADINGS / STATS / LABELS / TEXT blocks — STATS catches
-  // patterns like "12 followers" automatically, which is exactly what the user
-  // asked about. Anything fact-finding depends on lives here.
-  lines.push("=== PAGE TEXT (structured: HEADINGS, STATS, LABELS, then full TEXT — STATS contains the data the user asked for) ===");
+  // ponytail: replay-ready fields — visible anchor and button inventories
+  // come BEFORE structured page text so the model sees them first. Each
+  // link/button carries its href + axPath + attributeHash + bbox, which
+  // is what the future workflow recorder needs.
+  if (snap.links && snap.links.length > 0) {
+    lines.push("=== ANCHORS (text → href) ===");
+    for (const l of snap.links.slice(0, 100)) {
+      try {
+        const u = new URL(l.href);
+        lines.push(`  ${l.text.padEnd(28)} → ${u.pathname}${u.search}`);
+      } catch {
+        lines.push(`  ${l.text.padEnd(28)} → ${l.href}`);
+      }
+    }
+    lines.push("");
+  }
+  if (snap.buttons && snap.buttons.length > 0) {
+    lines.push("=== BUTTONS (text) ===");
+    for (const b of snap.buttons.slice(0, 100)) {
+      lines.push(`  ${b.text}`);
+    }
+    lines.push("");
+  }
+  // ponytail: smart-structured page text comes AFTER anchors/buttons so the
+  // model sees the human-readable clickables first, then the body. The walker
+  // produces HEADINGS / STATS / LABELS / TEXT blocks — STATS catches patterns
+  // like "12 followers" automatically, which is exactly what the user asked
+  // about. Anything fact-finding depends on lives here.
+  lines.push("=== PAGE TEXT (HEADINGS + STATS + LABELS + TEXT — STATS contains the data the user asked for) ===");
   lines.push(snap.bodyTextSnippet || "(empty)");
   lines.push("=== END PAGE TEXT ===");
   lines.push("");
-  lines.push("Elements (use IDs, click coords inline):");
+  lines.push("Elements (use IDs, click coords inline; anchors include href):");
   for (const el of snap.elements) {
     const tags: string[] = [];
     if (el.focused) tags.push("focused");
@@ -242,7 +276,16 @@ export const SNAPSHOT_FN_SRC = `(function () {
   function smartExtractText() {
     var SKIP_TAGS = { script:1, style:1, meta:1, link:1, noscript:1, svg:1, path:1 };
     var HIDDEN_ROLES = { navigation:1, banner:1, contentinfo:1 };
-    var NAV_LINE_RE = /^(sign in|sign up|log in|log out|menu|search|skip to|home|about|contact|privacy|terms|cookie|copyright|©)/i;
+    // ponytail: literal chrome denylist replaces the over-broad NAV_LINE_RE.
+    // The old regex hid navigation labels the model needs
+    // ("Browse repositories", "Filter by languages").
+    var CHROME_DENYLIST = {
+      'skip to content': 1,
+      'skip to main content': 1,
+      'skip to navigation': 1,
+      '©': 1,
+      'all rights reserved': 1,
+    };
     function vis(el) {
       if (!el || el.nodeType !== 1) return false;
       var t = el.tagName.toLowerCase();
@@ -302,7 +345,9 @@ export const SNAPSHOT_FN_SRC = `(function () {
       if (el.nodeType === 3) {
         var t = clean(el.textContent);
         if (t.length < 3) return;
-        if (NAV_LINE_RE.test(t)) return;
+        // ponytail: dropped NAV_LINE_RE; only the literal chrome denylist
+        // hides a line now.
+        if (CHROME_DENYLIST[t.toLowerCase()]) return;
         if (seen[t]) return;
         seen[t] = 1;
         lines.push(t);
@@ -320,12 +365,142 @@ export const SNAPSHOT_FN_SRC = `(function () {
     return parts.join('\\n\\n');
   }
 
+  // ponytail: page-identity fingerprint + replay-ready fields.
+  // Mirrors the extension's collectPageSnapshot.
+  function pathFor(el) {
+    var path = [];
+    var cur = el;
+    while (cur && cur !== document.documentElement) {
+      var role = cur.getAttribute('role') || cur.tagName.toLowerCase();
+      var parent = cur.parentElement;
+      var idx = 0;
+      if (parent) {
+        var sameRole = [];
+        for (var k = 0; k < parent.children.length; k++) {
+          var c = parent.children[k];
+          var cr = c.getAttribute('role') || c.tagName.toLowerCase();
+          if (cr === role) sameRole.push(c);
+        }
+        idx = sameRole.indexOf(cur);
+        if (idx < 0) idx = 0;
+      }
+      var name = (cur.getAttribute('aria-label') || cur.getAttribute('title') || '').trim().slice(0, 80);
+      path.unshift({ role: role, index: idx, name: name || undefined });
+      cur = parent;
+    }
+    return path;
+  }
+  function hashAttrs(el) {
+    var keys = ['id', 'aria-label', 'data-testid', 'data-id', 'name', 'type', 'href', 'role', 'title'];
+    var parts = [];
+    for (var i = 0; i < keys.length; i++) {
+      var v = el.getAttribute(keys[i]);
+      if (typeof v === 'string' && v.length > 0) parts.push(keys[i] + '=' + v);
+    }
+    var text = parts.join('|');
+    var h1 = 0xcbf29ce484222325 | 0;
+    var h2 = 0x84222325cbf29ce4 | 0;
+    for (var j = 0; j < text.length; j++) {
+      var cc = text.charCodeAt(j);
+      h1 = Math.imul(h1 ^ cc, 0x100000001b3) | 0;
+      h2 = Math.imul(h2 ^ cc, 0x100000001b3) | 0;
+    }
+    function hex(n) { var s = (n >>> 0).toString(16); while (s.length < 8) s = '0' + s; return s; }
+    return hex(h1) + hex(h2);
+  }
+  function rect(el) {
+    var r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  }
+  function linkText(el) {
+    var t = ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).trim().replace(/\\s+/g, ' ');
+    return t.slice(0, 256);
+  }
+  function safeText(t) {
+    return /\\b(?:authorization|cookie|credentials?|localstorage|password|passcode|profile|proxy|secret|sessionstorage|token)\\b/i.test(t);
+  }
+  function pageIdentity() {
+    var lines = [];
+    var walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT, null);
+    var nd = walker.currentNode;
+    while (nd) {
+      var el = nd;
+      var role = el.getAttribute('role') || el.tagName.toLowerCase();
+      var parent = el.parentElement;
+      var idx = 0;
+      if (parent) {
+        var sameRole = [];
+        for (var k = 0; k < parent.children.length; k++) {
+          var c = parent.children[k];
+          var cr = c.getAttribute('role') || c.tagName.toLowerCase();
+          if (cr === role) sameRole.push(c);
+        }
+        idx = sameRole.indexOf(el);
+        if (idx < 0) idx = 0;
+      }
+      var name = (el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().slice(0, 80);
+      lines.push(role + '|' + idx + '|' + name);
+      nd = walker.nextNode();
+    }
+    var text = lines.join('\\n');
+    var h1 = 0xcbf29ce484222325 | 0;
+    var h2 = 0x84222325cbf29ce4 | 0;
+    for (var i = 0; i < text.length; i++) {
+      var cc = text.charCodeAt(i);
+      h1 = Math.imul(h1 ^ cc, 0x100000001b3) | 0;
+      h2 = Math.imul(h2 ^ cc, 0x100000001b3) | 0;
+    }
+    function hex(n) { var s = (n >>> 0).toString(16); while (s.length < 8) s = '0' + s; return s; }
+    return hex(h1) + hex(h2);
+  }
+  var pagePurpose = '';
+  var meta = document.querySelector('meta[name="description"], meta[property="og:description"]');
+  if (meta) pagePurpose = (meta.getAttribute('content') || '').trim();
+  var h1El = document.querySelector('h1');
+  if (h1El) pagePurpose = (pagePurpose ? pagePurpose + ' — ' : '') + (h1El.textContent || '').trim();
+  if (pagePurpose.length > 512) pagePurpose = pagePurpose.slice(0, 512);
+
+  var links = [];
+  var linkSel = "a[href], [role='link'][href], [role='link']";
+  var linkIter = document.querySelectorAll(linkSel);
+  for (var li = 0; li < linkIter.length && links.length < 500; li++) {
+    var le = linkIter[li];
+    if (!isVisible(le)) continue;
+    var lt = linkText(le);
+    if (!lt || safeText(lt)) continue;
+    var lhref = le.getAttribute('href') || '';
+    if (lhref.indexOf('javascript:') === 0) continue;
+    var labs;
+    try { labs = new URL(lhref, location.href).toString(); } catch (e) { continue; }
+    if (labs.length > 2048) labs = labs.slice(0, 2048);
+    links.push({ text: lt, href: labs, axPath: pathFor(le), attributeHash: hashAttrs(le), bbox: rect(le) });
+  }
+
+  var buttons = [];
+  var btnSel = "button, [role='button'], [role='tab'], input[type='submit'], input[type='button']";
+  var btnIter = document.querySelectorAll(btnSel);
+  for (var bi = 0; bi < btnIter.length && buttons.length < 500; bi++) {
+    var be = btnIter[bi];
+    if (!isVisible(be)) continue;
+    if (be.tagName.toLowerCase() === 'input') {
+      var bt = ((be.type || '') + '').toLowerCase();
+      if (bt === 'hidden' || bt === 'password') continue;
+    }
+    var btext = ((be.getAttribute('aria-label') || '') + ' ' + ((be.value || '') + '') + ' ' + (be.textContent || '')).trim().replace(/\\s+/g, ' ');
+    if (!btext || safeText(btext)) continue;
+    buttons.push({ text: btext.slice(0, 256), axPath: pathFor(be), attributeHash: hashAttrs(be), bbox: rect(be) });
+  }
+
   return {
     url: location.href,
     title: document.title,
     elements: out,
     focusedId: (focused && focused !== document.body) ? stableId(focused, []) : null,
     bodyTextSnippet: smartExtractText(),
+    pageIdentity: pageIdentity(),
+    pagePurpose: pagePurpose,
+    links: links,
+    buttons: buttons,
   };
 })()`;
 

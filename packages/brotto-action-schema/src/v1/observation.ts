@@ -241,6 +241,32 @@ export const AccessibilityNodeSchema = z.object({
   attributeHash: Sha256Schema,
 });
 
+// ponytail: replay-ready clickables inventory. Captured per observation so a
+// future workflow recorder can serialize (text → href) pairs without
+// re-scraping the page. axPath + attributeHash enable StableRef matching
+// during replay; bbox is the capture-time click coordinates.
+export const PageLinkSchema = z.object({
+  text: SafeSemanticTextSchema,
+  href: z.string().max(2048),
+  axPath: z.array(AXTupleSchema).max(64),
+  attributeHash: Sha256Schema,
+  bbox: BoundingBoxSchema,
+}).strict();
+
+export const PageButtonSchema = z.object({
+  text: SafeSemanticTextSchema,
+  axPath: z.array(AXTupleSchema).max(64),
+  attributeHash: Sha256Schema,
+  bbox: BoundingBoxSchema,
+}).strict();
+
+// ponytail: page identity fingerprint. SHA-256 over a normalized AX-subtree
+// dump. Stable across renders when the page is semantically the same;
+// different when navigation actually happened. Replaces the unreliable
+// obs-sig (which used only the first semanticTarget's stableRef and drifted
+// whenever the page re-rendered).
+export const PageIdentitySchema = z.string().regex(/^[a-f0-9]{64}$/i);
+
 export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({
   observationId: ObservationIdSchema,
   capturedAt: z.string().datetime(),
@@ -255,6 +281,19 @@ export const ObservationV1Schema = withForbiddenBrowserDataGuard(z.object({
   // Optional so older payloads still validate. Replaces the lazy
   // accessibilityNodes.slice(0, 400) cap in the planner context builder.
   bodyText: z.string().max(50_000).optional(),
+  // ponytail: replay-ready fields — added for future workflow recorder.
+  // pageIdentity: SHA-256 over normalized AX subtree; lets the harness detect
+  // "click didn't navigate" reliably across page re-renders.
+  // pagePurpose: meta description + first h1; orients the model and labels
+  // recorded steps.
+  // links / buttons: human-readable clickables inventory (text + href + bbox
+  // + StableRef identity) — what the recorder needs to emit
+  // `(text="Browse repositories", href="/orgs/X/repositories")` without
+  // re-querying the page.
+  pageIdentity: PageIdentitySchema.optional(),
+  pagePurpose: z.string().max(512).optional(),
+  links: z.array(PageLinkSchema).max(500).optional(),
+  buttons: z.array(PageButtonSchema).max(500).optional(),
 }).strict());
 
 export type Screenshot = z.infer<typeof ScreenshotSchema>;
@@ -268,3 +307,6 @@ export type ControlMetadata = z.infer<typeof ControlMetadataSchema>;
 export type ObservationV1 = z.infer<typeof ObservationV1Schema>;
 export type AXTuple = z.infer<typeof AXTupleSchema>;
 export type AccessibilityNode = z.infer<typeof AccessibilityNodeSchema>;
+export type PageLink = z.infer<typeof PageLinkSchema>;
+export type PageButton = z.infer<typeof PageButtonSchema>;
+export type PageIdentity = z.infer<typeof PageIdentitySchema>;

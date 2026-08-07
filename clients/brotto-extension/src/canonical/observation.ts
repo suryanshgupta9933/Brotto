@@ -76,6 +76,26 @@ interface RawPageSnapshot {
   sensitiveRegions?: unknown;
   semanticTargets?: unknown;
   bodyTextSnippet?: unknown;
+  // ponytail: replay-ready fields populated by collectPageSnapshot.
+  pageIdentity?: unknown;
+  pagePurpose?: unknown;
+  links?: unknown;
+  buttons?: unknown;
+}
+
+interface PageLinkSnapshot {
+  text: string;
+  href: string;
+  axPath: Array<{ role: string; index: number; name?: string }>;
+  attributeHash: string;
+  bbox: { x: number; y: number; width: number; height: number };
+}
+
+interface PageButtonSnapshot {
+  text: string;
+  axPath: Array<{ role: string; index: number; name?: string }>;
+  attributeHash: string;
+  bbox: { x: number; y: number; width: number; height: number };
 }
 
 interface PageSnapshot {
@@ -96,6 +116,11 @@ interface PageSnapshot {
   sensitiveRegions: SensitiveRegion[];
   semanticTargets: RawSemanticTarget[];
   bodyTextSnippet: string;
+  // ponytail: replay-ready fields populated by collectPageSnapshot.
+  pageIdentity: string;
+  pagePurpose: string;
+  links: PageLinkSnapshot[];
+  buttons: PageButtonSnapshot[];
 }
 
 interface RuntimeEvaluateResult {
@@ -506,7 +531,14 @@ function collectPageSnapshot(
     const HIDDEN_ROLES: Record<string, number> = {
       navigation: 1, banner: 1, contentinfo: 1,
     };
-    const NAV_LINE_RE = /^(sign in|sign up|log in|log out|menu|search|skip to|home|about|contact|privacy|terms|cookie|copyright|©)/i;
+    // ponytail: literal chrome denylist (replaces the over-broad NAV_LINE_RE
+    // regex that hid navigation labels the model actually needs, e.g.
+    // "Browse repositories", "Filter by languages"). Only the literal
+    // cookie/copyright chrome goes through this filter now.
+    const CHROME_DENYLIST = new Set([
+      "skip to content", "skip to main content", "skip to navigation",
+      "©", "all rights reserved",
+    ]);
     const clean = (s: string | null | undefined): string =>
       (s || "").replace(/\s+/g, " ").trim();
     const vis = (el: Element | null): boolean => {
@@ -555,7 +587,9 @@ function collectPageSnapshot(
       if (el.nodeType === Node.TEXT_NODE) {
         const t = clean(el.textContent);
         if (t.length < 3) return;
-        if (NAV_LINE_RE.test(t)) return;
+        // ponytail: dropped the over-broad NAV_LINE_RE filter. Only the
+        // literal chrome denylist hides a line now.
+        if (CHROME_DENYLIST.has(t.toLowerCase())) return;
         if (seen[t]) return;
         seen[t] = 1;
         lines.push(t);
@@ -573,6 +607,152 @@ function collectPageSnapshot(
 
     return parts.join("\n\n");
   })();
+
+  // ponytail: page-identity fingerprint. SHA-256 over a normalized
+  // AX-subtree dump (role|indexInParentByRole|name). Stable across DOM
+  // re-renders; flips when navigation actually happens. Replaces the
+  // unreliable obs-sig (which used only the first semanticTarget's
+  // stableRef and drifted on every re-render).
+  const pageIdentity = (() => {
+    const lines: string[] = [];
+    const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
+    let nd: Node | null = walker.currentNode;
+    while (nd) {
+      const el = nd as Element;
+      const role = el.getAttribute("role") || el.tagName.toLowerCase();
+      const parent = el.parentElement;
+      let idx = 0;
+      if (parent) {
+        const sameRole = Array.from(parent.children).filter((c) => {
+          const r = c.getAttribute("role") || c.tagName.toLowerCase();
+          return r === role;
+        });
+        idx = sameRole.indexOf(el);
+        if (idx < 0) idx = 0;
+      }
+      const name = (el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 80);
+      lines.push(`${role}|${idx}|${name}`);
+      nd = walker.nextNode();
+    }
+    const text = lines.join("\n");
+    let h1 = 0xcbf29ce484222325n;
+    let h2 = 0x84222325cbf29ce4n;
+    const prime = 0x100000001b3n;
+    const mask = (1n << 64n) - 1n;
+    for (let i = 0; i < text.length; i++) {
+      const c = BigInt(text.charCodeAt(i));
+      h1 = ((h1 ^ c) * prime) & mask;
+      h2 = ((h2 ^ c) * prime) & mask;
+    }
+    const hex = (n: bigint) => n.toString(16).padStart(16, "0");
+    return hex(h1) + hex(h2);
+  })();
+
+  // ponytail: page purpose — meta description + first h1. Stable step label
+  // for the future workflow recorder; orients the model in one glance.
+  const pagePurpose = (() => {
+    const meta = document.querySelector('meta[name="description"], meta[property="og:description"]');
+    const metaDesc = meta ? (meta.getAttribute("content") || "").trim() : "";
+    const h1 = document.querySelector("h1");
+    const h1Text = h1 ? (h1.textContent || "").trim() : "";
+    const parts = [metaDesc, h1Text].filter((s) => s.length > 0);
+    return parts.join(" — ").slice(0, 512);
+  })();
+
+  // ponytail: StableRef helpers inlined because collectPageSnapshot runs as
+  // a string in the page context (no module imports). Mirrors ax-snapshot.ts.
+  const pathFor = (el: Element): Array<{ role: string; index: number; name?: string }> => {
+    const path: Array<{ role: string; index: number; name?: string }> = [];
+    let cur: Element | null = el;
+    while (cur && cur !== document.documentElement) {
+      const curEl: Element = cur;
+      const role = curEl.getAttribute("role") || curEl.tagName.toLowerCase();
+      const parent = curEl.parentElement;
+      let idx = 0;
+      if (parent) {
+        const sameRole: Element[] = Array.from(parent.children).filter((c: Element) => {
+          const r = c.getAttribute("role") || c.tagName.toLowerCase();
+          return r === role;
+        });
+        idx = sameRole.indexOf(curEl);
+        if (idx < 0) idx = 0;
+      }
+      const name = (cur.getAttribute("aria-label") || cur.getAttribute("title") || "").trim().slice(0, 80);
+      path.unshift({ role, index: idx, name: name || undefined });
+      cur = parent;
+    }
+    return path;
+  };
+  const hashAttrs = (el: Element): string => {
+    const parts: string[] = [];
+    for (const k of ["id", "aria-label", "data-testid", "data-id", "name", "type", "href", "role", "title"]) {
+      const v = el.getAttribute(k);
+      if (typeof v === "string" && v.length > 0) parts.push(`${k}=${v}`);
+    }
+    const text = parts.join("|");
+    let h1 = 0xcbf29ce484222325n;
+    let h2 = 0x84222325cbf29ce4n;
+    const prime = 0x100000001b3n;
+    const mask = (1n << 64n) - 1n;
+    for (let i = 0; i < text.length; i++) {
+      const c = BigInt(text.charCodeAt(i));
+      h1 = ((h1 ^ c) * prime) & mask;
+      h2 = ((h2 ^ c) * prime) & mask;
+    }
+    const hex = (n: bigint) => n.toString(16).padStart(16, "0");
+    return hex(h1) + hex(h2);
+  };
+
+  // ponytail: visible anchor inventory. text + href + axPath + attributeHash
+  // + bbox. Captured for the future workflow recorder — serializes
+  // (text='Browse repositories', href='/orgs/X/repositories') without
+  // re-querying the page.
+  const links: Array<{ text: string; href: string; axPath: Array<{ role: string; index: number; name?: string }>; attributeHash: string; bbox: { x: number; y: number; width: number; height: number } }> = [];
+  {
+    const sel = "a[href], [role='link'][href], [role='link']";
+    const iter = document.querySelectorAll(sel);
+    for (let i = 0; i < iter.length && links.length < 500; i++) {
+      const el = iter[i] as Element;
+      if (!isVisible(el)) continue;
+      const text = (((el.getAttribute("aria-label") || "") + " " + (el.textContent || "")).trim().replace(/\s+/g, " "));
+      if (!text) continue;
+      if (sensitivePattern.test(text) || sensitiveValuePattern.test(text)) continue;
+      const rawHref = (el as HTMLAnchorElement).getAttribute("href") || "";
+      if (rawHref.startsWith("javascript:")) continue;
+      let href = "";
+      try { href = new URL(rawHref, location.href).toString(); } catch { continue; }
+      if (href.length > 2048) href = href.slice(0, 2048);
+      const rect = el.getBoundingClientRect();
+      links.push({ text: text.slice(0, 256), href, axPath: pathFor(el), attributeHash: hashAttrs(el), bbox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
+    }
+  }
+
+  // ponytail: visible button inventory (button + role=button + role=tab +
+  // submit/button input).
+  const buttons: Array<{ text: string; axPath: Array<{ role: string; index: number; name?: string }>; attributeHash: string; bbox: { x: number; y: number; width: number; height: number } }> = [];
+  {
+    const sel = "button, [role='button'], [role='tab'], input[type='submit'], input[type='button']";
+    const iter = document.querySelectorAll(sel);
+    for (let i = 0; i < iter.length && buttons.length < 500; i++) {
+      const el = iter[i] as Element;
+      if (!isVisible(el)) continue;
+      if (el.tagName.toLowerCase() === "input") {
+        const t = ((el as HTMLInputElement).type || "").toLowerCase();
+        if (["hidden", "password"].includes(t)) continue;
+      }
+      const text = (
+        (el.getAttribute("aria-label") || "") +
+        " " +
+        ((el as HTMLInputElement).value || "") +
+        " " +
+        (el.textContent || "")
+      ).trim().replace(/\s+/g, " ");
+      if (!text) continue;
+      if (sensitivePattern.test(text) || sensitiveValuePattern.test(text)) continue;
+      const rect = el.getBoundingClientRect();
+      buttons.push({ text: text.slice(0, 256), axPath: pathFor(el), attributeHash: hashAttrs(el), bbox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
+    }
+  }
 
   return {
     url: location.href,
@@ -592,6 +772,10 @@ function collectPageSnapshot(
     sensitiveRegions,
     semanticTargets,
     bodyTextSnippet,
+    pageIdentity,
+    pagePurpose,
+    links,
+    buttons,
   };
 }
 
@@ -812,6 +996,16 @@ function validatePageSnapshot(value: unknown): PageSnapshot {
     throw securityError("Semantic targets are invalid");
   if (typeof raw.bodyTextSnippet !== "string")
     throw securityError("Page body text is missing");
+  // ponytail: replay-ready fields. pageIdentity is required (computed
+  // for every capture); pagePurpose/links/buttons are optional but expected
+  // to be populated. Older snapshots without these fields fall back
+  // safely (the merged ObservationV1 just won't have them).
+  const pageIdentity = typeof raw.pageIdentity === "string" && /^[a-f0-9]{32}$/i.test(raw.pageIdentity)
+    ? raw.pageIdentity
+    : "";
+  const pagePurpose = typeof raw.pagePurpose === "string" ? raw.pagePurpose : "";
+  const links = Array.isArray(raw.links) ? (raw.links as PageLinkSnapshot[]) : [];
+  const buttons = Array.isArray(raw.buttons) ? (raw.buttons as PageButtonSnapshot[]) : [];
 
   return {
     url: raw.url,
@@ -825,6 +1019,10 @@ function validatePageSnapshot(value: unknown): PageSnapshot {
     sensitiveRegions: validateSensitiveRegions(raw.sensitiveRegions, viewport),
     semanticTargets: raw.semanticTargets as RawSemanticTarget[],
     bodyTextSnippet: raw.bodyTextSnippet,
+    pageIdentity,
+    pagePurpose,
+    links,
+    buttons,
   };
 }
 
@@ -1148,6 +1346,26 @@ async function captureObservationInternal(
     // ponytail: structured page text from smart DOM extractor. Sensitive
     // content (passwords, tokens, etc.) is redacted via sanitizeBrowserText.
     bodyText: sanitizeBrowserText(after.bodyTextSnippet),
+    // ponytail: replay-ready fields. pageIdentity is a SHA-256 over a
+    // normalized AX-subtree dump — stable across DOM re-renders, flips
+    // when navigation actually happens. pagePurpose / links / buttons
+    // give the future workflow recorder everything it needs without a
+    // re-scrape.
+    pageIdentity: after.pageIdentity || undefined,
+    pagePurpose: after.pagePurpose ? sanitizeBrowserText(after.pagePurpose) : undefined,
+    links: after.links.length > 0 ? after.links.map((l) => ({
+      text: sanitizeBrowserText(l.text),
+      href: l.href,
+      axPath: l.axPath,
+      attributeHash: l.attributeHash,
+      bbox: l.bbox,
+    })) : undefined,
+    buttons: after.buttons.length > 0 ? after.buttons.map((b) => ({
+      text: sanitizeBrowserText(b.text),
+      axPath: b.axPath,
+      attributeHash: b.attributeHash,
+      bbox: b.bbox,
+    })) : undefined,
   };
 
   assertNoForbiddenBrowserData(observation);

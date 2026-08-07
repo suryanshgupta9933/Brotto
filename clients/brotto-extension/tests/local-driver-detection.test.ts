@@ -1,7 +1,7 @@
 // ponytail: unit tests for the detection helpers in local-driver.ts. These
 // are pure functions, so we exercise them directly without the runner.
 
-import { detectLoop, detectStuckFailures, looksLikeAuthChallenge, looksLikeLoginPage, looksLikeSignInLink, needsApproval } from "../src/local-driver";
+import { detectLoop, detectPageStagnation, detectStagnation, detectStuckFailures, looksLikeAuthChallenge, looksLikeLoginPage, looksLikeSignInLink, needsApproval } from "../src/local-driver";
 
 describe("detectLoop", () => {
   it("returns false when history is shorter than threshold", () => {
@@ -41,6 +41,46 @@ describe("detectLoop", () => {
     ];
     expect(detectLoop(history, 4).loop).toBe(true);
     expect(detectLoop(history, 5).loop).toBe(false);
+  });
+});
+
+describe("detectPageStagnation", () => {
+  // ponytail: regression for the GitHub "find repo with most stars" run
+  // where the model clicked (44, 76) four times in a row on the same
+  // page without navigating. The pageIdentity fingerprint stays stable
+  // across re-renders; 3 consecutive identical fingerprints = stuck.
+  it("returns null with fewer than 3 entries", () => {
+    expect(detectPageStagnation([])).toBeNull();
+    expect(detectPageStagnation(["abc"])).toBeNull();
+    expect(detectPageStagnation(["abc", "abc"])).toBeNull();
+  });
+
+  it("returns null when the last 3 pageIdentities are different", () => {
+    expect(detectPageStagnation(["abc", "def", "ghi"])).toBeNull();
+  });
+
+  it("fires when the last 3 pageIdentities match", () => {
+    const r = detectPageStagnation(["x", "y", "x", "x", "x"]);
+    expect(r).not.toBeNull();
+    expect(r?.kind).toBe("repeated_observation");
+    expect(r?.signature).toBe("x");
+  });
+
+  it("skips empty pageIdentity entries (uncomputable)", () => {
+    expect(detectPageStagnation(["", "", ""])).toBeNull();
+    expect(detectPageStagnation(["x", "", "x"])).toBeNull();
+  });
+});
+
+describe("detectStagnation (regression for action + obs-sig signals)", () => {
+  it("still fires on repeated actions even when page identity changes", () => {
+    // Click(44, 76) x3, then click(44, 76) again after page changed —
+    // the action repetition is the secondary signal.
+    const actionSigs = ["click:44,76", "click:44,76", "click:44,76", "click:44,76"];
+    const obsSigs = ["a|b|1", "a|b|2", "a|b|3", "a|b|4"];
+    const r = detectStagnation(actionSigs, obsSigs);
+    expect(r).not.toBeNull();
+    expect(r?.kind).toBe("repeated_action");
   });
 });
 

@@ -18,6 +18,41 @@ export interface ElementState {
   checked?: boolean;
 }
 
+export interface ElementState {
+  id: string;
+  tag: string;
+  role: string;
+  name: string;
+  value: string;
+  type?: string;
+  placeholder?: string;
+  focused: boolean;
+  disabled: boolean;
+  visible: boolean;
+  cx: number;
+  cy: number;
+  href?: string;
+  checked?: boolean;
+}
+
+// ponytail: replay-ready clickables inventory. Mirrors PageLinkSchema in
+// packages/brotto-action-schema/src/v1/observation.ts so the orchestrator's
+// Playwright path produces the same observation shape as the extension.
+export interface PageLinkState {
+  text: string;
+  href: string;
+  axPath: Array<{ role: string; index: number; name?: string }>;
+  attributeHash: string;
+  bbox: { x: number; y: number; width: number; height: number };
+}
+
+export interface PageButtonState {
+  text: string;
+  axPath: Array<{ role: string; index: number; name?: string }>;
+  attributeHash: string;
+  bbox: { x: number; y: number; width: number; height: number };
+}
+
 export interface PageSnapshot {
   url: string;
   title: string;
@@ -27,6 +62,14 @@ export interface PageSnapshot {
   // ponytail: optional screenshot (base64 PNG). Only populated when DEMO_VISION=1.
   // Default OFF — DOM + body text is enough for most tasks and skips the cost.
   screenshot?: string;
+  // ponytail: replay-ready fields (slice E). pageIdentity is the most
+  // reliable "did the click land?" signal — stable across re-renders.
+  // pagePurpose / links / buttons are what the future workflow recorder
+  // needs to serialize steps without re-scraping.
+  pageIdentity?: string;
+  pagePurpose?: string;
+  links?: PageLinkState[];
+  buttons?: PageButtonState[];
 }
 
 export interface HistoryEntry {
