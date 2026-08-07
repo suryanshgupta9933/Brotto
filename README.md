@@ -82,12 +82,25 @@ See [SECURITY.md](SECURITY.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
 | Context rendering (stable IDs, diff, history) | ✅ shipped |
 | Login pause + manual authentication | ✅ shipped |
 | Side panel UI (Claude in Chrome style) | ✅ shipped |
-| Strict CDP allowlist | ✅ shipped |
+| Goal-detector banner (delivery-status gating) | ✅ shipped |
+| Working memory + fact extractor | ✅ shipped |
+| Stagnation nudge (memory-aware, not hard-stop) | ✅ shipped |
+| Strict CDP allowlist (canonical path) | ✅ shipped |
 | Sensitive region masking | ✅ shipped |
 | Multi-tab flows | ⏳ planned |
 | Anthropic-native computer-use adapter | ⏳ planned |
 | Desktop connector (native binary, isolated profile) | ⏳ planned |
 | Deterministic step recording + replay | ⏳ planned |
+
+## Branches
+
+- **`stable`** — pinned working set. Use this if you want a known-good
+  build to install and try.
+- **`main`** — tracks the security + canonical-path work.
+- **`feature/v2-dom-workflow`** — active development; new harness
+  improvements land here first.
+
+See [CHANGELOG.md](CHANGELOG.md) for the recent fix list.
 
 ## Development
 

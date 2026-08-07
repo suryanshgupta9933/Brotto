@@ -82,3 +82,12 @@ node test.mjs
 
 Use `superpowers:execute-plan` for implementation planning and tracking.
 Use `superpowers:brainstorming` when exploring new designs or major changes.
+
+## Branches
+
+- `stable` — pinned working set for install + try.
+- `main` — canonical-path / security work.
+- `feature/v2-dom-workflow` — active harness iteration (goal-detector,
+  working memory, stagnation nudges, pre-navigate-to-goal-site, etc.).
+
+Recent fixes are documented in [CHANGELOG.md](CHANGELOG.md).
