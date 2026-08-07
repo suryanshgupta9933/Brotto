@@ -193,7 +193,6 @@ const STAGNATION_WINDOW = 6;
 
 export function actionSignature(
   action: { type?: string; url?: string; x?: number; y?: number; text?: string; key?: string },
-  obs?: { semanticTargets?: Array<{ visible?: boolean; stableRef?: string; targetId: string; boundingBox: { x: number; y: number; width: number; height: number } }> },
 ): string {
   const t = (action.type ?? "unknown").toLowerCase();
   switch (t) {
@@ -202,19 +201,14 @@ export function actionSignature(
     case "double_click":
     case "right_click":
     case "mouse_move": {
-      if (obs?.semanticTargets && typeof action.x === "number" && typeof action.y === "number") {
-        const x = action.x;
-        const y = action.y;
-        const target = obs.semanticTargets.find((candidate) => {
-          const bb = candidate.boundingBox;
-          return bb && x >= bb.x && x <= bb.x + bb.width && y >= bb.y && y <= bb.y + bb.height && candidate.visible;
-        });
-        if (target) {
-          const id = target.stableRef ?? target.targetId;
-          return `${t}:target:${id}`;
-        }
-      }
-      // Fallback: bucket coordinates to 20px grid to catch nearby duplicate clicks
+      // ponytail: bucket to a 20px grid. Two clicks with the same bucket
+      // count as the same action (the model is trying the same spot).
+      // Clicks in different buckets — even inside the same element's
+      // bbox — are distinct actions; one may be on padding, the other on
+      // the actual hit target. Resolving to the element's targetId here
+      // was a false-positive trap: a wide bbox covers many pixels and
+      // would collapse distinct attempts into one "ALREADY attempted"
+      // rejection. Don't.
       const rx = Math.round((action.x ?? 0) / 20) * 20;
       const ry = Math.round((action.y ?? 0) / 20) * 20;
       return `${t}:${rx},${ry}`;
@@ -1404,7 +1398,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       // and loop to the next turn so the model is forced to pivot without wasting time/CDP.
       // NOTE: `scroll` is explicitly excluded from Hard Action Rejection because scrolling down
       // long pages or lists is a normal multi-step action that doesn't change URL.
-      const actionSig = actionSignature(action, obs);
+      const actionSig = actionSignature(action);
       const isRepeatUnchanged = action.type !== "scroll" && history.some(
         (h) => (h.action === desc || actionSigs.includes(actionSig)) && h.result.includes("[Unchanged"),
       );
@@ -1492,7 +1486,6 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       }
       let outcomeTag = "";
       let pageChanged = false;
-      let autoCorrectedFrom: { x: number; y: number } | null = null;
       if (postObs) {
         if (postObs.url !== obs.url) {
           outcomeTag = ` [Verified: Navigated to ${postObs.url}]`;
@@ -1508,93 +1501,6 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
           pageChanged = true;
         } else if (action.type === "key") {
           outcomeTag = ` [Verified: Key pressed]`;
-          pageChanged = true;
-        } else if (action.type === "left_click" || action.type === "double_click") {
-          // ponytail: AUTO-CORRECT. The model often picks raw x/y that
-          // land BETWEEN rows (Gmail search results, table cells) and
-          // miss every interactive element. If the click didn't change
-          // the page, retry once at the nearest interactive target
-          // before reporting unchanged. Saves the agent a turn and
-          // stops the click-twice-same-coords → STAGNATION spiral.
-          const acCx = action.x ?? 0;
-          const acCy = action.y ?? 0;
-          const acRoles = new Set(["button", "link", "textbox", "searchbox", "tab", "menuitem", "combobox", "switch", "option"]);
-          const acRanked = (obs.semanticTargets ?? [])
-            .filter((t: { visible?: boolean; role?: string }) => t.visible && acRoles.has((t.role ?? "").toLowerCase()))
-            .map((t: { boundingBox: { x: number; y: number; width: number; height: number } }) => {
-              const dx = (t.boundingBox.x + t.boundingBox.width / 2) - acCx;
-              const dy = (t.boundingBox.y + t.boundingBox.height / 2) - acCy;
-              return { t, dist: Math.hypot(dx, dy) };
-            })
-            .sort((a: { dist: number }, b: { dist: number }) => a.dist - b.dist);
-          const acNearest = acRanked[0];
-          if (acNearest && acNearest.dist > 5) {
-            const nb = acNearest.t.boundingBox;
-            const nx = Math.round(nb.x + nb.width / 2);
-            const ny = Math.round(nb.y + nb.height / 2);
-            try {
-              await debuggerModule.sendCommand(tabId, {
-                method: "Input.dispatchMouseEvent",
-                params: { type: "mousePressed", x: nx, y: ny, button: "left", clickCount: 1 },
-              });
-              await debuggerModule.sendCommand(tabId, {
-                method: "Input.dispatchMouseEvent",
-                params: { type: "mouseReleased", x: nx, y: ny, button: "left", clickCount: 1 },
-              });
-              autoCorrectedFrom = { x: acCx, y: acCy };
-              const retryObs = await captureObservationWithTimeout(tabId, CAPTURE_TIMEOUT_MS).catch(() => null);
-              if (retryObs && (retryObs.url !== obs.url || (retryObs.pageIdentity && obs.pageIdentity && retryObs.pageIdentity !== obs.pageIdentity))) {
-                outcomeTag = ` [Auto-corrected: original click at (${acCx}, ${acCy}) missed; re-clicked nearest interactive at (${nx}, ${ny}). Verified: navigated to ${retryObs.url}]`;
-                pageChanged = true;
-                postUrl = retryObs.url;
-                postObs = retryObs;
-              } else {
-                outcomeTag = ` [Auto-corrected: original click at (${acCx}, ${acCy}) missed; re-clicked nearest interactive at (${nx}, ${ny}) but page unchanged]`;
-              }
-            } catch { /* fall through */ }
-          }
-          if (!autoCorrectedFrom) {
-            const nearby = acRanked.slice(0, 3).map(({ t }: { t: { accessibleName?: { text?: string }; role?: string; boundingBox: { x: number; y: number; width: number; height: number } } }) => {
-              const name = t.accessibleName?.text ?? "(unnamed)";
-              const bx = Math.round(t.boundingBox.x + t.boundingBox.width / 2);
-              const by = Math.round(t.boundingBox.y + t.boundingBox.height / 2);
-              return `"${name}" (${t.role ?? "?"} at ${bx},${by})`;
-            }).join(", ");
-            if (nearby) {
-              outcomeTag = ` [Unchanged: click landed but page didn't change. Nearest interactive elements: ${nearby}. Try one of those, or scroll/visit_url.]`;
-            } else {
-              outcomeTag = ` [Unchanged: URL and page state remained identical]`;
-            }
-          }
-          // ponytail: click diagnostic when the click landed but nothing
-          // changed. The model needs to know WHY: did it hit empty space,
-          // a non-interactive element, or the right element with no
-          // side effect (e.g. clicking an already-selected tab). Find
-          // the nearest interactive element so the model has a fresh
-          // candidate next turn.
-          const cx = action.x ?? 0;
-          const cy = action.y ?? 0;
-          const interactiveRoles = new Set(["button", "link", "textbox", "searchbox", "tab", "menuitem", "combobox", "switch", "option"]);
-          const ranked = (obs.semanticTargets ?? [])
-            .filter((t: { visible?: boolean; role?: string }) => t.visible && interactiveRoles.has((t.role ?? "").toLowerCase()))
-            .map((t: { boundingBox: { x: number; y: number; width: number; height: number }; accessibleName?: { text?: string }; role?: string }) => {
-              const dx = (t.boundingBox.x + t.boundingBox.width / 2) - cx;
-              const dy = (t.boundingBox.y + t.boundingBox.height / 2) - cy;
-              return { t, dist: Math.hypot(dx, dy) };
-            })
-            .sort((a: { dist: number }, b: { dist: number }) => a.dist - b.dist)
-            .slice(0, 3);
-          const nearby = ranked.map(({ t }: { t: { accessibleName?: { text?: string }; role?: string; boundingBox: { x: number; y: number; width: number; height: number } } }) => {
-            const name = t.accessibleName?.text ?? "(unnamed)";
-            const bx = Math.round(t.boundingBox.x + t.boundingBox.width / 2);
-            const by = Math.round(t.boundingBox.y + t.boundingBox.height / 2);
-            return `"${name}" (${t.role ?? "?"} at ${bx},${by})`;
-          }).join(", ");
-          if (nearby) {
-            outcomeTag = ` [Unchanged: click landed but page didn't change. Nearest interactive elements: ${nearby}. Try one of those, or scroll/visit_url.]`;
-          } else {
-            outcomeTag = ` [Unchanged: URL and page state remained identical]`;
-          }
           pageChanged = true;
         } else {
           outcomeTag = ` [Unchanged: URL and page state remained identical]`;
@@ -1624,7 +1530,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       //     compare pre-action identity to itself → always identical.
       //   - actionSigs: detect same click coord repeated.
       // Whichever fires first wins.
-      actionSigs.push(actionSignature(action, obs));
+      actionSigs.push(actionSignature(action));
       const postTitle = postObs?.title ?? obs.title;
       const postTargets = postObs?.semanticTargets ?? obs.semanticTargets;
       obsSigs.push(observationSignature({ url: postUrl, title: postTitle, elements: postTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
