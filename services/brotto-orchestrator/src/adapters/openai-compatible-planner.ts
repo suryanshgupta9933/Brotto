@@ -240,6 +240,7 @@ export class OpenAICompatiblePlanner implements InferencePort {
         "- insert_text types into the currently focused element only. If the field you want is NOT marked focused=true, left_click it first.",
         "- Do NOT call wait. The harness waits between actions automatically.",
         "- Do NOT call ask_user_question for routine navigation. Use it ONLY when the goal is genuinely ambiguous.",
+        "- CLICK BY ELEMENT ID, NOT BY PIXELS: Every click tool accepts a `targetId` field. The `=== INTERACTIVE ELEMENTS ===` block in your context shows bracketed ids like `[f377c754f377c754]` — pass that string as `targetId`. The harness resolves it to the element's center. Pixel coordinates (`x`, `y`) are a fallback for canvas / drawn content that does not appear in INTERACTIVE ELEMENTS — DO NOT use them when an element id is visible. Clicking at guessed coordinates almost always misses the target.",
       ].join("\n"),
     });
 
@@ -417,6 +418,12 @@ export class OpenAICompatiblePlanner implements InferencePort {
     }
 
     const parser = new ToolCallParser();
+    // ponytail: feed the parser the current observation's semantic
+    // targets so click tool calls' targetId can be resolved to (x, y)
+    // bbox centers. Mirrors browser-use / computer-use semantics.
+    if (Array.isArray(input.observation?.semanticTargets)) {
+      parser.setLastSemanticTargets(input.observation.semanticTargets);
+    }
     let parseResult;
     try {
       parseResult = parser.parse(faraToolCalls);

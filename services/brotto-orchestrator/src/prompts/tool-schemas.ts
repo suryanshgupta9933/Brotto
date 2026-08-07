@@ -20,8 +20,8 @@ export interface ToolSchema {
 }
 
 const COORDINATE_PROPS = {
-  x: { type: "number", description: "X coordinate in CSS pixels" },
-  y: { type: "number", description: "Y coordinate in CSS pixels" },
+  x: { type: "number", description: "X coordinate in CSS pixels. Optional when targetId is provided." },
+  y: { type: "number", description: "Y coordinate in CSS pixels. Optional when targetId is provided." },
 } as const;
 
 // ponytail: every tool call carries a one-sentence `reasoning` field. The
@@ -37,9 +37,16 @@ const REASONING_PROP = {
 const TARGET_ID_PROP = {
   targetId: {
     type: "string",
-    description: "Optional semantic target id for stable references",
+    description: "REQUIRED. Semantic target id from the observation's INTERACTIVE ELEMENTS list (e.g. 'f377c754f377c754'). The harness resolves it to the element's bounding-box center and clicks there.",
   },
 } as const;
+
+// ponytail: x and y are now OPTIONAL. Click tools accept element
+// references (targetId) as the primary path, mirroring browser-use /
+// computer-use. The model MUST pass targetId from the rendered
+// INTERACTIVE ELEMENTS section. x/y are kept as a fallback for
+// elements that don't appear in the AX tree (canvas, drawn content).
+const CLICK_REQUIRED = ["targetId"];
 
 // ponytail: structured working-memory updates. Optional on every action — the
 // model records durable findings (e.g. key='answer', value='33', evidence='profile header')
@@ -76,11 +83,11 @@ export function buildToolSchemas(): ToolSchema[] {
       type: "function",
       function: {
         name: "left_click",
-        description: "Left-click at the given viewport coordinate.",
+        description: "Left-click. Pass the targetId from INTERACTIVE ELEMENTS (preferred — harness resolves to bbox center) OR fall back to x/y for canvas content.",
         parameters: {
           type: "object",
           properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP, ...MEMORY_UPDATE_PROP },
-          required: withReasoning(["x", "y"]),
+          required: withReasoning(CLICK_REQUIRED),
         },
       },
     },
@@ -88,11 +95,11 @@ export function buildToolSchemas(): ToolSchema[] {
       type: "function",
       function: {
         name: "double_click",
-        description: "Double-click at the given viewport coordinate.",
+        description: "Double-click. Pass targetId (preferred) or x/y.",
         parameters: {
           type: "object",
           properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP, ...MEMORY_UPDATE_PROP },
-          required: withReasoning(["x", "y"]),
+          required: withReasoning(CLICK_REQUIRED),
         },
       },
     },
@@ -100,11 +107,11 @@ export function buildToolSchemas(): ToolSchema[] {
       type: "function",
       function: {
         name: "right_click",
-        description: "Right-click at the given viewport coordinate.",
+        description: "Right-click. Pass targetId (preferred) or x/y.",
         parameters: {
           type: "object",
           properties: { ...COORDINATE_PROPS, ...TARGET_ID_PROP, ...REASONING_PROP, ...MEMORY_UPDATE_PROP },
-          required: withReasoning(["x", "y"]),
+          required: withReasoning(CLICK_REQUIRED),
         },
       },
     },

@@ -130,6 +130,15 @@ export interface CoordinateBounds {
 export class ToolCallParser {
   private coordinateBounds: CoordinateBounds | null = null;
   private currentObservationId: number | null = null;
+  // ponytail: semantic targets from the most recent observation. Used to
+  // resolve click tool calls' targetId to (x, y) bbox centers. Model
+  // passes the element id (e.g. "f377c754f377c754"); harness looks it up
+  // here and clicks the center.
+  private lastSemanticTargets: ReadonlyArray<{
+    targetId: string;
+    stableRef?: string;
+    boundingBox: { x: number; y: number; width: number; height: number };
+  }> = [];
 
   /**
    * Set viewport bounds for coordinate validation
@@ -145,12 +154,40 @@ export class ToolCallParser {
     this.currentObservationId = id;
   }
 
+  // ponytail: feed the most recent observation's semantic targets so the
+  // parser can resolve targetId clicks. Call once per planning cycle.
+  setLastSemanticTargets(targets: ReadonlyArray<{
+    targetId: string;
+    stableRef?: string;
+    boundingBox: { x: number; y: number; width: number; height: number };
+  }>): void {
+    this.lastSemanticTargets = targets;
+  }
+
   /**
    * Clear viewport bounds
    */
   clearBounds(): void {
     this.coordinateBounds = null;
     this.currentObservationId = null;
+  }
+
+  // ponytail: targetId → (x, y) bbox center. Match by full targetId,
+  // stableRef, or suffix (the rendered context shows the truncated
+  // stableRef as the bracketed id; we accept either). Returns null when
+  // no match; caller falls back to args.x/args.y.
+  private resolveTargetId(targetId: string): { x: number; y: number } | null {
+    const tid = targetId.toLowerCase();
+    for (const t of this.lastSemanticTargets) {
+      const fullId = t.targetId.toLowerCase();
+      const stable = (t.stableRef ?? "").toLowerCase();
+      if (fullId === tid || stable === tid || fullId.endsWith(tid) || tid.endsWith(fullId) || tid.endsWith(stable) || stable.endsWith(tid)) {
+        const cx = Math.round(t.boundingBox.x + t.boundingBox.width / 2);
+        const cy = Math.round(t.boundingBox.y + t.boundingBox.height / 2);
+        return { x: cx, y: cy };
+      }
+    }
+    return null;
   }
 
   /**
@@ -285,19 +322,35 @@ export class ToolCallParser {
       case ActionType.LEFT_CLICK:
       case ActionType.DOUBLE_CLICK:
       case ActionType.RIGHT_CLICK:
-      case ActionType.MOUSE_MOVE:
+      case ActionType.MOUSE_MOVE: {
+        // ponytail: resolve click coordinates. The model passes either
+        // targetId (preferred — element id from INTERACTIVE ELEMENTS) or
+        // raw x/y. Try targetId lookup first; fall back to x/y when the
+        // element isn't in the observation (canvas, drawn content, etc.).
+        const targetId = typeof args.targetId === "string" ? args.targetId.trim() : "";
+        const resolved = targetId ? this.resolveTargetId(targetId) : null;
+        const finalX = resolved?.x ?? this.numberArg(args.x, "x", toolCall);
+        const finalY = resolved?.y ?? this.numberArg(args.y, "y", toolCall);
+        if (typeof finalX !== "number" || typeof finalY !== "number") {
+          return {
+            toolCall,
+            error: `${actionType} requires either a targetId from INTERACTIVE ELEMENTS or x/y coordinates. Both resolved to nothing.`,
+            code: ParseErrorCode.MISSING_REQUIRED_FIELD,
+          };
+        }
         return {
           ...baseArgs,
           type: actionType,
           coordinates: {
-            x: this.numberArg(args.x, 'x', toolCall),
-            y: this.numberArg(args.y, 'y', toolCall),
+            x: finalX,
+            y: finalY,
           },
           viewport: {
             viewportWidth: this.numberArg(args.viewportWidth || args.viewport_width, 'viewportWidth', toolCall, 1920),
             viewportHeight: this.numberArg(args.viewportHeight || args.viewport_height, 'viewportHeight', toolCall, 1080),
           },
         };
+      }
 
       case ActionType.DRAG:
         return {
