@@ -1431,35 +1431,33 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         injectedGuidance = stagnation.message + recoveryHint;
         // ponytail: reset stagnation tracking after injecting guidance so
         // the agent gets a fresh window to try the recovery strategies.
-        actionSigs.length = 0;
-        obsSigs.length = 0;
         pageIdentities.length = 0;
         opts.onAnswered?.({ question: stagnation.kind, answer: stagnation.message });
       }
       // ponytail: loop detection. Same action 3+ times in a row = stuck.
-      // Surface a clarifying question so the user can redirect.
+      // For `scroll`, inject internal corrective guidance into injectedGuidance
+      // without interrupting the user. For other actions, surface a clarifying question.
       const loop = detectLoop(history);
       if (loop.loop) {
-        log(opts, `loop detected: ${loop.action} repeated ${history.length} times`);
-        const answer = await opts.onClarify({
-          reason: `Action "${loop.action}" repeated ${history.length} times in a row`,
-          question: `The agent keeps doing "${loop.action}" without progress. How should it proceed?`,
-          context: loop.action,
-        });
-        injectedGuidance = answer;
-        // ponytail: do NOT reset history on loop recovery — history is the
-        // model's working memory of what it has tried. Wiping it causes the
-        // model to repeat the same path from scratch, re-triggering the loop.
-        // Instead, reset only the action/obs/page signature arrays (those
-        // exist purely for stagnation detection, not for model context) and
-        // keep history intact so the model can see what failed and pick a
-        // genuinely different strategy.
+        log(opts, `loop detected: ${loop.action} repeated in history`);
+        if (loop.action === "scroll") {
+          injectedGuidance = `[HARNESS NOTICE]: You have scrolled multiple times in a row on this page. Read the CARDS & LIST ITEMS and PAGE TEXT sections in the current context carefully. If the information you need is present, extract it into memoryUpdates and call terminate(finalAnswer=...). If you need to refine your search, use direct URL parameters (e.g. ?sort=stargazers, ?type=source, ?q=query) or click a specific item link.`;
+          opts.onAnswered?.({ question: "scroll loop", answer: injectedGuidance });
+        } else {
+          const answer = await opts.onClarify({
+            reason: `Action "${loop.action}" repeated in history`,
+            question: `The agent keeps doing "${loop.action}" without progress. How should it proceed?`,
+            context: loop.action,
+          });
+          injectedGuidance = answer;
+          opts.onAnswered?.({ question: loop.action, answer });
+        }
         actionSigs.length = 0;
         obsSigs.length = 0;
         pageIdentities.length = 0;
         stagnationHits = 0;
-        opts.onAnswered?.({ question: loop.action, answer });
       }
+
       // ponytail: per-iteration time budget check. If the iteration took
       // longer than STEP_BUDGET_MS, surface a clarifying question so the
       // user can redirect before the loop burns more model turns. The
