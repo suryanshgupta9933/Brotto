@@ -16,6 +16,18 @@ interface PlanRequest {
   recentResults?: unknown[];
   trajectory?: unknown[];
   screenshot?: string;
+  // ponytail: forward the real semantic targets + page identity from the
+  // extension so the planner can resolve targetId clicks (browser-use
+  // semantics). Without this, the parser's resolveTargetId has nothing
+  // to look up and rejects every targetId-only tool call.
+  semanticTargets?: Array<{
+    targetId: string;
+    stableRef?: string;
+    accessibleName?: { text?: string };
+    role?: string;
+    boundingBox: { x: number; y: number; width: number; height: number };
+  }>;
+  pageIdentity?: string;
 }
 
 function buildConfigFromEnv(family: ReturnType<typeof inferFamilyFromEnv>): InferenceConfig {
@@ -129,7 +141,21 @@ async function main() {
         // whenever the model returns content (no tool call) to signal
         // termination. crypto.randomUUID() generates a fresh UUID per
         // request; the value is opaque to the planner (just a brand token).
-        observation: { observationId: crypto.randomUUID(), url: "", title: "", page: { tabId: "x" as never, frameId: "x" as never, lifecycle: "complete", visibility: "visible" }, viewport: { width: 0, height: 0, devicePixelRatio: 0, zoom: 0, scrollX: 0, scrollY: 0 }, screenshot: { kind: "inline", encoding: "base64", data: "", sha256: "a".repeat(64), width: 0, height: 0 }, semanticTargets: [] },
+        // ponytail: forward the extension's real semantic targets + page
+        // identity so the planner's resolveTargetId() can map a model
+        // tool call's `targetId` field to the element's bbox center.
+        // Without this, targetId-only clicks always reject because the
+        // placeholder semanticTargets:[] leaves the lookup empty.
+        observation: {
+          observationId: crypto.randomUUID(),
+          url: "",
+          title: "",
+          page: { tabId: "x" as never, frameId: "x" as never, lifecycle: "complete", visibility: "visible" },
+          viewport: { width: 0, height: 0, devicePixelRatio: 0, zoom: 0, scrollX: 0, scrollY: 0 },
+          screenshot: { kind: "inline", encoding: "base64", data: "", sha256: "a".repeat(64), width: 0, height: 0 },
+          semanticTargets: (req.body.semanticTargets ?? []) as never,
+          ...(req.body.pageIdentity ? { pageIdentity: req.body.pageIdentity } : {}),
+        },
         recentResults: (req.body.recentResults ?? []) as never,
         trajectory: (req.body.trajectory ?? []) as never,
         context: req.body.context,

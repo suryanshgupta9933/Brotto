@@ -758,6 +758,7 @@ async function waitForLoginResume(
 async function callPlanner(
   opts: LocalDriverOptions,
   context: string,
+  obs: ObservationV1,
 ): Promise<PlanningOutcome> {
   // ponytail: short retry with backoff for transient 429s (matches demo-server).
   let lastErr: Error | null = null;
@@ -766,6 +767,17 @@ async function callPlanner(
   // runs). sessionId is a constant placeholder for now; the local-driver
   // owns a per-run uuid so the demo-server's logs reflect "new task" cleanly.
   const driverTaskId = (opts as { taskId?: string }).taskId ?? "ext-task";
+  // ponytail: forward the real semantic targets + page identity so the
+  // planner can resolve targetId clicks (browser-use semantics). Without
+  // this forwarding, the demo-server builds a placeholder observation
+  // with empty semanticTargets and every targetId-only tool call rejects.
+  const semanticTargets = (obs.semanticTargets ?? []).map((t: SemanticTarget) => ({
+    targetId: t.targetId,
+    stableRef: t.stableRef,
+    accessibleName: t.accessibleName ? { text: t.accessibleName.text ?? "" } : undefined,
+    role: t.role,
+    boundingBox: t.boundingBox,
+  }));
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetch(`${opts.plannerUrl}/plan`, {
@@ -780,6 +792,8 @@ async function callPlanner(
           context,
           recentResults: [],
           trajectory: [],
+          semanticTargets,
+          ...(obs.pageIdentity ? { pageIdentity: obs.pageIdentity } : {}),
         }),
         signal: opts.signal,
       });
@@ -1254,7 +1268,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         obs, history, injectedGuidance, memory.toView(),
         stepInfo, goalMatch.banner, goalKeywords, opts.goal,
       );
-      const outcome = await callPlanner(opts, context);
+      const outcome = await callPlanner(opts, context, obs);
       if (opts.signal.aborted) {
         terminal = { kind: "error", error: { code: "ABORTED", message: "Loop was cancelled" } };
         return;
