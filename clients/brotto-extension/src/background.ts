@@ -235,10 +235,11 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
           notifyUi({ type: "task_failed", code, message });
         },
         onLog: (message) => {
-          // ponytail: emit as 'log' event so the side panel renders a small
-          // activity card. (canonical_step used to write to a deleted DOM
-          // element.)
-          notifyUi({ type: "log", message });
+          // ponytail: internal loop liveness — service worker console only.
+          // The side panel used to render every step/approval/timing string
+          // as a system message in the chat; we now keep chat clean and let
+          // the operator inspect logs in chrome://extensions.
+          console.log(`[brotto-bg] ${message}`);
         },
         onClarify: ({ reason, question, context }) => {
           // ponytail: send a clarify event to the side panel and wait for
@@ -259,10 +260,10 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
           });
         },
         onAnswered: ({ question, answer }) => {
-          notifyUi({ type: "log", message: `User answered: ${answer.slice(0, 60)}` });
+          console.log(`[brotto-bg] user answered (${question.slice(0, 60)}): ${answer.slice(0, 80)}`);
         },
         onApprovalResolved: ({ approved, action }) => {
-          notifyUi({ type: "log", message: approved ? `Approved ${action.type ?? "action"}` : `Denied ${action.type ?? "action"}` });
+          console.log(`[brotto-bg] ${approved ? "approved" : "denied"} ${action.type ?? "action"}`);
         },
       }).then(() => {
         localAbortController = null;

@@ -14167,6 +14167,7 @@ ${lines.join("\n")}
 `;
   }
   function log(opts, message) {
+    console.log(`[local-driver] ${message}`);
     opts.onLog?.(message);
   }
   var STAGNATION_REPEAT_THRESHOLD = 3;
@@ -14988,7 +14989,7 @@ ${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
             notifyUi({ type: "task_failed", code, message: message2 });
           },
           onLog: (message2) => {
-            notifyUi({ type: "log", message: message2 });
+            console.log(`[brotto-bg] ${message2}`);
           },
           onClarify: ({ reason, question, context }) => {
             const id = newRequestId("clarify");
@@ -15005,10 +15006,10 @@ ${findings.map((f) => `  - ${f.key} = "${f.value}"`).join("\n") || "  (none)"}`;
             });
           },
           onAnswered: ({ question, answer }) => {
-            notifyUi({ type: "log", message: `User answered: ${answer.slice(0, 60)}` });
+            console.log(`[brotto-bg] user answered (${question.slice(0, 60)}): ${answer.slice(0, 80)}`);
           },
           onApprovalResolved: ({ approved, action }) => {
-            notifyUi({ type: "log", message: approved ? `Approved ${action.type ?? "action"}` : `Denied ${action.type ?? "action"}` });
+            console.log(`[brotto-bg] ${approved ? "approved" : "denied"} ${action.type ?? "action"}`);
           }
         }).then(() => {
           localAbortController = null;

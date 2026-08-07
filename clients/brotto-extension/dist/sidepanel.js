@@ -214,11 +214,17 @@ async function sendUserMessage() {
     return;
   }
 
+  // ponytail: start the timer the moment the user kicks off a task. Earlier
+  // wiring only started the timer inside startTask() (bound to a hidden
+  // #startBtn), so sendUserMessage's actual run_local_task path never
+  // started the counter — the user always saw 0.0s.
+  startTimer();
   // ponytail: send the goal to the background. The background opens a
   // new tab, captures observations, calls the planner, dispatches actions
   // via chrome.debugger. The side panel just renders events.
   const response = await sendMessage({ type: 'run_local_task', task: text });
   if (!response.success) {
+    stopTimer();
     setPhase('error', `Failed to start: ${response.error || 'unknown error'}`);
     appendMessage({ role: 'error', text: `Failed to start: ${response.error || 'unknown error'}` });
   }
@@ -581,6 +587,57 @@ function appendPlanCard({ title, sites, steps }) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// ponytail: step bubble that tucks the raw tool call behind a "details"
+// toggle so the chat reads naturally while still letting the operator
+// drill in when debugging. Reasoning stays as the bubble title.
+function appendStepWithDetails({ text, details }) {
+  const empty = messagesEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const msg = document.createElement('div');
+  msg.className = 'message assistant';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble step-bubble';
+
+  const head = document.createElement('div');
+  head.className = 'step-head';
+  head.textContent = text || 'Working…';
+  bubble.appendChild(head);
+
+  if (details && details.length > 0) {
+    const wrap = document.createElement('div');
+    wrap.className = 'step-details';
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'step-details-toggle';
+    toggle.textContent = 'details';
+    toggle.setAttribute('aria-expanded', 'false');
+
+    const body = document.createElement('div');
+    body.className = 'step-details-body';
+    body.textContent = details;
+    body.style.display = 'none';
+
+    toggle.addEventListener('click', () => {
+      const open = body.style.display !== 'none';
+      body.style.display = open ? 'none' : 'block';
+      toggle.setAttribute('aria-expanded', String(!open));
+      toggle.textContent = open ? 'details' : 'hide details';
+    });
+
+    wrap.appendChild(toggle);
+    wrap.appendChild(body);
+    bubble.appendChild(wrap);
+  }
+
+  msg.appendChild(bubble);
+  messagesEl.appendChild(msg);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return msg;
+}
+
 // ── Approval request card ─────────────────────────────────────────────────
 function appendApprovalCard({ id, reason, action }) {
   const empty = messagesEl.querySelector('.empty-state');
@@ -862,22 +919,18 @@ chrome.runtime.onMessage.addListener((message) => {
       const reasoningText = (message.reasoning && message.reasoning.trim())
         || deriveReasoningFromAction(message.title || '', message.iconKind);
       const toolSubtitle = `${message.title || ''}${message.result ? ' → ' + message.result : ''}`.trim();
-      // ponytail: each step gets its OWN persistent bubble. Earlier code
-      // reused `currentAssistantMsg` and either overwrote content in place
-      // OR called finish() with empty title, which cleared the previous
-      // bubble's text. appendMessage emits a fresh message every time so
-      // the conversation history shows every step the model took.
+      // ponytail: each step gets its OWN persistent bubble. Reasoning is the
+      // bubble title; raw tool call ("visit_url https://... → navigated to...")
+      // lives behind a "details" toggle so the chat reads naturally and the
+      // operator can drill in when debugging.
       const stepText = (icon ? icon + ' ' : '') + reasoningText;
-      appendMessage({ role: 'assistant', text: stepText, inlineLogs: toolSubtitle ? [toolSubtitle] : [] });
+      appendStepWithDetails({ text: stepText, details: toolSubtitle, ts: message.ts });
       break;
     }
 
     case 'log':
-      if (currentAssistantMsg) {
-        appendLogToAssistant(message.message || '');
-      } else {
-        appendMessage({ role: 'system', text: message.message || '' });
-      }
+      // ponytail: historical handler kept for back-compat. New background
+      // logs go to the service worker console only; UI stays clean.
       break;
 
     case 'login_required':

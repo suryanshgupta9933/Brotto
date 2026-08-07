@@ -50,9 +50,15 @@ async function main() {
 
   console.log(`[demo-server] family=${family} model=${config.model}`);
 
+  // ponytail: turn counter so each request/response is easy to correlate with
+  // a step in the agent loop. The local-driver fires /plan sequentially, so a
+  // bare increment is safe (no concurrent handlers).
+  let turnCounter = 0;
+
   const app = Fastify({ logger: false });
   app.get("/health", async () => ({ status: "ok", family, model: config.model }));
   app.post<{ Body: PlanRequest }>("/plan", async (req) => {
+    const myTurn = ++turnCounter;
     const t0 = Date.now();
     // ponytail: log the incoming request — goal + context size + key signals
     // (current URL, page text snippet). Verbose by design; the demo terminal
@@ -61,23 +67,41 @@ async function main() {
     const urlLine = ctx.match(/URL:\s*(.+)/)?.[1]?.trim() ?? "?";
     const titleLine = ctx.match(/Title:\s*(.+)/)?.[1]?.trim() ?? "?";
     const textStart = ctx.indexOf("=== PAGE TEXT");
-    const textSnippet = textStart >= 0
-      ? ctx.slice(textStart, textStart + 200).replace(/\n/g, " ").trim()
+    const textEnd = textStart >= 0 ? ctx.indexOf("=== END PAGE TEXT", textStart) : -1;
+    const pageTextRaw = textStart >= 0 && textEnd >= 0 ? ctx.slice(textStart, textEnd) : "";
+    const pageTextChars = pageTextRaw.replace(/=== PAGE TEXT[^=]*===/g, "").replace(/=== END PAGE TEXT ===/g, "").trim().length;
+    const pageTextSnippet = textStart >= 0
+      ? ctx.slice(textStart, Math.min(textStart + 240, textEnd > 0 ? textEnd : textStart + 240)).replace(/\n/g, " ").trim()
       : "(no page text)";
-    const memLine = ctx.match(/Working memory[^\n]*\n((?:\s+- [^\n]+\n?)+)/)?.[1]?.trim() ?? "";
-    const historyLines = ctx.match(/Previous steps[^\n]*\n((?:\s+\d+\.[^\n]+\n?)+)/)?.[1]?.trim() ?? "";
-    console.log(`[demo-server] ── /plan req ─────────────────────────────`);
-    console.log(`[demo-server]   goal:      ${req.body.goal}`);
-    console.log(`[demo-server]   url:       ${urlLine}`);
-    console.log(`[demo-server]   title:     ${titleLine}`);
-    console.log(`[demo-server]   context:   ${ctx.length} chars`);
-    if (memLine) console.log(`[demo-server]   memory:\n${memLine.split("\n").map((l) => `               ${l}`).join("\n")}`);
-    if (historyLines) console.log(`[demo-server]   history:\n${historyLines.split("\n").map((l) => `               ${l}`).join("\n")}`);
-    console.log(`[demo-server]   page text: ${textSnippet.slice(0, 160)}…`);
+    const memLines = ctx.match(/Working memory[^\n]*\n((?:\s+- [^\n]+\n?)+)/)?.[1]?.trim().split("\n").filter(Boolean) ?? [];
+    const historyLines = ctx.match(/Previous steps[^\n]*\n((?:\s+\d+\.[^\n]+\n?)+)/)?.[1]?.trim().split("\n").filter(Boolean) ?? [];
+    const elementCount = (ctx.match(/click=\(\d+, \d+\)/g) ?? []).length;
+    const sep = `── /plan turn #${myTurn} ${"─".repeat(Math.max(0, 50 - String(myTurn).length))}`;
+    console.log("");
+    console.log(`[demo-server] ${sep}`);
+    console.log(`[demo-server]   REQ  ${req.body.workId}`);
+    console.log(`[demo-server]   goal      : ${req.body.goal}`);
+    console.log(`[demo-server]   url       : ${urlLine}`);
+    console.log(`[demo-server]   title     : ${titleLine}`);
+    console.log(`[demo-server]   ctx chars : ${ctx.length} (page text ${pageTextChars}, ${elementCount} elements)`);
+    if (memLines.length > 0) {
+      console.log(`[demo-server]   memory (${memLines.length} fact${memLines.length === 1 ? "" : "s"}):`);
+      for (const l of memLines) console.log(`[demo-server]      ${l.trim()}`);
+    } else {
+      console.log(`[demo-server]   memory    : (none yet)`);
+    }
+    if (historyLines.length > 0) {
+      console.log(`[demo-server]   history (${historyLines.length} step${historyLines.length === 1 ? "" : "s"}):`);
+      for (const l of historyLines) console.log(`[demo-server]      ${l.trim()}`);
+    } else {
+      console.log(`[demo-server]   history   : (no prior steps — first turn)`);
+    }
+    console.log(`[demo-server]   page text : ${pageTextSnippet.slice(0, 200)}…`);
     // ponytail: short retry/backoff for transient 429s. Vision mode sends
     // heavier payloads and can blow past OpenAI's per-minute token limit; a
     // 1-2s wait usually clears it. Cap at 3 retries so the demo doesn't hang.
     let outcome;
+    let lastErrMessage: string | null = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         outcome = await planner.plan({
@@ -94,7 +118,8 @@ async function main() {
       } as never, new AbortController().signal);
         break;
       } catch (err) {
-        const e = err as { retryable?: boolean; retryAfterMs?: number };
+        lastErrMessage = err instanceof Error ? err.message : String(err);
+        const e = err as { retryable?: boolean; retryAfterMs?: number; code?: string };
         const retryable = e.retryable === true;
         if (!retryable || attempt === 2) throw err;
         // ponytail: prefer the planner's retryAfterMs hint (from Retry-After
@@ -102,18 +127,30 @@ async function main() {
         // has a chance to clear before we burn another request.
         const hint = e.retryAfterMs;
         const backoffMs = Math.max(hint ?? 0, 1000 * 2 ** attempt);
-        console.warn(`[demo-server] retryable error, backing off ${backoffMs}ms (attempt ${attempt + 1}/3): ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(`[demo-server] turn #${myTurn} retryable error, backing off ${backoffMs}ms (attempt ${attempt + 1}/3, code=${e.code ?? "?"}): ${lastErrMessage.slice(0, 240)}`);
         await new Promise((r) => setTimeout(r, backoffMs));
       }
     }
     try {
       const elapsed = Date.now() - t0;
-      console.log(`[demo-server] ── /plan resp in ${elapsed}ms ─────────────`);
+      const respSep = `── /plan turn #${myTurn} resp ${"─".repeat(Math.max(0, 44 - String(myTurn).length))}`;
+      console.log(`[demo-server] ${respSep} ${elapsed}ms`);
       if (outcome.kind === "action") {
         const a = (outcome as { action: Record<string, unknown> }).action;
         const type = a.type ?? "?";
         const reasoning = typeof a.reasoning === "string" ? a.reasoning : "";
         const memUpdates = Array.isArray(a.memoryUpdates) ? a.memoryUpdates as Array<{ key: string; value: string; evidence: string }> : [];
+        // ponytail: action signature is the same logic the harness uses to
+        // detect stagnation. Logging it server-side lets the operator spot a
+        // repeat without scrolling back to prior turns.
+        const sig = (() => {
+          const t = String(type).toLowerCase();
+          if (t === "visit_url") return `visit_url:${a.url ?? ""}`;
+          if (t === "left_click" || t === "double_click" || t === "right_click") return `${t}:${a.x ?? 0},${a.y ?? 0}`;
+          if (t === "insert_text") return `insert_text:${String(a.text ?? "").slice(0, 40)}`;
+          if (t === "key") return `key:${a.key ?? ""}`;
+          return t;
+        })();
         const argParts: string[] = [];
         if (typeof a.x === "number" && typeof a.y === "number") argParts.push(`(${a.x}, ${a.y})`);
         if (typeof a.url === "string") argParts.push(a.url);
@@ -121,30 +158,32 @@ async function main() {
         if (typeof a.key === "string") argParts.push(`key=${a.key}`);
         if (typeof a.finalAnswer === "string" && a.finalAnswer) argParts.push(`finalAnswer="${a.finalAnswer.slice(0, 80)}"`);
         if (typeof a.question === "string") argParts.push(`question="${a.question.slice(0, 80)}"`);
-        console.log(`[demo-server]   kind:    action`);
-        console.log(`[demo-server]   type:    ${type} ${argParts.join(" ")}`);
-        if (reasoning) console.log(`[demo-server]   reason:  ${reasoning}`);
+        console.log(`[demo-server]   kind      : action (${type})`);
+        console.log(`[demo-server]   args      : ${argParts.join(" ") || "(none)"}`);
+        console.log(`[demo-server]   signature : ${sig}`);
+        if (reasoning) console.log(`[demo-server]   reason    : ${reasoning}`);
         if (memUpdates.length > 0) {
-          console.log(`[demo-server]   memory:`);
+          console.log(`[demo-server]   memory updates (${memUpdates.length}):`);
           for (const m of memUpdates) {
-            console.log(`[demo-server]     - ${m.key} = "${m.value}"${m.evidence ? ` (evidence: ${m.evidence})` : ""}`);
+            console.log(`[demo-server]      + ${m.key} = "${m.value}"${m.evidence ? ` (evidence: ${m.evidence})` : ""}`);
           }
         }
       } else if (outcome.kind === "question") {
         const q = (outcome as { question: string }).question;
-        console.log(`[demo-server]   kind:     question`);
-        console.log(`[demo-server]   question: ${q}`);
+        console.log(`[demo-server]   kind      : question`);
+        console.log(`[demo-server]   question  : ${q}`);
       } else if (outcome.kind === "completion") {
         const c = outcome as { summary?: string };
-        console.log(`[demo-server]   kind:    completion`);
-        if (c.summary) console.log(`[demo-server]   summary: ${c.summary.slice(0, 160)}`);
+        console.log(`[demo-server]   kind      : completion`);
+        if (c.summary) console.log(`[demo-server]   summary   : ${c.summary.slice(0, 160)}`);
       } else {
-        console.log(`[demo-server]   kind:    ${outcome.kind}`);
+        console.log(`[demo-server]   kind      : ${outcome.kind}`);
       }
       return outcome;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`[demo-server] /plan error: ${message}`);
+      console.error(`[demo-server] turn #${myTurn} failed after ${Date.now() - t0}ms: ${message}`);
+      if (lastErrMessage && lastErrMessage !== message) console.error(`[demo-server] turn #${myTurn} prior error: ${lastErrMessage.slice(0, 400)}`);
       throw err;
     }
   });

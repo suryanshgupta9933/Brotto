@@ -95,6 +95,12 @@ function renderMemoryBlock(facts: MemoryUpdate[]): string {
 }
 
 function log(opts: LocalDriverOptions, message: string): void {
+  // ponytail: internal loop liveness goes to the background service worker
+  // console (chrome://extensions → Inspect views). The side panel used to
+  // surface every one of these as a system message in the chat which drowned
+  // out the actual agent activity. Re-enable UI logging via opts.onLog if a
+  // future debug build wants chat-level detail.
+  console.log(`[local-driver] ${message}`);
   opts.onLog?.(message);
 }
 
