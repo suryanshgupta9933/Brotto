@@ -93,14 +93,25 @@ export class OpenAICompatiblePlanner implements InferencePort {
       headers[header] = `${prefix}${this.config.apiKey}`;
     }
 
+    // ponytail: gpt-5/o-series quirks (per OpenAI gpt-5 migration guide):
+    //   - max_tokens → use max_completion_tokens (or omit)
+    //   - temperature → must be 1 or omit (default)
+    //   - reasoning_effort → function tools on /v1/chat/completions
+    //     require reasoning_effort="none" (non-reasoning fallback). The
+    //     alternative is switching to /v1/responses — a bigger refactor.
+    //   - tool_choice: "required" for gpt-5 family — forces the model to
+    //     emit a tool call (terminate is the escape hatch) instead of
+    //     dumping structured intent as prose. gpt-5 with reasoning_effort
+    //     = "none" sometimes narrates its tool call into content rather
+    //     than invoking it.
+    const isReasoningFamily = /^(gpt-5|o[1-9])/i.test(this.config.model);
     const body = JSON.stringify({
       model: this.config.model,
       messages: this.buildMessages(input),
       tools: buildToolSchemas(),
-      tool_choice: 'auto',
-      max_tokens: this.config.maxTokens ?? 2048,
-      temperature: this.config.temperature ?? 0.7,
+      tool_choice: isReasoningFamily ? 'required' : 'auto',
       stream: true,
+      ...(isReasoningFamily ? { reasoning_effort: 'none' as const } : {}),
     });
 
     let response: Response;
