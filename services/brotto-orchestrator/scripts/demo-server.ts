@@ -56,6 +56,85 @@ interface PlanRequest {
   pageIdentity?: string;
 }
 
+// ponytail: parse the rendered context for element lines and synthesize
+// semanticTargets so the parser's resolveTargetId can map a model targetId
+// to a click center. Used as a FALLBACK when the request body has empty
+// semanticTargets (e.g. demo-server driven by the orchestrator's
+// Playwright snapshot which doesn't emit semanticTargets).
+//
+// Element line format from renderSnapshot:
+//   [5983667059836670] <a> "Gmail help center" click=(435, 906)
+//
+// From this we synthesize:
+//   {
+//     targetId: "5983667059836670",
+//     stableRef: "5983667059836670",
+//     accessibleName: { text: "Gmail help center" },
+//     role: undefined,
+//     boundingBox: { x: 435, y: 906, width: 0, height: 0 },
+//   }
+//
+// The bbox is degenerate (width=0, height=0) because `click=(x, y)` only
+// gives us the center, not dimensions. The parser's resolveTargetId
+// returns bbox center = (x + 0/2, y + 0/2) = (x, y) — exactly the click
+// center we want. Bbox fidelity check would fire if the model also
+// supplies x/y outside this degenerate bbox, which is the correct
+// behavior (the model should trust the rendered center).
+function extractSemanticTargetsFromContext(ctx: string): Array<{
+  targetId: string;
+  stableRef?: string;
+  accessibleName?: { text?: string };
+  role?: string;
+  boundingBox: { x: number; y: number; width: number; height: number };
+}> {
+  if (!ctx) return [];
+  // ponytail: lenient line parser. Real format from the local-driver /
+  // orchestrator's renderSnapshot is:
+  //   [id] <tag> "name" [role=...] [type=...] [(attrs)] click=(x, y)
+  // The name, role, and attrs appear in any order. We only require:
+  //   - bracket id at start
+  //   - tag name
+  //   - "quoted name" somewhere before click=
+  //   - click=(x, y) at the end
+  // Skip lines that don't have a click= — they're metadata, not clickables.
+  const out: Array<{
+    targetId: string;
+    stableRef?: string;
+    accessibleName?: { text?: string };
+    role?: string;
+    boundingBox: { x: number; y: number; width: number; height: number };
+  }> = [];
+  const lines = ctx.split("\n");
+  for (const line of lines) {
+    const idMatch = line.match(/\[([0-9a-z]{6,32})\]/);
+    const tagMatch = line.match(/<([a-z]+)>/);
+    const clickMatch = line.match(/click=\((\d+),\s*(\d+)\)\s*$/);
+    if (!idMatch || !tagMatch || !clickMatch) continue;
+    // Extract first quoted name between tag and click.
+    const after = line.slice(tagMatch.index! + tagMatch[0].length, clickMatch.index);
+    // ponytail: pick the LAST quoted string before click= as the name. Real
+    // element lines put attrs first (role=, type=, placeholder=) and the
+    // name LAST, so the last quoted value is the accessible name. Avoids
+    // picking "link" from `role="link"` as the name.
+    const allQuoted = [...after.matchAll(/"([^"]+)"/g)];
+    const nameMatch = allQuoted.length > 0 ? allQuoted[allQuoted.length - 1] : null;
+    // role= can be unquoted (role=link) or quoted (role="link") — match either.
+    const roleMatch = after.match(/role=(?:"([^"]+)"|([a-z]+))/);
+    const x = parseInt(clickMatch[1], 10);
+    const y = parseInt(clickMatch[2], 10);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const id = idMatch[1];
+    out.push({
+      targetId: id,
+      stableRef: id,
+      accessibleName: nameMatch ? { text: nameMatch[1] } : undefined,
+      role: roleMatch?.[1] ?? (tagMatch[1] === "a" ? "link" : tagMatch[1] === "button" ? "button" : tagMatch[1] === "input" ? "textbox" : undefined),
+      boundingBox: { x, y, width: 0, height: 0 },
+    });
+  }
+  return out;
+}
+
 function buildConfigFromEnv(family: ReturnType<typeof inferFamilyFromEnv>): InferenceConfig {
   if (family === "fara") {
     return { family: "fara", endpoint: process.env.FARA_ENDPOINT ?? "" };
@@ -187,14 +266,26 @@ async function main() {
         // tool call's `targetId` field to the element's bbox center.
         // Without this, targetId-only clicks always reject because the
         // placeholder semanticTargets:[] leaves the lookup empty.
+        // ponytail: FALLBACK — when the request body has empty semanticTargets
+        // (e.g. demo-server run with the orchestrator's Playwright snapshot
+        // that doesn't emit semanticTargets), extract element IDs and click
+        // centers from the rendered context. This lets the parser's
+        // resolveTargetId map targetId clicks even without the extension
+        // feeding real semanticTargets. We can't recover the bbox width/
+        // height from `click=(x, y)` alone, so we use width=0/height=0 —
+        // the parser's resolveTargetId returns the click center as the
+        // bbox center, which is the cx/cy we already have.
+        const extractedTargets = Array.isArray(req.body.semanticTargets) && req.body.semanticTargets.length > 0
+          ? req.body.semanticTargets
+          : extractSemanticTargetsFromContext(ctx);
         observation: {
           observationId: crypto.randomUUID(),
-          url: "",
-          title: "",
+          url: urlLine === "?" ? "" : urlLine,
+          title: titleLine === "?" ? "" : titleLine,
           page: { tabId: "x" as never, frameId: "x" as never, lifecycle: "complete", visibility: "visible" },
           viewport: { width: 0, height: 0, devicePixelRatio: 0, zoom: 0, scrollX: 0, scrollY: 0 },
           screenshot: { kind: "inline", encoding: "base64", data: "", sha256: "a".repeat(64), width: 0, height: 0 },
-          semanticTargets: (req.body.semanticTargets ?? []) as never,
+          semanticTargets: extractedTargets as never,
           ...(req.body.pageIdentity ? { pageIdentity: req.body.pageIdentity } : {}),
         },
         recentResults: (req.body.recentResults ?? []) as never,
