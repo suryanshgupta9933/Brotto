@@ -339,10 +339,34 @@ export class ToolCallParser {
         // verifyTargetFidelity in the extension's canonical pipeline.
         const targetId = typeof args.targetId === "string" ? args.targetId.trim() : "";
         const resolved = targetId ? this.resolveTargetId(targetId) : null;
-        const modelX = typeof args.x === "number" ? args.x : undefined;
-        const modelY = typeof args.y === "number" ? args.y : undefined;
-        if (resolved && modelX !== undefined && modelY !== undefined) {
+        const hasModelX = typeof args.x === "number";
+        const hasModelY = typeof args.y === "number";
+
+        // ponytail: specific error message when targetId is provided but
+        // the harness couldn't resolve it AND the model didn't include x/y
+        // as fallback. The previous logic called `numberArg` first which
+        // throws a generic "missing field: x" — that didn't tell the
+        // model to either pick a different targetId from INTERACTIVE
+        // ELEMENTS or include x/y. Now: emit the specific corrective.
+        if (targetId && !resolved && !hasModelX && !hasModelY) {
+          return {
+            toolCall,
+            error: `${actionType}: targetId "${targetId}" is not in the current INTERACTIVE ELEMENTS. The harness could not find an element with that ID in the latest observation. Either pass x/y coordinates matching the element's location, or pick a different targetId from the latest INTERACTIVE ELEMENTS block.`,
+            code: ParseErrorCode.MISSING_REQUIRED_FIELD,
+          };
+        }
+        if (!targetId && !hasModelX && !hasModelY) {
+          return {
+            toolCall,
+            error: `${actionType} requires either targetId (from INTERACTIVE ELEMENTS) OR x/y coordinates.`,
+            code: ParseErrorCode.MISSING_REQUIRED_FIELD,
+          };
+        }
+
+        if (resolved && hasModelX && hasModelY) {
           const b = resolved.bbox;
+          const modelX = args.x as number;
+          const modelY = args.y as number;
           if (modelX < b.x || modelX > b.x + b.width || modelY < b.y || modelY > b.y + b.height) {
             return {
               toolCall,
@@ -353,19 +377,6 @@ export class ToolCallParser {
         }
         const finalX = resolved?.x ?? this.numberArg(args.x, "x", toolCall);
         const finalY = resolved?.y ?? this.numberArg(args.y, "y", toolCall);
-        if (typeof finalX !== "number" || typeof finalY !== "number") {
-          // ponytail: error messages are now specific so the corrective
-          // tells the model exactly what to fix. "targetId X is stale" vs
-          // "no targetId AND no x/y" produce different corrective text.
-          const msg = targetId
-            ? `${actionType}: targetId "${targetId}" is not in the current INTERACTIVE ELEMENTS (it may have been re-rendered or moved). Pick a different targetId from the latest observation, or pass x/y coordinates.`
-            : `${actionType} requires either targetId (from INTERACTIVE ELEMENTS) OR x/y coordinates.`;
-          return {
-            toolCall,
-            error: msg,
-            code: ParseErrorCode.MISSING_REQUIRED_FIELD,
-          };
-        }
         return {
           ...baseArgs,
           type: actionType,
