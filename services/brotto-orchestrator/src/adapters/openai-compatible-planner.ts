@@ -19,7 +19,7 @@ import {
 } from '../engine/types.js';
 import { buildToolSchemas } from '../prompts/tool-schemas.js';
 import { ToolCallParser, type FaraToolCall } from '../parser.js';
-import { validateMemoryUpdates } from '../context/decision.js';
+import { validateMemoryUpdates, validateMemoryUpdatesForGoal } from '../context/decision.js';
 
 export interface OpenAICompatibleConfig {
   baseUrl: string;
@@ -271,6 +271,25 @@ export class OpenAICompatiblePlanner implements InferencePort {
         "- A payment email has the order ID but NOT the package status. NEVER terminate after opening a payment email — keep searching for the delivery notification.",
         "- For Gmail searches, use delivery-specific operators instead of broad `from:amazon.com`: `from:amazon subject:(delivered OR shipped OR tracking)`, or `from:amazon \"out for delivery\"`, or `from:amazon \"tracking id\"`. These narrow the result list to actual delivery emails.",
         "- After clicking a search result, verify in the page text that the email body contains a delivery status phrase ('Delivered …', 'Tracking ID …'). If it only mentions payment/amount, go back and click the next result instead of terminating.",
+        "",
+        "DOMAIN VERIFICATION (when the user names a specific seller / site):",
+        "- When the user says 'my Amazon package', 'my Flipkart order', 'my Uber ride', etc., the named entity is the GOAL DOMAIN. Every action — opening an email, clicking a link, recording memory — must be grounded on data FROM that domain.",
+        "- Do NOT open an email or click a link whose sender or hostname does not match the goal domain. ANY other seller is suspect, regardless of how relevant the subject line looks. 'Other shipping email' is NEVER 'the user's Amazon package' just because the words 'order' or 'shipping' appear.",
+        "- When the rendered context includes an === INBOX ROWS === table, use the sender column to filter BEFORE clicking. Skip rows whose sender doesn't match the goal domain — do NOT open them to 'check if they're relevant'.",
+        "- If you cannot find a matching email after scanning the visible inbox, your next action must be a DOMAIN-SPECIFIC search (e.g. `from:amazon subject:(delivered OR shipped OR tracking)`), not more inbox browsing.",
+        "",
+        "SEARCH-FIRST (when the user names a domain + topic):",
+        "- If the goal names a specific domain (Amazon, GitHub, Flipkart, Jira, etc.) AND a topic ('my package', 'my repo', 'my order'), the FIRST action should almost always be a direct search URL on that domain, not inbox / list browsing.",
+        "- Examples:",
+        "  - Amazon package → visit_url('https://www.amazon.in/gp/your-account/order-history') or Gmail search 'from:amazon subject:(delivered OR shipped OR tracking)'.",
+        "  - GitHub starred repos → visit_url('https://github.com/<user>?tab=repositories&sort=stars').",
+        "  - Jira ticket → visit_url('https://<org>.atlassian.net/browse/<KEY>') if a key is mentioned.",
+        "- Direct search URLs bypass the inbox-row-selection failure mode entirely. Only browse the inbox / list when the goal has no specific domain or when the direct URL is unknown.",
+        "",
+        "MEMORY DISCIPLINE (model-emitted memoryUpdates):",
+        "- memoryUpdates are a CLAIM, not a fact. The harness will REJECT updates whose value/evidence doesn't reference any goal keyword (e.g. 'amazon', 'package') AND isn't in an always-crucial category (tracking_id, order_id, amount_*, status, event_date, delivered_date, sender).",
+        "- Before each turn, re-read WORKING MEMORY. If any fact's sender/domain contradicts the goal (e.g. SOCKENUP.IN memory under an Amazon goal), discard it mentally and re-derive from the current page text.",
+        "- Never let a stale memory fact override a fresh page observation. The page is the source of truth; memory is a working summary.",
       ].join("\n"),
     });
 
@@ -417,7 +436,23 @@ export class OpenAICompatiblePlanner implements InferencePort {
     // a memoryUpdate and rewrite the call to a no-op screenshot so the parser
     // doesn't fail on a now-removed schema.
     const firstArgs = (faraToolCalls[0]?.arguments ?? {}) as Record<string, unknown>;
-    const memoryUpdates = validateMemoryUpdates(firstArgs.memoryUpdates);
+    // ponytail: validate model-emitted memoryUpdates against goal keywords
+    // before accepting them. Rejects facts that don't cite the goal domain
+    // (e.g. SOCKENUP.IN shipping data under an "Amazon package" goal). Emits
+    // a corrective if any update was rejected.
+    const memValidation = validateMemoryUpdatesForGoal(firstArgs.memoryUpdates, input.goal);
+    if (memValidation.rejected.length > 0) {
+      const reasons = memValidation.rejected.map((r) => r.reason).join(" | ");
+      return {
+        kind: 'question',
+        observationId: input.observation.observationId,
+        question: `Some memoryUpdates were rejected because they don't match the goal domain. ${reasons} Re-issue the tool call with ONLY memoryUpdates that match the goal domain, or remove them entirely.`,
+        choices: undefined,
+        proseOnly: true,
+        toolError: true,
+      };
+    }
+    const memoryUpdates = memValidation.accepted;
     if (faraToolCalls[0]?.name === 'memorize_fact' || faraToolCalls[0]?.name === 'pause_and_memorize_fact') {
       const legacyFact = typeof firstArgs.fact === 'string' ? firstArgs.fact.trim() : '';
       if (legacyFact) {
