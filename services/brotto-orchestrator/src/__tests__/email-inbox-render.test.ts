@@ -161,6 +161,16 @@ describe("renderEmailInbox", () => {
     const out = renderEmailInbox(snap);
     expect(out.toLowerCase()).toContain("verify the sender matches the goal domain");
   });
+
+  it("warns that row CONTAINERS don't navigate — click inner element instead", () => {
+    const snap = emailSnapshot("https://mail.google.com/mail/u/0/", [{ sender: "Amazon", subject: "Delivered" }]);
+    const out = renderEmailInbox(snap);
+    // Row container is role=link but no click handler. Model must click
+    // an inner element (View order / Open / subject line) instead.
+    expect(out.toLowerCase()).toContain("container");
+    expect(out.toLowerCase()).toContain("not the row container");
+    expect(out.toLowerCase()).toContain("view order");
+  });
 });
 
 describe("integration: render is wired into renderSnapshot", () => {

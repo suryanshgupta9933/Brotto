@@ -66,4 +66,20 @@ describe("system prompt — Fix #5 part B sections present", () => {
       expect(block[0]).toContain("Skip rows whose sender doesn't match");
     }
   });
+
+  it("includes ROW CONTAINER vs INNER LINK rule (Gmail/Outlook rows don't navigate)", () => {
+    expect(plannerSource).toContain("ROW CONTAINER vs INNER LINK");
+    const block = plannerSource.match(/ROW CONTAINER[\s\S]+?(?=MEMORY DISCIPLINE)/);
+    expect(block).not.toBeNull();
+    if (block) {
+      // Rule must teach: row containers have role=link but don't navigate,
+      // so click the inner element (View order, Open, Track).
+      expect(block[0]).toContain("row CONTAINER");
+      expect(block[0]).toContain("does NOT navigate");
+      expect(block[0]).toContain("View order");
+      expect(block[0]).toMatch(/Open|Track/);
+      // Heuristic for self-correction when click has no effect
+      expect(block[0]).toMatch(/2 consecutive|page.*stay|URL change/);
+    }
+  });
 });

@@ -115,9 +115,15 @@ export function extractListRows(elements: PageSnapshot["elements"]): ListRow[] {
 export function renderEmailInbox(snap: PageSnapshot): string {
   const rows = extractListRows(snap.elements);
   if (rows.length === 0) return "";
+  // ponytail: row containers in Gmail / Outlook / Yahoo / Proton often have
+  // role="link" but no actual click handler — clicking the container does
+  // nothing. The clickable element is INSIDE: the message subject link or a
+  // named action button ("View order", "Track package", "Open"). The row
+  // entry's bbox points at the container's center, which is unreliable.
+  // Tell the model this so it picks a child target, not the row itself.
   const lines = [
     "=== INBOX ROWS (sender → subject, top-down — newest at top) ===",
-    "Each row is a clickable email/message. Verify the sender matches the goal domain BEFORE opening; skip rows whose sender doesn't match.",
+    "Each row is a CONTAINER. Verify the sender matches the goal domain BEFORE opening. To open a row, click an INNER element (the subject line or a named action like View order / Track package / Open) — NOT the row container itself, which has role=link but does not navigate.",
   ];
   for (let i = 0; i < rows.length; i += 1) {
     const r = rows[i];
