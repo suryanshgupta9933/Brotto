@@ -110,6 +110,7 @@ export enum ParseErrorCode {
   INVALID_URL = 'INVALID_URL',
   MISSING_REQUIRED_FIELD = 'MISSING_REQUIRED_FIELD',
   STALE_OBSERVATION = 'STALE_OBSERVATION',
+  STALE_TARGET = 'STALE_TARGET',
 }
 
 function isParseError(value: FaraActionArgs | ParseError): value is ParseError {
@@ -172,19 +173,22 @@ export class ToolCallParser {
     this.currentObservationId = null;
   }
 
-  // ponytail: targetId → (x, y) bbox center. Match by full targetId,
-  // stableRef, or suffix (the rendered context shows the truncated
-  // stableRef as the bracketed id; we accept either). Returns null when
+  // ponytail: targetId → (x, y) bbox center + the bbox itself. Exact
+  // match on stableRef or targetId only. Earlier permissive endsWith
+  // fallback caused collisions when two targets shared a hex suffix — a
+  // 4-char fragment could resolve to the wrong element. Returns null when
   // no match; caller falls back to args.x/args.y.
-  private resolveTargetId(targetId: string): { x: number; y: number } | null {
+  private resolveTargetId(targetId: string):
+    | { x: number; y: number; bbox: { x: number; y: number; width: number; height: number } }
+    | null {
     const tid = targetId.toLowerCase();
     for (const t of this.lastSemanticTargets) {
       const fullId = t.targetId.toLowerCase();
       const stable = (t.stableRef ?? "").toLowerCase();
-      if (fullId === tid || stable === tid || fullId.endsWith(tid) || tid.endsWith(fullId) || tid.endsWith(stable) || stable.endsWith(tid)) {
+      if (fullId === tid || stable === tid) {
         const cx = Math.round(t.boundingBox.x + t.boundingBox.width / 2);
         const cy = Math.round(t.boundingBox.y + t.boundingBox.height / 2);
-        return { x: cx, y: cy };
+        return { x: cx, y: cy, bbox: t.boundingBox };
       }
     }
     return null;
@@ -327,8 +331,26 @@ export class ToolCallParser {
         // targetId (preferred — element id from INTERACTIVE ELEMENTS) or
         // raw x/y. Try targetId lookup first; fall back to x/y when the
         // element isn't in the observation (canvas, drawn content, etc.).
+        //
+        // Fidelity check: when the model supplies BOTH targetId AND x/y,
+        // verify the model's x/y lies inside the resolved bbox. If not,
+        // the targetId is stale or the model miscomputed — emit STALE_TARGET
+        // so the planner injects a corrective forcing re-snapshot. Mirrors
+        // verifyTargetFidelity in the extension's canonical pipeline.
         const targetId = typeof args.targetId === "string" ? args.targetId.trim() : "";
         const resolved = targetId ? this.resolveTargetId(targetId) : null;
+        const modelX = typeof args.x === "number" ? args.x : undefined;
+        const modelY = typeof args.y === "number" ? args.y : undefined;
+        if (resolved && modelX !== undefined && modelY !== undefined) {
+          const b = resolved.bbox;
+          if (modelX < b.x || modelX > b.x + b.width || modelY < b.y || modelY > b.y + b.height) {
+            return {
+              toolCall,
+              error: `${actionType}: targetId "${targetId}" resolved to bbox (${b.x}, ${b.y}, ${b.width}x${b.height}) but the model's x/y (${modelX}, ${modelY}) fall outside it. The page may have re-rendered. Re-snapshot the page (targetId + bbox) and re-issue the click using only the targetId, or pass x/y that match the current bbox.`,
+              code: ParseErrorCode.STALE_TARGET,
+            };
+          }
+        }
         const finalX = resolved?.x ?? this.numberArg(args.x, "x", toolCall);
         const finalY = resolved?.y ?? this.numberArg(args.y, "y", toolCall);
         if (typeof finalX !== "number" || typeof finalY !== "number") {
