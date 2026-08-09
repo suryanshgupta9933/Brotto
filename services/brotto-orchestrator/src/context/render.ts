@@ -136,6 +136,63 @@ export function renderEmailInbox(snap: PageSnapshot): string {
   return lines.join("\n");
 }
 
+// ponytail: AX-tree row renderer. CDP Accessibility.getFullAXTree gives
+// us parent/child structure (list → listitem → link / statictext) that
+// the DOM walker flattens. Surface this structure to the planner so
+// each row's navigable target is visible at a glance and container-vs-
+// inner-link confusion is impossible. Used by the extension's
+// observation.ts to render group structure. Snapshots that don't have
+// axRows fall back to the flat Elements block (orchestrator's SNAPSHOT_FN_SRC).
+export interface AxNodeView {
+  nodeId: string;
+  role: string;
+  name: string;
+  bbox: { x: number; y: number; width: number; height: number };
+  navigable: boolean;
+  isContainer: boolean;
+  stableRef?: string;
+}
+
+export interface AxRowGroup {
+  parentNodeId: string;
+  parentRole: string;
+  parentName: string;
+  navigableChildCount: number;
+  children: AxNodeView[];
+}
+
+export function renderAxRows(rows: AxRowGroup[]): string {
+  if (!rows || rows.length === 0) return "";
+  // ponytail: skip the header entirely if no group has any children to
+  // surface — empty AX ROWS block is worse than nothing.
+  if (!rows.some((g) => g.children.length > 0)) return "";
+  const lines = [
+    "=== AX ROWS (listitem/row children, with navigable flag) ===",
+    "Each row lists its children. A row CONTAINER with 0 navigable children does NOT navigate when clicked — open the row by clicking the row's inner link/button (the navigable child marked with [nav]).",
+  ];
+  let rowNum = 0;
+  for (const group of rows) {
+    rowNum++;
+    if (group.children.length === 0) continue;
+    const navHint = group.navigableChildCount > 0
+      ? `, ${group.navigableChildCount} navigable child${group.navigableChildCount > 1 ? "ren" : ""}`
+      : ", 0 navigable children (CONTAINER — don't click)";
+    const roleLabel = group.parentRole.toUpperCase();
+    const nameLabel = group.parentName ? ` "${group.parentName}"` : "";
+    lines.push(`  Row ${rowNum}: ${roleLabel}${nameLabel} [${group.parentNodeId}]${navHint}`);
+    for (const child of group.children) {
+      const flags: string[] = [];
+      if (child.navigable) flags.push("nav");
+      if (child.isContainer) flags.push("container");
+      const flagStr = flags.length > 0 ? ` [${flags.join(",")}]` : "";
+      const name = child.name ? ` "${child.name.slice(0, 60)}"` : "";
+      lines.push(`    - [${child.role}]${name}${flagStr} stableRef=${child.stableRef ?? "(none)"} bbox=(${child.bbox.x},${child.bbox.y})`);
+    }
+  }
+  lines.push("=== END AX ROWS ===");
+  return lines.join("\n");
+}
+
 export function describeAction(a: {
   type?: string;
   x?: number;
@@ -293,6 +350,14 @@ export function renderSnapshot(snap: PageSnapshot, prev: PageSnapshot | null): s
   // etc. No-op on unrelated pages.
   const inboxTable = isEmailInbox(snap.url) ? renderEmailInbox(snap) : "";
   if (inboxTable) lines.push(inboxTable);
+  // ponytail: AX-tree row renderer — fires when the snapshot carries
+  // axRows (set by the extension's CDP path). Surfaces per-row grouping
+  // + navigable flag so the planner knows which element in each row
+  // actually navigates. No-op when axRows is empty (orchestrator's
+  // SNAPSHOT_FN_SRC path falls back to the flat Elements block below).
+  if (snap.axRows && snap.axRows.length > 0) {
+    lines.push(renderAxRows(snap.axRows));
+  }
   lines.push("=== PAGE TEXT (HEADINGS + STATS + LABELS + TEXT — STATS contains the data the user asked for) ===");
   lines.push(snap.bodyTextSnippet || "(empty)");
   lines.push("=== END PAGE TEXT ===");

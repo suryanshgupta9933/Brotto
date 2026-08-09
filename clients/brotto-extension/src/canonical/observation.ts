@@ -12,6 +12,7 @@ import {
   type RawSemanticTarget,
 } from "./redaction";
 import { collectAccessibilitySnapshot } from "./ax-snapshot";
+import { collectSemanticTargetsFromAXTree } from "./ax-targets";
 
 const DEFAULT_MAX_SEMANTIC_TARGETS = 200;
 // ponytail: Gmail, login widgets, and other real-world apps easily exceed
@@ -299,7 +300,7 @@ function parseMaskedPng(bytes: Uint8Array): ParsedPng {
   return { bytes, data, width, height };
 }
 
-async function opaqueUuid(seed: string): Promise<string> {
+export async function opaqueUuid(seed: string): Promise<string> {
   const digest = await sha256(new TextEncoder().encode(seed));
   const bytes = digest.slice(0, UUID_BYTE_LENGTH);
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -1241,6 +1242,19 @@ async function captureObservationInternal(
     maxSemanticTargets,
     maxDomElements,
   );
+  // ponytail: replace DOM-walker semanticTargets with AX-tree-derived ones.
+  // The DOM walker still produces bodyText (smartExtractText) and links/buttons
+  // — keep those. But for the action resolver (resolveTargetId) we want
+  // stable AX nodeIds + per-row grouping, not 79 flat elements per Gmail list.
+  // CDP failure falls back to DOM walker output transparently.
+  try {
+    const axTargets = await collectSemanticTargetsFromAXTree(tabId, sendCdpCommand);
+    if (axTargets.length > 0) {
+      after.semanticTargets = axTargets as RawSemanticTarget[];
+    }
+  } catch (err) {
+    console.warn("[observation] AX-tree semanticTarget extraction failed; using DOM walker fallback:", err);
+  }
   requireActiveIdentity(tabId, initialIdentity, await getTabIdentity(tabId));
   // ponytail: chrome.tabs.captureVisibleTab fails on chrome://, about:,
   // devtools://, and other restricted URLs. Catch only those permission-
