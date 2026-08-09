@@ -6,6 +6,130 @@ import type { PageSnapshot, HistoryEntry, HistoryEntryV1, WorkingMemoryView } fr
 
 const HISTORY_LIMIT = 6;
 
+// ponytail: Generic list-row renderer. Any webmail / inbox / list view
+// where rows render as role=link elements with names of the form
+// "<sender> - <subject> <preview>" gets the same structured table —
+// sender/subject visible upfront so the model can spot domain mismatches
+// without parsing a 80-char truncated string. URL detection covers major
+// email providers; the row extractor is provider-agnostic.
+//
+// Note: this is specifically for email/inbox-style rows where the first
+// segment of the row name is the sender identifier. Other list views
+// (issue trackers, e-commerce, search results) have different row
+// semantics and shouldn't use this renderer.
+
+const EMAIL_PROVIDER_HOSTS = new Set([
+  // Gmail + Inbox
+  "mail.google.com",
+  "inbox.google.com",
+  // Outlook
+  "outlook.live.com",
+  "outlook.office.com",
+  "outlook.office365.com",
+  // Yahoo Mail
+  "mail.yahoo.com",
+  "ymail.com",
+  // Proton Mail
+  "proton.me",
+  "mail.proton.me",
+  "protonmail.com",
+  // Fastmail
+  "fastmail.com",
+  // iCloud Mail
+  "mail.icloud.com",
+  "www.icloud.com",
+  // AOL Mail
+  "mail.aol.com",
+  // Zoho Mail
+  "mail.zoho.com",
+  // Yandex Mail
+  "mail.yandex.com",
+  // GMX / Web.de
+  "mail.gmx.com",
+  "web.de",
+]);
+
+// Hosts that signal "this looks like a list of items with sender-like
+// prefixes" even if not a known email provider. Generic fallback.
+const LIST_LIKE_HOST_PATTERNS = [
+  /^mail\./,
+  /^inbox\./,
+  /\.mail\./,
+];
+
+export function isEmailInbox(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (EMAIL_PROVIDER_HOSTS.has(u.hostname)) return true;
+    return LIST_LIKE_HOST_PATTERNS.some((re) => re.test(u.hostname));
+  } catch {
+    return false;
+  }
+}
+
+export interface ListRow {
+  rowId: string;
+  sender: string;
+  subject: string;
+  snippet: string;
+  bboxCx: number;
+  bboxCy: number;
+}
+
+// Generic chrome / UI labels that aren't real senders.
+const CHROME_SENDERS = new Set([
+  "gmail", "google", "search", "tab", "help", "training",
+  "send feedback to google", "outlook", "yahoo", "proton",
+  "compose", "inbox", "drafts", "sent", "spam", "trash",
+  "starred", "important", "snoozed", "archive",
+]);
+
+export function extractListRows(elements: PageSnapshot["elements"]): ListRow[] {
+  // ponytail: List rows typically render as role=link divs whose name is
+  // "<sender> - <subject> <first line of body>". We split on the FIRST
+  // " - " to peel sender off. Sender must be ≤80 chars (real names, not
+  // chrome link labels). Filter out inbox chrome (logo, "Inbox 585", etc.)
+  // by name.
+  const rows: ListRow[] = [];
+  for (const el of elements) {
+    if (el.role !== "link") continue;
+    const name = el.name || "";
+    const dashIdx = name.indexOf(" - ");
+    if (dashIdx <= 0) continue;
+    const sender = name.slice(0, dashIdx).trim();
+    const rest = name.slice(dashIdx + 3).trim();
+    if (!sender || sender.length > 80) continue;
+    if (CHROME_SENDERS.has(sender.toLowerCase())) continue;
+    rows.push({
+      rowId: el.id,
+      sender,
+      subject: rest.slice(0, 80),
+      snippet: rest.slice(80, 180),
+      bboxCx: el.cx,
+      bboxCy: el.cy,
+    });
+  }
+  return rows;
+}
+
+export function renderEmailInbox(snap: PageSnapshot): string {
+  const rows = extractListRows(snap.elements);
+  if (rows.length === 0) return "";
+  const lines = [
+    "=== INBOX ROWS (sender → subject, top-down — newest at top) ===",
+    "Each row is a clickable email/message. Verify the sender matches the goal domain BEFORE opening; skip rows whose sender doesn't match.",
+  ];
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i];
+    const snippetSuffix = r.snippet ? ` snippet="${r.snippet.trim()}"` : "";
+    lines.push(
+      `  ${String(i + 1).padStart(2, " ")}. [${r.rowId}] sender="${r.sender}" subject="${r.subject}"${snippetSuffix} bbox=(${r.bboxCx},${r.bboxCy})`,
+    );
+  }
+  lines.push("=== END INBOX ROWS ===");
+  return lines.join("\n");
+}
+
 export function describeAction(a: {
   type?: string;
   x?: number;
@@ -158,6 +282,11 @@ export function renderSnapshot(snap: PageSnapshot, prev: PageSnapshot | null): s
   // produces HEADINGS / STATS / LABELS / TEXT blocks — STATS catches patterns
   // like "12 followers" automatically, which is exactly what the user asked
   // about. Anything fact-finding depends on lives here.
+  // ponytail: email/inbox row table — surfaces sender/subject per row so
+  // the model can spot domain mismatches on Gmail, Outlook, Yahoo, Proton,
+  // etc. No-op on unrelated pages.
+  const inboxTable = isEmailInbox(snap.url) ? renderEmailInbox(snap) : "";
+  if (inboxTable) lines.push(inboxTable);
   lines.push("=== PAGE TEXT (HEADINGS + STATS + LABELS + TEXT — STATS contains the data the user asked for) ===");
   lines.push(snap.bodyTextSnippet || "(empty)");
   lines.push("=== END PAGE TEXT ===");
