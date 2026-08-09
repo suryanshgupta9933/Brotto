@@ -145,6 +145,20 @@ interface StableRefInput {
   attributes: Record<string, string | undefined>;
 }
 
+// ponytail: 64-bit hash for stableRef. Compute two independent FNV-1a 32-bit
+// hashes with different offset bases and concatenate. Pre-fix this was just
+// one 32-bit hash duplicated (no real entropy past 32 bits) — birthday
+// collisions in dense lists (Gmail inbox rows, search results) become
+// likely past ~50 targets.
+function fnv1a32(seed: string, offsetBasis: number): number {
+  let hash = offsetBasis;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
 export function computeStableRef(input: StableRefInput): string | undefined {
   const parts = [
     input.tag,
@@ -156,13 +170,12 @@ export function computeStableRef(input: StableRefInput): string | undefined {
     input.attributes.type ?? "",
   ].map((part) => part.toLowerCase());
   const seed = parts.join("\x1f");
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < seed.length; index += 1) {
-    hash ^= seed.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  const hex = (hash >>> 0).toString(16).padStart(8, "0");
-  return (hex + hex).slice(0, STABLE_REF_HEX_LENGTH);
+  const h1 = fnv1a32(seed, 0x811c9dc5); // FNV-1a standard offset basis
+  const h2 = fnv1a32(seed, 0xcbf29ce4); // FNV-1a alternate offset basis
+  const hex =
+    h1.toString(16).padStart(8, "0") +
+    h2.toString(16).padStart(8, "0");
+  return hex.slice(0, STABLE_REF_HEX_LENGTH);
 }
 
 function sanitizeAccessibleName(
