@@ -248,6 +248,18 @@ async function main() {
     let lastErrMessage: string | null = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
+        // ponytail: FALLBACK — when the request body has empty semanticTargets
+        // (e.g. demo-server run with the orchestrator's Playwright snapshot
+        // that doesn't emit semanticTargets), extract element IDs and click
+        // centers from the rendered context. This lets the parser's
+        // resolveTargetId map targetId clicks even without the extension
+        // feeding real semanticTargets. We can't recover the bbox width/
+        // height from `click=(x, y)` alone, so we use width=0/height=0 —
+        // the parser's resolveTargetId returns the click center as the
+        // bbox center, which is the cx/cy we already have.
+        const extractedTargets = Array.isArray(req.body.semanticTargets) && req.body.semanticTargets.length > 0
+          ? req.body.semanticTargets
+          : extractSemanticTargetsFromContext(ctx);
         outcome = await planner.plan({
         workId: req.body.workId,
         sessionId: "00000000-0000-4000-8000-000000000001" as never,
@@ -266,18 +278,6 @@ async function main() {
         // tool call's `targetId` field to the element's bbox center.
         // Without this, targetId-only clicks always reject because the
         // placeholder semanticTargets:[] leaves the lookup empty.
-        // ponytail: FALLBACK — when the request body has empty semanticTargets
-        // (e.g. demo-server run with the orchestrator's Playwright snapshot
-        // that doesn't emit semanticTargets), extract element IDs and click
-        // centers from the rendered context. This lets the parser's
-        // resolveTargetId map targetId clicks even without the extension
-        // feeding real semanticTargets. We can't recover the bbox width/
-        // height from `click=(x, y)` alone, so we use width=0/height=0 —
-        // the parser's resolveTargetId returns the click center as the
-        // bbox center, which is the cx/cy we already have.
-        const extractedTargets = Array.isArray(req.body.semanticTargets) && req.body.semanticTargets.length > 0
-          ? req.body.semanticTargets
-          : extractSemanticTargetsFromContext(ctx);
         observation: {
           observationId: crypto.randomUUID(),
           url: urlLine === "?" ? "" : urlLine,
