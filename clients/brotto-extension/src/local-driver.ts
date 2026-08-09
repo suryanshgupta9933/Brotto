@@ -231,6 +231,30 @@ export function observationSignature(obs: { url?: string; title?: string; elemen
   return `${(obs.url ?? "").trim()}|${(obs.title ?? "").trim()}|${firstId}`;
 }
 
+// ponytail: filter memory facts to those that mention a goal keyword.
+// Used by the stagnation handler to auto-terminate when the model has
+// the answer in memory but is stuck clicking a dead target (e.g. Gmail
+// row container that doesn't navigate). Exported for isolated unit tests.
+export function goalMatchedFactsList(
+  goal: string,
+  facts: ReadonlyArray<{ key: string; value: string }>,
+): Array<{ key: string; value: string }> {
+  const keywords = extractGoalKeywords(goal);
+  if (keywords.length === 0) return [];
+  return facts.filter((f) => {
+    const hay = `${f.key} ${f.value}`.toLowerCase();
+    return keywords.some((kw) => hay.includes(kw));
+  });
+}
+
+// ponytail: synthesize a one-sentence finalAnswer from a list of facts.
+// Joined as "key: value; key: value". Exported for tests.
+export function synthesizeFinalAnswer(
+  facts: ReadonlyArray<{ key: string; value: string }>,
+): string {
+  return facts.map((f) => `${f.key}: ${f.value}`).join("; ");
+}
+
 // ponytail: page-identity stagnation. The Observation's `pageIdentity` is a
 // SHA-256 over a normalized AX-subtree dump — stable across re-renders,
 // flips when navigation actually happens. 3 consecutive identical
@@ -1591,6 +1615,29 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       if (stagnation) {
         stagnationHits++;
         log(opts, `stagnation: ${stagnation.kind} signature="${stagnation.signature}" nudge ${stagnationHits}/${STAGNATION_NUDGE_CAP}`);
+        // ponytail: when memory has goal-matching facts and we're stuck,
+        // synthesize a finalAnswer from memory and auto-terminate. The
+        // model often keeps clicking a dead target (e.g. Gmail row
+        // container that doesn't navigate) while the answer is already
+        // recorded. Without this, the user gets an abrupt STAGNATION
+        // error instead of an answer. Triggered on the FIRST stagnation
+        // hit, not after the nudge cap — the model is clearly on the
+        // right track if it has goal-matching facts in memory.
+        const goalFindings = memory.toView();
+        const goalMatchedFacts = goalMatchedFactsList(opts.goal, goalFindings);
+        if (goalMatchedFacts.length >= 1) {
+          const summary = synthesizeFinalAnswer(goalMatchedFacts);
+          log(opts, `stagnation auto-terminate: ${goalFindings.length} findings, ${goalMatchedFacts.length} goal-match`);
+          terminal = {
+            kind: "complete",
+            complete: {
+              summary,
+              steps: stepIndex + 1,
+              finalAnswer: summary,
+            },
+          };
+          return;
+        }
         // ponytail: instead of terminating, list the agent's memory facts
         // and explicitly ask it to either terminate with what it has or
         // pivot to a fundamentally different strategy. Without this, the

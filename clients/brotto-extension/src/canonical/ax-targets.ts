@@ -353,7 +353,7 @@ export function axNodesToRowGroups(rawNodes: RawAXNode[]): RowGroupView[] {
       const container = isGroup(child);
       if (nav) navCount++;
       children.push({
-        nodeId: child.nodeId,
+        nodeId: child.nodeId ?? "",
         role: childRole,
         name: child.name?.value ?? "",
         bbox: {
@@ -368,7 +368,7 @@ export function axNodesToRowGroups(rawNodes: RawAXNode[]): RowGroupView[] {
     }
     out.push({
       parentNodeId: g.nodeId,
-      parentRole: g.role.value,
+      parentRole: g.role?.value ?? "",
       parentName: g.name?.value ?? "",
       navigableChildCount: navCount,
       children,
