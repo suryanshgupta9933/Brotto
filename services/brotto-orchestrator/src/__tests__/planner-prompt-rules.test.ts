@@ -69,7 +69,7 @@ describe("system prompt — Fix #5 part B sections present", () => {
 
   it("includes ROW CONTAINER vs INNER LINK rule (Gmail/Outlook rows don't navigate)", () => {
     expect(plannerSource).toContain("ROW CONTAINER vs INNER LINK");
-    const block = plannerSource.match(/ROW CONTAINER[\s\S]+?(?=MEMORY DISCIPLINE)/);
+    const block = plannerSource.match(/ROW CONTAINER[\s\S]+?(?=DRILL INTO DEEPER|MEMORY DISCIPLINE)/);
     expect(block).not.toBeNull();
     if (block) {
       // Rule must teach: row containers have role=link but don't navigate,
@@ -80,6 +80,36 @@ describe("system prompt — Fix #5 part B sections present", () => {
       expect(block[0]).toMatch(/Open|Track/);
       // Heuristic for self-correction when click has no effect
       expect(block[0]).toMatch(/2 consecutive|page.*stay|URL change/);
+    }
+  });
+
+  it("includes DRILL INTO DEEPER SOURCE OF TRUTH rule (general — applies beyond tracking)", () => {
+    // General principle: list pages summarize, detail pages have the answer.
+    // Should NOT name specific vendors (Amazon, Flipkart, courier names).
+    expect(plannerSource).toContain("DRILL INTO DEEPER SOURCE OF TRUTH");
+    const block = plannerSource.match(/DRILL INTO DEEPER SOURCE OF TRUTH[\s\S]+?(?=MEMORY DISCIPLINE)/);
+    expect(block).not.toBeNull();
+    if (block) {
+      // General principles:
+      expect(block[0]).toMatch(/SUMMAR(IES|Y)|summary/i);
+      expect(block[0]).toContain("DETAIL page");
+      expect(block[0]).toMatch(/drill in/i);
+      // Anchor-list pointer (the existing ANCHORS block is the data source):
+      expect(block[0]).toMatch(/ANCHORS|anchor/i);
+      // Self-check before terminate:
+      expect(block[0]).toMatch(/self-check|source of truth|SOURCE OF TRUTH/i);
+      // Generic applicability — list of contexts where the rule applies:
+      expect(block[0]).toContain("search results");
+      expect(block[0]).toContain("GitHub");
+      expect(block[0]).toContain("e-commerce");
+      expect(block[0]).toContain("news");
+      expect(block[0]).toContain("doc");
+      // MUST NOT name a specific courier or vendor as the only example:
+      expect(block[0]).not.toMatch(/^[\s\S]*Bluedart[\s\S]*$/m);
+      expect(block[0]).not.toMatch(/^[\s\S]*Delhivery[\s\S]*$/m);
+      expect(block[0]).not.toMatch(/^[\s\S]*FedEx[\s\S]*$/m);
+      expect(block[0]).not.toMatch(/^[\s\S]*UPS[\s\S]*$/m);
+      expect(block[0]).not.toMatch(/^[\s\S]*DHL[\s\S]*$/m);
     }
   });
 });
