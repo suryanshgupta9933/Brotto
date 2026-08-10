@@ -1610,17 +1610,16 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         } else if (postObs.pageIdentity && obs.pageIdentity && postObs.pageIdentity !== obs.pageIdentity) {
           outcomeTag = ` [Verified: Page content updated]`;
           pageChanged = true;
-        } else if (action.type === "scroll") {
-          outcomeTag = ` [Verified: Scrolled page]`;
-          pageChanged = true;
-        } else if (action.type === "insert_text") {
-          outcomeTag = ` [Verified: Typed text]`;
-          pageChanged = true;
-        } else if (action.type === "key") {
-          outcomeTag = ` [Verified: Key pressed]`;
-          pageChanged = true;
         } else {
-          outcomeTag = ` [Unchanged: URL and page state remained identical]`;
+          // ponytail: be honest with the model. insert_text / key press
+          // don't navigate by themselves — only the URL or page identity
+          // tells us navigation happened. Previously these forced
+          // pageChanged = true to mask Gmail's `[Unchanged]` after a
+          // click that did focus an input. That hid real stagnation. Now
+          // the model sees [Unchanged] when the page really didn't
+          // change, and gets a fast [Unchanged → Unchanged → Unchanged]
+          // → stagnation signal that pushes it to visit_url.
+          outcomeTag = ` [Unchanged: action ${action.type} dispatched but page state unchanged]`;
         }
       }
 
