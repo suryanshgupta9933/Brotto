@@ -373,6 +373,22 @@ export function renderSnapshot(snap: PageSnapshot, prev: PageSnapshot | null): s
     if (el.type) tags.push(`type=${el.type}`);
     if (el.checked !== undefined) tags.push(`checked=${el.checked}`);
     if (el.href) tags.push(`href="${el.href}"`);
+    // ponytail: detect row containers in list views. A row div typically
+    // has role=link, a long name (subject + preview + sender, > 80 chars),
+    // and NO action verb in its name. Inner link targets ("View order",
+    // "Open", "Track") have short names with an action verb. Marking the
+    // container in the rendered output prevents the model from clicking
+    // the row (which doesn't navigate on Gmail/Outlook/GitHub/etc.) and
+    // nudges it toward the inner link instead. Generic — no vendor
+    // names in the heuristic.
+    if (
+      el.role === "link" &&
+      el.tag === "div" &&
+      (el.name?.length ?? 0) > 80 &&
+      !/\b(View|View order|Track|Open|Read more|Inspect|Source|Details|Continue)\b/i.test(el.name ?? "")
+    ) {
+      tags.push("container");
+    }
     const tagStr = tags.length ? ` (${tags.join(", ")})` : "";
     const nameStr = el.name ? ` "${el.name}"` : "";
     lines.push(`  [${el.id}] <${el.tag}>${nameStr}${tagStr} click=(${el.cx}, ${el.cy})`);

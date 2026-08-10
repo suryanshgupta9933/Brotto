@@ -255,6 +255,56 @@ export function synthesizeFinalAnswer(
   return facts.map((f) => `${f.key}: ${f.value}`).join("; ");
 }
 
+// ponytail: extract goal-relevant sentences from the page text when memory
+// is empty. Status keywords + goal keywords + sentence-level extraction
+// surface what the model is missing in its memory commits. Used by the
+// stagnation handler as a fallback auto-terminate source. Generic — no
+// vendor names, works for any page with answer-shaped content.
+//
+// We extract sentences (split on . ! ?) that contain any goal keyword.
+// Each matched sentence becomes a "fact". The first N are joined into
+// a finalAnswer so the user gets SOMETHING even when the model stalled.
+const STATUS_WORDS = [
+  "delivered", "out for delivery", "shipped", "in transit",
+  "arriving", "dispatched", "cancelled", "returned", "tracking",
+  "tracking id", "order id", "order #", "order number",
+  "status", "estimated delivery",
+];
+
+export function extractPageAnswer(
+  goal: string,
+  pageText: string,
+): Array<{ key: string; value: string }> {
+  if (!goal || !pageText) return [];
+  const keywords = extractGoalKeywords(goal);
+  if (keywords.length === 0) return [];
+  const lcText = pageText.toLowerCase();
+  // ponytail: split on sentence boundaries. Cheap heuristic — good enough
+  // for status pages where answers are 1-2 sentences. Misses some edge
+  // cases (abbreviations with periods) but that's OK for the fallback.
+  const sentences = pageText.split(/(?<=[.!?])\s+/);
+  const out: Array<{ key: string; value: string }> = [];
+  for (let i = 0; i < sentences.length && out.length < 5; i += 1) {
+    const s = sentences[i]?.trim();
+    if (!s || s.length < 10 || s.length > 300) continue;
+    const lc = s.toLowerCase();
+    const hasGoal = keywords.some((kw) => lc.includes(kw));
+    const hasStatus = STATUS_WORDS.some((sw) => lc.includes(sw));
+    if (!hasGoal && !hasStatus) continue;
+    // ponytail: keep sentences that have both a goal keyword AND a
+    // status-ish word (high precision), OR a goal keyword + 1+ status
+    // hit (medium precision). Pure status-keyword sentences without a
+    // goal keyword are too noisy — they fire on every Gmail inbox page
+    // even when the goal is unrelated.
+    if (hasGoal) {
+      // Find first goal keyword for the key
+      const kw = keywords.find((k) => lc.includes(k)) ?? "info";
+      out.push({ key: `${kw}_from_page`, value: s });
+    }
+  }
+  return out;
+}
+
 // ponytail: page-identity stagnation. The Observation's `pageIdentity` is a
 // SHA-256 over a normalized AX-subtree dump — stable across re-renders,
 // flips when navigation actually happens. 3 consecutive identical
@@ -1625,9 +1675,22 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         // right track if it has goal-matching facts in memory.
         const goalFindings = memory.toView();
         const goalMatchedFacts = goalMatchedFactsList(opts.goal, goalFindings);
-        if (goalMatchedFacts.length >= 1) {
-          const summary = synthesizeFinalAnswer(goalMatchedFacts);
-          log(opts, `stagnation auto-terminate: ${goalFindings.length} findings, ${goalMatchedFacts.length} goal-match`);
+        let autoTerminateFacts = goalMatchedFacts;
+        // ponytail: when memory is empty, fall back to extracting
+        // goal-relevant sentences from the page text. This handles the
+        // case where the model never committed any memory (e.g. it got
+        // stuck before recording anything) but the page still has the
+        // answer — surface it so the user gets SOMETHING instead of an
+        // abrupt STAGNATION error.
+        if (autoTerminateFacts.length === 0 && postObs?.bodyText) {
+          autoTerminateFacts = extractPageAnswer(opts.goal, postObs.bodyText);
+          if (autoTerminateFacts.length > 0) {
+            log(opts, `stagnation auto-terminate fallback: ${autoTerminateFacts.length} facts extracted from page text`);
+          }
+        }
+        if (autoTerminateFacts.length >= 1) {
+          const summary = synthesizeFinalAnswer(autoTerminateFacts);
+          log(opts, `stagnation auto-terminate: ${goalFindings.length} facts in memory, ${autoTerminateFacts.length} goal-match`);
           terminal = {
             kind: "complete",
             complete: {

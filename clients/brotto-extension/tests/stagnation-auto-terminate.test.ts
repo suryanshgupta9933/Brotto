@@ -9,7 +9,7 @@
  * abrupt STAGNATION error instead of an answer.
  */
 
-import { goalMatchedFactsList, synthesizeFinalAnswer } from "../src/local-driver";
+import { goalMatchedFactsList, synthesizeFinalAnswer, extractPageAnswer } from "../src/local-driver";
 
 describe("goalMatchedFactsList", () => {
   it("returns facts whose key+value contains any goal keyword", () => {
@@ -96,5 +96,48 @@ describe("integration: stagnation auto-terminate signal", () => {
     expect(finalAnswer).toContain("Yogabar");
     expect(finalAnswer).toContain("delivered");
     expect(finalAnswer).toContain("405-");
+  });
+});
+
+describe("extractPageAnswer (page-text fallback when memory is empty)", () => {
+  it("returns empty for empty goal or empty page text", () => {
+    expect(extractPageAnswer("", "some text")).toEqual([]);
+    expect(extractPageAnswer("check package", "")).toEqual([]);
+  });
+
+  it("extracts a sentence that mentions a goal keyword + status word", () => {
+    const facts = extractPageAnswer(
+      "check amazon package status",
+      "Your Amazon package was delivered today. Order # 405-3881124-5123560. Yogabar 26g High Protein.",
+    );
+    expect(facts.length).toBeGreaterThan(0);
+    expect(facts[0].value.toLowerCase()).toContain("delivered");
+    expect(facts[0].value.toLowerCase()).toContain("amazon");
+  });
+
+  it("skips sentences without goal keywords", () => {
+    const facts = extractPageAnswer(
+      "check amazon package status",
+      "Weather is sunny. Stock market up 2%. Sun rises in the east.",
+    );
+    expect(facts).toEqual([]);
+  });
+
+  it("returns at most 5 sentences", () => {
+    const longText = Array.from({ length: 20 }, (_, i) =>
+      `Yogabar package delivered at step ${i}.`,
+    ).join(" ");
+    const facts = extractPageAnswer("check amazon package status", longText);
+    expect(facts.length).toBeLessThanOrEqual(5);
+  });
+
+  it("filters sentences that are too short or too long", () => {
+    const facts = extractPageAnswer(
+      "check amazon package",
+      "short. Way too long amazon package " + "x".repeat(500) + " delivered.",
+    );
+    // Short sentence fails <10 char filter; long sentence fails >300 filter.
+    // Neither passes.
+    expect(facts).toEqual([]);
   });
 });
