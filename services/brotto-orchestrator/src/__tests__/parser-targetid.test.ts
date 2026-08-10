@@ -153,3 +153,137 @@ describe('resolveTargetId — exact-match only (Fix #3)', () => {
     if (r.ok) expect(r.action.coordinates.y).toBe(125);
   });
 });
+
+describe('row container rejection (Gmail / Outlook lists)', () => {
+  // A Gmail / Outlook row container: role=link, div tag, long name
+  // (sender + subject + preview > 80 chars), no action verb. The
+  // harness should REJECT the click and tell the model to pick an
+  // inner element instead.
+  const containerTargets = [
+    {
+      targetId: 'aaa-row-1',
+      stableRef: 'aaa1111aaa1111aa',
+      tag: 'div',
+      role: 'link',
+      accessibleName: {
+        source: 'computed',
+        text: 'Inbox Delivered: Your Amazon package has been delivered. - www.amazon.in. Hi Suryansh, Your package has been delivered! Please rate your delivery experience. Return or replace items in Your Orders.',
+      },
+      boundingBox: { x: 100, y: 100, width: 800, height: 60 },
+    },
+    {
+      targetId: 'bbb-inner-view',
+      stableRef: 'bbb2222bbb2222bb',
+      tag: 'div',
+      role: 'button',
+      accessibleName: { source: 'computed', text: 'View order' },
+      boundingBox: { x: 504, y: 100, width: 80, height: 24 },
+    },
+  ];
+
+  function makeContainerParser() {
+    const p = new ToolCallParser();
+    p.setViewportBounds({ width: 1920, height: 1080 });
+    p.setCurrentObservationId(1);
+    p.setLastSemanticTargets(containerTargets as never);
+    return p;
+  }
+
+  it('rejects click on row container with corrective pointing to inner element', () => {
+    const r = tryParse(makeContainerParser(), [
+      { name: 'left_click', arguments: { targetId: 'aaa-row-1' } },
+    ]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      // Code is STALE_TARGET (reused — it's about target drift / wrong target).
+      expect(r.thrown.code).toBe(ParseErrorCode.STALE_TARGET);
+      // Error must explain it's a container and direct to inner element.
+      expect(r.thrown.error).toContain('row container');
+      expect(r.thrown.error).toContain('View order');
+      expect(r.thrown.error).toContain('aaa-row-1');
+    }
+  });
+
+  it('rejects right_click on row container too', () => {
+    const p = makeContainerParser();
+    const r = tryParse(p, [
+      { name: 'right_click', arguments: { targetId: 'aaa-row-1' } },
+    ]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.thrown.code).toBe(ParseErrorCode.STALE_TARGET);
+      expect(r.thrown.error).toContain('row container');
+    }
+  });
+
+  it('allows click on inner element (View order button)', () => {
+    const r = tryParse(makeContainerParser(), [
+      { name: 'left_click', arguments: { targetId: 'bbb-inner-view' } },
+    ]);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.action.coordinates.x).toBe(544); // 504 + 80/2
+      expect(r.action.coordinates.y).toBe(112); // 100 + 24/2
+    }
+  });
+
+  it('allows click on container with action verb in name (e.g. View order text)', () => {
+    // The heuristic skips containers whose name contains "View|Track|Open|..."
+    // because those are actionable child links named with the verb.
+    const target = {
+      targetId: 'ccc-view-text',
+      stableRef: 'ccc3333ccc3333cc',
+      tag: 'div',
+      role: 'link',
+      accessibleName: { source: 'computed', text: 'View order details' },
+      boundingBox: { x: 50, y: 50, width: 100, height: 30 },
+    };
+    const p = new ToolCallParser();
+    p.setViewportBounds({ width: 1920, height: 1080 });
+    p.setCurrentObservationId(1);
+    p.setLastSemanticTargets([target] as never);
+    const r = tryParse(p, [{ name: 'left_click', arguments: { targetId: 'ccc-view-text' } }]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('allows click on short-named link (e.g. subject text)', () => {
+    // Subject lines are short, so they're not flagged as containers.
+    const target = {
+      targetId: 'ddd-subject',
+      stableRef: 'ddd4444ddd4444dd',
+      tag: 'a',
+      role: 'link',
+      accessibleName: { source: 'computed', text: 'Yogabar delivery' },
+      boundingBox: { x: 200, y: 180, width: 400, height: 20 },
+    };
+    const p = new ToolCallParser();
+    p.setViewportBounds({ width: 1920, height: 1080 });
+    p.setCurrentObservationId(1);
+    p.setLastSemanticTargets([target] as never);
+    const r = tryParse(p, [{ name: 'left_click', arguments: { targetId: 'ddd-subject' } }]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('allows click when targetId has no matching semantic target (x/y fallback)', () => {
+    // If targetId doesn't resolve, the parser falls back to x/y. The
+    // container check only applies to resolved targets — an unknown
+    // targetId with x/y supplied should still work.
+    const r = tryParse(makeContainerParser(), [
+      {
+        name: 'left_click',
+        arguments: {
+          targetId: 'unknown',
+          x: 100,
+          y: 100,
+          viewportWidth: 1920,
+          viewportHeight: 1080,
+        },
+      },
+    ]);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.action.coordinates.x).toBe(100);
+      expect(r.action.coordinates.y).toBe(100);
+    }
+  });
+});

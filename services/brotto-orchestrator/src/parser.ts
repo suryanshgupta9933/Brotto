@@ -134,11 +134,17 @@ export class ToolCallParser {
   // ponytail: semantic targets from the most recent observation. Used to
   // resolve click tool calls' targetId to (x, y) bbox centers. Model
   // passes the element id (e.g. "f377c754f377c754"); harness looks it up
-  // here and clicks the center.
+  // here and clicks the center. Enriched with tag/role/accessibleName
+  // so the parser can reject row-container clicks (div + role=link +
+  // long name + no action verb) — these have role=link but no actual
+  // click handler in Gmail / Outlook / GitHub lists.
   private lastSemanticTargets: ReadonlyArray<{
     targetId: string;
     stableRef?: string;
     boundingBox: { x: number; y: number; width: number; height: number };
+    tag?: string;
+    role?: string;
+    accessibleName?: { source?: string; text?: string };
   }> = [];
 
   /**
@@ -179,7 +185,7 @@ export class ToolCallParser {
   // 4-char fragment could resolve to the wrong element. Returns null when
   // no match; caller falls back to args.x/args.y.
   private resolveTargetId(targetId: string):
-    | { x: number; y: number; bbox: { x: number; y: number; width: number; height: number } }
+    | { x: number; y: number; bbox: { x: number; y: number; width: number; height: number }; tag?: string; role?: string; name?: string }
     | null {
     const tid = targetId.toLowerCase();
     for (const t of this.lastSemanticTargets) {
@@ -188,10 +194,26 @@ export class ToolCallParser {
       if (fullId === tid || stable === tid) {
         const cx = Math.round(t.boundingBox.x + t.boundingBox.width / 2);
         const cy = Math.round(t.boundingBox.y + t.boundingBox.height / 2);
-        return { x: cx, y: cy, bbox: t.boundingBox };
+        return { x: cx, y: cy, bbox: t.boundingBox, tag: t.tag, role: t.role, name: t.accessibleName?.text };
       }
     }
     return null;
+  }
+
+  // ponytail: detect row containers in email / list views. A row div
+  // typically has role="link" + long accessible name (subject + preview
+  // + sender, >80 chars) + NO action verb. Clicking it dispatches but
+  // doesn't navigate on Gmail / Outlook / GitHub lists because the click
+  // handler is on an inner element (subject link, View order button).
+  // Returns the target info when it's a container, null otherwise.
+  // Generic — no vendor names in the heuristic.
+  private isRowContainer(t: { tag?: string; role?: string; name?: string }): { name?: string } | null {
+    if (t.tag !== "div") return null;
+    if ((t.role ?? "").toLowerCase() !== "link") return null;
+    const name = t.name ?? "";
+    if (name.length <= 80) return null;
+    if (/\b(View|View order|Track|Open|Read more|Inspect|Source|Details|Continue)\b/i.test(name)) return null;
+    return { name };
   }
 
   /**
@@ -371,6 +393,23 @@ export class ToolCallParser {
             return {
               toolCall,
               error: `${actionType}: targetId "${targetId}" resolved to bbox (${b.x}, ${b.y}, ${b.width}x${b.height}) but the model's x/y (${modelX}, ${modelY}) fall outside it. The page may have re-rendered. Re-snapshot the page (targetId + bbox) and re-issue the click using only the targetId, or pass x/y that match the current bbox.`,
+              code: ParseErrorCode.STALE_TARGET,
+            };
+          }
+        }
+        // ponytail: row-container rejection. Gmail / Outlook / GitHub list
+        // views often have role="link" on the OUTER row div, but the actual
+        // click handler is on an INNER element (subject, View order, Track).
+        // Clicking the row container dispatches but doesn't navigate. Detect
+        // this generic pattern (div + role=link + long name + no action verb)
+        // and reject the action with a corrective telling the model to pick
+        // an inner link instead. Generic — no vendor names.
+        if (resolved) {
+          const containerCheck = this.isRowContainer(resolved);
+          if (containerCheck) {
+            return {
+              toolCall,
+              error: `${actionType}: targetId "${targetId}" is a row container, not a navigable link. Row containers in email / list views have role="link" but no click handler — clicking them dispatches but doesn't navigate. Find an INNER element of this row that IS navigable: a "View order" / "Track package" / "View" / "Open" / "Subject" link or button. The rendered INTERACTIVE ELEMENTS block lists these as separate elements (different targetId) at coordinates adjacent to the container. Pick one of those instead. The container's name was: "${(containerCheck.name ?? "").slice(0, 80)}".`,
               code: ParseErrorCode.STALE_TARGET,
             };
           }
