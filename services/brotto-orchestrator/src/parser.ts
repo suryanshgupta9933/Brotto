@@ -110,6 +110,7 @@ export enum ParseErrorCode {
   INVALID_URL = 'INVALID_URL',
   MISSING_REQUIRED_FIELD = 'MISSING_REQUIRED_FIELD',
   STALE_OBSERVATION = 'STALE_OBSERVATION',
+  STALE_TARGET = 'STALE_TARGET',
 }
 
 function isParseError(value: FaraActionArgs | ParseError): value is ParseError {
@@ -133,11 +134,17 @@ export class ToolCallParser {
   // ponytail: semantic targets from the most recent observation. Used to
   // resolve click tool calls' targetId to (x, y) bbox centers. Model
   // passes the element id (e.g. "f377c754f377c754"); harness looks it up
-  // here and clicks the center.
+  // here and clicks the center. Enriched with tag/role/accessibleName
+  // so the parser can reject row-container clicks (div + role=link +
+  // long name + no action verb) — these have role=link but no actual
+  // click handler in Gmail / Outlook / GitHub lists.
   private lastSemanticTargets: ReadonlyArray<{
     targetId: string;
     stableRef?: string;
     boundingBox: { x: number; y: number; width: number; height: number };
+    tag?: string;
+    role?: string;
+    accessibleName?: { source?: string; text?: string };
   }> = [];
 
   /**
@@ -172,22 +179,41 @@ export class ToolCallParser {
     this.currentObservationId = null;
   }
 
-  // ponytail: targetId → (x, y) bbox center. Match by full targetId,
-  // stableRef, or suffix (the rendered context shows the truncated
-  // stableRef as the bracketed id; we accept either). Returns null when
+  // ponytail: targetId → (x, y) bbox center + the bbox itself. Exact
+  // match on stableRef or targetId only. Earlier permissive endsWith
+  // fallback caused collisions when two targets shared a hex suffix — a
+  // 4-char fragment could resolve to the wrong element. Returns null when
   // no match; caller falls back to args.x/args.y.
-  private resolveTargetId(targetId: string): { x: number; y: number } | null {
+  private resolveTargetId(targetId: string):
+    | { x: number; y: number; bbox: { x: number; y: number; width: number; height: number }; tag?: string; role?: string; name?: string }
+    | null {
     const tid = targetId.toLowerCase();
     for (const t of this.lastSemanticTargets) {
       const fullId = t.targetId.toLowerCase();
       const stable = (t.stableRef ?? "").toLowerCase();
-      if (fullId === tid || stable === tid || fullId.endsWith(tid) || tid.endsWith(fullId) || tid.endsWith(stable) || stable.endsWith(tid)) {
+      if (fullId === tid || stable === tid) {
         const cx = Math.round(t.boundingBox.x + t.boundingBox.width / 2);
         const cy = Math.round(t.boundingBox.y + t.boundingBox.height / 2);
-        return { x: cx, y: cy };
+        return { x: cx, y: cy, bbox: t.boundingBox, tag: t.tag, role: t.role, name: t.accessibleName?.text };
       }
     }
     return null;
+  }
+
+  // ponytail: detect row containers in email / list views. A row div
+  // typically has role="link" + long accessible name (subject + preview
+  // + sender, >80 chars) + NO action verb. Clicking it dispatches but
+  // doesn't navigate on Gmail / Outlook / GitHub lists because the click
+  // handler is on an inner element (subject link, View order button).
+  // Returns the target info when it's a container, null otherwise.
+  // Generic — no vendor names in the heuristic.
+  private isRowContainer(t: { tag?: string; role?: string; name?: string }): { name?: string } | null {
+    if (t.tag !== "div") return null;
+    if ((t.role ?? "").toLowerCase() !== "link") return null;
+    const name = t.name ?? "";
+    if (name.length <= 80) return null;
+    if (/\b(View|View order|Track|Open|Read more|Inspect|Source|Details|Continue)\b/i.test(name)) return null;
+    return { name };
   }
 
   /**
@@ -327,23 +353,69 @@ export class ToolCallParser {
         // targetId (preferred — element id from INTERACTIVE ELEMENTS) or
         // raw x/y. Try targetId lookup first; fall back to x/y when the
         // element isn't in the observation (canvas, drawn content, etc.).
+        //
+        // Fidelity check: when the model supplies BOTH targetId AND x/y,
+        // verify the model's x/y lies inside the resolved bbox. If not,
+        // the targetId is stale or the model miscomputed — emit STALE_TARGET
+        // so the planner injects a corrective forcing re-snapshot. Mirrors
+        // verifyTargetFidelity in the extension's canonical pipeline.
         const targetId = typeof args.targetId === "string" ? args.targetId.trim() : "";
         const resolved = targetId ? this.resolveTargetId(targetId) : null;
-        const finalX = resolved?.x ?? this.numberArg(args.x, "x", toolCall);
-        const finalY = resolved?.y ?? this.numberArg(args.y, "y", toolCall);
-        if (typeof finalX !== "number" || typeof finalY !== "number") {
-          // ponytail: error messages are now specific so the corrective
-          // tells the model exactly what to fix. "targetId X is stale" vs
-          // "no targetId AND no x/y" produce different corrective text.
-          const msg = targetId
-            ? `${actionType}: targetId "${targetId}" is not in the current INTERACTIVE ELEMENTS (it may have been re-rendered or moved). Pick a different targetId from the latest observation, or pass x/y coordinates.`
-            : `${actionType} requires either targetId (from INTERACTIVE ELEMENTS) OR x/y coordinates.`;
+        const hasModelX = typeof args.x === "number";
+        const hasModelY = typeof args.y === "number";
+
+        // ponytail: specific error message when targetId is provided but
+        // the harness couldn't resolve it AND the model didn't include x/y
+        // as fallback. The previous logic called `numberArg` first which
+        // throws a generic "missing field: x" — that didn't tell the
+        // model to either pick a different targetId from INTERACTIVE
+        // ELEMENTS or include x/y. Now: emit the specific corrective.
+        if (targetId && !resolved && !hasModelX && !hasModelY) {
           return {
             toolCall,
-            error: msg,
+            error: `${actionType}: targetId "${targetId}" is not in the current INTERACTIVE ELEMENTS. The harness could not find an element with that ID in the latest observation. Either pass x/y coordinates matching the element's location, or pick a different targetId from the latest INTERACTIVE ELEMENTS block.`,
             code: ParseErrorCode.MISSING_REQUIRED_FIELD,
           };
         }
+        if (!targetId && !hasModelX && !hasModelY) {
+          return {
+            toolCall,
+            error: `${actionType} requires either targetId (from INTERACTIVE ELEMENTS) OR x/y coordinates.`,
+            code: ParseErrorCode.MISSING_REQUIRED_FIELD,
+          };
+        }
+
+        if (resolved && hasModelX && hasModelY) {
+          const b = resolved.bbox;
+          const modelX = args.x as number;
+          const modelY = args.y as number;
+          if (modelX < b.x || modelX > b.x + b.width || modelY < b.y || modelY > b.y + b.height) {
+            return {
+              toolCall,
+              error: `${actionType}: targetId "${targetId}" resolved to bbox (${b.x}, ${b.y}, ${b.width}x${b.height}) but the model's x/y (${modelX}, ${modelY}) fall outside it. The page may have re-rendered. Re-snapshot the page (targetId + bbox) and re-issue the click using only the targetId, or pass x/y that match the current bbox.`,
+              code: ParseErrorCode.STALE_TARGET,
+            };
+          }
+        }
+        // ponytail: row-container rejection. Gmail / Outlook / GitHub list
+        // views often have role="link" on the OUTER row div, but the actual
+        // click handler is on an INNER element (subject, View order, Track).
+        // Clicking the row container dispatches but doesn't navigate. Detect
+        // this generic pattern (div + role=link + long name + no action verb)
+        // and reject the action with a corrective telling the model to pick
+        // an inner link instead. Generic — no vendor names.
+        if (resolved) {
+          const containerCheck = this.isRowContainer(resolved);
+          if (containerCheck) {
+            return {
+              toolCall,
+              error: `${actionType}: targetId "${targetId}" is a row container, not a navigable link. Row containers in email / list views have role="link" but no click handler — clicking them dispatches but doesn't navigate. Find an INNER element of this row that IS navigable: a "View order" / "Track package" / "View" / "Open" / "Subject" link or button. The rendered INTERACTIVE ELEMENTS block lists these as separate elements (different targetId) at coordinates adjacent to the container. Pick one of those instead. The container's name was: "${(containerCheck.name ?? "").slice(0, 80)}".`,
+              code: ParseErrorCode.STALE_TARGET,
+            };
+          }
+        }
+        const finalX = resolved?.x ?? this.numberArg(args.x, "x", toolCall);
+        const finalY = resolved?.y ?? this.numberArg(args.y, "y", toolCall);
         return {
           ...baseArgs,
           type: actionType,

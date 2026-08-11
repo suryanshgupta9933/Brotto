@@ -6,6 +6,193 @@ import type { PageSnapshot, HistoryEntry, HistoryEntryV1, WorkingMemoryView } fr
 
 const HISTORY_LIMIT = 6;
 
+// ponytail: Generic list-row renderer. Any webmail / inbox / list view
+// where rows render as role=link elements with names of the form
+// "<sender> - <subject> <preview>" gets the same structured table —
+// sender/subject visible upfront so the model can spot domain mismatches
+// without parsing a 80-char truncated string. URL detection covers major
+// email providers; the row extractor is provider-agnostic.
+//
+// Note: this is specifically for email/inbox-style rows where the first
+// segment of the row name is the sender identifier. Other list views
+// (issue trackers, e-commerce, search results) have different row
+// semantics and shouldn't use this renderer.
+
+const EMAIL_PROVIDER_HOSTS = new Set([
+  // Gmail + Inbox
+  "mail.google.com",
+  "inbox.google.com",
+  // Outlook
+  "outlook.live.com",
+  "outlook.office.com",
+  "outlook.office365.com",
+  // Yahoo Mail
+  "mail.yahoo.com",
+  "ymail.com",
+  // Proton Mail
+  "proton.me",
+  "mail.proton.me",
+  "protonmail.com",
+  // Fastmail
+  "fastmail.com",
+  // iCloud Mail
+  "mail.icloud.com",
+  "www.icloud.com",
+  // AOL Mail
+  "mail.aol.com",
+  // Zoho Mail
+  "mail.zoho.com",
+  // Yandex Mail
+  "mail.yandex.com",
+  // GMX / Web.de
+  "mail.gmx.com",
+  "web.de",
+]);
+
+// Hosts that signal "this looks like a list of items with sender-like
+// prefixes" even if not a known email provider. Generic fallback.
+const LIST_LIKE_HOST_PATTERNS = [
+  /^mail\./,
+  /^inbox\./,
+  /\.mail\./,
+];
+
+export function isEmailInbox(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (EMAIL_PROVIDER_HOSTS.has(u.hostname)) return true;
+    return LIST_LIKE_HOST_PATTERNS.some((re) => re.test(u.hostname));
+  } catch {
+    return false;
+  }
+}
+
+export interface ListRow {
+  rowId: string;
+  sender: string;
+  subject: string;
+  snippet: string;
+  bboxCx: number;
+  bboxCy: number;
+}
+
+// Generic chrome / UI labels that aren't real senders.
+const CHROME_SENDERS = new Set([
+  "gmail", "google", "search", "tab", "help", "training",
+  "send feedback to google", "outlook", "yahoo", "proton",
+  "compose", "inbox", "drafts", "sent", "spam", "trash",
+  "starred", "important", "snoozed", "archive",
+]);
+
+export function extractListRows(elements: PageSnapshot["elements"]): ListRow[] {
+  // ponytail: List rows typically render as role=link divs whose name is
+  // "<sender> - <subject> <first line of body>". We split on the FIRST
+  // " - " to peel sender off. Sender must be ≤80 chars (real names, not
+  // chrome link labels). Filter out inbox chrome (logo, "Inbox 585", etc.)
+  // by name.
+  const rows: ListRow[] = [];
+  for (const el of elements) {
+    if (el.role !== "link") continue;
+    const name = el.name || "";
+    const dashIdx = name.indexOf(" - ");
+    if (dashIdx <= 0) continue;
+    const sender = name.slice(0, dashIdx).trim();
+    const rest = name.slice(dashIdx + 3).trim();
+    if (!sender || sender.length > 80) continue;
+    if (CHROME_SENDERS.has(sender.toLowerCase())) continue;
+    rows.push({
+      rowId: el.id,
+      sender,
+      subject: rest.slice(0, 80),
+      snippet: rest.slice(80, 180),
+      bboxCx: el.cx,
+      bboxCy: el.cy,
+    });
+  }
+  return rows;
+}
+
+export function renderEmailInbox(snap: PageSnapshot): string {
+  const rows = extractListRows(snap.elements);
+  if (rows.length === 0) return "";
+  // ponytail: row containers in Gmail / Outlook / Yahoo / Proton often have
+  // role="link" but no actual click handler — clicking the container does
+  // nothing. The clickable element is INSIDE: the message subject link or a
+  // named action button ("View order", "Track package", "Open"). The row
+  // entry's bbox points at the container's center, which is unreliable.
+  // Tell the model this so it picks a child target, not the row itself.
+  const lines = [
+    "=== INBOX ROWS (sender → subject, top-down — newest at top) ===",
+    "Each row is a CONTAINER. Verify the sender matches the goal domain BEFORE opening. To open a row, click an INNER element (the subject line or a named action like View order / Track package / Open) — NOT the row container itself, which has role=link but does not navigate.",
+  ];
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i];
+    const snippetSuffix = r.snippet ? ` snippet="${r.snippet.trim()}"` : "";
+    lines.push(
+      `  ${String(i + 1).padStart(2, " ")}. [${r.rowId}] sender="${r.sender}" subject="${r.subject}"${snippetSuffix} bbox=(${r.bboxCx},${r.bboxCy})`,
+    );
+  }
+  lines.push("=== END INBOX ROWS ===");
+  return lines.join("\n");
+}
+
+// ponytail: AX-tree row renderer. CDP Accessibility.getFullAXTree gives
+// us parent/child structure (list → listitem → link / statictext) that
+// the DOM walker flattens. Surface this structure to the planner so
+// each row's navigable target is visible at a glance and container-vs-
+// inner-link confusion is impossible. Used by the extension's
+// observation.ts to render group structure. Snapshots that don't have
+// axRows fall back to the flat Elements block (orchestrator's SNAPSHOT_FN_SRC).
+export interface AxNodeView {
+  nodeId: string;
+  role: string;
+  name: string;
+  bbox: { x: number; y: number; width: number; height: number };
+  navigable: boolean;
+  isContainer: boolean;
+  stableRef?: string;
+}
+
+export interface AxRowGroup {
+  parentNodeId: string;
+  parentRole: string;
+  parentName: string;
+  navigableChildCount: number;
+  children: AxNodeView[];
+}
+
+export function renderAxRows(rows: AxRowGroup[]): string {
+  if (!rows || rows.length === 0) return "";
+  // ponytail: skip the header entirely if no group has any children to
+  // surface — empty AX ROWS block is worse than nothing.
+  if (!rows.some((g) => g.children.length > 0)) return "";
+  const lines = [
+    "=== AX ROWS (listitem/row children, with navigable flag) ===",
+    "Each row lists its children. A row CONTAINER with 0 navigable children does NOT navigate when clicked — open the row by clicking the row's inner link/button (the navigable child marked with [nav]).",
+  ];
+  let rowNum = 0;
+  for (const group of rows) {
+    rowNum++;
+    if (group.children.length === 0) continue;
+    const navHint = group.navigableChildCount > 0
+      ? `, ${group.navigableChildCount} navigable child${group.navigableChildCount > 1 ? "ren" : ""}`
+      : ", 0 navigable children (CONTAINER — don't click)";
+    const roleLabel = group.parentRole.toUpperCase();
+    const nameLabel = group.parentName ? ` "${group.parentName}"` : "";
+    lines.push(`  Row ${rowNum}: ${roleLabel}${nameLabel} [${group.parentNodeId}]${navHint}`);
+    for (const child of group.children) {
+      const flags: string[] = [];
+      if (child.navigable) flags.push("nav");
+      if (child.isContainer) flags.push("container");
+      const flagStr = flags.length > 0 ? ` [${flags.join(",")}]` : "";
+      const name = child.name ? ` "${child.name.slice(0, 60)}"` : "";
+      lines.push(`    - [${child.role}]${name}${flagStr} stableRef=${child.stableRef ?? "(none)"} bbox=(${child.bbox.x},${child.bbox.y})`);
+    }
+  }
+  lines.push("=== END AX ROWS ===");
+  return lines.join("\n");
+}
+
 export function describeAction(a: {
   type?: string;
   x?: number;
@@ -158,6 +345,19 @@ export function renderSnapshot(snap: PageSnapshot, prev: PageSnapshot | null): s
   // produces HEADINGS / STATS / LABELS / TEXT blocks — STATS catches patterns
   // like "12 followers" automatically, which is exactly what the user asked
   // about. Anything fact-finding depends on lives here.
+  // ponytail: email/inbox row table — surfaces sender/subject per row so
+  // the model can spot domain mismatches on Gmail, Outlook, Yahoo, Proton,
+  // etc. No-op on unrelated pages.
+  const inboxTable = isEmailInbox(snap.url) ? renderEmailInbox(snap) : "";
+  if (inboxTable) lines.push(inboxTable);
+  // ponytail: AX-tree row renderer — fires when the snapshot carries
+  // axRows (set by the extension's CDP path). Surfaces per-row grouping
+  // + navigable flag so the planner knows which element in each row
+  // actually navigates. No-op when axRows is empty (orchestrator's
+  // SNAPSHOT_FN_SRC path falls back to the flat Elements block below).
+  if (snap.axRows && snap.axRows.length > 0) {
+    lines.push(renderAxRows(snap.axRows));
+  }
   lines.push("=== PAGE TEXT (HEADINGS + STATS + LABELS + TEXT — STATS contains the data the user asked for) ===");
   lines.push(snap.bodyTextSnippet || "(empty)");
   lines.push("=== END PAGE TEXT ===");
@@ -173,6 +373,22 @@ export function renderSnapshot(snap: PageSnapshot, prev: PageSnapshot | null): s
     if (el.type) tags.push(`type=${el.type}`);
     if (el.checked !== undefined) tags.push(`checked=${el.checked}`);
     if (el.href) tags.push(`href="${el.href}"`);
+    // ponytail: detect row containers in list views. A row div typically
+    // has role=link, a long name (subject + preview + sender, > 80 chars),
+    // and NO action verb in its name. Inner link targets ("View order",
+    // "Open", "Track") have short names with an action verb. Marking the
+    // container in the rendered output prevents the model from clicking
+    // the row (which doesn't navigate on Gmail/Outlook/GitHub/etc.) and
+    // nudges it toward the inner link instead. Generic — no vendor
+    // names in the heuristic.
+    if (
+      el.role === "link" &&
+      el.tag === "div" &&
+      (el.name?.length ?? 0) > 80 &&
+      !/\b(View|View order|Track|Open|Read more|Inspect|Source|Details|Continue)\b/i.test(el.name ?? "")
+    ) {
+      tags.push("container");
+    }
     const tagStr = tags.length ? ` (${tags.join(", ")})` : "";
     const nameStr = el.name ? ` "${el.name}"` : "";
     lines.push(`  [${el.id}] <${el.tag}>${nameStr}${tagStr} click=(${el.cx}, ${el.cy})`);

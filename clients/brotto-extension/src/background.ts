@@ -29,6 +29,16 @@ let localTabId: number | null = null;
 let localTaskTerminalEmitted = false;
 const DEFAULT_PLANNER_URL = "http://127.0.0.1:3001";
 
+// ponytail: terminal cleanup shared by .then/.catch/cancel/reset paths.
+// Captures localTabId BEFORE nulling it, clears the per-tab badge so the
+// user no longer sees "AI" on the agent tab after the run ends. setBadgeForTab
+// handles a closed tab gracefully (try/catch internally).
+function endLocalTab(): void {
+  const tabId = localTabId;
+  localTabId = null;
+  if (tabId !== null) void setBadgeForTab(tabId, false);
+}
+
 // ponytail: pending-clarify and pending-approval resolvers keyed by request id.
 // The side panel responds by sending `submit_clarification` / `submit_approval`
 // with the same id. Resolved value is whatever the user typed/clicked.
@@ -212,6 +222,10 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
         signal: controller_ac.signal,
         onTabOpened: (tabId) => {
           localTabId = tabId;
+          // ponytail: per-tab badge so the user can see which tab is the
+          // agent tab at a glance. Cleared in the terminal cleanup paths
+          // (.then/.catch below and the cancel_local_task handler).
+          void setBadgeForTab(tabId, true);
         },
         onTabEvent: (event) => {
           // ponytail: forward tab lifecycle (opened/closed/navigated/focused)
@@ -290,7 +304,7 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
         },
       }).then(() => {
         localAbortController = null;
-        localTabId = null;
+        endLocalTab();
         // ponytail: only emit canonical_status: completed if the task
         // ended cleanly. If the task errored, the onError callback above
         // already emitted task_failed (which sets phase to 'error') and
@@ -300,7 +314,7 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
         }
       }).catch((err: unknown) => {
         localAbortController = null;
-        localTabId = null;
+        endLocalTab();
         notifyUi({ type: "canonical_error", code: "LOCAL_LOOP_THREW", message: err instanceof Error ? err.message : String(err) });
       });
       return { success: true };
@@ -316,7 +330,7 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
       localAbortController = null;
       if (localTabId !== null) {
         await debuggerModule.detachFromTab(localTabId).catch(() => undefined);
-        localTabId = null;
+        endLocalTab();
       }
       // ponytail: emit the terminal event SYNCHRONOUSLY so the side
       // panel exits 'Working' within ~1 tick. Without this the user
@@ -373,7 +387,7 @@ async function dispatchMessage(message: Record<string, unknown>): Promise<Record
       }
       if (localTabId !== null) {
         await debuggerModule.detachFromTab(localTabId).catch(() => undefined);
-        localTabId = null;
+        endLocalTab();
       }
       pendingClarifyResolvers.clear();
       pendingApprovalResolvers.clear();
@@ -554,6 +568,24 @@ function updateBadgeForEvent(event: ControllerUiEvent): void {
 async function setBadge(active: boolean): Promise<void> {
   await chrome.action.setBadgeBackgroundColor({ color: active ? BADGE_ACTIVE_COLOR : BADGE_INACTIVE_COLOR });
   await chrome.action.setBadgeText({ text: active ? "ON" : "" });
+}
+
+// ponytail: per-tab badge so the user can identify the agent tab at a
+// glance when the loop is running. Targets a specific tabId rather than the
+// extension-icon-wide state — the user might have many tabs open and only
+// one of them is "busy". chrome.action accepts a closed/missing tabId
+// silently, so we don't guard the call.
+async function setBadgeForTab(tabId: number, active: boolean): Promise<void> {
+  try {
+    await chrome.action.setBadgeBackgroundColor({
+      tabId,
+      color: active ? BADGE_ACTIVE_COLOR : BADGE_INACTIVE_COLOR,
+    });
+    await chrome.action.setBadgeText({ tabId, text: active ? "AI" : "" });
+  } catch {
+    // ponytail: tab might already be gone (closed mid-run). The next
+    // caller's localTabId === null check skips future badge updates.
+  }
 }
 
 function notifyUi(event: ControllerUiEvent): void {

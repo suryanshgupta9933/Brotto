@@ -70,6 +70,11 @@ export interface PageSnapshot {
   pagePurpose?: string;
   links?: PageLinkState[];
   buttons?: PageButtonState[];
+  // ponytail: optional AX-tree-derived row groups (CDP path). When set,
+  // renderSnapshot emits a per-row table with navigable vs container
+  // flags so the planner can target inner links, not row containers.
+  // No-op when unset (orchestrator's SNAPSHOT_FN_SRC path).
+  axRows?: import("./render.js").AxRowGroup[];
 }
 
 export interface HistoryEntry {

@@ -17,6 +17,30 @@ const CAPTURE_TIMEOUT_MS = 25_000;
 // ponytail: per-action pause so the demo loop can be cancelled cleanly and
 // the model isn't given time to fly past user-visible state changes.
 const POST_ACTION_PAUSE_MS = 400;
+// ponytail: floor on the inter-step gap. Applied at the top of every iteration
+// so the FIRST step also gets an initial settle and subsequent steps never run
+// back-to-back faster than this. Without it, capture→plan→execute can pile up
+// faster than the user can read the side panel and the agent races past its own
+// UI updates. 500ms = snappy but readable.
+const STEP_INTERVAL_MS = 500;
+// ponytail: how long to wait for the click target element to be present at
+// the model-chosen (x, y) before giving up and dispatching the click anyway.
+// 2s is generous for SPAs that re-render continuously (Gmail, GitHub) and
+// short enough that a stalled page surfaces quickly.
+const ELEMENT_READY_TIMEOUT_MS = 2_000;
+// ponytail: viewport-stability tolerance for the click guard. Captured bboxes
+// are frozen at observation time; if the window resizes / zooms / devtools
+// toggles between capture and dispatch, the click would land on whatever now
+// occupies those coords. DPR rounding causes ~1-2 px drift, so we accept
+// ≤4 px before declaring the viewport stale. 0.01 DPR fraction catches zoom
+// changes (Chrome zoom = 1.0/1.25/1.5; difference is 0.25+).
+const VIEWPORT_TOLERANCE_PX = 4;
+const VIEWPORT_TOLERANCE_DPR = 0.01;
+// ponytail: shared prefix for the viewport-stability guard's "click was
+// skipped because the page resized" return value. Both executeAction's
+// guard (producer) and the loop's `result.startsWith(...)` check
+// (consumer) read from this constant.
+export const VIEWPORT_CHANGED_PREFIX = "viewport_changed";
 
 export interface LocalDriverOptions {
   plannerUrl: string;
@@ -231,6 +255,80 @@ export function observationSignature(obs: { url?: string; title?: string; elemen
   return `${(obs.url ?? "").trim()}|${(obs.title ?? "").trim()}|${firstId}`;
 }
 
+// ponytail: filter memory facts to those that mention a goal keyword.
+// Used by the stagnation handler to auto-terminate when the model has
+// the answer in memory but is stuck clicking a dead target (e.g. Gmail
+// row container that doesn't navigate). Exported for isolated unit tests.
+export function goalMatchedFactsList(
+  goal: string,
+  facts: ReadonlyArray<{ key: string; value: string }>,
+): Array<{ key: string; value: string }> {
+  const keywords = extractGoalKeywords(goal);
+  if (keywords.length === 0) return [];
+  return facts.filter((f) => {
+    const hay = `${f.key} ${f.value}`.toLowerCase();
+    return keywords.some((kw) => hay.includes(kw));
+  });
+}
+
+// ponytail: synthesize a one-sentence finalAnswer from a list of facts.
+// Joined as "key: value; key: value". Exported for tests.
+export function synthesizeFinalAnswer(
+  facts: ReadonlyArray<{ key: string; value: string }>,
+): string {
+  return facts.map((f) => `${f.key}: ${f.value}`).join("; ");
+}
+
+// ponytail: extract goal-relevant sentences from the page text when memory
+// is empty. Status keywords + goal keywords + sentence-level extraction
+// surface what the model is missing in its memory commits. Used by the
+// stagnation handler as a fallback auto-terminate source. Generic — no
+// vendor names, works for any page with answer-shaped content.
+//
+// We extract sentences (split on . ! ?) that contain any goal keyword.
+// Each matched sentence becomes a "fact". The first N are joined into
+// a finalAnswer so the user gets SOMETHING even when the model stalled.
+const STATUS_WORDS = [
+  "delivered", "out for delivery", "shipped", "in transit",
+  "arriving", "dispatched", "cancelled", "returned", "tracking",
+  "tracking id", "order id", "order #", "order number",
+  "status", "estimated delivery",
+];
+
+export function extractPageAnswer(
+  goal: string,
+  pageText: string,
+): Array<{ key: string; value: string }> {
+  if (!goal || !pageText) return [];
+  const keywords = extractGoalKeywords(goal);
+  if (keywords.length === 0) return [];
+  const lcText = pageText.toLowerCase();
+  // ponytail: split on sentence boundaries. Cheap heuristic — good enough
+  // for status pages where answers are 1-2 sentences. Misses some edge
+  // cases (abbreviations with periods) but that's OK for the fallback.
+  const sentences = pageText.split(/(?<=[.!?])\s+/);
+  const out: Array<{ key: string; value: string }> = [];
+  for (let i = 0; i < sentences.length && out.length < 5; i += 1) {
+    const s = sentences[i]?.trim();
+    if (!s || s.length < 10 || s.length > 300) continue;
+    const lc = s.toLowerCase();
+    const hasGoal = keywords.some((kw) => lc.includes(kw));
+    const hasStatus = STATUS_WORDS.some((sw) => lc.includes(sw));
+    if (!hasGoal && !hasStatus) continue;
+    // ponytail: keep sentences that have both a goal keyword AND a
+    // status-ish word (high precision), OR a goal keyword + 1+ status
+    // hit (medium precision). Pure status-keyword sentences without a
+    // goal keyword are too noisy — they fire on every Gmail inbox page
+    // even when the goal is unrelated.
+    if (hasGoal) {
+      // Find first goal keyword for the key
+      const kw = keywords.find((k) => lc.includes(k)) ?? "info";
+      out.push({ key: `${kw}_from_page`, value: s });
+    }
+  }
+  return out;
+}
+
 // ponytail: page-identity stagnation. The Observation's `pageIdentity` is a
 // SHA-256 over a normalized AX-subtree dump — stable across re-renders,
 // flips when navigation actually happens. 3 consecutive identical
@@ -420,6 +518,169 @@ function describeAction(a: { type?: string; x?: number; y?: number; text?: strin
   }
 }
 
+// ponytail: detect email inbox URLs. Same provider set as the orchestrator's
+// render.ts so both paths surface the INBOX ROWS block at the same sites.
+// Catches Gmail / Outlook / Yahoo / Proton / iCloud / etc. — anywhere the
+// model's "find the latest" reasoning needs structured row context.
+const EMAIL_PROVIDER_HOSTS = new Set([
+  "mail.google.com", "inbox.google.com",
+  "outlook.live.com", "outlook.office.com", "outlook.office365.com",
+  "mail.yahoo.com", "ymail.com",
+  "proton.me", "mail.proton.me", "protonmail.com",
+  "fastmail.com",
+  "mail.icloud.com", "www.icloud.com",
+  "mail.aol.com",
+  "mail.zoho.com",
+  "mail.yandex.com",
+  "mail.gmx.com", "web.de",
+]);
+const LIST_LIKE_HOST_PATTERNS = [/^mail\./, /^inbox\./, /\.mail\./];
+function isEmailInboxUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (EMAIL_PROVIDER_HOSTS.has(u.hostname)) return true;
+    return LIST_LIKE_HOST_PATTERNS.some((re) => re.test(u.hostname));
+  } catch {
+    return false;
+  }
+}
+
+interface InboxRowView {
+  rowId: string;
+  sender: string;
+  subject: string;
+  date: string | null;
+  dateTs: number;
+  bboxCx: number;
+  bboxCy: number;
+  visible: boolean;
+}
+
+// ponytail: extract structured rows from the extension's semanticTargets.
+// Mirrors services/.../render.ts extractListRows so both code paths give the
+// model the same row table. Splits the accessibleName on the first " - " to
+// peel sender off the subject. Includes a date when parseable so the model
+// can rank rows by recency even without the orchestrator's pre-sort.
+function extractInboxRows(targets: SemanticTarget[]): InboxRowView[] {
+  const chromeSenders = new Set([
+    "gmail", "google", "search", "tab", "help", "training",
+    "send feedback to google", "outlook", "yahoo", "proton",
+    "compose", "inbox", "drafts", "sent", "spam", "trash",
+    "starred", "important", "snoozed", "archive",
+  ]);
+  const rows: InboxRowView[] = [];
+  for (const t of targets) {
+    if ((t.role ?? "").toLowerCase() !== "link") continue;
+    const name = (t.accessibleName?.text ?? t.attributes?.id ?? t.attributes?.name ?? "").trim();
+    const dashIdx = name.indexOf(" - ");
+    if (dashIdx <= 0) continue;
+    const sender = name.slice(0, dashIdx).trim();
+    const rest = name.slice(dashIdx + 3).trim();
+    if (!sender || sender.length > 80) continue;
+    if (chromeSenders.has(sender.toLowerCase())) continue;
+    const bb = t.boundingBox;
+    const cx = Math.round(bb.x + bb.width / 2);
+    const cy = Math.round(bb.y + bb.height / 2);
+    const date = extractDateToken(name);
+    const dateTs = date ? Date.parse(date) : NaN;
+    rows.push({
+      rowId: t.stableRef ?? t.targetId,
+      sender,
+      subject: rest.slice(0, 80),
+      date: date ?? null,
+      dateTs: Number.isFinite(dateTs) ? dateTs : 0,
+      bboxCx: cx,
+      bboxCy: cy,
+      visible: t.visible,
+    });
+  }
+  // ponytail: sort newest-first when dates parse; undated rows go to the
+  // bottom in DOM order. Stable sort within each bucket.
+  rows.sort((a, b) => {
+    if (a.dateTs > 0 && b.dateTs <= 0) return -1;
+    if (a.dateTs <= 0 && b.dateTs > 0) return 1;
+    if (a.dateTs > 0 && b.dateTs > 0) return b.dateTs - a.dateTs;
+    return 0;
+  });
+  return rows;
+}
+
+function renderInboxRowsBlock(obs: ObservationV1): string {
+  if (!isEmailInboxUrl(obs.url ?? "")) return "";
+  const rows = extractInboxRows(obs.semanticTargets ?? []);
+  if (rows.length === 0) return "";
+  const hasAllDates = rows.every((r) => r.dateTs > 0);
+  const sortNote = hasAllDates
+    ? "rows are sorted by date (newest first); row #1 is the latest"
+    : "rows are sorted by date when parseable; rows without a visible date stay in DOM order at the bottom";
+  const lines = [
+    `=== INBOX ROWS (sender → subject — ${sortNote}) ===`,
+    "Each row is a CONTAINER. Verify the sender matches the goal domain BEFORE opening. To open a row, click an INNER element (the subject line or a named action like View order / Track package / Open) — NOT the row container itself, which has role=link but does not navigate.",
+  ];
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i];
+    const id = r.rowId.slice(0, 8);
+    const dateSuffix = r.date ? ` date="${r.date}"` : "";
+    lines.push(
+      `  ${String(i + 1).padStart(2, " ")}. [${id}] sender="${r.sender}" subject="${r.subject}"${dateSuffix} bbox=(${r.bboxCx},${r.bboxCy})`,
+    );
+  }
+  lines.push("=== END INBOX ROWS ===");
+  return lines.join("\n");
+}
+
+// ponytail: extract a date token from a string. Gmail embeds the row date
+// inline in the accessibleName ("Amazon - Order shipped, Aug 5, 2025, 4:32 PM"),
+// Outlook uses day-month ("5 Aug 2025 16:32"). Returning the raw match keeps
+// the rendered line human-readable; the orchestrator's extractListRows also
+// surfaces these so the model can rank rows by date.
+export function extractDateToken(text: string): string | null {
+  if (!text) return null;
+  // Order matters: try "Day Month" first so "5 Aug 2025" doesn't get half-eaten
+  // by the "Month Day" branch (which would otherwise take "Aug 20" out of "Aug 2025").
+  // "5 Aug" / "5 Aug 2025" / "5 Aug 2025 4:32 PM"
+  const dayFirst = /\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*(?:\s*[,-]?\s*(\d{4}))?(?:,?\s+(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|am|pm)?))?/i.exec(text);
+  if (dayFirst) return dayFirst[0];
+  // "Aug 5" / "Aug 5, 2025" / "Aug 5, 2025, 4:32 PM" / "Aug 5 16:32"
+  const monthFirst = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2})(?:,?\s*(\d{4}))?(?:,?\s+(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|am|pm)?))?/i.exec(text);
+  if (monthFirst) return monthFirst[0];
+  // "Today" / "Yesterday"
+  const rel = /\b(Today|Yesterday)\b/i.exec(text);
+  if (rel) return rel[0];
+  return null;
+}
+
+// ponytail: row-container retry detector. Pure helper so the harness can call
+// it from the click-pre-dispatch gate without dragging in the full state
+// machine. Returns true when `next` is a click that lands in the same row
+// band as `prev` AND within a row's x span — the failure pattern where the
+// planner keeps re-clicking the same row trying to land on the inner link.
+// dy ≤ 25 px catches same-row; dx ≤ 200 catches in-row x variation
+// (date column, subject link, action button all sit on the same row).
+export function isRowContainerRetry(
+  prev: { x: number; y: number } | null,
+  next: { x: number; y: number },
+): boolean {
+  if (prev === null) return false;
+  return Math.abs(next.x - prev.x) <= 200 && Math.abs(next.y - prev.y) <= 25;
+}
+
+// ponytail: viewport-stability comparator for the click guard. Pure helper so
+// the harness can call it from the click-pre-dispatch gate without dragging
+// in chrome.debugger. Captured vs current viewport; returns true if they're
+// close enough that a bbox frozen at capture-time still points at the same
+// element today.
+export function viewportsMatch(
+  captured: { width: number; height: number; devicePixelRatio: number },
+  current: { width: number; height: number; devicePixelRatio: number },
+): boolean {
+  return (
+    Math.abs(captured.width - current.width) <= VIEWPORT_TOLERANCE_PX &&
+    Math.abs(captured.height - current.height) <= VIEWPORT_TOLERANCE_PX &&
+    Math.abs(captured.devicePixelRatio - current.devicePixelRatio) < VIEWPORT_TOLERANCE_DPR
+  );
+}
+
 // ponytail: convert canonical ObservationV1 to the harness text format the
 // OpenAI-compatible planner expects. Mirrors scripts/context-builder.ts so the
 // model sees the same shape whether the observation came from Playwright or the
@@ -512,6 +773,29 @@ export function renderObservationForPlanner(
       const checked = (t.control as { checked?: boolean }).checked;
       if (typeof checked === "boolean") tags.push(`checked=${checked}`);
     }
+    // ponytail: row-container marker. Mirrors the orchestrator's renderSnapshot
+    // heuristic (services/.../render.ts): role=link + tag=div/span + long
+    // accessibleName + no action verb in the name = list-row container that
+    // does NOT navigate when clicked (Gmail/Outlook/Reddit/GitHub). Surface
+    // as `(container)` so the model picks the inner subject link / named
+    // action on the first try instead of the bbox center of the wrapper.
+    const tagLower = t.tag.toLowerCase();
+    const roleLower = (t.role ?? "").toLowerCase();
+    if (
+      (roleLower === "link" || roleLower === "row") &&
+      (tagLower === "div" || tagLower === "span" || tagLower === "li") &&
+      name.length > 80 &&
+      !/\b(View|View order|Track|Open|Read more|Inspect|Source|Details|Continue)\b/i.test(name)
+    ) {
+      tags.push("container");
+    }
+    // ponytail: surface any date token from the accessible name as a `date="…"`
+    // tag so the planner can rank rows by recency without re-parsing the long
+    // name. Mirrors the orchestrator's extractListRows so both code paths give
+    // the model the same recency signal. Today / Yesterday → kept as-is; the
+    // planner prompt names them as "most recent" implicitly.
+    const dateToken = extractDateToken(name);
+    if (dateToken) tags.unshift(`date="${dateToken}"`);
     const tagStr = tags.length ? ` (${tags.join(", ")})` : "";
     const nameStr = name ? ` "${name}"` : "";
     return `  [${id}] <${t.tag}>${nameStr}${role}${type}${tagStr} click=(${cx}, ${cy})`;
@@ -567,6 +851,17 @@ export function renderObservationForPlanner(
       }
     }
   }
+
+  // ponytail: structured INBOX ROWS block (mirrors the orchestrator's
+  // renderEmailInbox). On email-host URLs (mail.google.com, outlook.*, etc.)
+  // extract sender/subject/date from each role=link target's accessibleName,
+  // sort rows by date desc, and emit a compact table — so the model sees
+  // "row #1 is the latest" instead of having to manually scan the full
+  // element list and pick top-down. Without this, the extension path's
+  // "latest" guesses degrade to "first row in flat list" which on Gmail
+  // SEARCH results (default sort 'Most relevant') picks older emails.
+  const inboxBlock = renderInboxRowsBlock(obs);
+  if (inboxBlock) lines.push(inboxBlock);
 
   lines.push("=== INTERACTIVE ELEMENTS (In Viewport) ===");
   if (inViewport.length > 0) {
@@ -820,7 +1115,40 @@ async function callPlanner(
   throw lastErr ?? new Error("planner call failed");
 }
 
-async function executeAction(tabId: number, action: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string; deltaX?: number; deltaY?: number }): Promise<string> {
+// ponytail: re-read the page's current viewport via Runtime.evaluate.
+// Used by the click guard to compare against the captured viewport before
+// dispatching — if the user resized/zoomed the window between capture and
+// dispatch, bboxes are stale and the click would land on the wrong element.
+async function readPageViewport(tabId: number): Promise<{ width: number; height: number; devicePixelRatio: number }> {
+  const r = await debuggerModule.sendCommand(tabId, {
+    method: "Runtime.evaluate",
+    params: {
+      expression:
+        "JSON.stringify({w:window.innerWidth,h:window.innerHeight,dpr:window.devicePixelRatio})",
+      returnByValue: true,
+    },
+  });
+  const v = JSON.parse((r as { result: { value: string } }).result.value);
+  return { width: v.w, height: v.h, devicePixelRatio: v.dpr };
+}
+
+async function executeAction(tabId: number, action: { type?: string; x?: number; y?: number; text?: string; key?: string; url?: string; deltaX?: number; deltaY?: number }, obs: ObservationV1 | null = null): Promise<string> {
+  // ponytail: viewport-stability guard. Captured bboxes are frozen; if the
+  // viewport changed between capture and dispatch (resize / zoom / devtools
+  // toggle), the stored coords no longer point at the element the planner
+  // picked. Surface as a result string so the loop skips the action, pushes
+  // it to history, and re-captures next iteration naturally.
+  if (obs !== null && obs.viewport !== undefined) {
+    try {
+      const currentVp = await readPageViewport(tabId);
+      if (!viewportsMatch(obs.viewport, currentVp)) {
+        return `${VIEWPORT_CHANGED_PREFIX} (${obs.viewport.width}x${obs.viewport.height}@${obs.viewport.devicePixelRatio} → ${currentVp.width}x${currentVp.height}@${currentVp.devicePixelRatio}); refresh and retry`;
+      }
+    } catch {
+      // ponytail: viewport probe failed (debugger detached, page crashed, etc.).
+      // Don't gate the dispatch — the caller's failure handling will surface it.
+    }
+  }
   switch (action.type) {
     case "left_click": {
       await debuggerModule.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x: action.x, y: action.y, button: "left", clickCount: 1 } });
@@ -960,6 +1288,77 @@ async function captureObservationWithTimeout(tabId: number, timeoutMs: number): 
 }
 const captureForDriverWithTimeout = (tabId: number, timeoutMs: number) => captureObservationWithTimeout(tabId, timeoutMs);
 
+// ponytail: NAV_SETTLE_MS — how long to wait for a click-induced navigation
+// to commit URL change. Real Chrome sometimes takes 2-3 s for SPAs (Gmail,
+// Reddit) to finish a click→navigate cycle, especially right after page
+// hydration. Without this, the harness reports [Unchanged] even though the
+// click landed correctly and the navigation is just late. 3500 ms is the
+// minimum that catches Gmail reliably without making the loop feel stuck.
+const NAV_SETTLE_MS = 3_500;
+
+// ponytail: race chrome.webNavigation.onCommitted for the agent tab against
+// a hard timeout. Resolves true + the new URL once the top frame of the
+// tab changes (proves the click navigated), or false on timeout. Used
+// immediately after every dispatchable action that should land on a new
+// page (clicks, visit_url, history_back). Avoids the
+// [Unchanged]-despite-navigation race that costs the loop 1-2 wasted turns
+// on every slow SPA. Sub-frame navigations are ignored — only the top
+// frame URL is treated as "real" navigation for the agent.
+async function waitForNavigationOrTimeout(
+  tabId: number,
+  timeoutMs: number,
+): Promise<{ navigated: boolean; finalUrl: string | null }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (navigated: boolean, finalUrl: string | null) => {
+      if (settled) return;
+      settled = true;
+      try { chrome.webNavigation.onCommitted.removeListener(listener); } catch { /* */ }
+      clearTimeout(handle);
+      resolve({ navigated, finalUrl });
+    };
+    const listener = (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => {
+      if (details.tabId !== tabId) return;
+      if (details.frameId !== 0) return;
+      settle(true, details.url);
+    };
+    let handle: ReturnType<typeof setTimeout>;
+    try {
+      chrome.webNavigation.onCommitted.addListener(listener);
+    } catch {
+      // ponytail: webNavigation permission missing in some test envs (e.g.
+      // jest with a stubbed chrome). Fall through to the timeout path so
+      // the loop still works — just without fast-path detection.
+    }
+    handle = setTimeout(() => settle(false, null), timeoutMs);
+  });
+}
+
+// ponytail: click-coordinates verification. After dispatching a click, ask
+// the live DOM: "what is at (x, y) RIGHT NOW?" If it returns BODY/HTML or
+// the click target moved off, surface a warning in the run log so the
+// post-action capture can attribute the [Unchanged] to either (a) the click
+// correctly hit an unresponsive element (row container) or (b) the page
+// shifted and the (x, y) is now in dead space. Reduces time spent
+// debugging "why didn't the click work" without requiring target plumbing.
+async function readElementAtPoint(tabId: number, x: number, y: number): Promise<{ hitBody: boolean; tagName: string | null }> {
+  try {
+    const r = await debuggerModule.sendCommand(tabId, {
+      method: "Runtime.evaluate",
+      params: {
+        expression: `(() => { const el = document.elementFromPoint(${x}, ${y}); if (!el) return null; return el.tagName; })()`,
+        returnByValue: true,
+      },
+    });
+    const tag = (r as { result?: { value?: unknown } } | undefined)?.result?.value;
+    if (typeof tag !== "string") return { hitBody: false, tagName: null };
+    const up = tag.toUpperCase();
+    return { hitBody: up === "BODY" || up === "HTML", tagName: tag };
+  } catch {
+    return { hitBody: false, tagName: null };
+  }
+}
+
 // ponytail: real page settlement wait. Polls tab status === "complete" and runs an
 // in-page MutationObserver to wait until DOM mutations quiet down for 200ms (max 1500ms).
 // Critical for React/Vue SPAs where status === "complete" fires before hydration/re-renders.
@@ -1004,6 +1403,35 @@ async function waitForNetworkIdle(tabId: number, _timeoutMs = 800): Promise<void
     await new Promise((r) => setTimeout(r, 250));
   }
 
+}
+
+// ponytail: wait until document.elementFromPoint(x, y) returns a real element.
+// Catches the common "model clicks before the SPA has re-rendered" failure
+// where status===complete is fine but the target coordinate is over a
+// placeholder. Polls every 100ms up to `timeoutMs`. Returns true if the
+// element was present within the budget, false on timeout.
+async function waitForElementAt(tabId: number, x: number, y: number, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const r = await debuggerModule.sendCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: {
+          expression: `(() => { const el = document.elementFromPoint(${x}, ${y}); return el ? el.tagName : null; })()`,
+          returnByValue: true,
+        },
+      });
+      const tag = (r as { result?: { value?: unknown } } | undefined)?.result?.value;
+      if (typeof tag === "string" && tag.length > 0) return true;
+    } catch {
+      // ponytail: CDP can be temporarily detached mid-evaluate (tab switch,
+      // debugger re-attach after a navigation). Bail out — the click will
+      // still dispatch, we just lose the readiness signal for this step.
+      return false;
+    }
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  return false;
 }
 
 
@@ -1054,6 +1482,12 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
   // turns mean the agent's clicks aren't navigating.
   const pageIdentities: string[] = [];
   let stagnationHits = 0;
+  // ponytail: most-recent click that left the page unchanged. Used as a
+  // backstop: if the planner proposes another click within ~30 px of this
+  // point, the row is almost certainly a non-navigable container and we
+  // hard-reject before dispatching. Reset on every navigation so a stale
+  // entry doesn't block a legitimate later click on the same row.
+  let lastUnchangedClick: { x: number; y: number } | null = null;
   // ponytail: cap on consecutive stagnation NUDGES (not terminates). The
   // loop used to terminate after the 2nd hit and surface a STAGNATION error
   // — but the agent often already had a complete answer in memory by then
@@ -1126,18 +1560,6 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
     };
     chrome.tabs.onActivated.addListener(handler);
     tabListeners.push(() => chrome.tabs.onActivated.removeListener(handler));
-  }
-  // ponytail: ensure the agent tab is the active tab in its window before
-  // every observation capture. chrome.tabs.captureVisibleTab rejects when the
-  // target tab isn't the visible one — and Gmail/real sites briefly switch
-  // focus during redirects, causing "Target tab is not the active tab" errors.
-  // Cheap (just sets focus) and idempotent.
-  async function activateAgentTab(): Promise<void> {
-    try {
-      await chrome.tabs.update(tabId, { active: true });
-    } catch {
-      /* tab might be gone — let captureObservation surface the real error */
-    }
   }
   // ponytail: detect whether the click opened a new tab to an external origin
   // (e.g. Gmail's "Track package" link → amazon.in) and follow it. Without
@@ -1219,7 +1641,13 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       }
       const iterationStartedAt = Date.now();
       log(opts, `step ${stepIndex + 1}`);
-      await activateAgentTab();
+      // ponytail: inter-step throttle + page-ready gate. STEP_INTERVAL_MS is the
+      // minimum gap between consecutive steps; waitForNetworkIdle re-checks
+      // tab.status === "complete" + DOM quietness so we don't capture or click
+      // a half-rendered page (e.g. mid-navigation from the previous step's
+      // visit_url, before chrome.tabs.onUpdated reports 'complete').
+      await new Promise((r) => setTimeout(r, STEP_INTERVAL_MS));
+      await waitForNetworkIdle(tabId).catch(() => undefined);
       const obs = await captureForDriverWithTimeout(tabId, CAPTURE_TIMEOUT_MS);
       // ponytail: detect login / auth challenge BEFORE calling the planner so
       // we don't burn a plan step on "click this invisible login form". Catches
@@ -1470,8 +1898,53 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       let result: string;
       const actionTs = Date.now();
 
+      // ponytail: element-ready gate for actions that target a (x, y)
+      // coordinate. document.elementFromPoint must return a non-null element
+      // before we dispatch the click — otherwise the click lands on the body
+      // and either no-ops or hits the wrong target. Non-click actions skip
+      // this; their readiness is covered by the page-ready gate above.
+      if (
+        (action.type === "left_click" || action.type === "double_click" || action.type === "right_click" || action.type === "mouse_move") &&
+        typeof action.x === "number" && typeof action.y === "number"
+      ) {
+        const ready = await waitForElementAt(tabId, action.x, action.y, ELEMENT_READY_TIMEOUT_MS);
+        if (!ready) {
+          log(opts, `element at (${action.x}, ${action.y}) not ready within ${ELEMENT_READY_TIMEOUT_MS}ms — dispatching click anyway`);
+        }
+      }
+
+      // ponytail: row-container retry guard. If the previous click was
+      // [Unchanged] AND the current click lands in the same row band,
+      // the planner is fishing in the same spot — hard-reject and force a
+      // pivot to a child element, a different row, or a direct URL.
+      if (
+        lastUnchangedClick !== null &&
+        (action.type === "left_click" || action.type === "double_click" || action.type === "right_click") &&
+        typeof action.x === "number" && typeof action.y === "number" &&
+        isRowContainerRetry(lastUnchangedClick, { x: action.x, y: action.y })
+      ) {
+        {
+          log(opts, `click near last [Unchanged] click (${lastUnchangedClick.x}, ${lastUnchangedClick.y}) — likely row container`);
+          const rejectMsg = `[REJECTED BY HARNESS]: Your previous click near (${lastUnchangedClick.x}, ${lastUnchangedClick.y}) left the page unchanged, and you are clicking the same row again. The bbox center of a row container (role=link, div, long name, no action verb) is often NOT a clickable target — pick the row's INNER subject link / a named action (View order, Open, Track) instead.`;
+          history.push({ action: desc, result: rejectMsg });
+          injectedGuidance = rejectMsg;
+          opts.onStep({ index: stepIndex, action: desc, result: rejectMsg, url: obs.url, pageTitle: obs.title, pagePurpose: obs.pagePurpose, screenshot: null, iconKind, reasoning: action.reasoning });
+          actionSigs.push(actionSig);
+          obsSigs.push(observationSignature({ url: obs.url, title: obs.title, elements: obs.semanticTargets.slice(0, 1).map((t: SemanticTarget) => ({ id: t.stableRef ?? t.targetId.slice(0, 8) })) }));
+          pageIdentities.push(obs.pageIdentity || `${obs.url}|${obs.title}`);
+          stagnationHits++;
+          if (stagnationHits >= STAGNATION_NUDGE_CAP) {
+            const blockedMessage = `STOP — clicks on the same row rejected by harness after ${stagnationHits} nudges.\n\nFindings:\n${memory.toView().map((f) => `  - ${f.key} = "${f.value}"`).join("\n")}`;
+            terminal = { kind: "error", error: { code: "STAGNATION", message: blockedMessage } };
+            return;
+          }
+          stepIndex++;
+          continue;
+        }
+      }
+
       try {
-        result = await executeAction(tabId, action);
+        result = await executeAction(tabId, action, obs);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         log(opts, `action failed (${failures.length + 1} in a row): ${message}`);
@@ -1492,6 +1965,59 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         }
         terminal = { kind: "error", error: { code: "ACTION_FAILED", message } };
         return;
+      }
+      // ponytail: viewport-stability guard short-circuited executeAction. No
+      // click was dispatched; emit the step to the UI (so the user sees
+      // why), record it in history, and skip the post-action captures +
+      // signature trackers. Polluting actionSigs/obsSigs/pageIdentities
+      // with a click that never fired would mask real stagnation on the
+      // next iteration. The loop's natural re-capture handles the refresh.
+      if (result.startsWith(VIEWPORT_CHANGED_PREFIX)) {
+        log(opts, result);
+        history.push({ action: desc, result });
+        opts.onStep({ index: stepIndex, action: desc, result, url: obs.url, pageTitle: obs.title, pagePurpose: obs.pagePurpose, screenshot: null, iconKind, reasoning: action.reasoning });
+        failures.length = 0;
+        stepIndex++;
+        continue;
+      }
+      // ponytail: navigation race. For actions that should change the
+      // page (left_click, visit_url, history_back, double_click,
+      // right_click), wait up to NAV_SETTLE_MS for the top frame's URL to
+      // actually change. SPAs (Gmail) hydrate and then commit navigation
+      // 1-3 s after the click — short waits report [Unchanged] falsely.
+      // Tracking this lets the postObs capture happen AFTER the navigation
+      // finishes, so pageChanged = true and the model sees [Verified].
+      // scroll/insert_text/key/wait/screenshot/terminate don't navigate,
+      // so we skip the race.
+      let screenshot: string | null = null;
+      let postUrl = obs.url;
+      let postObs: ObservationV1 | null = null;
+      let pageChanged = false;
+      let verifiedResult = result;
+      if (
+        action.type === "left_click" ||
+        action.type === "double_click" ||
+        action.type === "right_click" ||
+        action.type === "visit_url" ||
+        action.type === "history_back"
+      ) {
+        const nav = await waitForNavigationOrTimeout(tabId, NAV_SETTLE_MS);
+        if (nav.navigated && nav.finalUrl) {
+          log(opts, `navigation committed after click: → ${nav.finalUrl.slice(0, 80)}`);
+        }
+      }
+      // ponytail: post-click landed-element check. If the click went to
+      // dead space (BODY/HTML at the (x, y) coords), the page shifted
+      // between capture and dispatch — log the finding so the [Unchanged]
+      // diagnosis has a clear cause. Cost: one Runtime.evaluate per click.
+      if (
+        (action.type === "left_click" || action.type === "double_click" || action.type === "right_click") &&
+        typeof action.x === "number" && typeof action.y === "number"
+      ) {
+        const landed = await readElementAtPoint(tabId, action.x, action.y);
+        if (landed.hitBody) {
+          log(opts, `click landed on ${landed.tagName ?? "BODY"} at (${action.x}, ${action.y}) — coords may be stale (page shifted between capture and dispatch)`);
+        }
       }
       await waitForNetworkIdle(tabId).catch(() => undefined);
       await new Promise((r) => setTimeout(r, POST_ACTION_PAUSE_MS));
@@ -1516,11 +2042,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         }
         await waitForNetworkIdle(tabId).catch(() => undefined);
       }
-      let screenshot: string | null = null;
-      let postUrl = obs.url;
-      let postObs: ObservationV1 | null = null;
       try {
-        await activateAgentTab();
         postObs = await captureObservationWithTimeout(tabId, CAPTURE_TIMEOUT_MS);
         screenshot = postObs.screenshot && postObs.screenshot.data.length > 0 ? postObs.screenshot.data : null;
         postUrl = postObs.url;
@@ -1528,7 +2050,6 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         log(opts, `post-action observation failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       let outcomeTag = "";
-      let pageChanged = false;
       if (postObs) {
         if (postObs.url !== obs.url) {
           outcomeTag = ` [Verified: Navigated to ${postObs.url}]`;
@@ -1536,23 +2057,32 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         } else if (postObs.pageIdentity && obs.pageIdentity && postObs.pageIdentity !== obs.pageIdentity) {
           outcomeTag = ` [Verified: Page content updated]`;
           pageChanged = true;
-        } else if (action.type === "scroll") {
-          outcomeTag = ` [Verified: Scrolled page]`;
-          pageChanged = true;
-        } else if (action.type === "insert_text") {
-          outcomeTag = ` [Verified: Typed text]`;
-          pageChanged = true;
-        } else if (action.type === "key") {
-          outcomeTag = ` [Verified: Key pressed]`;
-          pageChanged = true;
         } else {
-          outcomeTag = ` [Unchanged: URL and page state remained identical]`;
+          // ponytail: be honest with the model. insert_text / key press
+          // don't navigate by themselves — only the URL or page identity
+          // tells us navigation happened. Previously these forced
+          // pageChanged = true to mask Gmail's `[Unchanged]` after a
+          // click that did focus an input. That hid real stagnation. Now
+          // the model sees [Unchanged] when the page really didn't
+          // change, and gets a fast [Unchanged → Unchanged → Unchanged]
+          // → stagnation signal that pushes it to visit_url.
+          outcomeTag = ` [Unchanged: action ${action.type} dispatched but page state unchanged]`;
         }
       }
-
-      const verifiedResult = `${result}${outcomeTag}`;
+      verifiedResult = `${result}${outcomeTag}`;
       history.push({ action: desc, result: verifiedResult });
       failures.length = 0;
+      // ponytail: track the most-recent click coordinates on which the page
+      // did NOT change. Used by the row-container retry guard above to
+      // reject the next click in the same row. Cleared on a successful
+      // navigation (see the `if (pageChanged)` block below).
+      if (
+        verifiedResult.includes("[Unchanged") &&
+        (action.type === "left_click" || action.type === "double_click" || action.type === "right_click") &&
+        typeof action.x === "number" && typeof action.y === "number"
+      ) {
+        lastUnchangedClick = { x: action.x, y: action.y };
+      }
       // ponytail: pass the planner's one-sentence reasoning to the UI. The
       // side panel uses it as the assistant bubble title instead of the raw
       // `desc` (which is the tool call like "visit_url ...").
@@ -1566,6 +2096,7 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
         obsSigs.length = 0;
         pageIdentities.length = 0;
         stagnationHits = 0;
+        lastUnchangedClick = null;
       }
       // ponytail: signature-based stagnation. Two parallel signals:
       //   - pageIdentities: post-action pageIdentity hash. MUST use postObs,
@@ -1591,6 +2122,42 @@ export async function runLocalLoop(opts: LocalDriverOptions): Promise<void> {
       if (stagnation) {
         stagnationHits++;
         log(opts, `stagnation: ${stagnation.kind} signature="${stagnation.signature}" nudge ${stagnationHits}/${STAGNATION_NUDGE_CAP}`);
+        // ponytail: when memory has goal-matching facts and we're stuck,
+        // synthesize a finalAnswer from memory and auto-terminate. The
+        // model often keeps clicking a dead target (e.g. Gmail row
+        // container that doesn't navigate) while the answer is already
+        // recorded. Without this, the user gets an abrupt STAGNATION
+        // error instead of an answer. Triggered on the FIRST stagnation
+        // hit, not after the nudge cap — the model is clearly on the
+        // right track if it has goal-matching facts in memory.
+        const goalFindings = memory.toView();
+        const goalMatchedFacts = goalMatchedFactsList(opts.goal, goalFindings);
+        let autoTerminateFacts = goalMatchedFacts;
+        // ponytail: when memory is empty, fall back to extracting
+        // goal-relevant sentences from the page text. This handles the
+        // case where the model never committed any memory (e.g. it got
+        // stuck before recording anything) but the page still has the
+        // answer — surface it so the user gets SOMETHING instead of an
+        // abrupt STAGNATION error.
+        if (autoTerminateFacts.length === 0 && postObs?.bodyText) {
+          autoTerminateFacts = extractPageAnswer(opts.goal, postObs.bodyText);
+          if (autoTerminateFacts.length > 0) {
+            log(opts, `stagnation auto-terminate fallback: ${autoTerminateFacts.length} facts extracted from page text`);
+          }
+        }
+        if (autoTerminateFacts.length >= 1) {
+          const summary = synthesizeFinalAnswer(autoTerminateFacts);
+          log(opts, `stagnation auto-terminate: ${goalFindings.length} facts in memory, ${autoTerminateFacts.length} goal-match`);
+          terminal = {
+            kind: "complete",
+            complete: {
+              summary,
+              steps: stepIndex + 1,
+              finalAnswer: summary,
+            },
+          };
+          return;
+        }
         // ponytail: instead of terminating, list the agent's memory facts
         // and explicitly ask it to either terminate with what it has or
         // pivot to a fundamentally different strategy. Without this, the
