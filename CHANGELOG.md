@@ -7,6 +7,8 @@ beta, expect breaking changes."
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-11
+
 ### Fixed
 - SW termination between tasks (MV3 idle-kill). Added a long-lived
   `chrome.runtime.connect` port from the side panel with an
@@ -76,3 +78,4 @@ beta, expect breaking changes."
 Initial open-source beta. See README.md for the feature matrix.
 
 [Unreleased]: https://github.com/suryanshgupta9933/brotto/compare/stable...HEAD
+[0.2.0]: https://github.com/suryanshgupta9933/brotto/compare/v0.1.0...stable
