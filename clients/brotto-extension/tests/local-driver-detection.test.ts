@@ -1,7 +1,8 @@
 // ponytail: unit tests for the detection helpers in local-driver.ts. These
 // are pure functions, so we exercise them directly without the runner.
 
-import { detectLoop, detectPageStagnation, detectStagnation, detectStuckFailures, looksLikeAuthChallenge, looksLikeLoginPage, looksLikeSignInLink, needsApproval } from "../src/local-driver";
+import { detectLoop, detectPageStagnation, detectStagnation, detectStuckFailures, looksLikeAuthChallenge, looksLikeLoginPage, looksLikeSignInLink, needsApproval, isRowContainerRetry, extractDateToken, renderObservationForPlanner, viewportsMatch } from "../src/local-driver";
+import type { ObservationV1, SemanticTarget } from "@brotto/brotto-action-schema";
 
 describe("detectLoop", () => {
   it("returns false when history is shorter than threshold", () => {
@@ -239,6 +240,57 @@ describe("looksLikeSignInLink", () => {
   });
 });
 
+describe("extractDateToken", () => {
+  // ponytail: regression for the "agent opened an older Amazon email"
+  // failure. Gmail embeds the row date inline in the accessibleName; without
+  // the model seeing that token, it picks whichever row Gmail happens to
+  // surface first (search default = 'Most relevant', NOT date).
+  it.each([
+    ["Gmail month-day with year", "Amazon - Order shipped, Aug 5, 2025, 4:32 PM", "Aug 5, 2025"],
+    ["Gmail month-day with time", "Amazon - Order shipped, Aug 5, 4:32 PM", "Aug 5"],
+    ["Outlook day-month-year", "Amazon - Order delivered 5 Aug 2025 16:32", "5 Aug 2025"],
+    ["Outlook day-month no year", "Amazon - Order delivered 5 Aug", "5 Aug"],
+    ["Today", "Amazon - Order delivered Today", "Today"],
+    ["Yesterday", "Amazon - Order delivered Yesterday", "Yesterday"],
+  ])("parses %s", (_label, input, contains) => {
+    const got = extractDateToken(input);
+    expect(got).not.toBeNull();
+    expect(got!.toLowerCase()).toContain(contains.toLowerCase());
+  });
+
+  it("returns null when no date token is present", () => {
+    expect(extractDateToken("Amazon - Order delivered")).toBeNull();
+    expect(extractDateToken("")).toBeNull();
+  });
+});
+
+describe("isRowContainerRetry", () => {
+  // ponytail: regression for the Gmail search results click pattern where
+  // the planner clicks (481, 340) then (396, 340) — same row, different x,
+  // both [Unchanged]. Helper returns true so the harness rejects the
+  // second click instead of dispatching it and burning another [Unchanged]
+  // turn.
+  it("returns true for two clicks in the same row band", () => {
+    expect(isRowContainerRetry({ x: 481, y: 340 }, { x: 396, y: 340 })).toBe(true);
+  });
+
+  it("returns true for clicks at slightly different y within the band", () => {
+    expect(isRowContainerRetry({ x: 481, y: 340 }, { x: 500, y: 360 })).toBe(true);
+  });
+
+  it("returns false when the next click is on a different row (y delta > 25)", () => {
+    expect(isRowContainerRetry({ x: 481, y: 340 }, { x: 396, y: 420 })).toBe(false);
+  });
+
+  it("returns false when the next click is way off in x (outside row span)", () => {
+    expect(isRowContainerRetry({ x: 481, y: 340 }, { x: 1000, y: 340 })).toBe(false);
+  });
+
+  it("returns false when there is no previous unchanged click", () => {
+    expect(isRowContainerRetry(null, { x: 481, y: 340 })).toBe(false);
+  });
+});
+
 describe("looksLikeAuthChallenge — Google OAuth round-trip", () => {
   // ponytail: regression test for the GitHub "Sign in with Google" run.
   // The user's tab bounces between github.com/login →
@@ -288,5 +340,105 @@ describe("looksLikeAuthChallenge — Google OAuth round-trip", () => {
       title: "GitHub",
     } as never);
     expect(r.auth).toBe(false);
+  });
+});
+
+describe("renderObservationForPlanner — INBOX ROWS block on email URLs", () => {
+  function obs(url: string, rows: Array<{ id: string; name: string; cx: number; cy: number; }>): ObservationV1 {
+    return {
+      url,
+      title: "Search results - Gmail",
+      semanticTargets: rows.map((r) => ({
+        targetId: r.id,
+        stableRef: r.id,
+        tag: "div",
+        role: "link",
+        accessibleName: { text: r.name },
+        attributes: {},
+        control: { kind: "link" },
+        boundingBox: { x: r.cx - 50, y: r.cy - 20, width: 100, height: 40 },
+        visible: true,
+        framePath: [],
+        locatorCandidates: [],
+      })) as unknown as SemanticTarget[],
+      // minimal valid ObservationV1 — fields the renderer doesn't touch are stubbed.
+      observationId: "obs-1" as never,
+      capturedAt: new Date().toISOString(),
+      page: { tabId: "0".repeat(36) as never, frameId: "0".repeat(36) as never, lifecycle: "complete", visibility: "visible" },
+      bodyText: "",
+    } as unknown as ObservationV1;
+  }
+
+  it("renders an INBOX ROWS block on Gmail URLs", () => {
+    const o = obs("https://mail.google.com/mail/u/0/#search/from:amazon", [
+      { id: "row-1", name: "Amazon - Shipped, Aug 8, 2025, 4:32 PM", cx: 480, cy: 200 },
+      { id: "row-2", name: "Amazon - Delivered, Aug 5, 2025, 4:32 PM", cx: 480, cy: 260 },
+    ]);
+    const out = renderObservationForPlanner(o, [], undefined, [], { index: 1, totalBudget: 60_000, elapsedMs: 0, budgetMs: 60_000, pageIdentity: "" }, "", [], "x");
+    expect(out).toContain("INBOX ROWS");
+    expect(out).toContain('sender="Amazon"');
+    expect(out).toContain('date="Aug 8, 2025, 4:32 PM"');
+  });
+
+  it("sorts rows newest-first when dates parse", () => {
+    const o = obs("https://mail.google.com/mail/u/0/", [
+      { id: "row-old", name: "Amazon - Old, Aug 1, 2025, 4:32 PM", cx: 480, cy: 300 },
+      { id: "row-new", name: "Amazon - New, Aug 8, 2025, 4:32 PM", cx: 480, cy: 200 },
+    ]);
+    const out = renderObservationForPlanner(o, [], undefined, [], { index: 1, totalBudget: 60_000, elapsedMs: 0, budgetMs: 60_000, pageIdentity: "" }, "", [], "x");
+    const newIdx = out.indexOf("row-new");
+    const oldIdx = out.indexOf("row-old");
+    expect(newIdx).toBeGreaterThan(-1);
+    expect(oldIdx).toBeGreaterThan(-1);
+    expect(newIdx).toBeLessThan(oldIdx); // newest appears first in the table
+  });
+
+  it("does NOT render INBOX ROWS on non-email URLs", () => {
+    const o = obs("https://example.com/", [
+      { id: "x-1", name: "Foo - bar", cx: 100, cy: 100 },
+    ]);
+    const out = renderObservationForPlanner(o, [], undefined, [], { index: 1, totalBudget: 60_000, elapsedMs: 0, budgetMs: 60_000, pageIdentity: "" }, "", [], "x");
+    expect(out).not.toContain("INBOX ROWS");
+  });
+});
+
+describe("viewportsMatch — click-pre-dispatch viewport-stability guard", () => {
+  // ponytail: pure comparator used by executeAction before dispatching clicks.
+  // If the page's current viewport diverges from the captured one (window
+  // resize, browser zoom, devtools toggle), the frozen bboxes would land on
+  // the wrong element. Tolerance covers DPR rounding (~1-2 px drift) but
+  // rejects meaningful viewport changes.
+  const vp = (width: number, height: number, devicePixelRatio: number) => ({ width, height, devicePixelRatio });
+
+  it("matches identical viewports", () => {
+    expect(viewportsMatch(vp(1920, 1080, 1), vp(1920, 1080, 1))).toBe(true);
+  });
+
+  it("tolerates ≤4px drift on both axes", () => {
+    expect(viewportsMatch(vp(1920, 1080, 1), vp(1924, 1083, 1))).toBe(true);
+    expect(viewportsMatch(vp(1920, 1080, 1), vp(1916, 1077, 1))).toBe(true);
+  });
+
+  it("rejects width resize beyond tolerance", () => {
+    expect(viewportsMatch(vp(1920, 1080, 1), vp(1280, 1080, 1))).toBe(false);
+  });
+
+  it("rejects height resize beyond tolerance", () => {
+    expect(viewportsMatch(vp(1920, 1080, 1), vp(1920, 720, 1))).toBe(false);
+  });
+
+  it("rejects DPR change (HiDPI toggle)", () => {
+    expect(viewportsMatch(vp(1920, 1080, 1), vp(1920, 1080, 2))).toBe(false);
+  });
+
+  it("rejects browser zoom change (DPR fraction)", () => {
+    // ponytail: Chrome zoom (1.0 / 1.25 / 1.5) shows up as a fractional DPR
+    // change. Our 0.01 threshold catches any of these.
+    expect(viewportsMatch(vp(1920, 1080, 1), vp(1920, 1080, 1.25))).toBe(false);
+    expect(viewportsMatch(vp(1920, 1080, 1.25), vp(1920, 1080, 1))).toBe(false);
+  });
+
+  it("tolerates tiny DPR drift below the 0.01 threshold", () => {
+    expect(viewportsMatch(vp(1920, 1080, 1.0), vp(1920, 1080, 1.005))).toBe(true);
   });
 });

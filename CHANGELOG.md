@@ -42,6 +42,16 @@ beta, expect breaking changes."
 - Wasted first turn navigating from a blank tab. The new tab now
   opens directly at the goal site (gmail, github, amazon, …) based on
   a small keyword map in the local driver, saving one navigation turn.
+- Click drift after window resize / zoom. `getBoundingClientRect()`
+  captured bboxes are frozen at observation time; if the window
+  resized between capture and dispatch, clicks landed wherever those
+  coords happened to point after the resize. Added a viewport-stability
+  guard at the top of `executeAction` that re-reads
+  `window.innerWidth/Height/devicePixelRatio` via `Runtime.evaluate`
+  before dispatching. On mismatch (≤4 px tolerance covers DPR
+  rounding; 0.01 DPR fraction catches Chrome zoom steps), the click
+  is skipped, the result lands in history as
+  `viewport_changed (...)`, and the next iteration re-captures.
 
 ### Added
 - `stable` branch — pins the verified-working extension + local-driver
@@ -49,6 +59,17 @@ beta, expect breaking changes."
 - `inferStartingUrl(goal)` in the local driver — small keyword → URL
   map for common goal sites. Unknown goals still fall through to
   `about:blank` and the model navigates itself.
+- True background mode. `chrome.tabs.captureVisibleTab` rejected when
+  the agent tab wasn't the active one — meaning the harness yanked
+  focus back to the agent tab every iteration. Added a
+  `Page.captureScreenshot` fallback via `chrome.debugger` so the
+  screenshot path keeps working when the user has switched tabs.
+  Removed `activateAgentTab()` calls and the helper itself; CDP
+  commands operate on the attached tab regardless of focus.
+- Per-tab `AI` badge on the agent tab via `chrome.action.setBadgeText`.
+  The user can see at a glance which tab is busy while the loop runs
+  in the background, and the badge clears cleanly across all terminal
+  paths (clean finish, threw, cancel, reset).
 
 ## [0.1.0] - 2026-08-08
 

@@ -857,6 +857,46 @@ async function defaultCaptureVisibleTab(
   }
 }
 
+// ponytail: CDP-based screenshot fallback. Page.captureScreenshot works on
+// the attached tab regardless of whether it's the visible/active tab —
+// unlike chrome.tabs.captureVisibleTab which rejects when the user has
+// switched focus to another tab. Used by captureVisibleTabWithCdpFallback
+// so the harness can run with the agent tab in the background. Returns the
+// same dataUrl shape as defaultCaptureVisibleTab so downstream parsing
+// (parsePngDataUrl, masking, validation) keeps working unchanged.
+async function captureScreenshotViaCdp(tabId: number): Promise<string> {
+  const r = await defaultSendCdpCommand(tabId, "Page.captureScreenshot", {
+    format: "png",
+  });
+  const data = (r as { data?: string }).data;
+  if (typeof data !== "string" || data.length === 0) {
+    throw securityError("Page.captureScreenshot returned no data");
+  }
+  return `data:image/png;base64,${data}`;
+}
+
+// ponytail: try captureVisibleTab first (faster, more reliable when the tab
+// is the active one), fall back to Page.captureScreenshot on inactive-tab
+// errors so the harness keeps working when the user has switched tabs.
+async function captureVisibleTabWithCdpFallback(
+  tabId: number,
+  windowId: number,
+): Promise<string> {
+  try {
+    return await defaultCaptureVisibleTab(tabId, windowId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Chrome returns "Tabs cannot be edited right now" / "not the active
+    // tab" when the user has switched focus to another tab. Fall back to
+    // CDP so the harness keeps capturing. Other errors (parse failures,
+    // oversize PNG, etc.) propagate as before.
+    if (/not the active tab|Cannot capture/i.test(msg)) {
+      return captureScreenshotViaCdp(tabId);
+    }
+    throw err;
+  }
+}
+
 async function defaultGetZoom(tabId: number): Promise<number> {
   return new Promise((resolve, reject) => {
     chrome.tabs.getZoom(tabId, (zoomFactor) => {
@@ -1216,7 +1256,7 @@ async function captureObservationInternal(
   const capturedAt = now.toISOString();
   const sendCdpCommand = options.sendCdpCommand ?? defaultSendCdpCommand;
   const captureVisibleTab =
-    options.captureVisibleTab ?? defaultCaptureVisibleTab;
+    options.captureVisibleTab ?? captureVisibleTabWithCdpFallback;
   const getTabIdentity = options.getTabIdentity ?? defaultGetTabIdentity;
   const getZoom = options.getZoom ?? defaultGetZoom;
   const maskScreenshot = options.maskScreenshot ?? defaultMaskScreenshot;
