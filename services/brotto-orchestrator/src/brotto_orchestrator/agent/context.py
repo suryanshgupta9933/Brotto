@@ -29,7 +29,9 @@ class AgentTurn(BaseModel):
     current_url: str
     current_page_title: str
     ax_tree: str
-    ax_diff: str  # what changed since last action
+    ax_diff: str
+    last_read_text: str   # result of last read_page_text, empty if none
+    last_read_selector: str
     step_summaries: list[StepSummary]
 
 
@@ -67,3 +69,5 @@ class AgentDeps:
     step_number: int = 0
     result: TaskResult | None = None
     prev_targets: list = field(default_factory=list)  # AX targets from previous step for diffing
+    last_read_text: str = ""          # last read_page_text result, shown in next turn
+    last_read_selector: str = ""      # selector used for that read

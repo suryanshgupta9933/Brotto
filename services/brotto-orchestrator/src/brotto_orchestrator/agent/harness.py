@@ -61,6 +61,10 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     history = "\n".join(history_lines) or "(none yet)"
 
     diff_section = f"\n### What changed after last action\n{turn.ax_diff}\n" if turn.ax_diff else ""
+    read_section = (
+        f"\n### Page text read last step (selector: {turn.last_read_selector!r})\n{turn.last_read_text}\n"
+        if turn.last_read_text else ""
+    )
 
     return f"""## Task
 {turn.task}
@@ -74,7 +78,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
 ## Current page (step {turn.step_number})
 URL: {turn.current_url}
 Title: {turn.current_page_title}
-{diff_section}
+{diff_section}{read_section}
 ### AX Tree (interactive elements only)
 {turn.ax_tree}
 
@@ -117,7 +121,10 @@ async def _execute_decision(decision: AgentDecision, deps: AgentDeps) -> str:
         elif action == "read_page_text":
             selector = args.get("selector", "body")
             text = await cdp.read_page_text(selector)
-            return f"Page text ({selector}):\n{text}"
+            deps.last_read_text = text
+            deps.last_read_selector = selector
+            preview = text[:120] if text else "(empty)"
+            return f"read_page_text({selector!r}) → {len(text)} chars. Content shown in next step context."
 
         elif action == "find_element":
             targets = await cdp.get_targets()
@@ -245,8 +252,13 @@ class AgentHarness:
                 current_page_title=page_title,
                 ax_tree=filtered_ax + stagnation_note,
                 ax_diff=ax_diff,
+                last_read_text=deps.last_read_text,
+                last_read_selector=deps.last_read_selector,
                 step_summaries=deps.step_summaries,
             )
+            # Clear after including — agent should write what it needs to scratchpad
+            deps.last_read_text = ""
+            deps.last_read_selector = ""
 
             log.info("[%s] step %d  url=%s  ax_elements=%d", deps.user_id, step, current_url[:80], len(targets))
 

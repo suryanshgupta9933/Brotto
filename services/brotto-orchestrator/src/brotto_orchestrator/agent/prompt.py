@@ -33,7 +33,9 @@ What you can do:
   read_page_text(selector)    — read visible text from a page section (scores, article body,
                                 comment text — anything not interactive). selector is a CSS
                                 selector e.g. "body", ".score", "#comments", "article".
-                                Use this when content you need is not in the AX tree.
+                                The full text appears in your NEXT step context under
+                                "Page text read last step". Write what you need to scratchpad
+                                immediately — it is shown only once.
   read_scratchpad()           — read your working memory
   write_scratchpad(content)   — overwrite your working memory
   task_complete(summary, data) — declare success with what you accomplished
@@ -94,6 +96,13 @@ If read_page_text returns nothing useful after a targeted attempt, widen the sel
 Always begin by assessing where you are.
 Read the current URL and page title before taking any action.
 If you are not on the right page for the task, navigate there first.
+
+## When the task involves "latest", "most recent", or "newest"
+Do not click the first result without verifying it is the most recent.
+Read the date or timestamp visible in the list before clicking.
+For email tasks: check the date shown in the inbox row. For search results: verify the
+date before opening. If dates are not visible in the AX tree, use read_page_text to
+read them before clicking.
 
 ## When the goal requires a specific page
 Navigate directly if you can construct the URL. Web apps expose their state in the URL —
