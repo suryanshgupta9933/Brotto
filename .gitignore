@@ -22,6 +22,7 @@ htmlcov/
 
 # Environment
 .env
+.env.*
 .env.local
 .env.*.local
 
@@ -42,3 +43,8 @@ Thumbs.db
 logs/
 *.log
 .pw-browsers/
+
+# Build artifacts
+services/brotto-orchestrator/dist/
+services/brotto-orchestrator/node_modules/
+.turbo/

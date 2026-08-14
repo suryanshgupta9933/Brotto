@@ -257,7 +257,7 @@ async function startRelay(goal: string, serverUrl: string, startingUrl?: string)
         void setBadge(false);
         const r = msg.result ?? {};
         if (r.status === "completed") {
-          notifyUi({ type: "task_completed", summary: r.summary ?? "", steps: stepIndex, finalAnswer: r.summary ?? "" });
+          notifyUi({ type: "task_completed", summary: r.summary ?? "", steps: stepIndex, finalAnswer: r.summary ?? "", extracted_data: r.extracted_data });
           notifyUi({ type: "canonical_status", status: "completed" });
         } else {
           notifyUi({ type: "task_failed", code: r.failure_reason ?? r.status ?? "failed", message: r.summary ?? "Task failed" });

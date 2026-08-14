@@ -1134,9 +1134,21 @@ chrome.runtime.onMessage.addListener((message) => {
       setPhase('done', message.summary ? message.summary.slice(0, 60) : 'Task complete');
       state.stepCount = message.steps || state.stepCount;
       updateStepCount();
+      let messageText = `${message.steps || state.stepCount} steps · ${message.summary || ''}`;
+      // If extracted_data exists, append it as structured facts (already formatted by agent)
+      if (message.extracted_data && typeof message.extracted_data === 'object') {
+        const facts = Object.entries(message.extracted_data)
+          .filter(([, v]) => v && typeof v === 'string')
+          .map(([k, v]) => {
+            const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            return `${label}: ${v}`;
+          })
+          .join(' | ');
+        if (facts) messageText += `\n\n${facts}`;
+      }
       appendMessage({
         role: 'done',
-        text: `${message.steps || state.stepCount} steps · ${message.summary || ''}`,
+        text: messageText,
         finalAnswer: message.finalAnswer,
       });
       break;
