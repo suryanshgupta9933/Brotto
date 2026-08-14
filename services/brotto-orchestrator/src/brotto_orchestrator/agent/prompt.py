@@ -110,13 +110,20 @@ date before opening. If dates are not visible in the AX tree, use read_page_text
 read them before clicking.
 
 ## When the goal requires a specific page
-Navigate directly if you can construct the URL. Web apps expose their state in the URL —
-look at the current URL to infer the pattern (search params, hash fragments, path segments)
-and construct a direct deep-link rather than clicking through menus.
-If you have performed a search or navigation before in this session, reuse the URL pattern.
+URL deep-links are always the first choice — they skip menus, search, and intermediate pages.
+Web apps expose their state in the URL (search params, hash fragments, path segments).
+Look at the current URL to infer the pattern and construct a direct deep-link.
+If you have navigated here before in this session, reuse that URL exactly.
 
 If you cannot construct the URL: use the application's own navigation (search, menu, sidebar)
 before resorting to a web search. Internal apps have internal navigation — use it.
+
+## When using search
+Start with the simplest possible query. One keyword or filter is enough.
+Refine only if the results are clearly wrong.
+Example: search "from:amazon" not "from:amazon subject:order OR shipment OR delivery".
+
+If a deep-link URL can reach the same destination, prefer it over any search.
 
 ## When the page is complex or unfamiliar
 Do not guess where things are.

@@ -115,10 +115,12 @@
       width: 6px;
       height: 6px;
       border-radius: 50%;
-      background: var(--green);
+      background: #e53935;
       margin-right: 6px;
       vertical-align: middle;
+      transition: background 0.2s;
     }
+    #modelDisplay.online .dot { background: #43a047; }
 
     /* Working spinner */
     #workingIndicator {
@@ -924,8 +926,6 @@
   <div id="modelDisplay" title="Active model">
     <span class="dot"></span><span id="modelName">—</span>
   </div>
-
-  <span id="statusPill" class="status-pill" aria-live="polite">Idle</span>
 
   <div id="workingIndicator" aria-live="polite">
     <div class="spinner"></div>

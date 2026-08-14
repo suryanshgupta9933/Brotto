@@ -26,7 +26,12 @@ def check_login_page(page_title: str, ax_tree: str, url: str) -> bool:
     return any(r.search(combined) for r in _LOGIN_RE)
 
 
+_TERMINAL = {"task_complete", "cannot_complete", "ask_human"}
+
+
 def check_critical_action(action: str, action_args: dict) -> bool:
+    if action in _TERMINAL:
+        return False
     combined = f"{action} {action_args}"
     return any(r.search(combined) for r in _CRITICAL_RE)
 

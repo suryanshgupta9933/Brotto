@@ -398,7 +398,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         case "cancel_local_task": {
           taskTerminalEmitted = true;
           stopRelay();
-          notifyUi({ type: "task_failed", code: "CANCELLED", message: "Task was cancelled by user" });
           notifyUi({ type: "canonical_status", status: "cancelled" });
           sendResponse({ success: true });
           break;

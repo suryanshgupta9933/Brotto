@@ -25,10 +25,20 @@ def filter_ax_targets(
 
     viewport_coords: (x, y, width, height) bounding box — elements outside are marked off-screen.
     """
+    # Suppress list-selection checkboxes when a link with the same name exists.
+    # These are bulk-select controls (Gmail, Notion, etc.) — the link opens the item.
+    link_names = {t.name.lower() for t in targets if t.role.lower() == "link" and t.name}
+    shadow_checkboxes = {
+        t.ref_id for t in targets
+        if t.role.lower() == "checkbox" and t.name and t.name.lower() in link_names
+    }
+
     lines: list[str] = []
     offscreen: list[str] = []
 
     for t in targets:
+        if t.ref_id in shadow_checkboxes:
+            continue
         role = t.role.lower()
         if role in STRIP_ROLES:
             continue

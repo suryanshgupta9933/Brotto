@@ -178,7 +178,11 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
             except json.JSONDecodeError as exc:
                 log.warning("[%s] bad JSON from extension: %s", session_id, exc)
             except Exception as exc:
-                log.error("[%s] receive loop error: %s", session_id, exc)
+                # WebSocket close frames (1000/1001/1005) surface as ConnectionClosed
+                if "ConnectionClosed" in type(exc).__name__ or "CloseCode" in str(exc):
+                    log.info("[%s] websocket closed: %s", session_id, exc)
+                else:
+                    log.error("[%s] receive loop error: %s", session_id, exc)
                 break
     except WebSocketDisconnect:
         log.info("[%s] extension disconnected mid-task", session_id)

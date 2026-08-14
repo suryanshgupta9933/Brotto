@@ -20,7 +20,6 @@ const startingUrlEl   = document.getElementById('startingUrl');
 const connectBtn      = document.getElementById('connectBtn');
 const disconnectBtn   = document.getElementById('disconnectBtn');
 const refreshBtn      = document.getElementById('refreshBtn');
-const statusPill      = document.getElementById('statusPill');
 const brandDot        = document.getElementById('brandDot');
 const stepCountEl     = document.getElementById('stepCount');
 const timerEl         = document.getElementById('timer');
@@ -332,16 +331,13 @@ function setPhase(phase, message) {
   }
   // ponytail: status pill is visible in the header. Updates text + color
   // class so the user can read connection state at a glance (Idle by default).
-  const labels = {
-    idle: 'Idle', connecting: 'Connecting', connected: 'Connected',
-    executing: 'Running', paused: 'Paused', done: 'Done', error: 'Error',
-    reconnecting: 'Reconnecting',
-  };
-  if (statusPill) {
-    statusPill.textContent = labels[phase] || 'Idle';
-    statusPill.className = `status-pill ${phase}`;
+  const modelDisplay = document.getElementById('modelDisplay');
+  const online = ['connected', 'executing', 'paused', 'done', 'reconnecting'].includes(phase);
+  if (modelDisplay) modelDisplay.classList.toggle('online', online);
+  if (!online) {
+    const modelNameEl = document.getElementById('modelName');
+    if (modelNameEl && !state.plannerUrl) modelNameEl.textContent = 'Not connected';
   }
-  if (brandDot) brandDot.className = 'brandDot' + (phase === 'executing' ? ' executing' : phase === 'connected' ? ' connected' : phase === 'error' ? ' error' : '');
   if (connectBtn) connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
   if (disconnectBtn) disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
   if (startBtn) startBtn.disabled = phase === 'connecting';
