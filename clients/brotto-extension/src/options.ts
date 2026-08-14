@@ -19,7 +19,7 @@ interface Settings {
 }
 
 const defaultSettings: Settings = {
-  serverUrl: "",
+  serverUrl: "http://localhost:8000",
   autoConnect: false,
   showNotifications: true,
   confirmBeforeAttach: true

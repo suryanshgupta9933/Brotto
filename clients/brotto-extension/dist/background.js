@@ -6508,8 +6508,14 @@ ${factList}`;
   });
   var bootstrap = {
     async bootstrap(input, signal) {
-      if (managedControlPlaneUrl === null) throw new Error("Administrator-managed control-plane URL is unavailable");
-      const endpoint = bootstrapEndpoint(managedControlPlaneUrl);
+      let controlPlaneUrl = managedControlPlaneUrl;
+      if (controlPlaneUrl === null) {
+        const stored = await chrome.storage.local.get("settings");
+        const settings = stored.settings;
+        controlPlaneUrl = settings?.serverUrl || null;
+      }
+      if (controlPlaneUrl === null) throw new Error("Server URL not configured. Set it in extension options.");
+      const endpoint = bootstrapEndpoint(controlPlaneUrl);
       return new ControlPlaneConnectionBootstrap(endpoint).bootstrap(input, signal);
     }
   };
