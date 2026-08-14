@@ -14,8 +14,8 @@ from typing import Any
 from playwright.async_api import Browser, Page, async_playwright, CDPSession
 from brotto_contracts import ObservationV1
 
-from ..browser_interface import BrowserInterface
-from ..domain.models import ActionResult, SessionDeps
+from brotto_orchestrator.browser_interface import BrowserInterface
+from brotto_orchestrator.domain.models import ActionResult, SessionDeps
 from .ax_tree_extractor import AXTreeExtractor, SemanticTarget
 
 

@@ -11,7 +11,7 @@ from typing import Any
 
 from brotto_contracts import ObservationV1
 
-from ..domain.models import ActionResult, SessionDeps
+from brotto_orchestrator.domain.models import ActionResult, SessionDeps
 
 
 class BrowserInterface(ABC):

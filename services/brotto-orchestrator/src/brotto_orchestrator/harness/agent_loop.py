@@ -15,9 +15,9 @@ from typing import Any, Optional
 from pydantic_ai import Agent
 from brotto_contracts import BrowserAction
 
-from ..browser_interface import BrowserInterface
-from ..context.builder import build_context
-from ..domain.models import SessionDeps
+from brotto_orchestrator.browser_interface import BrowserInterface
+from brotto_orchestrator.context.builder import build_context
+from brotto_orchestrator.domain.models import SessionDeps
 
 
 @dataclass

@@ -9,8 +9,8 @@ from __future__ import annotations
 from typing import Any
 from brotto_contracts import ObservationV1
 
-from ..browser_interface import BrowserInterface
-from ..domain.models import ActionResult, SessionDeps
+from brotto_orchestrator.browser_interface import BrowserInterface
+from brotto_orchestrator.domain.models import ActionResult, SessionDeps
 
 
 class WebSocketBrowser(BrowserInterface):
