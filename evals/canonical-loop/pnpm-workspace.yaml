@@ -1,9 +1,0 @@
-packages:
-  - .
-  - ../../services/agent-orchestrator
-  - ../../packages/fara-action-schema
-  - ../../packages/relay-protocol
-  - ../../packages/policy-engine
-
-allowBuilds:
-  esbuild: false
