@@ -44,24 +44,35 @@ def _group_by_row(targets: list["SemanticTarget"]) -> dict[int, list["SemanticTa
 def _compute_annotations(targets: list["SemanticTarget"]) -> dict[str, str]:
     """Compute action annotations for elements in list/table rows.
 
-    For any row that contains both a checkbox and a link/button/listitem:
-    - The link/button/listitem gets '[→ open]' (primary action)
-    - The checkbox gets '[☐ select-only]' (not for opening items)
-
-    Returns a dict mapping ref_id to annotation string (e.g., "[→ open]").
+    Strategy: mark all checkboxes in list contexts as [☐ select-only].
+    In lists/tables with links/buttons, checkboxes are bulk-select controls, not openers.
     """
     annotations: dict[str, str] = {}
-    rows = _group_by_row(targets)
 
-    for row_members in rows.values():
-        checkboxes = [t for t in row_members if t.role.lower() == "checkbox"]
-        openers = [t for t in row_members
-                   if t.role.lower() in ("link", "button", "listitem", "gridcell")]
-        if checkboxes and openers:
-            for t in openers:
-                annotations[t.ref_id] = "[→ open]"
-            for t in checkboxes:
+    # Detect list context: multiple rows or list-like roles
+    has_list_items = any(t.role.lower() in ("listitem", "option", "gridcell", "row") for t in targets)
+    has_links_or_buttons = any(t.role.lower() in ("link", "button") for t in targets)
+    is_list_context = has_list_items or (has_links_or_buttons and len(targets) > 3)
+
+    if is_list_context:
+        # In list context, mark ALL checkboxes as select-only
+        for t in targets:
+            if t.role.lower() == "checkbox":
                 annotations[t.ref_id] = "[☐ select-only]"
+            elif t.role.lower() in ("link", "button") and t.name:
+                annotations[t.ref_id] = "[→ open]"
+    else:
+        # In non-list contexts, use spatial grouping
+        rows = _group_by_row(targets)
+        for row_members in rows.values():
+            checkboxes = [t for t in row_members if t.role.lower() == "checkbox"]
+            openers = [t for t in row_members
+                       if t.role.lower() in ("link", "button", "listitem", "gridcell")]
+            if checkboxes and openers:
+                for t in openers:
+                    annotations[t.ref_id] = "[→ open]"
+                for t in checkboxes:
+                    annotations[t.ref_id] = "[☐ select-only]"
 
     return annotations
 

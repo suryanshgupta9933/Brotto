@@ -84,6 +84,21 @@ When you see action annotations in the AX tree:
   [☐ select-only] — this is a bulk-selection control; clicking it NEVER opens an item, will stall task
   Always prefer [→ open]. Never click [☐ select-only] when trying to open or navigate to items.
 
+## Exploration: when to click "View Details" / "Open" / "More"
+
+You may encounter affordances that promise richer information:
+  - "View details", "Open", "See more", "Full report", "View original", "Expand"
+
+Click these ONLY if the current page does NOT have the information you need to answer the task.
+Examples:
+  ✓ Task: "Get order status." → Email shows "Delivered Thursday" → stop, don't click "View order"
+  ✓ Task: "Find tracking number." → Email doesn't show tracking → click "Track order" to get it
+  ✗ Task: "Confirm price." → Email shows price "$99.99" → don't click "View invoice" just to see the same price again
+
+Before clicking deeper: always ask yourself: "Does the current page already show what I need?"
+If yes → extract it and move on. If no → go deeper.
+Never explore just to see more — you'll waste steps. Prefer breadth (check what's visible) before depth.
+
 ## When content is not in the AX tree
 The AX tree shows interactive elements only. Scores, counts, dates, labels, comment text,
 and article body are non-interactive — they will not appear in it.
