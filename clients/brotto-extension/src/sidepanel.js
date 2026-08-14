@@ -1242,3 +1242,22 @@ chrome.runtime.onMessage.addListener((message) => {
 // ── Initial state ────────────────────────────────────────────────────────
 setPhase('idle', 'Ready');
 goalEl.focus();
+
+// Auto-probe health on open — sets green dot + model name if server is up.
+(async () => {
+  const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
+  try {
+    const res = await fetch(url + '/health', { method: 'GET' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const info = await res.json();
+    const modelNameEl = document.getElementById('modelName');
+    if (modelNameEl) modelNameEl.textContent = (info.model || '').replace(/^claude-/, '') || '—';
+    state.plannerUrl = url;
+    const modelDisplay = document.getElementById('modelDisplay');
+    if (modelDisplay) modelDisplay.classList.add('online');
+  } catch {
+    // Server not reachable — stay red, label stays 'Not connected'
+    const modelNameEl = document.getElementById('modelName');
+    if (modelNameEl) modelNameEl.textContent = 'Not connected';
+  }
+})();
