@@ -133,7 +133,8 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         await websocket.close(code=4000)
         return
 
-    relay = ExtensionCDPRelay(ws_send, obs_queue, session_id)
+    eval_queue: asyncio.Queue = asyncio.Queue()
+    relay = ExtensionCDPRelay(ws_send, obs_queue, eval_queue, session_id)
     deps = AgentDeps(
         user_id=session_id,
         task=task,
@@ -162,6 +163,9 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                 elif t == "observation_error":
                     log.warning("[%s] ← observation_error  err=%s", session_id, incoming.get("error"))
                     await obs_queue.put({"url": "", "title": "", "axTargets": []})
+                elif t == "evaluate_result":
+                    log.debug("[%s] ← evaluate_result  len=%d", session_id, len(incoming.get("value", "")))
+                    await eval_queue.put(incoming.get("value", ""))
                 elif t == "human_reply":
                     log.info("[%s] ← human_reply", session_id)
                     await human_queue.put(incoming.get("content", ""))

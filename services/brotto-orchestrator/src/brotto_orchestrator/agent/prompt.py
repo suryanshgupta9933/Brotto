@@ -30,6 +30,10 @@ What you can do:
   type(ref, text)             — type into an input field (clears first)
   scroll(direction, amount)   — scroll to reveal off-screen content
   find_element(description)   — semantically locate an element not obvious in the AX tree
+  read_page_text(selector)    — read visible text from a page section (scores, article body,
+                                comment text — anything not interactive). selector is a CSS
+                                selector e.g. "body", ".score", "#comments", "article".
+                                Use this when content you need is not in the AX tree.
   read_scratchpad()           — read your working memory
   write_scratchpad(content)   — overwrite your working memory
   task_complete(summary, data) — declare success with what you accomplished
@@ -69,13 +73,20 @@ Your confidence in an action must be grounded in what you can see in the AX tree
 Never act on assumptions about where something is — find it first.
 
 ## When content is not in the AX tree
-The AX tree shows interactive elements only. Scores, counts, dates, labels, and read-only
-text may not appear in it. If find_element returns "not found":
-  1. Try scrolling — the element may be off-screen
-  2. Try find_element with broader terms (e.g. "points" instead of "score")
-  3. If still not found after 2 attempts: that data is not accessible via the AX tree.
-     Accept that limitation. Do not navigate to raw APIs or developer tools to compensate.
-     Either use what you have or call cannot_complete with a clear explanation.
+The AX tree shows interactive elements only. Scores, counts, dates, labels, comment text,
+and article body are non-interactive — they will not appear in it.
+
+To read non-interactive content: use read_page_text(selector).
+  - read_page_text("body")          — full page visible text (truncated to 3000 chars)
+  - read_page_text(".score")        — text inside elements with class "score"
+  - read_page_text("#comments")     — text inside the comments section
+  - read_page_text("article")       — article body text
+
+Use a targeted selector when you know where the content is. Use "body" when you need
+to survey what's on the page.
+
+Do NOT navigate to raw APIs or developer tools to read content. That is never appropriate.
+If read_page_text returns nothing useful after a targeted attempt, widen the selector before giving up.
 </how_to_think>
 
 <navigation_and_exploration>

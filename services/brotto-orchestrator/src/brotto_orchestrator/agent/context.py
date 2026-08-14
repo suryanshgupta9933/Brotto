@@ -29,6 +29,7 @@ class AgentTurn(BaseModel):
     current_url: str
     current_page_title: str
     ax_tree: str
+    ax_diff: str  # what changed since last action
     step_summaries: list[StepSummary]
 
 
@@ -37,7 +38,7 @@ class AgentDecision(BaseModel):
     thought: str    # one sentence shown live in the side panel — no internals, no jargon
     action: Literal[
         "navigate", "click", "type_text", "scroll",
-        "find_element", "write_scratchpad", "read_scratchpad",
+        "find_element", "read_page_text", "write_scratchpad", "read_scratchpad",
         "task_complete", "cannot_complete", "ask_human",
     ]
     action_args: dict
@@ -65,3 +66,4 @@ class AgentDeps:
     step_summaries: list[StepSummary] = field(default_factory=list)
     step_number: int = 0
     result: TaskResult | None = None
+    prev_targets: list = field(default_factory=list)  # AX targets from previous step for diffing

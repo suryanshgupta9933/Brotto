@@ -13,10 +13,13 @@ from pydantic_ai import Agent
 
 from .context import AgentDeps, AgentDecision, AgentTurn, StepSummary, TaskResult, Scratchpad
 from .ax_filter import filter_ax_targets
+from .ax_diff import compute_ax_diff
 from .stagnation import check_stagnation
 from .guardrails import check_login_page, check_critical_action, wait_for_redirect
 from .prompt import SYSTEM_PROMPT
 from .run_logger import RunLogger
+
+_HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
 
 log = logging.getLogger("brotto.harness")
 
@@ -40,11 +43,24 @@ agent = _build_agent()
 
 
 def _turn_to_prompt(turn: AgentTurn) -> str:
-    history = "\n".join(
+    summaries = turn.step_summaries
+    if len(summaries) > _HISTORY_WINDOW:
+        shown = summaries[:3] + summaries[-(_HISTORY_WINDOW - 3):]
+        skipped = len(summaries) - _HISTORY_WINDOW
+    else:
+        shown = summaries
+        skipped = 0
+
+    history_lines = [
         f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}"
         + (f" [extracted: {s.extracted}]" if s.extracted else "")
-        for s in turn.step_summaries
-    ) or "(none yet)"
+        for s in shown
+    ]
+    if skipped:
+        history_lines.insert(3, f"  ... {skipped} steps omitted ...")
+    history = "\n".join(history_lines) or "(none yet)"
+
+    diff_section = f"\n### What changed after last action\n{turn.ax_diff}\n" if turn.ax_diff else ""
 
     return f"""## Task
 {turn.task}
@@ -58,7 +74,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
 ## Current page (step {turn.step_number})
 URL: {turn.current_url}
 Title: {turn.current_page_title}
-
+{diff_section}
 ### AX Tree (interactive elements only)
 {turn.ax_tree}
 
@@ -97,6 +113,11 @@ async def _execute_decision(decision: AgentDecision, deps: AgentDeps) -> str:
             await cdp.scroll(direction, amount)
             await cdp.refresh_target_map()
             return f"Scrolled {direction}"
+
+        elif action == "read_page_text":
+            selector = args.get("selector", "body")
+            text = await cdp.read_page_text(selector)
+            return f"Page text ({selector}):\n{text}"
 
         elif action == "find_element":
             targets = await cdp.get_targets()
@@ -190,6 +211,7 @@ class AgentHarness:
             current_url = await deps.cdp.get_current_url()
             page_title = await deps.cdp.get_page_title()
             filtered_ax = filter_ax_targets(targets)
+            ax_diff = compute_ax_diff(deps.prev_targets, targets)
 
             # Guardrail: login detection
             if check_login_page(page_title, filtered_ax, current_url):
@@ -222,6 +244,7 @@ class AgentHarness:
                 current_url=current_url,
                 current_page_title=page_title,
                 ax_tree=filtered_ax + stagnation_note,
+                ax_diff=ax_diff,
                 step_summaries=deps.step_summaries,
             )
 
@@ -267,6 +290,9 @@ class AgentHarness:
 
             # Execute
             outcome = await _execute_decision(decision, deps)
+
+            # Save targets for next-step diff
+            deps.prev_targets = targets
 
             # Persist scratchpad after any update
             if decision.scratchpad_update or decision.action in ("write_scratchpad",):

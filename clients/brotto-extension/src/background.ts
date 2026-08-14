@@ -306,6 +306,19 @@ async function startRelay(goal: string, serverUrl: string, startingUrl?: string)
       case "stagnation_warning":
         notifyUi({ type: "stagnation_warning", reason: msg.reason ?? "" });
         break;
+
+      case "evaluate": {
+        try {
+          const r = await dbg.sendCommand(tid, {
+            method: "Runtime.evaluate",
+            params: { expression: msg.expression ?? "''", returnByValue: true },
+          }) as { result?: { value?: unknown } };
+          ws!.send(JSON.stringify({ type: "evaluate_result", value: String(r.result?.value ?? "") }));
+        } catch (e) {
+          ws!.send(JSON.stringify({ type: "evaluate_result", value: "", error: String(e) }));
+        }
+        break;
+      }
     }
   };
 
