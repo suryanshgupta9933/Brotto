@@ -15,6 +15,55 @@ KEEP_ROLES = {
 STRIP_ROLES = {"generic", "none", "presentation", "separator"}
 
 MAX_CHARS = 6000
+ROW_Y_THRESHOLD = 30  # px — elements within this y-band are considered "same row"
+
+
+def _group_by_row(targets: list["SemanticTarget"]) -> dict[int, list["SemanticTarget"]]:
+    """Bucket targets into horizontal bands by y-coordinate.
+
+    Elements with similar y-coordinates (within ROW_Y_THRESHOLD) are grouped together.
+    Returns a dict mapping canonical y-coordinate to list of targets in that row.
+    """
+    rows: dict[int, list["SemanticTarget"]] = {}
+    for t in targets:
+        if not t.coordinates:
+            continue
+        cy = t.coordinates.get("y", 0)
+        # Find existing band within threshold
+        matched = False
+        for band_y in sorted(rows.keys()):
+            if abs(cy - band_y) <= ROW_Y_THRESHOLD:
+                rows[band_y].append(t)
+                matched = True
+                break
+        if not matched:
+            rows[cy] = [t]
+    return rows
+
+
+def _compute_annotations(targets: list["SemanticTarget"]) -> dict[str, str]:
+    """Compute action annotations for elements in list/table rows.
+
+    For any row that contains both a checkbox and a link/button/listitem:
+    - The link/button/listitem gets '[→ open]' (primary action)
+    - The checkbox gets '[☐ select-only]' (not for opening items)
+
+    Returns a dict mapping ref_id to annotation string (e.g., "[→ open]").
+    """
+    annotations: dict[str, str] = {}
+    rows = _group_by_row(targets)
+
+    for row_members in rows.values():
+        checkboxes = [t for t in row_members if t.role.lower() == "checkbox"]
+        openers = [t for t in row_members
+                   if t.role.lower() in ("link", "button", "listitem", "gridcell")]
+        if checkboxes and openers:
+            for t in openers:
+                annotations[t.ref_id] = "[→ open]"
+            for t in checkboxes:
+                annotations[t.ref_id] = "[☐ select-only]"
+
+    return annotations
 
 
 def filter_ax_targets(
@@ -24,13 +73,24 @@ def filter_ax_targets(
     """Filter SemanticTargets to a token-capped AX tree string.
 
     viewport_coords: (x, y, width, height) bounding box — elements outside are marked off-screen.
+
+    Elements are annotated to clarify their action:
+    - [→ open] — primary action for this row (click to open/select the item)
+    - [☐ select-only] — bulk-selection control (never opens the item)
     """
-    # Suppress list-selection checkboxes when a link with the same name exists.
-    # These are bulk-select controls (Gmail, Notion, etc.) — the link opens the item.
+    # Compute spatial annotations (marks primary actions and selection controls)
+    annotations = _compute_annotations(targets)
+
+    # Fallback suppression for elements without coordinates (extension path).
+    # Keep the name-match heuristic as a secondary guard.
+    has_list_rows = any(t.role.lower() in ("listitem", "option", "gridcell", "row") for t in targets)
     link_names = {t.name.lower() for t in targets if t.role.lower() == "link" and t.name}
     shadow_checkboxes = {
         t.ref_id for t in targets
-        if t.role.lower() == "checkbox" and t.name and t.name.lower() in link_names
+        if t.role.lower() == "checkbox"
+        and not t.coordinates  # only suppress if no y-coordinate available
+        and t.name and t.name.lower() in link_names
+        and has_list_rows
     }
 
     lines: list[str] = []
@@ -52,6 +112,10 @@ def filter_ax_targets(
             line += f' "{t.name[:80]}"'
         if t.value:
             line += f' value="{str(t.value)[:80]}"'
+        # Append action annotation if computed
+        ann = annotations.get(t.ref_id)
+        if ann:
+            line += f"  {ann}"
 
         if viewport_coords and t.coordinates:
             vx, vy, vw, vh = viewport_coords

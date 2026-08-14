@@ -79,6 +79,11 @@ When clicking to open or navigate to an item (email, row, card, result):
   - Checkboxes in list views are for bulk selection, not opening.
   - If you see both a checkbox and a link for the same item, always use the link.
 
+When you see action annotations in the AX tree:
+  [→ open]       — this is the primary action for this row; click it to open/select the item
+  [☐ select-only] — this is a bulk-selection control; clicking it NEVER opens an item, will stall task
+  Always prefer [→ open]. Never click [☐ select-only] when trying to open or navigate to items.
+
 ## When content is not in the AX tree
 The AX tree shows interactive elements only. Scores, counts, dates, labels, comment text,
 and article body are non-interactive — they will not appear in it.
