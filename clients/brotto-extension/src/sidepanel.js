@@ -277,7 +277,7 @@ async function ensureConnected() {
   const modelNameEl = document.getElementById('modelName');
   if (modelNameEl) modelNameEl.textContent = (info.model || '').replace(/^claude-/, '') || info.family || '—';
   setPhase('connected', null);
-  appendMessage({ role: 'system', text: `Connected to planner at ${url} (${label})` });
+  appendMessage({ role: 'system', text: `Connected to planner at ${url}` });
 }
 
 async function resetForNewTask() {
