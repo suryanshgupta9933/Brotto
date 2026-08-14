@@ -274,10 +274,9 @@ async function ensureConnected() {
   const response = await fetch(url + '/health', { method: 'GET' });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const info = await response.json();
-  const label = info.model ? `${info.family} · ${info.model}` : info.family || 'planner';
   const modelNameEl = document.getElementById('modelName');
-  if (modelNameEl) modelNameEl.textContent = info.model || info.family || 'connected';
-  setPhase('connected', `Connected · ${label}`);
+  if (modelNameEl) modelNameEl.textContent = (info.model || '').replace(/^claude-/, '') || info.family || '—';
+  setPhase('connected', null);
   appendMessage({ role: 'system', text: `Connected to planner at ${url} (${label})` });
 }
 
@@ -324,9 +323,7 @@ function setPhase(phase, message) {
   // so the user knows the loop stopped on purpose, not from a network
   // error. The actual message is rendered by the task_failed handler.
   if (phase === 'done' || phase === 'error') {
-    // ponytail: cleanup any leftover login-pause fallback. The Continue
-    // button is only useful while the loop is waiting for sign-in; once
-    // we are post-terminal the user has moved on.
+    stopTimer();
     document.querySelectorAll(".login-continue-btn").forEach((el) => el.remove());
   }
   // ponytail: status pill is visible in the header. Updates text + color
@@ -423,13 +420,10 @@ async function connect() {
     const info = await response.json();
     state.plannerUrl = url;
     plannerUrlEl.value = url;
-    const label = info.model ? `${info.family} · ${info.model}` : info.family || 'planner';
-    // ponytail: show the active model in the header as a text label, not
-    // a dropdown. Dropdown can come back later if needed.
     const modelNameEl = document.getElementById("modelName");
-    if (modelNameEl) modelNameEl.textContent = info.model || info.family || 'connected';
-    setPhase('connected', `Connected · ${label}`);
-    appendMessage({ role: 'system', text: `Connected to planner at ${url} (${label})` });
+    if (modelNameEl) modelNameEl.textContent = (info.model || '').replace(/^claude-/, '') || info.family || '—';
+    setPhase('connected', null);
+    appendMessage({ role: 'system', text: `Connected to planner at ${url}` });
   } catch (err) {
     state.plannerUrl = '';
     const modelNameEl = document.getElementById("modelName");

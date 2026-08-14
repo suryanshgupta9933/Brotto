@@ -58,7 +58,8 @@ harness = AgentHarness()
 @app.get("/health")
 async def health():
     log.debug("health check")
-    return {"status": "ok", "service": "brotto-orchestrator", "version": "2.0.0"}
+    from .agent.harness import _MODEL
+    return {"status": "ok", "service": "brotto-orchestrator", "version": "2.0.0", "model": _MODEL}
 
 
 # ---------------------------------------------------------------------------
