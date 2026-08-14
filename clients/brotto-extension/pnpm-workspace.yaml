@@ -1,0 +1,7 @@
+packages:
+  - "."
+  - "../../packages/brotto-action-schema"
+  - "../../packages/brotto-relay-protocol"
+
+allowBuilds:
+  esbuild: true
