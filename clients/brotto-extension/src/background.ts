@@ -1,622 +1,498 @@
-import { createCanonicalExecutionPipeline } from "./canonical/action-executor";
-import {
-  CanonicalExtensionController,
-  ControlPlaneConnectionBootstrap,
-  type BootstrapInput,
-  type ConnectionBootstrapPort,
-  type ControllerUiEvent,
-} from "./canonical/controller";
-import { captureObservation } from "./canonical/observation";
-import { PageSettler } from "./canonical/page-settler";
-import { CanonicalSessionStore, type StorageAreaPort } from "./canonical/session-store";
-import { CanonicalTransport } from "./canonical/transport";
-import * as debuggerModule from "./debugger";
-import { resolveLoginPause, runLocalLoop } from "./local-driver";
+/**
+ * Brotto background service worker.
+ * Thin relay: captures AX tree from the active tab, sends observations to the
+ * orchestrator over WebSocket, executes actions returned by the agent.
+ */
 
-const BADGE_ACTIVE_COLOR = "#22c55e";
-const BADGE_INACTIVE_COLOR = "#6b7280";
-const BOOTSTRAP_PATH = "/v1/sessions";
+import * as dbg from "./debugger";
 
-// ponytail: local-driver state. One active loop at a time. The planner URL
-// defaults to orchestrator on localhost; override via storage.local if needed.
-let localAbortController: AbortController | null = null;
-let localTabId: number | null = null;
-// ponytail: true once the user pressed Stop (or the loop completed and the
-// post-loop cleanup ran). The loop reads this in its finally block to
-// decide whether to emit a follow-up terminal event — the cancel handler
-// already emits one immediately so the side panel exits 'Working' within
-// ~1 second; the loop's eventual emit would race and double-fire.
-let localTaskTerminalEmitted = false;
-const DEFAULT_PLANNER_URL = "http://127.0.0.1:8000";
+const DEFAULT_SERVER = "http://localhost:8000";
 
-// ponytail: terminal cleanup shared by .then/.catch/cancel/reset paths.
-// Captures localTabId BEFORE nulling it, clears the per-tab badge so the
-// user no longer sees "AI" on the agent tab after the run ends. setBadgeForTab
-// handles a closed tab gracefully (try/catch internally).
-function endLocalTab(): void {
-  const tabId = localTabId;
-  localTabId = null;
-  if (tabId !== null) void setBadgeForTab(tabId, false);
-}
+const KEEP_ROLES = new Set([
+  "button","link","textbox","searchbox","combobox","checkbox","radio",
+  "menuitem","tab","option","switch","slider","spinbutton","gridcell",
+  "heading","dialog","alert","listitem",
+]);
 
-// ponytail: pending-clarify and pending-approval resolvers keyed by request id.
-// The side panel responds by sending `submit_clarification` / `submit_approval`
-// with the same id. Resolved value is whatever the user typed/clicked.
-const pendingClarifyResolvers = new Map<string, (answer: string) => void>();
+const BADGE_ACTIVE = "#22c55e";
+const BADGE_IDLE   = "#6b7280";
+
+// ── State ───────────────────────────────────────────────────────────────────
+
+let ws: WebSocket | null = null;
+let activeTabId: number | null = null;
+let tabStack: number[] = []; // opener history for back-navigation
+let sessionId: string | null = null;
+let taskTerminalEmitted = false;
+let stepIndex = 0;
+
+const pendingClarifyResolvers  = new Map<string, (answer: string) => void>();
 const pendingApprovalResolvers = new Map<string, (approved: boolean) => void>();
-let requestIdCounter = 0;
+let reqCounter = 0;
+function newId(prefix: string) { return `${prefix}-${Date.now().toString(36)}-${++reqCounter}`; }
 
-function newRequestId(prefix: string): string {
-  requestIdCounter += 1;
-  return `${prefix}-${Date.now().toString(36)}-${requestIdCounter}`;
-}
+// ── AX tree capture ─────────────────────────────────────────────────────────
 
-let managedHostnames = new Set<string>();
-let managedOrigins: string[] = [];
-let managedControlPlaneUrl: string | null = null;
+async function extractAx(tabId: number): Promise<object[]> {
+  await dbg.sendCommand(tabId, { method: "Accessibility.enable" });
+  const raw = await dbg.sendCommand(tabId, {
+    method: "Accessibility.getFullAXTree",
+  }) as { nodes?: any[] };
+  const nodes = raw.nodes ?? [];
+  const targets: object[] = [];
 
-const store = new CanonicalSessionStore({
-  local: chrome.storage.local as unknown as StorageAreaPort,
-  ...(chrome.storage.session === undefined
-    ? {}
-    : { session: chrome.storage.session as unknown as StorageAreaPort }),
-});
-
-const bootstrap: ConnectionBootstrapPort = {
-  async bootstrap(input: BootstrapInput, signal: AbortSignal) {
-    let controlPlaneUrl = managedControlPlaneUrl;
-
-    // Fall back to user settings if managed URL not available
-    if (controlPlaneUrl === null) {
-      const stored = await chrome.storage.local.get("settings");
-      const settings = stored.settings as any;
-      controlPlaneUrl = settings?.serverUrl || null;
-    }
-
-    if (controlPlaneUrl === null) throw new Error("Server URL not configured. Set it in extension options.");
-    const endpoint = bootstrapEndpoint(controlPlaneUrl);
-    return new ControlPlaneConnectionBootstrap(endpoint).bootstrap(input, signal);
-  },
-};
-
-const controller = new CanonicalExtensionController({
-  bootstrap,
-  store,
-  tabs: {
-    activeTabId: async () => {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const tabId = tabs.length === 1 ? tabs[0]?.id : undefined;
-      if (tabId === undefined) throw new Error("Exactly one active browser tab is required");
-      const url = tabs[0]?.url;
-      if (url === undefined || !/^https?:\/\//i.test(url)) throw new Error("The active tab must use HTTP(S)");
-      return tabId;
-    },
-    attach: async (tabId) => { await debuggerModule.attachToTab(tabId); },
-    detach: async (tabId) => { await debuggerModule.detachFromTab(tabId); },
-    isAttached: async (tabId) => {
-      if (debuggerModule.isAttached(tabId)) return true;
-      const targets = await debuggerModule.getTargets() as unknown as Array<{ tabId?: number; attached?: boolean }>;
-      return targets.some((target) => target.tabId === tabId && target.attached === true);
-    },
-  },
-  capture: async (tabId, signal) => {
-    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    const before = await mainFrameId(tabId);
-    const observation = await captureObservation(tabId);
-    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    const after = await mainFrameId(tabId);
-    if (before !== after) throw new Error("The main frame changed across canonical capture");
-    return { observation, mainFrameId: after };
-  },
-  executionPipelineFactory: ({ tabId, serverUrl, observationAuthority, approvals }) => createCanonicalExecutionPipeline({
-    tabId,
-    observationAuthority,
-    approvals,
-    resolver: new CustomerControlledDnsResolver(serverUrl),
-    trustedHostnamePolicy: { isTrusted: (hostname) => managedHostnames.has(hostname.toLowerCase()) },
-    allowedOrigins: managedOrigins,
-    createSettler: (mainFrame, initialPageState) => new PageSettler({
-      tabId,
-      mainFrameId: mainFrame,
-      initialPageState,
-      getPageState: () => readPageState(tabId),
-    }),
-    send: async (id, command) => debuggerModule.sendCommand(id, command),
-  }),
-  transportFactory: (context) => new CanonicalTransport({
-    material: context.material,
-    initialSequences: {
-      lastReceivedSequence: context.recovery.lastReceivedSequence,
-      lastSentSequence: context.recovery.lastSentSequence,
-    },
-    pendingActionIds: context.pendingActionIds,
-    getReconnectMaterial: context.getReconnectMaterial,
-    onMaterial: context.onMaterial,
-    onMessage: context.onMessage,
-    onMessageError: (error) => notifyUi({
-      type: "canonical_error",
-      code: "CONTROLLER_MESSAGE_FAILED",
-      message: error instanceof Error ? error.message : "Canonical controller message failed",
-    }),
-    onStateChange: context.onStateChange,
-    onProtocolError: (code) => notifyUi({ type: "canonical_error", code, message: "A canonical protocol message was rejected" }),
-  }),
-  emitUiEvent: (event) => {
-    updateBadgeForEvent(event);
-    notifyUi(event);
-  },
-});
-
-function handleMessage(
-  message: Record<string, unknown>,
-  _sender: chrome.runtime.MessageSender,
-  sendResponse: (response: Record<string, unknown>) => void,
-): boolean {
-  void dispatchMessage(message)
-    .then((response) => sendResponse(response))
-    .catch((error: unknown) => sendResponse({
-      success: false,
-      error: error instanceof Error ? error.message : "Canonical extension request failed",
-    }));
-  return true;
-}
-
-async function dispatchMessage(message: Record<string, unknown>): Promise<Record<string, unknown>> {
-  switch (message.type) {
-    case "get_connection_status": {
-      const state = await controller.viewState();
-      return {
-        success: true,
-        status: {
-          connected: state.transport?.status === "open",
-          recovery: state.recovery,
-          reconnect: state.transport,
-          trajectory: state.trajectory,
-          terminal: state.terminal,
-          approval: state.approval,
-        },
-      };
-    }
-    case "send_task":
-      await loadManagedPolicy();
-      await controller.startTask(String(message.task ?? ""));
-      return { success: true };
-    case "cancel_task":
-    case "stop_task":
-      await controller.cancel(typeof message.reason === "string" ? message.reason : undefined);
-      return { success: true };
-    case "disconnect_relay":
-      await controller.disconnect();
-      return { success: true };
-    case "approve_action":
-      await controller.resolveApproval(true);
-      return { success: true };
-    case "deny_action":
-      await controller.resolveApproval(false);
-      return { success: true };
-    case "login_complete":
-      await controller.submitFreshObservation("User interaction completed; fresh observation submitted");
-      return { success: true };
-    case "clear_trajectory":
-      await store.clearTrajectory();
-      return { success: true };
-    case "connect_relay":
-      return { success: false, error: "Sending a task starts its authenticated canonical session" };
-    case "run_local_task": {
-      // ponytail: extension runs the agent loop locally against the demo-server.
-      // Used for the demo path where the user installs the extension and watches
-      // actions take place in their real Chrome without a remote orchestrator.
-      if (localAbortController !== null || localTabId !== null) {
-        return { success: false, error: "A local task is already running" };
-      }
-      // ponytail: reset the terminal-emitted flag so a new task can emit
-      // its own completion/error event. Without this, the first run after
-      // a cancel would silently drop its terminal emit.
-      localTaskTerminalEmitted = false;
-      const goal = String(message.task ?? "").trim();
-      if (goal.length === 0) return { success: false, error: "task is empty" };
-      const startingUrl = typeof message.startingUrl === "string" ? message.startingUrl : undefined;
-      const plannerUrl = typeof message.plannerUrl === "string" ? message.plannerUrl : DEFAULT_PLANNER_URL;
-      const controller_ac = new AbortController();
-      localAbortController = controller_ac;
-      notifyUi({ type: "canonical_status", status: "executing" });
-      void runLocalLoop({
-        goal,
-        startingUrl,
-        plannerUrl,
-        // ponytail: stable per-task uuid so the demo-server can reset its
-        // turn counter when a new task starts (otherwise the counter
-        // accumulates across all runs in the server's lifetime).
-        taskId: crypto.randomUUID(),
-        signal: controller_ac.signal,
-        onTabOpened: (tabId) => {
-          localTabId = tabId;
-          // ponytail: per-tab badge so the user can see which tab is the
-          // agent tab at a glance. Cleared in the terminal cleanup paths
-          // (.then/.catch below and the cancel_local_task handler).
-          void setBadgeForTab(tabId, true);
-        },
-        onTabEvent: (event) => {
-          // ponytail: forward tab lifecycle (opened/closed/navigated/focused)
-          // to the side panel so the user can see what the agent opened in
-          // their browser, with a brief context line per tab.
-          notifyUi({ type: "tab_event", event } as unknown as ControllerUiEvent);
-        },
-        onStep: ({ index, action, result, url, pageTitle, pagePurpose, screenshot, iconKind, reasoning, clientText }) => {
-          notifyUi({
-            type: "step_card",
-            index,
-            title: action,
-            result,
-            url,
-            pageTitle,
-            pagePurpose,
-            screenshot: screenshot ?? undefined,
-            screenshotPlaceholder: screenshot ? undefined : "Screenshot unavailable (chrome:// page or capture blocked)",
-            iconKind,
-            ts: Date.now(),
-            // ponytail: split reasoning from client-facing text. `clientText`
-            // is the planner's clean one-line update (e.g. "Looking for your
-            // Amazon delivery email.") — shown as the bubble title. `reasoning`
-            // is the internal scratchpad, hidden behind the details toggle.
-            // Without this split, internal jargon ("phase 2: verify_latest",
-            // "next_step: …") leaked to the user and the chat read like a
-            // raw log instead of a human conversation.
-            clientText,
-            reasoning,
-          });
-        },
-        // ponytail: log events surface as 'observation' kind so the existing
-        // popup log handler picks them up without a new message type.
-        onLoginRequired: ({ url, domain }) => {
-          notifyUi({ type: "login_required", url, domain });
-        },
-        onComplete: ({ summary, steps, finalAnswer }) => {
-          // ponytail: skip if the cancel handler already emitted a
-          // terminal event. Otherwise we would append a duplicate
-          // 'Task complete' bubble on top of 'Task was cancelled'.
-          if (localTaskTerminalEmitted) return;
-          localTaskTerminalEmitted = true;
-          notifyUi({ type: "task_completed", summary, steps, finalAnswer });
-        },
-        onError: ({ code, message }) => {
-          // ponytail: skip if the cancel handler already emitted a
-          // terminal event for the user-pressed-Stop case.
-          if (localTaskTerminalEmitted) return;
-          localTaskTerminalEmitted = true;
-          notifyUi({ type: "task_failed", code, message });
-        },
-        onLog: (message) => {
-          // ponytail: internal loop liveness — service worker console only.
-          // The side panel used to render every step/approval/timing string
-          // as a system message in the chat; we now keep chat clean and let
-          // the operator inspect logs in chrome://extensions.
-          console.log(`[brotto-bg] ${message}`);
-        },
-        onClarify: ({ reason, question, context }) => {
-          // ponytail: send a clarify event to the side panel and wait for
-          // submit_clarification. Returns the user's answer string.
-          const id = newRequestId("clarify");
-          return new Promise<string>((resolve) => {
-            pendingClarifyResolvers.set(id, resolve);
-            notifyUi({ type: "clarify_request", id, reason, question, context });
-          });
-        },
-        onApprovalRequired: ({ reason, action, url }) => {
-          // ponytail: send an approval_request event and wait for the user's
-          // approve/deny click in the side panel.
-          const id = newRequestId("approval");
-          return new Promise<boolean>((resolve) => {
-            pendingApprovalResolvers.set(id, resolve);
-            notifyUi({ type: "approval_request", id, reason, action, url });
-          });
-        },
-        onAnswered: ({ question, answer }) => {
-          console.log(`[brotto-bg] user answered (${question.slice(0, 60)}): ${answer.slice(0, 80)}`);
-        },
-        onApprovalResolved: ({ approved, action }) => {
-          console.log(`[brotto-bg] ${approved ? "approved" : "denied"} ${action.type ?? "action"}`);
-        },
-      }).then(() => {
-        localAbortController = null;
-        endLocalTab();
-        // ponytail: only emit canonical_status: completed if the task
-        // ended cleanly. If the task errored, the onError callback above
-        // already emitted task_failed (which sets phase to 'error') and
-        // a follow-up 'completed' would overwrite it back to 'done'.
-        if (!localTaskTerminalEmitted) {
-          notifyUi({ type: "canonical_status", status: "completed" });
+  for (const node of nodes) {
+    if (node.ignored) continue;
+    const role = (node.role?.value ?? "").toLowerCase();
+    if (!KEEP_ROLES.has(role)) continue;
+    const name  = node.name?.value?.trim() ?? "";
+    const value = node.value?.value ?? undefined;
+    const backendId = node.backendDOMNodeId;
+    let x: number | undefined, y: number | undefined;
+    if (backendId) {
+      try {
+        const box = await dbg.sendCommand(tabId, {
+          method: "DOM.getBoxModel",
+          params: { backendNodeId: backendId },
+        }) as { model?: { content?: number[] } };
+        const c = box.model?.content;
+        if (c && c.length >= 4) {
+          x = Math.round((c[0] + c[2]) / 2);
+          y = Math.round((c[1] + c[3]) / 2);
         }
-      }).catch((err: unknown) => {
-        localAbortController = null;
-        endLocalTab();
-        notifyUi({ type: "canonical_error", code: "LOCAL_LOOP_THREW", message: err instanceof Error ? err.message : String(err) });
-      });
-      return { success: true };
+      } catch { /* offscreen — skip coords */ }
     }
-    case "cancel_local_task": {
-      if (localAbortController === null) return { success: false, error: "No local task is running" };
-      // ponytail: mark terminal-emitted BEFORE aborting so the loop's
-      // cleanup phase (which can take up to the 15s capture timeout)
-      // does not fire a duplicate terminal event that would overwrite
-      // the error phase or append a duplicate error bubble.
-      localTaskTerminalEmitted = true;
-      localAbortController.abort();
-      localAbortController = null;
-      if (localTabId !== null) {
-        await debuggerModule.detachFromTab(localTabId).catch(() => undefined);
-        endLocalTab();
-      }
-      // ponytail: emit the terminal event SYNCHRONOUSLY so the side
-      // panel exits 'Working' within ~1 tick. Without this the user
-      // sees the spinner continue for up to 15 seconds after pressing
-      // Stop (waiting for the in-flight capture timeout).
-      notifyUi({
-        type: "task_failed",
-        code: "CANCELLED",
-        message: "Task was cancelled by user",
-      });
-      notifyUi({ type: "canonical_status", status: "cancelled" });
-      return { success: true };
+    targets.push({
+      ref: node.nodeId, role, name,
+      ...(value !== undefined ? { value } : {}),
+      ...(x !== undefined    ? { x, y }   : {}),
+    });
+  }
+  await dbg.sendCommand(tabId, { method: "Accessibility.disable" });
+  return targets;
+}
+
+async function captureObservation(tabId: number) {
+  await waitForPageReady(tabId);
+
+  const ps = await dbg.sendCommand(tabId, {
+    method: "Runtime.evaluate",
+    params: { expression: "({url:location.href,title:document.title})", returnByValue: true },
+  }) as { result?: { value?: { url: string; title: string } } };
+  const { url = "", title = "" } = ps.result?.value ?? {};
+
+  let axTargets = await extractAx(tabId);
+
+  // SPA pages render interactives after readyState — retry with backoff
+  for (let i = 0; i < 4 && axTargets.length < 3; i++) {
+    await sleep(800 * (i + 1));
+    axTargets = await extractAx(tabId);
+  }
+
+  return { url, title, axTargets };
+}
+
+// ── Action execution ─────────────────────────────────────────────────────────
+
+async function executeAction(tabId: number, action: any): Promise<void> {
+  const t = action.type;
+  if (t === "navigate") {
+    await dbg.sendCommand(tabId, { method: "Page.navigate", params: { url: action.url } });
+    await sleep(200); // brief pause for navigation to start before readyState polling
+  } else if (t === "click") {
+    const { x, y } = action;
+    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x, y, button: "left", clickCount: 1 } });
+    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x, y, button: "left", clickCount: 1 } });
+    await sleep(200); // brief pause for click to register / navigation to start
+  } else if (t === "type") {
+    for (const ch of (action.text ?? "") as string) {
+      await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "char", text: ch } });
     }
-    case "local_login_complete": {
-      // ponytail: the user clicked Continue in the popup. Resume the loop by
-      // resolving the pending login-pause promise for the active tab.
-      if (localTabId === null) return { success: false, error: "No local task is paused" };
-      const resolved = resolveLoginPause(localTabId);
-      return { success: resolved, error: resolved ? undefined : "No pending login pause" };
-    }
-    case "local_login_skip": {
-      // ponytail: the user dismissed the login prompt. Abort the loop cleanly.
-      if (localAbortController === null) return { success: false, error: "No local task is running" };
-      localAbortController.abort();
-      localAbortController = null;
-      localTabId = null;
-      return { success: true };
-    }
-    case "submit_clarification": {
-      // ponytail: side panel returns the user's answer to a clarify request.
-      const id = typeof message.id === "string" ? message.id : "";
-      const resolve = pendingClarifyResolvers.get(id);
-      if (!resolve) return { success: false, error: "No pending clarification" };
-      pendingClarifyResolvers.delete(id);
-      resolve(typeof message.answer === "string" ? message.answer : "");
-      return { success: true };
-    }
-    case "submit_approval": {
-      // ponytail: side panel returns the user's approve/deny click.
-      const id = typeof message.id === "string" ? message.id : "";
-      const resolve = pendingApprovalResolvers.get(id);
-      if (!resolve) return { success: false, error: "No pending approval" };
-      pendingApprovalResolvers.delete(id);
-      resolve(message.approved === true);
-      return { success: true };
-    }
-    case "reset_session": {
-      // ponytail: Refresh button handler. Aborts loop, detaches debugger,
-      // clears state, persists nothing. Doesn't close the tab — the user
-      // may want to keep the page open.
-      if (localAbortController !== null) {
-        localAbortController.abort();
-        localAbortController = null;
-      }
-      if (localTabId !== null) {
-        await debuggerModule.detachFromTab(localTabId).catch(() => undefined);
-        endLocalTab();
-      }
-      pendingClarifyResolvers.clear();
-      pendingApprovalResolvers.clear();
-      notifyUi({ type: "log", message: "Session reset" });
-      return { success: true };
-    }
-    case "submit_user_input": {
-      // ponytail: side panel surfaced a clarifying question. The local-driver
-      // doesn't currently emit questions — this hook is reserved for the next
-      // slice where the planner returns QuestionProposal and we want the
-      // user to type an answer. For now, just acknowledge.
-      return { success: true, acknowledged: typeof message.value === "string" ? message.value : "" };
-    }
-    default:
-      return { success: false, error: "Unknown message type" };
+  } else if (t === "scroll") {
+    await dbg.sendCommand(tabId, {
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mouseWheel", x: 400, y: 300, deltaX: 0, deltaY: action.deltaY ?? 300 },
+    });
+    await sleep(300);
+  } else if (t === "key") {
+    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyDown", key: action.key } });
+    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp",   key: action.key } });
   }
 }
 
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+async function waitForPageReady(tabId: number, maxWaitMs = 10_000): Promise<void> {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    try {
+      const r = await dbg.sendCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: { expression: "document.readyState", returnByValue: true },
+      }) as { result?: { value?: string } };
+      if (r.result?.value === "complete") {
+        await sleep(400); // let JS frameworks render
+        return;
+      }
+    } catch { /* tab mid-navigation — keep polling */ }
+    await sleep(300);
+  }
+  // timed out — proceed with whatever is there
+}
+
+// ── Sidepanel notifications ──────────────────────────────────────────────────
+
+function notifyUi(event: Record<string, unknown>): void {
+  void chrome.runtime.sendMessage(event).catch(() => undefined);
+}
+
+async function setBadge(active: boolean): Promise<void> {
+  await chrome.action.setBadgeBackgroundColor({ color: active ? BADGE_ACTIVE : BADGE_IDLE });
+  await chrome.action.setBadgeText({ text: active ? "ON" : "" });
+}
+
+// ── WebSocket observation sender ─────────────────────────────────────────────
+
+async function sendObservation(tabId: number): Promise<void> {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    const obs = await captureObservation(tabId);
+    ws.send(JSON.stringify({ type: "observation", ...obs }));
+    // Keep tab bar in sync with every navigation within the active tab
+    notifyUi({ type: "tab_event", event: { kind: "navigated", tabId, url: obs.url, title: obs.title } });
+  } catch (e) {
+    ws.send(JSON.stringify({ type: "observation_error", error: String(e) }));
+  }
+}
+
+// ── Main relay ───────────────────────────────────────────────────────────────
+
+async function startRelay(goal: string, serverUrl: string, startingUrl?: string): Promise<void> {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const activeTab = tabs[0];
+
+  let tab: chrome.tabs.Tab;
+  let needsNavigate = !!startingUrl;
+
+  if (activeTab?.id && activeTab.url && /^https?:\/\//i.test(activeTab.url)) {
+    tab = activeTab;
+  } else {
+    // Non-HTTP tab (chrome://, about:blank, etc.) — open a new one
+    const initialUrl = startingUrl ?? "https://www.google.com";
+    tab = await chrome.tabs.create({ url: initialUrl, active: true });
+    await sleep(1500);
+    needsNavigate = false; // already at startingUrl (or google as default)
+  }
+
+  if (!tab.id) throw new Error("No usable tab");
+  activeTabId = tab.id;
+  tabStack    = [];
+  stepIndex   = 0;
+
+  // Re-query to get live title — the tab object from create/query may be stale
+  const liveTab = await chrome.tabs.get(tab.id);
+  notifyUi({ type: "tab_event", event: { kind: "focused", tabId: tab.id, url: liveTab.url ?? tab.url ?? "", title: liveTab.title ?? tab.title ?? "" } });
+
+  await dbg.attachToTab(tab.id);
+  await dbg.sendCommand(tab.id, { method: "Page.enable" });
+
+  if (needsNavigate && startingUrl) {
+    await dbg.sendCommand(tab.id, { method: "Page.navigate", params: { url: startingUrl } });
+    await sleep(1500);
+    notifyUi({ type: "tab_event", event: { kind: "opened", tabId: tab.id, url: startingUrl, title: startingUrl } });
+  }
+
+  // Create orchestrator session
+  const resp = await fetch(`${serverUrl}/v1/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!resp.ok) throw new Error(`Session create failed: HTTP ${resp.status}`);
+  const { session_id, websocket_url } = await resp.json() as { session_id: string; websocket_url: string };
+  sessionId = session_id;
+
+  const wsUrl = websocket_url.startsWith("ws") ? websocket_url : websocket_url.replace(/^http/, "ws");
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    ws!.send(JSON.stringify({ type: "task_start", task: goal, session_id }));
+  };
+
+  ws.onmessage = async (ev) => {
+    if (!activeTabId) return;
+    const msg = JSON.parse(ev.data as string) as any;
+    const tid = activeTabId;
+
+    switch (msg.type) {
+      case "observe":
+        await sendObservation(tid);
+        break;
+
+      case "action":
+        await executeAction(tid, msg.action);
+        await sendObservation(tid);
+        break;
+
+      case "step_progress":
+        notifyUi({
+          type:        "step_card",
+          index:       stepIndex++,
+          title:       msg.action ?? "",
+          clientText:  msg.thought ?? msg.reasoning ?? "",
+          reasoning:   msg.reasoning ?? "",
+          result:      "",
+          url:         msg.url ?? "",
+          pageTitle:   "",
+          actionTarget: msg.action_target ?? null,
+          iconKind:    msg.action ?? "navigate",
+          ts:          Date.now(),
+        });
+        notifyUi({ type: "canonical_status", status: "executing" });
+        break;
+
+      case "task_result": {
+        if (taskTerminalEmitted) break;
+        taskTerminalEmitted = true;
+        void setBadge(false);
+        const r = msg.result ?? {};
+        if (r.status === "completed") {
+          notifyUi({ type: "task_completed", summary: r.summary ?? "", steps: stepIndex, finalAnswer: r.summary ?? "" });
+          notifyUi({ type: "canonical_status", status: "completed" });
+        } else {
+          notifyUi({ type: "task_failed", code: r.failure_reason ?? r.status ?? "failed", message: r.summary ?? "Task failed" });
+          notifyUi({ type: "canonical_status", status: "failed" });
+        }
+        break;
+      }
+
+      case "task_error":
+        if (taskTerminalEmitted) break;
+        taskTerminalEmitted = true;
+        void setBadge(false);
+        notifyUi({ type: "task_failed", code: "TASK_ERROR", message: msg.error ?? "Unknown error" });
+        notifyUi({ type: "canonical_status", status: "failed" });
+        break;
+
+      case "ask_human": {
+        const id = newId("clarify");
+        pendingClarifyResolvers.set(id, (answer) => {
+          ws?.send(JSON.stringify({ type: "human_reply", content: answer }));
+        });
+        notifyUi({ type: "clarify_request", id, question: msg.question ?? "", reason: "" });
+        break;
+      }
+
+      case "approval_required": {
+        const id = newId("approval");
+        pendingApprovalResolvers.set(id, (approved) => {
+          ws?.send(JSON.stringify({ type: "human_reply", content: approved ? "yes" : "no" }));
+        });
+        notifyUi({
+          type: "approval_request", id,
+          reason: msg.reasoning ?? "The agent wants to perform a sensitive action.",
+          action: { type: msg.action, url: msg.args?.url },
+        });
+        break;
+      }
+
+      case "login_required": {
+        let domain = "";
+        try { domain = new URL(msg.message ?? "").hostname; } catch { domain = "this site"; }
+        notifyUi({ type: "login_required", url: msg.message ?? "", domain });
+        break;
+      }
+
+      case "stagnation_warning":
+        notifyUi({ type: "stagnation_warning", reason: msg.reason ?? "" });
+        break;
+    }
+  };
+
+  ws.onerror = () => {
+    if (!taskTerminalEmitted) {
+      taskTerminalEmitted = true;
+      void setBadge(false);
+      notifyUi({ type: "task_failed", code: "WS_ERROR", message: "WebSocket connection error" });
+      notifyUi({ type: "canonical_status", status: "failed" });
+    }
+  };
+
+  ws.onclose = () => { void cleanup(); };
+}
+
+async function cleanup(): Promise<void> {
+  const tid = activeTabId;
+  activeTabId = null;
+  tabStack = [];
+  ws = null;
+  sessionId = null;
+  if (tid !== null) void dbg.detachFromTab(tid).catch(() => undefined);
+  void setBadge(false);
+}
+
+function stopRelay(): void {
+  taskTerminalEmitted = true;
+  ws?.close();
+  ws = null;
+  const tid = activeTabId;
+  activeTabId = null;
+  if (tid !== null) void dbg.detachFromTab(tid).catch(() => undefined);
+}
+
+// ── Message handler ──────────────────────────────────────────────────────────
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  void (async () => {
+    try {
+      switch (message.type) {
+
+        case "run_local_task": {
+          if (ws !== null && ws.readyState === WebSocket.OPEN) {
+            sendResponse({ success: false, error: "A task is already running" });
+            return;
+          }
+          taskTerminalEmitted = false;
+          pendingClarifyResolvers.clear();
+          pendingApprovalResolvers.clear();
+
+          const goal = String(message.task ?? "").trim();
+          if (!goal) { sendResponse({ success: false, error: "task is empty" }); return; }
+
+          const stored = await chrome.storage.local.get("settings");
+          const serverUrl: string =
+            (message.plannerUrl as string | undefined) ||
+            (stored.settings as any)?.serverUrl ||
+            DEFAULT_SERVER;
+
+          void setBadge(true);
+          notifyUi({ type: "canonical_status", status: "executing" });
+
+          startRelay(goal, serverUrl, message.startingUrl as string | undefined)
+            .catch((err: unknown) => {
+              void setBadge(false);
+              if (!taskTerminalEmitted) {
+                taskTerminalEmitted = true;
+                notifyUi({ type: "task_failed", code: "START_FAILED", message: err instanceof Error ? err.message : String(err) });
+                notifyUi({ type: "canonical_status", status: "failed" });
+              }
+            });
+
+          sendResponse({ success: true });
+          break;
+        }
+
+        case "cancel_local_task": {
+          taskTerminalEmitted = true;
+          stopRelay();
+          notifyUi({ type: "task_failed", code: "CANCELLED", message: "Task was cancelled by user" });
+          notifyUi({ type: "canonical_status", status: "cancelled" });
+          sendResponse({ success: true });
+          break;
+        }
+
+        case "local_login_complete": {
+          if (activeTabId !== null) void sendObservation(activeTabId);
+          sendResponse({ success: true });
+          break;
+        }
+
+        case "local_login_skip": {
+          stopRelay();
+          sendResponse({ success: true });
+          break;
+        }
+
+        case "submit_clarification": {
+          const res = pendingClarifyResolvers.get(String(message.id));
+          if (res) { pendingClarifyResolvers.delete(String(message.id)); res(String(message.answer ?? "")); }
+          sendResponse({ success: true });
+          break;
+        }
+
+        case "submit_approval": {
+          const res = pendingApprovalResolvers.get(String(message.id));
+          if (res) { pendingApprovalResolvers.delete(String(message.id)); res(message.approved === true); }
+          sendResponse({ success: true });
+          break;
+        }
+
+        case "reset_session": {
+          stopRelay();
+          taskTerminalEmitted = false;
+          pendingClarifyResolvers.clear();
+          pendingApprovalResolvers.clear();
+          sendResponse({ success: true });
+          break;
+        }
+
+        case "get_connection_status":
+          sendResponse({ success: true, status: { connected: ws?.readyState === WebSocket.OPEN, session_id: sessionId } });
+          break;
+
+        default:
+          sendResponse({ success: false, error: "Unknown message type" });
+      }
+    } catch (e) {
+      sendResponse({ success: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  })();
+  return true; // keep channel open for async response
+});
+
+// ── Tab lifecycle — follow new tabs opened from the active tab ───────────────
+
+chrome.tabs.onCreated.addListener((tab) => {
+  if (activeTabId === null || !tab.id) return;
+  if (tab.openerTabId !== activeTabId) return; // not from our tab
+
+  const newTabId = tab.id;
+  const oldTabId = activeTabId;
+
+  tabStack.push(oldTabId);
+  activeTabId = newTabId;
+
+  sleep(400).then(async () => {
+    try {
+      await dbg.detachFromTab(oldTabId).catch(() => undefined);
+      await dbg.attachToTab(newTabId);
+      await dbg.sendCommand(newTabId, { method: "Page.enable" });
+      notifyUi({ type: "tab_event", event: { kind: "opened", tabId: newTabId, url: tab.url ?? "", title: tab.title ?? "" } });
+    } catch (e) {
+      console.error("[brotto] failed to attach to new tab:", e);
+      activeTabId = oldTabId; // rollback
+      tabStack.pop();
+    }
+  });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId !== activeTabId) return;
+  // Active tab closed — fall back to opener if available
+  const fallback = tabStack.pop() ?? null;
+  activeTabId = fallback;
+  if (fallback !== null) {
+    dbg.attachToTab(fallback).then(() =>
+      dbg.sendCommand(fallback, { method: "Page.enable" })
+    ).catch(() => undefined);
+  }
+});
+
+// ── Initialise ───────────────────────────────────────────────────────────────
+
 async function initialize(): Promise<void> {
-  chrome.runtime.onMessage.addListener(handleMessage);
-  // ponytail: accept the side-panel keep-alive port. Without an onConnect
-  // listener the port exists client-side but Chrome doesn't treat the
-  // SW as having an open connection — it can still terminate the SW
-  // after the current event drain. Registering onConnect with a no-op
-  // handler pins the SW alive for the lifetime of the side panel.
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== "brotto-sidepanel") return;
-    port.onMessage.addListener(() => {
-      // Keep-alive port — no payload expected. Acknowledge so the
-      // sender's onMessage handler doesn't see "port closed" if it
-      // ever sends a heartbeat.
-    });
+    port.onMessage.addListener(() => { /* keep-alive */ });
   });
+
   chrome.runtime.onInstalled.addListener(() => { void setBadge(false); });
-  // ponytail: open the side panel when the user clicks the action icon. This
-  // replaces the old popup behavior — the side panel is the live activity
-  // stream, login prompts, and approval surface.
+
   try {
     if (chrome.sidePanel?.setPanelBehavior) {
       await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
     }
-  } catch (err) {
-    console.warn("sidePanel.setPanelBehavior failed:", err);
-  }
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.status !== undefined || changeInfo.url !== undefined) controller.invalidateObservation(tabId);
-  });
-  chrome.tabs.onActivated.addListener(({ tabId }) => { controller.invalidateObservation(tabId); });
-  await loadManagedPolicy();
-  const restored = await controller.restore().catch((error: unknown) => {
-    notifyUi({
-      type: "canonical_error",
-      code: "SESSION_RESTORE_FAILED",
-      message: error instanceof Error ? error.message : "Session restoration failed",
-    });
-    return false;
-  });
-  await setBadge(restored);
-}
-
-class CustomerControlledDnsResolver {
-  private readonly endpoint: string;
-
-  constructor(serverUrl: string) {
-    const url = new URL(serverUrl);
-    url.protocol = "https:";
-    url.pathname = "/v1...dns/resolve";
-    url.search = "";
-    url.hash = "";
-    this.endpoint = url.href;
-  }
-
-  async resolve(hostname: string, signal?: AbortSignal): Promise<readonly string[]> {
-    const response = await fetch(this.endpoint, {
-      method: "POST",
-      credentials: "omit",
-      cache: "no-store",
-      referrerPolicy: "no-referrer",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ hostname }),
-      signal,
-    });
-    if (!response.ok) throw new Error("Customer-controlled DNS resolution failed");
-    const body = await response.json() as { addresses?: unknown };
-    if (!Array.isArray(body.addresses) || !body.addresses.every((value) => typeof value === "string")) {
-      throw new Error("Customer-controlled DNS response is invalid");
-    }
-    return body.addresses;
-  }
-}
-
-function bootstrapEndpoint(rawServerUrl: string): string {
-  const url = new URL(rawServerUrl);
-
-  // Allow http://localhost for local development, require https for production
-  const isLocalhost = url.hostname === "localhost" || url.hostname === "127.0.0.1";
-
-  if (url.protocol === "wss:") url.protocol = "https:";
-  if (url.protocol === "ws:") url.protocol = "http:";
-
-  // For localhost, allow http. For others, require https.
-  if (!isLocalhost && url.protocol !== "https:") {
-    throw new Error("Control-plane URL must use HTTPS (except localhost for dev)");
-  }
-
-  if (url.username !== "" || url.password !== "") {
-    throw new Error("Control-plane URL must not contain credentials");
-  }
-
-  url.pathname = BOOTSTRAP_PATH;
-  url.search = "";
-  url.hash = "";
-  return url.href;
-}
-
-async function loadManagedPolicy(): Promise<void> {
-  try {
-    const managed = await chrome.storage.managed.get(["canonicalAllowedHostnames", "canonicalAllowedOrigins", "canonicalControlPlaneUrl"]);
-    const hostnames = Array.isArray(managed.canonicalAllowedHostnames) ? managed.canonicalAllowedHostnames : [];
-    const origins = Array.isArray(managed.canonicalAllowedOrigins) ? managed.canonicalAllowedOrigins : [];
-    managedHostnames = new Set(hostnames.flatMap((value) => typeof value === "string" && validHostname(value) ? [value.toLowerCase()] : []));
-    managedOrigins = origins.flatMap((value) => typeof value === "string" && validHttpsOrigin(value) ? [new URL(value).origin] : []);
-    managedControlPlaneUrl = typeof managed.canonicalControlPlaneUrl === "string" && validHttpsOrigin(managed.canonicalControlPlaneUrl)
-      ? managed.canonicalControlPlaneUrl
-      : null;
-  } catch {
-    managedHostnames = new Set();
-    managedOrigins = [];
-    managedControlPlaneUrl = null;
-  }
-}
-
-async function mainFrameId(tabId: number): Promise<string> {
-  const result = await debuggerModule.sendCommand(tabId, { method: "Page.getFrameTree" }) as {
-    frameTree?: { frame?: { id?: unknown }; childFrames?: unknown[] };
-  };
-  const id = result.frameTree?.frame?.id;
-  if (typeof id !== "string" || id.length === 0 || (result.frameTree?.childFrames?.length ?? 0) > 0) {
-    throw new Error("A single canonical main frame could not be proven");
-  }
-  return id;
-}
-
-async function readPageState(tabId: number): Promise<{
-  url: string;
-  title: string;
-  lifecycle: "loading" | "interactive" | "complete" | "frozen";
-}> {
-  const result = await debuggerModule.sendCommand(tabId, {
-    method: "Runtime.evaluate",
-    params: {
-      expression: "({url:location.href,title:document.title,lifecycle:document.readyState})",
-      returnByValue: true,
-      awaitPromise: false,
-    },
-  }) as { result?: { value?: unknown }; exceptionDetails?: unknown };
-  if (result.exceptionDetails !== undefined || result.result?.value === null || typeof result.result?.value !== "object") {
-    throw new Error("Page state is unavailable");
-  }
-  const value = result.result.value as Record<string, unknown>;
-  if (typeof value.url !== "string" || typeof value.title !== "string" ||
-    !["loading", "interactive", "complete"].includes(String(value.lifecycle))) {
-    throw new Error("Page state is invalid");
-  }
-  return {
-    url: value.url,
-    title: value.title,
-    lifecycle: value.lifecycle as "loading" | "interactive" | "complete",
-  };
-}
-
-function validHostname(value: string): boolean {
-  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(value);
-}
-
-function validHttpsOrigin(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" && url.username === "" && url.password === "" && url.origin === value.replace(/\/$/, "");
-  } catch {
-    return false;
-  }
-}
-
-function updateBadgeForEvent(event: ControllerUiEvent): void {
-  if (event.type !== "canonical_status") return;
-  void setBadge(event.status === "connected" || event.status === "executing" || event.status === "waiting_for_approval");
-}
-
-async function setBadge(active: boolean): Promise<void> {
-  await chrome.action.setBadgeBackgroundColor({ color: active ? BADGE_ACTIVE_COLOR : BADGE_INACTIVE_COLOR });
-  await chrome.action.setBadgeText({ text: active ? "ON" : "" });
-}
-
-// ponytail: per-tab badge so the user can identify the agent tab at a
-// glance when the loop is running. Targets a specific tabId rather than the
-// extension-icon-wide state — the user might have many tabs open and only
-// one of them is "busy". chrome.action accepts a closed/missing tabId
-// silently, so we don't guard the call.
-async function setBadgeForTab(tabId: number, active: boolean): Promise<void> {
-  try {
-    await chrome.action.setBadgeBackgroundColor({
-      tabId,
-      color: active ? BADGE_ACTIVE_COLOR : BADGE_INACTIVE_COLOR,
-    });
-    await chrome.action.setBadgeText({ tabId, text: active ? "AI" : "" });
-  } catch {
-    // ponytail: tab might already be gone (closed mid-run). The next
-    // caller's localTabId === null check skips future badge updates.
-  }
-}
-
-function notifyUi(event: ControllerUiEvent): void {
-  void chrome.runtime.sendMessage(event).catch(() => undefined);
+  } catch { /* Firefox/older Chrome */ }
 }
 
 void initialize();
