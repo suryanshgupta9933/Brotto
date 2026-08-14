@@ -37,7 +37,7 @@ const tabBarToggle   = document.getElementById('tabBarToggle');
 
 // ── Settings panel ────────────────────────────────────────────────────────
 settingsBtn.addEventListener('click', () => {
-  plannerUrlSetting.value = plannerUrlEl.value || 'http://127.0.0.1:3001';
+  plannerUrlSetting.value = plannerUrlEl.value || 'http://localhost:8000';
   settingsOverlay.classList.add('open');
 });
 
@@ -124,11 +124,21 @@ const state = {
 
 let timerInterval = null;
 
-// ponytail: tiny XSS guard for any user/model-supplied text we put in innerHTML.
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[c]);
+  return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// Minimal markdown renderer for agent output — bold, italic, inline code, links, line breaks.
+// HTML-escapes first so injected HTML stays literal; only our own tags get through.
+function renderMarkdown(raw) {
+  if (!raw) return '';
+  let s = escapeHtml(String(raw));
+  s = s.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  s = s.replace(/\*(.+?)\*/g, '<i>$1</i>');
+  s = s.replace(/`([^`\n]+)`/g, '<code style="background:var(--surface-2);padding:1px 4px;border-radius:3px;font-size:0.88em;font-family:ui-monospace,monospace">$1</code>');
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  s = s.replace(/\n/g, '<br>');
+  return s;
 }
 
 // ponytail: if the model skipped `reasoning` (gpt-4o-mini occasionally drops
@@ -216,7 +226,7 @@ async function sendUserMessage() {
   // the second hits "A local task is already running" in background.
   if (state.phase !== 'idle' && state.phase !== 'done' && state.phase !== 'error'
       && state.phase !== 'completed' && state.phase !== 'cancelled' && state.phase !== 'disconnected'
-      && state.phase !== 'failed') return;
+      && state.phase !== 'failed' && state.phase !== 'connected') return;
   // ponytail: clear prior conversation so each task starts fresh.
   clearMessages();
   // ponytail: clear previous task's tab-bar (the loop's tabEvent subscriptions
@@ -259,7 +269,7 @@ async function sendUserMessage() {
 async function ensureConnected() {
   // ponytail: reuses the plannerUrl from settings (default :3001). Probes
   // /health; sets phase to 'connected' on success. Throws on failure.
-  const url = plannerUrlEl.value.trim() || 'http://127.0.0.1:3001';
+  const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
   state.plannerUrl = url;
   plannerUrlEl.value = url;
   const response = await fetch(url + '/health', { method: 'GET' });
@@ -409,7 +419,7 @@ function clearMessages() {
 
 // ── Core logic (preserved verbatim) ───────────────────────────────────────
 async function connect() {
-  const url = plannerUrlEl.value.trim() || 'http://127.0.0.1:3001';
+  const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
   setPhase('connecting', `Probing ${url}...`);
   try {
     const response = await fetch(url + '/health', { method: 'GET' });
@@ -593,7 +603,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
     // Bubble wrapper
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.textContent = text;
+    bubble.innerHTML = renderMarkdown(text);
     msg.appendChild(bubble);
 
     // Inline logs appended inside assistant bubble
@@ -623,7 +633,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
     const stepsMatch = (text || '').match(/^(\d+)\s*steps?\b/i);
     const stepCount = stepsMatch ? stepsMatch[1] : '';
     const finalAnswerHtml = finalAnswer
-      ? `<div class="final-answer"><div class="final-answer-text">${escapeHtml(finalAnswer)}</div></div>`
+      ? `<div class="final-answer"><div class="final-answer-text">${renderMarkdown(finalAnswer)}</div></div>`
       : '';
     const factsHtml = finalAnswer ? renderFacts(finalAnswer) : '';
     const captionHtml =
@@ -707,7 +717,7 @@ function appendPlanCard({ title, sites, steps }) {
 // ponytail: icon is set via innerHTML on its own <span> so HTML entities
 // (&#8594;, &#9654;, &#10003;) decode to glyphs. The reasoning text uses
 // textContent so any user/model-supplied HTML stays literal and safe.
-function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle }) {
+function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, actionTarget }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
@@ -723,13 +733,18 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle }) {
   // the user sees the bubble, because the page has already changed.
   // Anchoring each step to its captured page state removes the temporal
   // disconnect between reasoning text and visible browser tab.
-  if (pageUrl || pageTitle) {
+  const domainOf = (url) => { try { return new URL(url).hostname; } catch { return url; } };
+  if (pageUrl) {
     const chip = document.createElement('div');
     chip.className = 'step-page-chip';
-    const u = pageUrl ?? '';
-    const t = pageTitle ?? '';
-    chip.innerHTML = `<span class="step-page-chip-icon">&#9655;</span><span class="step-page-chip-url">${escapeHtml(u)}</span><span class="step-page-chip-title">${escapeHtml(t)}</span>`;
+    chip.innerHTML = `<span class="step-page-chip-icon">&#9655;</span><span class="step-page-chip-url">${escapeHtml(domainOf(pageUrl))}</span>`;
     bubble.appendChild(chip);
+  }
+  if (actionTarget) {
+    const dest = document.createElement('div');
+    dest.className = 'step-page-chip';
+    dest.innerHTML = `<span class="step-page-chip-icon">&#8594;</span><span class="step-page-chip-url">${escapeHtml(domainOf(actionTarget))}</span>`;
+    bubble.appendChild(dest);
   }
 
   const head = document.createElement('div');
@@ -741,7 +756,9 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle }) {
     head.appendChild(iconEl);
     head.appendChild(document.createTextNode(' '));
   }
-  head.appendChild(document.createTextNode(text || 'Working…'));
+  const stepTextEl = document.createElement('span');
+  stepTextEl.innerHTML = renderMarkdown(text || 'Working…');
+  head.appendChild(stepTextEl);
   bubble.appendChild(head);
 
   if (details && details.length > 0) {
@@ -1080,7 +1097,7 @@ chrome.runtime.onMessage.addListener((message) => {
       // toggle so the chat reads naturally and the operator can drill in
       // when debugging. Icon is passed separately so HTML entities decode
       // instead of rendering as literal `&#8594;`.
-      appendStepWithDetails({ icon, text: bubbleTitle, details, ts: message.ts, pageUrl: message.url, pageTitle: message.pageTitle });
+      appendStepWithDetails({ icon, text: bubbleTitle, details, ts: message.ts, pageUrl: message.url, pageTitle: message.pageTitle, actionTarget: message.actionTarget ?? null });
       break;
     }
 
@@ -1234,3 +1251,4 @@ chrome.runtime.onMessage.addListener((message) => {
 
 // ── Initial state ────────────────────────────────────────────────────────
 setPhase('idle', 'Ready');
+goalEl.focus();

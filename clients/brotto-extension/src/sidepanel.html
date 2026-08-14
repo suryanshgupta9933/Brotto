@@ -948,7 +948,7 @@
 </header>
 
 <!-- ── Hidden placeholders (preserved for sidepanel.js DOM-id compatibility) ── -->
-<input id="plannerUrl" type="hidden" value="http://127.0.0.1:3001">
+<input id="plannerUrl" type="hidden" value="http://localhost:8000">
 <input id="startingUrl" type="hidden">
 <button id="startBtn" style="display:none">Start task</button>
 <button id="refreshBtn" style="display:none">Refresh</button>
@@ -1017,9 +1017,9 @@
     </button>
     <div class="settings-title">Settings</div>
     <div class="settings-section">
-      <label for="plannerUrlSetting">Planner URL</label>
-      <input id="plannerUrlSetting" class="input" type="url" placeholder="http://127.0.0.1:3001">
-      <p class="settings-hint">Connect to the local planner that Brotto uses for the agent loop.</p>
+      <label for="plannerUrlSetting">Orchestrator URL</label>
+      <input id="plannerUrlSetting" class="input" type="url" placeholder="http://localhost:8000">
+      <p class="settings-hint">URL of the Brotto orchestrator server.</p>
     </div>
   </div>
 </div>
