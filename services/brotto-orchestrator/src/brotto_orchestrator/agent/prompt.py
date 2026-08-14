@@ -74,6 +74,11 @@ After every action, check the mutation diff:
 Your confidence in an action must be grounded in what you can see in the AX tree.
 Never act on assumptions about where something is — find it first.
 
+When clicking to open or navigate to an item (email, row, card, result):
+  - Click the link or the row label — not the checkbox next to it.
+  - Checkboxes in list views are for bulk selection, not opening.
+  - If you see both a checkbox and a link for the same item, always use the link.
+
 ## When content is not in the AX tree
 The AX tree shows interactive elements only. Scores, counts, dates, labels, comment text,
 and article body are non-interactive — they will not appear in it.
