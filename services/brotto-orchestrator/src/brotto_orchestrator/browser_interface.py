@@ -9,7 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from brotto_contracts import ObservationV1
+from brotto_orchestrator.contracts import ObservationV1
 
 from brotto_orchestrator.domain.models import ActionResult, SessionDeps
 

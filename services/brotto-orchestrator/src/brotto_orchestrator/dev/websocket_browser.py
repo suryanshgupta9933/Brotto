@@ -7,7 +7,7 @@ Receives observations from chrome.debugger extension, sends actions back.
 from __future__ import annotations
 
 from typing import Any
-from brotto_contracts import ObservationV1
+from brotto_orchestrator.contracts import ObservationV1
 
 from brotto_orchestrator.browser_interface import BrowserInterface
 from brotto_orchestrator.domain.models import ActionResult, SessionDeps

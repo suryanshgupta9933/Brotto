@@ -11,7 +11,7 @@ sys.path.insert(0, "services/brotto-orchestrator/src")
 from brotto_orchestrator.dev.playwright_browser import PlaywrightBrowser
 from brotto_orchestrator.dev.websocket_browser import WebSocketBrowser
 from brotto_orchestrator.domain.models import SessionDeps, ActionResult
-from brotto_contracts import ObservationV1
+from brotto_orchestrator.contracts import ObservationV1
 
 
 async def test_playwright_mode():

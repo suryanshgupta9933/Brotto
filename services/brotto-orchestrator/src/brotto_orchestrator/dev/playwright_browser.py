@@ -12,7 +12,7 @@ import base64
 from typing import Any
 
 from playwright.async_api import Browser, Page, async_playwright, CDPSession
-from brotto_contracts import ObservationV1
+from brotto_orchestrator.contracts import ObservationV1
 
 from brotto_orchestrator.browser_interface import BrowserInterface
 from brotto_orchestrator.domain.models import ActionResult, SessionDeps

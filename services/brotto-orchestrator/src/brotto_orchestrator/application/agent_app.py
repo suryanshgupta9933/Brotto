@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic_ai import Agent
-from brotto_contracts import BrowserAction
+from brotto_orchestrator.contracts import BrowserAction
 
 from ..browser_interface import BrowserInterface
 from ..domain.models import SessionDeps, PlanningInput, PlanningOutcome

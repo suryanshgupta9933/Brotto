@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from pydantic_ai import Agent
-from brotto_contracts import BrowserAction
+from brotto_orchestrator.contracts import BrowserAction
 
 from brotto_orchestrator.browser_interface import BrowserInterface
 from brotto_orchestrator.context.builder import build_context
