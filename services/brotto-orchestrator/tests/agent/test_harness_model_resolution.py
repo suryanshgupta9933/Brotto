@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from brotto_orchestrator.model.store import (
     BROTTO_USER_MODEL_DIR_ENV,
     save_user_config,
 )
+from brotto_orchestrator.testing.scripted_planner import ScriptTargetUnresolved
 
 
 @pytest.fixture
@@ -45,3 +47,34 @@ def test_per_user_config_used_when_no_inline(tmp_model_dir: Path, monkeypatch):
     from brotto_orchestrator.model.resolver import resolve_model_config
     cfg, _ = resolve_model_config("127.0.0.1", None, None)
     assert cfg == saved
+
+
+def test_bad_provider_keyerror_is_not_a_scripted_target_failure():
+    """A bad provider reaches PROVIDER_REGISTRY[cfg.provider] unguarded.
+
+    The KeyError it raises is a LookupError, so a bare `except LookupError`
+    in the harness turns a live production misconfiguration into a
+    "scripted target not found" TaskResult with no planner in play. The
+    scripted raise must be a distinct type that cannot match it.
+    """
+    with pytest.raises(KeyError) as excinfo:
+        PROVIDER_REGISTRY["not-a-real-provider"]
+    assert not isinstance(excinfo.value, ScriptTargetUnresolved)
+    assert not issubclass(ScriptTargetUnresolved, KeyError)
+    # Still a LookupError, so the existing scripted-planner contract holds.
+    assert issubclass(ScriptTargetUnresolved, LookupError)
+
+
+def test_harness_catches_only_the_scripted_target_type():
+    """Pins the wiring: the plan block's handler names ScriptTargetUnresolved
+    explicitly, so no KeyError from the model path can reach it."""
+    import brotto_orchestrator.agent.harness as harness
+
+    tree = ast.parse(Path(harness.__file__).read_text())
+    caught = {
+        h.type.id
+        for h in ast.walk(tree)
+        if isinstance(h, ast.ExceptHandler) and isinstance(h.type, ast.Name)
+    }
+    assert "ScriptTargetUnresolved" in caught
+    assert "LookupError" not in caught

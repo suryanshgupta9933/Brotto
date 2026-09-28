@@ -33,6 +33,7 @@ from .stagnation import check_stagnation
 from .guardrails import check_login_page, check_critical_action, check_sensitive_action
 from ..policy.gate import GateDecision, check_domain_policy, check_first_time_seen
 from ..policy.domains import etld1
+from ..testing.scripted_planner import ScriptTargetUnresolved
 from .prompt import SYSTEM_PROMPT, secure_mode_preamble
 from .run_logger import RunLogger
 
@@ -904,10 +905,13 @@ class AgentHarness:
                 decision: AgentDecision = (
                     scripted if scripted is not None else result.output
                 )
-            except LookupError as e:
+            except ScriptTargetUnresolved as e:
                 # A scripted ref that will not resolve means the target the
                 # script asked for is not in the AX tree the agent sees —
                 # that is the Wave 0 gap itself, not an infrastructure fault.
+                # Catches only this type: a KeyError from the model path
+                # (bad provider in PROVIDER_REGISTRY) is a production
+                # misconfiguration, not a perception gap, and must propagate.
                 deps.result = TaskResult(
                     status="failed",
                     summary=f"scripted target not found: {e}",

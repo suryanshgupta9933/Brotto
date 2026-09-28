@@ -21,6 +21,17 @@ _AX_LINE = re.compile(r'(?:\[off-screen\]\s*)?\[([^\]]+)\]\s+(\S+)\s+"([^"]*)"')
 _EXHAUSTED = "script exhausted"
 
 
+class ScriptTargetUnresolved(LookupError):
+    """A scripted action arg could not be resolved in the current AX tree.
+
+    Subclasses LookupError so existing `except LookupError` callers keep
+    working, but the harness catches this name specifically: a bare
+    LookupError from the model path (e.g. PROVIDER_REGISTRY[cfg.provider]
+    raising KeyError on a bad provider) is a production misconfiguration and
+    must not be reported as a scripted-perception failure.
+    """
+
+
 def resolve_ref(ax_tree: str, name: str, *, role: str | None = None) -> str | None:
     """First ref whose accessible name matches, optionally filtered by role.
 
@@ -68,7 +79,7 @@ def _resolve_args(action_args: dict, ax_tree: str) -> dict:
         if resolved is None:
             # Raising beats falling back to a previously-resolved ref, which
             # would click whatever now occupies that slot.
-            raise LookupError(
+            raise ScriptTargetUnresolved(
                 f"scripted action arg {key!r} did not resolve in the current AX tree"
             )
         out[key] = resolved
