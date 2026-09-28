@@ -623,11 +623,12 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
                         cdp = CDPRelay(browser)
                         # Test/dev only. Honor `script` solely in dev so a production
                         # server can never be driven by a client-supplied decision
-                        # sequence.
+                        # sequence. Opt-out, not opt-in: a deploy that forgets to
+                        # set BROTTO_ENV must get the prod behaviour.
                         scripted_planner = None
                         script_name = script_request
                         if script_name:
-                            if os.getenv("BROTTO_ENV", "dev") == "prod":
+                            if os.getenv("BROTTO_ENV", "dev") != "dev":
                                 log.warning("[%s] ignoring task_start script in prod  name=%s",
                                             user_id, script_name)
                             else:
@@ -715,7 +716,7 @@ async def run_task(request: Request):
         scripted_planner = None
         script_name = body.get("script")
         if script_name:
-            if os.getenv("BROTTO_ENV", "dev") == "prod":
+            if os.getenv("BROTTO_ENV", "dev") != "dev":
                 log.warning("/run: ignoring script in prod  name=%s", script_name)
             else:
                 from .testing.scripts import SCRIPT_NAMES, build_script
