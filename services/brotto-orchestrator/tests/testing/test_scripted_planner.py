@@ -107,8 +107,11 @@ def test_unresolvable_ref_raises_instead_of_clicking_stale():
     resolved ref would click whatever now occupies that slot."""
     planner = ScriptedPlanner([_click("Next"), _click("Next")])
     planner.next(_turn(AX))
-    with pytest.raises(LookupError):
+    with pytest.raises(LookupError) as excinfo:
         planner.next(_turn(AX.replace('"Next"', '"Gone"')))
+    # The name is the whole triage value: without it every PERCEPTION_FAILURE
+    # row in the baseline carries the same string.
+    assert "Next" in str(excinfo.value)
 
 
 # ── exhaustion and introspection ────────────────────────────────────────────

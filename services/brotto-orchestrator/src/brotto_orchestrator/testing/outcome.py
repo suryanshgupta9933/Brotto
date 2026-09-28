@@ -92,11 +92,12 @@ def classify(
     return Outcome.RECOVERY_FAILURE
 
 
-# Best-first; a higher rank is worse. `PASS` is best because it is the only
-# outcome proving the agent actually reached the control — so closing a
-# perception gap moves a fixture toward rank 0 and reads as progress.
-# `HARNESS_ERROR` is deliberately last: a broken harness produced no
-# measurement at all, and must not read as a perception change.
+# Best-first; a higher rank is worse. `PASS` is best, but note what it does
+# and does not prove: `task_complete` is unconditional, so PASS means refs
+# resolved and an action was dispatched — not that the control was reached.
+# A missed click is only stringified, never verified. `HARNESS_ERROR` is
+# deliberately last: a broken harness produced no measurement at all, and
+# must not read as a perception change.
 SEVERITY: tuple[str, ...] = (
     Outcome.PASS.value,
     Outcome.PERCEPTION_FAILURE.value,

@@ -53,6 +53,9 @@ def ref_by_name(name: str, *, role: str | None = None) -> Callable[[str], str | 
     def _resolve(ax_tree: str) -> str | None:
         return resolve_ref(ax_tree, name, role=role)
 
+    # Carried so an unresolved ref can name the control it failed to find;
+    # the key alone is byte-identical across every failing fixture.
+    _resolve.__name__ = name
     return _resolve
 
 
@@ -72,9 +75,12 @@ def _resolve_args(action_args: dict, ax_tree: str) -> dict:
         resolved = value(ax_tree)
         if resolved is None:
             # Raising beats falling back to a previously-resolved ref, which
-            # would click whatever now occupies that slot.
+            # would click whatever now occupies that slot. The target name
+            # goes in the message: it is the only thing that says *which*
+            # control the fixture failed to see.
             raise ScriptTargetUnresolved(
-                f"scripted action arg {key!r} did not resolve in the current AX tree"
+                f"scripted action arg {key!r} (target "
+                f"{getattr(value, '__name__', key)!r}) did not resolve in the current AX tree"
             )
         out[key] = resolved
     return out
