@@ -4,9 +4,11 @@
 
 // Static catalog mirrors the Python PROVIDER_REGISTRY. Keep in sync with
 // services/brotto-orchestrator/src/brotto_orchestrator/model/registry.py.
+// MiniMax-M3.1-Flash-Preview = Token Plan (covered). MiniMax-M3 =
+// pay-as-you-go with separate credits.
 const MODEL_CATALOG = {
   anthropic: [
-    { model: "MiniMax-M3", context_window: 1000000 },
+    { model: "MiniMax-M3.1-Flash-Preview", context_window: 1000000 },
     { model: "claude-3-5-sonnet-latest", context_window: 200000 },
   ],
   openai: [
@@ -14,6 +16,7 @@ const MODEL_CATALOG = {
     { model: "o1", context_window: 200000 },
   ],
   minimax: [
+    { model: "MiniMax-M3.1-Flash-Preview", context_window: 1000000 },
     { model: "MiniMax-M3", context_window: 1000000 },
     { model: "MiniMax-M2.7", context_window: 204800 },
   ],

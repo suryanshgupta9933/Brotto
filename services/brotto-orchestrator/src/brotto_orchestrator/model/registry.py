@@ -14,12 +14,16 @@ class ProviderFactory(Protocol):
     def validate_model_id(self, model_id: str) -> bool: ...
 
 
+# Catalog order = preference. MiniMax-M3.1-Flash-Preview is the Token Plan
+# model (covered by Claude Code Token Plan subscriptions); MiniMax-M3 is
+# pay-as-you-go with separate credits — using M3 without a paid balance
+# returns 402 insufficient_balance.
 _DEFAULT_ANTHROPIC_MODELS: list[tuple[str, int]] = [
-    ("MiniMax-M3", 1_000_000),
-    ("MiniMax-M3.1-Flash-Preview", 1_000_000),
-    ("MiniMax-M2.7", 204_800),
-    ("MiniMax-M2.7-highspeed", 204_800),
-    ("claude-3-5-sonnet-latest", 200_000),
+    ("MiniMax-M3.1-Flash-Preview", 1_000_000),  # Token Plan (default)
+    ("MiniMax-M3", 1_000_000),                   # pay-as-you-go
+    ("MiniMax-M2.7", 204_800),                  # pay-as-you-go, legacy
+    ("MiniMax-M2.7-highspeed", 204_800),        # pay-as-you-go, legacy
+    ("claude-3-5-sonnet-latest", 200_000),       # direct Anthropic API
 ]
 
 
