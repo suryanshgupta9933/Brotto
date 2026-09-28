@@ -89,7 +89,6 @@ async def test_step_usage_lands_in_the_returned_timing(monkeypatch):
 @pytest.mark.asyncio
 async def test_usage_accumulates_across_steps(monkeypatch):
     """Two steps, two usages, two sums — not a last-write-wins overwrite."""
-    _stub_plan(monkeypatch, [_Usage(1_000, 100), _Usage(2_000, 200)])
     # First step's task_complete ends the run, so drive the second step by
     # returning a non-terminal decision first.
     seq = iter([

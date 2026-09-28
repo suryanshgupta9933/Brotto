@@ -131,6 +131,12 @@ class TaskResult(BaseModel):
     # badge for the duration of the task_result bubble. Optional so
     # existing callers/tests don't have to populate it.
     policy_mode: str | None = None
+    # ponytail: set by the harness to the URL observed at the start of the
+    # final step, so a benchmark record can tell "navigated then failed"
+    # apart from "never left the start page". Approximation: pre-step, not
+    # post-action — upgrade to a post-action read if a task that ends with a
+    # click ever matters. Optional so existing callers/tests don't change.
+    final_url: str = ""
 
 
 @dataclass

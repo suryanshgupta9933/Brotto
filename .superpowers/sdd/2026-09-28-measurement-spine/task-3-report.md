@@ -228,3 +228,121 @@ Dependency direction still holds:
 $ grep -rn "from.*testing" src/brotto_orchestrator/agent/
 (no matches)
 ```
+
+---
+
+## Fix round 2
+
+Addressed the two Important issues and both Minors from the task-3 review.
+
+### Important 1 — `final_url` was a confident wrong number
+
+`runner.py:131` recorded `final_url=start_url`, and `TaskResult` had no
+`final_url` field at all, so there was nothing to read. A task that navigated
+`/login → /dashboard` and then failed recorded `/login` — indistinguishable
+from a task that never navigated. Unlike `approval_requested`, nothing marked
+the field as unobserved.
+
+- `src/brotto_orchestrator/agent/context.py:130-136` — added
+  `final_url: str = ""` to `TaskResult`, with a `ponytail:` comment in the
+  same style as the existing `policy_mode` note: the harness sets it, and it
+  is optional so existing callers and tests need no change.
+- `src/brotto_orchestrator/agent/harness.py:859-863` and `:1275-1279` — set
+  `deps.result.final_url` immediately before both `return deps.result`
+  sites. `deps.step_url` is the URL observed at the top of the last step this
+  loop entered; no new state, no loop restructuring.
+- `src/brotto_orchestrator/agent/harness.py:1286-1294` — a **third** return
+  path turned up: the `MAX_STEPS`-exhausted `TaskResult` built at the bottom
+  of `run()`. It now carries `final_url=deps.step_url` too. Without this, a
+  run that hit the step ceiling would still have reported nothing.
+
+The reads use `getattr(deps, "step_url", "") or ""`, not a bare attribute.
+`step_url` is not declared on `AgentDeps` — it is set dynamically at
+`harness.py:877`, and the abort gate at the top of the loop can return before
+any observe has run. This is the same defensive read already used at
+`harness.py:484` for the click cross-domain gate.
+
+**Honest semantics.** `deps.step_url` is the URL observed at the *start* of
+the final step, not after the final step's actions. This is a real
+approximation and both the `context.py` and `harness.py` comments say so.
+It needs upgrading only if a task whose last action is a navigation ever has
+to be attributed to the destination page rather than the page it left.
+
+- `src/brotto_orchestrator/testing/runner.py:87-99` — `_result_from_payload`
+  now maps `final_url` (previously dropped, so the value never reached the
+  parsed `TaskResult` at all).
+- `src/brotto_orchestrator/testing/runner.py:126-136` — `run_task` reads the
+  real value, `body.get("final_url") or result.final_url or start_url`, so a
+  body that reports none still falls back to the start URL rather than to an
+  empty string.
+
+### Important 2 — `_result_from_payload` had zero coverage
+
+Every existing test handed `_record_from_result` a hand-built `TaskResult`,
+so the real `/run` body path — where the first commit's `dict[str, float]`
+bug lived — never executed. Two tests added at
+`tests/testing/test_runner.py:161-233`:
+
+1. `test_run_task_maps_a_real_response_body` — monkeypatches `_post_run` to
+   return `TaskResult(...).model_dump()` for a realistically populated
+   failed run (`status="failed"`, `extracted_data`, `tried`,
+   `failure_reason`, `steps_taken=3`, a full `_harness_timing` dict with the
+   nested `components` dict and `per_step` list of dicts, and a
+   `final_url` of `/dashboard` distinct from the `/login` start URL), then
+   asserts the returned `TaskRecord` field by field. `failure_reason` is
+   chosen so it classifies to `LOGIN_FAILURE`, which means the assertion
+   proves the value reached `classify()`, not merely `rec.reason`.
+2. `test_run_task_falls_back_to_start_url_when_body_has_none` — a body with
+   no `final_url` records the start URL.
+
+The assertions are per-field on purpose, per the review. Verified by
+mutation: deleting a single `msg.get(...)` line from `_result_from_payload`
+and re-running `pytest tests/testing/test_runner.py` fails a specific
+assertion for `final_url`, `failure_reason`, `steps_taken` and `timing`.
+(`summary`, `extracted_data` and `tried` are carried on `TaskResult` but are
+not `TaskRecord` fields, so there is nothing downstream for them to break.)
+
+### Minor 3 — dead line in a test
+
+`tests/agent/test_harness_token_accounting.py:92` — removed the
+`_stub_plan(monkeypatch, [...])` call that was immediately overwritten by the
+`monkeypatch.setattr(harness_mod, "_plan_step", _fake_plan)` twelve lines
+later.
+
+### Minor 4 — dead `tokens` key in the runner
+
+`src/brotto_orchestrator/testing/runner.py:53-70` — removed the
+`timing.pop("tokens", None)` and the `tokens_in if tok_in is not None else
+tokens` fallback. The harness never writes a `tokens` key into
+`TaskResult.timing`; `tokens_in`/`tokens_out` are the only real source.
+Behaviour is unchanged — the removed fallback could only ever have supplied
+`None`, which is already what `tok_in` is when absent.
+
+### Not changed
+
+The review's other Minor — `_err_record` setting `final_url=""` while the
+success path sets a URL — is a deliberate empty-means-unknown and was left
+alone, as instructed.
+
+### Verify
+
+```
+$ ./.venv/bin/python -m pytest services/brotto-orchestrator/tests/ -q
+270 passed in 1.97s
+```
+
+Baseline was 268; +2 new tests, 0 failures.
+
+Dependency direction still holds — the shipped package does not depend on
+`testing/`:
+
+```
+$ grep -rn "from.*testing" services/brotto-orchestrator/src/brotto_orchestrator/agent/
+(no matches)
+```
+
+Extension impact checked rather than assumed: `clients/brotto-extension/src/background.ts:454`
+reads specific named fields off `msg.result` (`status`, `summary`,
+`steps_taken`, `extracted_data`, `timing`, `failure_reason`) and ignores
+everything else. `final_url` is additive and unread, so no extension change
+is needed.

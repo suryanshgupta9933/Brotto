@@ -51,7 +51,6 @@ def _record_from_result(
 ) -> TaskRecord:
     outcome = classify(result, harness_error=harness_error)
     timing = dict(result.timing or {})
-    tokens = timing.pop("tokens", None)
     tok_in = timing.pop("tokens_in", None)
     tok_out = timing.pop("tokens_out", None)
     usd = None
@@ -65,7 +64,7 @@ def _record_from_result(
         fixture=fixture,
         outcome=outcome,
         steps_taken=result.steps_taken,
-        tokens_in=tok_in if tok_in is not None else tokens,
+        tokens_in=tok_in,
         tokens_out=tok_out,
         usd=usd,
         timing=timing,
@@ -95,6 +94,7 @@ def _result_from_payload(msg: dict) -> Any:
         failure_reason=msg.get("failure_reason"),
         tried=list(msg.get("tried", []) or []),
         timing=msg.get("timing"),
+        final_url=msg.get("final_url", "") or "",
     )
 
 
@@ -126,8 +126,11 @@ async def run_task(
     # ponytail: approval_requested is unobservable on the HTTP path — /run
     # returns one final result and no intermediate approval frames. Restore it
     # if a streaming transport ever carries task_start/approval_required.
+    result = _result_from_payload(body)
     return _record_from_result(
-        task_id=task_id, fixture=fixture_name,
-        result=_result_from_payload(body), final_url=start_url,
+        task_id=task_id, fixture=fixture_name, result=result,
+        # Real observed URL; start_url is the honest floor for a task that
+        # reported none (harness aborts before its first observe).
+        final_url=body.get("final_url") or result.final_url or start_url,
         approval_requested=False,
     )

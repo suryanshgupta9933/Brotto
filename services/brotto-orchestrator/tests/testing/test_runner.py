@@ -153,3 +153,82 @@ def test_scripted_run_reports_zero_tokens_not_null():
     assert rec.tokens_in == 0
     assert rec.tokens_out == 0
     assert rec.usd == 0.0
+
+
+# ── The /run body path ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_task_maps_a_real_response_body(monkeypatch):
+    """Covers `run_task` → `_post_run` → `_result_from_payload` →
+    `_record_from_result` end to end. Every other test in this file hands
+    `_record_from_result` a hand-built TaskResult, which means
+    `_result_from_payload` — the real path, and the one that dropped a field
+    in the first round — could rot silently.
+
+    Assertions are per-field on purpose: an outcome-only check passes even
+    when half the record is empty. Deleting any single `msg.get(...)` line in
+    `_result_from_payload` fails a specific assertion below.
+    """
+    result = TaskResult(
+        status="failed",
+        summary="could not reach the dashboard",
+        extracted_data={"last_seen": "login"},
+        steps_taken=3,
+        failure_reason="login required to reach the dashboard",
+        tried=["click:submit", "wait:selector=.dash"],
+        timing=_harness_timing(1_234_567, 89_012),
+        final_url="http://127.0.0.1:1/dashboard",
+    )
+
+    async def _fake_post_run(base_url, payload, timeout):
+        return result.model_dump()
+
+    monkeypatch.setattr(runner_mod, "_post_run", _fake_post_run)
+    rec = await runner_mod.run_task(
+        script_name="s", fixture_name="auth-shadow",
+        base_url="http://127.0.0.1:1", start_url="http://127.0.0.1:1/login",
+        timeout=5.0,
+    )
+
+    assert rec.fixture == "auth-shadow"
+    assert rec.task_id.startswith("auth-shadow-")
+    # Mapped, not defaulted: `_result_from_payload` must not coerce status.
+    # Proves failure_reason reached classify(), not just `reason` — a dropped
+    # msg.get("failure_reason") in _result_from_payload fails here.
+    assert rec.outcome == OUTCOMES.LOGIN_FAILURE
+    assert rec.steps_taken == 3
+    # The URL where the task actually got to — not the one it started at.
+    assert rec.final_url == "http://127.0.0.1:1/dashboard"
+    assert rec.approval_requested is False
+    assert rec.reason == "login required to reach the dashboard"
+    # Nested timing survives the round trip; only the token keys are popped.
+    assert rec.tokens_in == 1_234_567
+    assert rec.tokens_out == 89_012
+    assert rec.usd == 5.038881
+    assert rec.timing["components"] == {
+        "observe": 0.31, "execute": 1.4, "model_plan": 2.79,
+    }
+    assert rec.timing["per_step"] == [
+        {"observe": 0.11, "execute": 0.5, "model_plan": 0.9}
+    ]
+    assert rec.timing["wall_s"] == 5.42
+    assert "tokens_in" not in rec.timing and "tokens_out" not in rec.timing
+
+
+@pytest.mark.asyncio
+async def test_run_task_falls_back_to_start_url_when_body_has_none(monkeypatch):
+    """A body with no final_url (older server, or a harness that aborted
+    before its first observe) records the start URL rather than an empty
+    string that reads as 'never navigated'."""
+
+    async def _fake_post_run(base_url, payload, timeout):
+        return TaskResult(status="completed", summary="ok", steps_taken=1).model_dump()
+
+    monkeypatch.setattr(runner_mod, "_post_run", _fake_post_run)
+    rec = await runner_mod.run_task(
+        script_name="s", fixture_name="auth-shadow",
+        base_url="http://127.0.0.1:1", start_url="http://127.0.0.1:1/login",
+        timeout=5.0,
+    )
+    assert rec.final_url == "http://127.0.0.1:1/login"

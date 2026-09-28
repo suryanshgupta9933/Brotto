@@ -856,6 +856,11 @@ class AgentHarness:
                     deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
                     tokens=tokens,
                 )
+                # deps.step_url is the URL observed at the top of the last
+                # step this loop entered — pre-step, not post-action. The
+                # abort gate at the top of the loop can return before any
+                # observe, hence the getattr (same defensive read as :484).
+                deps.result.final_url = getattr(deps, "step_url", "") or ""
                 return deps.result
 
             steps_run += 1
@@ -1267,6 +1272,11 @@ class AgentHarness:
                     deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
                     tokens=tokens,
                 )
+                # deps.step_url is the URL observed at the top of the last
+                # step this loop entered — pre-step, not post-action. The
+                # abort gate at the top of the loop can return before any
+                # observe, hence the getattr (same defensive read as :484).
+                deps.result.final_url = getattr(deps, "step_url", "") or ""
                 return deps.result
 
         timing_report = self._log_timings(
@@ -1280,6 +1290,7 @@ class AgentHarness:
             steps_taken=self.MAX_STEPS,
             timing=timing_report,
             policy_mode=_policy_mode(deps),
+            final_url=deps.step_url,
         )
 
     @staticmethod
