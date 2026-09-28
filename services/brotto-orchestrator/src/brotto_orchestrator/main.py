@@ -10,17 +10,22 @@ import uuid
 
 from dotenv import load_dotenv
 
+# Token Plan compat: pydantic-ai's AnthropicProvider only reads
+# ANTHROPIC_API_KEY; Token Plan users have ANTHROPIC_AUTH_TOKEN. Propagate
+# unconditionally (idempotent — only fires if API_KEY is unset) so this
+# works in any mode, not just dev.
+if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
+    os.environ["ANTHROPIC_API_KEY"] = os.getenv("ANTHROPIC_AUTH_TOKEN")
+
 # Dev-mode defaults: BROTTO_ENV=dev (default) pre-populates the env vars the
-# harness reads at module-import time, so `python start_server.py` works with
-# only ANTHROPIC_AUTH_TOKEN set in the operator's shell (Token Plan key).
-# Set BROTTO_ENV=prod to opt out — the server then uses whatever the operator
-# configured (extension settings, .env, AGENT_MODEL, etc.) and raises "no
-# model configuration" if nothing resolves.
+# harness reads at module-import time, so `python start_server.py` works
+# without any further env config. Set BROTTO_ENV=prod to opt out — the
+# server then uses whatever the operator configured (extension settings,
+# .env, AGENT_MODEL, etc.) and raises "no model configuration" if
+# nothing resolves.
 if os.getenv("BROTTO_ENV", "dev") == "dev":
     os.environ.setdefault("AGENT_MODEL", "anthropic:MiniMax-M3")
     os.environ.setdefault("CONTEXT_WINDOW_TOKENS", "1000000")
-    if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
-        os.environ["ANTHROPIC_API_KEY"] = os.getenv("ANTHROPIC_AUTH_TOKEN")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware

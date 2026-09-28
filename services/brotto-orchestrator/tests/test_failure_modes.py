@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import pytest
 
@@ -68,3 +69,43 @@ def test_harness_converts_unknown_model_to_model_not_found():
     assert converted.failure_reason == "model_not_found"
     # Sanity: the source error mentions the same model.
     assert "minimax" in str(fake_user_error) and "totally-fake" in str(fake_user_error)
+
+
+def test_auth_token_propagates_to_api_key_in_prod_mode(monkeypatch):
+    """Regression guard: AUTH_TOKEN → API_KEY propagation must fire in
+    BROTTO_ENV=prod too, not only dev. Token Plan users (anthropic
+    AUTH_TOKEN with no ANTHROPIC_API_KEY) hit a UserError otherwise."""
+    import importlib
+    import sys
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-cp-tokenplan-test")
+    monkeypatch.setenv("BROTTO_ENV", "prod")
+
+    # Reload main + harness so their module-level propagation re-runs
+    # under the prod env. Without this, the test only verifies the
+    # *current* env state, not what a fresh prod-mode server would see.
+    for mod in list(sys.modules):
+        if mod.startswith("brotto_orchestrator"):
+            del sys.modules[mod]
+    import brotto_orchestrator.main  # noqa: F401  (import triggers propagation)
+
+    assert os.environ.get("ANTHROPIC_API_KEY") == "sk-cp-tokenplan-test", (
+        "AUTH_TOKEN → API_KEY propagation must run in prod mode too; "
+        "without it pydantic-ai's AnthropicProvider raises UserError"
+    )
+
+
+def test_auth_token_propagates_in_dev_mode(monkeypatch):
+    """Positive control: dev mode also propagates (regression guard)."""
+    import sys
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-cp-dev")
+    monkeypatch.setenv("BROTTO_ENV", "dev")
+
+    for mod in list(sys.modules):
+        if mod.startswith("brotto_orchestrator"):
+            del sys.modules[mod]
+    import brotto_orchestrator.main  # noqa: F401
+
+    assert os.environ.get("ANTHROPIC_API_KEY") == "sk-cp-dev"
