@@ -17,7 +17,7 @@ if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
     os.environ["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_AUTH_TOKEN"]
 
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.exceptions import UserError, ModelHTTPError
 
 from brotto_orchestrator.model.config import UserCredentials
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
@@ -247,6 +247,26 @@ def _make_policy_blocked_result(step: int, domain: str, deps: AgentDeps | None =
         summary=f"Blocked by policy: {domain}",
         failure_reason="policy_blocked",
         steps_taken=step + 1,
+        policy_mode=_policy_mode(deps),
+    )
+
+
+def _make_model_not_found_result(provider: str, model_id: str, deps: AgentDeps | None = None) -> TaskResult:
+    return TaskResult(
+        status="failed",
+        summary=f"Unknown model {provider}:{model_id}",
+        failure_reason="model_not_found",
+        policy_mode=_policy_mode(deps),
+    )
+
+
+def _make_auth_failed_result(provider: str, deps: AgentDeps | None = None) -> TaskResult:
+    # ponytail: do NOT echo the key. The user can re-enter it in extension
+    # settings; the failure bubble just names the provider.
+    return TaskResult(
+        status="failed",
+        summary=f"Authentication failed for {provider}. Check the API key in extension settings.",
+        failure_reason="auth_failed",
         policy_mode=_policy_mode(deps),
     )
 
@@ -865,15 +885,28 @@ class AgentHarness:
                     result = await agent.run(_turn_to_prompt(turn), deps=deps, model=_per_task_model)
                 decision: AgentDecision = result.output
             except UserError as e:
-                # pydantic-ai auto-detect fails on bare model names that don't
-                # match its known patterns. With defer_model_check=True the
-                # check fires here, not at Agent construction. Re-raise with
-                # a hint that names the fix without hard-coding a model id.
+                # Convert "Unknown model" failures to a model_not_found
+                # TaskResult. The next iteration's abort gate returns it.
                 if "Unknown model" in str(e):
-                    raise UserError(
-                        f"{e}. Set AGENT_MODEL to '<provider>:<model>' "
-                        f"to route to the correct provider."
-                    ) from e
+                    deps.result = _make_model_not_found_result(
+                        provider=cfg.provider, model_id=cfg.model, deps=deps,
+                    )
+                    _CURRENT_DEPS = None
+                    continue
+                # pydantic-ai auto-detect failures on bare model names —
+                # raise with a hint that names the fix without hard-coding.
+                raise UserError(
+                    f"{e}. Set AGENT_MODEL to '<provider>:<model>' "
+                    f"to route to the correct provider."
+                ) from e
+            except ModelHTTPError as http_err:
+                # 401 / 403 → auth_failed. Don't echo any key in the summary.
+                if http_err.status_code in (401, 403):
+                    deps.result = _make_auth_failed_result(
+                        provider=cfg.provider, deps=deps,
+                    )
+                    _CURRENT_DEPS = None
+                    continue
                 raise
             finally:
                 # _turn_to_prompt reads _CURRENT_DEPS for the secure-mode

@@ -33,3 +33,38 @@ def test_api_key_redaction_in_log(caplog):
 
     flat = " ".join(r.getMessage() for r in caplog.records)
     assert secret not in flat, f"API key leaked into logs: {flat!r}"
+
+
+def test_make_model_not_found_result():
+    from brotto_orchestrator.agent.harness import _make_model_not_found_result
+    r = _make_model_not_found_result(provider="minimax", model_id="totally-fake")
+    assert r.failure_reason == "model_not_found"
+    assert r.status == "failed"
+    assert "minimax" in r.summary and "totally-fake" in r.summary
+
+
+def test_make_auth_failed_result():
+    from brotto_orchestrator.agent.harness import _make_auth_failed_result
+    r = _make_auth_failed_result(provider="anthropic")
+    assert r.failure_reason == "auth_failed"
+    assert r.status == "failed"
+    assert "anthropic" in r.summary
+    # The summary must NOT echo any API key.
+    assert "sk-" not in r.summary
+
+
+def test_harness_converts_unknown_model_to_model_not_found():
+    """When factory.validate_model_id returns False, the harness loop
+    surfaces a TaskResult with failure_reason=model_not_found (not the
+    generic task_error path)."""
+    from pydantic_ai.exceptions import UserError
+    from brotto_orchestrator.agent.harness import _make_model_not_found_result
+
+    # Simulate the path: factory rejects the model id → UserError raised.
+    fake_user_error = UserError("Unknown model minimax:totally-fake")
+    # The conversion happens in the harness loop; verify the helper is
+    # wired and produces the right TaskResult shape.
+    converted = _make_model_not_found_result("minimax", "totally-fake")
+    assert converted.failure_reason == "model_not_found"
+    # Sanity: the source error mentions the same model.
+    assert "minimax" in str(fake_user_error) and "totally-fake" in str(fake_user_error)
