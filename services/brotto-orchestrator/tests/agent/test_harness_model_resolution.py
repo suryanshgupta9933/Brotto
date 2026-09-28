@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import pytest
 
+from brotto_orchestrator.agent.context import (
+    AgentDeps,
+    AgentTurn,
+    ScriptTargetUnresolved,
+)
+from brotto_orchestrator.agent.harness import _plan_step
 from brotto_orchestrator.model.config import ModelConfig, UserCredentials
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
 from brotto_orchestrator.model.store import (
     BROTTO_USER_MODEL_DIR_ENV,
     save_user_config,
 )
-from brotto_orchestrator.testing.scripted_planner import ScriptTargetUnresolved
 
 
 @pytest.fixture
@@ -65,16 +67,54 @@ def test_bad_provider_keyerror_is_not_a_scripted_target_failure():
     assert issubclass(ScriptTargetUnresolved, LookupError)
 
 
-def test_harness_catches_only_the_scripted_target_type():
-    """Pins the wiring: the plan block's handler names ScriptTargetUnresolved
-    explicitly, so no KeyError from the model path can reach it."""
-    import brotto_orchestrator.agent.harness as harness
+def _turn() -> AgentTurn:
+    return AgentTurn(
+        task="t", step_number=0, scratchpad_notes="", scratchpad_entries=[],
+        current_url="http://x/", current_page_title="x", ax_tree="",
+        ax_diff="", step_summaries=[],
+    )
 
-    tree = ast.parse(Path(harness.__file__).read_text())
-    caught = {
-        h.type.id
-        for h in ast.walk(tree)
-        if isinstance(h, ast.ExceptHandler) and isinstance(h.type, ast.Name)
-    }
-    assert "ScriptTargetUnresolved" in caught
-    assert "LookupError" not in caught
+
+def _deps(**kw) -> AgentDeps:
+    async def _ws_send(_msg: dict) -> None:
+        return None
+
+    return AgentDeps(user_id="u", task="t", cdp=None, ws_send=_ws_send, **kw)
+
+
+class _UnresolvingPlanner:
+    """Stands in for a ScriptedPlanner whose ref is absent from the AX tree."""
+
+    def next(self, turn):
+        raise ScriptTargetUnresolved("ref 'Next' did not resolve")
+
+
+async def test_bad_provider_propagates_keyerror(monkeypatch):
+    """A bad provider reaches PROVIDER_REGISTRY[cfg.provider] unguarded.
+
+    The KeyError it raises is a LookupError, so a handler that caught
+    LookupError (or a tuple naming it) would turn a live production
+    misconfiguration into a "scripted target not found" TaskResult. Pins
+    that the plan step does not swallow it.
+    """
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    deps = _deps(
+        scripted_planner=None,
+        model_config=ModelConfig(
+            provider="not-a-real-provider", model="m", context_window=1000,
+        ),
+    )
+    with pytest.raises(KeyError):
+        await _plan_step(deps, _turn(), agent=object())
+
+
+async def test_unresolved_scripted_target_becomes_failed_result():
+    """The other half: the typed handler still does its job, so an
+    unresolvable scripted ref is reported as a perception gap rather than
+    crashing the run."""
+    deps = _deps(scripted_planner=_UnresolvingPlanner())
+    assert await _plan_step(deps, _turn(), agent=object()) is None
+    assert deps.result.status == "failed"
+    assert deps.result.failure_reason == (
+        "scripted target did not resolve: ref 'Next' did not resolve"
+    )

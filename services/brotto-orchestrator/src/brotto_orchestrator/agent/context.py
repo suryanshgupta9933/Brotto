@@ -105,6 +105,20 @@ class AgentDecision(BaseModel):
     actions: list[ActionCall]
 
 
+class ScriptTargetUnresolved(LookupError):
+    """A scripted action arg could not be resolved in the current AX tree.
+
+    Subclasses LookupError so existing `except LookupError` callers keep
+    working, but the harness catches this name specifically: a bare
+    LookupError from the model path (e.g. PROVIDER_REGISTRY[cfg.provider]
+    raising KeyError on a bad provider) is a production misconfiguration and
+    must not be reported as a scripted-perception failure.
+
+    Lives here, not in testing/, because the production harness raises and
+    catches it — see AgentDeps.scripted_planner's comment.
+    """
+
+
 class TaskResult(BaseModel):
     status: Literal["completed", "failed", "awaiting_human", "stagnated"]
     summary: str

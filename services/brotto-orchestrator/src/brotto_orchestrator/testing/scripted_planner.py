@@ -11,7 +11,12 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from ..agent.context import ActionCall, AgentDecision, AgentTurn
+from ..agent.context import (
+    ActionCall,
+    AgentDecision,
+    AgentTurn,
+    ScriptTargetUnresolved,
+)
 
 # One filtered AX line: `[off-screen] [ref] role "name"`. The off-screen
 # block re-emits lines under a second prefix, so the prefix is matched
@@ -19,17 +24,6 @@ from ..agent.context import ActionCall, AgentDecision, AgentTurn
 _AX_LINE = re.compile(r'(?:\[off-screen\]\s*)?\[([^\]]+)\]\s+(\S+)\s+"([^"]*)"')
 
 _EXHAUSTED = "script exhausted"
-
-
-class ScriptTargetUnresolved(LookupError):
-    """A scripted action arg could not be resolved in the current AX tree.
-
-    Subclasses LookupError so existing `except LookupError` callers keep
-    working, but the harness catches this name specifically: a bare
-    LookupError from the model path (e.g. PROVIDER_REGISTRY[cfg.provider]
-    raising KeyError on a bad provider) is a production misconfiguration and
-    must not be reported as a scripted-perception failure.
-    """
 
 
 def resolve_ref(ax_tree: str, name: str, *, role: str | None = None) -> str | None:

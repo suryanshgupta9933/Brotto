@@ -26,6 +26,7 @@ from brotto_orchestrator.model.resolver import resolve_model_config
 from .context import (
     AgentDeps, AgentDecision, AgentTurn, ActionCall,
     StepSummary, TaskResult, Scratchpad, MemoryEntry, DIGEST_LEN,
+    ScriptTargetUnresolved,
 )
 from .ax_filter import filter_ax_targets
 from .ax_diff import compute_ax_diff
@@ -33,7 +34,6 @@ from .stagnation import check_stagnation
 from .guardrails import check_login_page, check_critical_action, check_sensitive_action
 from ..policy.gate import GateDecision, check_domain_policy, check_first_time_seen
 from ..policy.domains import etld1
-from ..testing.scripted_planner import ScriptTargetUnresolved
 from .prompt import SYSTEM_PROMPT, secure_mode_preamble
 from .run_logger import RunLogger
 
@@ -699,12 +699,105 @@ def _scripted_decision(deps: AgentDeps, turn: AgentTurn) -> AgentDecision | None
     return planner.next(turn)
 
 
+async def _plan_step(
+    deps: AgentDeps, turn: AgentTurn, agent: Agent
+) -> tuple[AgentDecision, int, object] | None:
+    """Return (decision, context_window, pydantic-ai result), or None to
+    abandon the step.
+
+    Extracted from AgentHarness.run so the branch — scripted planner vs
+    model path vs error mapping — is unit-testable without driving the full
+    observe→plan→act loop. None means "deps.result is set, loop continues";
+    the timing bucket is deliberately not charged for those steps.
+    """
+    global _CURRENT_DEPS
+    _CURRENT_DEPS = deps
+    try:
+        # Resolve model_config first so we have context_window for the
+        # CONTEXT cell regardless of which branch below runs.
+        # AGENT_MODEL="test" is a pydantic-ai sentinel for TestModel;
+        # bypass the resolver's env-fallback (which would reject "test")
+        # by reading the env var directly for context_window only.
+        scripted = _scripted_decision(deps, turn)
+        if scripted is not None:
+            # Test/dev path: no model, no key, no network. result is
+            # left None so the shared assignment below stays valid.
+            context_window = _CONTEXT_WINDOW_TOKENS
+            result = None
+        elif os.getenv("AGENT_MODEL") == "test":
+            context_window = _CONTEXT_WINDOW_TOKENS
+            result = await agent.run(_turn_to_prompt(turn), deps=deps)
+        else:
+            cfg, creds = resolve_model_config(
+                client_ip=getattr(deps, "client_ip", "127.0.0.1"),
+                inline_config=getattr(deps, "model_config", None),
+                inline_creds=(
+                    UserCredentials(api_key=deps.api_key, base_url=None)
+                    if getattr(deps, "api_key", None)
+                    else None
+                ),
+            )
+            context_window = cfg.context_window
+            factory = PROVIDER_REGISTRY[cfg.provider]
+            if not factory.validate_model_id(cfg.model):
+                raise UserError(
+                    f"Unknown model {cfg.provider}:{cfg.model}"
+                )
+            _per_task_model = factory.build(cfg.model, creds)
+            result = await agent.run(_turn_to_prompt(turn), deps=deps, model=_per_task_model)
+        decision: AgentDecision = (
+            scripted if scripted is not None else result.output
+        )
+    except ScriptTargetUnresolved as e:
+        # A scripted ref that will not resolve means the target the
+        # script asked for is not in the AX tree the agent sees —
+        # that is the Wave 0 gap itself, not an infrastructure fault.
+        # Catches only this type: a KeyError from the model path
+        # (bad provider in PROVIDER_REGISTRY) is a production
+        # misconfiguration, not a perception gap, and must propagate.
+        deps.result = TaskResult(
+            status="failed",
+            summary=f"scripted target not found: {e}",
+            failure_reason=f"scripted target did not resolve: {e}",
+            policy_mode=_policy_mode(deps),
+        )
+        return None
+    except UserError as e:
+        # Convert "Unknown model" failures to a model_not_found
+        # TaskResult. The next iteration's abort gate returns it.
+        if "Unknown model" in str(e):
+            deps.result = _make_model_not_found_result(
+                provider=cfg.provider, model_id=cfg.model, deps=deps,
+            )
+            return None
+        # pydantic-ai auto-detect failures on bare model names —
+        # raise with a hint that names the fix without hard-coding.
+        raise UserError(
+            f"{e}. Set AGENT_MODEL to '<provider>:<model>' "
+            f"to route to the correct provider."
+        ) from e
+    except ModelHTTPError as http_err:
+        # 401 / 403 → auth_failed. Don't echo any key in the summary.
+        if http_err.status_code in (401, 403):
+            deps.result = _make_auth_failed_result(
+                provider=cfg.provider, deps=deps,
+            )
+            return None
+        raise
+    finally:
+        # _turn_to_prompt reads _CURRENT_DEPS for the secure-mode
+        # preamble; clear it after the call so it doesn't leak
+        # across tasks (the loop is sequential but the value
+        # outlives this iteration otherwise).
+        _CURRENT_DEPS = None
+    return decision, context_window, result
+
+
 class AgentHarness:
     MAX_STEPS = 30
     STAGNATION_WINDOW = 3
 
     async def run(self, deps: AgentDeps) -> TaskResult:
-        global _CURRENT_DEPS
         timings: dict[str, float] = {b: 0.0 for b in TIMING_BUCKETS}
         # Snapshot of `timings` taken at the start of each step iteration —
         # lets us report a per-step breakdown without instrumenting every
@@ -868,88 +961,11 @@ class AgentHarness:
             # Plan
             t_plan = time.perf_counter()
             log.debug("[%s] calling model...", deps.user_id)
-            _CURRENT_DEPS = deps
-            try:
-                # Resolve model_config first so we have context_window for the
-                # CONTEXT cell regardless of which branch below runs.
-                # AGENT_MODEL="test" is a pydantic-ai sentinel for TestModel;
-                # bypass the resolver's env-fallback (which would reject "test")
-                # by reading the env var directly for context_window only.
-                scripted = _scripted_decision(deps, turn)
-                if scripted is not None:
-                    # Test/dev path: no model, no key, no network. result is
-                    # left None so the shared assignment below stays valid.
-                    context_window = _CONTEXT_WINDOW_TOKENS
-                    result = None
-                elif os.getenv("AGENT_MODEL") == "test":
-                    context_window = _CONTEXT_WINDOW_TOKENS
-                    result = await agent.run(_turn_to_prompt(turn), deps=deps)
-                else:
-                    cfg, creds = resolve_model_config(
-                        client_ip=getattr(deps, "client_ip", "127.0.0.1"),
-                        inline_config=getattr(deps, "model_config", None),
-                        inline_creds=(
-                            UserCredentials(api_key=deps.api_key, base_url=None)
-                            if getattr(deps, "api_key", None)
-                            else None
-                        ),
-                    )
-                    context_window = cfg.context_window
-                    factory = PROVIDER_REGISTRY[cfg.provider]
-                    if not factory.validate_model_id(cfg.model):
-                        raise UserError(
-                            f"Unknown model {cfg.provider}:{cfg.model}"
-                        )
-                    _per_task_model = factory.build(cfg.model, creds)
-                    result = await agent.run(_turn_to_prompt(turn), deps=deps, model=_per_task_model)
-                decision: AgentDecision = (
-                    scripted if scripted is not None else result.output
-                )
-            except ScriptTargetUnresolved as e:
-                # A scripted ref that will not resolve means the target the
-                # script asked for is not in the AX tree the agent sees —
-                # that is the Wave 0 gap itself, not an infrastructure fault.
-                # Catches only this type: a KeyError from the model path
-                # (bad provider in PROVIDER_REGISTRY) is a production
-                # misconfiguration, not a perception gap, and must propagate.
-                deps.result = TaskResult(
-                    status="failed",
-                    summary=f"scripted target not found: {e}",
-                    failure_reason=f"scripted target did not resolve: {e}",
-                    policy_mode=_policy_mode(deps),
-                )
-                _CURRENT_DEPS = None
+            planned = await _plan_step(deps, turn, agent)
+            if planned is None:
+                # deps.result is set; skip the rest of this step.
                 continue
-            except UserError as e:
-                # Convert "Unknown model" failures to a model_not_found
-                # TaskResult. The next iteration's abort gate returns it.
-                if "Unknown model" in str(e):
-                    deps.result = _make_model_not_found_result(
-                        provider=cfg.provider, model_id=cfg.model, deps=deps,
-                    )
-                    _CURRENT_DEPS = None
-                    continue
-                # pydantic-ai auto-detect failures on bare model names —
-                # raise with a hint that names the fix without hard-coding.
-                raise UserError(
-                    f"{e}. Set AGENT_MODEL to '<provider>:<model>' "
-                    f"to route to the correct provider."
-                ) from e
-            except ModelHTTPError as http_err:
-                # 401 / 403 → auth_failed. Don't echo any key in the summary.
-                if http_err.status_code in (401, 403):
-                    deps.result = _make_auth_failed_result(
-                        provider=cfg.provider, deps=deps,
-                    )
-                    _CURRENT_DEPS = None
-                    continue
-                raise
-            finally:
-                # _turn_to_prompt reads _CURRENT_DEPS for the secure-mode
-                # preamble; clear it after the call so it doesn't leak
-                # across tasks (the loop is sequential but the value
-                # outlives this iteration otherwise).
-                _CURRENT_DEPS = None
+            decision, context_window, result = planned
             timings["model_plan"] += time.perf_counter() - t_plan
             actions_summary = ", ".join(f"{c.action}" for c in decision.actions) or "(none)"
             log.info("[%s] step %d  actions=[%s]", deps.user_id, step, actions_summary)
