@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from brotto_orchestrator.model.config import UserCredentials
-from brotto_orchestrator.model.registry import AnthropicFactory
+from brotto_orchestrator.model.registry import AnthropicFactory, OpenAIFactory
 
 
 def test_anthropic_factory_default_models_nonempty():
@@ -43,3 +43,25 @@ def test_anthropic_factory_falls_back_to_default_base_url():
     model = f.build("MiniMax-M3", UserCredentials(api_key="sk-test", base_url=None))
     assert isinstance(model, AnthropicModel)
     assert str(model._provider.base_url).rstrip("/") == "https://default.example"
+
+
+def test_openai_factory_default_models_nonempty():
+    f = OpenAIFactory()
+    models = f.default_models()
+    assert len(models) >= 1
+    for mid, ctx in models:
+        assert isinstance(mid, str) and mid
+        assert ctx > 0
+
+
+def test_openai_factory_build_returns_openai_model():
+    from pydantic_ai.models.openai import OpenAIChatModel
+    f = OpenAIFactory()
+    model = f.build("gpt-4o", UserCredentials(api_key="sk-test", base_url=None))
+    assert isinstance(model, OpenAIChatModel)
+
+
+def test_openai_factory_rejects_unknown_model():
+    f = OpenAIFactory()
+    assert f.validate_model_id("gpt-4o") is True
+    assert f.validate_model_id("definitely-not-a-real-model-xyz") is False
