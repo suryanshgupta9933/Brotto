@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic_ai.models import Model
 
 from brotto_orchestrator.model.config import UserCredentials
 
 
+@runtime_checkable
 class ProviderFactory(Protocol):
     def build(self, model_id: str, creds: UserCredentials) -> Model: ...
     def default_models(self) -> list[tuple[str, int]]: ...
@@ -71,3 +72,10 @@ class OpenAIFactory:
             kwargs["base_url"] = base_url
         provider = OpenAIProvider(**kwargs)  # type: ignore[arg-type]
         return OpenAIChatModel(model_id, provider=provider)
+
+
+PROVIDER_REGISTRY: dict[str, ProviderFactory] = {
+    "anthropic": AnthropicFactory(),
+    "openai": OpenAIFactory(),
+    "minimax": AnthropicFactory(default_base_url="https://api.minimax.io/anthropic"),
+}

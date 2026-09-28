@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from brotto_orchestrator.model.config import UserCredentials
-from brotto_orchestrator.model.registry import AnthropicFactory, OpenAIFactory
+from brotto_orchestrator.model.registry import AnthropicFactory, OpenAIFactory, PROVIDER_REGISTRY
 
 
 def test_anthropic_factory_default_models_nonempty():
@@ -65,3 +65,19 @@ def test_openai_factory_rejects_unknown_model():
     f = OpenAIFactory()
     assert f.validate_model_id("gpt-4o") is True
     assert f.validate_model_id("definitely-not-a-real-model-xyz") is False
+
+
+def test_provider_registry_has_three_entries():
+    assert set(PROVIDER_REGISTRY) == {"anthropic", "openai", "minimax"}
+
+
+def test_minimax_uses_anthropic_factory_with_minimax_base_url():
+    f = PROVIDER_REGISTRY["minimax"]
+    assert isinstance(f, AnthropicFactory)
+    assert f.default_base_url == "https://api.minimax.io/anthropic"
+
+
+def test_provider_registry_returns_factory_for_known_provider():
+    from brotto_orchestrator.model.registry import ProviderFactory
+    f = PROVIDER_REGISTRY["anthropic"]
+    assert isinstance(f, ProviderFactory)
