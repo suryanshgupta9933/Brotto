@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Brotto fixture — popup</title></head>
+<body>
+  <h1>Sign in</h1>
+  <form id="login" onsubmit="event.preventDefault();enter()">
+    <label for="u">Email</label><input id="u" type="email">
+    <label for="p">Password</label><input id="p" type="password">
+    <button type="submit">Sign in</button>
+  </form>
+  <div id="app"></div>
+  <script>
+    function enter() {
+      document.getElementById('app').innerHTML =
+        '<h2>Settings</h2><button>Delete account</button>';
+      const back = document.createElement('div');
+      back.setAttribute('role', 'dialog');
+      back.setAttribute('aria-label', 'Cookie notice');
+      back.style.cssText = 'position:fixed;inset:0;background:#0008;display:flex;' +
+        'align-items:center;justify-content:center';
+      back.innerHTML = '<div style="background:#fff;padding:24px">' +
+        '<p>We use cookies.</p><button aria-label="Accept">Accept</button></div>';
+      document.body.appendChild(back);
+    }
+  </script>
+</body></html>
