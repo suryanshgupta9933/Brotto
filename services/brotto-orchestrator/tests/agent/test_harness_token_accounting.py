@@ -135,3 +135,35 @@ def test_log_timings_reports_zero_tokens_when_none_passed():
     out = AgentHarness._log_timings("u", {b: 0.0 for b in TIMING_BUCKETS}, steps=0, wall=0.0)
     assert out["tokens_in"] == 0
     assert out["tokens_out"] == 0
+
+
+def test_every_run_return_site_stamps_final_url():
+    """A new return path in run() that forgets `final_url` would silently
+    report the task's start URL as where it ended.
+
+    Completeness check over the exits of `run()`, not a behaviour test: a new
+    exit must either stamp the field or be listed here deliberately.
+    """
+    import ast
+    import inspect
+
+    import brotto_orchestrator.agent.harness as harness_mod
+
+    src = inspect.getsource(harness_mod.AgentHarness.run)
+    lines = src.splitlines()
+    tree = ast.parse(src.lstrip())
+    unstamped = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        if "final_url" in (ast.get_source_segment(src.lstrip(), node) or ""):
+            continue
+        if "deps.result" in (ast.get_source_segment(src.lstrip(), node) or ""):
+            # `return deps.result` — the stamp must appear above it, in the
+            # same block, not somewhere else in the method.
+            head = "\n".join(lines[max(0, node.lineno - 8) : node.lineno - 1])
+            if "deps.result.final_url" not in head:
+                unstamped.append(f"line {node.lineno}: return deps.result")
+        else:
+            unstamped.append(f"line {node.lineno}: {(ast.get_source_segment(src.lstrip(), node) or '')[:60]}")
+    assert not unstamped, f"return sites missing final_url: {unstamped}"

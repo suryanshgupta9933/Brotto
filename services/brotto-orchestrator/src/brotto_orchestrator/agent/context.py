@@ -155,6 +155,10 @@ class AgentDeps:
     step_summaries: list[StepSummary] = field(default_factory=list)
     step_number: int = 0
     result: TaskResult | None = None
+    # URL observed at the top of the current step, before its actions run.
+    # Read by the click cross-domain gate and stamped onto TaskResult.
+    # final_url as "where the task ended up" — see TaskResult.final_url.
+    step_url: str = ""
     prev_targets: list = field(default_factory=list)  # AX targets from previous step for diffing
     policy: object = None  # Policy (services/brotto_orchestrator/policy/schema.Policy). Lazy import.
     # Test/dev only: a brotto_orchestrator.testing.ScriptedPlanner that

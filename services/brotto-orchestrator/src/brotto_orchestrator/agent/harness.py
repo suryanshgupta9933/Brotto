@@ -817,6 +817,8 @@ class AgentHarness:
                 summary="CDP not healthy at task start",
                 failure_reason="cdp_preflight_failed",
                 policy_mode=_policy_mode(deps),
+                # Pre-observe: no URL was ever observed, so this is "".
+                final_url=deps.step_url,
             )
 
         if not deps.task_id:
@@ -857,10 +859,10 @@ class AgentHarness:
                     tokens=tokens,
                 )
                 # deps.step_url is the URL observed at the top of the last
-                # step this loop entered — pre-step, not post-action. The
-                # abort gate at the top of the loop can return before any
-                # observe, hence the getattr (same defensive read as :484).
-                deps.result.final_url = getattr(deps, "step_url", "") or ""
+                # step this loop entered — pre-step, not post-action. It is
+                # "" until the first observe, which is what the abort gate
+                # can return on.
+                deps.result.final_url = deps.step_url
                 return deps.result
 
             steps_run += 1
@@ -910,6 +912,7 @@ class AgentHarness:
                         steps_taken=steps_run,
                         timing=timing_report,
                         policy_mode=_policy_mode(deps),
+                        final_url=deps.step_url,
                     )
 
             # Guardrail: login detection
@@ -936,6 +939,7 @@ class AgentHarness:
                         failure_reason="user_skipped_login",
                         timing=timing_report,
                         policy_mode=_policy_mode(deps),
+                        final_url=deps.step_url,
                     )
                 # reply == "resume" (or anything else): loop continues,
                 # next step re-runs check_login_page to confirm we're out.
@@ -1273,10 +1277,10 @@ class AgentHarness:
                     tokens=tokens,
                 )
                 # deps.step_url is the URL observed at the top of the last
-                # step this loop entered — pre-step, not post-action. The
-                # abort gate at the top of the loop can return before any
-                # observe, hence the getattr (same defensive read as :484).
-                deps.result.final_url = getattr(deps, "step_url", "") or ""
+                # step this loop entered — pre-step, not post-action. It is
+                # "" until the first observe, which is what the abort gate
+                # can return on.
+                deps.result.final_url = deps.step_url
                 return deps.result
 
         timing_report = self._log_timings(

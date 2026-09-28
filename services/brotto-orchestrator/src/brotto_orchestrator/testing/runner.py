@@ -131,6 +131,6 @@ async def run_task(
         task_id=task_id, fixture=fixture_name, result=result,
         # Real observed URL; start_url is the honest floor for a task that
         # reported none (harness aborts before its first observe).
-        final_url=body.get("final_url") or result.final_url or start_url,
+        final_url=result.final_url or start_url,
         approval_requested=False,
     )
