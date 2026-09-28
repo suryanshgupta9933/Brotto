@@ -48,12 +48,16 @@ if ($modelSave) {
     const model = $modelName.value;
     const catalog = MODEL_CATALOG[provider] || [];
     const ctx = catalog.find((e) => e.model === model)?.context_window;
-    await chrome.storage.local.set({
-      modelConfig: {
-        model_config: { provider, model, context_window: ctx },
-        api_key: $modelKey.value.trim() || null,
-      },
-    });
+    // model_config → chrome.storage.local (persists).
+    // api_key → chrome.storage.session (in-memory; cleared on browser restart).
+    await Promise.all([
+      chrome.storage.local.set({
+        modelConfig: { provider, model, context_window: ctx },
+      }),
+      $modelKey.value.trim()
+        ? chrome.storage.session.set({ modelApiKey: $modelKey.value.trim() })
+        : chrome.storage.session.remove('modelApiKey'),
+    ]);
     if ($modelStatus) {
       $modelStatus.textContent = 'Saved.';
       setTimeout(() => { $modelStatus.textContent = ''; }, 2000);
@@ -70,6 +74,8 @@ async function hydrateModelSettings() {
     populateModelOptions();
     $modelName.value = v.model_config.model;
   }
+  // Don't re-hydrate the API key field — it's in chrome.storage.session
+  // and we deliberately don't surface it in the UI (no plaintext display).
 }
 hydrateModelSettings();
 
