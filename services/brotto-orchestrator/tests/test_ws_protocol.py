@@ -271,3 +271,31 @@ def test_separate_sessions_have_independent_trackers(agent_disabled):
             }))
             wsB.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(wsB, "pong") == {"type": "pong"}
+
+
+def test_task_start_parses_with_model_config():
+    from brotto_orchestrator.contracts import TaskStart
+    msg = TaskStart.model_validate(
+        {
+            "type": "task_start",
+            "goal": "search for cats",
+            "model_config": {
+                "provider": "minimax",
+                "model": "MiniMax-M3",
+                "context_window": 1000000,
+            },
+            "api_key": "sk-test",
+        }
+    )
+    assert msg.model_cfg is not None
+    assert msg.model_cfg.provider == "minimax"
+    assert msg.model_cfg.model == "MiniMax-M3"
+    assert msg.api_key == "sk-test"
+    assert msg.remember_key is False
+
+
+def test_task_start_parses_without_model_config():
+    from brotto_orchestrator.contracts import TaskStart
+    msg = TaskStart.model_validate({"type": "task_start", "goal": "search for cats"})
+    assert msg.model_cfg is None
+    assert msg.api_key is None
