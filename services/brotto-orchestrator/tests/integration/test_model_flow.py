@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from brotto_orchestrator.contracts import ModelConfigWire, TaskStart
+from brotto_orchestrator.model.config import ModelConfig, UserCredentials
+from brotto_orchestrator.model.resolver import resolve_model_config
+from brotto_orchestrator.model.store import (
+    BROTTO_USER_MODEL_DIR_ENV,
+    load_user_config,
+    save_user_config,
+)
+
+
+@pytest.fixture
+def tmp_model_dir(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv(BROTTO_USER_MODEL_DIR_ENV, str(tmp_path))
+    return tmp_path
+
+
+def test_task_start_with_inline_model_config_round_trips():
+    msg = TaskStart(
+        goal="search",
+        model_cfg=ModelConfigWire(provider="minimax", model="MiniMax-M3", context_window=1_000_000),
+        api_key="sk-test",
+    )
+    assert msg.model_cfg.provider == "minimax"
+    assert msg.api_key == "sk-test"
+
+
+def test_remember_key_saves_per_user_config(tmp_model_dir: Path):
+    msg = TaskStart(
+        goal="search",
+        model_cfg=ModelConfigWire(provider="minimax", model="MiniMax-M3", context_window=1_000_000),
+        api_key="sk-test",
+        remember_key=True,
+        client_ip="10.0.0.1",
+    )
+    if msg.remember_key and msg.model_cfg and msg.client_ip:
+        cfg = ModelConfig(
+            provider=msg.model_cfg.provider,
+            model=msg.model_cfg.model,
+            context_window=msg.model_cfg.context_window or 400_000,
+        )
+        save_user_config(msg.client_ip, cfg)
+    loaded = load_user_config("10.0.0.1")
+    assert loaded is not None
+    assert loaded.provider == "minimax"
+
+
+@pytest.mark.asyncio
+async def test_inline_task_start_routes_to_resolver(monkeypatch, tmp_path):
+    """End-to-end: inline task_start with model_config + api_key. Resolver
+    should pick the inline tier and produce a Model."""
+    inline = ModelConfig(provider="minimax", model="MiniMax-M3", context_window=1_000_000)
+    creds = UserCredentials(api_key="sk-test", base_url=None)
+    cfg, got_creds = resolve_model_config("127.0.0.1", inline, creds)
+    assert cfg == inline
+    assert got_creds == creds
+
+
+@pytest.mark.asyncio
+async def test_old_task_start_without_model_config_falls_back_to_env(monkeypatch, tmp_path):
+    """Backward compat: no model_config on task_start must still work when
+    AGENT_MODEL env var is set."""
+    monkeypatch.setenv("BROTTO_USER_MODEL_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_MODEL", "anthropic:MiniMax-M3")
+    monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", "1000000")
+
+    cfg, _ = resolve_model_config("127.0.0.1", None, None)
+    assert cfg.provider == "anthropic"
+    assert cfg.model == "MiniMax-M3"
+
+
+@pytest.mark.asyncio
+async def test_resolved_context_window_propagates_to_model_config(monkeypatch):
+    """CONTEXT cell guard: resolver returns the right context_window
+    so the side-panel renders the correct percentage."""
+    monkeypatch.setenv("AGENT_MODEL", "minimax:MiniMax-M3")
+    monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", "1000000")
+
+    cfg, _ = resolve_model_config("127.0.0.1", None, None)
+    assert cfg.context_window == 1_000_000, "side-panel CONTEXT cell will render wrong %"
