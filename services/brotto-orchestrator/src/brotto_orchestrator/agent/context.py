@@ -137,6 +137,11 @@ class AgentDeps:
     result: TaskResult | None = None
     prev_targets: list = field(default_factory=list)  # AX targets from previous step for diffing
     policy: object = None  # Policy (services/brotto_orchestrator/policy/schema.Policy). Lazy import.
+    # Test/dev only: a brotto_orchestrator.testing.ScriptedPlanner that
+    # replaces agent.run() so perception and action work can be exercised
+    # with no model, no key, and no network. Typed loosely to keep the
+    # production package free of a dependency on testing/.
+    scripted_planner: object = None
     # (etld1, action_type) tuples seen this session — used to gate the
     # first-time-seen prompt so it fires once per pair. Added on both
     # approve AND deny: on deny, the task is aborted anyway, but if a

@@ -686,6 +686,18 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
         return f"Error executing {action}: {e}"
 
 
+def _scripted_decision(deps: AgentDeps, turn: AgentTurn) -> AgentDecision | None:
+    """Return a scripted decision, or None to use the model as normal.
+
+    Kept as a separate function so the branch is unit-testable without
+    driving the full observe→plan→act loop.
+    """
+    planner = getattr(deps, "scripted_planner", None)
+    if planner is None:
+        return None
+    return planner.next(turn)
+
+
 class AgentHarness:
     MAX_STEPS = 30
     STAGNATION_WINDOW = 3
@@ -862,7 +874,13 @@ class AgentHarness:
                 # AGENT_MODEL="test" is a pydantic-ai sentinel for TestModel;
                 # bypass the resolver's env-fallback (which would reject "test")
                 # by reading the env var directly for context_window only.
-                if os.getenv("AGENT_MODEL") == "test":
+                scripted = _scripted_decision(deps, turn)
+                if scripted is not None:
+                    # Test/dev path: no model, no key, no network. result is
+                    # left None so the shared assignment below stays valid.
+                    context_window = _CONTEXT_WINDOW_TOKENS
+                    result = None
+                elif os.getenv("AGENT_MODEL") == "test":
                     context_window = _CONTEXT_WINDOW_TOKENS
                     result = await agent.run(_turn_to_prompt(turn), deps=deps)
                 else:
@@ -883,7 +901,21 @@ class AgentHarness:
                         )
                     _per_task_model = factory.build(cfg.model, creds)
                     result = await agent.run(_turn_to_prompt(turn), deps=deps, model=_per_task_model)
-                decision: AgentDecision = result.output
+                decision: AgentDecision = (
+                    scripted if scripted is not None else result.output
+                )
+            except LookupError as e:
+                # A scripted ref that will not resolve means the target the
+                # script asked for is not in the AX tree the agent sees —
+                # that is the Wave 0 gap itself, not an infrastructure fault.
+                deps.result = TaskResult(
+                    status="failed",
+                    summary=f"scripted target not found: {e}",
+                    failure_reason=f"scripted target did not resolve: {e}",
+                    policy_mode=_policy_mode(deps),
+                )
+                _CURRENT_DEPS = None
+                continue
             except UserError as e:
                 # Convert "Unknown model" failures to a model_not_found
                 # TaskResult. The next iteration's abort gate returns it.
