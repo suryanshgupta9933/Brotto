@@ -25,13 +25,14 @@ class Outcome(str, Enum):
 # The wave each outcome points at, using the spec's own labels
 # (docs/superpowers/specs/2026-09-28-measurement-spine-design.md). The id is
 # a comma/span string, not a single wave, where the spec lists more than one —
-# collapsing 2A-2E to "2" would destroy the resolution that makes the tally
-# usable as a work order.
+# collapsing 2A–2E to "2" would destroy the resolution that makes the tally
+# usable as a work order. Labels are copied from the spec verbatim, punctuation
+# included, so drift between code and spec shows up as a test failure.
 WAVE_BY_OUTCOME: dict[Outcome, str] = {
     Outcome.PASS: "-",
     Outcome.PERCEPTION_FAILURE: "0A",
     Outcome.ACTION_FAILURE: "1A/1B/1C",
-    Outcome.RECOVERY_FAILURE: "2A-2E",
+    Outcome.RECOVERY_FAILURE: "2A–2E",
     Outcome.LOGIN_FAILURE: "2E, 3A",
     Outcome.BUDGET_EXHAUSTED: "5C",
     Outcome.HARNESS_ERROR: "0C",

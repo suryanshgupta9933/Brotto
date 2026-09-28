@@ -93,7 +93,7 @@ def test_every_outcome_maps_to_a_wave():
         OUTCOMES.PASS: "-",
         OUTCOMES.PERCEPTION_FAILURE: "0A",
         OUTCOMES.ACTION_FAILURE: "1A/1B/1C",
-        OUTCOMES.RECOVERY_FAILURE: "2A-2E",
+        OUTCOMES.RECOVERY_FAILURE: "2A–2E",
         OUTCOMES.LOGIN_FAILURE: "2E, 3A",
         OUTCOMES.BUDGET_EXHAUSTED: "5C",
         OUTCOMES.HARNESS_ERROR: "0C",
@@ -145,8 +145,12 @@ def test_cdp_preflight_failed_is_harness_error():
 
 
 def test_max_steps_exceeded_is_budget_exhausted():
-    """harness.py:1267 emits `max_steps_exceeded` with steps_taken=MAX_STEPS."""
-    assert classify(_failed("max_steps_exceeded", steps=30)) \
+    """harness.py:1267 emits `max_steps_exceeded` with steps_taken=MAX_STEPS.
+
+    steps=0 so the name alone decides — at steps=30 the max_steps fallback
+    would satisfy this and the needle would go unpinned.
+    """
+    assert classify(_failed("max_steps_exceeded", steps=0)) \
         == OUTCOMES.BUDGET_EXHAUSTED
 
 
