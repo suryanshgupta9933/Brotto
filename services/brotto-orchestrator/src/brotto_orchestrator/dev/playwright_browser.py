@@ -97,7 +97,10 @@ class PlaywrightBrowser(BrowserInterface):
 
         try:
             cdp_session = await self.page.context.new_cdp_session(self.page)
-            targets = await AXTreeExtractor.extract_targets(cdp_session, max_targets=50)
+            # Not the perception budget — agent/ax_filter.py's MAX_CHARS=6000
+            # is, and it must be what the benchmark trips. A cap low enough to
+            # bite first turns every large-page fixture into a lookup miss.
+            targets = await AXTreeExtractor.extract_targets(cdp_session, max_targets=2000)
             return targets
         except Exception as e:
             print(f"Warning: Failed to extract targets via CDP: {e}")
