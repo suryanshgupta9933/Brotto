@@ -20,6 +20,9 @@ from .agent.harness import AgentHarness
 from .cdp.relay import CDPRelay
 from .cdp.extension_relay import ExtensionCDPRelay
 from .cdp.watchdog import CDPWatchdog
+from .model.config import ModelConfig
+from .model.registry import PROVIDER_REGISTRY
+from .model.store import save_user_config
 from .session.auth import validate_token
 from .session.observation_validator import validate_observation
 from .session.registry import SessionRegistry
@@ -309,6 +312,40 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     # finally agree.
     client_host = websocket.client.host if websocket.client else "unknown"
 
+    # Parse per-task model config (BYOK) from task_start. Additive — older
+    # extension builds that don't send these still work via env-var fallback.
+    model_cfg_payload = msg.get("model_config")
+    api_key = msg.get("api_key")
+    remember_key = bool(msg.get("remember_key", False))
+
+    parsed_model_cfg = None
+    if isinstance(model_cfg_payload, dict):
+        provider_name = model_cfg_payload.get("provider", "")
+        if provider_name not in PROVIDER_REGISTRY:
+            log.warning("[%s] unknown provider %r — closing", session_id, provider_name)
+            await ws_send({
+                "type": "task_failed",
+                "failure_reason": "model_not_found",
+                "summary": f"Unknown provider: {provider_name}",
+            })
+            await websocket.close(code=4000)
+            return
+        try:
+            parsed_model_cfg = ModelConfig(
+                provider=provider_name,
+                model=str(model_cfg_payload.get("model", "")),
+                context_window=int(model_cfg_payload.get("context_window") or 400_000),
+            )
+        except (ValueError, TypeError) as e:
+            log.warning("[%s] invalid model_config in task_start: %s", session_id, e)
+            parsed_model_cfg = None
+
+        if remember_key and parsed_model_cfg is not None:
+            try:
+                save_user_config(client_host, parsed_model_cfg)
+            except OSError as e:
+                log.warning("[%s] failed to persist user config: %s", session_id, e)
+
     # Merge floor + user policy. Server floor wins on mode; lists union.
     user_policy_payload = msg.get("user_policy")
     user_policy: Policy | None = None
@@ -336,6 +373,9 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         ws_send=ws_send,
         policy=effective_policy,
         human_input_queue=human_queue,
+        model_config=parsed_model_cfg,
+        api_key=api_key,
+        client_ip=client_host,
     )
 
     agent_task = asyncio.create_task(harness.run(deps))
