@@ -111,7 +111,7 @@ _CURRENT_DEPS: AgentDeps | None = None
 _TEST_DEPS: AgentDeps | None = None
 
 
-def _build_context(tokens: int | None) -> dict:
+def _build_context(tokens: int | None, window: int | None = None) -> dict:
     """Build the context payload the side panel renders.
 
     The cell shows `pct` (and tooltip `tokens` / `window`) — all math
@@ -119,11 +119,18 @@ def _build_context(tokens: int | None) -> dict:
     when the model hasn't been called yet (e.g. before step 1); we
     return null pct so the cell shows "0%" via the frontend's
     null-tokens branch.
+
+    `window` is the per-task context_window (resolved via ModelConfig).
+    When None, falls back to the env var default. The fallback reads
+    os.getenv fresh (not the module-level capture) so monkeypatch-based
+    tests can vary it per test.
     """
+    if window is None:
+        window = int(os.getenv("CONTEXT_WINDOW_TOKENS", "400000"))
     if tokens is None or tokens < 0:
-        return {"tokens": None, "window": _CONTEXT_WINDOW_TOKENS, "pct": None}
-    pct = round((tokens / _CONTEXT_WINDOW_TOKENS) * 100, 1) if _CONTEXT_WINDOW_TOKENS else 0
-    return {"tokens": tokens, "window": _CONTEXT_WINDOW_TOKENS, "pct": pct}
+        return {"tokens": None, "window": window, "pct": None}
+    pct = round((tokens / window) * 100, 1) if window else 0
+    return {"tokens": tokens, "window": window, "pct": pct}
 
 
 def _build_agent() -> Agent[AgentDeps, AgentDecision]:
@@ -830,10 +837,13 @@ class AgentHarness:
             log.debug("[%s] calling model...", deps.user_id)
             _CURRENT_DEPS = deps
             try:
-                # AGENT_MODEL="test" is a pydantic-ai sentinel that tells the
-                # Agent to use TestModel. Bypass the resolver entirely in that
-                # case — dev/test only; never set in production.
+                # Resolve model_config first so we have context_window for the
+                # CONTEXT cell regardless of which branch below runs.
+                # AGENT_MODEL="test" is a pydantic-ai sentinel for TestModel;
+                # bypass the resolver's env-fallback (which would reject "test")
+                # by reading the env var directly for context_window only.
                 if os.getenv("AGENT_MODEL") == "test":
+                    context_window = _CONTEXT_WINDOW_TOKENS
                     result = await agent.run(_turn_to_prompt(turn), deps=deps)
                 else:
                     cfg, creds = resolve_model_config(
@@ -845,6 +855,7 @@ class AgentHarness:
                             else None
                         ),
                     )
+                    context_window = cfg.context_window
                     factory = PROVIDER_REGISTRY[cfg.provider]
                     if not factory.validate_model_id(cfg.model):
                         raise UserError(
@@ -1060,7 +1071,7 @@ class AgentHarness:
                 tokens_used = usage.input_tokens if usage else None
             except Exception:
                 tokens_used = None
-            context = _build_context(tokens_used)
+            context = _build_context(tokens_used, window=context_window)
             external = [c for c in decision.actions if c.action not in _INTERNAL_ACTIONS]
             if external:
                 actions_payload = [

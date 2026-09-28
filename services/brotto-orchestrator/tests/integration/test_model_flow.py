@@ -83,3 +83,26 @@ async def test_resolved_context_window_propagates_to_model_config(monkeypatch):
 
     cfg, _ = resolve_model_config("127.0.0.1", None, None)
     assert cfg.context_window == 1_000_000, "side-panel CONTEXT cell will render wrong %"
+
+
+def test_build_context_uses_resolved_window_when_provided(monkeypatch):
+    """Per-task context_window must drive the CONTEXT cell, not the
+    module-level env var."""
+    monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", "99999")  # would be wrong
+    from brotto_orchestrator.agent.harness import _build_context
+    # Use the resolved window (1M for MiniMax-M3), not the env-set 99999
+    payload = _build_context(tokens=50_000, window=1_000_000)
+    assert payload["window"] == 1_000_000
+    assert payload["tokens"] == 50_000
+    assert payload["pct"] == 5.0  # 50k / 1M = 5%
+
+
+def test_build_context_falls_back_to_env_when_window_is_none(monkeypatch):
+    """When the caller passes window=None, fall back to env default.
+    This preserves the existing behavior for callers that haven't been
+    updated yet (defense in depth — main flow passes the resolved window)."""
+    monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", "200000")
+    from brotto_orchestrator.agent.harness import _build_context
+    payload = _build_context(tokens=10_000, window=None)
+    assert payload["window"] == 200_000
+    assert payload["pct"] == 5.0
