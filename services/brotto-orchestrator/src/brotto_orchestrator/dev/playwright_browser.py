@@ -203,7 +203,7 @@ class PlaywrightBrowser(BrowserInterface):
             else:
                 return {
                     "ok": False,
-                    "error": "No coordinates or backend_node_id for target",
+                    "error": "No coordinates on target's box model",
                     "action_type": "left_click",
                 }
 
@@ -250,7 +250,7 @@ class PlaywrightBrowser(BrowserInterface):
             else:
                 return {
                     "ok": False,
-                    "error": "No selector for target",
+                    "error": "No coordinates on target's box model",
                     "action_type": "insert_text",
                 }
 

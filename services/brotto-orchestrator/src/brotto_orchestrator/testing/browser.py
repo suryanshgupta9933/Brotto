@@ -12,7 +12,7 @@ from playwright.async_api import BrowserContext, async_playwright
 
 @contextlib.asynccontextmanager
 async def brotto_browser(
-    *, extension_dir: str, headless: bool = True
+    *, extension_dir: str, headless: bool = False
 ) -> AsyncIterator[BrowserContext]:
     """Launch Chrome with the extension and a throwaway profile.
 

@@ -54,6 +54,17 @@ def test_load_fixture_rejects_unknown():
         load_fixture("auth-nope")
 
 
+def test_every_fixture_builds_a_script():
+    """A fixture with no script can only ever record HARNESS_ERROR.
+
+    Lives here, not in the BROTTO_E2E-gated harness file: building a planner
+    needs no browser, so a skip-gated copy of this never ran.
+    """
+    from brotto_orchestrator.testing.scripts import get_script
+    for f in FIXTURES:
+        assert get_script(f.name).steps, f.name
+
+
 def test_server_serves_every_fixture():
     """The catalogue tests read files off disk; only this one proves the server
     resolves WEB_ROOT and answers. A wrong WEB_ROOT passes all of them."""

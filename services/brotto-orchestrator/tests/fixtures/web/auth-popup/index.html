@@ -18,8 +18,15 @@
       back.style.cssText = 'position:fixed;inset:0;background:#0008;display:flex;' +
         'align-items:center;justify-content:center';
       back.innerHTML = '<div style="background:#fff;padding:24px">' +
-        '<p>We use cookies.</p><button aria-label="Accept">Accept</button></div>';
+        '<p>We use cookies.</p><button aria-label="Accept" onclick="dismiss()">Accept</button></div>';
       document.body.appendChild(back);
+    }
+    // The obstacle has to be real, or the fixture measures nothing: without a
+    // handler the overlay stays in the DOM, swallows the next coordinate click,
+    // and the run records a PASS having never reached the button behind it.
+    function dismiss() {
+      const d = document.querySelector('[role=dialog]');
+      if (d) d.remove();
     }
   </script>
 </body></html>
