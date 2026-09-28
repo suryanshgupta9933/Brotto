@@ -10,6 +10,12 @@ from typing import Callable, Coroutine, Any
 
 import logging
 
+# Falls back to ANTHROPIC_AUTH_TOKEN so Claude Code-style setups (Token Plan
+# / proxy auth) work without a second env var. pydantic-ai's AnthropicModel
+# only reads ANTHROPIC_API_KEY, so we propagate before Agent construction.
+if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
+    os.environ["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_AUTH_TOKEN"]
+
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 
