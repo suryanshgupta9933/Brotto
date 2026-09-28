@@ -25,7 +25,7 @@ import socket
 import urllib.request
 
 from brotto_orchestrator.testing.fixtures import FIXTURES, IFRAME_PORT, MAIN_PORT, load_fixture
-from brotto_orchestrator.testing.outcome import WAVE_BY_OUTCOME, Outcome, rank
+from brotto_orchestrator.testing.outcome import WAVE_BY_OUTCOME, Outcome
 from brotto_orchestrator.testing.records import TaskRecord
 from brotto_orchestrator.testing.runner import run_task
 from brotto_orchestrator.testing.server import serve_fixtures, serve_iframe_origin
@@ -98,7 +98,18 @@ async def _run(names: list[str]) -> list[TaskRecord]:
 
 
 def _check(records: list[TaskRecord], baseline_path: pathlib.Path = BASELINE) -> int:
-    """Exit 1 if any fixture is worse than its recorded baseline."""
+    """Exit 1 on a regression. The rule is deliberately narrow.
+
+    A fixture regresses when it *was* PASS and no longer is, when it is now
+    BUDGET_EXHAUSTED or HARNESS_ERROR (the run stopped producing evidence),
+    or when the same outcome class now fails earlier than it did.
+
+    Every other transition — including every failure-class change — is
+    movement, and movement is the point: closing a perception gap moves a
+    fixture from PERCEPTION_FAILURE to ACTION_FAILURE, and a rank net told
+    the next engineer to revert that. Known blind spots are in
+    tests/fixtures/README.md.
+    """
     if not baseline_path.is_file():
         log.error("no baseline at %s — record one before using --check", baseline_path)
         return 1
@@ -106,6 +117,7 @@ def _check(records: list[TaskRecord], baseline_path: pathlib.Path = BASELINE) ->
         r["fixture"]: r
         for r in json.loads(baseline_path.read_text())["records"]
     }
+    no_evidence = (Outcome.BUDGET_EXHAUSTED.value, Outcome.HARNESS_ERROR.value)
     regressions = 0
     for rec in records:
         was_row = baseline.get(rec.fixture)
@@ -113,29 +125,29 @@ def _check(records: list[TaskRecord], baseline_path: pathlib.Path = BASELINE) ->
             log.warning("%-16s no baseline entry", rec.fixture)
             continue
         was = was_row["outcome"]
-        if rank(rec.outcome.value) > rank(was):
-            log.error("REGRESSION %-16s %s → %s", rec.fixture, was, rec.outcome.value)
-            regressions += 1
-            continue
+        now = rec.outcome.value
         was_steps = (was_row.get("timing") or {}).get("steps")
         now_steps = (rec.timing or {}).get("steps")
-        if (
-            rank(rec.outcome.value) == rank(was)
+        if (was == Outcome.PASS.value and now != Outcome.PASS.value) or now in no_evidence:
+            log.error("REGRESSION %-16s %s → %s", rec.fixture, was, now)
+            regressions += 1
+        elif (
+            now == was
             and rec.outcome is not Outcome.PASS
             and was_steps is not None
             and now_steps is not None
             and now_steps < was_steps
         ):
             # Same severity, fewer steps: the failure moved earlier in the task
-            # (e.g. the login button stopped resolving), which rank alone
-            # cannot see.
+            # (e.g. the login button stopped resolving), which the outcome
+            # class alone cannot see.
             log.error(
                 "REGRESSION %-16s %s at step %s, was %s",
-                rec.fixture, rec.outcome.value, now_steps, was_steps,
+                rec.fixture, now, now_steps, was_steps,
             )
             regressions += 1
-        elif rank(rec.outcome.value) < rank(was):
-            log.info("improved    %-16s %s → %s", rec.fixture, was, rec.outcome.value)
+        else:
+            log.info("movement    %-16s %s → %s", rec.fixture, was, now)
     return 1 if regressions else 0
 
 

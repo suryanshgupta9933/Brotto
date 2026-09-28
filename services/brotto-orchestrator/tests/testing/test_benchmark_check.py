@@ -48,6 +48,30 @@ def test_improvement_exits_0(tmp_path):
     assert _check([_record("auth-inbox", Outcome.PASS, 6)], baseline) == 0
 
 
+def test_failure_class_change_is_movement_not_regression(tmp_path):
+    """The rule the old rank net got backwards.
+
+    Wave 0 exists to close perception gaps. A fixture that moves
+    PERCEPTION_FAILURE → ACTION_FAILURE got a ref to resolve and an action
+    dispatched; exiting 1 on that tells the next engineer to revert correct
+    work.
+    """
+    baseline = tmp_path / "baseline.json"
+    _baseline(baseline, [("auth-iframe", Outcome.PERCEPTION_FAILURE, 4)])
+    assert _check([_record("auth-iframe", Outcome.ACTION_FAILURE, 4)], baseline) == 0
+
+
+def test_no_evidence_is_a_regression(tmp_path):
+    """HARNESS_ERROR produced no measurement; BUDGET_EXHAUSTED stopped the run.
+
+    Neither is a perception change, so neither may read as one.
+    """
+    for outcome in (Outcome.HARNESS_ERROR, Outcome.BUDGET_EXHAUSTED):
+        baseline = tmp_path / f"{outcome.value}.json"
+        _baseline(baseline, [("auth-inbox", Outcome.PERCEPTION_FAILURE, 4)])
+        assert _check([_record("auth-inbox", outcome, 4)], baseline) == 1, outcome
+
+
 def test_unchanged_exits_0(tmp_path):
     baseline = tmp_path / "baseline.json"
     _baseline(baseline, [("auth-inbox", Outcome.PERCEPTION_FAILURE, 4)])
