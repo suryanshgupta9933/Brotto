@@ -24,7 +24,9 @@ if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
 # .env, AGENT_MODEL, etc.) and raises "no model configuration" if
 # nothing resolves.
 if os.getenv("BROTTO_ENV", "dev") == "dev":
-    os.environ.setdefault("AGENT_MODEL", "anthropic:MiniMax-M3")
+    # Token Plan covers MiniMax-M3.1-Flash-Preview. M3 is pay-as-you-go and
+    # returns 402 insufficient_balance for Token Plan users.
+    os.environ.setdefault("AGENT_MODEL", "anthropic:MiniMax-M3.1-Flash-Preview")
     os.environ.setdefault("CONTEXT_WINDOW_TOKENS", "1000000")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
