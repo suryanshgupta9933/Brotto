@@ -126,6 +126,10 @@ class AgentDeps:
     cdp: object  # CDPRelay
     ws_send: object  # async callable: (dict) -> None
     task_id: str = ""  # set by harness for run logging
+    # Per-task model selection (BYOK / extension-driven; see model/registry.py)
+    model_config: object = None  # ModelConfig | None — typed loosely to avoid cycle
+    api_key: str | None = None
+    client_ip: str = "127.0.0.1"
     human_input_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     scratchpad: Scratchpad = field(default_factory=Scratchpad)
     step_summaries: list[StepSummary] = field(default_factory=list)

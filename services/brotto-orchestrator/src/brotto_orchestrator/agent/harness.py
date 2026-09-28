@@ -19,6 +19,10 @@ if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 
+from brotto_orchestrator.model.config import UserCredentials
+from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
+from brotto_orchestrator.model.resolver import resolve_model_config
+
 from .context import (
     AgentDeps, AgentDecision, AgentTurn, ActionCall,
     StepSummary, TaskResult, Scratchpad, MemoryEntry, DIGEST_LEN,
@@ -88,6 +92,10 @@ TIMING_BUCKETS = (
 _HUMAN_PAUSE_BUCKETS = frozenset({"login_pause", "approval_pause"})
 
 _MODEL = os.getenv("AGENT_MODEL", "no-model")
+# Placeholder model id used to construct the module-level Agent object.
+# defer_model_check=True defers validation; the real model is selected per
+# task via resolve_model_config(deps) and passed to agent.run(model=...).
+_PLACEHOLDER_MODEL = os.getenv("AGENT_MODEL", "anthropic:MiniMax-M3")
 # Context window size (tokens) used for the side panel's CONTEXT cell
 # (% of context used). Override per model in .env. Defaults to 400k.
 _CONTEXT_WINDOW_TOKENS = int(os.getenv("CONTEXT_WINDOW_TOKENS", "400000"))
@@ -119,12 +127,11 @@ def _build_context(tokens: int | None) -> dict:
 
 
 def _build_agent() -> Agent[AgentDeps, AgentDecision]:
-    # Pass the raw model id; pydantic-ai auto-detects the provider from the
-    # model name. Operators who want explicit routing can set
-    # AGENT_MODEL="<provider>:<model>" (e.g. "anthropic:claude-3-5-sonnet").
-    # This file names no vendor.
+    # Placeholder model id; defer_model_check=True means it's not validated
+    # at construction. The real per-task model is selected via
+    # resolve_model_config(deps) and passed to agent.run(model=...).
     return Agent(
-        _MODEL,
+        _PLACEHOLDER_MODEL,
         output_type=AgentDecision,
         deps_type=AgentDeps,
         system_prompt=SYSTEM_PROMPT,
@@ -823,7 +830,28 @@ class AgentHarness:
             log.debug("[%s] calling model...", deps.user_id)
             _CURRENT_DEPS = deps
             try:
-                result = await agent.run(_turn_to_prompt(turn), deps=deps)
+                # AGENT_MODEL="test" is a pydantic-ai sentinel that tells the
+                # Agent to use TestModel. Bypass the resolver entirely in that
+                # case — dev/test only; never set in production.
+                if os.getenv("AGENT_MODEL") == "test":
+                    result = await agent.run(_turn_to_prompt(turn), deps=deps)
+                else:
+                    cfg, creds = resolve_model_config(
+                        client_ip=getattr(deps, "client_ip", "127.0.0.1"),
+                        inline_config=getattr(deps, "model_config", None),
+                        inline_creds=(
+                            UserCredentials(api_key=deps.api_key, base_url=None)
+                            if getattr(deps, "api_key", None)
+                            else None
+                        ),
+                    )
+                    factory = PROVIDER_REGISTRY[cfg.provider]
+                    if not factory.validate_model_id(cfg.model):
+                        raise UserError(
+                            f"Unknown model {cfg.provider}:{cfg.model}"
+                        )
+                    _per_task_model = factory.build(cfg.model, creds)
+                    result = await agent.run(_turn_to_prompt(turn), deps=deps, model=_per_task_model)
                 decision: AgentDecision = result.output
             except UserError as e:
                 # pydantic-ai auto-detect fails on bare model names that don't
