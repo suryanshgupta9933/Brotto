@@ -24,7 +24,14 @@ class CDPRelay:
         await asyncio.sleep(0.5)  # brief settle after navigation
 
     async def get_targets(self) -> list[SemanticTarget]:
-        return await self._browser._extract_semantic_targets()
+        # Publish the map as a side effect. The harness observes with this
+        # call and dispatches its next action against `target_map`, and
+        # nothing else had filled it: refresh_target_map only runs *after* a
+        # navigate/click/scroll, so the first action of every task failed with
+        # "Target not found". observe() already does this; mirror it here.
+        targets = await self._browser._extract_semantic_targets()
+        self._browser.target_map = {t.ref_id: t for t in targets}
+        return targets
 
     async def get_current_url(self) -> str:
         if self._browser.page:
