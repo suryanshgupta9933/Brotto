@@ -63,7 +63,7 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-./.venv/bin/python -m pytest tests/ -q     # 211 tests
+./.venv/bin/python -m pytest tests/ -q     # 300 tests (2 skipped)
 
 # Smoke test (real API call, exercises full model adapter)
 AGENT_MODEL=anthropic:MiniMax-M3.1-Flash-Preview .venv/bin/python scripts/smoke_minimax_endtoend.py
