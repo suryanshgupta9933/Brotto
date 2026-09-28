@@ -5,6 +5,7 @@
  */
 
 import * as dbg from "./debugger";
+import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
 
@@ -376,18 +377,22 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
   const wsUrl = websocket_url.startsWith("ws") ? websocket_url : websocket_url.replace(/^http/, "ws");
   ws = new WebSocket(wsUrl);
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     // ponytail: Bug 4 — successful open resets the reconnect backoff
     // counter. Next time the WS dies we start the delay at 1s again.
     resetReconnectStateOnSuccess();
     // ponytail: Bug 5 — start the ping/pong watchdog.
     startHeartbeat();
-    ws!.send(JSON.stringify({
+    const stored = await getStoredModelConfig();
+    const payload: Record<string, unknown> = {
       type: "task_start",
       task: goal,
       session_id,
       user_policy: userPolicy,
-    }));
+    };
+    if (stored.model_config) payload.model_config = stored.model_config;
+    if (stored.api_key) payload.api_key = stored.api_key;
+    ws!.send(JSON.stringify(payload));
   };
 
   ws.onmessage = async (ev) => {
