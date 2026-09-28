@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from .outcome import Outcome
@@ -15,7 +17,10 @@ class TaskRecord(BaseModel):
     tokens_in: int | None = None
     tokens_out: int | None = None
     usd: float | None = None
-    timing: dict[str, float] = {}
+    # The harness's timing dict is not flat: `components` is a dict and
+    # `per_step` a list of per-step dicts. Typed as dict[str, float] this
+    # record rejected every real run at validation.
+    timing: dict[str, Any] = {}
     final_url: str = ""
     approval_requested: bool = False
     reason: str = ""

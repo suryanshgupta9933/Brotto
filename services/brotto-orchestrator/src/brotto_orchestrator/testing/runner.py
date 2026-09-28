@@ -29,9 +29,16 @@ USD_OUT_PER_MTOK = 15.00
 
 
 async def _post_run(base_url: str, payload: dict, timeout: float) -> dict:
-    """POST to /run and return the parsed TaskResult body. Overridden in tests."""
+    """POST to /run and return the parsed TaskResult body. Overridden in tests.
+
+    The client-side timeout bounds the real HTTP path (including body read);
+    `run_task`'s `asyncio.wait_for` is the transport-agnostic backstop that
+    also covers a substituted transport.
+    """
     url = f"{base_url.rstrip('/')}/run"
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=timeout),
+    ) as session:
         async with session.post(url, json=payload) as resp:
             if resp.status >= 400:
                 raise RuntimeError(f"HTTP {resp.status}: {(await resp.text())[:200]}")

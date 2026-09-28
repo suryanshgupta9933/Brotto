@@ -803,6 +803,11 @@ class AgentHarness:
         # lets us report a per-step breakdown without instrumenting every
         # early-exit (continue) site in the loop.
         cumulative_snapshots: list[dict[str, float]] = []
+        # Provider-reported token usage, summed across steps and reported in
+        # the timing dict so the benchmark runner can price the run. The
+        # scripted-planner path never calls `agent.run`, so these stay 0
+        # there — a real fact (no model ran), not missing data.
+        tokens: dict[str, int] = {"in": 0, "out": 0}
         steps_run = 0
         task_start = time.perf_counter()
 
@@ -849,6 +854,7 @@ class AgentHarness:
             if deps.result is not None:
                 deps.result.timing = self._log_timings(
                     deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
+                    tokens=tokens,
                 )
                 return deps.result
 
@@ -890,6 +896,7 @@ class AgentHarness:
                     timing_report = self._log_timings(
                         deps.user_id, timings, steps_run,
                         time.perf_counter() - task_start, cumulative_snapshots,
+                        tokens=tokens,
                     )
                     return TaskResult(
                         status="failed",
@@ -917,7 +924,7 @@ class AgentHarness:
                     continue
                 if str(reply).lower() == "skip":
                     timings["login_pause"] += time.perf_counter() - t_lp
-                    timing_report = self._log_timings(deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots)
+                    timing_report = self._log_timings(deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots, tokens=tokens)
                     return TaskResult(
                         status="failed",
                         summary="User skipped login",
@@ -1154,6 +1161,9 @@ class AgentHarness:
             try:
                 usage = result.usage
                 tokens_used = usage.input_tokens if usage else None
+                if usage is not None:
+                    tokens["in"] += usage.input_tokens
+                    tokens["out"] += usage.output_tokens
             except Exception:
                 tokens_used = None
             context = _build_context(tokens_used, window=context_window)
@@ -1255,11 +1265,13 @@ class AgentHarness:
             if deps.result is not None:
                 deps.result.timing = self._log_timings(
                     deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
+                    tokens=tokens,
                 )
                 return deps.result
 
         timing_report = self._log_timings(
             deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
+            tokens=tokens,
         )
         return TaskResult(
             status="failed",
@@ -1277,6 +1289,7 @@ class AgentHarness:
         steps: int,
         wall: float,
         snapshots: list[dict[str, float]] | None = None,
+        tokens: dict[str, int] | None = None,
     ) -> dict:
         """Emit a per-component timing summary at task end.
 
@@ -1322,6 +1335,7 @@ class AgentHarness:
                 }
                 per_step.append(delta)
 
+        tok = tokens or {}
         return {
             "steps": steps,
             "wall_s": round(wall, 3),
@@ -1329,4 +1343,7 @@ class AgentHarness:
             "human_pause_s": round(human_pause_total, 3),
             "components": {k: round(timings[k], 3) for k in TIMING_BUCKETS},
             "per_step": per_step,
+            # Consumed by testing/runner.py, which pops these to price the run.
+            "tokens_in": tok.get("in", 0),
+            "tokens_out": tok.get("out", 0),
         }

@@ -72,3 +72,84 @@ async def test_http_error_is_attributable_not_a_crash(monkeypatch):
     )
     assert rec.outcome == OUTCOMES.HARNESS_ERROR
     assert "500" in rec.reason
+
+
+# ── Token / USD extraction ──────────────────────────────────────────────────
+
+
+def _harness_timing(tokens_in: int, tokens_out: int) -> dict:
+    """A `timing` dict in exactly the shape `AgentHarness._log_timings`
+    returns — no more, no less, so a harness key rename breaks here."""
+    return {
+        "steps": 3,
+        "wall_s": 5.42,
+        "wall_agent_s": 3.1,
+        "human_pause_s": 2.32,
+        "components": {"observe": 0.31, "execute": 1.4, "model_plan": 2.79},
+        "per_step": [{"observe": 0.11, "execute": 0.5, "model_plan": 0.9}],
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+    }
+
+
+def test_populated_timing_yields_tokens_and_a_hand_computed_usd():
+    """Pins the full extraction path. Without this, a record can be built and
+    committed with `tokens_in: null, usd: null` forever and nothing fails.
+
+    USD by hand at the pinned Sonnet-class rates ($3/Mtok in, $15/Mtok out):
+        1_234_567/1e6 * 3 = 3.703701
+          89_012/1e6 * 15 = 1.335180
+                          = 5.038881
+    Hard-coded rather than recomputed from the constants, so a pricing change
+    cannot pass silently.
+    """
+    result = TaskResult(
+        status="completed", summary="ok", steps_taken=3,
+        timing=_harness_timing(1_234_567, 89_012),
+    )
+    rec = runner_mod._record_from_result(
+        task_id="t", fixture="auth-shadow", result=result,
+        final_url="http://127.0.0.1:1/auth-shadow", approval_requested=False,
+    )
+    assert rec.tokens_in == 1_234_567
+    assert rec.tokens_out == 89_012
+    assert rec.usd == 5.038881
+    # The token keys are popped, not copied — the residual timing is timing.
+    assert "tokens_in" not in rec.timing
+    assert "tokens_out" not in rec.timing
+    assert rec.timing["wall_s"] == 5.42
+
+
+def test_timing_without_token_keys_leaves_tokens_and_usd_null():
+    """A result with no token keys (older server, or a timing dict built by
+    hand) must not raise and must not invent a cost — null means unknown,
+    not zero."""
+    result = TaskResult(
+        status="completed", summary="ok", steps_taken=1,
+        timing={"steps": 1, "wall_s": 1.0, "wall_agent_s": 1.0,
+                "human_pause_s": 0.0, "components": {}, "per_step": []},
+    )
+    rec = runner_mod._record_from_result(
+        task_id="t", fixture="auth-shadow", result=result,
+        final_url="http://127.0.0.1:1/auth-shadow", approval_requested=False,
+    )
+    assert rec.tokens_in is None
+    assert rec.tokens_out is None
+    assert rec.usd is None
+
+
+def test_scripted_run_reports_zero_tokens_not_null():
+    """The scripted-planner path never calls the model, so the harness
+    reports 0/0. That is a real fact and must price at $0.00 — not be
+    recorded as unknown."""
+    result = TaskResult(
+        status="completed", summary="ok", steps_taken=2,
+        timing=_harness_timing(0, 0),
+    )
+    rec = runner_mod._record_from_result(
+        task_id="t", fixture="auth-shadow", result=result,
+        final_url="http://127.0.0.1:1/auth-shadow", approval_requested=False,
+    )
+    assert rec.tokens_in == 0
+    assert rec.tokens_out == 0
+    assert rec.usd == 0.0
