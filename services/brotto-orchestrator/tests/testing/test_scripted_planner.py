@@ -14,10 +14,10 @@ from brotto_orchestrator.testing.scripted_planner import (
 
 
 AX = (
-    'heading "Inbox"  [ref=heading_aaa111]\n'
-    '[button_a1b2c3] button "Next"  [ref=button_a1b2c3]\n'
-    '[textbox_d4e5f6] textbox "Search"  value=""\n'
-    '[off-screen] [link_99aa11] link "Settings"  [ref=link_99aa11]\n'
+    '[heading_aaa111] heading "Inbox"\n'
+    '[button_a1b2c3] button "Next"\n'
+    '[textbox_d4e5f6] textbox "Search"\n'
+    '[off-screen] [link_99aa11] link "Settings"\n'
 )
 
 
@@ -109,3 +109,34 @@ def test_unresolvable_ref_raises_instead_of_clicking_stale():
     planner.next(_turn(AX))
     with pytest.raises(LookupError):
         planner.next(_turn(AX.replace('"Next"', '"Gone"')))
+
+
+# ── exhaustion and introspection ────────────────────────────────────────────
+
+def test_invalid_on_exhausted_is_rejected_at_construction():
+    """A typo'd terminal action would otherwise surface as an unknown action
+    mid-task, long after the mistake was made."""
+    with pytest.raises(ValueError):
+        ScriptedPlanner([], on_exhausted="give_up")
+
+
+@pytest.mark.parametrize("terminal", ["task_complete", "cannot_complete"])
+def test_exhausted_planner_emits_the_chosen_terminal_action(terminal):
+    planner = ScriptedPlanner([_click("Next")], on_exhausted=terminal)
+    planner.next(_turn(AX))
+    assert planner.next(_turn(AX)).actions[0].action == terminal
+
+
+def test_cursor_and_remaining_track_consumed_steps():
+    planner = ScriptedPlanner([_click("Next"), _click("Next"), _click("Next")])
+    assert planner.remaining == 3
+    planner.next(_turn(AX))
+    assert (planner.cursor, planner.remaining) == (1, 2)
+    planner.next(_turn(AX))
+    assert (planner.cursor, planner.remaining) == (2, 1)
+
+
+def test_steps_is_a_copy_so_callers_cannot_mutate_the_script():
+    planner = ScriptedPlanner([_click("Next")])
+    planner.steps.clear()
+    assert planner.remaining == 1

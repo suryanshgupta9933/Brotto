@@ -91,7 +91,7 @@ class ScriptedPlanner:
     ) -> None:
         if on_exhausted not in ("task_complete", "cannot_complete"):
             raise ValueError(
-                f"on_exhausted must be task_complete or cannot_complete, "
+                "on_exhausted must be task_complete or cannot_complete, "
                 f"got {on_exhausted!r}"
             )
         self._steps = list(steps)
