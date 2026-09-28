@@ -92,6 +92,27 @@ def classify(
     return Outcome.RECOVERY_FAILURE
 
 
+# Best-first; a higher rank is worse. `PASS` is best because it is the only
+# outcome proving the agent actually reached the control — so closing a
+# perception gap moves a fixture toward rank 0 and reads as progress.
+# `HARNESS_ERROR` is deliberately last: a broken harness produced no
+# measurement at all, and must not read as a perception change.
+SEVERITY: tuple[str, ...] = (
+    Outcome.PASS.value,
+    Outcome.PERCEPTION_FAILURE.value,
+    Outcome.ACTION_FAILURE.value,
+    Outcome.RECOVERY_FAILURE.value,
+    Outcome.LOGIN_FAILURE.value,
+    Outcome.BUDGET_EXHAUSTED.value,
+    Outcome.HARNESS_ERROR.value,
+)
+
+
+def rank(outcome: str) -> int:
+    """Worse-is-higher. Unknown outcomes rank worst — never silently best."""
+    return SEVERITY.index(outcome) if outcome in SEVERITY else len(SEVERITY)
+
+
 # Alias so callers can write `OUTCOMES.PASS` without importing the class
 # name, which reads better at call sites that never subclass it.
 OUTCOMES = Outcome
