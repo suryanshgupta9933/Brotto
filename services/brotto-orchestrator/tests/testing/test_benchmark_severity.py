@@ -26,5 +26,20 @@ def test_severity_covers_every_outcome_exactly_once():
     assert sorted(SEVERITY) == sorted(o.value for o in Outcome)
 
 
+def test_severity_order_is_pinned_literally():
+    """The four assertions here survive a mid-band swap — PERCEPTION_FAILURE
+    ↔ ACTION_FAILURE keeps rank() monotonic — and that swap would then exit 0
+    on a real regression. Pin the tuple itself, in order."""
+    assert SEVERITY == (
+        "PASS",
+        "PERCEPTION_FAILURE",
+        "ACTION_FAILURE",
+        "RECOVERY_FAILURE",
+        "LOGIN_FAILURE",
+        "BUDGET_EXHAUSTED",
+        "HARNESS_ERROR",
+    )
+
+
 def test_unknown_outcome_ranks_worst():
     assert rank("SOMETHING_NEW") == len(SEVERITY)

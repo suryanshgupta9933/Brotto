@@ -865,10 +865,7 @@ class AgentHarness:
                 deps.result.final_url = deps.step_url
                 # The gate is the single point every terminal result passes
                 # through, so it is the one place steps_taken can be counted
-                # correctly. Results built elsewhere use three conventions
-                # (0-indexed step_number, step+1, unset) and _log_timings
-                # uses steps_run; max() keeps any already-right value and
-                # fixes the 0 case, and supersedes the 0-indexed off-by-one.
+                # right: built elsewhere it is 0-indexed, step+1, or unset.
                 deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
                 return deps.result
 
@@ -1296,10 +1293,7 @@ class AgentHarness:
                 deps.result.final_url = deps.step_url
                 # The gate is the single point every terminal result passes
                 # through, so it is the one place steps_taken can be counted
-                # correctly. Results built elsewhere use three conventions
-                # (0-indexed step_number, step+1, unset) and _log_timings
-                # uses steps_run; max() keeps any already-right value and
-                # fixes the 0 case, and supersedes the 0-indexed off-by-one.
+                # right: built elsewhere it is 0-indexed, step+1, or unset.
                 deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
                 return deps.result
 

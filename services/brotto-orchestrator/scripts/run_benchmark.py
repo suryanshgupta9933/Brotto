@@ -25,7 +25,7 @@ import socket
 import urllib.request
 
 from brotto_orchestrator.testing.fixtures import FIXTURES, IFRAME_PORT, MAIN_PORT, load_fixture
-from brotto_orchestrator.testing.outcome import WAVE_BY_OUTCOME, rank
+from brotto_orchestrator.testing.outcome import WAVE_BY_OUTCOME, Outcome, rank
 from brotto_orchestrator.testing.records import TaskRecord
 from brotto_orchestrator.testing.runner import run_task
 from brotto_orchestrator.testing.server import serve_fixtures, serve_iframe_origin
@@ -97,23 +97,42 @@ async def _run(names: list[str]) -> list[TaskRecord]:
     return records
 
 
-def _check(records: list[TaskRecord]) -> int:
+def _check(records: list[TaskRecord], baseline_path: pathlib.Path = BASELINE) -> int:
     """Exit 1 if any fixture is worse than its recorded baseline."""
-    if not BASELINE.is_file():
-        log.error("no baseline at %s — record one before using --check", BASELINE)
+    if not baseline_path.is_file():
+        log.error("no baseline at %s — record one before using --check", baseline_path)
         return 1
     baseline = {
-        r["fixture"]: r["outcome"]
-        for r in json.loads(BASELINE.read_text())["records"]
+        r["fixture"]: r
+        for r in json.loads(baseline_path.read_text())["records"]
     }
     regressions = 0
     for rec in records:
-        was = baseline.get(rec.fixture)
-        if was is None:
+        was_row = baseline.get(rec.fixture)
+        if was_row is None:
             log.warning("%-16s no baseline entry", rec.fixture)
             continue
+        was = was_row["outcome"]
         if rank(rec.outcome.value) > rank(was):
             log.error("REGRESSION %-16s %s → %s", rec.fixture, was, rec.outcome.value)
+            regressions += 1
+            continue
+        was_steps = (was_row.get("timing") or {}).get("steps")
+        now_steps = (rec.timing or {}).get("steps")
+        if (
+            rank(rec.outcome.value) == rank(was)
+            and rec.outcome is not Outcome.PASS
+            and was_steps is not None
+            and now_steps is not None
+            and now_steps < was_steps
+        ):
+            # Same severity, fewer steps: the failure moved earlier in the task
+            # (e.g. the login button stopped resolving), which rank alone
+            # cannot see.
+            log.error(
+                "REGRESSION %-16s %s at step %s, was %s",
+                rec.fixture, rec.outcome.value, now_steps, was_steps,
+            )
             regressions += 1
         elif rank(rec.outcome.value) < rank(was):
             log.info("improved    %-16s %s → %s", rec.fixture, was, rec.outcome.value)
@@ -147,6 +166,11 @@ def main() -> int:
         "tally": _tally(records),
     }
 
+    # Check before writing: --out then --check would otherwise write the run
+    # into the baseline and then check the baseline against itself — exit 0
+    # every time, by construction.
+    exit_code = _check(records) if args.check else 0
+
     if args.out:
         out = pathlib.Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -155,9 +179,7 @@ def main() -> int:
     else:
         print(json.dumps(document, indent=2))
 
-    if args.check:
-        return _check(records)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
