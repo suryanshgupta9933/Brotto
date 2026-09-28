@@ -58,6 +58,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("brotto.main")
 
+# ponytail: log the resolved auth env at startup, so misconfigured
+# Token Plan keys are immediately visible in server logs. We only print
+# length (never the value) to avoid leaking the key.
+_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+_auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+log.info(
+    "auth env at startup: ANTHROPIC_API_KEY=%s  ANTHROPIC_AUTH_TOKEN=%s  BROTTO_ENV=%s",
+    ("set (len=%d)" % len(_api_key)) if _api_key else "<unset>",
+    ("set (len=%d)" % len(_auth_token)) if _auth_token else "<unset>",
+    os.environ.get("BROTTO_ENV", "<unset>"),
+)
+
 # ponytail: match the sidepanel's MAX_TASK_CHARS. Anything over this is
 # logged as a warning (defense in depth) but NOT blocked — the sidepanel
 # already shows a confirm() dialog, and the user is the final authority
