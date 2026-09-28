@@ -165,7 +165,9 @@ async def test_harness_completes_with_test_model():
         h = AgentHarness()
         result = await h.run(deps)
         assert result.status == "completed"
-        assert result.steps_taken == 0
+        # Was 0: task_complete stamped the 0-indexed deps.step_number. The
+        # abort gate now stamps steps_run, so a one-step run reports 1.
+        assert result.steps_taken == 1
         # progress event was sent
         assert any(m.get("type") == "step_progress" for m in messages)
     finally:
