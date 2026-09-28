@@ -22,31 +22,44 @@ class Outcome(str, Enum):
     HARNESS_ERROR = "HARNESS_ERROR"
 
 
-# The wave each outcome points at. Mirrors
-# docs/superpowers/specs/2026-09-28-capability-map-design.md.
+# The wave each outcome points at, using the spec's own labels
+# (docs/superpowers/specs/2026-09-28-measurement-spine-design.md). The id is
+# a comma/span string, not a single wave, where the spec lists more than one —
+# collapsing 2A-2E to "2" would destroy the resolution that makes the tally
+# usable as a work order.
 WAVE_BY_OUTCOME: dict[Outcome, str] = {
     Outcome.PASS: "-",
     Outcome.PERCEPTION_FAILURE: "0A",
-    Outcome.ACTION_FAILURE: "1",
-    Outcome.RECOVERY_FAILURE: "2",
-    Outcome.LOGIN_FAILURE: "2E",
+    Outcome.ACTION_FAILURE: "1A/1B/1C",
+    Outcome.RECOVERY_FAILURE: "2A-2E",
+    Outcome.LOGIN_FAILURE: "2E, 3A",
     Outcome.BUDGET_EXHAUSTED: "5C",
     Outcome.HARNESS_ERROR: "0C",
 }
 
 # Order matters: the first substring found wins, so the more specific
-# failure reasons are tested before the broader ones.
+# failure reasons are tested before the broader ones. Every needle below is a
+# string the repo actually emits — see agent/harness.py and agent/stagnation.py.
+# HARNESS_ERROR is first: `auth_failed` is the *model provider* rejecting our
+# API key (broken infrastructure), not a website login wall, and
+# `model_not_found` / `cdp_preflight_failed` are equally ours, not the agent's.
+# Note: user_denied, policy_blocked and policy_preflight are deliberate
+# human/policy gates, not agent failures — they deliberately fall through to
+# the RECOVERY_FAILURE default. Leave them there.
 _RULES: tuple[tuple[Outcome, tuple[str, ...]], ...] = (
-    (Outcome.LOGIN_FAILURE, ("login required", "login page", "session expired")),
+    (Outcome.HARNESS_ERROR, ("auth_failed", "model_not_found", "cdp_preflight_failed")),
+    (Outcome.LOGIN_FAILURE, (
+        "login required", "login page", "session expired", "user_skipped_login",
+    )),
     (Outcome.PERCEPTION_FAILURE, (
-        "did not resolve", "not found in ax", "no target", "not visible", "truncated",
-        "shadow", "iframe", "aria-hidden", "canvas",
+        "did not resolve", "not found in ax", "does not exist in ax", "no target",
+        "not visible", "truncated", "shadow", "iframe", "aria-hidden", "canvas",
     )),
     (Outcome.ACTION_FAILURE, (
         "did not change", "no effect", "element is not", "ref is stale",
     )),
     (Outcome.RECOVERY_FAILURE, ("stagnat", "loop", "popup", "cookie banner")),
-    (Outcome.BUDGET_EXHAUSTED, ("budget exhausted", "token limit")),
+    (Outcome.BUDGET_EXHAUSTED, ("budget exhausted", "token limit", "max_steps_exceeded")),
 )
 
 MAX_STEPS = 30  # harness.AgentHarness.MAX_STEPS

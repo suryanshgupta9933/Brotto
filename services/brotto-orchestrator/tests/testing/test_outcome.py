@@ -10,7 +10,7 @@ from brotto_orchestrator.testing.outcome import (
 )
 
 
-def _failed(reason: str, steps: int = 3) -> TaskResult:
+def _failed(reason: str | None, steps: int = 3) -> TaskResult:
     return TaskResult(status="failed", summary="", failure_reason=reason,
                       steps_taken=steps)
 
@@ -86,8 +86,100 @@ def test_login_page_beats_a_generic_stagnation_reason():
 
 
 def test_every_outcome_maps_to_a_wave():
-    assert set(WAVE_BY_OUTCOME) == set(OUTCOMES)
+    """The ids are consumed by a later task as a work-order key, so they are
+    pinned to the spec's exact labels
+    (docs/superpowers/specs/2026-09-28-measurement-spine-design.md)."""
+    assert WAVE_BY_OUTCOME == {
+        OUTCOMES.PASS: "-",
+        OUTCOMES.PERCEPTION_FAILURE: "0A",
+        OUTCOMES.ACTION_FAILURE: "1A/1B/1C",
+        OUTCOMES.RECOVERY_FAILURE: "2A-2E",
+        OUTCOMES.LOGIN_FAILURE: "2E, 3A",
+        OUTCOMES.BUDGET_EXHAUSTED: "5C",
+        OUTCOMES.HARNESS_ERROR: "0C",
+    }
     assert all(isinstance(v, str) and v for v in WAVE_BY_OUTCOME.values())
+
+
+# --- The real reason vocabulary, as emitted by src/ -------------------------
+# These are not invented: each is the literal failure_reason (or summary)
+# the harness actually writes.
+
+
+def test_scripted_target_string_is_perception():
+    """harness.py:761 emits `scripted target did not resolve: {e}`."""
+    assert classify(_failed("scripted target did not resolve: 'Archive'")) \
+        == OUTCOMES.PERCEPTION_FAILURE
+
+
+def test_stagnation_ax_signal_is_perception():
+    """agent/stagnation.py:34 emits "…element does not exist in AX tree" —
+    the canonical Wave 0A perception signal."""
+    reason = "find_element failed 2 consecutive times — element does not exist in AX tree"
+    assert classify(_failed(reason)) == OUTCOMES.PERCEPTION_FAILURE
+
+
+def test_user_skipped_login_is_login_failure():
+    """harness.py:924 emits `user_skipped_login` — the user hit a login wall
+    and backed out, which is the 2E/3A signal."""
+    assert classify(_failed("user_skipped_login")) == OUTCOMES.LOGIN_FAILURE
+
+
+def test_auth_failed_is_harness_error_not_a_login_wall():
+    """harness.py:270 emits `auth_failed`, but it is the *model provider*
+    rejecting our API key. Calling it a login failure would send wave 2E at
+    a broken credential."""
+    assert classify(_failed("auth_failed")) == OUTCOMES.HARNESS_ERROR
+
+
+def test_model_not_found_is_harness_error():
+    """harness.py:259 / main.py:367 emit `model_not_found` — a bad
+    `provider:model` config string, i.e. our bug."""
+    assert classify(_failed("model_not_found")) == OUTCOMES.HARNESS_ERROR
+
+
+def test_cdp_preflight_failed_is_harness_error():
+    """harness.py:813 emits `cdp_preflight_failed` — we could not attach to
+    the browser, so nothing about the agent is being measured."""
+    assert classify(_failed("cdp_preflight_failed")) == OUTCOMES.HARNESS_ERROR
+
+
+def test_max_steps_exceeded_is_budget_exhausted():
+    """harness.py:1267 emits `max_steps_exceeded` with steps_taken=MAX_STEPS."""
+    assert classify(_failed("max_steps_exceeded", steps=30)) \
+        == OUTCOMES.BUDGET_EXHAUSTED
+
+
+def test_human_gates_stay_in_recovery():
+    """user_denied / policy_blocked / policy_preflight are deliberate human
+    or policy gates. They are pinned to RECOVERY_FAILURE on purpose so the
+    next reader does not "fix" them into a new class."""
+    for reason in ("user_denied", "policy_blocked", "policy_preflight"):
+        assert classify(_failed(reason)) == OUTCOMES.RECOVERY_FAILURE, reason
+
+
+# --- Headline invariant: an unrecognised failure is never a pass ------------
+
+
+def test_completed_with_scary_reason_is_still_pass():
+    """A completed run is a pass whatever its reason string says — a
+    leftover reason must not demote it."""
+    assert classify(TaskResult(status="completed", summary="done",
+                               failure_reason="auth_failed")) == OUTCOMES.PASS
+
+
+def test_none_and_empty_reason_both_classify_to_a_real_class():
+    """Neither may raise or slip through as PASS."""
+    for reason in (None, ""):
+        assert classify(_failed(reason)) == OUTCOMES.RECOVERY_FAILURE, reason
+
+
+def test_budget_exhausted_boundary():
+    """Exactly at the cap and one past it both exhaust the budget; one below
+    it does not."""
+    assert classify(_failed("unrecognised", steps=29)) == OUTCOMES.RECOVERY_FAILURE
+    assert classify(_failed("unrecognised", steps=30)) == OUTCOMES.BUDGET_EXHAUSTED
+    assert classify(_failed("unrecognised", steps=31)) == OUTCOMES.BUDGET_EXHAUSTED
 
 
 def test_outcome_values_are_stable_strings():
