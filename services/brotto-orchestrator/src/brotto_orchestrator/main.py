@@ -9,6 +9,19 @@ import os
 import uuid
 
 from dotenv import load_dotenv
+
+# Dev-mode defaults: BROTTO_ENV=dev (default) pre-populates the env vars the
+# harness reads at module-import time, so `python start_server.py` works with
+# only ANTHROPIC_AUTH_TOKEN set in the operator's shell (Token Plan key).
+# Set BROTTO_ENV=prod to opt out — the server then uses whatever the operator
+# configured (extension settings, .env, AGENT_MODEL, etc.) and raises "no
+# model configuration" if nothing resolves.
+if os.getenv("BROTTO_ENV", "dev") == "dev":
+    os.environ.setdefault("AGENT_MODEL", "anthropic:MiniMax-M3")
+    os.environ.setdefault("CONTEXT_WINDOW_TOKENS", "1000000")
+    if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
+        os.environ["ANTHROPIC_API_KEY"] = os.getenv("ANTHROPIC_AUTH_TOKEN")
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -317,6 +330,13 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     model_cfg_payload = msg.get("model_config")
     api_key = msg.get("api_key")
     remember_key = bool(msg.get("remember_key", False))
+    log.info(
+        "[%s] task_start model: provider=%s has_key=%s key_len=%d",
+        session_id,
+        (model_cfg_payload or {}).get("provider") if isinstance(model_cfg_payload, dict) else None,
+        bool(api_key),
+        len(api_key) if api_key else 0,
+    )
 
     parsed_model_cfg = None
     if isinstance(model_cfg_payload, dict):
