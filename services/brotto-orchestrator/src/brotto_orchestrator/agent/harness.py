@@ -915,8 +915,14 @@ class AgentHarness:
                         final_url=deps.step_url,
                     )
 
-            # Guardrail: login detection
-            if check_login_page(page_title, filtered_ax, current_url):
+            # Guardrail: login detection. Skipped under a scripted planner:
+            # there is no human to ask, the script carries its own login
+            # steps, and /run has no reply channel to answer on — without
+            # this the guardrail blocks 300s per step and every run records
+            # a timeout instead of a measurement.
+            if deps.scripted_planner is None and check_login_page(
+                page_title, filtered_ax, current_url
+            ):
                 t_lp = time.perf_counter()
                 await deps.ws_send({
                     "type": "login_required",
