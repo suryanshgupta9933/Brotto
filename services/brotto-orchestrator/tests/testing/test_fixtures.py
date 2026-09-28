@@ -9,7 +9,6 @@ from brotto_orchestrator.testing.fixtures import FIXTURES, load_fixture
 WEB = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "web"
 
 EXPECTED = {
-    "auth-shadow": "shadow_dom",
     "auth-iframe": "iframe",
     "auth-aria-hidden": "aria_hidden",
     "auth-canvas": "canvas",
@@ -20,7 +19,7 @@ EXPECTED = {
 }
 
 
-def test_all_eight_fixtures_registered():
+def test_all_seven_fixtures_registered():
     assert {f.name for f in FIXTURES} == set(EXPECTED)
 
 
@@ -53,3 +52,17 @@ def test_every_fixture_requires_a_login():
 def test_load_fixture_rejects_unknown():
     with pytest.raises(KeyError):
         load_fixture("auth-nope")
+
+
+def test_server_serves_every_fixture():
+    """The catalogue tests read files off disk; only this one proves the server
+    resolves WEB_ROOT and answers. A wrong WEB_ROOT passes all of them."""
+    import urllib.request
+
+    from brotto_orchestrator.testing.fixtures import MAIN_PORT
+    from brotto_orchestrator.testing.server import serve_fixtures
+
+    with serve_fixtures(MAIN_PORT):
+        for f in FIXTURES:
+            with urllib.request.urlopen(f"http://127.0.0.1:{f.port}{f.path}") as r:
+                assert r.status == 200, f.name

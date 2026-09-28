@@ -11,8 +11,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 # ponytail: the fixture HTML lives under tests/ rather than inside the
 # package. Fixtures are test assets, not a shipped artifact, and copying
 # them would let the benchmark drift from the pages it measures.
-PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[2]   # src/brotto_orchestrator
-REPO_ORCHESTRATOR = PACKAGE_ROOT.parents[0]                   # services/brotto-orchestrator
+SRC_ROOT = pathlib.Path(__file__).resolve().parents[2]   # src
+REPO_ORCHESTRATOR = SRC_ROOT.parents[0]                   # services/brotto-orchestrator
 WEB_ROOT = REPO_ORCHESTRATOR / "tests" / "fixtures" / "web"
 
 

@@ -12,15 +12,17 @@
     function enter() {
       document.getElementById('app').innerHTML =
         '<div role="tablist">' +
-        '<button role="tab" onclick="show(3)">Open Panel Three</button>' +
+        '<button role="tab" aria-selected="true" onclick="show(1)">Overview</button>' +
+        '<button role="tab" aria-selected="false" onclick="show(2)">Archived</button>' +
         '</div><div id="panel"></div>';
-      show(3);
+      show(1);
     }
+    // The target only exists in the panel the initially-selected tab does not show,
+    // so the page cannot be completed without activating the other tab.
     function show(n) {
-      document.getElementById('panel').innerHTML =
-        '<div>Panel ' + n + ' content' +
-        '<div><iframe srcdoc="&lt;button aria-label=&quot;Panel Three&quot;&gt;Panel Three&lt;/button&gt;" width="300" height="80"></iframe></div>' +
-        '</div>';
+      document.getElementById('panel').innerHTML = n === 1
+        ? '<div>Recent activity</div>'
+        : '<div>Nothing recent.<button>Restore Draft</button></div>';
     }
   </script>
 </body></html>

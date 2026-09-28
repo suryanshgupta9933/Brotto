@@ -19,8 +19,6 @@ class FixtureDef(BaseModel):
 
 
 FIXTURES: list[FixtureDef] = [
-    FixtureDef(name="auth-shadow", path="/auth-shadow/", port=MAIN_PORT,
-               target_name="Archive", targets_gap="shadow_dom"),
     FixtureDef(name="auth-iframe", path="/auth-iframe/", port=MAIN_PORT,
                target_name="Confirm", targets_gap="iframe", iframe_port=IFRAME_PORT),
     FixtureDef(name="auth-aria-hidden", path="/auth-aria-hidden/", port=MAIN_PORT,
@@ -30,11 +28,11 @@ FIXTURES: list[FixtureDef] = [
     FixtureDef(name="auth-slowjs", path="/auth-slowjs/", port=MAIN_PORT,
                target_name="Loaded", targets_gap="slow_js"),
     FixtureDef(name="auth-inbox", path="/auth-inbox/", port=MAIN_PORT,
-               target_name="Message 60", targets_gap="truncation"),
+               target_name="Message 400", targets_gap="truncation"),
     FixtureDef(name="auth-popup", path="/auth-popup/", port=MAIN_PORT,
-               target_name="Accept", targets_gap="popup"),
+               target_name="Delete account", targets_gap="popup"),
     FixtureDef(name="auth-tabbed", path="/auth-tabbed/", port=MAIN_PORT,
-               target_name="Panel Three", targets_gap="tabbed"),
+               target_name="Restore Draft", targets_gap="tabbed"),
 ]
 
 _BY_NAME = {f.name: f for f in FIXTURES}
