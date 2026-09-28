@@ -1418,6 +1418,31 @@
       <p class="settings-hint">One domain per line. Wildcard <code>*.example.com</code> allowed. These are added on top of your organisation's list.</p>
     </div>
     <div class="settings-section">
+      <h3>Model</h3>
+      <label>
+        Provider
+        <select id="model-provider">
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+          <option value="minimax">MiniMax (Anthropic-compat)</option>
+        </select>
+      </label>
+      <label>
+        Model
+        <select id="model-name">
+          <!-- populated from JS based on provider selection -->
+        </select>
+      </label>
+      <label>
+        API key
+        <input id="model-api-key" type="password" placeholder="Leave blank to use server default" autocomplete="off" />
+      </label>
+      <div class="settings-actions-row">
+        <button id="model-save" class="input" type="button">Save model</button>
+        <span id="model-save-status" class="settings-hint"></span>
+      </div>
+    </div>
+    <div class="settings-section">
       <div class="settings-actions-row">
         <button id="refreshPolicyBtn" class="input settings-btn-secondary"
                 type="button" title="Re-fetch the effective policy from the server">

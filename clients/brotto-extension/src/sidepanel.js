@@ -2,6 +2,77 @@
 // Preserves all event handlers, state machine, and message listeners.
 // Only rendering functions are updated to produce the Claude-in-Chrome chat interface.
 
+// Static catalog mirrors the Python PROVIDER_REGISTRY. Keep in sync with
+// services/brotto-orchestrator/src/brotto_orchestrator/model/registry.py.
+const MODEL_CATALOG = {
+  anthropic: [
+    { model: "MiniMax-M3", context_window: 1000000 },
+    { model: "claude-3-5-sonnet-latest", context_window: 200000 },
+  ],
+  openai: [
+    { model: "gpt-4o", context_window: 128000 },
+    { model: "o1", context_window: 200000 },
+  ],
+  minimax: [
+    { model: "MiniMax-M3", context_window: 1000000 },
+    { model: "MiniMax-M2.7", context_window: 204800 },
+  ],
+};
+
+const $modelProvider = document.getElementById('model-provider');
+const $modelName = document.getElementById('model-name');
+const $modelKey = document.getElementById('model-api-key');
+const $modelSave = document.getElementById('model-save');
+const $modelStatus = document.getElementById('model-save-status');
+
+function populateModelOptions() {
+  const provider = $modelProvider.value;
+  const catalog = MODEL_CATALOG[provider] || [];
+  $modelName.textContent = '';
+  for (const entry of catalog) {
+    const opt = document.createElement('option');
+    opt.value = entry.model;
+    opt.textContent = entry.model;
+    $modelName.appendChild(opt);
+  }
+}
+
+if ($modelProvider) {
+  $modelProvider.addEventListener('change', populateModelOptions);
+  populateModelOptions();
+}
+
+if ($modelSave) {
+  $modelSave.addEventListener('click', async () => {
+    const provider = $modelProvider.value;
+    const model = $modelName.value;
+    const catalog = MODEL_CATALOG[provider] || [];
+    const ctx = catalog.find((e) => e.model === model)?.context_window;
+    await chrome.storage.local.set({
+      modelConfig: {
+        model_config: { provider, model, context_window: ctx },
+        api_key: $modelKey.value.trim() || null,
+      },
+    });
+    if ($modelStatus) {
+      $modelStatus.textContent = 'Saved.';
+      setTimeout(() => { $modelStatus.textContent = ''; }, 2000);
+    }
+  });
+}
+
+async function hydrateModelSettings() {
+  if (!$modelProvider) return;
+  const stored = await chrome.storage.local.get('modelConfig');
+  const v = stored.modelConfig;
+  if (v && v.model_config) {
+    $modelProvider.value = v.model_config.provider;
+    populateModelOptions();
+    $modelName.value = v.model_config.model;
+  }
+}
+hydrateModelSettings();
+
 const messagesEl  = document.getElementById('messages');
 const emptyState   = document.getElementById('emptyState');
 const goalEl       = document.getElementById('goal');
