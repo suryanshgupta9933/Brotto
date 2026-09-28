@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from brotto_orchestrator.agent.context import TaskResult
-from brotto_orchestrator.testing.outcome import OUTCOMES
+from brotto_orchestrator.testing.outcome import Outcome
 from brotto_orchestrator.testing.records import TaskRecord, usd_estimate
 from brotto_orchestrator.testing import runner as runner_mod
 
@@ -29,7 +29,7 @@ def test_record_requires_a_known_outcome():
 def test_record_round_trips_to_json():
     """The value, not the member name, is what lands in committed benchmark
     JSON — a rename must break loudly rather than corrupt history."""
-    rec = TaskRecord(task_id="t", fixture="auth-shadow", outcome=OUTCOMES.PASS,
+    rec = TaskRecord(task_id="t", fixture="auth-shadow", outcome=Outcome.PASS,
                      steps_taken=2, tokens_in=10, tokens_out=20, usd=0.001,
                      timing={"wall": 1.0}, final_url="http://x/",
                      approval_requested=False, reason="")
@@ -52,7 +52,7 @@ async def test_timeout_is_a_harness_error_not_a_hang(monkeypatch):
         base_url="http://127.0.0.1:9", start_url="http://127.0.0.1:1/auth-shadow",
         timeout=0.05,
     )
-    assert rec.outcome == OUTCOMES.HARNESS_ERROR
+    assert rec.outcome == Outcome.HARNESS_ERROR
     assert "timeout" in rec.reason.lower() or "error" in rec.reason.lower()
 
 
@@ -70,7 +70,7 @@ async def test_http_error_is_attributable_not_a_crash(monkeypatch):
         base_url="http://127.0.0.1:9", start_url="http://127.0.0.1:1/auth-shadow",
         timeout=5.0,
     )
-    assert rec.outcome == OUTCOMES.HARNESS_ERROR
+    assert rec.outcome == Outcome.HARNESS_ERROR
     assert "500" in rec.reason
 
 
@@ -196,7 +196,7 @@ async def test_run_task_maps_a_real_response_body(monkeypatch):
     # Mapped, not defaulted: `_result_from_payload` must not coerce status.
     # Proves failure_reason reached classify(), not just `reason` — a dropped
     # msg.get("failure_reason") in _result_from_payload fails here.
-    assert rec.outcome == OUTCOMES.LOGIN_FAILURE
+    assert rec.outcome == Outcome.LOGIN_FAILURE
     assert rec.steps_taken == 3
     # The URL where the task actually got to — not the one it started at.
     assert rec.final_url == "http://127.0.0.1:1/dashboard"

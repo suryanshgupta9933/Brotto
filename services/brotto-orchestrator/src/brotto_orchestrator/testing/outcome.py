@@ -112,8 +112,3 @@ SEVERITY: tuple[str, ...] = (
 def rank(outcome: str) -> int:
     """Worse-is-higher. Unknown outcomes rank worst — never silently best."""
     return SEVERITY.index(outcome) if outcome in SEVERITY else len(SEVERITY)
-
-
-# Alias so callers can write `OUTCOMES.PASS` without importing the class
-# name, which reads better at call sites that never subclass it.
-OUTCOMES = Outcome
