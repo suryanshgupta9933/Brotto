@@ -179,7 +179,10 @@
       font-weight: 500;
       letter-spacing: 0.01em;
       color: var(--ink-2);
+      cursor: pointer;
     }
+    /* Buttons invert on hover; the pill is a button now, so it must too. */
+    .model-pill:hover, .model-pill:focus-visible { background: var(--ink); color: var(--paper); }
     .model-pill-name {
       position: relative;
       flex: 1 1 auto;
@@ -1242,7 +1245,8 @@
 
   <!-- Model pill: the agent's identity, always visible. The square spinner
        rides inside it and appears only while a task is running. -->
-  <div id="modelPill" class="model-pill" title="Model">
+  <div id="modelPill" class="model-pill" role="button" tabindex="0"
+       title="Change model — click to open settings">
     <span id="modelSpinner" class="spinner"></span>
     <span id="modelPillName" class="model-pill-name">—</span>
   </div>

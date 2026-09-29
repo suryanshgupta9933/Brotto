@@ -157,6 +157,7 @@ async function persistSession(): Promise<void> {
 async function restoreSession(): Promise<void> {
   const s = await chrome.storage.session.get([
     "sessionId", "activeTabId", "serverUrl", "waitingForLogin", "currentPrompt", "lastObservedUrl",
+    PANEL_LOG_KEY,
   ]);
   if (typeof s.sessionId === "string") sessionId = s.sessionId;
   if (typeof s.activeTabId === "number") activeTabId = s.activeTabId;
@@ -166,6 +167,7 @@ async function restoreSession(): Promise<void> {
     currentPrompt = s.currentPrompt;
   }
   if (typeof s.lastObservedUrl === "string") lastObservedUrl = s.lastObservedUrl;
+  if (Array.isArray(s[PANEL_LOG_KEY])) panelLog = s[PANEL_LOG_KEY] as Record<string, unknown>[];
 }
 
 async function clearSession(): Promise<void> {
@@ -297,7 +299,29 @@ async function waitForPageReady(tabId: number, maxWaitMs = 10_000): Promise<void
 
 // ── Sidepanel notifications ──────────────────────────────────────────────────
 
+// ponytail: the task outlives the panel — the WebSocket lives here, not in
+// the side panel — so closing the panel mid-task used to leave the next open
+// blank while the agent kept working. Buffering events here and replaying
+// them into the panel's own handler restores the transcript for free.
+// storage.session, not local: this is one run's log and must not survive a
+// browser restart, same reasoning as the API key.
+const PANEL_LOG_KEY = "panelLog";
+const PANEL_LOG_MAX = 200;
+let panelLog: Record<string, unknown>[] = [];
+
+function logToPanel(event: Record<string, unknown>): void {
+  // tab_event fires on every navigation and would push real transcript — the
+  // user's question, a pending approval — out of a capped log. The panel only
+  // tallies them, so keep the latest and accept an approximate count on a
+  // restored panel; a wrong tab tally beats a missing task.
+  if (event.type === "tab_event") panelLog = panelLog.filter((e) => e.type !== "tab_event");
+  panelLog.push(event);
+  if (panelLog.length > PANEL_LOG_MAX) panelLog = panelLog.slice(-PANEL_LOG_MAX);
+  void chrome.storage.session.set({ [PANEL_LOG_KEY]: panelLog }).catch(() => undefined);
+}
+
 function notifyUi(event: Record<string, unknown>): void {
+  logToPanel(event);
   void chrome.runtime.sendMessage(event).catch(() => undefined);
 }
 
@@ -716,9 +740,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           waitingForLogin = false;
           currentPrompt = null;
           lastObservedUrl = "";
+          panelLog = [];
 
           const goal = String(message.task ?? "").trim();
           if (!goal) { sendResponse({ success: false, error: "task is empty" }); return; }
+
+          // Logged, not broadcast: the live panel already renders the user's
+          // own message before it sends. This only exists so a reopened panel
+          // can put the question back at the top of the transcript.
+          logToPanel({ type: "task_started", task: goal });
 
           const stored = await chrome.storage.local.get("settings");
           const plannerUrl: string =
@@ -743,6 +773,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             });
 
           sendResponse({ success: true });
+          break;
+        }
+
+        case "get_panel_log": {
+          sendResponse({ success: true, events: panelLog });
           break;
         }
 

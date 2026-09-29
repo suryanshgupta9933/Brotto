@@ -24,11 +24,12 @@ window.chrome = {
       window.__sent.push(JSON.parse(JSON.stringify(msg)));
       const f = window.__forceFail;
       if (f && f.type === msg.type) { if (cb) cb({ success: false, error: f.error }); return; }
+      if (msg.type === 'get_panel_log') { if (cb) cb({ success: true, events: window.__log || [] }); return; }
       if (cb) cb({ success: true });
     },
     connect: () => ({ onMessage: { addListener(){} }, onDisconnect: { addListener(){} }, postMessage(){}, disconnect(){} }),
   },
-  storage: { local: area(window.__bag), session: area({}) },
+  storage: { local: area(window.__bag), session: area(window.__session = window.__session || {}) },
   debugger: { attach(){}, detach(){} },
 };
 window.__deliver = (m) => window.__onMessage(m, { id: 'test' });

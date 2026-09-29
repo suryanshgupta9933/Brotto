@@ -89,7 +89,7 @@ function setModelPill(model) {
     track.appendChild(copy);
   }
   modelPillName.replaceChildren(track);
-  if (modelPill) modelPill.title = model ? `Model: ${model}` : 'Model: server default';
+  if (modelPill) modelPill.title = `${model ? 'Model: ' + model : 'Model: server default'} — open settings to change it`;
   fitModelPill();
   // Geist may still be loading when this first runs, which would measure the
   // fallback face and under-report the overflow.
@@ -354,6 +354,14 @@ settingsBtn.addEventListener('click', async () => {
   await hydrateSettingsPanel();
   settingsOverlay.classList.add('open');
   renderVerifyStatus();
+});
+
+// ponytail: the pill names the model, and the model is set in Settings —
+// making the only place that shows it a way in to the only place that
+// changes it. Same handler as the gear, so the two can't drift.
+modelPill.addEventListener('click', () => settingsBtn.click());
+modelPill.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); settingsBtn.click(); }
 });
 
 // ponytail: Q1 — extracted so the Refresh button can re-run the same
@@ -854,6 +862,17 @@ goalEl.addEventListener('input', () => {
   goalEl.style.height = 'auto';
   goalEl.style.height = Math.min(goalEl.scrollHeight, 120) + 'px';
 });
+// ponytail: Esc stops, matching every terminal and every browser. Stop is
+// already on screen while a task runs, so this is a shortcut for the mouse,
+// not the only way out.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (settingsOverlay && settingsOverlay.classList.contains('open')) return;
+  if (historyOverlay && historyOverlay.classList.contains('open')) return;
+  if (!stopBtn || stopBtn.style.display === 'none' || stopBtn.disabled) return;
+  e.preventDefault();
+  void stopTask();
+});
 
 // ponytail: render the CONTEXT cell once on load so the value is owned
 // by JS (not just the static HTML default). Then ask the backend for
@@ -918,6 +937,8 @@ async function sendUserMessage() {
     stopTimer();
     setPhase('error', `Failed to start: ${response.error || 'unknown error'}`);
     appendMessage({ role: 'error', text: `Failed to start: ${response.error || 'unknown error'}` });
+  } else {
+    void chrome.storage.session.remove('draft');
   }
 }
 
@@ -2082,11 +2103,21 @@ function renderPolicyFailureCard(message) {
   return null;
 }
 
-chrome.runtime.onMessage.addListener((message) => {
+function handleEvent(message) {
   switch (message.type) {
 
     case 'session_started':
       state.sessionId = message.sessionId || state.sessionId;
+      break;
+
+    // ponytail: logged by the background at run_local_task but never
+    // broadcast, so this only fires on replay — its job is to put the user's
+    // own question back at the top of a restored transcript.
+    case 'task_started':
+      if (message.task && !messagesEl.querySelector('.message.user')) {
+        appendMessage({ role: 'user', text: message.task });
+        state.lastGoal = message.task;
+      }
       break;
 
     // ponytail: Bug 3 — WS closed. The background emits a separate
@@ -2436,13 +2467,40 @@ chrome.runtime.onMessage.addListener((message) => {
       break;
     }
   }
-});
+}
+
+// ponytail: the panel's own listener and the replay of a closed-panel log go
+// through the same handler, so a reopened panel renders exactly what the live
+// one did instead of a second rendering path that can drift.
+chrome.runtime.onMessage.addListener(handleEvent);
 
 // ── Initial state ────────────────────────────────────────────────────────
 setPhase('idle', 'Ready');
 goalEl.focus();
 
-// Auto-probe health on open — marks the planner as reachable if the server responds.
+// ponytail: a task lives in the service worker, so closing the panel mid-task
+// left the next open blank while the agent kept working. The background
+// buffers this run's events; replay them through the same handler. The
+// `canonical_status` the SW already pushed is in the log too, so phase and
+// timer come back on their own.
+(async () => {
+  const res = await sendMessage({ type: 'get_panel_log' });
+  const events = res && res.events;
+  if (!Array.isArray(events) || events.length === 0) return;
+  for (const e of events) handleEvent(e);
+})();
+
+// ponytail: an unsent task is the most expensive thing to lose to an
+// accidental panel close, and there is exactly one place the user can type
+// it. Same store as the API key — one run's worth, not a document.
+(async () => {
+  const { draft } = await chrome.storage.session.get('draft');
+  if (typeof draft === 'string' && draft.trim()) goalEl.value = draft;
+  goalEl.addEventListener('input', () => {
+    void chrome.storage.session.set({ draft: goalEl.value });
+  });
+})();
+
 (async () => {
   // ponytail: the hidden plannerUrl input was only ever written by an explicit
   // Save, so on a fresh open it held the localhost default and the panel probed

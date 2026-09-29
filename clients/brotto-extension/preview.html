@@ -105,13 +105,13 @@ document.getElementById('messages').innerHTML =
   '<div class="message user"><div class="bubble">Email Dave about the Q3 numbers and attach the deck.</div></div>';
 
 appendFailureBubble({
-  title: "Task not permitted by your organisation's security policy",
-  body: "Brotto's policy preamble listed this task as out of scope for secure mode. "
-      + 'The agent declined the request before navigating anywhere.',
+  title: "Action blocked by your Brotto server's policy",
+  body: 'This task tried to use a domain your Brotto server blocks. Brotto stopped it '
+      + 'rather than continue. Ask whoever runs that server to remove the domain.',
   footer: 'Blocked domain: mail.google.com',
 });
 
-toast('Agent declined — nothing was sent', 'bad', 20000);
+toast('Brotto stopped the task — nothing was sent', 'bad', 20000);
 </script>
 
 <script type="text/plain" id="fx-history">
