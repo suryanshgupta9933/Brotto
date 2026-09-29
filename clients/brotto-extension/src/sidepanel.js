@@ -579,6 +579,10 @@ let timerPausedAt = 0;
 // the guard never held. setPhase clears this when a new run starts.
 let stopping = false;
 
+// One timer for every pause. Armed and cleared inside setPhase, which is the
+// only place the phase changes.
+let pauseWatchdog = null;
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -802,7 +806,6 @@ connectSwKeepAlive();
 // ── Button handlers (preserved verbatim) ─────────────────────────────────
 if (connectBtn) connectBtn.addEventListener('click', () => void connect());
 if (disconnectBtn) disconnectBtn.addEventListener('click', () => void disconnect());
-if (startBtn) startBtn.addEventListener('click', () => void startTask());
 stopBtn.addEventListener('click', () => void stopTask());
 if (refreshBtn) refreshBtn.addEventListener('click', () => void refresh());
 
@@ -870,9 +873,10 @@ async function sendUserMessage() {
   }
 
   // ponytail: start the timer the moment the user kicks off a task. Earlier
-  // wiring only started the timer inside startTask() (bound to a hidden
-  // #startBtn), so sendUserMessage's actual run_local_task path never
-  // started the counter — the user always saw 0.0s.
+  // wiring only started the timer inside startTask(), which was reachable
+  // solely from a hidden #startBtn nobody can click — so sendUserMessage's
+  // actual run_local_task path never started the counter and the user always
+  // saw 0.0s. The hidden button is gone; this is the only start path.
   startTimer();
   // ponytail: send the goal to the background. The background opens a
   // new tab, captures observations, calls the planner, dispatches actions
@@ -924,6 +928,19 @@ function logSilently(message) {
 }
 
 // ── Phase / UI helpers ────────────────────────────────────────────────────
+// ponytail: a task emits more than one terminal event — the cancel path sends
+// its own pair, and the loop's .then() can deliver another one afterwards.
+// Without this guard a failure was rendered and then overwritten by a green
+// "Task complete", which is the one thing a user cannot be allowed to see.
+// Every terminal handler asks first; the phases are the same set the
+// composer treats as sendable.
+const TERMINAL_PHASES = new Set(['done', 'error', 'completed', 'cancelled', 'disconnected', 'failed']);
+function alreadyTerminal(label) {
+  if (!TERMINAL_PHASES.has(state.phase)) return false;
+  logSilently(`${label} arrived after terminal phase ${state.phase}; ignored`);
+  return true;
+}
+
 function setPhase(phase, message) {
   const wasPaused = state.phase === 'paused';
   state.phase = phase;
@@ -948,10 +965,10 @@ function setPhase(phase, message) {
   // error. The actual message is rendered by the task_failed handler.
   if (phase === 'done' || phase === 'error') {
     stopTimer();
-    // ponytail: clear any lingering login prompt so the bubble + button
-    // don't survive into the terminal state. (Auto-resume paths also call
-    // clearLoginPrompt directly, so it's idempotent.)
-    clearLoginPrompt();
+    // ponytail: clear every prompt the task was blocked on so no card
+    // survives into the terminal state. clearLoginPrompt alone left an
+    // approval or clarify card live and clickable on a finished task.
+    clearBlockingCards();
   }
   // ponytail: the live "still working" bubble must stop blinking the moment
   // the agent stops producing — which includes 'paused', because a pause is
@@ -967,11 +984,28 @@ function setPhase(phase, message) {
   // so resetting on `running` would clear the guard on the very tick it
   // was set and let the second click through.
   if (phase === 'executing') stopping = false;
+  // ponytail: a pause is the agent blocked on the *user* (approval, login,
+  // clarify) or on a site that never answers. There are five setPhase('paused')
+  // call sites and no timeout on any of them, so a reply that never arrives
+  // left the panel silent — no prompt, no composer, no explanation. Armed here
+  // rather than at each site so all five are covered by construction. It only
+  // prints: forcing a terminal phase would under-report a task that is still
+  // alive server-side, and Stop is already visible throughout a pause.
+  clearTimeout(pauseWatchdog);
+  if (phase === 'paused') {
+    pauseWatchdog = setTimeout(() => {
+      pauseWatchdog = null;
+      if (state.phase !== 'paused') return;
+      appendMessage({
+        role: 'system',
+        text: 'Brotto has not moved on. If nothing happens, press Stop to end the task.',
+      });
+    }, 60000);
+  }
   // ponytail: status pill is visible in the header. Updates text + color
   // class so the user can read connection state at a glance (Idle by default).
   if (connectBtn) connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
   if (disconnectBtn) disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
-  if (startBtn) startBtn.disabled = phase === 'connecting';
   stopBtn.disabled = !(phase === 'executing' || phase === 'paused');
   if (refreshBtn) refreshBtn.disabled = phase === 'connecting';
   // ponytail: status bar (steps + timer) shows during running/paused/done.
@@ -1183,6 +1217,10 @@ async function stopTask() {
   // click took effect. The background's cancel emits a terminal event
   // synchronously now, so the side panel exits 'Working' within ~1 tick.
   appendMessage({ role: 'system', text: 'Stopped by user — finishing current step…' });
+  // ponytail: Stop only moved the phase; an approval / clarify card stayed on
+  // screen and clickable, so the user could still approve a purchase on a task
+  // they had just cancelled. Same cleanup setPhase does on a terminal phase.
+  clearBlockingCards();
   setPhase('paused', 'Stopping…');
   // setPhase recomputes the button from the phase, so re-disable after it —
   // otherwise Stop stays clickable-looking while the guard silently no-ops.
@@ -1264,6 +1302,16 @@ function clearLoginPrompt() {
   setTimeout(() => {
     els.forEach((el) => { if (el.isConnected) el.remove(); });
   }, 200);
+}
+
+// ponytail: every prompt a task can be blocked on. Terminal events and Stop
+// must clear all of them, not just the login bubble — an approval card that
+// outlives its task means the user can still approve a purchase on something
+// that is no longer running. Not folded into clearLoginPrompt: the auto-resume
+// paths call that on every step, where a live approval card must survive.
+function clearBlockingCards() {
+  clearLoginPrompt();
+  messagesEl.querySelectorAll('.approval-card, .clarify-card').forEach((el) => el.remove());
 }
 
 function createEmptyState() {
@@ -1674,20 +1722,28 @@ function appendApprovalCard({ id, reason, action }) {
   const denyBtn = document.createElement('button');
   denyBtn.className = 'btn btn-danger btn-sm';
   denyBtn.textContent = 'Deny';
-  denyBtn.addEventListener('click', () => {
+  denyBtn.addEventListener('click', async () => {
+    denyBtn.disabled = true;
+    const res = await sendMessage({ type: 'submit_approval', id, approved: false });
+    // ponytail: the card used to be removed *before* the send, and sendMessage
+    // resolves {success:false} rather than rejecting — so a dropped message
+    // (SW asleep, task gone) left the agent blocked on a queue reply that would
+    // never come, with no card on screen to answer. Re-arm instead.
+    if (!res.success) return reArmApproval(card, denyBtn, approveBtn, res.error);
     appendMessage({ role: 'assistant', text: 'Action denied.' });
     card.remove();
-    void sendMessage({ type: 'submit_approval', id, approved: false });
   });
   actions.appendChild(denyBtn);
 
   const approveBtn = document.createElement('button');
   approveBtn.className = 'btn btn-primary btn-sm';
   approveBtn.textContent = 'Approve';
-  approveBtn.addEventListener('click', () => {
+  approveBtn.addEventListener('click', async () => {
+    approveBtn.disabled = true;
+    const res = await sendMessage({ type: 'submit_approval', id, approved: true });
+    if (!res.success) return reArmApproval(card, denyBtn, approveBtn, res.error);
     appendMessage({ role: 'assistant', text: 'Action approved.' });
     card.remove();
-    void sendMessage({ type: 'submit_approval', id, approved: true });
     // ponytail: 5s post-approval revoke window. Show a small inline
     // affordance below the action bubble. If the user changes their
     // mind, the extension sends `revoke` to the server, which clears
@@ -1719,6 +1775,24 @@ function appendApprovalCard({ id, reason, action }) {
 
   card.appendChild(actions);
   messagesEl.appendChild(card);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// ponytail: an approval whose reply never reached the server is still pending
+// on the server, so the card has to come back — the alternative is a task
+// blocked on a queue entry with nothing on screen to answer it. Re-enables
+// both buttons and says why, so the user can tell a retry from a real error.
+function reArmApproval(card, denyBtn, approveBtn, error) {
+  denyBtn.disabled = false;
+  approveBtn.disabled = false;
+  card.classList.add('blocking');
+  let note = card.querySelector('.approval-send-failed');
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'approval-body approval-send-failed';
+    card.insertBefore(note, card.querySelector('.approval-actions'));
+  }
+  note.textContent = `That didn't reach Brotto (${error || 'no response'}). Try again.`;
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -2014,16 +2088,13 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'canonical_status': {
       // ponytail: normalize canonical lifecycle (completed / failed / cancelled /
       // disconnected / cancelling / waiting_for_approval) into the side-panel
-      // phase enum so the UI doesn't get stuck in unmapped states. Do NOT
-      // regress from a terminal phase ('error' / 'done') — the cancel
-      // handler emits its own task_failed/canonical_status pair and a
-      // late-arriving canonical_status from the loop's .then() must not
-      // overwrite the already-correct terminal pill.
+      // phase enum so the UI doesn't get stuck in unmapped states. The
+      // alreadyTerminal guard covers the case this originally special-cased:
+      // the cancel handler emits its own task_failed/canonical_status pair and
+      // a late event from the loop's .then() must not overwrite a terminal
+      // phase that is already correct.
       const raw = String(message.status || '');
-      if (state.phase === 'error' || state.phase === 'done') {
-        logSilently(`canonical_status ${raw} arrived after terminal phase ${state.phase}; ignored`);
-        break;
-      }
+      if (alreadyTerminal(`canonical_status ${raw}`)) break;
       const mapped = (raw === 'completed' || raw === 'cancelled' || raw === 'disconnected') ? 'done'
         : raw === 'failed' ? 'error'
         : raw === 'cancelling' ? 'paused'
@@ -2150,9 +2221,10 @@ chrome.runtime.onMessage.addListener((message) => {
     }
 
     case 'task_completed':
+      if (alreadyTerminal('task_completed')) break;
       // ponytail: clear any lingering login prompt — task is ending, no
       // point leaving the user looking at a "Waiting for sign-in" bubble.
-      clearLoginPrompt();
+      clearBlockingCards();
       stopTimer();
       setPhase('done', message.summary ? message.summary.slice(0, 60) : 'Task complete');
       state.stepCount = message.steps || state.stepCount;
@@ -2184,10 +2256,11 @@ chrome.runtime.onMessage.addListener((message) => {
       break;
 
     case 'task_failed':
+      if (alreadyTerminal('task_failed')) break;
       // ponytail: same as task_completed — clean up login prompt on any
       // terminal event so the user never sees a stale "Waiting" bubble
       // after the task has failed / been cancelled.
-      clearLoginPrompt();
+      clearBlockingCards();
       stopTimer();
       // ponytail: structured failure bubble (title + body + footer) for
       // policy failures; falls back to the harness's `summary` for everything
@@ -2284,9 +2357,10 @@ chrome.runtime.onMessage.addListener((message) => {
     }
 
     case 'canonical_terminal': {
+      if (alreadyTerminal('canonical_terminal')) break;
       // ponytail: terminal event from the canonical stream — clean up
       // any login prompt so it doesn't survive past the task ending.
-      clearLoginPrompt();
+      clearBlockingCards();
       stopTimer();
       const m = message.message || {};
       if (m.type === 'task.completed') {
@@ -2296,8 +2370,11 @@ chrome.runtime.onMessage.addListener((message) => {
         setPhase('error', m.message || 'Task failed');
         appendMessage({ role: 'error', text: m.message || 'Task failed.' });
       } else {
-        setPhase('done', 'Task ended');
-        appendMessage({ role: 'done', text: 'Task ended.' });
+        // ponytail: this used to render a green "Task ended." for *any*
+        // other type, so a cancellation showed as a success. Anything that
+        // isn't a completion ends the task without claiming it worked.
+        setPhase('error', 'Task ended');
+        appendMessage({ role: 'error', text: m.message || 'The task ended before it finished.' });
       }
       break;
     }
@@ -2336,6 +2413,18 @@ goalEl.focus();
 
 // Auto-probe health on open — marks the planner as reachable if the server responds.
 (async () => {
+  // ponytail: the hidden plannerUrl input was only ever written by an explicit
+  // Save, so on a fresh open it held the localhost default and the panel probed
+  // /health and fetched /v1/policy against localhost while the service worker
+  // used the saved URL — the panel and the SW could disagree about which server
+  // the task was on. Hydrate both fields from storage first; everything below
+  // and every other call site reads plannerUrlEl, so this one read covers them.
+  const { settings } = await chrome.storage.local.get('settings');
+  const saved = (settings && typeof settings.serverUrl === 'string') ? settings.serverUrl.trim() : '';
+  if (saved) {
+    plannerUrlEl.value = saved;
+    plannerUrlSetting.value = saved;
+  }
   const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
   try {
     const res = await fetch(url + '/health', { method: 'GET' });
