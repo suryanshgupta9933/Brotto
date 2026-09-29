@@ -10,7 +10,6 @@
 // 2,500-line panel for four lines of data is not worth the reformat.
 const MODEL_CATALOG = {
   anthropic: [
-    { model: "MiniMax-M3.1-Flash-Preview", context_window: 1000000 },
     { model: "claude-3-5-sonnet-latest", context_window: 200000 },
   ],
   openai: [
