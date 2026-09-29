@@ -133,6 +133,7 @@ const emptyState   = document.getElementById('emptyState');
 const goalEl       = document.getElementById('goal');
 const sendBtn      = document.getElementById('sendBtn');
 const stopBtn      = document.getElementById('stopBtn');
+const composerHint = document.getElementById('composerHint');
 const modelPill    = document.getElementById('modelPill');
 const modelSpinner = document.getElementById('modelSpinner');
 const modelPillName = document.getElementById('modelPillName');
@@ -877,6 +878,14 @@ goalEl.addEventListener('keydown', (e) => {
     e.preventDefault();
     void sendUserMessage();
   }
+  // ↑ in an empty box brings back the last task. Re-running a task you
+  // already described is the common follow-up ("now do it properly"), and
+  // retyping it is the alternative.
+  if (e.key === 'ArrowUp' && !goalEl.value.trim() && state.lastGoal) {
+    e.preventDefault();
+    goalEl.value = state.lastGoal;
+    goalEl.dispatchEvent(new Event('input'));
+  }
 });
 goalEl.addEventListener('input', () => {
   goalEl.style.height = 'auto';
@@ -1027,6 +1036,13 @@ function setPhase(phase, message) {
   if (phase === 'paused') pauseTimer();
   else if (wasPaused) resumeTimer();
   stopBtn.style.display = running ? '' : 'none';
+  // Esc only stops while something is running. Advertising it when there is
+  // nothing to stop is a shortcut that does nothing.
+  if (composerHint) {
+    composerHint.textContent = running
+      ? 'Press Enter to send · Shift+Enter for newline · Esc to stop'
+      : 'Press Enter to send · Shift+Enter for newline';
+  }
   // ponytail: re-enable the composer explicitly when the task ends so a
   // "done" / "error" / "cancelled" / "disconnected" / "failed" phase
   // always makes the goal input re-usable. setPhase is the single source
@@ -1821,6 +1837,26 @@ function appendPlanCard({ title, sites, steps }) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// Copies the same cleaned address the chip displays, not the raw one: the
+// query string can carry a session token, and the chip deliberately hides
+// it. Copying what is on screen keeps the two from disagreeing — except for
+// the scheme, which the chip drops for width and the clipboard has to keep,
+// or the pasted value won't open.
+function wireCopyUrl(el, display, rawUrl) {
+  el.classList.add('step-page-chip--copy');
+  let copyValue = display;
+  try {
+    const u = new URL(rawUrl);
+    copyValue = u.origin + u.pathname;
+  } catch { /* leave the display form */ }
+  el.addEventListener('click', () => {
+    navigator.clipboard.writeText(copyValue).then(
+      () => toast('Address copied'),
+      () => toast('Could not copy — select the text instead', 'bad'),
+    );
+  });
+}
+
 // ponytail: step bubble that tucks the raw tool call behind a "details"
 // toggle so the chat reads naturally while still letting the operator
 // drill in when debugging. Reasoning stays as the bubble title.
@@ -1846,15 +1882,21 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, action
   const pageClean = cleanUrl(pageUrl);
   const actionClean = cleanUrl(actionTarget);
   if (pageClean) {
-    const chip = document.createElement('div');
+    const chip = document.createElement('button');
+    chip.type = 'button';
     chip.className = 'step-page-chip';
+    chip.title = 'Copy this address';
     chip.innerHTML = `<span class="step-page-chip-icon">&#9655;</span><span class="step-page-chip-url">${escapeHtml(pageClean)}</span>`;
+    wireCopyUrl(chip, pageClean, pageUrl);
     bubble.appendChild(chip);
   }
   if (actionClean && actionClean !== pageClean) {
-    const dest = document.createElement('div');
+    const dest = document.createElement('button');
+    dest.type = 'button';
     dest.className = 'step-page-chip';
+    dest.title = 'Copy this address';
     dest.innerHTML = `<span class="step-page-chip-icon">&#8594;</span><span class="step-page-chip-url">${escapeHtml(actionClean)}</span>`;
+    wireCopyUrl(dest, actionClean, actionTarget);
     bubble.appendChild(dest);
   }
 

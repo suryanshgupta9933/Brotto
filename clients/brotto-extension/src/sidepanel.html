@@ -1177,6 +1177,19 @@
       white-space: nowrap;
     }
     .step-page-chip-icon { color: var(--ink); flex-shrink: 0; }
+    /* The chip is a button: copying an address has to be reachable without a
+       mouse. Reset the UA button chrome and keep the chip's own rule. */
+    .step-page-chip--copy {
+      width: 100%;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid var(--rule);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .step-page-chip--copy:hover .step-page-chip-url { color: var(--ink); text-decoration: underline; }
+    .step-page-chip--copy:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
     .step-page-chip-url {
       font-family: var(--font-mono);
       font-size: 10.5px;
@@ -1371,7 +1384,7 @@
       </svg>
     </button>
   </div>
-  <div class="input-hint">Press Enter to send · Shift+Enter for newline</div>
+  <div class="input-hint" id="composerHint">Press Enter to send · Shift+Enter for newline</div>
 </section>
 
 <!-- ── Settings overlay ─────────────────────────────────────────── -->
