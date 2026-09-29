@@ -190,6 +190,19 @@ function signalResume(): void {
 
 // ── AX tree capture ─────────────────────────────────────────────────────────
 
+// Mirrors PAGE_TEXT_MAX in agent/ax_filter.py.
+const PAGE_TEXT_MAX = 20000;
+
+// A link's destination lives in a CDP "url" property, not a top-level field.
+function propUrl(node: any): string | undefined {
+  for (const p of node.properties ?? []) {
+    if (p.name !== "url") continue;
+    const v = p.value;
+    return (typeof v === "object" ? v?.value : v) || undefined;
+  }
+  return undefined;
+}
+
 async function extractAx(tabId: number): Promise<object[]> {
   await dbg.sendCommand(tabId, { method: "Accessibility.enable" });
   const raw = await dbg.sendCommand(tabId, {
@@ -198,12 +211,41 @@ async function extractAx(tabId: number): Promise<object[]> {
   const nodes = raw.nodes ?? [];
   const targets: object[] = [];
 
+  // The server indents by kept-ancestor depth, so it needs the parent
+  // chain. Send the nearest *kept* ancestor and let it derive depth — one
+  // implementation for both capture paths, not one per language. A link's
+  // immediate parent is usually a generic container that never survives
+  // KEEP_ROLES, so resolving only the direct parent yields depth 0.
+  const kept = new Set<number>();
+  const parentOf = new Map<number, number>();
   for (const node of nodes) {
+    if (typeof node.nodeId === "number" && typeof node.parentId === "number") {
+      parentOf.set(node.nodeId, node.parentId);
+    }
     if (node.ignored) continue;
     const role = (node.role?.value ?? "").toLowerCase();
     if (!KEEP_ROLES.has(role)) continue;
+    kept.add(node.nodeId);
+  }
+
+  const keptAncestor = (nodeId: number): number | undefined => {
+    const seen = new Set<number>();
+    let cur = parentOf.get(nodeId);
+    while (cur !== undefined && !kept.has(cur)) {
+      if (seen.has(cur)) return undefined;
+      seen.add(cur);
+      cur = parentOf.get(cur);
+    }
+    return cur;
+  };
+
+  for (const node of nodes) {
+    if (!kept.has(node.nodeId)) continue;
+    const role = (node.role?.value ?? "").toLowerCase();
     const name  = node.name?.value?.trim() ?? "";
     const value = node.value?.value ?? undefined;
+    const href  = propUrl(node);
+    const parentId = keptAncestor(node.nodeId);
     const backendId = node.backendDOMNodeId;
     let x: number | undefined, y: number | undefined;
     if (backendId) {
@@ -222,6 +264,8 @@ async function extractAx(tabId: number): Promise<object[]> {
     targets.push({
       ref: node.nodeId, role, name,
       ...(value !== undefined ? { value } : {}),
+      ...(href    !== undefined ? { href }    : {}),
+      ...(parentId !== undefined ? { parent: parentId } : {}),
       ...(x !== undefined    ? { x, y }   : {}),
     });
   }
@@ -232,11 +276,19 @@ async function extractAx(tabId: number): Promise<object[]> {
 async function captureObservation(tabId: number) {
   await waitForPageReady(tabId);
 
+  // Page text rides along with url/title in the evaluate that already runs
+  // every step — no extra round trip. innerText is the only place numbers
+  // like "Star 50" exist; the accessibility tree often omits them entirely.
   const ps = await dbg.sendCommand(tabId, {
     method: "Runtime.evaluate",
-    params: { expression: "({url:location.href,title:document.title})", returnByValue: true },
-  }) as { result?: { value?: { url: string; title: string } } };
-  const { url = "", title = "" } = ps.result?.value ?? {};
+    params: {
+      expression:
+        `({url:location.href,title:document.title,` +
+        `text:((document.body&&document.body.innerText)||'').replace(/\\s+/g,' ').slice(0,${PAGE_TEXT_MAX})})`,
+      returnByValue: true,
+    },
+  }) as { result?: { value?: { url: string; title: string; text: string } } };
+  const { url = "", title = "", text: pageText = "" } = ps.result?.value ?? {};
 
   let axTargets = await extractAx(tabId);
 
@@ -246,7 +298,7 @@ async function captureObservation(tabId: number) {
     axTargets = await extractAx(tabId);
   }
 
-  return { url, title, axTargets };
+  return { url, title, pageText, axTargets };
 }
 
 // ── Action execution ─────────────────────────────────────────────────────────

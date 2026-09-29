@@ -220,13 +220,23 @@
     @keyframes spin { to { transform: rotate(360deg); } }
 
     /* ─── Status bar (steps / time / tabs / context) ───────────────────── */
+    /* The frame carries the same weight as the rule above it, so the black
+       line runs out of the header, down both sides and closes underneath —
+       one continuous edge instead of a loose grid of numbers. The -1px
+       margin collapses the frame's top edge into the header's rule; without
+       it the two stack into a 2px line. Internals stay hairline: frame is
+       structure, hairline is division. */
     #statusBar {
       display: none;
       background: var(--paper-3);
-      border-bottom: 1px solid var(--rule);
+      border: 1px solid var(--rule-ink);
       flex-shrink: 0;
     }
-    #statusBar.active { display: grid; grid-template-columns: 1fr 1fr; }
+    #statusBar.active {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      margin-top: -1px;
+    }
     #statusBar .cell {
       min-width: 0;
       padding: 7px 14px;
