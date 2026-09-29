@@ -284,11 +284,14 @@ async def policy_ack(request: Request):
 # suggestions precisely when no task is running.
 @app.post("/v1/suggestions")
 async def suggestions(request: Request):
-    """Three task suggestions for the page the panel is looking at.
+    """Task suggestions for the page the panel is looking at.
 
-    `url` and `title` are the whole input. The panel has no content script
-    and holds `<all_urls>`, so page text is not an option without injecting
-    into every site the user visits.
+    `page_text` is the page's visible text, read on demand by the panel with
+    `chrome.scripting.executeScript` — not a permanently injected content
+    script, and never the debugger, which would raise Chrome's debugging
+    banner for a feature the user only opened a panel to look at. It comes
+    back empty on chrome:// pages and anywhere else that refuses a script;
+    that is passed through as absence rather than filled in.
     """
     from .agent.suggest import generate
 
@@ -297,6 +300,7 @@ async def suggestions(request: Request):
     if not url:
         return JSONResponse(status_code=400, content={"error": "url is required"})
     title = str(body.get("title", "") or "")
+    page_text = str(body.get("page_text", "") or "")
 
     client_host = request.client.host if request.client else "unknown"
     inline_config = None
@@ -322,13 +326,16 @@ async def suggestions(request: Request):
         return JSONResponse(status_code=502, content={"error": str(exc)})
 
     try:
-        lines = await generate(url, title, cfg, creds)
+        lines = await generate(url, title, cfg, creds, page_text=page_text)
     except Exception as exc:
         # 502 rather than 500 so the panel can tell "your server couldn't do
         # this" from "your request was malformed" and keep its fallback.
         log.warning("suggestions failed for %s: %s", url[:120], exc)
         return JSONResponse(status_code=502, content={"error": str(exc)})
-    return JSONResponse(content={"lines": lines})
+    # context_used is what the panel needs to decide how long to keep the
+    # result: a line derived from page text is page content, and storing one
+    # in chrome.storage.local for a day is a leak the user never agreed to.
+    return JSONResponse(content={"lines": lines, "context_used": bool(page_text)})
 
 
 # ---------------------------------------------------------------------------

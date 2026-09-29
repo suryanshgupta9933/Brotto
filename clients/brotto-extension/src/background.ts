@@ -610,7 +610,6 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
           url:         msg.url ?? "",
           pageTitle:   "",
           actionTarget: msg.action_target ?? null,
-          actions:     Array.isArray(msg.actions) ? msg.actions : [],
           iconKind:    msg.action ?? "navigate",
           ts:          Date.now(),
           context:     msg.context ?? null,
@@ -712,10 +711,6 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
         notifyUi({ type: "login_required", url: msg.message ?? "", domain });
         break;
       }
-
-      case "stagnation_warning":
-        notifyUi({ type: "stagnation_warning", reason: msg.reason ?? "" });
-        break;
 
       case "evaluate": {
         try {
@@ -830,8 +825,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
           // Logged, not broadcast: the live panel already renders the user's
           // own message before it sends. This only exists so a reopened panel
-          // can put the question back at the top of the transcript.
-          logToPanel({ type: "task_started", task: goal });
+          // can put the question back at the top of the transcript, resume
+          // the run's clock, and recognise a run it has already recorded.
+          // `startedAt` is that anchor: without it a reopened panel has no
+          // start time, so ACTIVE reads 0.0s for the rest of the run and
+          // every reopen writes a duplicate history row.
+          logToPanel({ type: "task_started", task: goal, startedAt: Date.now() });
 
           const stored = await chrome.storage.local.get("settings");
           const plannerUrl: string =

@@ -40,7 +40,8 @@ WAVE_BY_OUTCOME: dict[Outcome, str] = {
 
 # Order matters: the first substring found wins, so the more specific
 # failure reasons are tested before the broader ones. Every needle below is a
-# string the repo actually emits — see agent/harness.py and agent/stagnation.py.
+# string the repo has actually emitted on a recorded run — the "stagnat"
+# needle matches runs captured before the stagnation detector was removed.
 # HARNESS_ERROR is first: `auth_failed` is the *model provider* rejecting our
 # API key (broken infrastructure), not a website login wall, and
 # `model_not_found` / `cdp_preflight_failed` are equally ours, not the agent's.

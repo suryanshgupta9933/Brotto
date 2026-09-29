@@ -145,8 +145,6 @@ const plannerUrlSetting = document.getElementById('plannerUrlSetting');
 // Preserved DOM IDs for background.ts compatibility
 const plannerUrlEl    = document.getElementById('plannerUrl');
 const startingUrlEl   = document.getElementById('startingUrl');
-const connectBtn      = document.getElementById('connectBtn');
-const disconnectBtn   = document.getElementById('disconnectBtn');
 const refreshBtn      = document.getElementById('refreshBtn');
 const brandDot        = document.getElementById('brandDot');
 const stepCountEl     = document.getElementById('stepCount');
@@ -272,14 +270,13 @@ async function saveSession({ status, steps, elapsed }) {
   const sessions = await listSessions();
   // Every panel open replays the run's buffered events, so the terminal event
   // arrives again for a task already recorded — 20 opens was enough to evict
-  // every real task from the list. The session id is the only identifier that
-  // survives the replay; state.startTime does not, because it is set in
-  // startTask and never re-run.
-  if (state.sessionId && sessions[0]?.sessionId === state.sessionId) return;
+  // every real task from the list. The run's start time is the identifier that
+  // survives the replay: it is restored from the replayed `task_started`. The
+  // server's session id cannot be used here — the panel never receives it.
+  if (state.startTime && sessions[0]?.startedAt === state.startTime) return;
   sessions.unshift({
     task,
     status,
-    sessionId: state.sessionId || null,
     steps: steps || state.stepCount || 0,
     elapsed: elapsed || '—',
     startedAt: state.startTime || Date.now(),
@@ -632,7 +629,6 @@ if (saveSettingsBtn) {
 const state = {
   phase: 'idle',
   plannerUrl: '',
-  sessionId: null,
   startTime: 0,
   stepCount: 0,
   pendingClarifyId: null,
@@ -808,7 +804,10 @@ function renderMarkdown(raw) {
   html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
   html = html.replace(/\*(.+?)\*/g, '<i>$1</i>');
   html = html.replace(/`([^`\n]+)`/g,
-    '<code style="background:var(--surface-2);padding:1px 4px;border-radius:3px;font-size:0.88em;font-family:ui-monospace,monospace">$1</code>');
+    // ponytail: --surface-2 does not exist, so this rendered as no chip at
+    // all. --paper-2 is the sunken token, and the system is square — the 3px
+    // radius was the only rounded corner in the panel.
+    '<code style="background:var(--paper-2);padding:1px 4px;font-size:0.88em;font-family:ui-monospace,monospace">$1</code>');
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
     '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 
@@ -844,15 +843,6 @@ function deriveReasoningFromAction(title, iconKind) {
   return t.length > 80 ? `${t.slice(0, 77)}…` : `${t}…`;
 }
 
-// ponytail: formatToolCall is no longer used — tool call names are rendered
-// inline in the step_card message handler. Kept as a placeholder if the
-// tooling needs to expand later. The details panel only shows the names
-// (e.g. "navigate, append_scratchpad") when the step had multiple actions.
-function formatToolCall(a) {
-  if (!a || typeof a.action !== 'string') return '';
-  return a.action;
-}
-
 // ── SW keep-alive (MV3) ──────────────────────────────────────────────────
 // ponytail: open a long-lived port to the service worker so Chrome doesn't
 // terminate it between tasks. Without this, the SW is killed after ~30s of
@@ -879,9 +869,7 @@ function connectSwKeepAlive() {
 }
 connectSwKeepAlive();
 
-// ── Button handlers (preserved verbatim) ─────────────────────────────────
-if (connectBtn) connectBtn.addEventListener('click', () => void connect());
-if (disconnectBtn) disconnectBtn.addEventListener('click', () => void disconnect());
+// ── Button handlers ──────────────────────────────────────────────────────
 stopBtn.addEventListener('click', () => void stopTask());
 if (refreshBtn) refreshBtn.addEventListener('click', () => void refresh());
 
@@ -958,9 +946,14 @@ async function sendUserMessage() {
   // double-clicks during the connecting/connected window before the loop sets
   // 'executing'. Without this, two parallel run_local_task messages race and
   // the second hits "A local task is already running" in background.
+  //
+  // 'connected' is deliberately NOT a sendable phase: answering a clarify or
+  // approval card sets it while the task is still running, and letting Enter
+  // through there wiped the live transcript (clearMessages runs below) before
+  // failing with "a task is already running".
   if (state.phase !== 'idle' && state.phase !== 'done' && state.phase !== 'error'
       && state.phase !== 'completed' && state.phase !== 'cancelled' && state.phase !== 'disconnected'
-      && state.phase !== 'failed' && state.phase !== 'connected') return;
+      && state.phase !== 'failed') return;
   // ponytail: soft length cap. Tasks > MAX_TASK_CHARS get a confirm dialog
   // because long compound instructions are a classic prompt-injection vector.
   // The server logs a warning on the same threshold (defense in depth) but
@@ -971,6 +964,14 @@ async function sendUserMessage() {
         `This task is ${text.length} characters. Long instructions are more likely to contain something Brotto shouldn't follow. Send anyway?`)) {
     return;
   }
+  // ponytail: accepting a send re-arms Stop, which a previous stopTask left
+  // latched. It belongs here — the first line after the send is accepted —
+  // and not on the send's own path: a connect failure returns early, and Stop
+  // stayed greyed out for every task after that one. It must also not live in
+  // setPhase, because `canonical_status: executing` arrives on every step and
+  // would re-arm Stop while a cancel was still in flight.
+  stopping = false;
+  stopBtn.disabled = false;
   // ponytail: clear prior conversation so each task starts fresh.
   clearMessages();
   // ponytail: clear the previous task's tab tally (the loop's tabEvent
@@ -994,11 +995,7 @@ async function sendUserMessage() {
     return;
   }
 
-  // ponytail: start the timer the moment the user kicks off a task. Earlier
-  // wiring only started the timer inside startTask(), which was reachable
-  // solely from a hidden #startBtn nobody can click — so sendUserMessage's
-  // actual run_local_task path never started the counter and the user always
-  // saw 0.0s. The hidden button is gone; this is the only start path.
+  // ponytail: start the timer the moment the run actually begins.
   startTimer();
   // ponytail: send the goal to the background. The background opens a
   // new tab, captures observations, calls the planner, dispatches actions
@@ -1145,8 +1142,6 @@ function setPhase(phase, message) {
   }
   // ponytail: status pill is visible in the header. Updates text + color
   // class so the user can read connection state at a glance (Idle by default).
-  if (connectBtn) connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
-  if (disconnectBtn) disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
   // The `stopping` latch has to be read here, not just inside stopTask: this
   // line recomputes the button on every phase change, and the server keeps
   // sending `canonical_status: executing` while a cancel is in flight. Without
@@ -1193,10 +1188,15 @@ function renderElapsed() {
   if (timerActiveEl) timerActiveEl.textContent = elapsed;
 }
 
-function startTimer() {
+// ponytail: `from` is the run's real start. Omitted on a live send (the run
+// starts now); supplied when a reopened panel replays the run's own
+// `task_started`, so ACTIVE counts from where the run actually is rather
+// than from the moment the panel happened to reopen.
+function startTimer(from) {
   clearTimer();
-  state.startTime = Date.now();
+  state.startTime = from || Date.now();
   timerInterval = setInterval(renderElapsed, 100);
+  renderElapsed();
 }
 
 // ponytail: freeze the clock while the agent waits on the user. Guarded on
@@ -1246,30 +1246,10 @@ function updateStepCount() {
 }
 
 // ── Core logic (preserved verbatim) ───────────────────────────────────────
-async function connect() {
-  const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
-  setPhase('connecting', `Probing ${url}...`);
-  try {
-    const response = await fetch(url + '/health', { method: 'GET' });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const info = await response.json();
-    state.plannerUrl = url;
-    plannerUrlEl.value = url;
-    setPhase('connected', null);
-    // Status pill already shows connection; no chat line.
-  } catch (err) {
-    state.plannerUrl = '';
-    setPhase('error', `Connect failed: ${err instanceof Error ? err.message : String(err)}`);
-    appendMessage({ role: 'error', text: `Connect failed: ${err instanceof Error ? err.message : String(err)}` });
-  }
-}
-
-function disconnect() {
-  if (state.phase === 'executing' || state.phase === 'paused') void stopTask();
-  state.plannerUrl = '';
-  setPhase('idle', 'Disconnected');
-  appendMessage({ role: 'system', text: 'Disconnected' });
-}
+// ponytail: `connect`/`disconnect` are gone. The panel connects implicitly on
+// the first send (ensureConnected), so the explicit connect step had no
+// button and no caller — it went when the dead startTask went, and its only
+// other listener was bound to a #connectBtn that is not in the document.
 
 // ponytail: Bug 2 — visible connection indicator. Dot-only — state
 // conveyed by colour (green/amber/red) + the title-attribute tooltip.
@@ -1312,41 +1292,6 @@ function toast(text, kind, ms = 2600) {
   toastTimer = setTimeout(() => el.classList.add('leaving'), ms);
   // 200ms covers the 180ms leave animation with a little slack.
   toastGoneTimer = setTimeout(() => el.remove(), ms + 200);
-}
-
-async function startTask() {
-  if (state.phase === 'executing' || state.phase === 'paused') return;
-  const goal = goalEl.value.trim();
-  if (!goal) {
-    appendMessage({ role: 'error', text: 'Enter a task description first.' });
-    return;
-  }
-  if (!state.plannerUrl) {
-    await connect();
-    if (state.phase !== 'connected') return;
-  }
-  clearMessages();
-  state.sessionId = 'session-' + Date.now();
-  // A fresh run re-arms Stop, which a previous stopTask left latched. This
-  // belongs here and not in setPhase: `canonical_status: executing` arrives on
-  // every step, so clearing it on the phase re-armed Stop while the cancel was
-  // still in flight and let a second click through.
-  stopping = false;
-  stopBtn.disabled = false;
-  setPhase('executing', 'Starting...');
-  startTimer();
-  appendMessage({ role: 'system', text: `Starting task: ${goal.slice(0, 80)}${goal.length > 80 ? '…' : ''}` });
-  const message = { type: 'run_local_task', task: goal, sessionId: state.sessionId };
-  const startUrl = startingUrlEl.value.trim();
-  const plannerUrl = plannerUrlEl.value.trim();
-  if (startUrl) message.startingUrl = startUrl;
-  if (plannerUrl) message.plannerUrl = plannerUrl;
-  const response = await sendMessage(message);
-  if (!response.success) {
-    stopTimer();
-    setPhase('error', `Start failed: ${response.error || 'unknown'}`);
-    appendMessage({ role: 'error', text: `Failed to start: ${response.error || 'unknown error'}` });
-  }
 }
 
 async function stopTask() {
@@ -1522,6 +1467,36 @@ const FALLBACK_SUGGESTIONS = [
 const SUGGESTION_CACHE_KEY = 'suggestionCache';
 const SUGGESTION_CACHE_MAX = 40;
 const SUGGESTION_DEBOUNCE_MS = 1000;
+// A line written from page text is page content: "three emails from your
+// manager" is a leak sitting in chrome.storage.local for as long as its entry
+// lives. A URL and a title are not sensitive, so those keep the day-long entry
+// the cache was built around; anything drawn from what was on screen expires
+// in minutes instead.
+const SUGGESTION_TTL_CONTEXT_MS = 10 * 60 * 1000;
+const SUGGESTION_TTL_DEFAULT_MS = 24 * 60 * 60 * 1000;
+// The server caps at the same number. Applied here so a 200KB document never
+// crosses the wire only to be truncated on arrival.
+const PAGE_TEXT_CHARS = 8000;
+
+// Read on demand, and only while the panel is open. A permanently injected
+// content script would put Brotto into every site the user visits, and the
+// debugger would raise Chrome's "debugging this browser" banner — a heavy
+// thing to show someone who opened a panel to read a list. chrome:// pages
+// and a few others refuse the script outright, and that is reported as
+// absence rather than guessed around.
+async function readPageContext(tabId) {
+  if (typeof tabId !== 'number') return '';
+  try {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (limit) => (document.body?.innerText || '').slice(0, limit),
+      args: [PAGE_TEXT_CHARS],
+    });
+    return (res?.result || '').trim();
+  } catch {
+    return '';
+  }
+}
 
 // One key in flight at a time. Rapid tab switching would otherwise queue a
 // model call per tab, and the last one to land is not the one being shown.
@@ -1581,16 +1556,16 @@ async function readSuggestionCache() {
   return stored[SUGGESTION_CACHE_KEY] || {};
 }
 
-async function writeSuggestionCache(key, lines) {
+async function writeSuggestionCache(key, lines, ttl) {
   const cache = await readSuggestionCache();
-  cache[key] = { at: Date.now(), lines };
+  cache[key] = { at: Date.now(), ttl, lines };
   const trimmed = Object.entries(cache)
     .sort((a, b) => b[1].at - a[1].at)
     .slice(0, SUGGESTION_CACHE_MAX);
   await chrome.storage.local.set({ [SUGGESTION_CACHE_KEY]: Object.fromEntries(trimmed) });
 }
 
-async function fetchSuggestions(url, title) {
+async function fetchSuggestions(url, title, pageText = '') {
   const key = suggestionKey(url);
   if (!key) return null;
   if (suggestionInFlight === key) return null;
@@ -1598,7 +1573,10 @@ async function fetchSuggestions(url, title) {
   try {
     const cache = await readSuggestionCache();
     const hit = cache[key];
-    if (hit && hit.lines && hit.lines.length) return hit.lines;
+    if (hit && hit.lines && hit.lines.length
+        && Date.now() - hit.at < (hit.ttl || SUGGESTION_TTL_DEFAULT_MS)) {
+      return hit.lines;
+    }
 
     const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
     const [local, key_] = await Promise.all([
@@ -1611,6 +1589,7 @@ async function fetchSuggestions(url, title) {
       body: JSON.stringify({
         url,
         title,
+        page_text: pageText || undefined,
         model_config: local.modelConfig || undefined,
         api_key: key_.modelApiKey || undefined,
       }),
@@ -1618,7 +1597,14 @@ async function fetchSuggestions(url, title) {
     if (!response.ok) return null;
     const data = await response.json();
     if (!Array.isArray(data.lines) || !data.lines.length) return null;
-    await writeSuggestionCache(key, data.lines);
+    // The server tells us whether it actually saw the page, rather than this
+    // side guessing from whether the read succeeded — a page can return an
+    // empty body and still be a page the model was given.
+    await writeSuggestionCache(
+      key,
+      data.lines,
+      data.context_used ? SUGGESTION_TTL_CONTEXT_MS : SUGGESTION_TTL_DEFAULT_MS,
+    );
     return data.lines;
   } catch {
     // Server down, or never configured. The fallback is already painted, so
@@ -1652,7 +1638,8 @@ function refreshEmptyState(tab) {
   if (!url || !plannerUrlEl.value) return;
   clearTimeout(suggestionTimer);
   suggestionTimer = setTimeout(async () => {
-    const lines = await fetchSuggestions(url, tab?.title || '');
+    const pageText = await readPageContext(tab.id);
+    const lines = await fetchSuggestions(url, tab?.title || '', pageText);
     if (lines) paintSuggestions(lines);
   }, SUGGESTION_DEBOUNCE_MS);
 }
@@ -1935,18 +1922,19 @@ function wireCopyUrl(el, copyValue) {
   });
 }
 
-// ponytail: step bubble that tucks the raw tool call behind a "details"
-// toggle so the chat reads naturally while still letting the operator
-// drill in when debugging. Reasoning stays as the bubble title.
+// ponytail: step bubble. The model's `clientText` is the title and the address
+// row is the only other thing drawn — the tool calls a step was built from are
+// server-side detail, and a toggle for them put debugging chrome in the one
+// surface the user actually reads.
 // ponytail: icon is set via innerHTML on its own <span> so HTML entities
 // (&#8594;, &#9654;, &#10003;) decode to glyphs. The reasoning text uses
 // textContent so any user/model-supplied HTML stays literal and safe.
-function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, actionTarget }) {
+function appendStep({ icon, text, pageUrl, actionTarget }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
   const msg = document.createElement('div');
-  msg.className = 'message assistant';
+  msg.className = 'message assistant step';
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble step-bubble';
@@ -1967,90 +1955,63 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, action
 
   // ponytail: the address goes under the step, not above it, and only the
   // host is boxed — it is the fragment that names the site rather than the
-  // page. A move within one site is the common case, so the host is drawn
-  // once and both paths share its line; crossing sites falls back to two
-  // rows, because one boxed host would then be lying about the second URL.
-  // Order is always source then destination, on both paths.
+  // page. A move is drawn as source → destination on ONE line: within a site
+  // the host is drawn once and both paths share it, and crossing sites draws
+  // both hosts with the arrow between. Two stacked rows read as two unrelated
+  // facts rather than a move, and they left the width beside each pill empty.
+  // Order is always source then destination.
   const page = splitUrl(pageUrl);
   const action = splitUrl(actionTarget);
   const sameSite = page && action && page.host === action.host;
-  const primary = page || action;
-  if (page || action) {
+  const primary = action || page;
+  if (primary) {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'step-url-row step-url-row--copy';
     row.title = 'Copy this address';
 
-    const box = document.createElement('span');
-    box.className = 'step-url-host';
-    box.textContent = primary.host;
-    row.appendChild(box);
+    // Two pills only when the move crosses sites. Within one site the host is
+    // drawn once and both paths share its line — boxing the same host twice
+    // would say "two sites" about a move that stayed on one. A step that did
+    // not move at all draws one path: "/home → /home" is an arrow between two
+    // copies of the same address, which is noise rather than a move.
+    const stayed = sameSite && page.raw === action.raw;
+    // The third element marks the source end of a cross-site move. Its path is
+    // the one fragment worth dropping when the row runs out of room: where the
+    // agent came FROM is context, and "indianex… /article/kathua…" costs four
+    // ellipses to say what "indianexpress.com" already said.
+    const ends = sameSite
+      ? [[page, stayed ? page.path : [page.path, action.path].filter(Boolean).join(' → '), false]]
+      : [[page, page && page.path, true], [action, action && action.path, false]];
 
-    const path = document.createElement('span');
-    path.className = 'step-url-path';
-    if (sameSite) {
-      const arrow = document.createElement('span');
-      arrow.className = 'step-url-arrow';
-      arrow.textContent = ' → ';
-      const from = document.createElement('span');
-      from.textContent = page.path;
-      const to = document.createElement('span');
-      to.textContent = action.path;
-      path.append(from, arrow, to);
-    } else {
-      path.textContent = primary.path;
+    let drawn = 0;
+    for (const [end, path, isFrom] of ends) {
+      // A missing end is not a second pill, and a path of nothing is not a
+      // path — either would leave a pill and a separator around nothing.
+      if (!end) continue;
+      if (drawn) {
+        const arrow = document.createElement('span');
+        arrow.className = 'step-url-arrow';
+        arrow.textContent = '→';
+        row.appendChild(arrow);
+      }
+      const box = document.createElement('span');
+      box.className = 'step-url-host';
+      box.textContent = end.host;
+      row.appendChild(box);
+      if (path) {
+        const p = document.createElement('span');
+        p.className = isFrom ? 'step-url-path step-url-path--from' : 'step-url-path';
+        p.textContent = path;
+        row.appendChild(p);
+      }
+      drawn++;
     }
-    // Neither half may be empty, or the row is a box and a dangling arrow
-    // around nothing.
-    if (sameSite ? (page.path || action.path) : primary.path) row.appendChild(path);
 
     // Copy the destination — where the agent ended up is the address worth
     // pasting, not where it started.
-    wireCopyUrl(row, (action || page).raw);
+    wireCopyUrl(row, primary.raw);
     bubble.appendChild(row);
-  }
-  if (page && action && !sameSite) {
-    const other = document.createElement('button');
-    other.type = 'button';
-    other.className = 'step-url-row step-url-row--copy';
-    other.title = 'Copy this address';
-    const box = document.createElement('span');
-    box.className = 'step-url-host';
-    box.textContent = action.host;
-    const path = document.createElement('span');
-    path.className = 'step-url-path';
-    path.textContent = action.path;
-    other.append(box);
-    if (action.path) other.appendChild(path);
-    wireCopyUrl(other, action.raw);
-    bubble.appendChild(other);
-  }
-
-  if (details && details.length > 0) {
-    const wrap = document.createElement('div');
-    wrap.className = 'step-details';
-
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = 'step-details-toggle';
-    toggle.textContent = 'details';
-    toggle.setAttribute('aria-expanded', 'false');
-
-    const body = document.createElement('div');
-    body.className = 'step-details-body';
-    body.textContent = details;
-    body.style.display = 'none';
-
-    toggle.addEventListener('click', () => {
-      const open = body.style.display !== 'none';
-      body.style.display = open ? 'none' : 'block';
-      toggle.setAttribute('aria-expanded', String(!open));
-      toggle.textContent = open ? 'details' : 'hide details';
-    });
-
-    wrap.appendChild(toggle);
-    wrap.appendChild(body);
-    bubble.appendChild(wrap);
   }
 
   msg.appendChild(bubble);
@@ -2457,10 +2418,6 @@ function renderPolicyFailureCard(message) {
 function handleEvent(message) {
   switch (message.type) {
 
-    case 'session_started':
-      state.sessionId = message.sessionId || state.sessionId;
-      break;
-
     // ponytail: logged by the background at run_local_task but never
     // broadcast, so this only fires on replay — its job is to put the user's
     // own question back at the top of a restored transcript.
@@ -2469,6 +2426,12 @@ function handleEvent(message) {
         appendMessage({ role: 'user', text: message.task });
         state.lastGoal = message.task;
       }
+      // ponytail: the clock belongs to the run, and the run started before
+      // this panel existed. This event is logged rather than broadcast, so it
+      // only ever arrives on replay — which is exactly when the start time is
+      // missing. It is also the only identifier that survives the replay; see
+      // saveSession, which dedupes on it.
+      if (message.startedAt && !state.startTime) startTimer(message.startedAt);
       break;
 
     // ponytail: Bug 3 — WS closed. The background emits a separate
@@ -2506,6 +2469,14 @@ function handleEvent(message) {
         : raw === 'failed' ? 'Task failed'
         : raw === 'cancelled' ? 'Task cancelled'
         : null;
+      // ponytail: a cancelled run is terminal but arrives WITHOUT a
+      // task_completed/task_failed pair — the background marks the task
+      // terminal before notifying, so those never fire. Without this the run
+      // vanished from history entirely, which reads as "nothing happened"
+      // rather than "I stopped it".
+      if (raw === 'cancelled') {
+        void saveSession({ status: 'cancelled', elapsed: timerActiveEl && timerActiveEl.textContent });
+      }
       setPhase(mapped, meta);
       break;
     }
@@ -2528,22 +2499,10 @@ function handleEvent(message) {
       const bubbleTitle = (message.clientText && message.clientText.trim())
         || (message.reasoning && message.reasoning.trim())
         || deriveReasoningFromAction(message.title || '', message.iconKind);
-      // ponytail: the details panel shows tool call names ONLY when the
-      // step had multiple actions. Single-action steps keep the bubble
-      // content as the only detail (the raw tool call args are hidden —
-      // the user said they don't want to see complete tool calls).
-      // Multi-action steps list the names joined by ", " so the operator
-      // can see at a glance which tools fired in this batch.
-      const actions = Array.isArray(message.actions) ? message.actions : [];
-      const details = actions.length > 1
-        ? actions.map(a => a.action).filter(Boolean).join(', ')
-        : '';
       // ponytail: each step gets its OWN persistent bubble. clientText is the
-      // bubble title; raw tool call + reasoning live behind a "details"
-      // toggle so the chat reads naturally and the operator can drill in
-      // when debugging. Icon is passed separately so HTML entities decode
+      // bubble title. Icon is passed separately so HTML entities decode
       // instead of rendering as literal `&#8594;`.
-      appendStepWithDetails({ icon, text: bubbleTitle, details, ts: message.ts, pageUrl: message.url, pageTitle: message.pageTitle, actionTarget: message.actionTarget ?? null });
+      appendStep({ icon, text: bubbleTitle, pageUrl: message.url, actionTarget: message.actionTarget ?? null });
       // Track context utilization for the CONTEXT cell. Backend ships
       // `{tokens, window, pct}` per step (pct is the model-reported
       // usage / model's context window). Frontend just stores and
@@ -2609,20 +2568,6 @@ function handleEvent(message) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
       break;
 
-    // ponytail: the harness detects a stall (N steps with the page itself
-    // unchanged) and the service worker forwards it, but the panel had no case
-    // for it — so the user watched an unexplained spinner while the agent
-    // looped. Say what happened, and that it is still working on it.
-    // No "stop the task" advice: the harness already tells the model to
-    // report what it has or take a genuinely different path, and a second
-    // nudge to quit is how a task one step from done gets abandoned.
-    case 'stagnation_warning':
-      appendMessage({
-        role: 'system',
-        text: `The page hasn't changed for a few steps${message.reason ? ` — ${message.reason}` : ''}. Trying a different approach.`,
-      });
-      break;
-
     case 'context_update': {
       // ponytail: scratchpad-only step (no external action visible to
       // bubble). Backend still emits context so the CONTEXT cell updates
@@ -2662,7 +2607,7 @@ function handleEvent(message) {
         const ms = (s) => `${(s * 1000).toFixed(0)}ms`;
         messageText += `\n\nTiming (${message.timing.steps} steps, ${message.timing.wall_s.toFixed(1)}s wall): ` +
           `observe=${ms(c.observe)}  plan=${ms(c.model_plan)}  exec=${ms(c.execute)}  ` +
-          `login=${ms(c.login_pause)}  other=${ms((c.filter ?? 0) + (c.stagnation ?? 0) + (c.approval_pause ?? 0) + (c.ws_send_progress ?? 0))}`;
+          `login=${ms(c.login_pause)}  other=${ms((c.filter ?? 0) + (c.approval_pause ?? 0) + (c.ws_send_progress ?? 0))}`;
       }
       appendMessage({
         role: 'done',

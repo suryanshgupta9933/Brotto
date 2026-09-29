@@ -44,13 +44,13 @@ def client():
 
 @pytest.fixture
 def generate(monkeypatch):
-    """Replaces the model call. Records the (url, title) it was handed."""
+    """Replaces the model call. Records the (url, title, page_text) it was handed."""
     import brotto_orchestrator.agent.suggest as suggest_mod
 
-    seen: list[tuple[str, str]] = []
+    seen: list[tuple[str, str, str]] = []
 
-    async def _fake(url, title, cfg, creds):
-        seen.append((url, title))
+    async def _fake(url, title, cfg, creds, page_text=""):
+        seen.append((url, title, page_text))
         return ["Summarise the open issues.", "Read the oldest one.", "Draft a reply."]
 
     monkeypatch.setattr(suggest_mod, "generate", _fake)
@@ -80,7 +80,36 @@ def test_returns_generated_lines(client, generate):
     assert r.json()["lines"] == [
         "Summarise the open issues.", "Read the oldest one.", "Draft a reply.",
     ]
-    assert generate == [("https://github.com/a/b/pulls", "a/b: Pull requests")]
+    assert generate == [("https://github.com/a/b/pulls", "a/b: Pull requests", "")]
+
+
+def test_page_text_reaches_the_model_and_is_reported_back(client, generate):
+    """The whole feature. Without it the model has a URL and a title, which
+    on a Gmail tab is nothing, and it writes the page's manual instead of a
+    task. `context_used` is what the panel shortens the cache TTL on, so a
+    line derived from a private page is not left on disk for a day."""
+    r = client.post("/v1/suggestions", json={
+        "url": "https://mail.google.com/mail/u/0/#inbox",
+        "title": "Inbox (23) - someone@gmail.com",
+        "page_text": "Ada - Q3 budget\nBen - lunch tomorrow",
+    })
+    assert r.status_code == 200
+    assert generate[0][2] == "Ada - Q3 budget\nBen - lunch tomorrow"
+    assert r.json()["context_used"] is True
+
+
+def test_a_page_that_refused_the_script_omits_context_rather_than_guessing(
+    client, generate,
+):
+    # chrome:// pages take no injected script, so the panel sends no text. The
+    # prompt is told the text is unavailable and must not invent a subject to
+    # fill the slot; the endpoint's job is to pass the absence through intact.
+    r = client.post("/v1/suggestions", json={
+        "url": "chrome://extensions/", "title": "Extensions",
+    })
+    assert r.status_code == 200
+    assert generate[0][2] == ""
+    assert r.json()["context_used"] is False
 
 
 def test_blank_url_is_a_client_error(client, generate):

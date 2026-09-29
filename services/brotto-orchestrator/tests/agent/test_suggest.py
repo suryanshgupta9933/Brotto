@@ -67,3 +67,63 @@ def test_everything_blank_yields_nothing_rather_than_a_placeholder():
     # The panel keeps its own fallback on an empty result, so returning
     # something here would overwrite the one path that always works.
     assert _normalise(["", "  ", "\n"]) == []
+
+
+def test_a_suggestion_that_proposes_a_change_is_dropped():
+    """The failure this guards, from a live idle panel: "Disable any
+    extension that has not been updated in over a year" rendered as a
+    one-tap suggestion. A destructive task offered casually is how it happens
+    by accident — the user has agreed to nothing yet."""
+    assert _normalise([
+        "Delete the branches for merged pull requests",
+        "Send the summary to the team channel",
+        "Summarise the mail that arrived today",
+    ]) == ["Summarise the mail that arrived today"]
+
+
+def test_a_destructive_word_as_a_subject_is_not_a_destructive_suggestion():
+    # Anchoring on the leading verb is what makes this safe. Matching anywhere
+    # in the line would throw away a legitimate read of a thread whose subject
+    # happens to be deletion.
+    assert _normalise([
+        "Summarise the thread about deleting the old deploy branch",
+    ]) == ["Summarise the thread about deleting the old deploy branch"]
+
+
+def test_a_dropped_line_does_not_consume_one_of_the_three_slots():
+    # Otherwise the filter silently shortens every list that contained one,
+    # and the panel renders two suggestions where it could render three.
+    assert _normalise([
+        "Delete everything in the trash",
+        "one", "two", "three", "four",
+    ]) == ["one", "two", "three"]
+
+
+def test_a_refusal_reaches_the_panel_as_an_empty_list():
+    """The prompt asks for a bare NONE, and on chrome:// pages the model takes
+    the permission to decline — but answers with prose about declining rather
+    than the sentinel or an empty reply. Rendered, that refusal was truncated
+    mid-sentence into a clickable task. The panel keeps its own fallback on an
+    empty result, so [] is the outcome that costs the user nothing."""
+    for refusal in (
+        "NONE",
+        "I can't return anything for this page - it's the browser's own "
+        "extensions settings, and suggesting tasks on it would only be noise",
+        "Nothing here is worth offering.",
+        "Nothing to suggest on an empty tab.",
+    ):
+        assert _normalise([refusal]) == [], refusal
+
+
+def test_a_refusal_alongside_real_suggestions_drops_only_itself():
+    assert _normalise([
+        "I don't have enough here to suggest anything specific.",
+        "Summarise the mail that arrived today",
+    ]) == ["Summarise the mail that arrived today"]
+
+
+def test_a_refusal_alongside_real_suggestions_drops_only_itself():
+    assert _normalise([
+        "I don't have enough here to suggest anything specific.",
+        "Summarise the mail that arrived today",
+    ]) == ["Summarise the mail that arrived today"]

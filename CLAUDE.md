@@ -133,15 +133,51 @@ Three gaps caused it, all of them assumptions the prompt did not state:
 
 There is also a per-navigation gate in `<how_to_think>`: *do I already have an answer, and what specific evidence will this step add?* A step that cannot name its evidence in one sentence does not navigate.
 
-`check_stagnation` compares the **page**, not the URL. A live run of "open the Google results for bermuda" was told *"stuck for 3 consecutive steps"* while the agent was focusing the box, typing the query and submitting — three different pages that share one URL, because typing does not navigate. The warning made it worse: the panel's copy said *"Stop the task if this doesn't clear"*, and the task went on to succeed.
+### Stagnation detection — removed, not fixed
 
-`StepSummary.state` is a `blake2b` of the rendered AX tree plus page text (`stagnation.page_fingerprint`), and the same-URL rule now requires that to be unchanged too. The value is load-bearing: `ax_filter` renders `value="..."`, and CDP puts the input's current text there, so the fingerprint moves on a keystroke. Verified through the real renderer — focus → `value="bermuda"` → `value="bermuda b"` gives three distinct fingerprints on one URL.
+`check_stagnation` is gone, along with `StepSummary.state`, the harness's
+`stagnation_warning` message and the note it injected into the model's context.
+It fired falsely on two live tasks that both went on to succeed, and it is worth
+recording why, because **the fix that preceded the removal was a wrong
+primitive, and a correct one would not have saved it.**
 
-Two constraints on that line, both deliberate:
-- It hashes `filtered_ax`, **not** `turn.ax_tree`. The latter has the stagnation note appended, so hashing it would report a state change on exactly the steps where nothing changed.
-- An empty `state` falls back to URL-only, so anything constructing a `StepSummary` by hand keeps the old behaviour.
+The rule was "same URL for 3 steps". The first fix hashed the page instead of
+the URL — `blake2b` of the filtered AX tree plus page text, in `StepSummary.state`
+— which was correct as far as it went: `ax_filter` renders `value="..."`, CDP
+puts an input's current text there, so the hash moved on a keystroke, and the
+Google "bermuda" false positive went away.
 
-The panel copy no longer advises stopping. The harness note already tells the model to report what it has or take a genuinely different path; a second nudge to quit is how a task one step from done gets abandoned.
+Then a run on `news.google.com` reported *"stuck for 3 consecutive steps"* again.
+The fingerprint was not moving, and the reason is that **both of its inputs are
+prefixes**:
+
+- `page_text` is `innerText.slice(0, PAGE_TEXT_MAX)`.
+- `filtered_ax` keeps the first lines in tree order and drops the tail when over
+  budget (`ax_filter.py`). On the extension path `viewport_coords` is `None`, so
+  the drop is by tree position, not by what is on screen.
+
+On an infinite feed, new articles land *later* in the tree. The retained prefix
+is byte-identical, so the hash is identical. This is not a threshold problem and
+not specific to Google News — the detector is structurally blind to everything
+below the cut, which is most of any long page.
+
+**The deeper argument is that the warning was never earning its keep.** It is a
+hint, not a safety net — `MAX_STEPS = 30` is the net. The run that motivated
+adding it (17 steps to conclude something the agent had at step 5) was actually
+fixed by the `<convergence>` prompt work above, not by the detector. Meanwhile
+its two observed effects were both harmful: it pushed a working agent toward
+reporting early, and it showed the user a warning during a task that succeeded.
+"Stuck" is not separable from "working on a slow-loading page" by hashing the
+top of a DOM.
+
+What replaced it is nothing. The model still self-assesses in
+`<stagnation_and_failure>` — same URL, same action twice, three failed
+approaches — which is the part that was always sound, because the model can see
+its own step history. Only the harness's external verdict is gone.
+
+`testing/outcome.py` keeps its `"stagnat"` needle on purpose: it classifies
+*recorded* runs, and the runs recorded before this removal still contain those
+strings.
 
 **Not done:** cross-task memory. `Scratchpad` is per-task — persisted to `logs/runs/<id>/` for resume within a task and gone otherwise, so `github.com/<user>/issues/assigned` (the entry point discovered on that run) is relearned every run. The obvious durable content is *where things live on a site and which routes are dead*: a per-user JSON store in the shape of `model/store.py`, injected at the top of every task. Unbuilt.
 
@@ -149,7 +185,8 @@ The panel copy no longer advises stopping. The harness note already tells the mo
 
 The three task suggestions on the idle panel are **written by the model**, not
 by a table. `POST /v1/suggestions` → `agent/suggest.py` → a standalone
-`Agent` with `output_type=Suggestions`, given the page's URL and title.
+`Agent` with no `output_type`, given the page's URL, title, and **visible page
+text**.
 
 Three hand-written versions came and went first: a 17-hostname table, then a
 bigger one (15 page classes × 6 lines, 20 object kinds × 2 lines, ~130 lines of
@@ -157,31 +194,73 @@ copy). Both were correct on the sites someone had thought of and generic
 everywhere else — the same failure, twice, at two scales. **The moment you
 want to improve these, fix the prompt. Adding a site table is the bug.**
 
-Four things that are load-bearing:
+A third version was model-written but still **URL and title only**, and that was
+the same bug in different clothes. On a new tab and on `chrome://extensions`
+the generator received a page *class* and nothing else, so it wrote each page's
+own manual back as a task — "List every installed extension along with its
+current enabled or disabled state" is `chrome://extensions` described to itself.
+Absence of signal rendered as confident specificity.
+
+Five things that are load-bearing:
 
 - **HTTP, not the WebSocket.** The socket is created in `startRelay`
   (`background.ts:505`) and only exists while a task is in flight — which is
   exactly when the panel does *not* need suggestions. `/v1/policy_ack` set the
   precedent for idle-time actions.
-- **URL and title only.** No content script, `host_permissions` is
-  `<all_urls>`, so page text would mean permanently injecting Brotto into
-  every site the user visits.
+- **Page text, read on demand.** `chrome.scripting.executeScript` from the
+  panel, which needs the `scripting` permission. Not a permanent content script
+  (`host_permissions` is `<all_urls>`, so that means Brotto inside every site
+  the user visits) and **not the debugger** — that raises Chrome's "debugging
+  this browser" banner, a heavy thing to show someone who opened a panel to
+  read a list. `chrome://` pages refuse the script; that arrives as
+  `context_used: false` and the prompt tells the model the text is
+  unavailable, so it must not invent a subject to fill the slot.
 - **A standalone Agent**, not the harness's. That one is bound to
   `AgentDecision` with a `SYSTEM_PROMPT` whose identity is "you are not a
   chatbot" — wrong for a suggestion writer, which is why `SUGGESTION_PROMPT` is
   a separate constant rather than a section of `SYSTEM_PROMPT`.
-- **The fallback stays site-agnostic.** Four lines in `FALLBACK_SUGGESTIONS`.
+- **The fallback stays site-agnostic.** Three lines in `FALLBACK_SUGGESTIONS`.
   The good path is a cache hit most of the time, so if the fallback grew a site
   table the failure would be invisible — it would just look like a cache.
+- **Two filters between the model and the button.** `_is_destructive` drops a
+  line that opens by proposing a change — deleting, disabling, sending, paying
+  — because a destructive task offered as a casual one-liner is how it happens
+  by accident. `_is_declining` drops the model's refusal. Both anchor on the
+  leading word, since a suggestion is an imperative and the first token is the
+  verb; matching anywhere in the line would throw away "summarise the thread
+  about deleting the old branch".
+
+**Declining had to become a closed set, which took two attempts.** The prompt
+allows fewer than three and none at all. Told it may return nothing, the model
+returns *prose about declining* — truncated to the panel's width, "I can't
+return anything for this page, it's the browser's own extensions settings…"
+rendered as a clickable button. It came back in three different shapes across
+three runs, so matching prose was a losing game. The prompt now asks for a
+literal `NONE` (a closed set, one comparison) and the prose openers are kept
+only as a named backstop for a model that ignores the sentinel. **An empty list
+is a correct outcome**: the panel already treats it as "keep your own fallback".
 
 Cache key is `host + pathShape + YYYY-MM-DD` in `chrome.storage.local`, with
-numeric and UUID path segments collapsed to `:id`, capped at 40. The panel
-paints the fallback first and swaps in the generated set when it lands, so the
-box is never empty and never waits on a model call.
+numeric and UUID path segments collapsed to `:id`, capped at 40. Entries carry
+a TTL, and **it is short when page text was used**: "three emails from your
+manager" is page content, and a day-long entry is that content left on disk.
+Ten minutes context-derived, a day for URL-and-title-only, chosen from the
+server's `context_used` rather than guessed at from whether the read
+succeeded. The panel paints the fallback first and swaps in the generated set
+when it lands, so the box is never empty and never waits on a model call.
+
+**This reads the user's page with no task in flight.** That is a real
+escalation from "the user asked for something" to ambient, and it is the one
+default here that was chosen rather than tested. The user owns the key and the
+extension already held `<all_urls>`, so it ships on — TTL as the mitigation,
+and a `page text N chars` / `page text unavailable` line in the server log as
+the only place it is visible. **There is no indicator in the panel.** If that
+matters, it is the missing piece, not a refinement.
 
 **Read the real output before believing a change here.** Diff inspection found
-nothing wrong with either table version. Both were only caught by running
-suggestions against real URLs and reading the sentences.
+nothing wrong with either table version, and nothing wrong with the
+URL-and-title version either. All three were only caught by running suggestions
+against real page shapes and reading the sentences.
 
 ## Extension storage
 
@@ -199,7 +278,7 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-../../.venv/bin/python -m pytest tests/ -q     # 335 tests (2 skipped)
+../../.venv/bin/python -m pytest tests/ -q     # 346 tests (2 skipped)
 # The pytest install lives in the REPO-ROOT venv, not services/brotto-orchestrator/.venv
 # (which has pydantic-ai but no pytest). Run it from services/brotto-orchestrator/.
 

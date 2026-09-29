@@ -1,4 +1,4 @@
-"""Agent harness: observe → plan → act loop with guardrails and stagnation detection."""
+"""Agent harness: observe → plan → act loop with guardrails."""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ from .context import (
 )
 from .ax_filter import budget_for_window, filter_ax_targets
 from .ax_diff import compute_ax_diff
-from .stagnation import check_stagnation, page_fingerprint
 from .guardrails import check_login_page, check_critical_action, check_sensitive_action
 from ..policy.gate import GateDecision, check_domain_policy, check_first_time_seen
 from ..policy.domains import etld1
@@ -110,7 +109,6 @@ TIMING_BUCKETS = (
     "observe",          # CDP observation round-trip (get_targets/url/title)
     "filter",           # AX filter + diff computation
     "login_pause",      # ws_send(login_required) + queue wait for resume
-    "stagnation",       # stagnation check
     "model_plan",       # agent.run — the LLM call
     "approval_pause",   # CRITICAL_PATTERNS approval + queue wait
     "execute",          # _execute_actions (CDP actions + post-obs)
@@ -847,7 +845,6 @@ async def _plan_step(
 
 class AgentHarness:
     MAX_STEPS = 30
-    STAGNATION_WINDOW = 3
 
     async def run(self, deps: AgentDeps) -> TaskResult:
         timings: dict[str, float] = {b: 0.0 for b in TIMING_BUCKETS}
@@ -1017,21 +1014,6 @@ class AgentHarness:
                 timings["login_pause"] += time.perf_counter() - t_lp
                 continue
 
-            # Stagnation check
-            t_sg = time.perf_counter()
-            stagnated, reason = check_stagnation(deps.step_summaries, self.STAGNATION_WINDOW)
-            if stagnated:
-                log.warning("[%s] stagnation detected: %s", deps.user_id, reason)
-                await deps.ws_send({"type": "stagnation_warning", "reason": reason})
-            timings["stagnation"] += time.perf_counter() - t_sg
-            stagnation_note = (
-                f"\n\n⚠ STAGNATION DETECTED: {reason}\n"
-                "Do not try another variation of what just failed. Either report what "
-                "you have — a well-established 'none exist' is a complete answer — or, "
-                "if a genuinely different path exists, take it now and say why it differs."
-                if stagnated else ""
-            )
-
             # Drain steering here, not at the top of the loop: the policy block
             # above `return`s and the login guardrail `continue`s, so a drain
             # placed earlier would read a message and then drop the step
@@ -1049,7 +1031,7 @@ class AgentHarness:
                 scratchpad_entries=list(deps.scratchpad.entries),  # manifest snapshot
                 current_url=current_url,
                 current_page_title=page_title,
-                ax_tree=filtered_ax + stagnation_note,
+                ax_tree=filtered_ax,
                 ax_diff=ax_diff,
                 step_summaries=deps.step_summaries,
                 page_text=page_text,
@@ -1245,12 +1227,10 @@ class AgentHarness:
             if deps.result is not None:
                 continue
 
-            # Stream progress — one bubble per decision. The full action list
-            # ships in the `actions` array so the side panel can render all
-            # tool calls under the "details" toggle. The lead action is also
-            # echoed at the top level for the icon + chip. Internal actions
-            # (scratchpad) are still silent — they're metadata, not tool calls
-            # the user sees.
+            # Stream progress — one bubble per decision. The lead action is
+            # echoed at the top level for the icon and the destination URL.
+            # Internal actions (scratchpad) are still silent — they're
+            # metadata, not tool calls the user sees.
             #
             # ponytail: actual `result.usage` from pydantic-ai (the model
             # provider's reported token count, not a `len(prompt) // 4`
@@ -1268,21 +1248,12 @@ class AgentHarness:
             context = _build_context(tokens_used, window=context_window)
             external = [c for c in decision.actions if c.action not in _INTERNAL_ACTIONS]
             if external:
-                actions_payload = [
-                    {
-                        "action": c.action,
-                        "action_target": c.action_args.get("url") if c.action == "navigate" else None,
-                        "args": c.action_args,
-                    }
-                    for c in external
-                ]
                 lead = external[0]
                 await deps.ws_send({
                     "type": "step_progress",
                     "step": step,
                     "action": lead.action,
                     "action_target": lead.action_args.get("url") if lead.action == "navigate" else None,
-                    "actions": actions_payload,
                     "thought": decision.thought,
                     "url": current_url,
                     "context": context,
@@ -1356,10 +1327,6 @@ class AgentHarness:
                 url=current_url,
                 action_taken="; ".join(action_trace) if action_trace else "no action",
                 outcome=combined_outcome[:120],
-                # filtered_ax, not turn.ax_tree — the latter has the
-                # stagnation note appended, so hashing it would report a
-                # state change on exactly the steps where nothing changed.
-                state=page_fingerprint(filtered_ax, page_text),
             ))
 
             # Terminal? Gate on deps.result, not on the action name. A

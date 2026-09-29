@@ -61,3 +61,6 @@ clients/brotto-extension/crx-signing.pem
 /assets/
 /docs/
 /CLAUDE.md
+
+# Local scratch previews
+.preview/

@@ -414,6 +414,7 @@
     .history-mark { width: 6px; height: 6px; margin-top: 6px; background: var(--ink-3); }
     .history-item[data-status="done"]       .history-mark { background: var(--ok); }
     .history-item[data-status="failed"]     .history-mark { background: var(--bad); }
+    .history-item[data-status="cancelled"]  .history-mark { background: var(--ink-3); }
     .history-item[data-status="interrupted"] .history-mark { background: var(--wait); }
 
     .history-task {
@@ -673,6 +674,10 @@
 
     .message.user      { align-self: flex-end; }
     .message.assistant { align-self: flex-start; }
+    /* A step is a record in a timeline, not a chat turn — a ragged right edge
+       down the list reads as unrelated cards. Stretching is what makes the
+       steps read as one column. */
+    .message.step      { align-self: stretch; }
 
     /* Live caret — the agent's "still writing". Square, like everything else
        in the system, and blink stepped rather than eased so it holds its
@@ -738,33 +743,6 @@
     /* ─── Step bubble ─────────────────────────────────────────────────── */
     .step-bubble { display: flex; flex-direction: column; gap: 5px; }
     .step-head { font-size: 13.5px; line-height: 1.45; }
-    .step-details { display: flex; flex-direction: column; gap: 5px; }
-    .step-details-toggle {
-      align-self: flex-start;
-      border: 1px solid var(--rule-2);
-      background: transparent;
-      color: var(--ink-2);
-      font-family: var(--font-mono);
-      font-size: 8.5px;
-      font-weight: 500;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      padding: 4px 9px;
-      cursor: pointer;
-      transition: background var(--t), color var(--t);
-    }
-    .step-details-toggle:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-    .step-details-body {
-      font-family: var(--font-mono);
-      font-size: 10.5px;
-      line-height: 1.5;
-      color: var(--ink-2);
-      background: var(--paper-2);
-      padding: 7px 9px;
-      border-left: 2px solid var(--rule-2);
-      white-space: pre-wrap;
-      overflow-x: auto;
-    }
 
     .msg-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
     .msg-name { color: var(--ink-3); }
@@ -1202,7 +1180,16 @@
       min-width: 0;
     }
     .step-url-host {
-      flex-shrink: 0;
+      /* A host names the site, so it keeps its full width rather than being
+         shrunk proportionally with everything else — two half-truncated pills
+         ("indiane… → en.wiki…") say less than one whole one. The 50% cap is
+         the other half of the rule: a very long domain can never take the
+         whole row and starve the path, and two long domains can never paint
+         past the bubble edge. */
+      flex: 0 0 auto;
+      max-width: 50%;
+      overflow: hidden;
+      text-overflow: ellipsis;
       font-family: var(--font-mono);
       font-size: 9.5px;
       font-weight: 500;
@@ -1222,7 +1209,14 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .step-url-arrow { color: var(--rule-2); }
+    .step-url-arrow { color: var(--rule-2); flex-shrink: 0; }
+    /* Narrow panel: a cross-site row is three fragments competing for ~260px,
+       and the source path loses. It is the least useful of them — the source
+       HOST already says which site the agent left — and it is the only one
+       that can go without losing meaning, so it goes first. */
+    @media (max-width: 400px) {
+      .step-url-path--from { display: none; }
+    }
     /* The row is a button — copying an address has to work without a mouse.
        Reset the UA chrome, which would otherwise draw a 2px outset box. */
     .step-url-row--copy {
@@ -1375,7 +1369,11 @@
 <span id="timer" style="display:none"></span>
 
 <!-- ── Status bar (2x2: steps, time / tabs, context) ─────────────── -->
-<div id="statusBar" aria-live="polite">
+<!-- Not a live region: the ACTIVE clock is rewritten ten times a second, and
+     aria-live would have a screen reader re-announce the elapsed time on every
+     one of them for the whole run. The run's progress is already announced by
+     each step bubble in #messages. -->
+<div id="statusBar">
   <div class="cell">
     <span class="label">Steps</span>
     <span class="value" id="stepCountActive">0</span>
