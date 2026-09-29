@@ -89,6 +89,9 @@ class AgentTurn(BaseModel):
     # a read_page_text call: the accessibility tree routinely omits the values
     # a question is actually about (a star count, a price, a total).
     page_text: str = ""
+    # A mid-task correction from the user, drained out of AgentDeps into the
+    # next turn. Empty on every step that has not received one.
+    steering: str = ""
 
 
 class ActionCall(BaseModel):
@@ -155,6 +158,18 @@ class AgentDeps:
     api_key: str | None = None
     client_ip: str = "127.0.0.1"
     human_input_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    # Mid-task steering, written by the WS receive loop while the agent task is
+    # running. A plain slot, not a queue, on purpose: every approval site does
+    # a bare `await deps.human_input_queue.get()` and branches on the string,
+    # so a steering message landing there would be read as a *deny* — and one
+    # arriving while an approval card is up would be consumed as the answer to
+    # it. A queue is also unsellable, since steering has to be readable
+    # without the harness ever blocking on it. Last write wins, which is the
+    # behaviour you want: "actually, Wednesday" supersedes "Tuesday".
+    steering: str = ""
+    # Carried into the next turn, then cleared. Separate from `steering` so the
+    # drain below the loop is a swap rather than a read.
+    pending_steering: str = ""
     scratchpad: Scratchpad = field(default_factory=Scratchpad)
     step_summaries: list[StepSummary] = field(default_factory=list)
     step_number: int = 0

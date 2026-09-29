@@ -918,6 +918,33 @@ void fetchContextWindow();
 async function sendUserMessage() {
   const text = goalEl.value.trim();
   if (!text) return;
+  // Mid-task steering. This has to come before everything below: the rest of
+  // this function is "start a task" — it clears the transcript, resets the
+  // tab tally and calls setPhase('connecting'), all of which would destroy
+  // the running task the user is trying to redirect. A paused task is
+  // excluded on purpose: a prompt is outstanding then, and the composer
+  // answer would be read by the server as the answer to that prompt. The
+  // disabled button is not the protection — Enter still reaches this
+  // function with the button off.
+  if (state.phase === 'executing') {
+    const res = await chrome.runtime.sendMessage({
+      type: 'send_to_server',
+      payload: { type: 'steer', content: text },
+    }).catch(() => ({ success: false, error: 'The background service worker is not responding.' }));
+    if (!res || res.success !== true) {
+      // Keep the text. The user typed a correction they do not want to
+      // retype, and losing it is the whole cost of a failed send.
+      appendMessage({
+        role: 'error',
+        text: `Could not send that: ${(res && res.error) || 'not connected'}. It is still in the box.`,
+      });
+      return;
+    }
+    goalEl.value = '';
+    goalEl.style.height = 'auto';
+    appendMessage({ role: 'user', text });
+    return;
+  }
   // ponytail: any non-terminal phase means a send is in flight. Guard against
   // double-clicks during the connecting/connected window before the loop sets
   // 'executing'. Without this, two parallel run_local_task messages race and
@@ -1045,16 +1072,24 @@ function setPhase(phase, message) {
   // Esc only stops while something is running. Advertising it when there is
   // nothing to stop is a shortcut that does nothing.
   if (composerHint) {
-    composerHint.textContent = running
-      ? 'Press Enter to send · Shift+Enter for newline · Esc to stop'
-      : 'Press Enter to send · Shift+Enter for newline';
+    // The hint has to name what Enter now does, or it is describing a
+    // control that has changed meaning.
+    composerHint.textContent = phase === 'executing'
+      ? 'Enter redirects the running task · Esc to stop'
+      : running
+        ? 'Answer the question above · Esc to stop'
+        : 'Press Enter to send · Shift+Enter for newline';
   }
   // ponytail: re-enable the composer explicitly when the task ends so a
   // "done" / "error" / "cancelled" / "disconnected" / "failed" phase
   // always makes the goal input re-usable. setPhase is the single source
   // of truth for the input's enabled state; other code paths must call
   // setPhase rather than toggling sendBtn.disabled directly.
-  sendBtn.disabled = running || phase === 'connecting';
+  // ponytail: 'executing' deliberately stays enabled — that is the whole
+  // point of steering, and a composer that locks the moment the task starts
+  // forces Stop, which throws the transcript away. 'paused' stays disabled
+  // because a prompt is outstanding and the same box answers it.
+  sendBtn.disabled = phase === 'connecting' || (running && phase !== 'executing');
   // ponytail: surface a brief feedback message for the prose-only failure
   // so the user knows the loop stopped on purpose, not from a network
   // error. The actual message is rendered by the task_failed handler.

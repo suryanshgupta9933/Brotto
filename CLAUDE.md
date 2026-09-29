@@ -104,6 +104,18 @@ Four things arrive per step. All four were captured and thrown away at some poin
 
 Verified: the "find my most starred repo" task that took 8 steps went to 2 — one navigate to the star-sorted view (discovered from a visible href), then the answer.
 
+## Mid-task steering
+
+The only way to redirect a running task was Stop, which discards the transcript. Now the composer stays live while `executing`: it posts `{"type":"steer"}` and the correction lands on the next turn.
+
+Three design points that are load-bearing, not incidental:
+
+- **`deps.steering` is a plain slot, not a queue.** Every approval site does a bare `await deps.human_input_queue.get()` and branches on the string, so a steer landing in that queue would be read as a *deny*, and one arriving during an approval would be consumed as the answer to it. A slot also gives last-write-wins for free — "actually, Wednesday" supersedes "Tuesday" instead of both reaching the model with the stale one read last.
+- **The drain is immediately above `AgentTurn(...)`, not at the loop top.** The policy block above it `return`s and the login guardrail `continue`s, so a drain placed earlier would read a message and then drop the step holding it. And the drain clears as it copies — a copy without a clear replays the same correction every step, so the model never converges past step 1.
+- **The prompt block goes last, immediately before the question.** The AX tree above is thousands of tokens; a correction placed earlier gets read past. `prompt.py` already told the model to treat mid-task messages as live corrections, so no prompt change was needed.
+
+The `paused` phase is excluded in the panel: a prompt is outstanding then, and the same composer box answers it.
+
 ## Convergence
 
 What the agent sees each step is only half of what decides the step count. The other half is `prompt.py`'s `<convergence>` section, added after a live run took **17 steps to conclude something the agent already had at step 5** ("no issues assigned to you"). It then visited five repositories to confirm an answer the assigned-to-me view had already given, and retyped one search query four times.
@@ -136,7 +148,7 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-./.venv/bin/python -m pytest tests/ -q     # 315 tests (2 skipped)
+./.venv/bin/python -m pytest tests/ -q     # 320 tests (2 skipped)
 
 # Smoke test (real API call, exercises full model adapter; reads .env)
 .venv/bin/python scripts/smoke_minimax_endtoend.py

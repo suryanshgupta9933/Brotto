@@ -483,6 +483,19 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                 elif t == "human_reply":
                     log.info("[%s] ← human_reply", session_id)
                     await human_queue.put(incoming.get("content", ""))
+                elif t == "steer":
+                    # A distinct type, not human_reply. That one means "reply
+                    # to a prompt that is currently outstanding" and its
+                    # handler cannot tell whether one is — so a message sent
+                    # mid-task would either be dropped or, worse, be consumed
+                    # by the next approval as if the user had answered it.
+                    content = str(incoming.get("content", "") or "").strip()
+                    if not content:
+                        log.info("[%s] ← steer (empty, ignored)", session_id)
+                        continue
+                    log.info("[%s] ← steer  len=%d", session_id, len(content))
+                    deps.steering = content
+                    await ws_send({"type": "steer_ack", "length": len(content)})
                 elif t == "revoke":
                     # ponytail: user clicked Revoke on a prior approval within
                     # the post-approval window. Clear the first-time-seen

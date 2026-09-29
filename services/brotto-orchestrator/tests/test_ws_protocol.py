@@ -225,6 +225,51 @@ def test_human_reply_accepted(agent_disabled):
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
 
+def test_steer_message_does_not_touch_human_input_queue(agent_disabled, monkeypatch):
+    """`steer` is a live correction, not an answer to a pending prompt.
+
+    Every approval site does a bare `await deps.human_input_queue.get()` and
+    branches on the string it gets back, so a steer that landed in that queue
+    would be read as a *deny* — and one arriving while an approval card is up
+    would be consumed as the answer to it. The harness is stubbed here, so the
+    assertion is structural: the frame is routed to `deps.steering`, the queue
+    is still empty, and the receive loop keeps going (the `ping` → `pong` is
+    what proves the loop was not broken by the new branch).
+    """
+    seen: list = []
+
+    class _Rec:
+        def __init__(self, deps):
+            self.deps = deps
+
+        async def run(self, deps):
+            seen.append(deps)
+            await asyncio.sleep(3600)
+
+    rec = _Rec(None)
+    monkeypatch.setattr(harness_mod.AgentHarness, "run", rec.run)
+    monkeypatch.setattr(main_mod.harness, "run", rec.run.__get__(main_mod.harness))
+
+    with TestClient(main_mod.app) as client:
+        with client.websocket_connect("/ws/ext/proto-steer") as ws:
+            ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
+            # Drain the task_start ack so the deps object is registered before
+            # the steer arrives — a control frame sent in the same breath can
+            # beat the harness task's first step onto the session registry.
+            ws.send_text(json.dumps({"type": "ping"}))
+            assert _drain_until(ws, "pong") == {"type": "pong"}
+
+            ws.send_text(json.dumps({"type": "steer", "content": "no, Tuesday"}))
+            assert _drain_until(ws, "steer_ack") == {"type": "steer_ack", "length": 11}
+
+            ws.send_text(json.dumps({"type": "ping"}))
+            assert _drain_until(ws, "pong") == {"type": "pong"}
+
+            deps = seen[-1]
+            assert deps.steering == "no, Tuesday"
+            assert deps.human_input_queue.empty()
+
+
 def test_unknown_message_type_is_logged_not_fatal(agent_disabled):
     """An unknown message type is logged and ignored — WS stays open."""
     with TestClient(main_mod.app) as client:

@@ -20,12 +20,20 @@ window.chrome = {
   runtime: {
     lastError: null,
     onMessage: { addListener: (fn) => { window.__onMessage = fn; } },
+    // Promise-returning: the real chrome.runtime.sendMessage resolves with
+    // whatever the SW passed to sendResponse, and the steering branch awaits
+    // that promise. A callback-only stub makes the panel look like it failed
+    // every steer, which is a harness artefact, not a bug.
     sendMessage: (msg, cb) => {
       window.__sent.push(JSON.parse(JSON.stringify(msg)));
       const f = window.__forceFail;
-      if (f && f.type === msg.type) { if (cb) cb({ success: false, error: f.error }); return; }
-      if (msg.type === 'get_panel_log') { if (cb) cb({ success: true, events: window.__log || [] }); return; }
-      if (cb) cb({ success: true });
+      const out = new Promise((res) => {
+        if (f && f.type === msg.type) { res({ success: false, error: f.error }); return; }
+        if (msg.type === 'get_panel_log') { res({ success: true, events: window.__log || [] }); return; }
+        res({ success: true });
+      });
+      if (!cb) return out;
+      return undefined;
     },
     connect: () => ({ onMessage: { addListener(){} }, onDisconnect: { addListener(){} }, postMessage(){}, disconnect(){} }),
   },

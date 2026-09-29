@@ -961,13 +961,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         case "send_to_server": {
           // ponytail: sidepanel wants to push a message over the active
-          // WS to the orchestrator (e.g. policy_acknowledged). Used when
-          // there's no task in flight but the user did something the
+          // WS to the orchestrator (e.g. policy_acknowledged, steer). Used
+          // when there's no task in flight but the user did something the
           // server should know about.
           const payload = message.payload;
-          if (ws && ws.readyState === WebSocket.OPEN && payload) {
-            ws.send(JSON.stringify(payload));
+          // Honest success. This used to answer {success:true} whether or
+          // not the socket was open, so a steer sent against a dropped
+          // connection looked delivered and the panel cleared the composer
+          // over a message the agent never saw. The existing callers ignore
+          // the response, so this is not a contract change for them.
+          if (!payload) {
+            sendResponse({ success: false, error: "nothing to send" });
+            break;
           }
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            sendResponse({ success: false, error: "not connected to the server" });
+            break;
+          }
+          ws.send(JSON.stringify(payload));
           sendResponse({ success: true });
           break;
         }

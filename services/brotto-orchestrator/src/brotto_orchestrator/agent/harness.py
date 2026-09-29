@@ -208,6 +208,15 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         else ""
     )
 
+    # ponytail: steering goes last, immediately before the question. Position
+    # is not cosmetic — the AX tree above is thousands of tokens and drowns
+    # anything placed earlier, so an update the user typed five seconds ago
+    # would land behind it and be missed.
+    steer_section = (
+        f"\n## User update (supersedes earlier intent)\n{turn.steering}\n"
+        if turn.steering else ""
+    )
+
     # ponytail: secure-mode preamble is injected here, not at Agent
     # construction, so we don't need to rebuild the Agent per-task. The
     # test-helper reads `_TEST_DEPS` (a module global); the harness loop
@@ -248,7 +257,7 @@ Title: {turn.current_page_title}
 <page_content untrusted url="{turn.current_url}">
 {turn.ax_tree}
 </page_content>
-{text_section}
+{text_section}{steer_section}
 ## What is your next action(s)?
 """
 
@@ -1018,6 +1027,15 @@ class AgentHarness:
                 if stagnated else ""
             )
 
+            # Drain steering here, not at the top of the loop: the policy block
+            # above `return`s and the login guardrail `continue`s, so a drain
+            # placed earlier would read a message and then drop the step
+            # holding it. The model call is uninterruptible, so this lands at
+            # the next step boundary — which is the right place anyway, since
+            # you do not interrupt a tool call.
+            if deps.steering:
+                deps.pending_steering, deps.steering = deps.steering, ""
+
             # Build turn
             turn = AgentTurn(
                 task=deps.task,
@@ -1030,6 +1048,7 @@ class AgentHarness:
                 ax_diff=ax_diff,
                 step_summaries=deps.step_summaries,
                 page_text=page_text,
+                steering=deps.pending_steering,
             )
 
             log.info("[%s] step %d  url=%s  ax_elements=%d  memory_entries=%d",
