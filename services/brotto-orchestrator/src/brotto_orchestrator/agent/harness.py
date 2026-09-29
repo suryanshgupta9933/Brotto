@@ -34,7 +34,7 @@ from .guardrails import check_login_page, check_critical_action, check_sensitive
 from ..policy.gate import GateDecision, check_domain_policy, check_first_time_seen
 from ..policy.domains import etld1
 from .prompt import SYSTEM_PROMPT, secure_mode_preamble
-from .run_logger import RunLogger
+from .audit import AuditTrail, REDACTED, is_secret_field, load_scratchpad
 
 _HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
 
@@ -49,11 +49,11 @@ _REASON_FIRST_TIME = "First time on {domain}: the agent wants to {action}. Conti
 # approval card is exactly that.
 _REASON_CRITICAL = "{thought} This can't be undone from here — continue?"
 
-# ponytail: every user-facing prompt in the harness routes through these
-# helpers so the "deny → abort task" contract is enforced exactly once.
-# Without this, every prompt site would need its own bookkeeping for
-# setting deps.result + log + audit + return — easy to forget one and
-# ship a partial fix.
+# ponytail: every user-facing prompt in the harness routes through
+# `_ask_user` (or its `_ask_user_text` variant) so the "deny → abort task"
+# contract and the audit row are enforced exactly once. Without this,
+# every prompt site carries its own bookkeeping for setting deps.result +
+# audit + return — easy to forget one and ship a partial fix.
 
 # Actions that don't fire a UI bubble. Scratchpad mutations and recall are
 # metadata — the user sees the thought, not the write/recall itself.
@@ -261,11 +261,118 @@ Title: {turn.current_page_title}
 
 
 # ── Task-abort helpers ──────────────────────────────────────────────────────
-# Every user-prompt site routes through `_prompt_user_for_approval`
-# below. On deny, the task is set up to terminate on the next loop
-# boundary via `deps.result = TaskResult(...)`. The `run()` loop checks
-# `deps.result` at the top of every iteration. This keeps the
-# "deny → abort" contract in one place.
+# Every user-prompt site routes through `_ask_user` below. On deny, the
+# task is set up to terminate on the next loop boundary via
+# `deps.result = TaskResult(...)`. The `run()` loop checks `deps.result`
+# at the top of every iteration. This keeps the "deny → abort" contract
+# in one place.
+
+
+async def _ask_user(deps: AgentDeps, audit, *, turn: int, kind: str,
+                    action: str, args: dict, domain: str | None,
+                    reason: str) -> bool:
+    """Raise one prompt, wait for the answer, record it. True = approved.
+
+    Seven sites were doing this by hand — send, block on the queue,
+    branch, log, set deps.result. Adding an audit record at each would
+    be seven more chances to forget one, so the site is centralised
+    instead. `login_required` deliberately does NOT use this: its
+    timeout continues the loop rather than aborting, and its "skip"
+    aborts, which is a contract this signature does not have.
+    """
+    pid = audit.record_prompt(turn, kind=kind, action=action, args=args,
+                              domain=domain, reason=reason)
+    await deps.ws_send({
+        "type": "approval_required", "action": action, "args": args,
+        "reasoning": reason,
+    })
+    t0 = time.perf_counter()
+    reply = await deps.human_input_queue.get()
+    wait_ms = int((time.perf_counter() - t0) * 1000)
+    approved = str(reply).lower() in APPROVE_SET
+    audit.resolve_prompt(pid, decision="approved" if approved else "denied",
+                         response=str(reply), wait_ms=wait_ms)
+    return approved
+
+
+async def _ask_user_text(deps: AgentDeps, audit, *, turn: int, action: str,
+                         args: dict, message: dict) -> str:
+    """`ask_human` needs the reply itself, not a boolean, so it gets its
+    own thin variant over the same two audit calls."""
+    pid = audit.record_prompt(turn, kind="ask_human", action=action, args=args,
+                              domain=None,
+                              reason=str(args.get("question", "")))
+    await deps.ws_send(message)
+    t0 = time.perf_counter()
+    reply = await deps.human_input_queue.get()
+    audit.resolve_prompt(pid, decision="answered", response=str(reply),
+                         wait_ms=int((time.perf_counter() - t0) * 1000))
+    return str(reply)
+
+
+async def _redact_if_secret(deps: AgentDeps, ref: str) -> bool:
+    """Is this field a password? Never raises.
+
+    Resolved here and not at extraction: one CDP round trip per TYPED
+    ACTION is cheap, one per textbox per STEP is not, and this loop is
+    latency-bound.
+
+    A field we cannot classify is redacted, not written. `get_attributes`
+    is best-effort by contract and returns {} on a dead relay, a
+    disconnected extension or a target with no backend node; the
+    accessible name is blank on some real login forms. If both signals
+    are silent there is no way to tell a password box from an email box,
+    and the two failure modes are not symmetric — over-redacting costs a
+    replay that says "[redacted:password]", under-redacting costs a
+    plaintext credential on disk forever.
+
+    ponytail: this redacts every typed value on a relay too old to answer
+    get_attributes. Upgrade path: a per-task "attributes unavailable"
+    counter, so the audit can say "this run had no DOM visibility" instead
+    of a field that looks deliberately masked.
+    """
+    target = next((t for t in deps.prev_targets if t.ref_id == ref), None)
+    if target is None:
+        return True
+    attrs: object = {}
+    getter = getattr(deps.cdp, "get_attributes", None)
+    if getter is not None and getattr(target, "backend_node_id", None):
+        try:
+            attrs = await getter(target.backend_node_id)
+        except Exception as exc:  # never raise: this runs mid-typing
+            log.debug("attribute lookup failed for %s: %s", ref, exc)
+            attrs = {}
+    if not isinstance(attrs, dict) or not attrs:
+        # No usable DOM signal — the accessible name is all that is left.
+        return is_secret_field(None, target.name) or not (
+            target.name or ""
+        ).strip()
+    return is_secret_field(attrs, target.name)
+
+
+def _step_timings(timings: dict[str, float],
+                  snapshots: list[dict[str, float]]) -> dict:
+    """What this step cost: the cumulative buckets minus the snapshot taken
+    at the top of it. Same answer from the bottom of the loop and from the
+    top of the next one, so end_turn can be called at either."""
+    if not snapshots:
+        return {}
+    base = snapshots[-1]
+    return {k: round(timings[k] - base[k], 3) for k in TIMING_BUCKETS}
+
+
+def _scrubbed(call: ActionCall, redact: bool) -> tuple[dict, str]:
+    """(args, trace-fragment) with the typed value masked when redacting.
+
+    The trace is built from the same dict, so scrubbing here covers the
+    second write path — StepSummary.action_taken goes into the next
+    step's prompt and into the resumed document.
+    """
+    if not redact or call.action != "type_text":
+        return call.action_args, f"{call.action}({call.action_args})"
+    text = call.action_args.get("text", "")
+    args = {**call.action_args, "text": REDACTED, "text_chars": len(str(text))}
+    return args, f"{call.action}({args})"
 
 
 def _policy_mode(deps: AgentDeps | None) -> str | None:
@@ -379,7 +486,7 @@ def _should_prompt_cross_domain_click(
 
 
 def _guard_first_time_seen_blacklist(
-    deps: AgentDeps, current_url: str, run_log, step: int, action: str,
+    deps: AgentDeps, current_url: str, audit, step: int, action: str,
 ) -> bool:
     """Defense-in-depth: if the current URL is blacklisted, block immediately
     instead of letting the first-time-seen prompt fire.
@@ -400,7 +507,7 @@ def _guard_first_time_seen_blacklist(
         "step=%d  url=%s  domain=%s  action=%s",
         deps.user_id, step, current_url, domain, action,
     )
-    run_log.log_policy(
+    audit.record_policy(
         step=step, kind="domain_blocked", domain=domain,
         action=action, decision="block",
     )
@@ -408,7 +515,8 @@ def _guard_first_time_seen_blacklist(
     return True
 
 
-async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> str:
+async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
+                          turn: int = -1) -> str:
     """Execute a single action. Returns outcome string."""
     cdp = deps.cdp
     action = call.action
@@ -431,10 +539,11 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
                         "[%s] POLICY VIOLATION: navigate BLOCKED  url=%s  domain=%s",
                         deps.user_id, target, domain,
                     )
-                    run_log.log_policy(
-                        step=deps.step_number, kind="navigate_blocked", domain=domain,
-                        action="navigate", decision="block",
-                    )
+                    if audit is not None:
+                        audit.record_policy(
+                            step=deps.step_number, kind="navigate_blocked", domain=domain,
+                            action="navigate", decision="block",
+                        )
                     deps.result = _make_policy_blocked_result(deps.step_number, domain, deps=deps)
                     return f"[BLOCKED] policy: cannot navigate to {target}"
                 # Confirm-before-navigate: first navigation to a new eTLD+1
@@ -447,27 +556,27 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
                         "[%s] POLICY VIOLATION: first navigation to domain  step=%d  domain=%s  (prompting user)",
                         deps.user_id, deps.step_number, target_domain,
                     )
-                    run_log.log_policy(
+                    audit.record_policy(
                         step=deps.step_number, kind="first_navigation",
                         domain=target_domain, action="navigate",
                         decision="require_approval",
                     )
-                    await deps.ws_send({
-                        "type": "approval_required",
-                        "action": "_policy_navigation",
-                        "args": {"url": target, "domain": target_domain},
-                        "reasoning": (
+                    approved = await _ask_user(
+                        deps, audit, turn=turn, kind="first_navigation",
+                        action="_policy_navigation",
+                        args={"url": target, "domain": target_domain},
+                        domain=target_domain,
+                        reason=(
                             f"First navigation to {target_domain} in this "
                             f"task. Continue?"
                         ),
-                    })
-                    reply = await deps.human_input_queue.get()
-                    if str(reply).lower() not in APPROVE_SET:
+                    )
+                    if not approved:
                         log.warning(
                             "[%s] POLICY VIOLATION: user DENIED first navigation  step=%d  domain=%s",
                             deps.user_id, deps.step_number, target_domain,
                         )
-                        run_log.log_policy(
+                        audit.record_policy(
                             step=deps.step_number, kind="first_navigation",
                             domain=target_domain, action="navigate",
                             decision="require_approval",
@@ -479,7 +588,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
                         )
                         return f"[BLOCKED] policy: user denied navigation to {target}"
                     deps.visited_domains.add(target_domain)
-                    run_log.log_policy(
+                    audit.record_policy(
                         step=deps.step_number, kind="first_navigation",
                         domain=target_domain, action="navigate",
                         decision="require_approval",
@@ -511,8 +620,8 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
                         "[%s] POLICY VIOLATION: click navigated to blacklisted URL  url=%s  domain=%s",
                         deps.user_id, post_url, domain,
                     )
-                    if run_log is not None:
-                        run_log.log_policy(
+                    if audit is not None:
+                        audit.record_policy(
                             step=deps.step_number, kind="click_blocked_post",
                             domain=domain, action="click", decision="block",
                         )
@@ -534,29 +643,30 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
                         "[%s] POLICY: cross-domain click  step=%d  pre=%s  post=%s  domain=%s",
                         deps.user_id, deps.step_number, pre_url, post_url, target_domain,
                     )
-                    if run_log is not None:
-                        run_log.log_policy(
+                    if audit is not None:
+                        audit.record_policy(
                             step=deps.step_number, kind="click_cross_domain",
                             domain=target_domain, action="click",
                             decision="require_approval",
                         )
-                    await deps.ws_send({
-                        "type": "approval_required",
-                        "action": "_policy_cross_domain_click",
-                        "args": {"from_url": pre_url, "to_url": post_url, "target_domain": target_domain},
-                        "reasoning": (
+                    approved = await _ask_user(
+                        deps, audit, turn=turn, kind="click_cross_domain",
+                        action="_policy_cross_domain_click",
+                        args={"from_url": pre_url, "to_url": post_url,
+                              "target_domain": target_domain},
+                        domain=target_domain,
+                        reason=(
                             f"Click would navigate to {target_domain}, a different "
                             f"organisation than the current page. Continue?"
                         ),
-                    })
-                    reply = await deps.human_input_queue.get()
-                    if str(reply).lower() not in APPROVE_SET:
+                    )
+                    if not approved:
                         log.warning(
                             "[%s] POLICY VIOLATION: user DENIED cross-domain click  step=%d  target=%s",
                             deps.user_id, deps.step_number, target_domain,
                         )
-                        if run_log is not None:
-                            run_log.log_policy(
+                        if audit is not None:
+                            audit.record_policy(
                                 step=deps.step_number, kind="click_cross_domain",
                                 domain=target_domain, action="click",
                                 decision="require_approval", user_decision="denied",
@@ -566,8 +676,8 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
                             kind=f"cross-domain click to {target_domain}", deps=deps,
                         )
                         return f"[BLOCKED] policy: user denied cross-domain click to {target_domain}"
-                    if run_log is not None:
-                        run_log.log_policy(
+                    if audit is not None:
+                        audit.record_policy(
                             step=deps.step_number, kind="click_cross_domain",
                             domain=target_domain, action="click",
                             decision="require_approval", user_decision="approved",
@@ -710,8 +820,8 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
             # Audit row so the compliance trail shows the agent declined
             # upfront because of the org's policy, not because of any
             # network or runtime failure.
-            if preflight and run_log is not None:
-                run_log.log_policy(
+            if preflight and audit is not None:
+                audit.record_policy(
                     step=deps.step_number, kind="agent_declined_preflight",
                     domain=None, action="cannot_complete",
                     decision="block", user_decision=None,
@@ -720,8 +830,14 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
 
         elif action == "ask_human":
             question = args.get("question", "")
-            await deps.ws_send({"type": "ask_human", "question": question})
-            reply = await deps.human_input_queue.get()
+            if audit is None:
+                await deps.ws_send({"type": "ask_human", "question": question})
+                return f"User replied: {await deps.human_input_queue.get()}"
+            reply = await _ask_user_text(
+                deps, audit, turn=turn, action="ask_human",
+                args={"question": question},
+                message={"type": "ask_human", "question": question},
+            )
             return f"User replied: {reply}"
 
         else:
@@ -872,12 +988,19 @@ class AgentHarness:
 
         if not deps.task_id:
             deps.task_id = str(uuid.uuid4())
-        run_log = RunLogger(deps.task_id)
+        audit = AuditTrail(deps.task_id)
+        # Index of the current step's turn in the audit document, -1 before
+        # the first begin_turn. Every audit call takes it; -1 means "no turn
+        # yet", which record_prompt/record_action drop rather than guess at.
+        a_turn = -1
 
-        # Seed the policy.log with the effective policy in force at task
-        # start. One row per task, so grep can find "what was active".
+        audit.set_goal(deps.task)
         if deps.policy is not None:
-            run_log.log_policy(
+            # The effective policy in force for the whole task, once.
+            audit.set_policy(deps.policy.model_dump()
+                             if hasattr(deps.policy, "model_dump") else dict(deps.policy))
+            # And one flat event so a reader can find it in the log too.
+            audit.record_policy(
                 step=-1, kind="policy_active", domain=None, action=None,
                 decision=(
                     f"mode={deps.policy.mode}  "
@@ -889,12 +1012,19 @@ class AgentHarness:
         # Restore scratchpad if this task was previously interrupted.
         # load_scratchpad returns a structured Scratchpad (entries + notes).
         # Legacy plain-text files (no # MEMORY v2 header) parse as notes-only.
-        loaded = run_log.load_scratchpad()
+        loaded = load_scratchpad(audit.scratchpad_path)
         if loaded.entries or loaded.notes:
             deps.scratchpad = loaded
 
         for step in range(self.MAX_STEPS):
             deps.step_number = step
+            # Close the previous turn here rather than at each exit: every
+            # path that skips the bottom of the loop is a `continue`, and
+            # this is the one place all of them pass through. end_turn is a
+            # plain overwrite, so the bottom-of-loop call below (which has
+            # exact numbers) simply wins on the normal path.
+            if a_turn >= 0:
+                audit.end_turn(a_turn, timings=_step_timings(timings, cumulative_snapshots))
             log.info("[%s] === step %d ===", deps.user_id, step)
 
             # Abort gate: if a previous iteration set deps.result (policy
@@ -916,6 +1046,7 @@ class AgentHarness:
                 # through, so it is the one place steps_taken can be counted
                 # right: built elsewhere it is 0-indexed, step+1, or unset.
                 deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
+                self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
                 return deps.result
 
             steps_run += 1
@@ -944,6 +1075,12 @@ class AgentHarness:
             budget = budget_for_window(getattr(deps, "context_window", None))
             filtered_ax = filter_ax_targets(targets, max_chars=budget)
             ax_diff = compute_ax_diff(deps.prev_targets, targets, max_chars=budget // 10)
+            # Published here, not at the bottom of the loop: the diff above
+            # has already been taken, and everything after this point —
+            # redaction in particular — resolves refs against the tree the
+            # model was just shown. Leaving it a step stale meant step 0's
+            # ref lookup had nothing to match.
+            deps.prev_targets = targets
             timings["filter"] += time.perf_counter() - t1
 
             # Guardrail: domain policy (secure mode only). No-op in normal
@@ -958,7 +1095,7 @@ class AgentHarness:
                         "[%s] POLICY VIOLATION: domain BLOCKED  step=%d  url=%s  domain=%s",
                         deps.user_id, step, current_url, domain,
                     )
-                    run_log.log_policy(
+                    audit.record_policy(
                         step=step, kind="domain_blocked", domain=domain,
                         action="observe", decision="block",
                     )
@@ -967,25 +1104,49 @@ class AgentHarness:
                         time.perf_counter() - task_start, cumulative_snapshots,
                         tokens=tokens,
                     )
-                    return TaskResult(
+                    deps.result = TaskResult(
                         status="failed",
                         summary=f"Blocked by policy: {domain}",
                         failure_reason="policy_blocked",
                         steps_taken=steps_run,
                         timing=timing_report,
                         policy_mode=_policy_mode(deps),
-                        final_url=deps.step_url,
                     )
+                    deps.result.final_url = deps.step_url
+                    self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
+                    return deps.result
+
+            # The turn opens here — after the policy block, before the
+            # login guardrail — so the login prompt has a turn to live in.
+            # A turn that pauses for a login and never reaches the model
+            # carries `model: None`, which is what happened, not a gap.
+            a_turn = audit.begin_turn(
+                step=step, url=current_url, page_title=page_title,
+                ax_targets=len(targets), ax_chars=len(filtered_ax),
+                ax_diff=ax_diff, page_text_chars=len(page_text),
+            )
 
             # Guardrail: login detection. Skipped under a scripted planner:
             # there is no human to ask, the script carries its own login
             # steps, and /run has no reply channel to answer on — without
             # this the guardrail blocks 300s per step and every run records
             # a timeout instead of a measurement.
+            #
+            # ponytail: the only prompt site that does NOT go through
+            # `_ask_user`. Its contract is different on both sides — a 300s
+            # timeout continues the loop instead of aborting, and "skip"
+            # aborts. Folding it into a helper that answers yes/no would
+            # have meant a signature carrying both contracts.
             if deps.scripted_planner is None and check_login_page(
                 page_title, filtered_ax, current_url
             ):
                 t_lp = time.perf_counter()
+                pid = audit.record_prompt(
+                    a_turn, kind="login_required", action="login",
+                    args={"url": current_url, "page_title": page_title},
+                    domain=etld1(current_url),
+                    reason=f"Please log in: {page_title}",
+                )
                 await deps.ws_send({
                     "type": "login_required",
                     "message": f"Please log in: {page_title}. Agent will continue when ready.",
@@ -996,21 +1157,29 @@ class AgentHarness:
                     )
                 except asyncio.TimeoutError:
                     await deps.ws_send({"type": "login_timeout"})
+                    audit.resolve_prompt(pid, decision="timeout", response="",
+                                         wait_ms=int((time.perf_counter() - t_lp) * 1000))
                     timings["login_pause"] += time.perf_counter() - t_lp
                     continue
                 if str(reply).lower() == "skip":
                     timings["login_pause"] += time.perf_counter() - t_lp
+                    audit.resolve_prompt(pid, decision="skipped", response=str(reply),
+                                         wait_ms=int((time.perf_counter() - t_lp) * 1000))
                     timing_report = self._log_timings(deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots, tokens=tokens)
-                    return TaskResult(
+                    deps.result = TaskResult(
                         status="failed",
                         summary="User skipped login",
                         failure_reason="user_skipped_login",
                         timing=timing_report,
                         policy_mode=_policy_mode(deps),
-                        final_url=deps.step_url,
                     )
+                    deps.result.final_url = deps.step_url
+                    self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
+                    return deps.result
                 # reply == "resume" (or anything else): loop continues,
                 # next step re-runs check_login_page to confirm we're out.
+                audit.resolve_prompt(pid, decision="resumed", response=str(reply),
+                                     wait_ms=int((time.perf_counter() - t_lp) * 1000))
                 timings["login_pause"] += time.perf_counter() - t_lp
                 continue
 
@@ -1053,6 +1222,28 @@ class AgentHarness:
             actions_summary = ", ".join(f"{c.action}" for c in decision.actions) or "(none)"
             log.info("[%s] step %d  actions=[%s]", deps.user_id, step, actions_summary)
 
+            # Read the provider's own usage once, here, and use it for both
+            # the running total and the turn. Read this late it would miss
+            # the cost of a step the user then denied — which is the step
+            # they paid for.
+            try:
+                usage = result.usage if result is not None else None
+                tokens_in = usage.input_tokens if usage else 0
+                tokens_out = usage.output_tokens if usage else 0
+                if usage is not None:
+                    tokens["in"] += tokens_in
+                    tokens["out"] += tokens_out
+            except Exception:
+                usage, tokens_in, tokens_out = None, 0, 0
+            tokens_used = tokens_in if usage is not None else None
+            context = _build_context(tokens_used, window=context_window)
+            audit.record_model(
+                a_turn, thought=decision.thought, reasoning=decision.reasoning,
+                tokens_in=tokens_in, tokens_out=tokens_out,
+                context_pct=context["pct"] or 0.0,
+                latency_ms=int((time.perf_counter() - t_plan) * 1000),
+            )
+
             # Secure-mode escalation: curated list of irreversible actions
             # that always require explicit approval in secure mode (even if
             # the regex CRITICAL_PATTERNS misses them). Fires before the
@@ -1066,26 +1257,25 @@ class AgentHarness:
                         "[%s] POLICY VIOLATION: sensitive action  step=%d  action=%s  (prompting user)",
                         deps.user_id, step, c.action,
                     )
-                    run_log.log_policy(
+                    audit.record_policy(
                         step=step, kind="sensitive_action", domain=None,
                         action=c.action, decision="require_approval",
                     )
-                    await deps.ws_send({
-                        "type": "approval_required",
-                        "action": _card_label(c.action, c.action_args),
-                        "args": c.action_args,
-                        "reasoning": (
+                    approved = await _ask_user(
+                        deps, audit, turn=a_turn, kind="sensitive_action",
+                        action=_card_label(c.action, c.action_args),
+                        args=c.action_args, domain=None,
+                        reason=(
                             f"Sensitive action (org policy): the agent wants to "
                             f"{_card_label(c.action, c.action_args)}. Continue?"
                         ),
-                    })
-                    reply = await deps.human_input_queue.get()
-                    if str(reply).lower() not in APPROVE_SET:
+                    )
+                    if not approved:
                         log.warning(
                             "[%s] POLICY VIOLATION: user DENIED sensitive action  step=%d  action=%s",
                             deps.user_id, step, c.action,
                         )
-                        run_log.log_policy(
+                        audit.record_policy(
                             step=step, kind="sensitive_action", domain=None,
                             action=c.action, decision="require_approval",
                             user_decision="denied",
@@ -1121,19 +1311,18 @@ class AgentHarness:
                 and check_critical_action(c.action, c.action_args)
             ]
             for c in critical_actions:
-                await deps.ws_send({
-                    "type": "approval_required",
-                    "action": _card_label(c.action, c.action_args),
-                    "args": c.action_args,
-                    "reasoning": _REASON_CRITICAL.format(thought=decision.thought),
-                })
-                reply = await deps.human_input_queue.get()
-                if str(reply).lower() not in APPROVE_SET:
+                approved = await _ask_user(
+                    deps, audit, turn=a_turn, kind="critical_action",
+                    action=_card_label(c.action, c.action_args),
+                    args=c.action_args, domain=None,
+                    reason=_REASON_CRITICAL.format(thought=decision.thought),
+                )
+                if not approved:
                     log.warning(
                         "[%s] POLICY VIOLATION: user DENIED critical action  step=%d  action=%s",
                         deps.user_id, step, c.action,
                     )
-                    run_log.log_policy(
+                    audit.record_policy(
                         step=step, kind="critical_action", domain=None,
                         action=c.action, decision="require_approval",
                         user_decision="denied",
@@ -1167,7 +1356,7 @@ class AgentHarness:
                     # Defense-in-depth: hard-block if current URL is blacklisted,
                     # even if the observe-phase block somehow let us through.
                     if _guard_first_time_seen_blacklist(
-                        deps, current_url, run_log, step, c.action,
+                        deps, current_url, audit, step, c.action,
                     ):
                         break
                     domain = etld1(current_url)
@@ -1180,26 +1369,25 @@ class AgentHarness:
                         "[%s] POLICY VIOLATION: first-time-seen on domain  step=%d  domain=%s  action=%s  (prompting user)",
                         deps.user_id, step, domain, c.action,
                     )
-                    run_log.log_policy(
+                    audit.record_policy(
                         step=step, kind="first_time_seen", domain=domain,
                         action=c.action, decision="require_approval",
                     )
-                    await deps.ws_send({
-                        "type": "approval_required",
-                        "action": _card_label(c.action, c.action_args),
-                        "args": c.action_args,
-                        "reasoning": _REASON_FIRST_TIME.format(
+                    approved = await _ask_user(
+                        deps, audit, turn=a_turn, kind="first_time_seen",
+                        action=_card_label(c.action, c.action_args),
+                        args=c.action_args, domain=domain,
+                        reason=_REASON_FIRST_TIME.format(
                             domain=domain, action=_card_label(c.action, c.action_args),
                         ),
-                    })
-                    reply2 = await deps.human_input_queue.get()
+                    )
                     deps.seen_first_time.add(key)
-                    if str(reply2).lower() not in APPROVE_SET:
+                    if not approved:
                         log.warning(
                             "[%s] POLICY VIOLATION: user DENIED first-time-seen  step=%d  domain=%s  action=%s",
                             deps.user_id, step, domain, c.action,
                         )
-                        run_log.log_policy(
+                        audit.record_policy(
                             step=step, kind="first_time_seen", domain=domain,
                             action=c.action, decision="require_approval",
                             user_decision="denied",
@@ -1218,7 +1406,7 @@ class AgentHarness:
                         "[%s] POLICY: user APPROVED first-time-seen  step=%d  domain=%s  action=%s",
                         deps.user_id, step, domain, c.action,
                     )
-                    run_log.log_policy(
+                    audit.record_policy(
                         step=step, kind="first_time_seen", domain=domain,
                         action=c.action, decision="require_approval",
                         user_decision="approved",
@@ -1231,21 +1419,7 @@ class AgentHarness:
             # echoed at the top level for the icon and the destination URL.
             # Internal actions (scratchpad) are still silent — they're
             # metadata, not tool calls the user sees.
-            #
-            # ponytail: actual `result.usage` from pydantic-ai (the model
-            # provider's reported token count, not a `len(prompt) // 4`
-            # approximation). The backend computes the percentage so the
-            # frontend is a dumb display. `usage` is a property, not a method.
             t_ws = time.perf_counter()
-            try:
-                usage = result.usage
-                tokens_used = usage.input_tokens if usage else None
-                if usage is not None:
-                    tokens["in"] += usage.input_tokens
-                    tokens["out"] += usage.output_tokens
-            except Exception:
-                tokens_used = None
-            context = _build_context(tokens_used, window=context_window)
             external = [c for c in decision.actions if c.action not in _INTERNAL_ACTIONS]
             if external:
                 lead = external[0]
@@ -1277,8 +1451,19 @@ class AgentHarness:
             outcomes: list[str] = []
             action_trace: list[str] = []
             for call in decision.actions:
-                action_trace.append(f"{call.action}({call.action_args})")
-                outcome = await _execute_action(call, deps, run_log=run_log)
+                # One DOM lookup per TYPED action, not per textbox per step.
+                redact = (call.action == "type_text"
+                          and await _redact_if_secret(deps, call.action_args.get("ref", "")))
+                rec_args, trace = _scrubbed(call, redact)
+                action_trace.append(trace)
+                t_a = time.perf_counter()
+                outcome = await _execute_action(call, deps, audit=audit, turn=a_turn)
+                audit.record_action(
+                    a_turn, action=call.action, args=rec_args, outcome=outcome,
+                    ok=not outcome.startswith("Error executing"),
+                    redacted=redact,
+                    duration_ms=int((time.perf_counter() - t_a) * 1000),
+                )
                 outcomes.append(outcome)
                 # Short-circuit the rest of the batch on a terminal action
                 # (task_complete/cannot_complete — sets deps.result) or on
@@ -1294,32 +1479,18 @@ class AgentHarness:
             timings["execute"] += time.perf_counter() - t_ex
             combined_outcome = "; ".join(outcomes) if outcomes else "no action"
 
-            # Save targets for next-step diff
-            deps.prev_targets = targets
-
             # Persist the full structured memory whenever any step touched
             # it: read_page_text (auto-capture), append_scratchpad /
             # write_scratchpad (synthesized notes). The file is the
             # source of truth — operators can inspect
-            # logs/runs/<task_id>/scratchpad.txt to see what memory was
+            # <sessions>/scratchpad.txt to see what memory was
             # built. Auto-append writes the digest; the full body lives
             # only in-memory and is lost on restart.
             memory_actions = {
                 "read_page_text", "write_scratchpad", "append_scratchpad",
             }
             if any(c.action in memory_actions for c in decision.actions):
-                run_log.save_scratchpad(deps.scratchpad)
-
-            # Log step
-            run_log.log_step(
-                step=step,
-                url=current_url,
-                action=action_trace[0] if action_trace else "no-op",
-                args=decision.actions[0].action_args if decision.actions else {},
-                reasoning=decision.reasoning,
-                thought=decision.thought,
-                outcome=combined_outcome,
-            )
+                audit.set_scratchpad(deps.scratchpad)
 
             # Record
             deps.step_summaries.append(StepSummary(
@@ -1346,21 +1517,46 @@ class AgentHarness:
                 # through, so it is the one place steps_taken can be counted
                 # right: built elsewhere it is 0-indexed, step+1, or unset.
                 deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
+                self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
                 return deps.result
+
+            audit.end_turn(a_turn, timings=_step_timings(timings, cumulative_snapshots))
 
         timing_report = self._log_timings(
             deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
             tokens=tokens,
         )
-        return TaskResult(
+        deps.result = TaskResult(
             status="failed",
             summary="Max steps reached",
             failure_reason="max_steps_exceeded",
             steps_taken=self.MAX_STEPS,
             timing=timing_report,
             policy_mode=_policy_mode(deps),
-            final_url=deps.step_url,
         )
+        deps.result.final_url = deps.step_url
+        self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
+        return deps.result
+
+    @staticmethod
+    def _close(audit, turn: int, result: TaskResult,
+               snapshots: list[dict[str, float]],
+               timings: dict[str, float] | None = None) -> None:
+        """End the open turn and seal the document.
+
+        Every terminal path out of the loop ends here so no route can
+        return without writing `result` and `status` — a document that
+        reads "running" after the task is over is worse than no document.
+        """
+        if turn >= 0:
+            audit.end_turn(turn, timings=_step_timings(timings or {}, snapshots))
+        audit.finish(result.model_dump())
+        audit.set_status(result.status)
+        # Deregister last, and only on a terminal path. A live trail holds
+        # the document in memory and rewrites the whole file on every flush,
+        # so a handle still pointing at it after the task ended would be
+        # writing into a sealed run.
+        audit.close()
 
     @staticmethod
     def _log_timings(

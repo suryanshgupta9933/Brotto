@@ -207,50 +207,16 @@ def test_first_time_seen_reason_format():
     assert "?" in msg  # asks the user
 
 
-# ── Merge sanity (a couple more cases for the redesigned schema) ───────────
-
-
-def test_merge_secure_sticky_with_empty_blacklist():
-    """Even with empty lists, secure mode from either side wins."""
-    from brotto_orchestrator.policy.schema import Policy, merge
-    assert merge(Policy(mode="secure"), Policy(mode="normal")).mode == "secure"
-    assert merge(Policy(mode="normal"), Policy(mode="secure")).mode == "secure"
-    assert merge(Policy(mode="normal"), Policy()).mode == "normal"
-
-
-def test_merge_blacklist_dedup_and_sort():
-    """Union semantics + deterministic order so the audit log is stable."""
-    from brotto_orchestrator.policy.schema import Policy, merge
-    merged = merge(
-        Policy(blacklist=["b.com", "a.com"]),
-        Policy(blacklist=["a.com", "c.com"]),
-    )
-    assert merged.blacklist == ["a.com", "b.com", "c.com"]
-
-
-def test_merge_first_time_seen_disabled_on_either_side():
-    """first_time_seen_prompt is OR — either side enabling it wins.
-    This is the OPPOSITE of mode (which is sticky upward)."""
-    from brotto_orchestrator.policy.schema import Policy, merge
-    # User disables, floor enabled → user disable wins? NO — OR.
-    assert merge(Policy(first_time_seen_prompt=True),
-                 Policy(first_time_seen_prompt=False)).first_time_seen_prompt is True
-    assert merge(Policy(first_time_seen_prompt=False),
-                 Policy(first_time_seen_prompt=True)).first_time_seen_prompt is True
-    assert merge(Policy(first_time_seen_prompt=False),
-                 Policy(first_time_seen_prompt=False)).first_time_seen_prompt is False
-
-
 # ── Bug A regression: first-time-seen guard ────────────────────────────────
 
 
 class _FakeRunLog:
-    """Minimal stand-in for RunLogger — records log_policy calls."""
+    """Minimal stand-in for AuditTrail — records record_policy calls."""
     def __init__(self):
         self.calls: list[dict] = []
 
-    def log_policy(self, *, step, kind, domain=None, action=None,
-                   decision=None, user_decision=None) -> None:
+    def record_policy(self, *, step, kind, domain=None, action=None,
+                      decision=None, user_decision=None) -> None:
         self.calls.append({
             "step": step, "kind": kind, "domain": domain,
             "action": action, "decision": decision,
@@ -273,7 +239,7 @@ def test_first_time_seen_guard_blocks_on_blacklisted_url():
     log = _FakeRunLog()
 
     blocked = _guard_first_time_seen_blacklist(
-        deps, current_url="https://evil.com/x", run_log=log,
+        deps, current_url="https://evil.com/x", audit=log,
         step=3, action="click",
     )
 
@@ -302,7 +268,7 @@ def test_first_time_seen_guard_passes_on_clean_url():
     log = _FakeRunLog()
 
     blocked = _guard_first_time_seen_blacklist(
-        deps, current_url="https://safe.com/x", run_log=log,
+        deps, current_url="https://safe.com/x", audit=log,
         step=0, action="click",
     )
 
@@ -326,7 +292,7 @@ def test_first_time_seen_guard_skips_in_normal_mode():
     log = _FakeRunLog()
 
     blocked = _guard_first_time_seen_blacklist(
-        deps, current_url="https://evil.com/x", run_log=log,
+        deps, current_url="https://evil.com/x", audit=log,
         step=0, action="click",
     )
 

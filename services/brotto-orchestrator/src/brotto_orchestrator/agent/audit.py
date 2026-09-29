@@ -238,6 +238,15 @@ def save_scratchpad(path: Path, scratchpad: Scratchpad) -> None:
     path.write_text("\n".join(lines))
 
 
+# Live trails, by session id. A policy acknowledgement arrives from an HTTP
+# handler while the agent loop is mid-run, and the loop's in-memory document is
+# the source of truth — it rewrites the whole file on every flush. So a second
+# writer read-modify-writing the same path would be clobbered by the very next
+# flush. Routing the event to the live instance keeps one writer per document.
+_LIVE: dict[str, "AuditTrail"] = {}
+_LIVE_LOCK = threading.Lock()
+
+
 class AuditTrail:
     def __init__(self, session_id: str, *, dir: Path | None = None) -> None:
         self.session_id = session_id
@@ -268,6 +277,14 @@ class AuditTrail:
             "policy_events": [],
         }
         self._mkdir()
+        with _LIVE_LOCK:
+            _LIVE[session_id] = self
+
+    def close(self) -> None:
+        """Drop out of the live registry. Idempotent."""
+        with _LIVE_LOCK:
+            if _LIVE.get(self.session_id) is self:
+                del _LIVE[self.session_id]
 
     # ── durability ──────────────────────────────────────────────
     def _mkdir(self) -> None:
@@ -669,3 +686,53 @@ def list_sessions(*, dir: Path | None = None) -> list[dict]:
             "corrupt": bool(doc.get("corrupt")),
         })
     return out
+
+
+def append_policy_event(session_id: str, *, step: int | None, kind: str,
+                        domain: str | None, action: str | None,
+                        decision: str,
+                        user_decision: str | None = None) -> None:
+    """Record a policy decision that belongs to no turn, from outside the loop.
+
+    Replaces `run_logger.append_policy_event`, which the panel's Save and
+    `/v1/policy_ack` handlers call mid-task. A running session is written
+    through the live instance so the loop's own flush is the only writer.
+    A finished one is read-modify-written in place. An unknown session is
+    not created — an ack for a run that never happened is not worth a file.
+
+    Never raises: the callers sit in HTTP handlers, and losing a policy
+    audit row is not worth failing a settings save over.
+    """
+    try:
+        with _LIVE_LOCK:
+            live = _LIVE.get(session_id)
+        if live is not None:
+            live.record_policy(step=step, kind=kind, domain=domain,
+                               action=action, decision=decision,
+                               user_decision=user_decision)
+            return
+
+        path = (default_dir() / f"{session_id}.json")
+        if not path.exists():
+            log.debug("audit: policy event for unknown session %s ignored",
+                      session_id)
+            return
+        doc = json.loads(path.read_text())
+        doc.setdefault("policy_events", []).append({
+            "seq": len(doc.get("turns", [])) + len(doc["policy_events"]) + 1,
+            "at": _now(),
+            "step": step,
+            "kind": kind,
+            "domain": domain,
+            "action": action,
+            "decision": decision,
+            "user_decision": user_decision,
+        })
+        doc["updated_at"] = _now()
+        tmp = path.with_suffix(".json.tmp")
+        with tmp.open("w") as fp:
+            json.dump(doc, fp, ensure_ascii=False, default=str)
+        os.replace(tmp, path)
+    except Exception as exc:
+        log.warning("audit: policy event for %s dropped: %s",
+                    session_id, type(exc).__name__)

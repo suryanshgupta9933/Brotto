@@ -46,6 +46,7 @@ if os.getenv("BROTTO_ENV", "dev") == "dev":
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .agent.context import AgentDeps
 from .agent.harness import AgentHarness
@@ -59,7 +60,7 @@ from .model.store import save_user_config
 from .session.auth import validate_token
 from .session.observation_validator import validate_observation
 from .session.registry import SessionRegistry
-from .policy import Policy, UserPolicy, load_policy, merge as merge_policy
+from .policy import Policy, UserPolicy
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -111,6 +112,107 @@ app.add_middleware(
 registry = SessionRegistry()
 harness = AgentHarness()
 
+# ponytail: one SessionState per task, created and never removed, so a
+# long-lived server grew without bound. Eviction is by insertion order
+# over idle sessions, not a true LRU — nothing reads a session's recency,
+# so the timestamp a real LRU needs would be written and never read.
+# Ceiling: over the cap with every session running, nothing is evicted.
+# Upgrade path: a `last_seen` field on SessionState written in
+# get_or_create, then sort on it.
+MAX_TRACKED_SESSIONS = 256
+
+
+def _prune_sessions() -> int:
+    """Drop the oldest idle sessions once over the cap. Returns the count.
+
+    A session with a live agent is skipped: its `in_seq` tracker is what
+    D9 reconnect dedup reads, and evicting it mid-task would quietly
+    re-enable replay of an already-seen observation.
+    """
+    sessions = registry._sessions
+    if len(sessions) <= MAX_TRACKED_SESSIONS:
+        return 0
+    dropped = 0
+    for sid, state in list(sessions.items()):
+        if len(sessions) <= MAX_TRACKED_SESSIONS:
+            break
+        if state.current_task and not state.current_task.done():
+            continue
+        del sessions[sid]
+        dropped += 1
+    if dropped:
+        log.info("session eviction  dropped=%d  tracked=%d  cap=%d",
+                 dropped, len(sessions), MAX_TRACKED_SESSIONS)
+    return dropped
+
+
+def _error(status: int, message: str, **extra) -> JSONResponse:
+    """The one error shape.
+
+    `error_id` is the correlation id: the same six characters go in the
+    log line, in the panel's failure bubble and in the audit document, so
+    a user reporting a failure hands over something an operator can grep.
+    """
+    from .agent.audit import new_error_id
+
+    return JSONResponse(
+        status_code=status,
+        content={"error": message, "error_id": new_error_id(), **extra},
+    )
+
+
+class _BadRequest(Exception):
+    """A body that arrived and cannot be used. Always a 400."""
+
+
+async def _json_body(request: Request) -> dict:
+    """Parse a JSON body, or raise _BadRequest naming the problem.
+
+    Three endpoints called `await request.json()` unguarded, where a
+    malformed body surfaced as an unhandled 500 and an HTML traceback
+    page — indistinguishable from the server itself being broken.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise _BadRequest(f"malformed JSON body: {exc}") from exc
+    if not isinstance(body, dict):
+        raise _BadRequest("body must be a JSON object")
+    return body
+
+
+@app.exception_handler(_BadRequest)
+async def _bad_request(_request: Request, exc: _BadRequest):
+    return _error(400, str(exc))
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exc(_request: Request, exc: StarletteHTTPException):
+    """Reroute FastAPI's own 404/405 through the same envelope.
+
+    Left alone these answer `{"detail": "Not Found"}`, so a wrong URL
+    produced a differently-shaped error from every other failure — the
+    one case a caller debugging by hand hits first.
+    """
+    return _error(exc.status_code, str(exc.detail))
+
+
+async def unhandled(_request: Request, exc: Exception):
+    """JSON with a correlation id, instead of a traceback page."""
+    from .agent.audit import new_error_id
+
+    error_id = new_error_id()
+    log.error("unhandled error_id=%s  %s", error_id, exc, exc_info=True)
+    return JSONResponse(status_code=500, content={
+        "error": "internal error", "error_id": error_id,
+    })
+
+
+# Two-arg call, not the decorator form: Starlette's add_exception_handler
+# returns None, so decorating with it would replace the handler with None.
+app.add_exception_handler(Exception, unhandled)
+
+
 # ponytail: hydrate persisted user policies so the in-memory cache
 # survives a server restart. Without this, GET /v1/policy right after
 # boot would return floor-only even for returning users. Loaded once
@@ -126,34 +228,15 @@ try:
 except Exception as exc:
     log.warning("user-policy hydrate failed (continuing without): %s", exc)
 
-# Floor policy: loaded once at startup. Used as the org-wide minimum that
-# user policies can raise but never lower. None when no file is configured.
-FLOOR_POLICY: Policy | None = load_policy()
-if FLOOR_POLICY is not None:
-    log.info("loaded floor policy  mode=%s  blacklist=%d",
-             FLOOR_POLICY.mode, len(FLOOR_POLICY.blacklist))
-else:
-    log.info("no floor policy file (BROTTO_POLICY_FILE unset and ./policy.json absent); user toggle is authoritative")
-
-
 @app.get("/health")
 async def health():
     log.debug("health check")
     from .agent.harness import _MODEL
-    policy_summary = None
-    if FLOOR_POLICY is not None:
-        policy_summary = {
-            "mode": FLOOR_POLICY.mode,
-            "blacklist_count": len(FLOOR_POLICY.blacklist),
-            "first_time_seen_prompt": FLOOR_POLICY.first_time_seen_prompt,
-            "sensitive_actions_count": len(FLOOR_POLICY.sensitive_actions),
-        }
     return {
         "status": "ok",
         "service": "brotto-orchestrator",
         "version": "2.0.0",
         "model": _MODEL,
-        "policy": policy_summary,
     }
 
 
@@ -194,10 +277,10 @@ async def context_limit():
     return {"model": _MODEL, "window": _CONTEXT_WINDOW_TOKENS}
 
 
-# ponytail: GET /v1/policy returns the EFFECTIVE policy the server will
-# enforce for this caller — union of floor + last-known user policy. The
-# extension calls this on Settings open so the sidepanel can render the
-# floor as a locked read-only block alongside the user's editable list.
+# ponytail: GET /v1/policy returns the policy the server will enforce for
+# this caller — the last-known user policy, verbatim. The extension calls
+# this on Settings open to fill the blacklist field with what the server
+# actually holds, so a stale local cache cannot quietly diverge.
 # Unauthenticated (same as /health) — payload only contains domain lists,
 # not secrets; this is fine for the demo. Add auth before any production
 # deployment.
@@ -216,15 +299,11 @@ async def get_effective_policy(request: Request):
             user_pol = UserPolicy.model_validate(user_payload)
         except Exception:
             user_pol = None
-    effective = merge_policy(FLOOR_POLICY, user_pol)
+    effective = user_pol or Policy()
     return JSONResponse(content={
         "mode": effective.mode,
         "blacklist": effective.blacklist,
         "sensitive_actions": effective.sensitive_actions,
-        "source": {
-            "floor": list(FLOOR_POLICY.blacklist) if FLOOR_POLICY else [],
-            "user": list(user_pol.blacklist) if user_pol else [],
-        },
         "caller": caller,
     })
 
@@ -237,6 +316,7 @@ async def get_effective_policy(request: Request):
 async def create_session(request: Request):
     session_id = str(uuid.uuid4())
     registry.get_or_create(session_id)
+    _prune_sessions()
     ws_url = f"ws://localhost:8000/ws/ext/{session_id}"
     log.info("session created  session_id=%s  ws_url=%s", session_id, ws_url)
     return JSONResponse(status_code=201, content={
@@ -246,12 +326,41 @@ async def create_session(request: Request):
     })
 
 
+@app.get("/v1/sessions")
+async def list_session_audits():
+    """Index of every session on disk, newest first.
+
+    Unauthenticated, like /health and /v1/policy — it summarises runs
+    the caller already owns, on their own server. A future auth layer
+    gates all of them together.
+    """
+    from .agent.audit import list_sessions as _list
+
+    return JSONResponse(content={"sessions": _list()})
+
+
+@app.get("/v1/sessions/{session_id}/audit")
+async def read_audit(session_id: str):
+    """The full nested document for one session.
+
+    A damaged file returns 200 with `corrupt: true` rather than an
+    error: the file exists to survive a crash, and failing to read it is
+    exactly the case it has to survive.
+    """
+    from .agent.audit import read as _read
+
+    doc = _read(session_id)
+    if not doc.get("found"):
+        return _error(404, "unknown session")
+    return JSONResponse(content=doc)
+
+
 # ponytail: separate HTTP endpoint for save-time notification. The
 # WS-based `policy_acknowledged` only works while a task is in flight;
 # this one logs even when the user clicks Save with no task running.
 @app.post("/v1/policy_ack")
 async def policy_ack(request: Request):
-    body = await request.json()
+    body = await _json_body(request)
     settings = body.get("settings") or {}
     user_id = body.get("user_id") or request.client.host if request.client else "unknown"
     mode = settings.get("mode")
@@ -267,7 +376,7 @@ async def policy_ack(request: Request):
         user_id, mode, blacklist,
     )
     try:
-        from .agent.run_logger import append_policy_event
+        from .agent.audit import append_policy_event
         append_policy_event(
             f"client-{user_id}",
             step=None, kind="policy_acknowledged",
@@ -295,10 +404,10 @@ async def suggestions(request: Request):
     """
     from .agent.suggest import generate
 
-    body = await request.json()
+    body = await _json_body(request)
     url = str(body.get("url", "") or "").strip()
     if not url:
-        return JSONResponse(status_code=400, content={"error": "url is required"})
+        return _error(400, "url is required")
     title = str(body.get("title", "") or "")
     page_text = str(body.get("page_text", "") or "")
 
@@ -323,7 +432,7 @@ async def suggestions(request: Request):
         # ValueError never carries a key — the resolver's own message names
         # the env var, not the secret.
         log.warning("suggestions: no model config: %s", exc)
-        return JSONResponse(status_code=502, content={"error": str(exc)})
+        return _error(502, str(exc))
 
     try:
         lines = await generate(url, title, cfg, creds, page_text=page_text)
@@ -331,7 +440,7 @@ async def suggestions(request: Request):
         # 502 rather than 500 so the panel can tell "your server couldn't do
         # this" from "your request was malformed" and keep its fallback.
         log.warning("suggestions failed for %s: %s", url[:120], exc)
-        return JSONResponse(status_code=502, content={"error": str(exc)})
+        return _error(502, str(exc))
     # context_used is what the panel needs to decide how long to keep the
     # result: a line derived from page text is page content, and storing one
     # in chrome.storage.local for a day is a leak the user never agreed to.
@@ -471,7 +580,7 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     if isinstance(user_policy_payload, dict):
         registry.set_user_policy(client_host, user_policy_payload)
         _persist_user_policy(client_host, user_policy_payload)
-    effective_policy = merge_policy(FLOOR_POLICY, user_policy)
+    effective_policy = user_policy or Policy()
     log.info("[%s] effective_policy  mode=%s  blacklist=%d",
              session_id, effective_policy.mode,
              len(effective_policy.blacklist))
@@ -490,6 +599,9 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     )
 
     agent_task = asyncio.create_task(harness.run(deps))
+    # Publish it on the session state so _prune_sessions() can tell a
+    # running session from an idle one and never evict the former.
+    registry.get_or_create(session_id).current_task = agent_task
     log.info("[%s] agent task started", session_id)
 
     # ponytail: one-shot WS frame so the sidepanel knows the EFFECTIVE
@@ -502,10 +614,6 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
             "mode": effective_policy.mode,
             "blacklist": effective_policy.blacklist,
             "sensitive_actions": effective_policy.sensitive_actions,
-            "source": {
-                "floor": list(FLOOR_POLICY.blacklist) if FLOOR_POLICY else [],
-                "user": list(user_policy.blacklist) if user_policy else [],
-            },
         })
     except Exception as exc:
         log.warning("[%s] failed to send policy_effective: %s", session_id, exc)
@@ -546,6 +654,12 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                 elif t == "evaluate_result":
                     log.debug("[%s] ← evaluate_result  len=%d", session_id, len(incoming.get("value", "")))
                     await eval_queue.put(incoming.get("value", ""))
+                elif t == "get_attributes_result":
+                    # Answers a get_attributes from a type_text. Without
+                    # this branch it sits undelivered and every password
+                    # lookup times out after _ATTRS_TIMEOUT, so the
+                    # redaction falls back to the accessible name alone.
+                    await relay.deliver_attributes_result(incoming)
                 elif t == "human_reply":
                     log.info("[%s] ← human_reply", session_id)
                     await human_queue.put(incoming.get("content", ""))
@@ -603,7 +717,7 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                         settings.get("blacklist"),
                     )
                     try:
-                        from .agent.run_logger import append_policy_event
+                        from .agent.audit import append_policy_event
                         append_policy_event(
                             session_id,
                             step=None, kind="policy_acknowledged",
@@ -692,7 +806,7 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
                         user_policy = UserPolicy.model_validate(user_policy_payload)
                     except Exception as exc:
                         log.warning("[%s] invalid user_policy, ignoring: %s", user_id, exc)
-                effective_policy = merge_policy(FLOOR_POLICY, user_policy)
+                effective_policy = user_policy or Policy()
                 log.info("[%s] submit_task  task=%r  start_url=%s  effective_mode=%s",
                          user_id, task_text[:80], start_url, effective_policy.mode)
                 log.info("[%s] effective_policy  mode=%s  blacklist=%d",
@@ -769,7 +883,7 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
 
 @app.post("/run")
 async def run_task(request: Request):
-    body = await request.json()
+    body = await _json_body(request)
     task = body.get("task", "")
     start_url = body.get("start_url", "about:blank")
     user_policy_payload = body.get("user_policy")
@@ -779,12 +893,12 @@ async def run_task(request: Request):
             user_policy = UserPolicy.model_validate(user_policy_payload)
         except Exception as exc:
             log.warning("/run: invalid user_policy, ignoring: %s", exc)
-    effective_policy = merge_policy(FLOOR_POLICY, user_policy)
+    effective_policy = user_policy or Policy()
     log.info("/run  task=%r  start_url=%s  effective_mode=%s",
              task[:80], start_url, effective_policy.mode)
 
     if not task:
-        return JSONResponse(status_code=400, content={"error": "task required"})
+        return _error(400, "task required")
 
     from .dev.playwright_browser import PlaywrightBrowser
     browser = PlaywrightBrowser()
@@ -806,10 +920,7 @@ async def run_task(request: Request):
             else:
                 from .testing.scripts import SCRIPT_NAMES, build_script
                 if script_name not in SCRIPT_NAMES:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"error": f"unknown script {script_name!r}"},
-                    )
+                    return _error(400, f"unknown script {script_name!r}")
                 scripted_planner = build_script(script_name)
         deps = AgentDeps(
             user_id="http-dev",
@@ -824,7 +935,7 @@ async def run_task(request: Request):
         return JSONResponse(content=result.model_dump())
     except Exception as exc:
         log.error("/run error: %s", exc, exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        return _error(500, str(exc))
     finally:
         await browser.close()
 

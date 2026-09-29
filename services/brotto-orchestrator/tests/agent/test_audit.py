@@ -334,3 +334,49 @@ def test_new_error_id_is_six_base36_chars():
     assert len(ids) == 200
     for i in ids:
         assert len(i) == 6 and all(c in "0123456789abcdefghijklmnopqrstuvwxyz" for c in i)
+
+
+def test_policy_event_during_a_run_goes_through_the_live_writer(tmp_path):
+    """A running trail holds the document in memory and rewrites the whole
+    file on every flush. A second writer read-modify-writing the path would
+    be clobbered by the next flush, so the event has to reach the instance.
+    Recording it, then writing again, must not lose the event."""
+    from brotto_orchestrator.agent.audit import append_policy_event
+
+    t = AuditTrail("live", dir=tmp_path)
+    t.set_goal("g")
+    t.begin_turn(step=0, url="u", page_title="t", ax_targets=1, ax_chars=1,
+                 ax_diff="", page_text_chars=0)
+
+    append_policy_event("live", step=None, kind="policy_acknowledged",
+                        domain=None, action=None, decision="mode=secure")
+
+    # Anything the loop writes afterwards must not erase it.
+    t.end_turn(0, timings={})
+    t.set_status("running")
+
+    doc = json.loads((tmp_path / "live.json").read_text())
+    kinds = [e["kind"] for e in doc["policy_events"]]
+    assert kinds == ["policy_acknowledged"]
+    assert doc["policy_events"][0]["decision"] == "mode=secure"
+    t.close()
+
+
+def test_policy_event_for_an_unknown_session_creates_nothing(tmp_path,
+                                                              monkeypatch):
+    from brotto_orchestrator.agent.audit import append_policy_event
+    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path))
+
+    append_policy_event("never-ran", step=None, kind="policy_acknowledged",
+                        domain=None, action=None, decision="mode=secure")
+
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_closed_trail_stops_accepting_live_events(tmp_path):
+    t = AuditTrail("sealed", dir=tmp_path)
+    t.set_goal("g")
+    t.close()
+    from brotto_orchestrator.agent import audit as audit_mod
+    with audit_mod._LIVE_LOCK:
+        assert "sealed" not in audit_mod._LIVE
