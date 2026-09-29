@@ -1253,6 +1253,16 @@ function toast(text, kind, ms = 2600) {
   el.className = 'toast' + (kind ? ' ' + kind : '');
   el.setAttribute('role', 'status');
   el.textContent = text;
+  // Clear whatever is actually at the bottom of the panel, measured rather
+  // than guessed. The input area grows when "+ New task" appears, and a
+  // hardcoded offset lands the toast on top of the composer the moment
+  // either height moves — it did, by 5px.
+  const top = Math.min(
+    ...[newTaskBtn, document.getElementById('inputArea')]
+      .filter((e) => e && e.offsetParent !== null)
+      .map((e) => e.getBoundingClientRect().top),
+  );
+  el.style.bottom = `${Math.round(window.innerHeight - top + 8)}px`;
   document.body.appendChild(el);
   toastTimer = setTimeout(() => el.classList.add('leaving'), ms);
   // 200ms covers the 180ms leave animation with a little slack.

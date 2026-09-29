@@ -993,7 +993,6 @@
       position: fixed;
       left: 14px;
       right: 14px;
-      bottom: 86px;
       z-index: 90;
       display: flex;
       align-items: center;
@@ -1012,9 +1011,9 @@
     }
     .toast.bad { border-left-color: var(--bad); color: var(--bad); }
     .toast.leaving { animation: msg-leave 0.18s ease forwards; }
-    /* The composer is 89px, but "+ New task" (33px) sits above it on a
-       terminal task — step over both rather than landing on the button. */
-    #newTaskBtn.visible ~ .toast { bottom: 144px; }
+    /* The vertical offset is set by toast() from the measured height of
+       whatever sits at the bottom of the panel, so it cannot go stale when
+       the input area or "+ New task" changes size. */
 
     /* ─── Input area (bottom) ─────────────────────────────────────────── */
     #inputArea {
