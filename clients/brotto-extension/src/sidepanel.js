@@ -704,19 +704,19 @@ function retryLastTask() {
   });
 }
 
-// ponytail: clean a URL for chip display. Strips query strings and hash
-// (often auth tokens, session IDs — visually noisy and sometimes
-// sensitive). Falls back to the raw URL if parsing fails. Truncates
-// long paths so the chip stays one line.
-function cleanUrl(url, maxLen = 56) {
-  if (!url) return '';
+// ponytail: split a URL into the two parts the step card shows. Query string
+// and hash are dropped (often auth tokens, session IDs — visually noisy and
+// sometimes sensitive), and a leading "www." goes because it costs width and
+// names nothing. Returns null when there is nothing worth showing.
+function splitUrl(url) {
+  if (!url) return null;
   try {
     const u = new URL(url);
-    let s = u.hostname + u.pathname;
-    if (s.length > maxLen) s = s.slice(0, maxLen - 1) + '…';
-    return s;
+    const host = u.hostname.replace(/^www\./, '');
+    if (!host) return null;
+    return { host, path: u.pathname || '/', raw: u.origin + u.pathname };
   } catch {
-    return url;
+    return null;
   }
 }
 
@@ -1844,18 +1844,11 @@ function appendPlanCard({ title, sites, steps }) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-// Copies the same cleaned address the chip displays, not the raw one: the
-// query string can carry a session token, and the chip deliberately hides
-// it. Copying what is on screen keeps the two from disagreeing — except for
-// the scheme, which the chip drops for width and the clipboard has to keep,
-// or the pasted value won't open.
-function wireCopyUrl(el, display, rawUrl) {
-  el.classList.add('step-page-chip--copy');
-  let copyValue = display;
-  try {
-    const u = new URL(rawUrl);
-    copyValue = u.origin + u.pathname;
-  } catch { /* leave the display form */ }
+// Copies the same address the row displays, not the raw one: the query
+// string can carry a session token and the row deliberately hides it. The
+// scheme is restored, because the row drops it for width and the clipboard
+// has to keep it or the pasted value won't open.
+function wireCopyUrl(el, copyValue) {
   el.addEventListener('click', () => {
     navigator.clipboard.writeText(copyValue).then(
       () => toast('Address copied'),
@@ -1880,33 +1873,6 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, action
   const bubble = document.createElement('div');
   bubble.className = 'bubble step-bubble';
 
-  // ponytail: page/action chips. The page chip shows the URL the agent
-  // was on (cleanUrl strips query/hash to avoid tokens in the chat).
-  // The action chip shows the URL the agent was navigating to. When
-  // navigated across the same domain to a different path, both chips
-  // still differentiate via the path — keeping the host-only render
-  // would have collapsed them to the same string.
-  const pageClean = cleanUrl(pageUrl);
-  const actionClean = cleanUrl(actionTarget);
-  if (pageClean) {
-    const chip = document.createElement('button');
-    chip.type = 'button';
-    chip.className = 'step-page-chip';
-    chip.title = 'Copy this address';
-    chip.innerHTML = `<span class="step-page-chip-icon">&#9655;</span><span class="step-page-chip-url">${escapeHtml(pageClean)}</span>`;
-    wireCopyUrl(chip, pageClean, pageUrl);
-    bubble.appendChild(chip);
-  }
-  if (actionClean && actionClean !== pageClean) {
-    const dest = document.createElement('button');
-    dest.type = 'button';
-    dest.className = 'step-page-chip';
-    dest.title = 'Copy this address';
-    dest.innerHTML = `<span class="step-page-chip-icon">&#8594;</span><span class="step-page-chip-url">${escapeHtml(actionClean)}</span>`;
-    wireCopyUrl(dest, actionClean, actionTarget);
-    bubble.appendChild(dest);
-  }
-
   const head = document.createElement('div');
   head.className = 'step-head';
   if (icon) {
@@ -1920,6 +1886,64 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, action
   stepTextEl.innerHTML = renderMarkdown(text || 'Working…');
   head.appendChild(stepTextEl);
   bubble.appendChild(head);
+
+  // ponytail: the address goes under the step, not above it, and only the
+  // host is boxed — it is the fragment that names the site rather than the
+  // page. A move within one site is the common case, so the host is drawn
+  // once and both paths share its line; crossing sites falls back to two
+  // rows, because one boxed host would then be lying about the second URL.
+  // Order is always source then destination, on both paths.
+  const page = splitUrl(pageUrl);
+  const action = splitUrl(actionTarget);
+  const sameSite = page && action && page.host === action.host;
+  const primary = page || action;
+  if (page || action) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'step-url-row step-url-row--copy';
+    row.title = 'Copy this address';
+
+    const box = document.createElement('span');
+    box.className = 'step-url-host';
+    box.textContent = primary.host;
+    row.appendChild(box);
+
+    const path = document.createElement('span');
+    path.className = 'step-url-path';
+    if (sameSite) {
+      const arrow = document.createElement('span');
+      arrow.className = 'step-url-arrow';
+      arrow.textContent = ' → ';
+      const from = document.createElement('span');
+      from.textContent = page.path;
+      const to = document.createElement('span');
+      to.textContent = action.path;
+      path.append(from, arrow, to);
+    } else {
+      path.textContent = primary.path;
+    }
+    row.appendChild(path);
+
+    // Copy the destination — where the agent ended up is the address worth
+    // pasting, not where it started.
+    wireCopyUrl(row, (action || page).raw);
+    bubble.appendChild(row);
+  }
+  if (page && action && !sameSite) {
+    const other = document.createElement('button');
+    other.type = 'button';
+    other.className = 'step-url-row step-url-row--copy';
+    other.title = 'Copy this address';
+    const box = document.createElement('span');
+    box.className = 'step-url-host';
+    box.textContent = action.host;
+    const path = document.createElement('span');
+    path.className = 'step-url-path';
+    path.textContent = action.path;
+    other.append(box, path);
+    wireCopyUrl(other, action.raw);
+    bubble.appendChild(other);
+  }
 
   if (details && details.length > 0) {
     const wrap = document.createElement('div');

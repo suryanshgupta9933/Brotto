@@ -418,7 +418,13 @@ function notify(id: string, spec: NotificationSpec): void {
     // failure this feature exists to prevent.
     requireInteraction: spec.blocking === true,
     buttons: spec.buttons,
-  } as chrome.notifications.NotificationOptions<true>, () => void chrome.runtime.lastError);
+  } as chrome.notifications.NotificationOptions<true>, () => {
+    // A notification that never appears is indistinguishable from one that was
+    // never fired unless we say which. Chrome swallows the reason otherwise.
+    const err = chrome.runtime.lastError;
+    if (err) console.error("[brotto] notification failed:", id, err.message);
+    else console.log("[brotto] notification shown:", id, spec.title);
+  });
 }
 
 /** Fires a notification for an event the panel also renders, if warranted. */
@@ -472,6 +478,15 @@ function maybeNotify(event: Record<string, unknown>): void {
       title: "Brotto stopped",
       message: String(event.summary || "The task could not be completed."),
     });
+    return;
+  }
+  // Only the three above are gated; anything else reaching here was never a
+  // candidate. Logged so "no notification appeared" has an answer in the
+  // console — the default for results is off, which is otherwise invisible.
+  if (t === "task_completed" || t === "task_failed") {
+    console.log(
+      `[brotto] no notification for ${t}: notifyResults=${notifyResults} panelConnected=${panelConnected}`,
+    );
   }
 }
 

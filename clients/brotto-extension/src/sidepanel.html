@@ -1181,41 +1181,52 @@
     }
     .bubble pre code { background: transparent; padding: 0; font-size: inherit; }
 
-    .step-page-chip {
+    /* The step text is the content; the address is context. So the address
+       sits under it on one 10px line, and the only part given a box is the
+       host — the one fragment that names the site rather than the page. */
+    .step-url-row {
       display: flex;
       align-items: center;
       gap: 6px;
-      font-size: 11px;
-      color: var(--ink-3);
-      padding: 4px 0 6px;
-      border-bottom: 1px solid var(--rule);
-      margin-bottom: 5px;
-      overflow: hidden;
+      margin-top: 6px;
+      min-width: 0;
+    }
+    .step-url-host {
+      flex-shrink: 0;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      color: var(--ink);
+      background: var(--paper-2);
+      border: 1px solid var(--rule);
+      padding: 2px 5px;
       white-space: nowrap;
     }
-    .step-page-chip-icon { color: var(--ink); flex-shrink: 0; }
-    /* The chip is a button: copying an address has to be reachable without a
-       mouse. Reset the UA button chrome and keep the chip's own rule. */
-    .step-page-chip--copy {
+    .step-url-path {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--ink-3);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .step-url-arrow { color: var(--rule-2); }
+    /* The row is a button — copying an address has to work without a mouse.
+       Reset the UA chrome, which would otherwise draw a 2px outset box. */
+    .step-url-row--copy {
       width: 100%;
       background: transparent;
       border: 0;
-      border-bottom: 1px solid var(--rule);
+      padding: 0;
       font: inherit;
       text-align: left;
       cursor: pointer;
     }
-    .step-page-chip--copy:hover .step-page-chip-url { color: var(--ink); text-decoration: underline; }
-    .step-page-chip--copy:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
-    .step-page-chip-url {
-      font-family: var(--font-mono);
-      font-size: 10.5px;
-      color: var(--ink-2);
-      max-width: 200px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .step-page-chip-title { color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+    .step-url-row--copy:hover .step-url-path { color: var(--ink-2); }
+    .step-url-row--copy:hover .step-url-host { border-color: var(--rule-2); }
+    .step-url-row--copy:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
     .facts {
       display: flex;
