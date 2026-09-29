@@ -7,49 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="panel-tokens.css">
   <style>
-    /* ═══ BROTTO — "Ink & Rule" design system v2 ═══════════════════════════
-       Monochrome brand. The mark is black, the wordmark is black, and colour
-       appears only to report agent state (live / needs you / done / blocked).
-       Hierarchy comes from border *weight*, never from shadow — there is not
-       a single box-shadow in this file. Corners are square by policy.
-       Type: Geist for anything you read or act on, Geist Mono (10px, 0.14em,
-       uppercase) for every label, stat, and secondary action.
-    ══════════════════════════════════════════════════════════════════════ */
-    :root {
-      /* Ink — the brand is its own black */
-      --ink:       #000000;
-      --ink-2:     #5C5C5C;   /* secondary text */
-      --ink-3:     #6E6E6E;   /* faint / placeholder — 4.7:1 on paper, 4.5:1 on paper-2 */
-
-      /* Paper — layered surfaces, no elevation, only tone */
-      --paper:     #FFFFFF;
-      --paper-2:   #F5F5F5;   /* sunken: inputs, code, hover rows */
-      --paper-3:   #EBEBEB;   /* raised: headers, bars */
-
-      /* Rules — the entire hierarchy system */
-      --rule:      #E5E5E5;   /* hairline: default separation */
-      --rule-2:    #C9C9C9;   /* medium: emphasis, control borders */
-      --rule-ink:  #000000;   /* hairline but emphatic */
-
-      /* State — the only colour in the system. All three clear 4.5:1 as
-         text on paper, which they have to be: each is used for a word, not
-         just a dot or a rule. */
-      --ok:        #15803D;
-      --ok-soft:   rgba(21, 128, 61, 0.08);
-      --wait:      #B45309;
-      --wait-soft: rgba(180, 83, 9, 0.08);
-      --bad:       #DC2626;
-      --bad-soft:  rgba(220, 38, 38, 0.08);
-
-      /* Type */
-      --font-ui:   'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-
-      /* Motion — 120ms flat, matching the reference's instant idiom */
-      --t: 120ms;
-    }
-
     *, *::before, *::after {
       box-sizing: border-box;
       margin: 0;
@@ -1470,6 +1429,10 @@
         <button id="refreshPolicyBtn" class="btn settings-btn-secondary"
                 type="button" title="Re-fetch the effective policy from the server">
           Refresh from server
+        </button>
+        <button id="replaySetupBtn" class="btn settings-btn-secondary"
+                type="button" title="Show the first-run wizard again">
+          Replay setup
         </button>
         <button id="saveSettingsBtn" class="btn btn-primary" type="button">Save</button>
       </div>

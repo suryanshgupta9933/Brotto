@@ -1164,7 +1164,18 @@ async function initialize(): Promise<void> {
     void chrome.notifications.clear(id);
   });
 
-  chrome.runtime.onInstalled.addListener(() => { void setBadge(false); });
+  chrome.runtime.onInstalled.addListener((details) => {
+    void setBadge(false);
+    // First run points the panel at the setup wizard; the wizard's own "Start"
+    // points it back at sidepanel.html. reason === 'install' only, so an
+    // update never drops an existing user back into setup.
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    if (details.reason === "install") {
+      void chrome.storage.local.get("settings").then((s) => {
+        if (!s.settings?.onboarded) chrome.sidePanel.setOptions({ path: "welcome.html" });
+      });
+    }
+  });
 
   // Auto-resume after manual login: when the active tab navigates, push a
   // fresh observation AND unblock the server's login wait. Top-frame only —

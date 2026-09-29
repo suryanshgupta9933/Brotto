@@ -346,6 +346,15 @@ const saveSettingsBtn     = document.getElementById('saveSettingsBtn');
 const refreshPolicyBtn    = document.getElementById('refreshPolicyBtn');
 const notifyBlockingSetting = document.getElementById('notifyBlockingSetting');
 const notifyResultsSetting  = document.getElementById('notifyResultsSetting');
+const replaySetupBtn        = document.getElementById('replaySetupBtn');
+
+// setOptions re-points the panel; it has no gesture requirement, so the
+// wizard replaces this page on the next open rather than in a new tab.
+if (replaySetupBtn) {
+  replaySetupBtn.addEventListener('click', () => {
+    void chrome.sidePanel.setOptions({ path: 'welcome.html' });
+  });
+}
 
 // ponytail: on Settings open, fetch the EFFECTIVE policy from the server
 // so the sidepanel shows what the server is actually enforcing (floor +

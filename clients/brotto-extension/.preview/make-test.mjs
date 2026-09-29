@@ -31,6 +31,7 @@ window.chrome = {
   },
   storage: { local: area(window.__bag), session: area(window.__session = window.__session || {}) },
   debugger: { attach(){}, detach(){} },
+  sidePanel: { setOptions: (o) => { window.__path = o.path; return Promise.resolve(); } },
 };
 window.__deliver = (m) => window.__onMessage(m, { id: 'test' });
 </script>
@@ -42,3 +43,26 @@ if (!html.includes(marker)) throw new Error('sidepanel.js script tag not found')
 mkdirSync('.preview', { recursive: true });
 writeFileSync('dist/__test.html', html.replace(marker, stub + marker));
 console.log('wrote dist/__test.html');
+
+// The wizard needs a different stub: no messaging, but a sidePanel that
+// records the path it was pointed at so the hand-off can be asserted.
+const welcomeStub = `<script>
+window.__path = null;
+window.__bag = window.__bag || {};
+window.__session = window.__session || {};
+const area = (bag) => ({
+  get: (k) => Promise.resolve(typeof k === 'string' ? (k in bag ? { [k]: bag[k] } : {}) : { ...bag }),
+  set: (o) => { Object.assign(bag, o); return Promise.resolve(); },
+  remove: (k) => { delete bag[k]; return Promise.resolve(); },
+});
+window.chrome = {
+  storage: { local: area(window.__bag), session: area(window.__session) },
+  sidePanel: { setOptions: (o) => { window.__path = o.path; return Promise.resolve(); } },
+};
+</script>
+`;
+const wHtml = readFileSync('dist/welcome.html', 'utf8');
+const wMarker = '<script src="welcome.js"></script>';
+if (!wHtml.includes(wMarker)) throw new Error('welcome.js script tag not found');
+writeFileSync('dist/__test-welcome.html', wHtml.replace(wMarker, welcomeStub + wMarker));
+console.log('wrote dist/__test-welcome.html');
