@@ -1,8 +1,27 @@
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 
 from .context import StepSummary
+
+
+def page_fingerprint(ax_tree: str, page_text: str) -> str:
+    """Cheap identity for "the page looks the same as last step".
+
+    Hashes the rendered state, not the address bar. A search flow — focus
+    the box, type the query, submit — holds one URL across three genuinely
+    different pages, and a URL-only rule reads that as three steps of
+    nothing happening. The accessibility tree carries the input's value, so
+    the fingerprint moves on a keystroke.
+
+    Hashed rather than stored: the raw tree is tens of thousands of
+    characters and only equality is ever asked of it.
+    """
+    return hashlib.blake2b(
+        f"{ax_tree}\x00{page_text}".encode("utf-8", "replace"),
+        digest_size=8,
+    ).hexdigest()
 
 
 def check_stagnation(
@@ -15,9 +34,11 @@ def check_stagnation(
     recent = summaries[-window:]
     urls = [s.url for s in recent]
 
-    # Stuck on the same page
-    if len(set(urls)) == 1:
-        return True, f"Stuck on {urls[0]} for {window} consecutive steps"
+    # Stuck on the same page. The URL alone is not enough — see
+    # page_fingerprint — so a step is only counted as stuck when the page
+    # behind it is also unchanged.
+    if len(set(urls)) == 1 and len({s.state for s in recent if s.state}) <= 1:
+        return True, f"Stuck on {urls[0]} for {window} consecutive steps with no change to the page"
 
     # Repeating the same action
     actions = [s.action_taken for s in recent]

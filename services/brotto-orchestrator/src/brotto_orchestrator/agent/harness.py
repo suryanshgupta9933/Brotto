@@ -30,7 +30,7 @@ from .context import (
 )
 from .ax_filter import budget_for_window, filter_ax_targets
 from .ax_diff import compute_ax_diff
-from .stagnation import check_stagnation
+from .stagnation import check_stagnation, page_fingerprint
 from .guardrails import check_login_page, check_critical_action, check_sensitive_action
 from ..policy.gate import GateDecision, check_domain_policy, check_first_time_seen
 from ..policy.domains import etld1
@@ -1356,6 +1356,10 @@ class AgentHarness:
                 url=current_url,
                 action_taken="; ".join(action_trace) if action_trace else "no action",
                 outcome=combined_outcome[:120],
+                # filtered_ax, not turn.ax_tree — the latter has the
+                # stagnation note appended, so hashing it would report a
+                # state change on exactly the steps where nothing changed.
+                state=page_fingerprint(filtered_ax, page_text),
             ))
 
             # Terminal? Gate on deps.result, not on the action name. A

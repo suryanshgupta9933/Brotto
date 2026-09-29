@@ -25,6 +25,48 @@ async def test_stagnation_detector():
 
 
 @pytest.mark.asyncio
+async def test_typing_into_a_search_box_is_not_stagnation():
+    """A real run: "open the Google results for bermuda" was reported as
+    "stuck for 3 consecutive steps" while the agent was focusing the box,
+    typing the query and submitting — three different pages that happen to
+    share one URL. The warning also told the model to consider stopping, so
+    it fired on a task that went on to succeed."""
+    from brotto_orchestrator.agent.stagnation import check_stagnation, page_fingerprint
+    from brotto_orchestrator.agent.context import StepSummary
+
+    url = "https://www.google.com/"
+    states = [
+        page_fingerprint('textbox "Google Search"', ""),            # focused
+        page_fingerprint('textbox "Google Search" value="bermuda"', ""),  # typed
+        page_fingerprint("link AI Overview", "bermuda results"),    # submitted
+    ]
+    steps = [
+        StepSummary(step=i, url=url, action_taken=f"step{i}", outcome="ok", state=st)
+        for i, st in enumerate(states)
+    ]
+    stagnated, _ = check_stagnation(steps, window=3)
+    assert not stagnated
+
+
+@pytest.mark.asyncio
+async def test_same_url_and_same_page_is_still_stagnation():
+    """The fingerprint must not disarm the rule it replaced — clicking
+    something inert three times is still a stuck agent."""
+    from brotto_orchestrator.agent.stagnation import check_stagnation, page_fingerprint
+    from brotto_orchestrator.agent.context import StepSummary
+
+    st = page_fingerprint('button "Close"', "identical text")
+    steps = [
+        StepSummary(step=i, url="http://same.com", action_taken="click(btn)",
+                    outcome="nothing", state=st)
+        for i in range(3)
+    ]
+    stagnated, reason = check_stagnation(steps, window=3)
+    assert stagnated
+    assert "same.com" in reason
+
+
+@pytest.mark.asyncio
 async def test_no_stagnation_with_progress():
     from brotto_orchestrator.agent.stagnation import check_stagnation
     from brotto_orchestrator.agent.context import StepSummary

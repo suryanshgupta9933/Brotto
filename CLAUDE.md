@@ -133,7 +133,15 @@ Three gaps caused it, all of them assumptions the prompt did not state:
 
 There is also a per-navigation gate in `<how_to_think>`: *do I already have an answer, and what specific evidence will this step add?* A step that cannot name its evidence in one sentence does not navigate.
 
-`check_stagnation` was left alone. A name-based repetition rule was tried and reverted: it flags three different clicks on three different pages (normal navigation, covered by an existing test), and it would not have caught this run, which alternated URLs rather than repeating one page three times. The detector was not the problem here.
+`check_stagnation` compares the **page**, not the URL. A live run of "open the Google results for bermuda" was told *"stuck for 3 consecutive steps"* while the agent was focusing the box, typing the query and submitting — three different pages that share one URL, because typing does not navigate. The warning made it worse: the panel's copy said *"Stop the task if this doesn't clear"*, and the task went on to succeed.
+
+`StepSummary.state` is a `blake2b` of the rendered AX tree plus page text (`stagnation.page_fingerprint`), and the same-URL rule now requires that to be unchanged too. The value is load-bearing: `ax_filter` renders `value="..."`, and CDP puts the input's current text there, so the fingerprint moves on a keystroke. Verified through the real renderer — focus → `value="bermuda"` → `value="bermuda b"` gives three distinct fingerprints on one URL.
+
+Two constraints on that line, both deliberate:
+- It hashes `filtered_ax`, **not** `turn.ax_tree`. The latter has the stagnation note appended, so hashing it would report a state change on exactly the steps where nothing changed.
+- An empty `state` falls back to URL-only, so anything constructing a `StepSummary` by hand keeps the old behaviour.
+
+The panel copy no longer advises stopping. The harness note already tells the model to report what it has or take a genuinely different path; a second nudge to quit is how a task one step from done gets abandoned.
 
 **Not done:** cross-task memory. `Scratchpad` is per-task — persisted to `logs/runs/<id>/` for resume within a task and gone otherwise, so `github.com/<user>/issues/assigned` (the entry point discovered on that run) is relearned every run. The obvious durable content is *where things live on a site and which routes are dead*: a per-user JSON store in the shape of `model/store.py`, injected at the top of every task. Unbuilt.
 

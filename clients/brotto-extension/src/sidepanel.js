@@ -719,9 +719,18 @@ function splitUrl(url) {
   if (!url) return null;
   try {
     const u = new URL(url);
+    // A bare "/" is not a path, and drawing it left a box, a slash and
+    // nothing — three pieces of chrome saying nothing. Empty means no path.
+    const path = u.pathname === '/' ? '' : u.pathname;
+    // chrome://extensions parses to host "extensions", which is not a domain
+    // — it is the page's own name. Boxing it as one would claim a site the
+    // agent never visited, so any other scheme is shown whole.
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return { host: u.href.replace(/\/$/, ''), path: '', raw: u.href };
+    }
     const host = u.hostname.replace(/^www\./, '');
     if (!host) return null;
-    return { host, path: u.pathname || '/', raw: u.origin + u.pathname };
+    return { host, path, raw: u.origin + u.pathname };
   } catch {
     return null;
   }
@@ -1991,7 +2000,9 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, action
     } else {
       path.textContent = primary.path;
     }
-    row.appendChild(path);
+    // Neither half may be empty, or the row is a box and a dangling arrow
+    // around nothing.
+    if (sameSite ? (page.path || action.path) : primary.path) row.appendChild(path);
 
     // Copy the destination — where the agent ended up is the address worth
     // pasting, not where it started.
@@ -2009,7 +2020,8 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, action
     const path = document.createElement('span');
     path.className = 'step-url-path';
     path.textContent = action.path;
-    other.append(box, path);
+    other.append(box);
+    if (action.path) other.appendChild(path);
     wireCopyUrl(other, action.raw);
     bubble.appendChild(other);
   }
@@ -2597,14 +2609,17 @@ function handleEvent(message) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
       break;
 
-    // ponytail: the harness detects a stall (N steps on the same page with no
-    // progress) and the service worker forwards it, but the panel had no case
+    // ponytail: the harness detects a stall (N steps with the page itself
+    // unchanged) and the service worker forwards it, but the panel had no case
     // for it — so the user watched an unexplained spinner while the agent
     // looped. Say what happened, and that it is still working on it.
+    // No "stop the task" advice: the harness already tells the model to
+    // report what it has or take a genuinely different path, and a second
+    // nudge to quit is how a task one step from done gets abandoned.
     case 'stagnation_warning':
       appendMessage({
         role: 'system',
-        text: `Not making progress${message.reason ? ` — ${message.reason}` : ''}. Still trying. Stop the task if this doesn't clear.`,
+        text: `The page hasn't changed for a few steps${message.reason ? ` — ${message.reason}` : ''}. Trying a different approach.`,
       });
       break;
 

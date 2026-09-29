@@ -13,6 +13,12 @@ class StepSummary(BaseModel):
     action_taken: str
     outcome: str
     extracted: str | None = None
+    # Fingerprint of the page's rendered state, see stagnation.page_fingerprint.
+    # A URL is not a state: focusing a search box, typing a query and
+    # submitting all leave it untouched while the page moves on, and a
+    # detector that reads it as "no progress" tells the model to give up
+    # mid-task. Compared alongside the URL, never instead of it.
+    state: str = ""
 
 
 class MemoryEntry(BaseModel):
