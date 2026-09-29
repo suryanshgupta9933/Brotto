@@ -109,12 +109,17 @@ function fitModelPill() {
 
 async function hydrateModelSettings() {
   const stored = await chrome.storage.local.get('modelConfig');
-  const v = stored.modelConfig;
-  if (v && v.model_config) {
-    if ($modelProvider) $modelProvider.value = v.model_config.provider;
+  const raw = stored.modelConfig;
+  // The stored shape has been flat since the migration in model_config.ts;
+  // the nested form is what a pre-migration install left behind. Reading
+  // only the nested shape meant a freshly saved config never came back, so
+  // the pill read "Default" and re-saving the API key reverted the model.
+  const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
+  if (cfg) {
+    if ($modelProvider) $modelProvider.value = cfg.provider;
     populateModelOptions();
-    if ($modelName) $modelName.value = v.model_config.model;
-    setModelPill(v.model_config.model);
+    if ($modelName) $modelName.value = cfg.model;
+    setModelPill(cfg.model);
   } else {
     setModelPill(null);
   }
@@ -569,6 +574,10 @@ const state = {
 
 let timerInterval = null;
 let timerPausedAt = 0;
+// A DOM flag can't guard this: setPhase recomputes stopBtn.disabled from the
+// phase, so `stopTask`'s own `disabled = true` was undone in the same tick and
+// the guard never held. setPhase clears this when a new run starts.
+let stopping = false;
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -944,6 +953,20 @@ function setPhase(phase, message) {
     // clearLoginPrompt directly, so it's idempotent.)
     clearLoginPrompt();
   }
+  // ponytail: the live "still working" bubble must stop blinking the moment
+  // the agent stops producing — which includes 'paused', because a pause is
+  // the agent asking for approval, a login, or an answer, not the agent
+  // working. finishAssistantMessage was the intended closer but had no call
+  // site, so the caret blinked for the life of the panel and every later
+  // step merged into that one bubble.
+  if (phase !== 'executing' && currentAssistantMsg) {
+    finishAssistantMessage({ title: currentAssistantMsg.textNode.nodeValue });
+  }
+  // A fresh run re-arms Stop, which a previous stopTask may have left latched.
+  // Only 'executing' counts: stopTask itself parks the phase on 'paused',
+  // so resetting on `running` would clear the guard on the very tick it
+  // was set and let the second click through.
+  if (phase === 'executing') stopping = false;
   // ponytail: status pill is visible in the header. Updates text + color
   // class so the user can read connection state at a glance (Idle by default).
   if (connectBtn) connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
@@ -1152,19 +1175,30 @@ async function stopTask() {
   // ponytail: guard against double-click. The cancel handler may finish
   // before the user releases the button, and a second click would post
   // 'cancel_local_task' which then returns 'No local task is running'.
+  if (stopping) return;
   if (state.phase !== 'executing' && state.phase !== 'paused') return;
+  stopping = true;
   stopBtn.disabled = true;
   // ponytail: surface immediate "Stopped" feedback so the user sees their
   // click took effect. The background's cancel emits a terminal event
   // synchronously now, so the side panel exits 'Working' within ~1 tick.
   appendMessage({ role: 'system', text: 'Stopped by user — finishing current step…' });
   setPhase('paused', 'Stopping…');
+  // setPhase recomputes the button from the phase, so re-disable after it —
+  // otherwise Stop stays clickable-looking while the guard silently no-ops.
+  stopBtn.disabled = true;
   const response = await sendMessage({ type: 'cancel_local_task' });
   if (!response.success) {
     // ponytail: cancel after the loop already terminated (the user's
     // second click). The terminal event is already on the way; do not
     // show an error bubble that contradicts it.
     logSilently(`cancel_local_task returned: ${response.error || 'unknown'}`);
+    // …but no terminal event is actually guaranteed here, so if the task is
+    // still running re-arm Stop rather than stranding it permanently off.
+    if (state.phase === 'executing' || state.phase === 'paused') {
+      stopping = false;
+      stopBtn.disabled = false;
+    }
   }
 }
 
@@ -2226,6 +2260,12 @@ chrome.runtime.onMessage.addListener((message) => {
         || 'Working on it…';
       if (!currentAssistantMsg) {
         startAssistantMessage({ icon, title: titleText });
+      } else {
+        // Each heartbeat supersedes the last: the bubble is one live "still
+        // working" line, not one message per step. Previously this branch
+        // did nothing, so every step's text was dropped.
+        currentAssistantMsg.textNode.nodeValue = titleText;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
       }
       break;
     }

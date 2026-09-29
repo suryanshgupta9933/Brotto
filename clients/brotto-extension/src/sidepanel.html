@@ -20,7 +20,7 @@
       /* Ink — the brand is its own black */
       --ink:       #000000;
       --ink-2:     #5C5C5C;   /* secondary text */
-      --ink-3:     #8E8E8E;   /* faint / placeholder */
+      --ink-3:     #6E6E6E;   /* faint / placeholder — 4.7:1 on paper, 4.5:1 on paper-2 */
 
       /* Paper — layered surfaces, no elevation, only tone */
       --paper:     #FFFFFF;
@@ -32,9 +32,11 @@
       --rule-2:    #C9C9C9;   /* medium: emphasis, control borders */
       --rule-ink:  #000000;   /* hairline but emphatic */
 
-      /* State — the only colour in the system */
-      --ok:        #16A34A;
-      --ok-soft:   rgba(22, 163, 74, 0.08);
+      /* State — the only colour in the system. All three clear 4.5:1 as
+         text on paper, which they have to be: each is used for a word, not
+         just a dot or a rule. */
+      --ok:        #15803D;
+      --ok-soft:   rgba(21, 128, 61, 0.08);
       --wait:      #B45309;
       --wait-soft: rgba(180, 83, 9, 0.08);
       --bad:       #DC2626;
@@ -141,7 +143,21 @@
       font-weight: 600;
       font-size: 15px;
       letter-spacing: -0.022em;
+      /* Without these the wordmark is a flex item that can't shrink, so at
+         320px it painted 10px past its box and under the status pill. */
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       line-height: 1;
+    }
+
+    /* The header's fixed parts (104px model pill + 3 buttons + status square)
+       need 268px, so the wordmark only fits from 340px up. Below that the
+       logo mark carries the identity on its own — which reads as deliberate,
+       where a truncated "Brot…" would read as a bug. */
+    @media (max-width: 360px) {
+      .brand-name { display: none; }
     }
 
     /* Model pill — the agent's identity, and its only activity cue. Fixed
@@ -199,22 +215,6 @@
     }
     .spinner.active { display: block; }
     @keyframes spin { to { transform: rotate(360deg); } }
-
-    /* Motion is decoration everywhere except the model pill, the waiting
-       rule, and the step flash — and each of those still carries its
-       meaning with the movement removed. So this drops movement, not
-       information. */
-    @media (prefers-reduced-motion: reduce) {
-      .marquee .model-pill-track,
-      .spinner,
-      .caret,
-      #statusBar .cell.flash,
-      .approval-card.blocking, .clarify-card.blocking,
-      .status-pill.reconnecting .dot,
-      .toast,
-      .login-required-badge::before { animation: none; }
-      * { transition-duration: 0.01ms !important; }
-    }
 
     /* ─── Status bar (steps / time / tabs / context) ───────────────────── */
     #statusBar {
@@ -817,6 +817,9 @@
       font-size: 13px;
       line-height: 1.45;
     }
+    /* The text is a flex item, so it needs min-width:0 to shrink below its
+       content width before word-break has anything to break. */
+    .plan-steps li > span { min-width: 0; word-break: break-word; }
     .plan-step-num {
       font-family: var(--font-mono);
       font-size: 10px;
@@ -826,6 +829,12 @@
     }
     .plan-actions, .approval-actions, .clarify-actions { display: flex; gap: 8px; }
 
+    /* These carry model-written text, so they need the same break the
+       bubbles have — a card is not a .bubble, and a URL in an approval
+       reason overflowed the card edge by 20px at panel width. */
+    .approval-body, .clarify-body, .plan-sites, .plan-approach {
+      word-break: break-word;
+    }
     .approval-body, .clarify-body { font-size: 13px; line-height: 1.5; margin-bottom: 10px; }
     .approval-preview {
       font-family: var(--font-mono);
@@ -1161,6 +1170,32 @@
       gap: 5px;
     }
     .done-icon { color: var(--ok); }
+
+    /* ─── Reduced motion ────────────────────────────────────────────────
+       MUST be last. Every rule above sets `animation` at equal specificity,
+       so a media block earlier in the sheet would lose the cascade to all
+       of them and silently do nothing. `animation: none` removes movement
+       but never information: each state below is still carried by colour,
+       a rule, a word, or a fixed position. */
+    @media (prefers-reduced-motion: reduce) {
+      .marquee .model-pill-track,   /* the model name is clipped, not scrolled */
+      .spinner,                      /* still present, just not turning */
+      .caret,                        /* still present, just not blinking */
+      #statusBar .cell.flash,
+      .overlay-panel,                /* appears instead of sliding in */
+      .message,                      /* entrance texture */
+      .message.removing,
+      .login-continue-btn.removing,
+      .plan-card, .approval-card, .clarify-card,
+      /* the `.blocking` forms are (0,2,0) and would outrank the bare
+         selectors above, so they have to be named here too */
+      .approval-card.blocking, .clarify-card.blocking,
+      .status-pill.reconnecting .dot,
+      .toast,
+      .toast.leaving,
+      .login-required-badge::before { animation: none; }
+      * { transition-duration: 0.01ms !important; }
+    }
   </style>
 </head>
 <body>
