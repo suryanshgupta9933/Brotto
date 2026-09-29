@@ -270,9 +270,16 @@ async function saveSession({ status, steps, elapsed }) {
   const task = (state.lastGoal || '').trim();
   if (!task) return;
   const sessions = await listSessions();
+  // Every panel open replays the run's buffered events, so the terminal event
+  // arrives again for a task already recorded — 20 opens was enough to evict
+  // every real task from the list. The session id is the only identifier that
+  // survives the replay; state.startTime does not, because it is set in
+  // startTask and never re-run.
+  if (state.sessionId && sessions[0]?.sessionId === state.sessionId) return;
   sessions.unshift({
     task,
     status,
+    sessionId: state.sessionId || null,
     steps: steps || state.stepCount || 0,
     elapsed: elapsed || '—',
     startedAt: state.startTime || Date.now(),
@@ -1059,8 +1066,12 @@ function setPhase(phase, message) {
   }
   // ponytail: the clock belongs to a run. Every terminal phase stops it,
   // not just done/error — a bar that kept counting after a failed or
-  // cancelled task would be reporting time that isn't passing.
-  if (!running) stopTimer();
+  // cancelled task would be reporting time that isn't passing. Keyed on
+  // TERMINAL_PHASES, not on `!running`: answering a clarifying question moves
+  // paused → connected, and stopping on anything non-running killed the
+  // interval that the line above had just restarted, so ACTIVE stayed frozen
+  // at the answer for the rest of the run.
+  if (TERMINAL_PHASES.has(phase)) stopTimer();
   // ponytail: the live "still working" bubble must stop blinking the moment
   // the agent stops producing — which includes 'paused', because a pause is
   // the agent asking for approval, a login, or an answer, not the agent
@@ -1070,11 +1081,6 @@ function setPhase(phase, message) {
   if (phase !== 'executing' && currentAssistantMsg) {
     finishAssistantMessage({ title: currentAssistantMsg.textNode.nodeValue });
   }
-  // A fresh run re-arms Stop, which a previous stopTask may have left latched.
-  // Only 'executing' counts: stopTask itself parks the phase on 'paused',
-  // so resetting on `running` would clear the guard on the very tick it
-  // was set and let the second click through.
-  if (phase === 'executing') stopping = false;
   // ponytail: a pause is the agent blocked on the *user* (approval, login,
   // clarify) or on a site that never answers. There are five setPhase('paused')
   // call sites and no timeout on any of them, so a reply that never arrives
@@ -1097,7 +1103,12 @@ function setPhase(phase, message) {
   // class so the user can read connection state at a glance (Idle by default).
   if (connectBtn) connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
   if (disconnectBtn) disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
-  stopBtn.disabled = !(phase === 'executing' || phase === 'paused');
+  // The `stopping` latch has to be read here, not just inside stopTask: this
+  // line recomputes the button on every phase change, and the server keeps
+  // sending `canonical_status: executing` while a cancel is in flight. Without
+  // it the button was re-enabled a click after Stop, and the click silently
+  // no-op'd on the `stopping` guard — a live-looking control that does nothing.
+  stopBtn.disabled = stopping || !(phase === 'executing' || phase === 'paused');
   if (refreshBtn) refreshBtn.disabled = phase === 'connecting';
   // ponytail: the bar belongs to a task, not to a moment. It appears on the
   // first step and stays through every terminal phase — a run that failed is
@@ -1190,16 +1201,6 @@ function updateStepCount() {
   cell.classList.add('flash');
 }
 
-function clearMessages() {
-  messagesEl.replaceChildren();
-  state.stepCount = 0;
-  updateStepCount();
-  stopTimer();
-  // ponytail: this used to inline a third copy of the empty state, which had
-  // drifted from the other two. appendEmptyState is the single JS source.
-  if (!document.getElementById('emptyState')) appendEmptyState();
-}
-
 // ── Core logic (preserved verbatim) ───────────────────────────────────────
 async function connect() {
   const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
@@ -1282,6 +1283,12 @@ async function startTask() {
   }
   clearMessages();
   state.sessionId = 'session-' + Date.now();
+  // A fresh run re-arms Stop, which a previous stopTask left latched. This
+  // belongs here and not in setPhase: `canonical_status: executing` arrives on
+  // every step, so clearing it on the phase re-armed Stop while the cancel was
+  // still in flight and let a second click through.
+  stopping = false;
+  stopBtn.disabled = false;
   setPhase('executing', 'Starting...');
   startTimer();
   appendMessage({ role: 'system', text: `Starting task: ${goal.slice(0, 80)}${goal.length > 80 ? '…' : ''}` });
@@ -1353,11 +1360,6 @@ function sendMessage(message) {
 }
 
 // ── Chat rendering ────────────────────────────────────────────────────────
-// ponytail: a single clearMessages is enough — the previous second
-// declaration (lines 456-461 in the old file) shadowed this one and skipped
-// the empty-state placeholder + timer reset, leaving the panel blank after
-// the first task ended. Keep this implementation canonical; remove any
-// duplicate.
 function clearMessages() {
   messagesEl.replaceChildren();
   state.stepCount = 0;
@@ -1366,6 +1368,11 @@ function clearMessages() {
   // The bar now survives the end of a task, so it has to be dropped
   // explicitly here or a fresh task opens showing the last run's numbers.
   statusBarEl?.classList.remove('active');
+  // The CONTEXT cell lives in that bar, so it needs the same treatment — a
+  // fresh task used to open showing the previous run's percentage until its
+  // own first step landed.
+  state.lastContext = null;
+  updateContextUsage();
   seenTabs.clear();
   updateTabCount();
   // ponytail: clean up any lingering login-pause fallback buttons from a
@@ -2021,6 +2028,9 @@ function appendApprovalCard({ id, reason, action }) {
   const card = document.createElement('div');
   // .blocking breathes the left rule — the card is waiting on the user.
   card.className = 'approval-card blocking';
+  // Stamped so `approval_resolved` can retire exactly this card when the
+  // prompt is answered from the OS notification instead of from here.
+  if (id) card.dataset.approvalId = String(id);
 
   const header = document.createElement('div');
   header.className = 'approval-header';
@@ -2553,6 +2563,17 @@ function handleEvent(message) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
       break;
 
+    // ponytail: the harness detects a stall (N steps on the same page with no
+    // progress) and the service worker forwards it, but the panel had no case
+    // for it — so the user watched an unexplained spinner while the agent
+    // looped. Say what happened, and that it is still working on it.
+    case 'stagnation_warning':
+      appendMessage({
+        role: 'system',
+        text: `Not making progress${message.reason ? ` — ${message.reason}` : ''}. Still trying. Stop the task if this doesn't clear.`,
+      });
+      break;
+
     case 'context_update': {
       // ponytail: scratchpad-only step (no external action visible to
       // bubble). Backend still emits context so the CONTEXT cell updates
@@ -2667,6 +2688,25 @@ function handleEvent(message) {
         reason: message.reason || 'Brotto wants to perform an action that needs your approval.',
         action: { type: a.type, url: a.url },
       });
+      break;
+    }
+
+    // ponytail: the approval can be answered from the OS notification, which
+    // the service worker resolves without the panel's help. Without this the
+    // card sat on screen with two dead buttons until the next step arrived.
+    case 'approval_resolved': {
+      const card = message.id
+        ? messagesEl.querySelector(`.approval-card[data-approval-id="${CSS.escape(String(message.id))}"]`)
+        : null;
+      if (!card) break;
+      card.remove();
+      appendMessage({
+        role: 'assistant',
+        text: message.approved ? 'Action approved.' : 'Action denied.',
+      });
+      // The task is unblocked, so the clock has to start counting again —
+      // setPhase('paused') is what stopped it, and nothing else resumes it.
+      if (state.phase === 'paused') setPhase('executing', 'Working…');
       break;
     }
 

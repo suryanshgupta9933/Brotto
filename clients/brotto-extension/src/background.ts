@@ -998,7 +998,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         case "submit_approval": {
           const res = pendingApprovalResolvers.get(String(message.id));
-          if (res) { pendingApprovalResolvers.delete(String(message.id)); res(message.approved === true); }
+          if (!res) {
+            // The resolver map is in memory only and does not survive service
+            // worker eviction, so a card replayed from panelLog can name a
+            // prompt nobody is waiting on any more. Reporting success here
+            // removed the card and showed a green tick for an agent that is
+            // still blocked. Failure sends the panel back through reArmApproval.
+            sendResponse({ success: false, error: "That approval is no longer waiting — the task has moved on." });
+            break;
+          }
+          pendingApprovalResolvers.delete(String(message.id));
+          res(message.approved === true);
           sendResponse({ success: true });
           break;
         }
@@ -1162,14 +1172,23 @@ async function initialize(): Promise<void> {
   // so there is one way to answer an approval rather than two.
   chrome.notifications?.onButtonClicked.addListener((id, index) => {
     if (!id.startsWith("approval:")) return;
-    const resolve = pendingApprovalResolvers.get(id.slice("approval:".length));
+    const promptId = id.slice("approval:".length);
+    const resolve = pendingApprovalResolvers.get(promptId);
     if (!resolve) {
       // The task moved on while the notification sat there. Say so rather
       // than letting the button look like it did something.
       void chrome.notifications.clear(id);
       return;
     }
+    // Delete before resolving, exactly as submit_approval does. Leaving the
+    // entry live meant the in-panel card could resolve it a second time, and
+    // that second human_reply is consumed by the *next* prompt — approving an
+    // action the user never saw.
+    pendingApprovalResolvers.delete(promptId);
     resolve(index === 0);
+    // The panel still shows the card; it was never told. Without this it
+    // sits on "Approval needed" for a prompt that is already answered.
+    notifyUi({ type: "approval_resolved", id: promptId, approved: index === 0 });
     void chrome.notifications.clear(id);
   });
 
