@@ -2,6 +2,8 @@
 
 Server-hosted browser automation harness: Python orchestrator (FastAPI + pydantic-ai + Playwright) drives a Chrome extension. Model-agnostic, BYOK.
 
+**Heads up — this project is a long-term product effort.** Strategic context lives in `docs/product/`; AI-dev workflow rules in `docs/product/dev-environment.md`. Read those before non-trivial work. See "Working agreements" below.
+
 ## Repo layout
 
 ```
@@ -13,10 +15,32 @@ services/brotto-orchestrator/  — server: FastAPI + pydantic-ai + Playwright
     policy/                  — secure-mode policy + persistence
 clients/brotto-extension/   — Chrome extension (TS, manifest v3)
   src/{background,sidepanel,model_config}.ts
-docs/superpowers/{specs,plans}/ — design docs
+docs/superpowers/{specs,plans}/ — formal feature specs (force-add with -f)
+docs/product/                  — product strategy docs (gitignored; force-add)
 ```
 
-## Model adapter (Phase 2)
+## Product docs (`docs/product/`) — strategic context
+
+**Read at session start: `vision.md` (2 min) + `open-questions.md` (1 min).** Other docs as relevant to the task.
+
+| Doc | Read when | Update when |
+|---|---|---|
+| `vision.md` | Session start | Strategic frame changes (rare) |
+| `open-questions.md` | Session start, before big calls | Question is answered (move to `decisions/`) |
+| `brotto-current-state.md` | Working on the codebase | Feature ships/rips/scope changes |
+| `competitors.md` | Before positioning claims | Competitor launches/pivots/dies/raises |
+| `market.md` | Before pricing/fundraising | Major analyst report or regulatory shift |
+| `users.md` | Before designing a feature | New pain-point or wishlist signal |
+| `positioning.md` | Before public-facing copy | White-space picks change |
+| `gap-analysis.md` | When planning work | A gap fills or a new one emerges |
+| `roadmap.md` | When planning work | Phase hits, misses, or re-prioritizes |
+| `risks.md` | When making risk decisions | New risk emerges, old one dies |
+| `dev-environment.md` | Starting a non-trivial Claude session | New skill/hook/pattern becomes standard |
+| `decisions/` | Before re-debating | **Append** a new file when answering an open question |
+
+Full navigation in `docs/product/README.md`.
+
+## Model adapter
 
 **Always-available providers** (`brotto_orchestrator.model.registry`):
 - `anthropic` (claude-3-5-sonnet-latest)
@@ -35,17 +59,28 @@ docs/superpowers/{specs,plans}/ — design docs
 
 ## Dev mode
 
-`BROTTO_ENV=dev` (default) pre-populates env vars at `main.py` module load:
-- `AGENT_MODEL` defaults to `anthropic:MiniMax-M3.1-Flash-Preview`
+`.env` is loaded first at `main.py` module load (before the dev defaults below, so an `AGENT_MODEL` in `.env` wins over the built-in one), then:
+
+`BROTTO_ENV=dev` (default) pre-populates env vars:
+- `AGENT_MODEL` defaults to `minimax:MiniMax-M3.1-Flash-Preview` — provider is `minimax`, not `anthropic`, because the `minimax` factory carries the `https://api.minimax.io/anthropic` base URL
 - `CONTEXT_WINDOW_TOKENS` defaults to `1000000`
 - `ANTHROPIC_AUTH_TOKEN` → `ANTHROPIC_API_KEY` propagation (idempotent; Token Plan users have AUTH_TOKEN, pydantic-ai reads API_KEY)
 
 Set `BROTTO_ENV=prod` to opt out — server then uses whatever operator configured (extension settings, .env, AGENT_MODEL).
 
+**`BROTTO_FORCE_ENV_MODEL=1`** — ignore the extension's model *and* key entirely, run on `.env`. Set it in `.env` and you never type a key into the side panel again. Also set in `tests/conftest.py`-neutralised scope so it can't leak into the suite.
+
 Startup log line shows resolved auth state immediately:
 ```
 auth env at startup: ANTHROPIC_API_KEY=set (len=125)  ANTHROPIC_AUTH_TOKEN=set (len=125)  BROTTO_ENV=dev
 ```
+
+## Model resolution (`model/resolver.py`)
+
+Tiers: inline (extension) → per-user file → env. Two rules that aren't obvious:
+
+- An inline config **without** a key is ignored and falls through. The extension stores `model_config` in `chrome.storage.local` (survives restart) but the key in `chrome.storage.session` (does not), so every browser restart it sends a config and no key. Honoring that gave a keyless provider and "Set `ANTHROPIC_API_KEY`" while shadowing a working `.env`.
+- A per-user config persists the *model* only, never a key — so after a browser restart it is unusable on its own and the resolver says so explicitly.
 
 ## Extension storage
 
@@ -63,14 +98,30 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-./.venv/bin/python -m pytest tests/ -q     # 300 tests (2 skipped)
+./.venv/bin/python -m pytest tests/ -q     # 308 tests (2 skipped)
 
-# Smoke test (real API call, exercises full model adapter)
-AGENT_MODEL=anthropic:MiniMax-M3.1-Flash-Preview .venv/bin/python scripts/smoke_minimax_endtoend.py
+# Smoke test (real API call, exercises full model adapter; reads .env)
+.venv/bin/python scripts/smoke_minimax_endtoend.py
 ```
 
-## Gotchas /
+## Gotchas
 
 - `.env` is gitignored. Use `.env.example` for documented config (currently there's no `.env.example`; the `.env` itself contains comments).
 - `/docs/` is gitignored (internal design artifacts); force-add with `git add -f` for spec/plan commits.
 - Don't include `Co-Authored-By: Claude ...` in commit messages (per global ~/.claude/CLAUDE.md).
+- **`decisions.md` is locked architectural decisions (D1–D10).** Don't change without explicit re-discussion. Product/strategy decisions live in `docs/product/decisions/`.
+
+## Working agreements (AI-assisted dev)
+
+Full list in `docs/product/dev-environment.md`. The non-negotiables:
+
+1. **Read product docs at session start** (vision + open-questions minimum).
+2. **Check `open-questions.md` before any fork-shaped decision.** If unresolved, **stop and ask the user** — do not implement past an unresolved fork.
+3. **Update the doc you're working from in the same commit as the change.** Stale product docs are worse than no docs.
+4. **Append decisions to `docs/product/decisions/`, never edit history.** When superseded, write a new file.
+5. **Use superpowers before plan mode.** Brainstorming first, writing-plans second, then ExitPlanMode. Use `subagent-driven-development` for parallelizable features.
+6. **Ponytail reflex on code.** Ladder: needs to exist? → already in codebase? → stdlib? → native? → installed dep? → one line? → minimum.
+7. **Bug fix = root cause.** Grep every caller of the function you're about to touch before editing. Fix in the shared function, not every caller.
+8. **No unrequested abstractions, no scaffolding "for later", no half-finished implementations.**
+9. **Comments only when WHY is non-obvious.** Don't repeat the code.
+10. **Don't include `Co-Authored-By: Claude ...` in commit messages.** Per global `~/.claude/CLAUDE.md`.

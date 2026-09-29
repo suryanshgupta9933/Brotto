@@ -10,6 +10,11 @@ import uuid
 
 from dotenv import load_dotenv
 
+# Load .env FIRST — before the dev defaults below. It used to run after
+# them, so os.environ.setdefault won the race and an AGENT_MODEL in .env
+# was silently ignored in favour of the dev default.
+load_dotenv()
+
 # Token Plan compat: pydantic-ai's AnthropicProvider only reads
 # ANTHROPIC_API_KEY; Token Plan users have ANTHROPIC_AUTH_TOKEN. Propagate
 # unconditionally (idempotent — only fires if API_KEY is unset) so this
@@ -26,14 +31,15 @@ if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
 if os.getenv("BROTTO_ENV", "dev") == "dev":
     # Token Plan covers MiniMax-M3.1-Flash-Preview. M3 is pay-as-you-go and
     # returns 402 insufficient_balance for Token Plan users.
-    os.environ.setdefault("AGENT_MODEL", "anthropic:MiniMax-M3.1-Flash-Preview")
+    # Provider is `minimax`, not `anthropic` — the minimax factory carries
+    # the https://api.minimax.io/anthropic base URL. `anthropic:` here
+    # would post a MiniMax model name to api.anthropic.com.
+    os.environ.setdefault("AGENT_MODEL", "minimax:MiniMax-M3.1-Flash-Preview")
     os.environ.setdefault("CONTEXT_WINDOW_TOKENS", "1000000")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-load_dotenv()
 
 from .agent.context import AgentDeps
 from .agent.harness import AgentHarness

@@ -1,22 +1,32 @@
 #!/usr/bin/env python3
 """Smoke test: legacy task_start (no model_config) reaches MiniMax via env.
 
-Run with:
-    AGENT_MODEL=anthropic:MiniMax-M3 CONTEXT_WINDOW_TOKENS=1000000 \
-        .venv/bin/python services/brotto-orchestrator/scripts/smoke_minimax_endtoend.py
+    .venv/bin/python services/brotto-orchestrator/scripts/smoke_minimax_endtoend.py
+
+Reads .env, so with the dev defaults set there this needs no arguments.
+Importing brotto_orchestrator.main would pull in the FastAPI app; load
+.dotenv directly instead.
 """
 from __future__ import annotations
 
 import asyncio
+import os
+
+from dotenv import load_dotenv
 
 from brotto_orchestrator.model.resolver import resolve_model_config
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
+
+load_dotenv()
+# Same propagation main.py does — the smoke script never imports it.
+if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
+    os.environ["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_AUTH_TOKEN"]
 
 
 async def main() -> None:
     cfg, creds = resolve_model_config("127.0.0.1", inline_config=None, inline_creds=None)
     print(f"resolved: provider={cfg.provider} model={cfg.model} ctx={cfg.context_window}")
-    print(f"creds:    api_key=...{creds.api_key[-8:] if creds.api_key else None}")
+    print(f"creds:    api_key={'set' if creds.api_key else 'MISSING'}")
 
     factory = PROVIDER_REGISTRY[cfg.provider]
     assert factory.validate_model_id(cfg.model), f"registry rejects {cfg.model}"

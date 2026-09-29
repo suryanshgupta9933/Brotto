@@ -49,8 +49,12 @@ def test_per_user_config_used_when_no_inline(tmp_model_dir: Path, monkeypatch):
     saved = ModelConfig(provider="openai", model="gpt-4o", context_window=128_000)
     save_user_config("127.0.0.1", saved)
     from brotto_orchestrator.model.resolver import resolve_model_config
-    cfg, _ = resolve_model_config("127.0.0.1", None, None)
+    # A per-user config is a remembered *model*; the key still has to come
+    # from this session, so it comes in as inline creds.
+    creds = UserCredentials(api_key="sk-session", base_url=None)
+    cfg, out = resolve_model_config("127.0.0.1", None, creds)
     assert cfg == saved
+    assert out == creds
 
 
 def test_bad_provider_keyerror_is_not_a_scripted_target_failure():
@@ -102,6 +106,9 @@ async def test_bad_provider_propagates_keyerror(monkeypatch):
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     deps = _deps(
         scripted_planner=None,
+        # Needs a key, or the resolver falls through the inline config
+        # (keyless inline is not honored) and we never reach the registry.
+        api_key="sk-whatever",
         model_config=ModelConfig(
             provider="not-a-real-provider", model="m", context_window=1000,
         ),
