@@ -99,9 +99,9 @@
 
     .brand-name {
       font-family: var(--font-ui);
-      font-weight: 600;
-      font-size: 15px;
-      letter-spacing: -0.022em;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: -0.03em;
       /* Without these the wordmark is a flex item that can't shrink, so at
          320px it painted 10px past its box and under the status pill. */
       min-width: 0;
@@ -595,7 +595,6 @@
       padding: 24px 22px;
       gap: 0;
     }
-    .empty-mark { line-height: 0; margin-bottom: 18px; }
     .empty-sub {
       font-size: 15px;
       line-height: 1.5;
@@ -606,7 +605,19 @@
     /* The idle page names the tab you're on, then offers tasks that only make
        sense for it. Everything below the mark is derived from the active tab,
        so it changes as you browse — that's the whole point. */
-    .empty-mark { margin-bottom: 16px; }
+    .empty-mark {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .empty-mark-name {
+      font-family: var(--font-ui);
+      font-weight: 700;
+      font-size: 28px;
+      letter-spacing: -0.04em;
+      line-height: 1;
+    }
     .empty-where {
       display: flex;
       align-items: baseline;
@@ -1388,6 +1399,7 @@
   <div class="empty-state" id="emptyState">
     <div class="empty-mark">
       <img src="assets/logo.svg" alt="" class="brand-logo brand-logo--lg">
+      <span class="empty-mark-name">Brotto</span>
     </div>
     <div class="empty-where" id="emptyWhere" hidden><span>On</span><b id="emptyHost"></b></div>
     <div class="empty-sub">Tell Brotto what to do in this tab. It navigates, clicks, and fills things in — you approve anything sensitive.</div>

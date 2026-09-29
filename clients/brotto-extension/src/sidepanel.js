@@ -1420,13 +1420,13 @@ function clearMessages() {
   // the panel doesn't look empty.
   if (!document.getElementById("emptyState")) {
     messagesEl.appendChild(createEmptyState());
-    void refreshEmptyState();
+    void currentTab().then(refreshEmptyState);
   }
 }
 
 function appendEmptyState() {
   messagesEl.appendChild(createEmptyState());
-  void refreshEmptyState();
+  void currentTab().then(refreshEmptyState);
 }
 
 // ponytail: helper to fade out + remove the login_required bubble and
@@ -1469,7 +1469,10 @@ function createEmptyState() {
   logo.src = 'assets/logo.svg';
   logo.alt = '';
   logo.className = 'brand-logo brand-logo--lg';
-  mark.appendChild(logo);
+  const name = document.createElement('span');
+  name.className = 'empty-mark-name';
+  name.textContent = 'Brotto';
+  mark.append(logo, name);
 
   const where = document.createElement('div');
   where.className = 'empty-where';
@@ -1493,232 +1496,28 @@ function createEmptyState() {
   return div;
 }
 
-// ─── Page-aware suggestions ──────────────────────────────────────────────
-// The panel is bound to a tab, so the idle page should know which one.
-//
-// This was a 17-entry table of hostname substrings with three generic
-// fallbacks. Only ~17 site families matched, so almost every page landed on
-// the fallback and got the same two sentences — which is exactly what it
-// looked like. Nothing here is generated and no model is involved; the
-// variety now comes from reading the page's own URL and title.
 
-// Path segments that name a section, not a subject. Kept out of the subject
-// slot so /mail/u/0 does not read "the messages in mail".
-const NOT_A_SUBJECT = new Set([
-  'index', 'home', 'en', 'en-us', 'en-gb', 'us', 'uk', 'www', 'www2', 'app',
-  'main', 'mail', 'inbox', 'u', 'user', 'users', 'p', 'c', 'r', 'd', 'v', 'b',
-  'feed', 'explore', 'browse', 'watch', 'queue', 'new', 'old', 'view', 'mode',
-  'sort', 'filter', 'q', 'page', 'ref', 'utm-source', 'item', 'items', 'list',
-]);
-
-// Matched against the last two path segments and the host, whole-segment only.
-// Substring matching put Netflix's /browse/queue in profile (it contains "u"),
-// so every needle here has to equal the segment.
-const KIND_RULES = [
-  ['inbox',     ['inbox', 'mail', 'messages', 'dm', 'chats', 'notifications', 'unread']],
-  ['checkout',  ['checkout', 'cart', 'basket', 'bag', 'payment', 'order', 'orders', 'basket']],
-  ['results',   ['searchresults', 'search', 'results', 'flights', 'hotels', 'deals', 'jobs', 's', 'q']],
-  ['thread',    ['thread', 'conversation', 'pull', 'pulls', 'issue', 'issues', 'discussion', 'post', 'comments', 'item']],
-  ['doc',       ['blob', 'readme', 'article', 'docs', 'wiki', 'notes', 'edit', 'document']],
-  ['settings',  ['settings', 'preferences', 'account', 'billing', 'security', 'profile', 'billing']],
-  ['repo',      ['repos', 'pulls', 'issues', 'commits', 'wiki']],
-  ['list',      ['watchlist', 'saved', 'favorites', 'favourites', 'bookmarks', 'collections', 'playlist', 'queue', 'list']],
+// ─── Suggestions ─────────────────────────────────────────────────────────
+// Written by the model, not by a table. Three hand-written versions came and
+// went; each one was a list of sites someone had thought of, so it was right
+// on those and generic everywhere else. This list is what shows when the
+// server can't be reached — it stays site-agnostic on purpose, because the
+// moment it grows a site table the failure is invisible again: the good path
+// is a cache hit most of the time, so a broken one looks like a working one.
+const FALLBACK_SUGGESTIONS = [
+  'Summarise what is on this page and flag anything that needs a decision.',
+  'Pull out the specifics: names, numbers, dates and links.',
+  'Compare what is here against what I ask for and tell me where it falls short.',
 ];
 
-// One anchor per kind — the line that could only be written for this page.
-// The other two come from SHARED, so a page type is not capped at three lines
-// that it then shows in full every day. That cap was the repetition complaint
-// arriving through a different door.
-const KIND_ANCHORS = {
-  inbox: [
-    'Draft a reply to the newest message and show it to me before it sends.',
-    'Find the messages here that are still waiting on a reply from me.',
-  ],
-  list: [
-    'Go through this list and tell me which entries actually need me.',
-    'What has changed in this list since I was last here?',
-  ],
-  detail: [
-    'Tell me what is on this page and what it means for me.',
-    'Check the details here and flag anything that looks off.',
-  ],
-  results: [
-    'Compare the top three results and tell me which you would pick and why.',
-    'Find the option with the best total cost once fees are included.',
-  ],
-  search: [
-    'Search this site again, more precisely, and tell me what turns up.',
-    'Go past the search results and find the actual answer on the site.',
-  ],
-  doc: [
-    'Summarise this in a way I could repeat to someone else.',
-    'Pull out anything here that contradicts what I told you earlier.',
-  ],
-  thread: [
-    'What do the replies here actually disagree about?',
-    'Read the last few replies and tell me where this ended up.',
-  ],
-  profile: [
-    'Summarise what this account is about and what changed recently.',
-    'What is worth following here?',
-  ],
-  settings: [
-    'Review these settings and flag anything risky or surprising.',
-    'What is changed here from the default?',
-  ],
-  checkout: [
-    'Check this order before I commit to it and tell me the total cost.',
-    'Is there anything here I would regret paying for?',
-  ],
-  dashboard: [
-    'What on this page changed in a way I would want to know about?',
-    'Is anything here asking for a decision?',
-  ],
-  repo: [
-    'What is going on here that needs my attention?',
-    'Find what has changed since I was last in this repository.',
-  ],
-  generic: [
-    'Tell me what is on this page and what it means for me.',
-    'What is the one thing here worth acting on?',
-  ],
-};
+const SUGGESTION_CACHE_KEY = 'suggestionCache';
+const SUGGESTION_CACHE_MAX = 40;
+const SUGGESTION_DEBOUNCE_MS = 1000;
 
-// The de-slugged subject can be any noun at all, so it is only ever dropped
-// into a frame that stays grammatical for one. "the messages in {subject}"
-// produced "the messages in mail"; "everything on this page about {subject}"
-// survives anything a URL can contain.
-const SUBJECT_TEMPLATES = [
-  'Everything on this page about {subject}, in one list.',
-  'What I should know about {subject}, based on what is here.',
-  'Compare what this page says about {subject} with what I already know.',
-  'What this page tells me about {subject}, and what it leaves out.',
-  'Turn this into the short version about {subject} that I would repeat to someone.',
-];
-
-// The shared pool. Deliberately much larger than the two lines drawn from it —
-// this is where day-to-day variety actually comes from.
-const SHARED_TEMPLATES = [
-  'Go through this page and flag anything that needs a decision.',
-  'What is the one thing here I should do next?',
-  'Read this in three sentences a stranger would understand.',
-  'What would I regret not asking about this page?',
-  'Is there anything here that contradicts what I already know?',
-  'What is missing from this page that I would want?',
-  'How does this compare with the last time I looked at it?',
-  'Give me the short version and then the part that would surprise me.',
-  'What is the most useful thing on this page?',
-  'Is anything on this page out of date?',
-  'What would you do with this page that I would not think to do?',
-  'Pull out the numbers, names and dates here into one list.',
-  'What does this page want me to do?',
-  'What would I need to know to be confident about this?',
-  'Is this page telling me everything it knows, or is something hidden?',
-  'What is the weakest part of what is shown here?',
-  'What would you check on another site to confirm this?',
-  'What is the cost of acting on this, and of not?',
-];
-
-const seg = (s) => s.replace(/[-_]+/g, ' ').replace(/%[0-9A-Fa-f]{2}/g, ' ').trim();
-
-// Any word that is already a kind is a route label, not a subject. "What this
-// page tells me about pulls" is what you get if you let one through.
-const KIND_WORDS = new Set(KIND_RULES.flatMap(([, needles]) => needles));
-
-// A subject has to read as a noun. These are the shapes that survive a URL
-// slug but mean nothing on their own: bare ids, hex blobs, and file names.
-const isSubject = (s) => {
-  const w = s.toLowerCase();
-  if (w.length < 3) return false;
-  if (NOT_A_SUBJECT.has(w) || KIND_WORDS.has(w)) return false;
-  if (/\.(html?|php|aspx?|json|xml|pdf|md|txt|php)$/i.test(w)) return false;  // searchresults.html
-  if (/^[0-9a-f]{8,}$/i.test(w)) return false;                                 // 1AbCdEf12, deadbeef
-  // Google Doc ids are short and mixed-case (1AbC), so the hex rule above
-  // misses them. A slug that opens with a digit is an id, not a name.
-  if (/^\d/.test(w)) return false;
-  if (!/[a-z]/i.test(w)) return false;                                         // 1234
-  return true;
-};
-
-function pageSignals(url, title) {
-  let host = '', path = '', query = '';
-  try {
-    const u = new URL(url);
-    // about:blank and chrome:// parse fine but carry nothing worth suggesting
-    // from — a "page" of browser chrome would get a page-shaped prompt.
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { host: '', segments: [], subject: '', title: '' };
-    host = u.hostname;
-    path = u.pathname;
-    // Search pages keep the query, not the path. /s?k=standing+desk names the
-    // thing far better than "s" does, and these pages are the ones a user is
-    // most likely to want help with.
-    query = u.searchParams.get('q') || u.searchParams.get('k') || u.searchParams.get('query') || '';
-  } catch { host = ''; }
-
-  const rawSegments = path.split('/').filter(Boolean);
-  // Kept unfiltered for kind matching: /s is a one-character route that says
-  // "search" and nothing else, so filtering it out lost the whole kind.
-  const segments = rawSegments.map(seg).filter(s => s.length > 1);
-  const fromPath = [...segments].reverse().find(isSubject);
-
-  // A search box beat the last path segment; a real title beat a de-slugged
-  // fragment, so both are only considered when the path said nothing.
-  const subject = (isSubject(seg(query)) ? seg(query) : '') || fromPath || '';
-
-  return { host, segments, rawSegments, subject, title: (title || '').trim() };
-}
-
-function kindFor(sig) {
-  if (!sig.host) return 'generic';
-  const probe = sig.rawSegments.slice(-2).map(s => s.toLowerCase());
-  for (const [kind, needles] of KIND_RULES) {
-    if (probe.some(p => needles.includes(p))) return kind;
-  }
-  const t = sig.title.toLowerCase();
-  if (/\b(issue|pull request|discussion|forum|thread|post)\b/.test(t)) return 'thread';
-  if (/\b(inbox|unread|starred|sent|drafts)\b/.test(t)) return 'inbox';
-  if (/\b(search|results?|find)\b/.test(t)) return 'results';
-  if (/\b(cart|checkout|payment|order)\b/.test(t)) return 'checkout';
-  if (/\b(settings|preferences|account)\b/.test(t)) return 'settings';
-  if (sig.segments.length) return 'detail';
-  return 'generic';
-}
-
-// Day-seeded so a page you keep re-opening does not hand you the same lines
-// forever, but is stable if you alt-tab back to it this afternoon.
-function seedOf(sig) {
-  const day = new Date().toISOString().slice(0, 10);
-  const s = `${sig.host}${sig.segments.join('/')}${sig.subject}${day}`;
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-
-function suggestionsFor(url, title) {
-  const sig = pageSignals(url, title);
-  const kind = kindFor(sig);
-  const seed = seedOf(sig);
-  const anchors = KIND_ANCHORS[kind] || KIND_ANCHORS.generic;
-
-  // One specific line, then two more from a per-page offset into a large pool.
-  // The stride is coprime with the pool size so consecutive picks never land
-  // adjacent, and the offset includes the page identity, so two pages open at
-  // the same time land in different places.
-  const out = [anchors[seed % anchors.length]];
-  const stride = 7;
-  const start = seed % SHARED_TEMPLATES.length;
-  out.push(SHARED_TEMPLATES[start]);
-  if (sig.subject) {
-    // A named page gets one line built around what it is about; that is the
-    // only part of the three that could not be written for any other page.
-    out[1] = SUBJECT_TEMPLATES[(seed >> 3) % SUBJECT_TEMPLATES.length].replace('{subject}', sig.subject);
-  }
-  out.push(SHARED_TEMPLATES[(start + stride) % SHARED_TEMPLATES.length]);
-  return out;
-}
-
-let lastSuggestionUrl = '';
-let lastSuggestionTitle = '';
+// One key in flight at a time. Rapid tab switching would otherwise queue a
+// model call per tab, and the last one to land is not the one being shown.
+let suggestionInFlight = '';
+let suggestionTimer = null;
 
 async function currentTab() {
   try {
@@ -1738,11 +1537,13 @@ function fillComposer(text) {
   goalEl.dispatchEvent(new Event('input'));
 }
 
-function paintSuggestions() {
+function paintSuggestions(lines) {
+  // Re-checked at paint time, not just at call time: a task can start during
+  // the await, and a late reply must not repaint a panel the transcript owns.
   const box = document.getElementById('suggestions');
   if (!box) return;
   box.textContent = '';
-  for (const text of suggestionsFor(lastSuggestionUrl, lastSuggestionTitle)) {
+  for (const text of lines) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'suggestion';
@@ -1752,12 +1553,78 @@ function paintSuggestions() {
   }
 }
 
-async function refreshEmptyState() {
+// Collapses the id-bearing segments so /issues/4821 and /issues/4822 share a
+// cache entry, and folds in the date so a page gets a fresh set tomorrow.
+function suggestionKey(url) {
+  let u;
+  try { u = new URL(url); } catch { return ''; }
+  if (!u.host) return '';
+  const shape = u.pathname
+    .split('/')
+    .map((s) => (/\d/.test(s) ? ':id' : s))
+    .join('/');
+  const day = new Date().toISOString().slice(0, 10);
+  return `${u.host}${shape}?${u.searchParams.get('q') || ''}#${day}`;
+}
+
+async function readSuggestionCache() {
+  const stored = await chrome.storage.local.get(SUGGESTION_CACHE_KEY);
+  return stored[SUGGESTION_CACHE_KEY] || {};
+}
+
+async function writeSuggestionCache(key, lines) {
+  const cache = await readSuggestionCache();
+  cache[key] = { at: Date.now(), lines };
+  const trimmed = Object.entries(cache)
+    .sort((a, b) => b[1].at - a[1].at)
+    .slice(0, SUGGESTION_CACHE_MAX);
+  await chrome.storage.local.set({ [SUGGESTION_CACHE_KEY]: Object.fromEntries(trimmed) });
+}
+
+async function fetchSuggestions(url, title) {
+  const key = suggestionKey(url);
+  if (!key) return null;
+  if (suggestionInFlight === key) return null;
+  suggestionInFlight = key;
+  try {
+    const cache = await readSuggestionCache();
+    const hit = cache[key];
+    if (hit && hit.lines && hit.lines.length) return hit.lines;
+
+    const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
+    const [local, key_] = await Promise.all([
+      chrome.storage.local.get('modelConfig'),
+      chrome.storage.session.get('modelApiKey'),
+    ]);
+    const response = await fetch(`${base}/v1/suggestions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        title,
+        model_config: local.modelConfig || undefined,
+        api_key: key_.modelApiKey || undefined,
+      }),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!Array.isArray(data.lines) || !data.lines.length) return null;
+    await writeSuggestionCache(key, data.lines);
+    return data.lines;
+  } catch {
+    // Server down, or never configured. The fallback is already painted, so
+    // there is nothing to report and nothing to retry.
+    return null;
+  } finally {
+    if (suggestionInFlight === key) suggestionInFlight = '';
+  }
+}
+
+function refreshEmptyState(tab) {
   // Only ever paint the idle page. Once a task starts, the transcript owns
   // the panel and a tab change must not disturb it.
   const box = document.getElementById('suggestions');
   if (!box) return;
-  const tab = await currentTab();
   let host = '';
   try {
     // hostname is '' for about: and chrome:// pages, so the empty-host case
@@ -1768,19 +1635,27 @@ async function refreshEmptyState() {
   const whereHost = document.getElementById('emptyHost');
   if (whereHost) whereHost.textContent = host;
   if (where) where.hidden = !host;
-  // The composer reads the path and query, not just the host.
-  lastSuggestionUrl = tab?.url || '';
-  lastSuggestionTitle = tab?.title || '';
-  paintSuggestions();
+
+  // Paint first, fetch second. The box is never empty and never waits on a
+  // model call to be usable.
+  paintSuggestions(FALLBACK_SUGGESTIONS);
+  const url = tab?.url || '';
+  if (!url || !plannerUrlEl.value) return;
+  clearTimeout(suggestionTimer);
+  suggestionTimer = setTimeout(async () => {
+    const lines = await fetchSuggestions(url, tab?.title || '');
+    if (lines) paintSuggestions(lines);
+  }, SUGGESTION_DEBOUNCE_MS);
 }
 
-// First paint in sidepanel.html ships without a suggestions box filled; this
-// fills it once the tab is known.
-void refreshEmptyState();
+// sidepanel.html ships with the suggestions box empty. The first fill waits
+// for the settings hydration at the foot of this file, which is the first
+// point the saved server URL is known — painting earlier means guessing the
+// server, and on a remote deployment that guess is a request to localhost.
 if (chrome.tabs?.onActivated) {
-  chrome.tabs.onActivated.addListener(() => { void refreshEmptyState(); });
+  chrome.tabs.onActivated.addListener(() => { void currentTab().then(refreshEmptyState); });
   chrome.tabs.onUpdated.addListener((_id, info) => {
-    if (info.status === 'complete') void refreshEmptyState();
+    if (info.status === 'complete') void currentTab().then(refreshEmptyState);
   });
 }
 
@@ -3010,4 +2885,7 @@ goalEl.focus();
     setConnPill(null, 'Server unreachable');
     toast('Server unreachable — settings still work locally', 'bad', 5000);
   }
+  // Last, so it runs whether or not the health probe succeeded: the panel
+  // still needs its fallback lines when the server is down.
+  void currentTab().then(refreshEmptyState);
 })();

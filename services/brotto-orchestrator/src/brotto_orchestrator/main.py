@@ -52,8 +52,9 @@ from .agent.harness import AgentHarness
 from .cdp.relay import CDPRelay
 from .cdp.extension_relay import ExtensionCDPRelay
 from .cdp.watchdog import CDPWatchdog
-from .model.config import ModelConfig
+from .model.config import ModelConfig, UserCredentials
 from .model.registry import PROVIDER_REGISTRY
+from .model.resolver import resolve_model_config
 from .model.store import save_user_config
 from .session.auth import validate_token
 from .session.observation_validator import validate_observation
@@ -276,6 +277,58 @@ async def policy_ack(request: Request):
     except Exception as exc:
         log.warning("failed to persist policy_acknowledged: %s", exc)
     return JSONResponse(content={"ok": True})
+
+
+# ponytail: HTTP, not the WS, for the same reason as /v1/policy_ack above —
+# the socket only exists while a task is in flight, and the panel needs
+# suggestions precisely when no task is running.
+@app.post("/v1/suggestions")
+async def suggestions(request: Request):
+    """Three task suggestions for the page the panel is looking at.
+
+    `url` and `title` are the whole input. The panel has no content script
+    and holds `<all_urls>`, so page text is not an option without injecting
+    into every site the user visits.
+    """
+    from .agent.suggest import generate
+
+    body = await request.json()
+    url = str(body.get("url", "") or "").strip()
+    if not url:
+        return JSONResponse(status_code=400, content={"error": "url is required"})
+    title = str(body.get("title", "") or "")
+
+    client_host = request.client.host if request.client else "unknown"
+    inline_config = None
+    cfg_payload = body.get("model_config")
+    if isinstance(cfg_payload, dict) and cfg_payload.get("provider"):
+        try:
+            inline_config = ModelConfig(
+                provider=str(cfg_payload["provider"]),
+                model=str(cfg_payload.get("model", "")),
+                context_window=int(cfg_payload.get("context_window") or 400_000),
+            )
+        except (ValueError, TypeError) as exc:
+            log.warning("invalid model_config in /v1/suggestions: %s", exc)
+    api_key = body.get("api_key")
+    inline_creds = UserCredentials(api_key=api_key, base_url=None) if api_key else None
+
+    try:
+        cfg, creds = resolve_model_config(client_host, inline_config, inline_creds)
+    except ValueError as exc:
+        # ValueError never carries a key — the resolver's own message names
+        # the env var, not the secret.
+        log.warning("suggestions: no model config: %s", exc)
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+
+    try:
+        lines = await generate(url, title, cfg, creds)
+    except Exception as exc:
+        # 502 rather than 500 so the panel can tell "your server couldn't do
+        # this" from "your request was malformed" and keep its fallback.
+        log.warning("suggestions failed for %s: %s", url[:120], exc)
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+    return JSONResponse(content={"lines": lines})
 
 
 # ---------------------------------------------------------------------------
