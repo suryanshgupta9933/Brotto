@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Callable, Awaitable
 
 from ..dev.ax_tree_extractor import SemanticTarget
 
 log = logging.getLogger("brotto.ext_relay")
+
+# ponytail: 2s ceiling on a best-effort lookup. A slower extension degrades to
+# the accessible-name check (over-redact, not under-redact); raise it only if
+# live runs show real timeouts.
+_ATTRS_TIMEOUT = 2.0
 
 
 class ExtensionCDPRelay:
@@ -18,6 +24,9 @@ class ExtensionCDPRelay:
     - Server sends {type: "observe"} → extension replies {type: "observation", url, title, axTargets}
     - Server sends {type: "action", action: {...}} → extension executes, then auto-sends observation
     - We consume the auto-sent observation so the next get_targets() skips the round-trip.
+    - Server sends {type: "get_attributes", backend_node_id, ref} → extension replies
+      {type: "get_attributes_result", ref, attributes: {name: value}}. Correlated by `ref`
+      and resolved by the caller via deliver_attributes_result().
     """
 
     def __init__(
@@ -32,6 +41,8 @@ class ExtensionCDPRelay:
         self._eval_queue: asyncio.Queue = eval_queue or asyncio.Queue()
         self._sid = session_id
         self._cached_obs: dict | None = None
+        self._attrs: asyncio.Queue = asyncio.Queue()
+        self._pending_attrs: set[str] = set()
 
     # ---------- Internal ----------
 
@@ -206,6 +217,43 @@ class ExtensionCDPRelay:
         log.info("[%s] scroll  direction=%s  delta=%d", self._sid, direction, delta)
         await self._send_action({"type": "scroll", "deltaY": delta})
 
+    async def get_attributes(self, backend_node_id: int) -> dict[str, str]:
+        """DOM attributes for one node, or {} on any failure.
+
+        Best-effort by design: this backs password redaction, and a relay
+        that raised here would abort a type_text that was about to succeed.
+        The caller falls back to the accessible-name check. Resolved lazily,
+        once per typed action — never per target per step, which the loop's
+        latency cannot afford.
+        """
+        if not backend_node_id:
+            return {}
+        ref = f"attrs-{uuid.uuid4().hex[:8]}"
+        self._pending_attrs.add(ref)
+        try:
+            await self._ws_send({"type": "get_attributes",
+                                 "backend_node_id": backend_node_id, "ref": ref})
+            async with asyncio.timeout(_ATTRS_TIMEOUT):
+                while True:
+                    msg = await self._attrs.get()
+                    if str(msg.get("ref", "")) != ref:
+                        continue  # late or foreign result — not ours to answer
+                    attrs = msg.get("attributes")
+                    return attrs if isinstance(attrs, dict) else {}
+        except Exception as exc:
+            log.debug("[%s] get_attributes failed: %s", self._sid, exc)
+            return {}
+        finally:
+            self._pending_attrs.discard(ref)
+
+    async def deliver_attributes_result(self, message: dict) -> None:
+        """Sink for an inbound get_attributes_result. Unmatched refs are
+        dropped rather than queued, so a stale reply can't satisfy a later
+        lookup or grow the queue on a session with nothing pending."""
+        ref = str(message.get("ref", ""))
+        if ref in self._pending_attrs:
+            self._attrs.put_nowait(message)
+
 
 def _to_semantic(ax_targets: list[dict]) -> list[SemanticTarget]:
     result = []
@@ -224,5 +272,9 @@ def _to_semantic(ax_targets: list[dict]) -> list[SemanticTarget]:
             # this is the same field the extractor fills with a ref hash.
             parent_ref_id=str(t["parent"]) if t.get("parent") is not None else None,
             href=t.get("href"),
+            # Password detection needs the DOM node, and the AX node is the
+            # only place its id is available. Carrying it costs one int on a
+            # target that is already being sent.
+            backend_node_id=t.get("backendNodeId"),
         ))
     return result

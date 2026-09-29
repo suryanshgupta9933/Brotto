@@ -1,0 +1,654 @@
+"""Per-session audit trail: one nested JSON document per run.
+
+The writer holds the whole document in memory and flushes it with
+`json.dump` to a temp file plus `os.replace`. That single atomic rename
+is the entire durability story: a crash mid-write leaves the previous
+valid file rather than a truncated one, and the document on disk is
+complete at every instant — which is what lets a monitor read a run
+that is still going.
+
+This REPLACES logs/runs/<task_id>/steps.jsonl and policy.log. The
+scratchpad's plain-text format is unchanged and moves here verbatim,
+because the agent re-reads it to restore its own memory across a
+restart and files already on disk must keep parsing.
+
+The writer never raises into the agent loop. Every record method is
+wrapped; a failure is counted, logged, and recorded in the document's
+own `errors` array, because losing a disk write must not stop a task.
+"""
+
+from __future__ import annotations
+
+import copy
+import datetime as _dt
+import json
+import logging
+import os
+import re
+import secrets
+import threading
+from pathlib import Path
+from typing import Any
+
+from .context import MemoryEntry, Scratchpad
+
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 1
+
+# A single scalar is capped so one pathological page cannot produce a
+# multi-megabyte document. The cap is recorded rather than silent.
+MAX_FIELD_CHARS = 8_000
+
+REDACTED = "[redacted:password]"
+
+_B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+_SECRET_NAME_RE = re.compile(
+    r"password|passcode|passphrase|one[- ]?time|\botp\b|\bpin\b", re.I
+)
+
+
+def is_secret_field(attributes: dict | None, accessible_name: str | None) -> bool:
+    """True when a field is a password/secret input.
+
+    Two signals, because neither is sufficient alone. `type="password"`
+    is definitive but only available when the DOM lookup succeeded; the
+    accessible name is free and always present, but is blank on some
+    real login forms. Either one redacts.
+
+    Lives here, not in a relay, so the Playwright and extension paths
+    cannot disagree about what counts as a secret.
+    """
+    if attributes and (attributes.get("type") or "").lower() == "password":
+        return True
+    return bool(_SECRET_NAME_RE.search(accessible_name or ""))
+
+
+# ponytail: one directory, one file per session, no database and no index.
+# Upgrade path if a session ever outgrows an atomic rewrite (megabytes of
+# per-step page text would do it): append JSONL during the run, compact to
+# this document at task end.
+def default_dir() -> Path:
+    return Path(os.getenv("BROTTO_SESSIONS_DIR", "logs/sessions"))
+
+
+def _now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds")
+
+
+def new_error_id() -> str:
+    """Six base36 characters from `secrets` — short enough to read aloud
+    over support, wide enough (~2 billion) to be unique within a session."""
+    n = secrets.randbelow(36 ** 6)
+    out = []
+    for _ in range(6):
+        n, r = divmod(n, 36)
+        out.append(_B36[r])
+    return "".join(out)
+
+
+def _cap(value: Any) -> Any:
+    """Truncate an over-long scalar, leaving a marker for the reader."""
+    if isinstance(value, str) and len(value) > MAX_FIELD_CHARS:
+        return value[:MAX_FIELD_CHARS]
+    return value
+
+
+def _text(container: dict, key: str, value: Any) -> None:
+    """Write one capped scalar, plus a sibling marker when it was cut."""
+    if isinstance(value, str) and len(value) > MAX_FIELD_CHARS:
+        container[key] = value[:MAX_FIELD_CHARS]
+        container[f"{key}_truncated"] = True
+    else:
+        container[key] = value
+
+
+def _cap_deep(value: Any, depth: int = 0) -> Any:
+    """Same cap, through the args/detail trees — page text arrives in args.
+
+    Depth-limited because `json.dump(default=str)` is the only backstop and
+    it would happily serialise a 5-deep cycle of page text.
+    """
+    if depth > 8:
+        return _cap(value)
+    if isinstance(value, str):
+        return _cap(value)
+    if isinstance(value, dict):
+        return {k: _cap_deep(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_cap_deep(v, depth + 1) for v in value]
+    return value
+
+
+def _as_scratchpad(value: Scratchpad | dict) -> Scratchpad | None:
+    if isinstance(value, Scratchpad):
+        return value
+    try:
+        return Scratchpad(
+            entries=[MemoryEntry(**e) for e in value.get("entries", [])],
+            notes=value.get("notes", ""),
+        )
+    except Exception as exc:  # a dict that is not entry-shaped
+        log.debug("audit: cannot rebuild scratchpad: %s", exc)
+        return None
+
+
+def _scratchpad_dict(value: Scratchpad | dict) -> dict:
+    if isinstance(value, Scratchpad):
+        return {"entries": [e.model_dump() for e in value.entries],
+                "notes": value.notes}
+    return _cap_deep(value)
+
+
+def load_scratchpad(path: Path) -> Scratchpad:
+    """Parse the structured file. Returns an empty Scratchpad on legacy
+    plain-text files (no header) — the run continues without entries.
+    """
+    if not path.exists():
+        return Scratchpad()
+    content = path.read_text()
+    if not content.startswith("# MEMORY v2"):
+        # Legacy plain text — treat as notes only, no entries.
+        return Scratchpad(notes=content.strip())
+    entries: list[MemoryEntry] = []
+    notes_lines: list[str] = []
+    in_notes = False
+    current_entry_lines: list[str] = []
+    current_header: dict[str, str] | None = None
+
+    for raw_line in content.splitlines():
+        line = raw_line.rstrip()
+        if in_notes:
+            notes_lines.append(line)
+            continue
+        if line.startswith("# NOTES"):
+            in_notes = True
+            continue
+        if line.startswith("# MANIFEST") or line == "# MEMORY v2" or line == "":
+            continue
+        m = re.match(r"^\[(r\d+)\s+step=(\d+)\s+sel=([^\s]+)\s+around=(\S+)\s+truncated=(True|False)\]\s*$", line)
+        if m:
+            # Flush previous entry
+            if current_header is not None:
+                entries.append(MemoryEntry(
+                    id=current_header["id"],
+                    step=int(current_header["step"]),
+                    selector=current_header["sel"],
+                    around=None if current_header["around"] == "None" else current_header["around"],
+                    digest="\n".join(current_entry_lines).strip(),
+                    body="\n".join(current_entry_lines),  # body == digest on reload
+                    was_truncated=(current_header["trunc"] == "True"),
+                ))
+            current_header = {
+                "id": m.group(1),
+                "step": m.group(2),
+                "sel": m.group(3),
+                "around": m.group(4),
+                "trunc": m.group(5),
+            }
+            current_entry_lines = []
+        else:
+            if current_header is not None:
+                current_entry_lines.append(line)
+
+    # Flush last entry
+    if current_header is not None:
+        entries.append(MemoryEntry(
+            id=current_header["id"],
+            step=int(current_header["step"]),
+            selector=current_header["sel"],
+            around=None if current_header["around"] == "None" else current_header["around"],
+            digest="\n".join(current_entry_lines).strip(),
+            body="\n".join(current_entry_lines),
+            was_truncated=(current_header["trunc"] == "True"),
+        ))
+
+    return Scratchpad(entries=entries, notes="\n".join(notes_lines).strip())
+
+
+def save_scratchpad(path: Path, scratchpad: Scratchpad) -> None:
+    """Serialize the structured Scratchpad to plain text.
+
+    Format is unchanged from run_logger.py and must not be touched: the
+    agent re-reads this file to restore its memory across a restart, and
+    files already on disk have to keep parsing.
+    """
+    lines = ["# MEMORY v2", ""]
+    lines.append("# MANIFEST")
+    for e in scratchpad.entries:
+        around = e.around if e.around is not None else "None"
+        trunc = "True" if e.was_truncated else "False"
+        lines.append(
+            f"[{e.id} step={e.step} sel={e.selector} around={around} truncated={trunc}]"
+        )
+        lines.append(e.digest)
+        lines.append("")
+    lines.append("# NOTES")
+    lines.append(scratchpad.notes)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines))
+
+
+class AuditTrail:
+    def __init__(self, session_id: str, *, dir: Path | None = None) -> None:
+        self.session_id = session_id
+        self.dir = dir or default_dir()
+        self._path = self.dir / f"{session_id}.json"
+        self._lock = threading.Lock()
+        self._dropped = 0
+        self._seq = 0
+        self._prompt_index: dict[str, tuple[int, dict]] = {}
+        self._doc: dict = {
+            "schema_version": SCHEMA_VERSION,
+            "session_id": session_id,
+            "created_at": _now(),
+            "updated_at": _now(),
+            "status": "running",
+            "goal": "",
+            "client": {},
+            "model": {},
+            "policy": {},
+            "totals": {"turns": 0, "steps": 0, "prompts": 0, "actions": 0,
+                       "tokens_in": 0, "tokens_out": 0, "wall_s": 0.0,
+                       "errors": 0},
+            "turns": [],
+            "errors": [],
+            # Policy decisions that belong to no single turn (preflight
+            # blocks, flat approval rows). Kept off `policy`, which is the
+            # policy configuration itself.
+            "policy_events": [],
+        }
+        self._mkdir()
+
+    # ── durability ──────────────────────────────────────────────
+    def _mkdir(self) -> None:
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # A missing directory is survivable: every write below will
+            # also fail and be counted, but construction must not raise,
+            # because the constructor runs inside the agent loop.
+            log.warning("audit: cannot create %s: %s", self.dir, exc)
+
+    def _flush(self) -> None:
+        try:
+            self._doc["updated_at"] = _now()
+            tmp = self._path.with_suffix(".json.tmp")
+            with tmp.open("w") as fp:
+                json.dump(self._doc, fp, ensure_ascii=False, default=str)
+            # os.replace is atomic on POSIX. Until this line the old file
+            # is intact; after it the new one is. There is no window in
+            # which the path holds a half-written document.
+            os.replace(tmp, self._path)
+        except Exception as exc:
+            self._note_dropped(exc, "audit.flush")
+
+    def _note_dropped(self, exc: Exception, where: str) -> None:
+        """Count a lost write and record it in the document itself.
+
+        Must not raise: this runs on the failure path of a method that is
+        already failing, and the agent loop is the caller.
+        """
+        self._dropped += 1
+        log.warning("audit: write failed for %s: %s", self.session_id, exc)
+        try:
+            self._doc["errors"].append({
+                "seq": self._next_seq(),
+                "at": _now(),
+                "error_id": new_error_id(),
+                "code": "audit_write_failed",
+                "where": where,
+                "message": str(exc),
+                "detail": {},
+            })
+            self._doc["totals"]["errors"] = len(self._doc["errors"])
+        except Exception:  # nothing left to do but keep counting
+            pass
+
+    def _record(self, fn, *args, **kwargs) -> Any:
+        """Run one mutation under the lock, then flush. Never raises.
+
+        Returns whatever `fn` returned, or None if it blew up.
+        """
+        with self._lock:
+            try:
+                out = fn(*args, **kwargs)
+                self._flush()
+                return out
+            except Exception as exc:
+                self._note_dropped(exc, getattr(fn, "__name__", "audit.record"))
+                return None
+
+    def _next_seq(self) -> int:
+        self._seq += 1
+        return self._seq
+
+    def _turn(self, index: int) -> dict | None:
+        turns = self._doc["turns"]
+        return turns[index] if isinstance(index, int) and 0 <= index < len(turns) else None
+
+    # ── accessors ───────────────────────────────────────────────
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def scratchpad_path(self) -> Path:
+        # Moved here from logs/runs/<id>/scratchpad.txt. The plain-text
+        # format is untouched; only the directory follows the document.
+        return self.dir / "scratchpad.txt"
+
+    @property
+    def dropped_writes(self) -> int:
+        return self._dropped
+
+    def document(self) -> dict:
+        with self._lock:
+            return copy.deepcopy(self._doc)
+
+    # ── header fields ───────────────────────────────────────────
+    def set_goal(self, goal: str) -> None:
+        self._record(self._set_goal, goal)
+
+    def _set_goal(self, goal: str) -> None:
+        _text(self._doc, "goal", goal)
+
+    def set_client(self, *, ip_hash: str, extension_version: str = "") -> None:
+        self._record(self._set_client, ip_hash=ip_hash,
+                     extension_version=extension_version)
+
+    def _set_client(self, *, ip_hash: str, extension_version: str = "") -> None:
+        _text(self._doc, "client", {"ip_hash": ip_hash,
+                                    "extension_version": extension_version})
+
+    def set_model(self, *, provider: str, model: str, context_window: int,
+                  source: str) -> None:
+        self._record(self._set_model, provider=provider, model=model,
+                     context_window=context_window, source=source)
+
+    def _set_model(self, *, provider: str, model: str, context_window: int,
+                   source: str) -> None:
+        self._doc["model"] = {
+            "provider": provider, "model": model,
+            "context_window": context_window, "source": source,
+        }
+
+    def set_policy(self, policy: dict) -> None:
+        self._record(self._set_policy, policy)
+
+    def _set_policy(self, policy: dict) -> None:
+        self._doc["policy"] = _cap_deep(policy)
+
+    def set_status(self, status: str) -> None:
+        self._record(self._set_status, status)
+
+    def _set_status(self, status: str) -> None:
+        self._doc["status"] = status
+
+    # ── turns ───────────────────────────────────────────────────
+    def begin_turn(self, *, step: int, url: str, page_title: str,
+                   ax_targets: int, ax_chars: int, ax_diff: str,
+                   page_text_chars: int) -> int:
+        # Key order is causal and load-bearing: model -> prompts -> actions,
+        # because that is the order they happen in and the order a replay
+        # walks. Test asserts on it.
+        idx = self._record(
+            self._begin_turn, step=step, url=url, page_title=page_title,
+            ax_targets=ax_targets, ax_chars=ax_chars, ax_diff=ax_diff,
+            page_text_chars=page_text_chars)
+        return -1 if idx is None else idx
+
+    def _begin_turn(self, *, step: int, url: str, page_title: str,
+                    ax_targets: int, ax_chars: int, ax_diff: str,
+                    page_text_chars: int) -> int:
+        obs: dict = {}
+        _text(obs, "url", url)
+        _text(obs, "page_title", page_title)
+        obs["ax_targets"] = ax_targets
+        obs["ax_chars"] = ax_chars
+        _text(obs, "ax_diff", ax_diff)
+        obs["page_text_chars"] = page_text_chars
+        turn = {
+            "seq": self._next_seq(),
+            "step": step,
+            "started_at": _now(),
+            "ended_at": None,
+            "observation": obs,
+            # Model/provider live once at the document root; repeating them
+            # per turn is the second source of truth this feature exists to
+            # remove. The turn keeps the usage numbers.
+            "model": None,
+            "prompts": [],
+            "actions": [],
+            "timings": {},
+            "error": None,
+        }
+        self._doc["turns"].append(turn)
+        self._doc["totals"]["turns"] += 1
+        self._doc["totals"]["steps"] += 1
+        return len(self._doc["turns"]) - 1
+
+    def record_model(self, turn: int, *, thought: str, reasoning: str,
+                     tokens_in: int, tokens_out: int, context_pct: float,
+                     latency_ms: int) -> None:
+        self._record(self._record_model, turn, thought=thought,
+                     reasoning=reasoning, tokens_in=tokens_in,
+                     tokens_out=tokens_out, context_pct=context_pct,
+                     latency_ms=latency_ms)
+
+    def _record_model(self, turn: int, *, thought: str, reasoning: str,
+                      tokens_in: int, tokens_out: int, context_pct: float,
+                      latency_ms: int) -> None:
+        t = self._turn(turn)
+        if t is None:
+            return
+        block: dict = {}
+        _text(block, "thought", thought)
+        _text(block, "reasoning", reasoning)
+        block["tokens_in"] = tokens_in
+        block["tokens_out"] = tokens_out
+        block["context_pct"] = context_pct
+        block["latency_ms"] = latency_ms
+        t["model"] = block
+        totals = self._doc["totals"]
+        totals["tokens_in"] += tokens_in
+        totals["tokens_out"] += tokens_out
+
+    def record_prompt(self, turn: int, *, kind: str, action: str, args: dict,
+                      domain: str | None, reason: str) -> str:
+        pid = self._record(self._record_prompt, turn, kind=kind, action=action,
+                           args=args, domain=domain, reason=reason)
+        return pid or ""
+
+    def _record_prompt(self, turn: int, *, kind: str, action: str, args: dict,
+                       domain: str | None, reason: str) -> str:
+        t = self._turn(turn)
+        if t is None:
+            return ""
+        prompt = {
+            "id": secrets.token_hex(8),
+            "seq": self._next_seq(),
+            "kind": kind,
+            # "pending" until resolve_prompt. A socket that dies between
+            # raising and answering leaves it pending, which is not the
+            # same thing as denied and must never read as denied.
+            "status": "pending",
+            "raised_at": _now(),
+            "answered_at": None,
+            "wait_ms": None,
+            "action": action,
+            "args": _cap_deep(args),
+            "domain": domain,
+        }
+        _text(prompt, "reason", reason)
+        prompt["decision"] = None
+        prompt["response"] = None
+        t["prompts"].append(prompt)
+        self._prompt_index[prompt["id"]] = (turn, prompt)
+        self._doc["totals"]["prompts"] += 1
+        return prompt["id"]
+
+    def resolve_prompt(self, prompt_id: str, *, decision: str, response: str,
+                       wait_ms: int) -> None:
+        self._record(self._resolve_prompt, prompt_id, decision=decision,
+                     response=response, wait_ms=wait_ms)
+
+    def _resolve_prompt(self, prompt_id: str, *, decision: str,
+                        response: str, wait_ms: int) -> None:
+        found = self._prompt_index.get(prompt_id)
+        if found is None:
+            # Not an error: the document may be a partial replay, and a
+            # prompt answered in a previous run is not resolvable again.
+            return
+        _, prompt = found
+        prompt["status"] = "answered"
+        prompt["answered_at"] = _now()
+        prompt["wait_ms"] = wait_ms
+        prompt["decision"] = decision
+        _text(prompt, "response", response)
+
+    def record_action(self, turn: int, *, action: str, args: dict,
+                      outcome: str, ok: bool, redacted: bool,
+                      duration_ms: int) -> None:
+        self._record(self._record_action, turn, action=action, args=args,
+                     outcome=outcome, ok=ok, redacted=redacted,
+                     duration_ms=duration_ms)
+
+    def _record_action(self, turn: int, *, action: str, args: dict,
+                       outcome: str, ok: bool, redacted: bool,
+                       duration_ms: int) -> None:
+        t = self._turn(turn)
+        if t is None:
+            return
+        ended = _now()
+        entry: dict = {"action": action, "args": _cap_deep(args)}
+        _text(entry, "outcome", outcome)
+        entry["ok"] = ok
+        # The end timestamp is derived, not slept for: the harness already
+        # measured the action, and an audit call must not add wall time.
+        entry["started_at"] = ended
+        entry["ended_at"] = ended
+        entry["duration_ms"] = duration_ms
+        entry["redacted"] = redacted
+        t["actions"].append(entry)
+        self._doc["totals"]["actions"] += 1
+
+    def end_turn(self, turn: int, *, timings: dict) -> None:
+        self._record(self._end_turn, turn, timings=timings)
+
+    def _end_turn(self, turn: int, *, timings: dict) -> None:
+        t = self._turn(turn)
+        if t is None:
+            return
+        t["ended_at"] = _now()
+        t["timings"] = _cap_deep(timings)
+
+    # ── flat events ─────────────────────────────────────────────
+    def record_policy(self, *, step: int, kind: str, domain: str | None,
+                      action: str | None, decision: str,
+                      user_decision: str | None = None) -> None:
+        self._record(self._record_policy, step=step, kind=kind, domain=domain,
+                     action=action, decision=decision,
+                     user_decision=user_decision)
+
+    def _record_policy(self, *, step: int, kind: str, domain: str | None,
+                       action: str | None, decision: str,
+                       user_decision: str | None = None) -> None:
+        self._doc["policy_events"].append({
+            "seq": self._next_seq(),
+            "at": _now(),
+            "step": step,
+            "kind": kind,
+            "domain": domain,
+            "action": action,
+            "decision": decision,
+            "user_decision": user_decision,
+        })
+
+    def record_error(self, *, code: str, where: str, message: str,
+                     detail: dict | None = None) -> str:
+        eid = self._record(self._record_error, code=code, where=where,
+                           message=message, detail=detail)
+        return eid or ""
+
+    def _record_error(self, *, code: str, where: str, message: str,
+                      detail: dict | None = None) -> str:
+        eid = new_error_id()
+        entry: dict = {
+            "seq": self._next_seq(),
+            "at": _now(),
+            "error_id": eid,
+            "code": code,
+            "where": where,
+        }
+        _text(entry, "message", message)
+        entry["detail"] = _cap_deep(detail or {})
+        self._doc["errors"].append(entry)
+        self._doc["totals"]["errors"] = len(self._doc["errors"])
+        return eid
+
+    # ── terminal ────────────────────────────────────────────────
+    def set_scratchpad(self, scratchpad: Scratchpad | dict) -> None:
+        self._record(self._set_scratchpad, scratchpad)
+
+    def _set_scratchpad(self, scratchpad: Scratchpad | dict) -> None:
+        self._doc["scratchpad"] = _scratchpad_dict(scratchpad)
+        model = _as_scratchpad(scratchpad)
+        if model is not None:
+            save_scratchpad(self.scratchpad_path, model)
+
+    def finish(self, result: dict) -> None:
+        self._record(self._finish, result)
+
+    def _finish(self, result: dict) -> None:
+        self._doc["result"] = _cap_deep(result)
+        status = result.get("status")
+        if status:
+            self._doc["status"] = status
+        wall = (result.get("timing") or {}).get("wall_s")
+        if wall is not None:
+            try:
+                self._doc["totals"]["wall_s"] = float(wall)
+            except (TypeError, ValueError):
+                pass
+
+
+def read(session_id: str, *, dir: Path | None = None) -> dict:
+    """Read one document. Never raises: a damaged file is reported."""
+    d = dir or default_dir()
+    p = d / f"{session_id}.json"
+    if not p.exists():
+        return {"found": False, "session_id": session_id}
+    try:
+        doc = json.loads(p.read_text())
+        doc.setdefault("found", True)
+        return doc
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("audit: %s unreadable: %s", p, exc)
+        return {"found": True, "corrupt": True, "schema_version": SCHEMA_VERSION,
+                "session_id": session_id, "status": "corrupt", "turns": [],
+                "errors": [{"code": "audit_unreadable", "message": str(exc)}],
+                "totals": {"turns": 0, "steps": 0, "prompts": 0, "actions": 0,
+                           "tokens_in": 0, "tokens_out": 0, "errors": 1}}
+
+
+def list_sessions(*, dir: Path | None = None) -> list[dict]:
+    """Index of every session on disk, newest first."""
+    d = dir or default_dir()
+    out = []
+    try:
+        files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return []
+    for p in files:
+        doc = read(p.stem, dir=d)
+        out.append({
+            "session_id": doc.get("session_id", p.stem),
+            "task": doc.get("goal", ""),
+            "status": doc.get("status", "unknown"),
+            "steps": doc.get("totals", {}).get("steps", 0),
+            "started_at": doc.get("created_at"),
+            "corrupt": bool(doc.get("corrupt")),
+        })
+    return out

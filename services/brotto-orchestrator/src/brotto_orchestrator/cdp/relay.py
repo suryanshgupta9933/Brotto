@@ -117,3 +117,24 @@ class CDPRelay:
         """Re-extract AX targets and update browser's target_map."""
         targets = await self._browser._extract_semantic_targets()
         self._browser.target_map = {t.ref_id: t for t in targets}
+
+    async def get_attributes(self, backend_node_id: int) -> dict[str, str]:
+        """DOM attributes for one node, or {} on any failure.
+
+        Same contract as the extension relay: this backs password redaction,
+        and raising here would abort a type_text that was about to succeed.
+        The caller falls back to the accessible-name check.
+        """
+        if not backend_node_id or not self._browser.page:
+            return {}
+        try:
+            session = await self._browser.page.context.new_cdp_session(self._browser.page)
+            resp = await session.send(
+                "DOM.getAttributes", {"backendNodeId": int(backend_node_id)}
+            )
+        except Exception as e:
+            log.debug("get_attributes failed: %s", e)
+            return {}
+        # CDP returns a flat [name, value, name, value, ...] list.
+        flat = (resp or {}).get("attributes") or []
+        return {str(flat[i]): str(flat[i + 1]) for i in range(0, len(flat) - 1, 2)}
