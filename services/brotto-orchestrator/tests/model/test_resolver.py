@@ -47,10 +47,24 @@ def test_per_user_fallback(tmp_model_dir: Path, no_env):
 def test_env_fallback(tmp_model_dir: Path, no_env, monkeypatch):
     monkeypatch.setenv("AGENT_MODEL", "anthropic:MiniMax-M3")
     monkeypatch.setenv("CONTEXT_WINDOW_TOKENS", "204800")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-from-env")
     cfg, creds = resolve_model_config("127.0.0.1", None, None)
     assert cfg.provider == "anthropic"
     assert cfg.model == "MiniMax-M3"
     assert cfg.context_window == 204800
+    assert creds.api_key == "sk-from-env"
+
+
+def test_env_model_without_a_key_says_so(tmp_model_dir: Path, no_env, monkeypatch):
+    """The recurring "Set the ANTHROPIC_API_KEY environment variable or pass
+    it via AnthropicProvider(api_key=...)" error. Every registered provider
+    needs a key, so a keyless env config used to resolve fine and then blow
+    up inside the provider constructor — an Anthropic error naming neither
+    AGENT_MODEL nor .env, whichever provider was actually configured."""
+    monkeypatch.setenv("AGENT_MODEL", "minimax:MiniMax-M3")
+    monkeypatch.setenv("BROTTO_FORCE_ENV_MODEL", "1")
+    with pytest.raises(ValueError, match="no key to authenticate"):
+        resolve_model_config("127.0.0.1", None, None)
 
 
 def test_inline_overrides_per_user(tmp_model_dir: Path, no_env):

@@ -70,6 +70,15 @@ Set `BROTTO_ENV=prod` to opt out — server then uses whatever operator configur
 
 **`BROTTO_FORCE_ENV_MODEL=1`** — ignore the extension's model *and* key entirely, run on `.env`. Set it in `.env` and you never type a key into the side panel again. Also set in `tests/conftest.py`-neutralised scope so it can't leak into the suite.
 
+**The key must be in `.env` itself, not in the shell.** Reloading the extension clears `chrome.storage.session`, so the key it sends disappears on every reload — which is what produced the recurring `AnthropicProvider(api_key=...)` error. With `BROTTO_FORCE_ENV_MODEL=1` the extension's key is never consulted, so the only thing that matters is `ANTHROPIC_AUTH_TOKEN` being in `.env`. A shell-exported token is not enough: it isn't inherited by a server started from Finder, a launch agent, or a fresh terminal. Verify with the key scrubbed from the environment entirely:
+
+```bash
+env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
+  ../../.venv/bin/python scripts/smoke_minimax_endtoend.py
+```
+
+A keyless `AGENT_MODEL` now raises at resolution time naming the variable and `.env`, rather than deferring into the provider constructor where pydantic-ai reports it as a generic `AnthropicProvider` error that names neither the model nor the file.
+
 Startup log line shows resolved auth state immediately:
 ```
 auth env at startup: ANTHROPIC_API_KEY=set (len=125)  ANTHROPIC_AUTH_TOKEN=set (len=125)  BROTTO_ENV=dev
@@ -111,7 +120,7 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-./.venv/bin/python -m pytest tests/ -q     # 314 tests (2 skipped)
+./.venv/bin/python -m pytest tests/ -q     # 315 tests (2 skipped)
 
 # Smoke test (real API call, exercises full model adapter; reads .env)
 .venv/bin/python scripts/smoke_minimax_endtoend.py

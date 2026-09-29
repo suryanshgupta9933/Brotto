@@ -23,10 +23,18 @@ def _from_env() -> tuple[ModelConfig, UserCredentials] | None:
         )
     provider, model_id = raw_model.split(":", 1)
     context_window = int(os.getenv("CONTEXT_WINDOW_TOKENS", "400000"))
-    creds = UserCredentials(
-        api_key=os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"),
-        base_url=os.getenv("ANTHROPIC_BASE_URL"),
-    )
+    api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")
+    if not api_key:
+        # Every registered provider needs a key, so returning one without it
+        # only defers the failure into the provider constructor, where
+        # pydantic-ai reports it as a generic AnthropicProvider error that
+        # names neither this model nor this file. Name them here.
+        raise ValueError(
+            f"AGENT_MODEL={raw_model!r} is set but there is no key to authenticate "
+            "with. Put ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in .env, or send "
+            "a key from the extension."
+        )
+    creds = UserCredentials(api_key=api_key, base_url=os.getenv("ANTHROPIC_BASE_URL"))
     return ModelConfig(provider=provider, model=model_id, context_window=context_window), creds
 
 
