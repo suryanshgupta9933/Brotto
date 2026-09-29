@@ -1345,11 +1345,13 @@ function clearMessages() {
   // the panel doesn't look empty.
   if (!document.getElementById("emptyState")) {
     messagesEl.appendChild(createEmptyState());
+    void refreshEmptyState();
   }
 }
 
 function appendEmptyState() {
   messagesEl.appendChild(createEmptyState());
+  void refreshEmptyState();
 }
 
 // ponytail: helper to fade out + remove the login_required bubble and
@@ -1385,12 +1387,184 @@ function clearBlockingCards() {
 function createEmptyState() {
   const div = document.createElement('div');
   div.className = 'empty-state';
-  div.innerHTML = `
-    <div class="empty-mark"><img src="assets/logo.svg" alt="" class="brand-logo brand-logo--lg"></div>
-    <div class="empty-title">Brotto</div>
-    <div class="empty-sub">Tell Brotto what to do in this tab. It navigates, clicks, and fills things in — you approve anything sensitive.</div>
-  `;
+
+  const mark = document.createElement('div');
+  mark.className = 'empty-mark';
+  const logo = document.createElement('img');
+  logo.src = 'assets/logo.svg';
+  logo.alt = '';
+  logo.className = 'brand-logo brand-logo--lg';
+  mark.appendChild(logo);
+
+  const where = document.createElement('div');
+  where.className = 'empty-where';
+  where.id = 'emptyWhere';
+  where.hidden = true;
+  const whereLabel = document.createElement('span');
+  whereLabel.textContent = 'On';
+  const whereHost = document.createElement('b');
+  whereHost.id = 'emptyHost';
+  where.append(whereLabel, whereHost);
+
+  const sub = document.createElement('div');
+  sub.className = 'empty-sub';
+  sub.textContent = 'Tell Brotto what to do in this tab. It navigates, clicks, and fills things in — you approve anything sensitive.';
+
+  const suggestions = document.createElement('div');
+  suggestions.className = 'suggestions';
+  suggestions.id = 'suggestions';
+
+  div.append(mark, where, sub, suggestions);
   return div;
+}
+
+// ─── Page-aware suggestions ──────────────────────────────────────────────
+// The panel is bound to a tab, so the idle page should know which one. Keyed
+// by registrable-ish suffix; first match wins, so order the specific entries
+// before the general ones.
+const SITE_SUGGESTIONS = [
+  ['mail.google.com', [
+    'Draft a reply to the last unread email and let me read it before sending.',
+    'Find every email from this week that has an attachment and list them.',
+  ]],
+  ['outlook.com', [
+    'Draft a reply to the last unread email and let me read it before sending.',
+    'Find every email from this week that has an attachment and list them.',
+  ]],
+  ['github.com', [
+    'Summarise the open pull requests I can review.',
+    'Find issues assigned to me that nobody has commented on in a week.',
+  ]],
+  ['amazon.', [
+    'Find the price history on the top result and tell me when it was cheapest.',
+    'Compare the first three results on price and delivery.',
+  ]],
+  ['booking.', [
+    'Find a non-stop flight for my dates under $600 and put the cheapest in cart.',
+    'Find a hotel in the city centre under $150 a night for my dates.',
+  ]],
+  ['airbnb.', [
+    'Find a place in the city centre for my dates and tell me the total with fees.',
+  ]],
+  ['linkedin.', [
+    'Find the jobs I saved that are still open and summarise what each needs.',
+  ]],
+  ['reddit.', [
+    'Summarise what the top comments on this thread actually disagree about.',
+  ]],
+  ['youtube.', [
+    'Collect the titles and durations of the videos on this page.',
+  ]],
+  ['netflix.', [
+    'Find what was added and removed from my list in the last month.',
+  ]],
+  ['docs.google.com', [
+    'Summarise this document and list anything that needs a decision.',
+  ]],
+  ['notion.', [
+    'Summarise this page and list anything that needs a decision.',
+  ]],
+  ['weather.', [
+    'What is the weather here tomorrow morning, and will I need a coat?',
+  ]],
+  ['maps.google.', [
+    'How long is the drive to the airport on a Tuesday morning?',
+  ]],
+  ['stackoverflow.', [
+    'Summarise the top answers to this question and say which one holds up.',
+  ]],
+  ['indeed.', [
+    'Find roles matching my saved search and tell me which are new this week.',
+  ]],
+];
+
+// Always available, whatever the tab — the floor that keeps the panel useful
+// on a blank page or a site not worth specialising for.
+const GENERIC_SUGGESTIONS = [
+  'Summarise what is on this page.',
+  'Find the thing on this page I asked about last time and open it.',
+  'Compare what is on this page against what I have saved elsewhere.',
+];
+
+function suggestionsFor(host, title) {
+  const h = (host || '').toLowerCase();
+  for (const [needle, list] of SITE_SUGGESTIONS) {
+    if (h.includes(needle)) return list;
+  }
+  // No table entry: the page title is still better than nothing, because a
+  // specific prompt beats three generic ones. Only with a real host — the
+  // title of a blank tab is browser chrome ("New Tab"), not a page.
+  const clean = (title || '').trim();
+  if (h && clean.length > 2) {
+    return [`Work through this page and tell me what it means: “${clean.slice(0, 80)}”.`, ...GENERIC_SUGGESTIONS.slice(0, 2)];
+  }
+  return GENERIC_SUGGESTIONS;
+}
+
+let lastSuggestionHost = null;
+let lastSuggestionTitle = '';
+
+async function currentTab() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab || null;
+  } catch {
+    return null;
+  }
+}
+
+// Fills the composer rather than sending. A suggestion is a starting point
+// the user still owns; running a task the moment it's read is the wrong
+// default for anything that clicks.
+function fillComposer(text) {
+  goalEl.value = text;
+  goalEl.focus();
+  goalEl.dispatchEvent(new Event('input'));
+}
+
+function paintSuggestions() {
+  const box = document.getElementById('suggestions');
+  if (!box) return;
+  box.textContent = '';
+  for (const text of suggestionsFor(lastSuggestionHost, lastSuggestionTitle)) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'suggestion';
+    btn.textContent = text;
+    btn.addEventListener('click', () => fillComposer(text));
+    box.appendChild(btn);
+  }
+}
+
+async function refreshEmptyState() {
+  // Only ever paint the idle page. Once a task starts, the transcript owns
+  // the panel and a tab change must not disturb it.
+  const box = document.getElementById('suggestions');
+  if (!box) return;
+  const tab = await currentTab();
+  let host = '';
+  try {
+    // hostname is '' for about: and chrome:// pages, so the empty-host case
+    // needs no special-casing.
+    host = tab?.url ? new URL(tab.url).hostname : '';
+  } catch { host = ''; }
+  const where = document.getElementById('emptyWhere');
+  const whereHost = document.getElementById('emptyHost');
+  if (whereHost) whereHost.textContent = host;
+  if (where) where.hidden = !host;
+  lastSuggestionHost = host;
+  lastSuggestionTitle = tab?.title || '';
+  paintSuggestions();
+}
+
+// First paint in sidepanel.html ships without a suggestions box filled; this
+// fills it once the tab is known.
+void refreshEmptyState();
+if (chrome.tabs?.onActivated) {
+  chrome.tabs.onActivated.addListener(() => { void refreshEmptyState(); });
+  chrome.tabs.onUpdated.addListener((_id, info) => {
+    if (info.status === 'complete') void refreshEmptyState();
+  });
 }
 
 // ponytail: extract structured facts from the model's finalAnswer so

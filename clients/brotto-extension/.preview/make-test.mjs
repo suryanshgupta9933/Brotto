@@ -32,6 +32,11 @@ window.chrome = {
   storage: { local: area(window.__bag), session: area(window.__session = window.__session || {}) },
   debugger: { attach(){}, detach(){} },
   sidePanel: { setOptions: (o) => { window.__path = o.path; return Promise.resolve(); } },
+  tabs: {
+    query: () => Promise.resolve(window.__tab ? [window.__tab] : []),
+    onActivated: { addListener: (fn) => { window.__onTabActivated = fn; } },
+    onUpdated: { addListener: (fn) => { window.__onTabUpdated = fn; } },
+  },
 };
 window.__deliver = (m) => window.__onMessage(m, { id: 'test' });
 </script>
