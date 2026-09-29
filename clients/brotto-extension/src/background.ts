@@ -27,31 +27,18 @@ let sessionId: string | null = null;
 let serverUrl: string = DEFAULT_SERVER;
 let taskTerminalEmitted = false;
 let stepIndex = 0;
-// ponytail: Bug B-fix — distinguish "task running, server died" from
-// "task finished cleanly, no need to keep the WS alive". Without this
-// flag, scheduleReconnect() opens a fresh WS after every clean task
-// end. The new WS has no task_start to send (the initial startRelay
-// path is the only sender), so the server's heartbeat ping arrives
-// as the first message ~20s later and the server logs
-// "expected task_start, got ping" before closing. Auto-reconnect is
-// only meaningful when an in-flight task needs the WS back.
+// ponytail: distinguish "task running, server died" from "task finished
+// cleanly". cleanup() uses it to decide whether the lost task needs a
+// terminal event before it reports the disconnect.
 let taskInFlight = false;
 
-// ponytail: Bug 4 — auto-reconnect state. Tracks attempts, target URL,
-// and whether the user has explicitly disconnected (in which case we
-// do NOT auto-reconnect, even if the WS dies).
-let reconnectAttempts = 0;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let userInitiatedDisconnect = false;
-// ponytail: 3 attempts at 5s flat. Earlier we used exponential backoff
-// (1s → 2s → 4s → 8s → 16s → 30s, 5 attempts max) — that surfaced
-// "Reconnecting… (attempt 5)" to the user and made the failure feel
-// unbounded. The user wants a short, predictable window: try 3 times
-// at 5s intervals, then surface the failure and require a manual
-// Connect. The reconnect is for the NEXT task; the in-flight task is
-// already lost when the WS dies (handled in cleanup()).
-const MAX_RECONNECT_ATTEMPTS = 3;
-const BASE_RECONNECT_DELAY_MS = 5000;
+// ponytail: 3 attempts at 5s flat when the server cannot be reached.
+// Earlier we used exponential backoff (1s → 2s → 4s → 8s → 16s → 30s, 5
+// attempts max) — that surfaced "attempt 5" to the user and made the
+// failure feel unbounded. The user wants a short, predictable window:
+// try 3 times at 5s intervals, then say so plainly.
+const SESSION_ATTEMPTS = 3;
+const SESSION_RETRY_MS = 5000;
 
 // ponytail: Bug 5 — heartbeat. Without this, the only signal that the
 // server is dead is the OS-level TCP timeout (can be minutes). With a
@@ -72,7 +59,7 @@ function startHeartbeat(): void {
     if (Date.now() - lastPongAt > HEARTBEAT_DEADLINE_MS) {
       console.warn("[brotto] heartbeat deadline missed — forcing reconnect");
       try { ws.close(); } catch { /* ignore */ }
-      return; // onclose → cleanup → scheduleReconnect
+      return; // onclose → cleanup
     }
     try {
       ws.send(JSON.stringify({ type: "ping" }));
@@ -552,14 +539,31 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
     notifyUi({ type: "tab_event", event: { kind: "opened", tabId: tab.id, url: startingUrl, title: startingUrl } });
   }
 
-  // Create orchestrator session
-  const resp = await fetch(`${serverUrl}/v1/sessions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: "{}",
-  });
-  if (!resp.ok) throw new Error(`Session create failed: HTTP ${resp.status}`);
-  const { session_id, websocket_url } = await resp.json() as { session_id: string; websocket_url: string };
+  // Create orchestrator session. This is the one call that fails when the
+  // server is down, so the retry lives here rather than in a reconnect
+  // probe: a probe's socket would be overwritten by the `new WebSocket`
+  // below and never carry a task_start, so it could not serve the next task.
+  let session: { session_id: string; websocket_url: string } | null = null;
+  for (let attempt = 1; attempt <= SESSION_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      notifyUi({ type: "server_unreachable", attempt, of: SESSION_ATTEMPTS });
+      await sleep(SESSION_RETRY_MS);
+    }
+    try {
+      const resp = await fetch(`${serverUrl}/v1/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      session = await resp.json() as { session_id: string; websocket_url: string };
+      break;
+    } catch (err) {
+      console.warn(`[brotto] session create attempt ${attempt}/${SESSION_ATTEMPTS} failed:`, err);
+    }
+  }
+  if (!session) throw new Error(`Can't reach ${serverUrl} after ${SESSION_ATTEMPTS} attempts. Is the server running?`);
+  const { session_id, websocket_url } = session;
   sessionId = session_id;
   observationSeq = 0;
 
@@ -567,10 +571,6 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
   ws = new WebSocket(wsUrl);
 
   ws.onopen = async () => {
-    // ponytail: Bug 4 — successful open resets the reconnect backoff
-    // counter. Next time the WS dies we start the delay at 1s again.
-    resetReconnectStateOnSuccess();
-    // ponytail: Bug 5 — start the ping/pong watchdog.
     startHeartbeat();
     const stored = await getStoredModelConfig();
     const payload: Record<string, unknown> = {
@@ -788,87 +788,6 @@ async function cleanup(): Promise<void> {
   if (tid !== null) void dbg.detachFromTab(tid).catch(() => undefined);
   void setBadge(false);
   void chrome.storage.session.clear();
-  // ponytail: Bug 4 — kick off auto-reconnect unless the user clicked
-  // Disconnect (their intent is to stay offline).
-  scheduleReconnect();
-}
-
-// ponytail: Bug 4 — flat-delay reconnect (3 attempts × 5s) for the
-// next task. The in-flight task is already terminated by cleanup();
-// reconnect is purely so the next `run_local_task` doesn't have to
-// wait for the server to come back AND the user to click Connect.
-function scheduleReconnect(): void {
-  if (userInitiatedDisconnect) return;
-  // ponytail: Bug B-fix — only auto-reconnect when a task is actually
-  // in flight. After a clean task ending, ws.onclose → cleanup() runs
-  // with taskInFlight=false, so reconnect early-returns. This avoids
-  // opening ghost WS connections that the server would reject with
-  // "expected task_start, got ping" once the 20s heartbeat fires.
-  if (!taskInFlight) return;
-  if (reconnectTimer !== null) return; // already scheduled
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    notifyUi({ type: "reconnect_giveup" });
-    return;
-  }
-  reconnectAttempts++;
-  notifyUi({ type: "reconnect_attempt", attempt: reconnectAttempts, delayMs: BASE_RECONNECT_DELAY_MS });
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    // ponytail: Bug 4 — empty-path WS fix: we used to call
-    // `new WebSocket(serverUrl)` where serverUrl is the http:// planner
-    // URL, which the browser normalises to ws://host/ (root path). The
-    // server's WS endpoints live at /ws/ext/{session_id} and /ws/{user_id}
-    // — root is 403. Fix: POST /v1/sessions first to mint a fresh
-    // session, then open the WS to the returned websocket_url. The user
-    // will need to click Start for the next task — the harness picks
-    // up this session via the next startRelay's task_start WS message.
-    if (!serverUrl) return;
-    void (async () => {
-      try {
-        const resp = await fetch(`${serverUrl}/v1/sessions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
-        if (!resp.ok) throw new Error(`session create failed: HTTP ${resp.status}`);
-        const { websocket_url } = await resp.json() as { websocket_url: string };
-        if (userInitiatedDisconnect) return; // bailed mid-flight
-        const probe = new WebSocket(websocket_url);
-        probe.onopen = () => {
-          if (userInitiatedDisconnect) { try { probe.close(); } catch { /* ignore */ } return; }
-          ws = probe;
-          resetReconnectStateOnSuccess();
-          startHeartbeat();
-          notifyUi({ type: "ws_ready" });
-        };
-        probe.onerror = () => { try { probe.close(); } catch { /* ignore */ } };
-        probe.onclose = () => {
-          // Probe failed → schedule another attempt. ws.onclose doesn't
-          // fire cleanup() here because we haven't reassigned ws yet
-          // (the original ws was already nulled by cleanup()).
-          void scheduleReconnect();
-        };
-      } catch (e) {
-        console.warn("[brotto] reconnect probe failed:", e);
-        // Failure → retry.
-        void scheduleReconnect();
-      }
-    })();
-  }, BASE_RECONNECT_DELAY_MS);
-}
-
-function cancelReconnect(): void {
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  reconnectAttempts = 0;
-}
-
-function resetReconnectStateOnSuccess(): void {
-  cancelReconnect();
-  reconnectAttempts = 0;
-  userInitiatedDisconnect = false;
 }
 
 function stopRelay(): void {
@@ -896,9 +815,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             return;
           }
           taskTerminalEmitted = false;
-          // ponytail: Bug B-fix — mark a task as in-flight so the
-          // auto-reconnect logic only fires for genuine mid-task WS
-          // death, not for clean task endings.
+          // ponytail: mark a task as in-flight so cleanup() knows the lost
+          // socket cost the user a running task, not a clean ending.
           taskInFlight = true;
           pendingClarifyResolvers.clear();
           pendingApprovalResolvers.clear();
@@ -955,13 +873,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           break;
         }
 
-        // ponytail: Bug 4 — user clicked Disconnect. Mark intent so
-        // auto-reconnect doesn't fight the user; close any in-flight
-        // session; the next sidepanel Connect clears the flag and
-        // re-allows reconnect.
         case "user_disconnect": {
-          userInitiatedDisconnect = true;
-          cancelReconnect();
           taskTerminalEmitted = true;
           taskInFlight = false;
           if (ws) {

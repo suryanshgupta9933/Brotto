@@ -2412,31 +2412,15 @@ function handleEvent(message) {
     // in-flight, so the timer stops and the failure bubble renders via
     // the existing task_failed handler. Here we just update the
     // connection pill; nothing else needs to happen on this event.
-    //
-    // This must not claim "Reconnecting…". Whether a reconnect actually
-    // follows is the background's call — it declines whenever no task is
-    // in flight, which is exactly what a task that just ended cleanly
-    // looks like. The pill used to sit on a reconnect that was never
-    // going to happen. Going neutral is always true, and the
-    // `reconnect_attempt` event below overwrites it in the same tick if a
-    // reconnect really is coming, so there is nothing to wait for.
     case 'disconnected':
       setConnPill(null, 'Idle');
       break;
 
-    // ponytail: Bug 4 — backoff state machine surfaces each attempt to
-    // the user via the amber pill so the sidepanel feels alive.
-    case 'reconnect_attempt':
-      setConnPill('reconnecting', `Reconnecting… (attempt ${message.attempt ?? '?'})`);
-      break;
-
-    // ponytail: Bug 4 — backoff exhausted or user clicked Disconnect.
-    // If a task was in flight, the CONNECTION_LOST bubble already
-    // explained the situation; the pill flipping to 'Disconnected'
-    // is enough. The earlier error message here duplicated that
-    // explanation and added noise to the chat.
-    case 'reconnect_giveup':
-      setConnPill('error', 'Disconnected');
+    // ponytail: the session-create retry in startRelay. A server that is
+    // down used to fail as one silent throw; the user saw the panel sit on
+    // "Starting…" with nothing to explain it.
+    case 'server_unreachable':
+      setConnPill('reconnecting', `Server unreachable… (retry ${message.attempt ?? '?'} of ${message.of ?? '?'})`);
       break;
 
     case 'canonical_status': {
@@ -2454,9 +2438,7 @@ function handleEvent(message) {
         : raw === 'cancelling' ? 'paused'
         : raw === 'waiting_for_approval' ? 'paused'
         : raw;
-      const meta = message.reconnectAttempt !== undefined
-        ? `Reconnecting (${message.reconnectAttempt})…`
-        : raw === 'completed' ? 'Task complete'
+      const meta = raw === 'completed' ? 'Task complete'
         : raw === 'failed' ? 'Task failed'
         : raw === 'cancelled' ? 'Task cancelled'
         : null;
@@ -2768,10 +2750,6 @@ function handleEvent(message) {
 
     case 'canonical_error':
       appendMessage({ role: 'error', text: `${message.code}: ${message.message}` });
-      break;
-
-    case 'canonical_reconnect':
-      setPhase('reconnecting', `Reconnecting (attempt ${message.attempt})…`);
       break;
 
     // ── Plan preview (from orchestrator) ─────────────────────────────────
