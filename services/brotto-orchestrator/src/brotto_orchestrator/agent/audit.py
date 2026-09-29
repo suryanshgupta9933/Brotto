@@ -45,7 +45,15 @@ REDACTED = "[redacted:password]"
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 _SECRET_NAME_RE = re.compile(
-    r"password|passcode|passphrase|one[- ]?time|\botp\b|\bpin\b", re.I
+    r"password|passcode|passphrase|one[- ]?time|\botp\b|\bpin\b"
+    # Not just passwords. An API-key or token field is usually type="text" or
+    # type="email", so the definitive check misses it and the name is all
+    # there is. False positives cost a replay that says [redacted:...] — the
+    # same asymmetry that decides the unresolvable-lookup case.
+    r"|secret|token|api[-_ ]?key|auth(?:orization)?|credential|bearer"
+    r"|private[-_ ]?key|csrf|xsrf|session[-_ ]?id"
+    r"|(?:recovery|backup|security|verification|confirmation)[- _]?code",
+    re.I,
 )
 
 
@@ -291,7 +299,13 @@ class AuditTrail:
         already failing, and the agent loop is the caller.
         """
         self._dropped += 1
-        log.warning("audit: write failed for %s: %s", self.session_id, exc)
+        # The log is the broadly-visible sink, so it gets the exception *type*
+        # and not its message: a serialization error can quote the value that
+        # failed to serialize, and that value is the document we were writing.
+        # The full message stays in the document below, which is per-session,
+        # already field-capped, and is the only place a diagnosis is useful.
+        log.warning("audit: write failed for %s at %s: %s",
+                    self.session_id, where, type(exc).__name__)
         try:
             self._doc["errors"].append({
                 "seq": self._next_seq(),
@@ -299,7 +313,7 @@ class AuditTrail:
                 "error_id": new_error_id(),
                 "code": "audit_write_failed",
                 "where": where,
-                "message": str(exc),
+                "message": str(exc)[:MAX_FIELD_CHARS],
                 "detail": {},
             })
             self._doc["totals"]["errors"] = len(self._doc["errors"])
@@ -335,9 +349,12 @@ class AuditTrail:
 
     @property
     def scratchpad_path(self) -> Path:
-        # Moved here from logs/runs/<id>/scratchpad.txt. The plain-text
-        # format is untouched; only the directory follows the document.
-        return self.dir / "scratchpad.txt"
+        # Per-session filename, not a shared one. `dir` defaults to the root
+        # that holds every session, so a bare "scratchpad.txt" here would make
+        # concurrent tasks overwrite each other's memory and let one session
+        # read another's. The old layout was logs/runs/<task_id>/scratchpad.txt,
+        # which was per-task; this keeps that property while moving the parent.
+        return self.dir / f"{self.session_id}.scratchpad.txt"
 
     @property
     def dropped_writes(self) -> int:

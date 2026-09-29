@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 
 from brotto_orchestrator.agent.audit import (
-    MAX_FIELD_CHARS, REDACTED, AuditTrail, list_sessions, read,
+    MAX_FIELD_CHARS, REDACTED, AuditTrail, is_secret_field, list_sessions,
+    load_scratchpad, read,
 )
 from brotto_orchestrator.agent.context import MemoryEntry, Scratchpad
 
@@ -133,6 +134,52 @@ def test_write_failure_never_raises_into_the_caller(tmp_path):
     t.finish({"status": "completed", "summary": "s"})
     assert t.dropped_writes > 0
     assert t.document()["totals"]["errors"] == t.dropped_writes
+
+
+def test_write_failure_log_line_does_not_quote_the_payload(tmp_path, caplog):
+    """A serialization failure can quote the value that failed to serialize,
+    and that value is the document. The log is the broadly-visible sink, so it
+    gets the exception type; the message stays in the per-session document."""
+    blocker = tmp_path / "afile"
+    blocker.write_text("not a directory")
+    t = AuditTrail("s1", dir=blocker / "sessions")
+    with caplog.at_level("WARNING"):
+        t.set_goal("g")
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "NotADirectoryError" in logged
+    assert "not a directory" not in logged
+
+
+def test_scratchpad_is_per_session_not_shared(tmp_path):
+    """`dir` holds every session, so a bare scratchpad.txt would make
+    concurrent tasks overwrite each other's memory and read each other's."""
+    a = AuditTrail("alpha", dir=tmp_path)
+    b = AuditTrail("beta", dir=tmp_path)
+    assert a.scratchpad_path != b.scratchpad_path
+    assert a.scratchpad_path.parent == b.scratchpad_path.parent == tmp_path
+    assert "alpha" in a.scratchpad_path.name
+
+    a.set_scratchpad(Scratchpad(notes="alpha was here"))
+    b.set_scratchpad(Scratchpad(notes="beta was here"))
+    assert load_scratchpad(a.scratchpad_path).notes == "alpha was here"
+    assert load_scratchpad(b.scratchpad_path).notes == "beta was here"
+
+
+def test_non_password_secrets_are_still_redacted():
+    """An API-key or token field is usually type=text, so the definitive
+    check misses it and the accessible name is all there is."""
+    for name in ("API Key", "Access Token", "Client Secret", "Authorization",
+                 "Recovery Code", "CSRF token", "Private Key"):
+        assert is_secret_field({}, name) is True, name
+    assert is_secret_field({"type": "password"}, "anything at all") is True
+
+
+def test_ordinary_fields_are_not_redacted():
+    """The cost of a false positive is a replay that says [redacted], so the
+    vocabulary has to stay narrower than 'contains a sensitive-ish word'."""
+    for name in ("Email", "Search", "First name", "Shipping address",
+                 "Username", "Phone"):
+        assert is_secret_field({}, name) is False, name
 
 
 def test_record_error_returns_id_and_appends(trail):
