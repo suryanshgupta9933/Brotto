@@ -629,6 +629,7 @@ if (saveSettingsBtn) {
 const state = {
   phase: 'idle',
   plannerUrl: '',
+  taskInFlight: false,
   startTime: 0,
   stepCount: 0,
   pendingClarifyId: null,
@@ -942,18 +943,14 @@ async function sendUserMessage() {
     appendMessage({ role: 'user', text });
     return;
   }
-  // ponytail: any non-terminal phase means a send is in flight. Guard against
-  // double-clicks during the connecting/connected window before the loop sets
-  // 'executing'. Without this, two parallel run_local_task messages race and
-  // the second hits "A local task is already running" in background.
-  //
-  // 'connected' is deliberately NOT a sendable phase: answering a clarify or
-  // approval card sets it while the task is still running, and letting Enter
-  // through there wiped the live transcript (clearMessages runs below) before
-  // failing with "a task is already running".
-  if (state.phase !== 'idle' && state.phase !== 'done' && state.phase !== 'error'
-      && state.phase !== 'completed' && state.phase !== 'cancelled' && state.phase !== 'disconnected'
-      && state.phase !== 'failed') return;
+  // ponytail: one send per run. The phase enum cannot answer this on its own,
+  // because 'connected' means two opposite things: idle-and-ready after "New
+  // task", and mid-run after the user answers an approval or clarify card.
+  // Keying the old guard on phase let that second case through — it cleared
+  // the live transcript and then failed with "a task is already running" —
+  // so the real question is whether a task is in flight, not what the phase
+  // is called.
+  if (state.taskInFlight) return;
   // ponytail: soft length cap. Tasks > MAX_TASK_CHARS get a confirm dialog
   // because long compound instructions are a classic prompt-injection vector.
   // The server logs a warning on the same threshold (defense in depth) but
@@ -972,6 +969,7 @@ async function sendUserMessage() {
   // would re-arm Stop while a cancel was still in flight.
   stopping = false;
   stopBtn.disabled = false;
+  state.taskInFlight = true;
   // ponytail: clear prior conversation so each task starts fresh.
   clearMessages();
   // ponytail: clear the previous task's tab tally (the loop's tabEvent
@@ -1032,6 +1030,7 @@ async function resetForNewTask() {
   // ponytail: drop the previous task's tab tally so each task starts at zero.
   seenTabs.clear();
   updateTabCount();
+  state.taskInFlight = false;
   clearMessages();
   stopTimer();
   setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Ready' : 'Ready');
@@ -1112,7 +1111,7 @@ function setPhase(phase, message) {
   // paused → connected, and stopping on anything non-running killed the
   // interval that the line above had just restarted, so ACTIVE stayed frozen
   // at the answer for the rest of the run.
-  if (TERMINAL_PHASES.has(phase)) stopTimer();
+  if (TERMINAL_PHASES.has(phase)) { stopTimer(); state.taskInFlight = false; }
   // ponytail: the live "still working" bubble must stop blinking the moment
   // the agent stops producing — which includes 'paused', because a pause is
   // the agent asking for approval, a login, or an answer, not the agent
