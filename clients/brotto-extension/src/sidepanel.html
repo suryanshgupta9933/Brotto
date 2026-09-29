@@ -378,14 +378,22 @@
        One row per past task, newest first. A ledger line, not a card: a
        hairline between rows, no box, no radius. Identity is the task text
        (what you asked for); the mono line underneath carries the facts
-       you'd want before reopening one. */
-    .history-list { display: flex; flex-direction: column; margin-top: 4px; }
+       you'd want before reopening one.
+
+       The one rule the spacing has to keep: the gap inside a row is always
+       smaller than the gap between rows. It was the other way round — meta
+       sat 4px under its own task and 11px from the next one — so the facts
+       grouped with the wrong row. */
+    .history-list { display: flex; flex-direction: column; margin-top: 2px; }
 
     .history-item {
       display: grid;
       grid-template-columns: 8px 1fr;
-      gap: 10px;
-      padding: 11px 0;
+      gap: 9px;
+      padding: 13px 0;
+      /* The row is a <button>, so the UA's 2px outset border applies to every
+         side this doesn't name. Zero it, then draw back only the ledger line. */
+      border: 0;
       border-bottom: 1px solid var(--rule);
       background: none;
       font: inherit;
@@ -394,19 +402,23 @@
       cursor: pointer;
       transition: background var(--t);
     }
-    .history-item:first-child { border-top: 1px solid var(--rule); }
+    /* No top border on the first row: .settings-head already closes with a
+       2px black rule, and a hairline 20px under it reads as a second one. */
     .history-item:hover { background: var(--paper-2); }
 
     /* Status is a 6px square, not a dot — at this size the mark is only
-       legible because the system has no curves. Colour carries the state. */
-    .history-mark { width: 6px; height: 6px; margin-top: 4px; background: var(--ink-3); }
+       legible because the system has no curves. Colour carries the state.
+       Sits level with the task text's cap height, not the line box top, so
+       it reads as belonging to the first line rather than floating over
+       the row. */
+    .history-mark { width: 6px; height: 6px; margin-top: 6px; background: var(--ink-3); }
     .history-item[data-status="done"]       .history-mark { background: var(--ok); }
     .history-item[data-status="failed"]     .history-mark { background: var(--bad); }
     .history-item[data-status="interrupted"] .history-mark { background: var(--wait); }
 
     .history-task {
       font-size: 13px;
-      line-height: 1.4;
+      line-height: 1.5;
       color: var(--ink);
       display: -webkit-box;
       -webkit-line-clamp: 2;
@@ -415,12 +427,14 @@
     }
     .history-meta {
       display: flex;
+      flex-wrap: wrap;
       align-items: baseline;
-      gap: 8px;
-      margin-top: 4px;
+      gap: 3px 8px;
+      margin-top: 7px;
       font-family: var(--font-mono);
       font-size: 9.5px;
       font-weight: 500;
+      line-height: 1.4;
       letter-spacing: 0.14em;
       text-transform: uppercase;
       color: var(--ink-3);
