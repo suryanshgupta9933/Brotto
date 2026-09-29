@@ -202,16 +202,19 @@ diff is mostly a signature change plus the new record types:
 
 | Existing call | Becomes |
 |---|---|
-| `run_log.log_step(step, url, action, args, reasoning, thought, outcome)` | `audit.record_turn(...)` — one call per step, with the full nested turn |
+| `run_log.log_step(step, url, action, args, reasoning, thought, outcome)` | `audit.begin_turn(...)` at the top of the step + `audit.record_model/record_action/record_prompt` + `audit.end_turn(...)` at the bottom |
 | `run_log.log_policy(step, kind, domain, action, decision, user_decision)` | `audit.record_policy(...)` — the flat cases (blocks, preflight) |
 | — | `audit.record_prompt(...)` — at the seven prompt sites |
 | — | `audit.record_error(...)` |
 | `run_log.save_scratchpad(...)` | unchanged |
 
-`record_turn` is called once, after the step's actions complete, so the turn
-object is whole. Mid-step granularity is carried by `prompts[].seq` and
-`actions[].started_at`, which is why `prompts` is written during the step but the
-turn is flushed after it.
+A turn is opened with `begin_turn` at the top of a step and closed with
+`end_turn` at the bottom, and every write flushes the whole document
+atomically. A turn is therefore always readable mid-step: `ended_at` is `null`
+until `end_turn` runs, and a resume treats a turn with `ended_at is None` as
+not a resume point. That matters for the monitoring goal — a task killed
+between `begin_turn` and `end_turn` still leaves the observation, the model
+call and every action completed up to the kill on disk, rather than nothing.
 
 ### A.4 Centralising the prompt sites
 
