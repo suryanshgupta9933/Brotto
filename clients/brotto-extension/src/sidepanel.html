@@ -1005,11 +1005,15 @@
     }
 
     /* ─── Status pill: a square, not a dot ────────────────────────────── */
+    /* The state is written out, not just tinted. A 8px square is invisible
+       to anyone who can't separate the two hues, and a hover-only tooltip
+       reaches nobody on touch and is easy to miss on desktop. One mono word
+       costs ~46px and the header has it at every width the wordmark is
+       still shown at. */
     .status-pill {
       display: inline-flex;
       align-items: center;
-      justify-content: center;
-      width: 14px;
+      gap: 5px;
       height: 14px;
       background: transparent;
       border: 0;
@@ -1022,7 +1026,22 @@
       height: 8px;
       background: var(--ink-3);
       display: block;
+      flex-shrink: 0;
       transition: background var(--t);
+    }
+    .status-pill .conn-label {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-2);
+      white-space: nowrap;
+    }
+    /* Below 340px the wordmark is already hidden, so the label can go too
+       and the dot carries the state. */
+    @media (max-width: 340px) {
+      .status-pill .conn-label { display: none; }
     }
     .status-pill.connected    .dot { background: var(--ink); }
     .status-pill.reconnecting .dot { background: var(--wait); animation: pulse 1.4s ease-in-out infinite; }
@@ -1218,6 +1237,7 @@
   <div id="statusPill" class="status-pill" aria-live="polite"
        title="Connection: idle">
     <span id="statusDot" class="dot"></span>
+    <span id="connLabel" class="conn-label">Idle</span>
   </div>
 
   <!-- Model pill: the agent's identity, always visible. The square spinner
@@ -1262,8 +1282,8 @@
     <span class="label">Steps</span>
     <span class="value" id="stepCountActive">0</span>
   </div>
-  <div class="cell">
-    <span class="label">Time</span>
+  <div class="cell" title="Time Brotto spent working. The clock pauses while it waits for you.">
+    <span class="label">Active</span>
     <span class="value" id="timerActive">0.0s</span>
   </div>
   <div class="cell" id="tabCountCell">
@@ -1319,9 +1339,9 @@
       </button>
     </div>
     <div class="settings-section">
-      <label for="plannerUrlSetting">Orchestrator URL</label>
+      <label for="plannerUrlSetting">Server address</label>
       <input id="plannerUrlSetting" class="input" type="url" placeholder="http://localhost:8000">
-      <p class="settings-hint">URL of the Brotto orchestrator server.</p>
+      <p class="settings-hint">Where Brotto sends your tasks. Leave this alone unless you run your own Brotto server.</p>
     </div>
     <div class="settings-section">
       <label for="securityModeSetting">Security mode</label>
@@ -1332,17 +1352,17 @@
       <p id="policyModeHeader" class="settings-hint">Loading current policy…</p>
     </div>
     <div class="settings-section">
-      <label>Organisation-enforced domains (locked)</label>
+      <label>Blocked by your Brotto server</label>
       <div id="floorBlacklist" class="floor-blacklist" aria-live="polite">
         <div class="floor-empty">Loading…</div>
       </div>
-      <p class="settings-hint">These are set by your IT administrator and cannot be removed from this panel. The agent will be hard-blocked from these sites in secure mode.</p>
+      <p class="settings-hint">Set by whoever runs your Brotto server, and you can't remove them here. In secure mode Brotto refuses these sites outright.</p>
     </div>
     <div class="settings-section">
       <label for="blacklistSetting">Your additional blocked domains</label>
       <textarea id="blacklistSetting" class="input" rows="3"
         placeholder="competitor.com&#10;mail.personal.com"></textarea>
-      <p class="settings-hint">One domain per line. Wildcard <code>*.example.com</code> allowed. These are added on top of your organisation's list.</p>
+      <p class="settings-hint">One domain per line. Wildcard <code>*.example.com</code> allowed. These are added on top of the server's list.</p>
     </div>
     <div class="settings-section">
       <h3>Model</h3>

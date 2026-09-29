@@ -6,7 +6,8 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 const stub = `<script>
 window.__sent = [];
 window.__bag = {
-  settings: { serverUrl: 'http://brotto.internal:9999' },
+  settings: { serverUrl: 'http://127.0.0.1:9911' },
+  sessions: window.__seed || [],
   modelConfig: { provider: 'anthropic', model: 'MiniMax-M3.1-Flash-Preview', context_window: 1000000 },
 };
 window.__forceFail = null;

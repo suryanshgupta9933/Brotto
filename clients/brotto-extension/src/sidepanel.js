@@ -157,6 +157,7 @@ const timerActiveEl   = document.getElementById('timerActive');
 const newTaskBtn      = document.getElementById('newTaskBtn');
 const connectionMeta  = document.getElementById('connectionMeta');
 const statusPill      = document.getElementById('statusPill');
+const connLabelEl     = document.getElementById('connLabel');
 
 // ponytail: soft length cap on user task input. Tasks over this many chars
 // trigger a confirm() before send; matching server warning at the same
@@ -242,21 +243,41 @@ const historyOverlay = document.getElementById('historyOverlay');
 const historyClose   = document.getElementById('historyClose');
 const historyList    = document.getElementById('historyList');
 
-historyBtn.addEventListener('click', () => {
-  renderHistory();
+historyBtn.addEventListener('click', async () => {
   historyOverlay.classList.add('open');
+  await renderHistory();
 });
 historyClose.addEventListener('click', () => historyOverlay.classList.remove('open'));
 historyOverlay.addEventListener('click', (e) => {
   if (e.target === historyOverlay) historyOverlay.classList.remove('open');
 });
 
-// ponytail: no session store yet — a task's transcript lives in the DOM and
-// dies with the panel, so this reads empty until one exists. Swap the return
-// for a `chrome.storage.local` read when sessions start being persisted; the
-// renderer below is already shaped for the record it will return.
-function listSessions() {
-  return [];
+// ponytail: sessions are a flat chrome.storage.local list, newest first,
+// capped so the panel's boot read stays trivial. The list is read on every
+// history open rather than held in memory — the whole point is that it
+// survives the panel being closed.
+const SESSION_LIMIT = 20;
+const SESSIONS_KEY = 'sessions';
+
+async function listSessions() {
+  const { sessions } = await chrome.storage.local.get(SESSIONS_KEY);
+  return Array.isArray(sessions) ? sessions : [];
+}
+
+// ponytail: one writer, one reader, one shape. Called from both terminal
+// handlers; `status` is what renderHistory maps to the row's mark.
+async function saveSession({ status, steps, elapsed }) {
+  const task = (state.lastGoal || '').trim();
+  if (!task) return;
+  const sessions = await listSessions();
+  sessions.unshift({
+    task,
+    status,
+    steps: steps || state.stepCount || 0,
+    elapsed: elapsed || '—',
+    startedAt: state.startTime || Date.now(),
+  });
+  await chrome.storage.local.set({ [SESSIONS_KEY]: sessions.slice(0, SESSION_LIMIT) });
 }
 
 function formatSessionTime(ts) {
@@ -271,12 +292,13 @@ function formatSessionTime(ts) {
   return `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} · ${clock}`;
 }
 
-function renderHistory() {
-  const sessions = listSessions();
+async function renderHistory() {
+  const sessions = await listSessions();
   if (sessions.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'history-empty';
-    empty.innerHTML = '<strong>No sessions yet</strong>Finished tasks collect here so you can pick one back up.';
+    empty.innerHTML = '<strong>No tasks yet</strong>Every task you finish is listed here. '
+      + 'Click one to put it back in the box.';
     historyList.replaceChildren(empty);
     return;
   }
@@ -288,6 +310,15 @@ function renderHistory() {
     row.innerHTML = '<span class="history-mark"></span><span><span class="history-task"></span>'
       + '<span class="history-meta"></span></span>';
     row.querySelector('.history-task').textContent = s.task || '(no task text)';
+    // A row you can't act on is a lie about what history is for. Clicking
+    // refills the composer with that task — enough to run it again without
+    // retyping, which is what "pick one back up" has to mean here.
+    row.title = 'Put this task back in the box';
+    row.addEventListener('click', () => {
+      goalEl.value = s.task || '';
+      historyOverlay.classList.remove('open');
+      goalEl.focus();
+    });
     const bits = [s.steps + ' steps', s.elapsed || '—', formatSessionTime(s.startedAt)];
     const meta = row.querySelector('.history-meta');
     bits.forEach((b, i) => {
@@ -378,13 +409,13 @@ async function hydrateSettingsPanel() {
       const empty = document.createElement('div');
       empty.className = 'floor-empty floor-unreachable';
       empty.textContent =
-        '⚠ Could not reach server — organisation policy list unknown. ' +
+        '⚠ Could not reach the server — its blocked-sites list is unknown. ' +
         'Your saved entries below are still active locally.';
       floorBlacklistEl.appendChild(empty);
     } else if (floorList.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'floor-empty';
-      empty.textContent = 'No organisation-wide entries.';
+      empty.textContent = 'None set by the server.';
       floorBlacklistEl.appendChild(empty);
     } else {
       for (const d of floorList) {
@@ -394,7 +425,7 @@ async function hydrateSettingsPanel() {
         const name = document.createTextNode(d + ' ');
         const tag = document.createElement('span');
         tag.className = 'floor-tag';
-        tag.textContent = 'organisation policy';
+        tag.textContent = 'server policy';
         row.appendChild(lock);
         row.appendChild(name);
         row.appendChild(tag);
@@ -611,9 +642,10 @@ function makeIconBtn(svgContent, title, onClick) {
   return btn;
 }
 
-// ponytail: store feedback (good/bad) per task in localStorage so the
-// user has a record of what they rated. The orchestrator can read this
-// later if needed.
+// ponytail: record the rating in localStorage. Nothing reads it — there is
+// no telemetry and the orchestrator never sees it. It exists so the rating
+// survives a panel close, and the button tooltips say as much rather than
+// implying a feedback channel that doesn't exist.
 function recordFeedback(kind) {
   try {
     const stored = JSON.parse(localStorage.getItem('brotto-feedback') || '[]');
@@ -846,7 +878,7 @@ async function sendUserMessage() {
   // default, prompt the user" UX spec.
   if (text.length > MAX_TASK_CHARS
       && !window.confirm(
-        `This task is ${text.length} characters. Long prompts increase the risk of prompt injection. Send anyway?`)) {
+        `This task is ${text.length} characters. Long instructions are more likely to contain something Brotto shouldn't follow. Send anyway?`)) {
     return;
   }
   // ponytail: clear prior conversation so each task starts fresh.
@@ -1102,18 +1134,9 @@ function clearMessages() {
   state.stepCount = 0;
   updateStepCount();
   stopTimer();
-  // ponytail: reset to initial empty-state by adding the empty-state
-  // placeholder back so the panel doesn't look empty.
-  if (!document.getElementById('emptyState')) {
-    const empty = document.createElement('div');
-    empty.id = 'emptyState';
-    empty.className = 'empty-state';
-    empty.innerHTML =
-      '<div class="empty-mark"><img src="assets/logo.svg" alt="Inventic" class="brand-logo brand-logo--lg"></div>' +
-      '<div class="empty-title">Brotto</div>' +
-      '<div class="empty-sub">Describe what you\'d like to do in your browser and Brotto will get it done for you.</div>';
-    messagesEl.appendChild(empty);
-  }
+  // ponytail: this used to inline a third copy of the empty state, which had
+  // drifted from the other two. appendEmptyState is the single JS source.
+  if (!document.getElementById('emptyState')) appendEmptyState();
 }
 
 // ── Core logic (preserved verbatim) ───────────────────────────────────────
@@ -1149,8 +1172,7 @@ function setConnPill(stateName, tooltipLabel) {
   if (!statusPill) return;
   statusPill.classList.remove('connected', 'reconnecting', 'error');
   if (stateName) statusPill.classList.add(stateName);
-  // The visible dot only changes colour. The label is in the tooltip
-  // (hover / screen-reader / aria-live).
+  if (connLabelEl) connLabelEl.textContent = tooltipLabel;
   statusPill.title = `Connection: ${tooltipLabel}`;
 }
 
@@ -1314,13 +1336,18 @@ function clearBlockingCards() {
   messagesEl.querySelectorAll('.approval-card, .clarify-card').forEach((el) => el.remove());
 }
 
+// ponytail: the copy below is duplicated verbatim in sidepanel.html for first
+// paint, before this runs. Two copies, not three — keep them identical.
+// alt is empty on purpose: the mark is decorative and "Brotto" is rendered as
+// the visible title right underneath it, so naming it twice just makes a
+// screen reader say the word twice.
 function createEmptyState() {
   const div = document.createElement('div');
   div.className = 'empty-state';
   div.innerHTML = `
-    <div class="empty-mark"><img src="assets/logo.svg" alt="Inventic" class="brand-logo brand-logo--lg"></div>
+    <div class="empty-mark"><img src="assets/logo.svg" alt="" class="brand-logo brand-logo--lg"></div>
     <div class="empty-title">Brotto</div>
-    <div class="empty-sub">Describe what you'd like to do in your browser and Brotto will get it done for you.</div>
+    <div class="empty-sub">Tell Brotto what to do in this tab. It navigates, clicks, and fills things in — you approve anything sensitive.</div>
   `;
   return div;
 }
@@ -1442,7 +1469,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
     // Click toggles its own state — clicking the other deactivates the
     // first. The .rated-good / .rated-bad classes stay until the user
     // clicks again to clear.
-    const goodBtn = makeIconBtn(LUCIDE_ICONS.thumbsUp, 'Good response', () => {
+    const goodBtn = makeIconBtn(LUCIDE_ICONS.thumbsUp, 'Good response — saved on this device only', () => {
       if (goodBtn.classList.contains('rated-good')) {
         goodBtn.classList.remove('rated-good');
         return;
@@ -1453,7 +1480,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
     });
     toolbar.appendChild(goodBtn);
 
-    const badBtn = makeIconBtn(LUCIDE_ICONS.thumbsDown, 'Bad response', () => {
+    const badBtn = makeIconBtn(LUCIDE_ICONS.thumbsDown, 'Bad response — saved on this device only', () => {
       if (badBtn.classList.contains('rated-bad')) {
         badBtn.classList.remove('rated-bad');
         return;
@@ -1750,7 +1777,7 @@ function appendApprovalCard({ id, reason, action }) {
     // approved_domains / seen_first_time so the next step re-prompts.
     const revoke = document.createElement('button');
     revoke.className = 'btn btn-secondary btn-sm revoke-btn';
-    revoke.textContent = 'Revoke (5s)';
+    revoke.textContent = 'Clear approval (5s)';
     let remaining = 5;
     const tick = setInterval(() => {
       remaining -= 1;
@@ -1758,14 +1785,18 @@ function appendApprovalCard({ id, reason, action }) {
         clearInterval(tick);
         revoke.remove();
       } else {
-        revoke.textContent = `Revoke (${remaining}s)`;
+        revoke.textContent = `Clear approval (${remaining}s)`;
       }
     }, 1000);
     revoke.addEventListener('click', () => {
       clearInterval(tick);
       revoke.remove();
       void sendMessage({ type: 'send_to_server', payload: { type: 'revoke' } });
-      appendMessage({ role: 'assistant', text: 'Approval revoked — next step will re-prompt.' });
+      appendMessage({
+        role: 'assistant',
+        text: 'Approval cleared — Brotto will ask again next time. '
+            + 'Anything the task already submitted is not undone.',
+      });
     });
     // Insert after the last assistant message bubble.
     const lastBubble = messagesEl.querySelector('.message.assistant:last-child') || messagesEl;
@@ -1999,11 +2030,10 @@ function renderPolicyFailureCard(message) {
   if (reason === 'policy_blocked') {
     const blockedDomain = summaryText.match(/Blocked by policy:\s*(\S+)/)?.[1] || '(unknown)';
     return {
-      title: "Action blocked by your organisation's security policy",
+      title: "Action blocked by your Brotto server's policy",
       body:
-        "This task attempted to interact with a domain on your organisation's restricted list. "
-        + "The action was stopped to protect company data. "
-        + "If you need access for legitimate work, contact your IT administrator.",
+        "This task tried to use a domain your Brotto server blocks. Brotto stopped it "
+        + "rather than continue. Ask whoever runs that server to remove the domain.",
       footer: 'Blocked domain: ' + blockedDomain,
     };
   }
@@ -2011,13 +2041,12 @@ function renderPolicyFailureCard(message) {
     return {
       title: 'Task stopped — approval not granted',
       body:
-        'You declined an approval prompt during this task. The agent has stopped rather than continuing '
-        + 'with an action you did not authorise. Start a new task to retry, or contact your administrator '
-        + 'if you need help.',
+        'You declined an approval prompt during this task. Brotto has stopped rather than continuing '
+        + 'with an action you did not approve. Start a new task to retry.',
     };
   }
   if (reason === 'policy_preflight') {
-    // ponypnail: Agent declined upfront after seeing the org blacklist in
+    // ponytail: Agent declined upfront after seeing the org blacklist in
     // its preamble. The harness's `summary` is the agent's own reason
     // ("The organisation's security policy explicitly blacklists
     // mail.google.com. Navigating there would violate your organisation's
@@ -2031,11 +2060,10 @@ function renderPolicyFailureCard(message) {
     // so the footer surfaces it without the user having to read the body.
     const blockedDomain = summaryText.match(/blacklists?\s+([^\s.,;]+)/i)?.[1] || '';
     return {
-      title: "Task not permitted by your organisation's security policy",
+      title: "Task not permitted by your Brotto server's policy",
       body: summaryText ||
-        "Brotto's policy preamble listed this task as out of scope for secure mode. "
-        + "The agent declined the request before navigating anywhere. "
-        + "Contact your IT administrator if you believe this is in error.",
+        "This task is out of scope for secure mode. Brotto declined it before navigating "
+        + "anywhere. Ask whoever runs your Brotto server if you think this is wrong.",
       footer: blockedDomain ? `Blocked domain: ${blockedDomain}` : '',
     };
   }
@@ -2047,7 +2075,7 @@ function renderPolicyFailureCard(message) {
     // the server is back.
     return {
       title: 'Connection to server lost',
-      body: "The agent lost contact with the Brotto server mid-task and can't continue from here. "
+      body: "Brotto lost contact with the server mid-task and can't continue from here. "
         + "Your browser is unaffected — start a new task once the server is back.",
     };
   }
@@ -2225,6 +2253,8 @@ chrome.runtime.onMessage.addListener((message) => {
       // ponytail: clear any lingering login prompt — task is ending, no
       // point leaving the user looking at a "Waiting for sign-in" bubble.
       clearBlockingCards();
+      // Captured before stopTimer, which resets the counter.
+      void saveSession({ status: 'done', steps: message.steps, elapsed: timerActiveEl && timerActiveEl.textContent });
       stopTimer();
       setPhase('done', message.summary ? message.summary.slice(0, 60) : 'Task complete');
       state.stepCount = message.steps || state.stepCount;
@@ -2261,6 +2291,7 @@ chrome.runtime.onMessage.addListener((message) => {
       // terminal event so the user never sees a stale "Waiting" bubble
       // after the task has failed / been cancelled.
       clearBlockingCards();
+      void saveSession({ status: 'failed', elapsed: timerActiveEl && timerActiveEl.textContent });
       stopTimer();
       // ponytail: structured failure bubble (title + body + footer) for
       // policy failures; falls back to the harness's `summary` for everything
@@ -2298,10 +2329,10 @@ chrome.runtime.onMessage.addListener((message) => {
       // before the new clarify card appears so the transition reads as
       // a single flow, not two stacked bubbles.
       clearLoginPrompt();
-      setPhase('paused', 'Clarifying question from agent');
+      setPhase('paused', 'Brotto has a question');
       appendClarifyCard({
         id: message.id,
-        question: message.question || 'The agent needs your guidance.',
+        question: message.question || 'Brotto needs your guidance.',
         reason: message.reason || '',
       });
       break;
@@ -2317,7 +2348,7 @@ chrome.runtime.onMessage.addListener((message) => {
       const preview = a.url ? `${a.type ?? 'action'} → ${a.url}` : (a.type ?? 'action');
       appendApprovalCard({
         id: message.id,
-        reason: message.reason || 'The agent wants to perform an action that needs your approval.',
+        reason: message.reason || 'Brotto wants to perform an action that needs your approval.',
         action: { type: a.type, url: a.url },
       });
       break;
@@ -2350,7 +2381,7 @@ chrome.runtime.onMessage.addListener((message) => {
       setPhase('paused', 'Agent is requesting approval');
       appendApprovalCard({
         id: req.actionId || 'unknown',
-        reason: 'The agent is requesting approval for a sensitive action.',
+        reason: 'Brotto is requesting approval for a sensitive action.',
         action: { type: req.action?.type },
       });
       break;
