@@ -1011,7 +1011,10 @@ class AgentHarness:
                 await deps.ws_send({"type": "stagnation_warning", "reason": reason})
             timings["stagnation"] += time.perf_counter() - t_sg
             stagnation_note = (
-                f"\n\n⚠ STAGNATION DETECTED: {reason}\nYou MUST either try a completely different approach or call cannot_complete now."
+                f"\n\n⚠ STAGNATION DETECTED: {reason}\n"
+                "Do not try another variation of what just failed. Either report what "
+                "you have — a well-established 'none exist' is a complete answer — or, "
+                "if a genuinely different path exists, take it now and say why it differs."
                 if stagnated else ""
             )
 
