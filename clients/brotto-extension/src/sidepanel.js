@@ -2402,8 +2402,16 @@ function handleEvent(message) {
     // in-flight, so the timer stops and the failure bubble renders via
     // the existing task_failed handler. Here we just update the
     // connection pill; nothing else needs to happen on this event.
+    //
+    // This must not claim "Reconnecting…". Whether a reconnect actually
+    // follows is the background's call — it declines whenever no task is
+    // in flight, which is exactly what a task that just ended cleanly
+    // looks like. The pill used to sit on a reconnect that was never
+    // going to happen. Going neutral is always true, and the
+    // `reconnect_attempt` event below overwrites it in the same tick if a
+    // reconnect really is coming, so there is nothing to wait for.
     case 'disconnected':
-      setConnPill('reconnecting', 'Reconnecting…');
+      setConnPill(null, 'Idle');
       break;
 
     // ponytail: Bug 4 — backoff state machine surfaces each attempt to
