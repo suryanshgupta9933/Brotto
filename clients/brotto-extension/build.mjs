@@ -17,11 +17,11 @@ for (const name of ['sidepanel.html', 'sidepanel.js']) {
 }
 copyFileSync(join(__dirname, 'manifest.json'), join(distDir, 'manifest.json'));
 
-// Brand mark PNGs — single source is src/assets/icon.svg; rsvg-convert
-// renders the standard Chrome extension sizes (toolbar, install, store).
-// ponytail: requires `rsvg-convert` (librsvg) on the build host. Same
-// geometry as the inline mark in sidepanel.html — change once, rebuild.
-const iconSvg = join(srcDir, 'assets', 'icon.svg');
+// Brand mark PNGs — single source is src/assets/logo.svg (the same file the
+// panel renders inline); rsvg-convert outputs the standard Chrome sizes
+// (toolbar, install, store). One geometry, one file, change once, rebuild.
+// ponytail: requires `rsvg-convert` (librsvg) on the build host.
+const iconSvg = join(srcDir, 'assets', 'logo.svg');
 const iconsDir = join(distDir, 'icons');
 mkdirSync(iconsDir, { recursive: true });
 for (const size of [16, 32, 48, 128]) {
@@ -36,15 +36,13 @@ for (const size of [16, 32, 48, 128]) {
   ]);
 }
 
-// ponytail: copy all other assets (e.g. logo.svg) verbatim so the side panel
-// can reference them as relative paths (assets/logo.svg). icon.svg is skipped
-// here because it's rendered to PNGs above.
+// ponytail: copy remaining assets verbatim so the side panel can reference
+// them as relative paths (assets/logo.svg).
 const assetsDir = join(srcDir, 'assets');
 if (existsSync(assetsDir)) {
   const destAssetsDir = join(distDir, 'assets');
   mkdirSync(destAssetsDir, { recursive: true });
   for (const file of readdirSync(assetsDir)) {
-    if (file === 'icon.svg') continue;
     const ext = file.slice(file.lastIndexOf('.') + 1).toLowerCase();
     if (['svg', 'png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
       copyFileSync(join(assetsDir, file), join(destAssetsDir, file));

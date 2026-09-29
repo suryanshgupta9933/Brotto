@@ -61,6 +61,7 @@ if ($modelSave) {
         ? chrome.storage.session.set({ modelApiKey: $modelKey.value.trim() })
         : chrome.storage.session.remove('modelApiKey'),
     ]);
+    setModelPill(model);
     if ($modelStatus) {
       $modelStatus.textContent = 'Saved.';
       setTimeout(() => { $modelStatus.textContent = ''; }, 2000);
@@ -68,14 +69,54 @@ if ($modelSave) {
   });
 }
 
+// ponytail: the header pill names the model the agent is actually running.
+// Storage is the only source the panel has — the server's resolved config
+// (env var, per-IP file) isn't visible from here, so the pill shows what
+// this browser last saved and nothing more.
+function setModelPill(model) {
+  if (!modelPillName) return;
+  const label = model || 'Default';
+  // Two copies of the name: the track travels exactly one copy's width, so
+  // the tail hands off to the head without a visible seam.
+  const track = document.createElement('div');
+  track.className = 'model-pill-track';
+  for (let i = 0; i < 2; i++) {
+    const copy = document.createElement('span');
+    copy.textContent = label;
+    // Only the head is content; the tail exists to hand off visually and
+    // would otherwise be announced as a second model name.
+    if (i) copy.setAttribute('aria-hidden', 'true');
+    track.appendChild(copy);
+  }
+  modelPillName.replaceChildren(track);
+  if (modelPill) modelPill.title = model ? `Model: ${model}` : 'Model: server default';
+  fitModelPill();
+  // Geist may still be loading when this first runs, which would measure the
+  // fallback face and under-report the overflow.
+  document.fonts?.ready.then(fitModelPill);
+}
+
+// A name that fits sits dead still; only an overflowing one travels. Measuring
+// beats guessing — a marquee that always runs makes "gpt-4o" drift pointlessly.
+// Compare one copy (plus the gap it needs to hand off) against the window, so
+// the decision never depends on the two-copy track's own width.
+function fitModelPill() {
+  const copy = modelPillName?.firstElementChild?.firstElementChild;
+  if (!copy) return;
+  const gap = parseFloat(getComputedStyle(copy).paddingRight) || 0;
+  modelPillName.classList.toggle('marquee', copy.offsetWidth + gap > modelPillName.clientWidth);
+}
+
 async function hydrateModelSettings() {
-  if (!$modelProvider) return;
   const stored = await chrome.storage.local.get('modelConfig');
   const v = stored.modelConfig;
   if (v && v.model_config) {
-    $modelProvider.value = v.model_config.provider;
+    if ($modelProvider) $modelProvider.value = v.model_config.provider;
     populateModelOptions();
-    $modelName.value = v.model_config.model;
+    if ($modelName) $modelName.value = v.model_config.model;
+    setModelPill(v.model_config.model);
+  } else {
+    setModelPill(null);
   }
   // Don't re-hydrate the API key field — it's in chrome.storage.session
   // and we deliberately don't surface it in the UI (no plaintext display).
@@ -87,7 +128,9 @@ const emptyState   = document.getElementById('emptyState');
 const goalEl       = document.getElementById('goal');
 const sendBtn      = document.getElementById('sendBtn');
 const stopBtn      = document.getElementById('stopBtn');
-const workingInd   = document.getElementById('workingIndicator');
+const modelPill    = document.getElementById('modelPill');
+const modelSpinner = document.getElementById('modelSpinner');
+const modelPillName = document.getElementById('modelPillName');
 const settingsBtn  = document.getElementById('settingsBtn');
 const settingsOverlay = document.getElementById('settingsOverlay');
 const settingsPanel   = document.getElementById('settingsPanel');
@@ -109,11 +152,6 @@ const timerActiveEl   = document.getElementById('timerActive');
 const newTaskBtn      = document.getElementById('newTaskBtn');
 const connectionMeta  = document.getElementById('connectionMeta');
 const statusPill      = document.getElementById('statusPill');
-// ponytail: tab-bar handles — render each lifecycle event (open/close/nav/
-// focus) as a row so the user sees what the agent touched in their browser.
-const tabBar         = document.getElementById('tabBar');
-const tabBarBody     = document.getElementById('tabBarBody');
-const tabBarToggle   = document.getElementById('tabBarToggle');
 
 // ponytail: soft length cap on user task input. Tasks over this many chars
 // trigger a confirm() before send; matching server warning at the same
@@ -124,73 +162,21 @@ const MAX_TASK_CHARS = 1000;
 // ── Settings panel ────────────────────────────────────────────────────────
 // (handlers below — reads chrome.storage.local, writes on Save)
 
-// ponytail: tab-bar — collapsed/expanded by default. Each row shows badge
-// (kind), title (or url), and a one-line context line.
+// ponytail: the TABS cell is the only tab surface — the old "Tabs opened"
+// lifecycle list was removed, but the events still feed the count.
 const seenTabs = new Map(); // tabId → {kind, url, title, lastUpdate}
-let tabBarCollapsed = false;
-function renderTabBar() {
-  // ponytail: tab bar is hidden — the new TABS status cell handles the
-  // count, and the tab lifecycle rows were noisy (badge + title + URL +
-  // tab id, with the badge floating outside the pill). We keep the
-  // function around so the tab lifecycle still feeds the cell, but the
-  // panel itself is no longer rendered.
-  if (tabBar) tabBar.hidden = true;
-  return;
-  tabBarBody.replaceChildren();
-  if (seenTabs.size === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'tab-row-empty';
-    empty.textContent = 'No tabs opened by the agent.';
-    tabBarBody.appendChild(empty);
-    return;
-  }
-  // ponytail: render in event order; we keep insertion order via Map. Most
-  // recent row at the bottom by appending as we iterate.
-  for (const [, row] of seenTabs) {
-    const row_el = document.createElement('div');
-    row_el.className = 'tab-row';
-    const badge = document.createElement('span');
-    badge.className = 'tab-row-badge ' + row.kind;
-    badge.textContent = row.kind;
-    row_el.appendChild(badge);
-    const info = document.createElement('div');
-    info.className = 'tab-row-info';
-    const titleEl = document.createElement('div');
-    titleEl.className = 'tab-row-title';
-    titleEl.textContent = row.title || row.url || '(no title)';
-    titleEl.title = row.title || row.url || '';
-    info.appendChild(titleEl);
-    const urlEl = document.createElement('div');
-    urlEl.className = 'tab-row-url';
-    urlEl.textContent = row.url || '—';
-    urlEl.title = row.url || '';
-    info.appendChild(urlEl);
-    row_el.appendChild(info);
-    tabBarBody.appendChild(row_el);
-  }
-  // tabBar.hidden = false removed — the new TABS status cell owns the count.
-  // The lifecycle rows are still built (so the data path stays intact for
-  // any future debug tool) but the panel itself never renders.
-}
 function recordTabEvent(ev) {
   if (!ev) return;
-  // ponytail: "closed" removes the row; everything else updates in place.
   if (ev.kind === 'closed') {
     seenTabs.delete(ev.tabId);
   } else {
     seenTabs.set(ev.tabId, { tabId: ev.tabId, kind: ev.kind, url: ev.url, title: ev.title });
   }
-  renderTabBar();
   updateTabCount();
 }
 function updateTabCount() {
-  const cell = document.getElementById('tabCountCell');
   const value = document.getElementById('tabCountActive');
-  if (!cell || !value) return;
-  const n = seenTabs.size;
-  value.textContent = String(n);
-  // Hide the cell when zero — empty stats are noise.
-  cell.hidden = n === 0;
+  if (value) value.textContent = String(seenTabs.size);
 }
 
 // ponytail: context utilization cell — backend is the source of truth.
@@ -237,14 +223,6 @@ async function fetchContextWindow() {
     updateContextUsage();
   } catch { /* offline / not running — backend will fill it in */ }
 }
-if (tabBarToggle) {
-  tabBarToggle.addEventListener('click', () => {
-    tabBarCollapsed = !tabBarCollapsed;
-    tabBar.classList.toggle('collapsed', tabBarCollapsed);
-    tabBarToggle.textContent = tabBarCollapsed ? '+' : '−';
-    tabBarToggle.setAttribute('aria-expanded', String(!tabBarCollapsed));
-  });
-}
 settingsClose.addEventListener('click', () => settingsOverlay.classList.remove('open'));
 settingsOverlay.addEventListener('click', (e) => {
   if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');
@@ -252,6 +230,76 @@ settingsOverlay.addEventListener('click', (e) => {
 plannerUrlSetting.addEventListener('input', () => {
   plannerUrlEl.value = plannerUrlSetting.value;
 });
+
+// ── Session history ────────────────────────────────────────────────────────
+const historyBtn     = document.getElementById('historyBtn');
+const historyOverlay = document.getElementById('historyOverlay');
+const historyClose   = document.getElementById('historyClose');
+const historyList    = document.getElementById('historyList');
+
+historyBtn.addEventListener('click', () => {
+  renderHistory();
+  historyOverlay.classList.add('open');
+});
+historyClose.addEventListener('click', () => historyOverlay.classList.remove('open'));
+historyOverlay.addEventListener('click', (e) => {
+  if (e.target === historyOverlay) historyOverlay.classList.remove('open');
+});
+
+// ponytail: no session store yet — a task's transcript lives in the DOM and
+// dies with the panel, so this reads empty until one exists. Swap the return
+// for a `chrome.storage.local` read when sessions start being persisted; the
+// renderer below is already shaped for the record it will return.
+function listSessions() {
+  return [];
+}
+
+function formatSessionTime(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const clock = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const sameDay = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (sameDay) return `Today · ${clock}`;
+  if (d.toDateString() === yesterday.toDateString()) return `Yesterday · ${clock}`;
+  return `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} · ${clock}`;
+}
+
+function renderHistory() {
+  const sessions = listSessions();
+  if (sessions.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'history-empty';
+    empty.innerHTML = '<strong>No sessions yet</strong>Finished tasks collect here so you can pick one back up.';
+    historyList.replaceChildren(empty);
+    return;
+  }
+  historyList.replaceChildren(...sessions.map((s) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'history-item';
+    row.dataset.status = s.status || 'done';
+    row.innerHTML = '<span class="history-mark"></span><span><span class="history-task"></span>'
+      + '<span class="history-meta"></span></span>';
+    row.querySelector('.history-task').textContent = s.task || '(no task text)';
+    const bits = [s.steps + ' steps', s.elapsed || '—', formatSessionTime(s.startedAt)];
+    const meta = row.querySelector('.history-meta');
+    bits.forEach((b, i) => {
+      if (i) {
+        const sep = document.createElement('span');
+        sep.className = 'sep';
+        sep.textContent = '/';
+        meta.appendChild(sep);
+      }
+      const span = document.createElement('span');
+      span.textContent = b;
+      if (i === bits.length - 1) span.className = 'when';
+      meta.appendChild(span);
+    });
+    return row;
+  }));
+}
 
 // ── Settings: load + save (first chrome.storage.local writes — today the
 // SW only reads `get("settings")`, so this is the seed for that key).
@@ -520,6 +568,7 @@ const state = {
 };
 
 let timerInterval = null;
+let timerPausedAt = 0;
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -790,10 +839,10 @@ async function sendUserMessage() {
   }
   // ponytail: clear prior conversation so each task starts fresh.
   clearMessages();
-  // ponytail: clear previous task's tab-bar (the loop's tabEvent subscriptions
-  // are rebounded inside the local-driver for every run_local_task).
+  // ponytail: clear the previous task's tab tally (the loop's tabEvent
+  // subscriptions are rebounded inside the local-driver for every run_local_task).
   seenTabs.clear();
-  if (tabBar) tabBar.hidden = true;
+  updateTabCount();
   appendMessage({ role: 'user', text });
   state.lastGoal = text;
   goalEl.value = '';
@@ -846,11 +895,9 @@ async function resetForNewTask() {
   // posting a new goal.
   state.lastGoal = '';
   state.stepCount = 0;
-  // ponytail: drop the previous task's tab-bar state so each task starts
-  // with a fresh journal of what was opened.
+  // ponytail: drop the previous task's tab tally so each task starts at zero.
   seenTabs.clear();
-  renderTabBar();
-  if (tabBar) tabBar.hidden = true;
+  updateTabCount();
   clearMessages();
   stopTimer();
   setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Ready' : 'Ready');
@@ -869,9 +916,17 @@ function logSilently(message) {
 
 // ── Phase / UI helpers ────────────────────────────────────────────────────
 function setPhase(phase, message) {
+  const wasPaused = state.phase === 'paused';
   state.phase = phase;
   const running = phase === 'executing' || phase === 'paused';
-  workingInd.classList.toggle('active', running);
+  modelSpinner.classList.toggle('active', running);
+  // ponytail: the clock measures agent work, not wall time. Every
+  // user-blocking wait (approval / login / clarify) arrives as phase
+  // 'paused', so pausing and resuming here — not at each of the six call
+  // sites — keeps the blocked window out of the total. Resume shifts the
+  // start time forward by the paused duration rather than resetting it.
+  if (phase === 'paused') pauseTimer();
+  else if (wasPaused) resumeTimer();
   stopBtn.style.display = running ? '' : 'none';
   // ponytail: re-enable the composer explicitly when the task ends so a
   // "done" / "error" / "cancelled" / "disconnected" / "failed" phase
@@ -921,19 +976,41 @@ function setPhase(phase, message) {
 
 function clearTimer() {
   if (timerInterval !== null) { clearInterval(timerInterval); timerInterval = null; }
+  timerPausedAt = 0;
   state.startTime = 0;
   timerEl.textContent = '0.0s';
   if (timerActiveEl) timerActiveEl.textContent = '0.0s';
 }
 
+function renderElapsed() {
+  const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
+  if (timerEl) timerEl.textContent = elapsed;
+  if (timerActiveEl) timerActiveEl.textContent = elapsed;
+}
+
 function startTimer() {
   clearTimer();
   state.startTime = Date.now();
-  timerInterval = setInterval(() => {
-    const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
-    if (timerEl) timerEl.textContent = elapsed;
-    if (timerActiveEl) timerActiveEl.textContent = elapsed;
-  }, 100);
+  timerInterval = setInterval(renderElapsed, 100);
+}
+
+// ponytail: freeze the clock while the agent waits on the user. Guarded on
+// timerInterval so a pause arriving outside a run (e.g. 'Stopping…' before
+// the task ever started) is a no-op rather than a stuck resume.
+function pauseTimer() {
+  if (timerInterval === null || timerPausedAt) return;
+  renderElapsed();
+  clearInterval(timerInterval);
+  timerInterval = null;
+  timerPausedAt = Date.now();
+}
+
+function resumeTimer() {
+  if (!timerPausedAt) return;
+  state.startTime += Date.now() - timerPausedAt;
+  timerPausedAt = 0;
+  timerInterval = setInterval(renderElapsed, 100);
+  renderElapsed();
 }
 
 function stopTimer() {
@@ -941,22 +1018,26 @@ function stopTimer() {
     clearInterval(timerInterval);
     timerInterval = null;
   }
+  timerPausedAt = 0;
   // ponytail: write the final time to BOTH elements every call. Earlier code
   // only updated the hidden header timer and skipped the visible status bar
   // on stopTimer, so the user kept seeing the last interval value rather than
   // the locked final time. Idempotent — safe to call after the interval is
   // already cleared.
-  if (state.startTime > 0) {
-    const finalElapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
-    if (timerEl) timerEl.textContent = finalElapsed;
-    if (timerActiveEl) timerActiveEl.textContent = finalElapsed;
-  }
+  if (state.startTime > 0) renderElapsed();
 }
 
 function updateStepCount() {
   const label = state.stepCount + (state.stepCount === 1 ? ' step' : ' steps');
   stepCountEl.textContent = label;
   if (stepCountActive) stepCountActive.textContent = String(state.stepCount);
+  // Flash the cell so a step landing is felt, not just read. The class has to
+  // be removed and re-added or the animation won't restart on repeat steps.
+  const cell = stepCountActive?.closest('.cell');
+  if (!cell) return;
+  cell.classList.remove('flash');
+  void cell.offsetWidth;
+  cell.classList.add('flash');
 }
 
 function clearMessages() {
@@ -1014,6 +1095,28 @@ function setConnPill(stateName, tooltipLabel) {
   // The visible dot only changes colour. The label is in the tooltip
   // (hover / screen-reader / aria-live).
   statusPill.title = `Connection: ${tooltipLabel}`;
+}
+
+// ponytail: transient notice for events that leave no other trace. One
+// element at a time — a second toast replaces the first rather than
+// stacking, because a stack of them is just a slower chat message.
+// Removal runs on its own timer instead of `animationend`, which never
+// fires under prefers-reduced-motion (the animation is set to `none`)
+// and would strand the toast on screen.
+let toastTimer = null;
+let toastGoneTimer = null;
+function toast(text, kind, ms = 2600) {
+  clearTimeout(toastTimer);
+  clearTimeout(toastGoneTimer);
+  document.querySelector('.toast')?.remove();
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  el.setAttribute('role', 'status');
+  el.textContent = text;
+  document.body.appendChild(el);
+  toastTimer = setTimeout(() => el.classList.add('leaving'), ms);
+  // 200ms covers the 180ms leave animation with a little slack.
+  toastGoneTimer = setTimeout(() => el.remove(), ms + 200);
 }
 
 async function startTask() {
@@ -1096,7 +1199,7 @@ function clearMessages() {
   updateStepCount();
   stopTimer();
   seenTabs.clear();
-  if (tabBar) tabBar.hidden = true;
+  updateTabCount();
   // ponytail: clean up any lingering login-pause fallback buttons from a
   // previous task — a leftover Continue button is confusing once the user
   // is starting fresh.
@@ -1509,7 +1612,8 @@ function appendApprovalCard({ id, reason, action }) {
   }
 
   const card = document.createElement('div');
-  card.className = 'approval-card';
+  // .blocking breathes the left rule — the card is waiting on the user.
+  card.className = 'approval-card blocking';
 
   const header = document.createElement('div');
   header.className = 'approval-header';
@@ -1594,7 +1698,7 @@ function appendClarifyCard({ id, question, reason }) {
   if (prior) prior.remove();
 
   const card = document.createElement('div');
-  card.className = 'clarify-card';
+  card.className = 'clarify-card blocking';
   card.dataset.clarifyId = id;
 
   const header = document.createElement('div');
@@ -1717,8 +1821,13 @@ function startAssistantMessage({ icon, title, meta }) {
   iconEl.innerHTML = icon || '&#8594;';
 
   const textNode = document.createTextNode(title || 'Working…');
+  // The caret is the only "still typing" signal the chat has. finishAssistant-
+  // Message rewrites the bubble's innerHTML, so it clears itself.
+  const caret = document.createElement('span');
+  caret.className = 'caret';
   bubble.appendChild(iconEl);
   bubble.appendChild(textNode);
+  bubble.appendChild(caret);
 
   msg.appendChild(bubble);
   messagesEl.appendChild(msg);
@@ -2193,25 +2302,14 @@ goalEl.focus();
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.plannerUrl = url;
   } catch {
-    // ponytail: Bug 9 — server unreachable on open. Surface a one-line
-    // toast so the user knows their UI isn't actually wired to a live
-    // server. Auto-dismiss after 5s. Don't mark plannerUrl so the
-    // connection pill stays in the default "Idle" state.
+    // ponytail: Bug 9 — server unreachable on open. A toast, not a chat
+    // message: this is a transient condition, not part of the transcript,
+    // and the connection pill already says it. The previous version posted
+    // a role:'error' message then tried to remove it with '.message-error'
+    // — but appendMessage writes class "message error" (a space), so the
+    // selector never matched and the notice sat in the chat forever.
     state.serverReachable = false;
     setConnPill(null, 'Server unreachable');
-    appendMessage({ role: 'error',
-      text: '⚠ Server unreachable — settings still work locally. Will auto-reconnect when it returns.',
-    });
-    // Don't keep the toast around forever; remove the most-recent error
-    // message after 5s so the chat stays clean for the next prompt.
-    setTimeout(() => {
-      const messages = messagesEl.querySelectorAll('.message-error');
-      if (messages.length) {
-        const oldest = messages[0];
-        if (oldest.textContent && oldest.textContent.includes('Server unreachable')) {
-          oldest.remove();
-        }
-      }
-    }, 5000);
+    toast('Server unreachable — settings still work locally', 'bad', 5000);
   }
 })();

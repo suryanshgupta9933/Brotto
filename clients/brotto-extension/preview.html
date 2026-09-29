@@ -1,0 +1,168 @@
+<!doctype html>
+<!-- Dev-only harness: renders dist/sidepanel.html in iframes at real
+     side-panel widths, with fixture content injected so every UI state can
+     be eyeballed without running the agent. Not shipped — build.mjs only
+     copies sidepanel.html/js/assets. Serve from this directory. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Brotto panel preview</title>
+<style>
+  body { margin: 0; background: #E5E5E5; font: 12px ui-monospace, monospace; display: flex; gap: 24px; padding: 24px; }
+  figure { margin: 0; }
+  figcaption { color: #5C5C5C; margin-bottom: 6px; letter-spacing: 0.1em; text-transform: uppercase; }
+  iframe { border: 1px solid #000; display: block; }
+</style>
+</head>
+<body>
+
+<figure><figcaption>empty · 400</figcaption><iframe data-fx="empty" src="dist/sidepanel.html" width="400" height="640"></iframe></figure>
+<figure><figcaption>running · 400</figcaption><iframe data-fx="running" src="dist/sidepanel.html" width="400" height="640"></iframe></figure>
+<figure><figcaption>done · 360</figcaption><iframe data-fx="done" src="dist/sidepanel.html" width="360" height="640"></iframe></figure>
+<figure><figcaption>failed · 400</figcaption><iframe data-fx="failed" src="dist/sidepanel.html" width="400" height="640"></iframe></figure>
+<figure><figcaption>history · 400</figcaption><iframe data-fx="history" src="dist/sidepanel.html" width="400" height="640"></iframe></figure>
+<figure><figcaption>history empty · 400</figcaption><iframe data-fx="history-empty" src="dist/sidepanel.html" width="400" height="640"></iframe></figure>
+<figure><figcaption>settings · 400</figcaption><iframe data-fx="settings" src="dist/sidepanel.html" width="400" height="640"></iframe></figure>
+
+<script type="text/plain" id="fx-running">
+document.getElementById('emptyState').remove();
+document.getElementById('statusBar').classList.add('active');
+setModelPill('MiniMax-M3.1-Flash-Preview');
+document.getElementById('modelSpinner').classList.add('active');
+document.getElementById('statusPill').classList.add('connected');
+document.getElementById('stepCountActive').textContent = '7';
+document.getElementById('timerActive').textContent = '42.1s';
+document.getElementById('contextValue').textContent = '38%';
+
+document.getElementById('tabCountActive').textContent = '3';
+
+document.getElementById('messages').innerHTML = [
+  '<div class="message user"><div class="bubble">Find the cheapest flight from SFO to Lisbon next month and put it in my cart.</div></div>',
+  '<div class="message assistant"><div class="bubble">Three options. The cheapest is a SFO–LIS non-stop on the 14th at $412 round trip.</div></div>',
+  '<div class="message assistant"><div class="step-bubble">' +
+    '<div class="msg-meta"><span class="msg-name">Brotto</span></div>' +
+    '<div class="step-head">Opening the airline’s results page and filtering to non-stop only.</div>' +
+    '<div class="step-page-chip">' +
+      '<span class="step-page-chip-icon">■</span>' +
+      '<span class="step-page-chip-title">Flights · SFO → LIS</span>' +
+      '<span class="step-page-chip-url">flights.example.com/results</span>' +
+    '</div>' +
+    '<button class="step-details-toggle">Show details</button>' +
+    '<div class="step-details-body">clicked: filter.nonstop\nwaited: 1.2s\nread: 18 results</div>' +
+  '</div></div>',
+  '<div class="message assistant"><div class="approval-card blocking">' +
+    '<div class="approval-header"><span class="approval-badge">Needs approval</span></div>' +
+    '<div class="approval-body">Adding the $412 fare to your cart holds it for 20 minutes. Confirm?</div>' +
+    '<div class="approval-preview">flight SFO-LIS-14JUN · 1 passenger</div>' +
+    '<div class="approval-actions">' +
+      '<button class="btn btn-sm btn-primary">Add to cart</button>' +
+      '<button class="btn btn-sm">Not now</button>' +
+    '</div>' +
+  '</div></div>'
+].join('');
+</script>
+
+<script type="text/plain" id="fx-done">
+document.getElementById('emptyState').remove();
+document.getElementById('statusBar').classList.add('active');
+document.getElementById('statusPill').classList.add('connected');
+setModelPill('MiniMax-M3.1-Flash-Preview');
+document.getElementById('stepCountActive').textContent = '14';
+document.getElementById('timerActive').textContent = '1m 08s';
+document.getElementById('newTaskBtn').classList.add('visible');
+document.getElementById('messages').innerHTML = [
+  '<div class="message user"><div class="bubble">What’s the cheapest flight to Lisbon next month?</div></div>',
+  '<div class="message done"><div class="bubble">' +
+    '<div class="done-header"><span class="done-icon">■</span>Done</div>' +
+    '<div class="final-answer"><div class="final-answer-text">A non-stop SFO–LIS on <strong>14 June for $412</strong> round trip, on United. The two-stop TAP option is $398 but adds nine hours.</div>' +
+      '<div class="facts">' +
+        '<div class="facts-group"><span class="facts-label">Flight</span><span class="facts-code">UA 1490</span><span class="facts-date">14 Jun</span></div>' +
+        '<div class="facts-group"><span class="facts-label">Fare</span><span class="facts-code">$412 USD</span><span class="facts-date">held 20 min</span></div>' +
+      '</div>' +
+      '<div class="final-answer-toolbar">' +
+        '<button class="final-answer-icon-btn rated-good" title="Good">✓</button>' +
+        '<button class="final-answer-icon-btn" title="Retry">↻</button>' +
+        '<button class="final-answer-icon-btn" title="Copy">⧉</button>' +
+      '</div>' +
+    '</div>' +
+  '</div></div>'
+].join('');
+</script>
+
+<script type="text/plain" id="fx-failed">
+// Drives the real render paths so what's reviewed here is what ships.
+setModelPill('MiniMax-M3.1-Flash-Preview');
+document.getElementById('emptyState').remove();
+document.getElementById('statusBar').classList.add('active');
+document.getElementById('statusPill').classList.add('error');
+document.getElementById('stepCountActive').textContent = '4';
+document.getElementById('timerActive').textContent = '0.2s';
+document.getElementById('contextValue').textContent = '2%';
+document.getElementById('tabCountActive').textContent = '0';
+document.getElementById('newTaskBtn').classList.add('visible');
+
+document.getElementById('messages').innerHTML =
+  '<div class="message user"><div class="bubble">Email Dave about the Q3 numbers and attach the deck.</div></div>';
+
+appendFailureBubble({
+  title: "Task not permitted by your organisation's security policy",
+  body: "Brotto's policy preamble listed this task as out of scope for secure mode. "
+      + 'The agent declined the request before navigating anywhere.',
+  footer: 'Blocked domain: mail.google.com',
+});
+
+toast('Agent declined — nothing was sent', 'bad', 20000);
+</script>
+
+<script type="text/plain" id="fx-history">
+setModelPill('MiniMax-M3.1-Flash-Preview');
+// No session store exists yet (listSessions() returns []), so the fixture
+// swaps in data to make the design reviewable.
+var H = 3600e3, D = 864e5, now = Date.now();
+listSessions = function () { return [
+  { task: 'Find the cheapest flight from SFO to Lisbon next month and put it in my cart.',
+    status: 'done', steps: 14, elapsed: '1m 08s', startedAt: now - 22 * 60e3 },
+  { task: 'Apply to the two data-engineering roles I saved, using the CV in my Downloads.',
+    status: 'done', steps: 31, elapsed: '4m 52s', startedAt: now - 3 * H },
+  { task: 'Renew the passport appointment — the site keeps logging me out halfway through.',
+    status: 'interrupted', steps: 6, elapsed: '1m 41s', startedAt: now - 26 * H },
+  { task: 'Compare last quarter’s revenue by region against the same quarter last year and pull out the three biggest movers.',
+    status: 'failed', steps: 4, elapsed: '0m 22s', startedAt: now - 2 * D },
+  { task: 'Book the cheapest Tuesday return from Berlin, checked bag included.',
+    status: 'done', steps: 9, elapsed: '0m 54s', startedAt: now - 5 * D }
+]; };
+document.getElementById('historyBtn').click();
+</script>
+
+<script type="text/plain" id="fx-history-empty">
+setModelPill('MiniMax-M3.1-Flash-Preview');
+document.getElementById('historyBtn').click();
+</script>
+
+<script type="text/plain" id="fx-settings">
+setModelPill('MiniMax-M3.1-Flash-Preview');
+document.getElementById('settingsOverlay').classList.add('open');
+document.getElementById('securityModeSetting').value = 'secure';
+var pmh = document.getElementById('policyModeHeader');
+pmh.textContent = 'Secure mode is on. Three sites are blocked.';
+pmh.classList.add('secure');
+var vs = document.getElementById('settingsVerifyStatus');
+vs.className = 'settings-hint settings-verify ok';
+vs.innerHTML = '<span class="dot"></span>Policy verified 2 seconds ago';
+document.getElementById('floorBlacklist').innerHTML =
+  '<div class="floor-item">mail.internal.acme.com <span class="floor-tag">SSO</span></div>' +
+  '<div class="floor-item">github.com <span class="floor-tag">Source</span></div>' +
+  '<div class="floor-item">okta.acme.com <span class="floor-tag">SSO</span></div>';
+</script>
+
+<script>
+for (const frame of document.querySelectorAll('iframe[data-fx]')) {
+  const name = frame.dataset.fx;
+  const code = name === 'empty' ? '' : document.getElementById('fx-' + name).textContent;
+  const inject = () => { try { frame.contentWindow.eval(code); } catch (e) { console.error(name, e); } };
+  if (frame.contentDocument && frame.contentDocument.getElementById('messages')) inject();
+  else frame.addEventListener('load', inject);
+}
+</script>
+</body>
+</html>

@@ -6,69 +6,61 @@
   <title>Brotto</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet">
   <style>
-    /* ─── Inventic Design Tokens (v1.0) ────────────────────────────────────
-       Brand: Inventic Blue #0052CC + Light Blue #6DB3D8
-       Type: Poppins (headings) + Inter (body)
-       See: docs/design-instructions.md
-    ─────────────────────────────────────────────────────────────────────── */
+    /* ═══ BROTTO — "Ink & Rule" design system v2 ═══════════════════════════
+       Monochrome brand. The mark is black, the wordmark is black, and colour
+       appears only to report agent state (live / needs you / done / blocked).
+       Hierarchy comes from border *weight*, never from shadow — there is not
+       a single box-shadow in this file. Corners are square by policy.
+       Type: Geist for anything you read or act on, Geist Mono (10px, 0.14em,
+       uppercase) for every label, stat, and secondary action.
+    ══════════════════════════════════════════════════════════════════════ */
     :root {
-      /* Brand palette */
-      --brand-primary:       #0052CC;
-      --brand-primary-hover: #003D99;
-      --brand-primary-soft:  rgba(0, 82, 204, 0.10);
-      --brand-light:         #6DB3D8;
-      --brand-light-soft:    rgba(109, 179, 216, 0.16);
-      --brand-deep:          #003D99;
-      --brand-navy:          #001A4D;
-      --brand-white:         #FFFFFF;
+      /* Ink — the brand is its own black */
+      --ink:       #000000;
+      --ink-2:     #5C5C5C;   /* secondary text */
+      --ink-3:     #8E8E8E;   /* faint / placeholder */
 
-      /* Surfaces */
-      --bg:           #FFFFFF;
-      --surface:      #FFFFFF;
-      --surface-1:    #F8FAFC;
-      --surface-2:    #EEF3F8;
-      --surface-3:    #E2EAF2;
+      /* Paper — layered surfaces, no elevation, only tone */
+      --paper:     #FFFFFF;
+      --paper-2:   #F5F5F5;   /* sunken: inputs, code, hover rows */
+      --paper-3:   #EBEBEB;   /* raised: headers, bars */
 
-      /* Borders */
-      --border:       #D9E2EC;
-      --border-soft:  #E8EEF4;
+      /* Rules — the entire hierarchy system */
+      --rule:      #E5E5E5;   /* hairline: default separation */
+      --rule-2:    #C9C9C9;   /* medium: emphasis, control borders */
+      --rule-ink:  #000000;   /* hairline but emphatic */
 
-      /* Text */
-      --text:         #1A1A1A;
-      --text-muted:   #5A6877;
-      --text-faint:   #94A2B0;
+      /* State — the only colour in the system */
+      --ok:        #16A34A;
+      --ok-soft:   rgba(22, 163, 74, 0.08);
+      --wait:      #B45309;
+      --wait-soft: rgba(180, 83, 9, 0.08);
+      --bad:       #DC2626;
+      --bad-soft:  rgba(220, 38, 38, 0.08);
 
-      /* Status (kept distinct from brand) */
-      --green:        #16A34A;
-      --green-soft:   rgba(22, 163, 74, 0.10);
-      --red:          #DC2626;
-      --red-soft:     rgba(220, 38, 38, 0.10);
-      --amber:        #D97706;
-      --amber-soft:   rgba(217, 119, 6, 0.10);
+      /* Type */
+      --font-ui:   'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
-      /* Radii */
-      --radius-sm:    6px;
-      --radius:       10px;
-      --radius-lg:    14px;
-      --radius-xl:    20px;
-
-      /* Shadows */
-      --shadow-sm:    0 1px 2px rgba(0, 26, 77, 0.06);
-      --shadow:       0 4px 12px rgba(0, 26, 77, 0.08), 0 1px 3px rgba(0, 26, 77, 0.05);
-      --shadow-lg:    0 10px 28px rgba(0, 26, 77, 0.12), 0 2px 6px rgba(0, 26, 77, 0.06);
-
-      --transition:   all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+      /* Motion — 120ms flat, matching the reference's instant idiom */
+      --t: 120ms;
     }
 
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      /* The system has no curves. Non-negotiable — this is the look. */
+      border-radius: 0 !important;
+    }
 
     html, body {
       height: 100%;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.55 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--paper);
+      color: var(--ink);
+      font: 400 13.5px/1.55 var(--font-ui);
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
     }
@@ -81,488 +73,526 @@
       overflow: hidden;
     }
 
+    /* ─── Grain: 1.5% scanlines + 2% noise ─────────────────────────────────
+       Keeps pure white from reading as clinical. One fixed node, two
+       pseudo-elements, pointer-events off so it never eats a click. */
+    .grain {
+      position: fixed;
+      inset: 0;
+      z-index: 999;
+      pointer-events: none;
+    }
+    .grain::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        180deg,
+        rgba(0, 0, 0, 0.015) 0 1px,
+        transparent 1px 4px
+      );
+    }
+    .grain::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      opacity: 0.02;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+
+    /* ─── The one shared label style ───────────────────────────────────────
+       Every stat caption, section head, badge, and secondary button. */
+    .label, .settings-title, .msg-name, .plan-approach-title,
+    .facts-label, .plan-badge, .approval-badge, .clarify-badge,
+    .login-required-badge, .settings-section h3,
+    .policy-block-card .footer {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
     /* ─── Hidden elements (kept for background.ts DOM-id compatibility) ─── */
     #plannerUrl, #startingUrl, #connectBtn, #disconnectBtn,
     #refreshBtn, #brandDot, #stepCount, #timer,
     #connectionMeta { display: none !important; }
 
-    /* ─── Brand mark (Inventic mountain) ────────────────────────────────── */
-    .brand-logo {
-      width: 24px;
-      height: 24px;
-      flex-shrink: 0;
-      display: block;
-    }
-    .brand-logo--lg { width: 56px; height: 56px; }
+    /* ─── Brand mark ───────────────────────────────────────────────────── */
+    .brand-logo { width: 20px; height: 20px; flex-shrink: 0; display: block; }
+    .brand-logo--lg { width: 44px; height: 44px; }
 
-    /* ─── Header ────────────────────────────────────────────────────────── */
+    /* ─── Header ───────────────────────────────────────────────────────── */
     header {
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 12px 16px;
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
+      padding: 0 14px;
+      background: var(--paper);
+      border-bottom: 1px solid var(--rule-ink);
       flex-shrink: 0;
-      height: 60px;
+      height: 50px;
     }
 
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex: 1;
-      min-width: 0;
-    }
+    .brand { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 
     .brand-name {
-      font-family: 'Poppins', sans-serif;
-      font-weight: 700;
-      font-size: 17px;
-      color: var(--brand-primary);
-      letter-spacing: -0.01em;
+      font-family: var(--font-ui);
+      font-weight: 600;
+      font-size: 15px;
+      letter-spacing: -0.022em;
       line-height: 1;
     }
 
-    /* Working spinner */
-    #workingIndicator {
-      display: none;
+    /* Model pill — the agent's identity, and its only activity cue. Fixed
+       width so it can never crowd the wordmark or the header buttons: an
+       identifer scrolls, it does not push. The name is a value, not a label,
+       so it keeps the mono face but drops the uppercase / wide-tracking
+       treatment. The square spinner rides inside and appears only while a
+       task runs. */
+    .model-pill {
+      display: flex;
       align-items: center;
-      gap: 6px;
-      font-size: 12px;
+      gap: 5px;
+      flex: 0 0 auto;
+      width: 104px;
+      padding: 3px 7px;
+      border: 1px solid var(--rule-2);
+      font-family: var(--font-mono);
+      font-size: 9px;
       font-weight: 500;
-      color: var(--text-muted);
-      font-family: 'Inter', sans-serif;
+      letter-spacing: 0.01em;
+      color: var(--ink-2);
     }
-    #workingIndicator.active { display: flex; }
+    .model-pill-name {
+      position: relative;
+      flex: 1 1 auto;
+      min-width: 0;
+      height: 12px;
+      overflow: hidden;
+    }
+    /* Two copies side by side; shifting the track by exactly one copy's
+       width (the gap is on the span, so it swaps seamlessly) walks the
+       name across. JS adds .marquee only after measuring an overflow, so a
+       name that fits (gpt-4o, o1) sits dead still. */
+    .model-pill-track { display: flex; width: max-content; }
+    .model-pill-track > span { white-space: nowrap; padding-right: 20px; }
+    .marquee .model-pill-track { animation: travel 17s linear infinite; }
+    .model-pill-name:hover .model-pill-track,
+    .model-pill-name:focus-visible .model-pill-track { animation-play-state: paused; }
+    @keyframes travel {
+      0%, 9%    { transform: translateX(0); }
+      50%, 59%  { transform: translateX(-50%); }
+      100%      { transform: translateX(0); }
+    }
+    /* Square spinner — the system has no curves, and a rotating square
+       reads as "working" just as clearly as a circle. Ink-toned rather than
+       rule-toned so it stays legible inside the pill's hairline border. */
     .spinner {
-      width: 14px;
-      height: 14px;
-      border: 2px solid var(--border);
-      border-top-color: var(--brand-primary);
-      border-radius: 50%;
+      display: none;
+      width: 7px;
+      height: 7px;
+      border: 1.5px solid var(--ink-3);
+      border-top-color: var(--ink);
       animation: spin 0.7s linear infinite;
       flex-shrink: 0;
     }
+    .spinner.active { display: block; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ─── Status bar (steps + timer) ────────────────────────────────────── */
+    /* Motion is decoration everywhere except the model pill, the waiting
+       rule, and the step flash — and each of those still carries its
+       meaning with the movement removed. So this drops movement, not
+       information. */
+    @media (prefers-reduced-motion: reduce) {
+      .marquee .model-pill-track,
+      .spinner,
+      .caret,
+      #statusBar .cell.flash,
+      .approval-card.blocking, .clarify-card.blocking,
+      .status-pill.reconnecting .dot,
+      .toast,
+      .login-required-badge::before { animation: none; }
+      * { transition-duration: 0.01ms !important; }
+    }
+
+    /* ─── Status bar (steps / time / tabs / context) ───────────────────── */
     #statusBar {
       display: none;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 1px;
-      background: var(--border);
-      border-bottom: 1px solid var(--border);
-      font-family: 'Inter', sans-serif;
-      font-size: 11px;
-      color: var(--text-muted);
+      background: var(--paper-3);
+      border-bottom: 1px solid var(--rule);
+      flex-shrink: 0;
     }
-    #statusBar.active { display: grid; }
+    #statusBar.active { display: grid; grid-template-columns: 1fr 1fr; }
     #statusBar .cell {
-      background: var(--surface);
-      padding: 9px 14px;
+      min-width: 0;
+      padding: 7px 14px;
       display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 6px;
+      flex-direction: column;
+      gap: 2px;
     }
-    #statusBar .label {
-      font-family: 'Poppins', sans-serif;
-      font-weight: 600;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      font-size: 10px;
-      color: var(--text-faint);
-    }
+    /* Hairlines follow the grid: one under the top row, one between columns. */
+    #statusBar .cell:nth-child(-n+2) { border-bottom: 1px solid var(--rule); }
+    #statusBar .cell:nth-child(even) { border-left: 1px solid var(--rule); }
+    #statusBar .label { color: var(--ink-2); }
     #statusBar .value {
-      font-weight: 600;
-      color: var(--text);
-      font-size: 13px;
+      font-weight: 500;
+      color: var(--ink);
+      font-size: 12.5px;
       font-variant-numeric: tabular-nums;
     }
-
-    /* ─── Tab lifecycle bar ─────────────────────────────────────────────── */
-    .tab-bar {
-      border-top: 1px solid var(--border);
-      background: var(--surface-1);
-      max-height: 200px;
-      overflow: hidden;
-      transition: max-height 0.18s ease;
-    }
-    .tab-bar[hidden] { display: none; }
-    .tab-bar.collapsed { max-height: 32px; }
-    .tab-bar-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 7px 14px;
-      font-family: 'Poppins', sans-serif;
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.07em;
-      text-transform: uppercase;
-      color: var(--text-faint);
-      background: var(--surface-2);
-      border-bottom: 1px solid var(--border);
-    }
-    .tab-bar-title { color: var(--text-faint); }
-    .tab-bar-toggle {
-      border: none;
-      background: transparent;
-      color: var(--text-faint);
-      font: inherit;
-      font-size: 14px;
-      font-weight: 700;
-      cursor: pointer;
-      padding: 0 4px;
-      line-height: 1;
-    }
-    .tab-bar-toggle:hover { color: var(--brand-primary); }
-    .tab-bar-body {
-      overflow-y: auto;
-      max-height: 168px;
-      padding: 4px 0;
-    }
-    .tab-bar.collapsed .tab-bar-body { display: none; }
-    .tab-row {
-      display: grid;
-      grid-template-columns: 56px 1fr auto;
-      gap: 8px;
-      align-items: center;
-      padding: 6px 14px;
-      font-size: 12px;
-      color: var(--text);
-      border-bottom: 1px solid transparent;
-    }
-    .tab-row:hover { background: var(--surface-2); }
-    .tab-row:last-child { border-bottom: none; }
-    .tab-row-badge {
-      font-family: 'Poppins', sans-serif;
-      font-size: 9px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      padding: 2px 6px;
-      border-radius: 6px;
-      background: var(--surface-2);
-      color: var(--text-faint);
-      text-align: center;
-      border: 1px solid var(--border);
-    }
-    .tab-row-badge.opened  { background: var(--brand-primary-soft); color: var(--brand-primary); border-color: rgba(0, 82, 204, 0.20); }
-    .tab-row-badge.closed  { background: var(--red-soft); color: var(--red); border-color: rgba(220, 38, 38, 0.20); }
-    .tab-row-badge.focused { background: var(--green-soft); color: var(--green); border-color: rgba(22, 163, 74, 0.20); }
-    .tab-row-info { min-width: 0; }
-    .tab-row-title {
-      font-weight: 600;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      color: var(--text);
-    }
-    .tab-row-url {
-      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-      font-size: 11px;
-      color: var(--text-faint);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .tab-row-empty {
-      padding: 12px 14px;
-      color: var(--text-faint);
-      font-size: 12px;
-      font-style: italic;
+    /* Step tick — a cell flashes to paper as a step lands, then settles. One
+       550ms scanline of the panel's own surface tone: it answers "did that
+       register?" without a number that jumps and a layout that reflows. */
+    #statusBar .cell.flash { animation: cell-flash 0.55s ease-out; }
+    @keyframes cell-flash {
+      from { background: var(--paper); }
+      to   { background: transparent; }
     }
 
-    /* ─── New Task button ──────────────────────────────────────────────── */
+    /* ─── New task button ─────────────────────────────────────────────── */
     .new-task-btn {
       align-self: center;
-      padding: 9px 18px;
-      border-radius: 999px;
-      border: 1px solid var(--brand-primary);
-      background: transparent;
-      color: var(--brand-primary);
-      font-family: 'Inter', sans-serif;
-      font-weight: 600;
-      font-size: 13px;
+      margin: 14px auto;
+      padding: 9px 20px;
+      border: 1px solid var(--ink);
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
       cursor: pointer;
-      transition: var(--transition);
-      margin: 16px auto;
       display: none;
-      letter-spacing: 0.01em;
+      transition: background var(--t), color var(--t);
     }
-    .new-task-btn:hover { background: var(--brand-primary-soft); transform: translateY(-1px); }
+    .new-task-btn:hover { background: var(--ink); color: var(--paper); }
     .new-task-btn.visible { display: block; }
 
-    /* ─── Login Continue button ───────────────────────────────────────── */
+    /* ─── Login continue button ───────────────────────────────────────── */
     .login-continue-btn {
       align-self: flex-start;
-      margin: 6px 0 0 4px;
-      padding: 7px 14px;
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--brand-primary);
-      background: var(--brand-primary);
-      color: #fff;
-      font-family: 'Inter', sans-serif;
-      font-size: 12px;
-      font-weight: 600;
+      margin: 8px 0 0;
+      padding: 8px 16px;
+      border: 1px solid var(--ink);
+      background: var(--ink);
+      color: var(--paper);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
       cursor: pointer;
-      transition: var(--transition);
+      transition: background var(--t), color var(--t);
     }
-    .login-continue-btn:hover:not(:disabled) { background: var(--brand-primary-hover); border-color: var(--brand-primary-hover); }
-    .login-continue-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .login-continue-btn:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
+    .login-continue-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
     /* ─── Header actions ──────────────────────────────────────────────── */
     .hdr-actions { display: flex; gap: 4px; align-items: center; }
 
     .btn-icon {
-      width: 32px;
-      height: 32px;
-      padding: 0;
-      display: grid;
-      place-items: center;
-      border-radius: var(--radius-sm);
-      border: 1px solid transparent;
-      background: transparent;
-      color: var(--text-muted);
-      cursor: pointer;
-      transition: var(--transition);
-      flex-shrink: 0;
-    }
-    .btn-icon:hover { background: var(--brand-primary-soft); color: var(--brand-primary); }
-    .btn-icon svg { width: 16px; height: 16px; pointer-events: none; }
-
-    .btn-icon.btn-stop {
-      color: var(--red);
       width: 28px;
       height: 28px;
+      display: grid;
+      place-items: center;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--ink-2);
+      cursor: pointer;
+      transition: background var(--t), color var(--t);
+      flex-shrink: 0;
     }
-    .btn-icon.btn-stop:hover { background: var(--red-soft); }
+    .btn-icon:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+    .btn-icon svg { width: 15px; height: 15px; pointer-events: none; }
+    .btn-icon.btn-stop { color: var(--bad); }
+    .btn-icon.btn-stop:hover { background: var(--bad); color: var(--paper); border-color: var(--bad); }
 
     /* ─── Settings overlay ────────────────────────────────────────────── */
-    #settingsOverlay {
+    /* Overlay idiom shared by settings and session history: a scrim that takes
+       the click to dismiss, and a panel that slides in from the right. */
+    .overlay {
       display: none;
       position: fixed;
       inset: 0;
-      background: rgba(0, 26, 77, 0.40);
+      background: rgba(0, 0, 0, 0.45);
       z-index: 100;
-      align-items: flex-start;
+      align-items: stretch;
       justify-content: flex-end;
     }
-    #settingsOverlay.open { display: flex; }
+    .overlay.open { display: flex; }
 
-    #settingsPanel {
-      width: 320px;
+    .overlay-panel {
+      width: 340px;
+      max-width: 100%;
       height: 100%;
-      background: var(--surface);
-      border-left: 1px solid var(--border);
-      padding: 20px 18px;
+      background: var(--paper);
+      border-left: 2px solid var(--ink);
+      padding: 16px 18px 28px;
       display: flex;
       flex-direction: column;
-      gap: 14px;
-      animation: slide-in-right 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      gap: 18px;
+      animation: slide-in-right 0.18s cubic-bezier(0.16, 1, 0.3, 1);
       overflow-y: auto;
-      box-shadow: var(--shadow-lg);
     }
     @keyframes slide-in-right {
-      from { transform: translateX(20px); opacity: 0; }
+      from { transform: translateX(16px); opacity: 0; }
       to   { transform: translateX(0);    opacity: 1; }
     }
 
-    .settings-title {
-      font-family: 'Poppins', sans-serif;
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--brand-primary);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
+    .settings-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid var(--ink);
     }
+    .settings-title { color: var(--ink); }
 
     .settings-section { display: flex; flex-direction: column; gap: 6px; }
+    .settings-section h3 { color: var(--ink); margin-top: 4px; }
 
-    /* Floor (organisation-enforced) blacklist — read-only block. */
+    /* ─── Session history ─────────────────────────────────────────────────
+       One row per past task, newest first. A ledger line, not a card: a
+       hairline between rows, no box, no radius. Identity is the task text
+       (what you asked for); the mono line underneath carries the facts
+       you'd want before reopening one. */
+    .history-list { display: flex; flex-direction: column; margin-top: 4px; }
+
+    .history-item {
+      display: grid;
+      grid-template-columns: 8px 1fr;
+      gap: 10px;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--rule);
+      background: none;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: background var(--t);
+    }
+    .history-item:first-child { border-top: 1px solid var(--rule); }
+    .history-item:hover { background: var(--paper-2); }
+
+    /* Status is a 6px square, not a dot — at this size the mark is only
+       legible because the system has no curves. Colour carries the state. */
+    .history-mark { width: 6px; height: 6px; margin-top: 4px; background: var(--ink-3); }
+    .history-item[data-status="done"]       .history-mark { background: var(--ok); }
+    .history-item[data-status="failed"]     .history-mark { background: var(--bad); }
+    .history-item[data-status="interrupted"] .history-mark { background: var(--wait); }
+
+    .history-task {
+      font-size: 13px;
+      line-height: 1.4;
+      color: var(--ink);
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .history-meta {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-top: 4px;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-3);
+    }
+    .history-meta .sep { color: var(--rule-2); }
+    .history-meta .when { color: var(--ink-2); }
+
+    .history-empty {
+      padding: 34px 8px;
+      text-align: center;
+      color: var(--ink-3);
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+    .history-empty strong {
+      display: block;
+      color: var(--ink-2);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      margin-bottom: 7px;
+    }
+
+    /* Labels that wrap their own control stack instead of running inline. */
+    .settings-section label:has(> select),
+    .settings-section label:has(> input) { display: flex; flex-direction: column; gap: 5px; }
+
+    /* Hint copy. Was referenced in markup but never defined — it was
+       inheriting 16px body text and breaking the settings rhythm. */
+    .settings-hint {
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: var(--ink-3);
+    }
+    .settings-hint code {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      background: var(--paper-2);
+      padding: 1px 4px;
+    }
+
     .floor-blacklist {
-      background: var(--surface-1, #f5f6f8);
-      border: 1px solid var(--border, #e0e3e7);
-      border-radius: 6px;
+      background: var(--paper-2);
+      border: 1px solid var(--rule);
       padding: 8px 10px;
       font-size: 12px;
       max-height: 110px;
       overflow-y: auto;
     }
-    .floor-item { padding: 2px 0; color: var(--text-muted, #555); }
+    .floor-item { padding: 2px 0; color: var(--ink-2); }
     .floor-tag {
       display: inline-block;
       margin-left: 4px;
-      padding: 1px 6px;
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      font-family: var(--font-mono);
+      font-size: 8.5px;
+      font-weight: 500;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
-      background: var(--brand-primary, #1f6feb);
-      color: white;
-      border-radius: 3px;
+      background: var(--ink);
+      color: var(--paper);
     }
-    .floor-empty { color: var(--text-faint, #999); font-style: italic; }
+    .floor-empty { color: var(--ink-3); }
+    /* "Could not reach server" is a warning, not an empty state. */
+    .floor-unreachable { color: var(--wait); }
 
-    /* Policy-mode header line (shows count + org framing). */
-    #policyModeHeader.secure { color: var(--brand-primary, #1f6feb); font-weight: 600; }
+    #policyModeHeader.secure { color: var(--ok); font-weight: 500; }
 
-    /* "Last verified N seconds ago" footer in Settings. */
-    .settings-actions-row {
-      display: flex;
-      gap: 8px;
-      align-items: stretch;
-    }
-    .settings-actions-row .settings-btn-secondary {
-      flex: 1;
-      background: var(--surface-1, #f5f6f8);
-      border: 1px solid var(--border, #e0e3e7);
-      color: var(--text-muted, #555);
-    }
-    .settings-verify {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      min-height: 18px;
-    }
-    .settings-verify .dot {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-    }
-    .settings-verify.ok    .dot { background: #1b873f; }
-    .settings-verify.stale .dot { background: #d4a017; }
-    .settings-verify.off   .dot { background: #b00020; }
-    .settings-verify.ok    { color: #1b873f; }
-    .settings-verify.stale { color: #8a6500; }
-    .settings-verify.off   { color: #5d0011; }
+    .settings-actions-row { display: flex; gap: 8px; align-items: stretch; }
+    .settings-actions-row .settings-btn-secondary { flex: 1; }
+    .settings-verify { display: flex; align-items: center; gap: 6px; min-height: 16px; }
+    .settings-verify .dot { width: 7px; height: 7px; background: var(--ink-3); flex-shrink: 0; }
+    .settings-verify.ok    { color: var(--ok); }
+    .settings-verify.ok    .dot { background: var(--ok); }
+    .settings-verify.stale { color: var(--wait); }
+    .settings-verify.stale .dot { background: var(--wait); }
+    .settings-verify.off   { color: var(--bad); }
+    .settings-verify.off   .dot { background: var(--bad); }
 
-    /* SECURE-mode badge in the status bar (sidepanel status area). */
     .secure-badge {
       display: inline-flex;
       align-items: center;
       gap: 4px;
-      padding: 2px 8px;
+      padding: 2px 7px;
       margin-left: 6px;
-      background: var(--brand-primary, #1f6feb);
-      color: white;
-      border-radius: 10px;
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
+      background: var(--ink);
+      color: var(--paper);
+      font-family: var(--font-mono);
+      font-size: 8.5px;
+      font-weight: 500;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
     }
 
-    /* Enterprise policy-block card for task_failed bubbles. */
     .policy-block-card {
-      border-left: 3px solid #b00020;
-      background: #fdf2f4;
+      border: 1px solid var(--bad);
+      border-left: 3px solid var(--bad);
+      background: var(--paper);
       padding: 10px 12px;
       margin: 6px 0;
-      border-radius: 4px;
     }
-    .policy-block-card .title { font-weight: 600; color: #5d0011; }
-    .policy-block-card .body  { color: #333; margin-top: 4px; }
-    .policy-block-card .footer{ color: #666; font-size: 11px; margin-top: 6px; }
+    .policy-block-card .title { font-weight: 500; }
+    .policy-block-card .body  { color: var(--ink-2); margin-top: 4px; }
 
     label {
-      font-size: 12px;
-      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
       font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-3);
     }
 
     .input {
       width: 100%;
-      padding: 9px 11px;
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--border);
-      background: var(--surface-1);
-      color: var(--text);
-      font-family: 'Inter', sans-serif;
+      padding: 8px 10px;
+      border: 1px solid var(--rule-2);
+      background: var(--paper-2);
+      color: var(--ink);
+      font-family: var(--font-ui);
       font-size: 13px;
       outline: none;
-      transition: var(--transition);
+      transition: border-color var(--t);
     }
-    .input:focus {
-      border-color: var(--brand-primary);
-      box-shadow: 0 0 0 3px var(--brand-primary-soft);
+    .input:focus { border-color: var(--ink); border-width: 2px; }
+    select.input {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.04em;
     }
 
-    #settingsClose {
-      align-self: flex-end;
-      width: 32px;
-      height: 32px;
-      border-radius: var(--radius-sm);
-      display: grid;
-      place-items: center;
-    }
+    #settingsClose { margin-bottom: -4px; }
 
     /* ─── Chat messages ────────────────────────────────────────────────── */
     #messages {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
-      padding: 18px 16px;
+      padding: 16px 14px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 8px;
       scroll-behavior: smooth;
-      background: var(--bg);
     }
-    #messages::-webkit-scrollbar { width: 4px; }
+    #messages::-webkit-scrollbar { width: 3px; }
     #messages::-webkit-scrollbar-track { background: transparent; }
-    #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-    #messages::-webkit-scrollbar-thumb:hover { background: var(--brand-light); }
+    #messages::-webkit-scrollbar-thumb { background: var(--rule-2); }
 
     /* ─── Empty state ─────────────────────────────────────────────────── */
     .empty-state {
       display: flex;
       flex-direction: column;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       height: 100%;
-      padding: 40px 24px;
-      color: var(--text-muted);
-      text-align: center;
-      gap: 12px;
+      padding: 24px 22px;
+      gap: 0;
     }
-    .empty-mark { line-height: 0; margin-top: 8px; }
+    .empty-mark { line-height: 0; margin-bottom: 18px; }
     .empty-title {
-      font-family: 'Poppins', sans-serif;
-      font-size: 18px;
-      font-weight: 700;
-      color: var(--brand-primary);
-      margin-top: 6px;
-      letter-spacing: -0.01em;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--ink-3);
+      margin-bottom: 10px;
     }
     .empty-sub {
-      font-size: 13px;
-      color: var(--text-muted);
-      max-width: 280px;
-      line-height: 1.6;
+      font-size: 15px;
+      line-height: 1.5;
+      letter-spacing: -0.011em;
+      color: var(--ink);
+      max-width: 30ch;
     }
 
     /* ─── Message bubbles ─────────────────────────────────────────────── */
     .message {
       display: flex;
       flex-direction: column;
-      max-width: 92%;
-      animation: msg-enter 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+      max-width: 94%;
+      animation: msg-enter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
     @keyframes msg-enter {
-      from { opacity: 0; transform: translateY(8px); }
+      from { opacity: 0; transform: translateY(6px); }
       to   { opacity: 1; transform: translateY(0); }
     }
-    /* ponytail: smooth fade-out when a message is removed mid-flight
-       (e.g. login bubble disappears after Continue click). 180ms is
-       short enough to feel instant, long enough to avoid flicker. */
     @keyframes msg-leave {
-      from { opacity: 1; transform: translateY(0); max-height: 200px; margin-bottom: 6px; }
-      to   { opacity: 0; transform: translateY(-4px); max-height: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0; }
+      from { opacity: 1; transform: translateY(0);    max-height: 200px; margin-bottom: 8px; }
+      to   { opacity: 0; transform: translateY(-4px); max-height: 0;    margin-bottom: 0; padding-top: 0; padding-bottom: 0; }
     }
     .message.removing,
     .login-continue-btn.removing { animation: msg-leave 0.18s ease forwards; }
@@ -570,40 +600,43 @@
     .message.user      { align-self: flex-end; }
     .message.assistant { align-self: flex-start; }
 
+    /* Live caret — the agent's "still writing". Square, like everything else
+       in the system, and blink stepped rather than eased so it holds its
+       edges instead of smearing. Added when a message starts being written
+       and wiped with the rest of the bubble when it's finalised. */
+    .caret {
+      display: inline-block;
+      width: 5px;
+      height: 11px;
+      margin-left: 3px;
+      background: var(--ink);
+      vertical-align: -1px;
+      animation: blink 1.05s step-end infinite;
+    }
+    @keyframes blink {
+      0%, 49%   { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
+
     .bubble {
-      padding: 11px 14px;
-      border-radius: var(--radius-lg);
-      font-size: 14px;
+      padding: 10px 13px;
+      font-size: 13.5px;
       line-height: 1.55;
       word-break: break-word;
     }
 
-    .message.user .bubble {
-      background: var(--brand-primary);
-      color: #fff;
-      border-bottom-right-radius: var(--radius-sm);
-      box-shadow: var(--shadow-sm);
-    }
+    /* Solid ink, no shadow — the user's own words, given the most weight. */
+    .message.user .bubble { background: var(--ink); color: var(--paper); }
 
-    .message.assistant .bubble {
-      background: var(--surface);
-      color: var(--text);
-      box-shadow: var(--shadow-sm);
-      border: 1px solid var(--border-soft);
-      border-bottom-left-radius: var(--radius-sm);
-    }
+    /* Hairline, not a shadow, to seat the agent's words on the page. */
+    .message.assistant .bubble { background: var(--paper); border: 1px solid var(--rule); }
 
-    /* ponytail: transient bubble for login_required. Visually distinct
-       from a regular assistant bubble (amber tint, dashed border) so the
-       user reads it as a temporary status, not a permanent message. The
-       "Waiting" badge with a slow pulse reinforces that the agent is
-       paused and waiting on the human. Removed smoothly on resolve. */
     .message.login-required-msg .bubble {
-      background: var(--amber-soft);
-      color: var(--amber);
-      border: 1px dashed rgba(217, 119, 6, 0.45);
-      border-bottom-left-radius: var(--radius);
-      padding: 10px 14px;
+      background: var(--wait-soft);
+      border: 1px solid var(--wait);
+      border-left: 3px solid var(--wait);
+      color: var(--ink);
+      padding: 10px 13px;
       display: flex;
       flex-direction: column;
       gap: 6px;
@@ -612,471 +645,363 @@
       display: flex;
       align-items: center;
       gap: 7px;
-      font-family: 'Poppins', sans-serif;
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.07em;
-      color: var(--amber);
+      color: var(--wait);
     }
     .login-required-badge::before {
       content: '';
       width: 6px;
       height: 6px;
-      border-radius: 50%;
-      background: var(--amber);
+      background: var(--wait);
       animation: login-pulse 1.6s ease-in-out infinite;
       flex-shrink: 0;
     }
     @keyframes login-pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50%      { opacity: 0.35; transform: scale(0.75); }
+      0%, 100% { opacity: 1;    transform: scale(1); }
+      50%      { opacity: 0.3;  transform: scale(0.7); }
     }
-    .login-required-body {
-      font-size: 13px;
-      line-height: 1.5;
-      color: var(--text);
-    }
+    .login-required-body { font-size: 13px; line-height: 1.5; }
 
-    /* ─── Step bubble (with collapsible details) ──────────────────────── */
-    .step-bubble { display: flex; flex-direction: column; gap: 4px; padding: 11px 14px; }
-    .step-head { font-size: 14px; line-height: 1.45; }
-    .step-details { display: flex; flex-direction: column; gap: 4px; }
+    /* ─── Step bubble ─────────────────────────────────────────────────── */
+    .step-bubble { display: flex; flex-direction: column; gap: 5px; }
+    .step-head { font-size: 13.5px; line-height: 1.45; }
+    .step-details { display: flex; flex-direction: column; gap: 5px; }
     .step-details-toggle {
       align-self: flex-start;
-      border: 1px solid var(--border);
-      background: var(--surface-2);
-      color: var(--text-muted);
-      font-family: 'Inter', sans-serif;
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      padding: 3px 9px;
-      border-radius: 999px;
+      border: 1px solid var(--rule-2);
+      background: transparent;
+      color: var(--ink-2);
+      font-family: var(--font-mono);
+      font-size: 8.5px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      padding: 4px 9px;
       cursor: pointer;
-      transition: var(--transition);
+      transition: background var(--t), color var(--t);
     }
-    .step-details-toggle:hover { color: var(--brand-primary); border-color: var(--brand-primary); }
+    .step-details-toggle:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
     .step-details-body {
-      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-      font-size: 11px;
-      color: var(--text-muted);
-      background: var(--surface-2);
-      padding: 7px 10px;
-      border-radius: 6px;
-      border: 1px solid var(--border-soft);
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      line-height: 1.5;
+      color: var(--ink-2);
+      background: var(--paper-2);
+      padding: 7px 9px;
+      border-left: 2px solid var(--rule-2);
       white-space: pre-wrap;
       overflow-x: auto;
     }
 
-    .msg-meta {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-bottom: 4px;
-      padding: 0 4px;
-    }
-    .msg-name {
-      font-family: 'Poppins', sans-serif;
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--brand-primary);
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-    }
+    .msg-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+    .msg-name { color: var(--ink-3); }
 
-    /* ─── System / error / done messages ──────────────────────────────── */
-    .message.system { align-self: center; max-width: 95%; }
+    /* ─── System / done / error messages ──────────────────────────────── */
+    .message.system { align-self: center; max-width: 96%; }
     .message.system .bubble {
       background: transparent;
-      color: var(--text-faint);
-      font-size: 12px;
-      font-style: italic;
-      padding: 4px 8px;
-      box-shadow: none;
+      color: var(--ink-3);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.04em;
+      padding: 3px 8px;
       text-align: center;
     }
 
-    .message.done { }
+    /* Tinting the whole bubble green fought the monochrome system. State is
+       carried by the rule and the header; the body stays on white paper. */
     .message.done .bubble {
-      background: var(--green-soft);
-      color: var(--green);
-      border: 1px solid rgba(22, 163, 74, 0.30);
-      border-left: 4px solid var(--green);
-      border-radius: var(--radius);
-      padding: 12px 16px;
+      background: var(--paper);
+      color: var(--ink);
+      border: 1px solid var(--ok);
+      border-left: 3px solid var(--ok);
+      padding: 11px 14px;
     }
     .done-header {
       display: flex;
       align-items: center;
       gap: 8px;
-      font-family: 'Poppins', sans-serif;
-      font-weight: 700;
-      font-size: 13px;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ok);
       margin-bottom: 6px;
     }
-    .done-icon { font-size: 16px; }
-    .done-summary { font-size: 13px; opacity: 0.95; }
+    .done-summary { font-size: 13px; line-height: 1.5; }
 
     .message.error .bubble {
-      background: var(--red-soft);
-      color: var(--red);
-      border: 1px solid rgba(220, 38, 38, 0.30);
-      border-left: 4px solid var(--red);
-      border-radius: var(--radius);
-      padding: 12px 16px;
+      background: var(--paper);
+      color: var(--ink);
+      border: 1px solid var(--bad);
+      border-left: 3px solid var(--bad);
+      padding: 11px 14px;
     }
 
-    /* ponytail: structured failure card (title + body + footer) for
-       policy violations. The single-line "Task failed" was hiding the
-       harness's actual reason; this card surfaces it. The footer is
-       muted so the eye lands on the body first. */
     .failure-bubble {
-      max-width: 92%;
+      max-width: 94%;
       display: flex;
       flex-direction: column;
       gap: 6px;
     }
     .failure-title {
-      font-weight: 600;
-      font-size: 14px;
-      line-height: 1.3;
-      color: var(--red);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--bad);
     }
-    .failure-body {
-      font-size: 13px;
-      line-height: 1.45;
-      color: var(--red);
-      opacity: 0.92;
-    }
-    .failure-body p { margin: 0 0 4px 0; }
+    .failure-body { font-size: 13px; line-height: 1.5; color: var(--ink); }
+    .failure-body p { margin: 0 0 5px 0; }
     .failure-body p:last-child { margin-bottom: 0; }
     .failure-footer {
-      font-size: 11px;
-      line-height: 1.3;
-      color: var(--red);
-      opacity: 0.6;
-      border-top: 1px solid rgba(220, 38, 38, 0.18);
+      font-size: 10.5px;
+      line-height: 1.4;
+      color: var(--ink-3);
+      border-top: 1px solid var(--rule);
       padding-top: 6px;
-      margin-top: 2px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
 
-    /* ─── Plan preview card ───────────────────────────────────────────── */
-    .plan-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
-      box-shadow: var(--shadow);
-      padding: 14px 16px;
-      max-width: 92%;
+    /* ─── Plan / approval / clarify cards ───────────────────────────────
+       One card primitive, three jobs. Distinguished by the 3px left rule,
+       not by a different radius, a different shadow, or a different hue. */
+    .plan-card, .approval-card, .clarify-card {
+      background: var(--paper);
+      border: 1px solid var(--ink);
+      border-left: 3px solid var(--ink);
+      padding: 13px 14px;
+      max-width: 94%;
       align-self: flex-start;
-      animation: msg-enter 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+      animation: msg-enter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    .plan-header {
+    .approval-card { border-left-color: var(--wait); }
+    .clarify-card  { border-left-color: var(--ink-2); }
+
+    /* The 3px left rule breathes while the card is blocking on the user. This
+       is the one place in the panel where motion is a prompt rather than
+       texture: the agent has stopped, and the only thing left to do is
+       yours. Range is deliberately narrow (0.35 → 1) — a wide fade would
+       read as an alarm. */
+    .approval-card.blocking, .clarify-card.blocking {
+      animation: msg-enter 0.2s cubic-bezier(0.16, 1, 0.3, 1), rule-breathe 2.4s ease-in-out 0.2s infinite;
+    }
+    @keyframes rule-breathe {
+      0%, 100% { border-left-color: rgba(180, 83, 9, 0.35); }
+      50%      { border-left-color: var(--wait); }
+    }
+
+    .plan-header, .approval-header, .clarify-header {
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-bottom: 10px;
+      margin-bottom: 9px;
     }
-    .plan-badge {
-      background: var(--brand-primary);
-      color: #fff;
-      font-family: 'Poppins', sans-serif;
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      padding: 3px 8px;
-      border-radius: 999px;
+    .plan-badge, .approval-badge, .clarify-badge {
+      display: inline-block;
+      padding: 3px 7px;
+      border: 1px solid var(--ink);
+      color: var(--ink);
     }
-    .plan-sites {
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-bottom: 10px;
-      padding: 0 2px;
-    }
-    .plan-sites strong { color: var(--text); font-weight: 600; }
-    .plan-approach-title {
-      font-family: 'Poppins', sans-serif;
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--brand-primary);
-      text-transform: uppercase;
-      letter-spacing: 0.07em;
-      margin-bottom: 6px;
-      padding: 0 2px;
-    }
-    .plan-steps {
-      list-style: none;
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-      margin-bottom: 12px;
-    }
+    .approval-badge { border-color: var(--wait); color: var(--wait); }
+    .clarify-badge  { border-color: var(--ink-2); color: var(--ink-2); }
+
+    .plan-sites { font-size: 12px; color: var(--ink-2); margin-bottom: 10px; }
+    .plan-sites strong { color: var(--ink); font-weight: 500; }
+    .plan-approach-title { color: var(--ink-3); margin-bottom: 7px; }
+
+    .plan-steps { list-style: none; display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
     .plan-steps li {
       display: flex;
-      gap: 8px;
+      gap: 9px;
       font-size: 13px;
-      color: var(--text);
       line-height: 1.45;
-      padding: 0 2px;
     }
     .plan-step-num {
-      font-family: 'Poppins', sans-serif;
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--brand-primary);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--ink-3);
       flex-shrink: 0;
       margin-top: 2px;
     }
-    .plan-actions { display: flex; gap: 8px; }
+    .plan-actions, .approval-actions, .clarify-actions { display: flex; gap: 8px; }
 
-    /* ─── Approval card ──────────────────────────────────────────────── */
-    .approval-card {
-      background: var(--surface);
-      border: 1px solid var(--amber);
-      border-left: 3px solid var(--amber);
-      border-radius: var(--radius-lg);
-      box-shadow: var(--shadow);
-      padding: 14px 16px;
-      max-width: 92%;
-      align-self: flex-start;
-      animation: msg-enter 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-    }
-    .approval-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    .approval-badge {
-      background: var(--amber);
-      color: #fff;
-      font-family: 'Poppins', sans-serif;
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      padding: 3px 8px;
-      border-radius: 999px;
-    }
-    .approval-body {
-      font-size: 13px;
-      color: var(--text);
-      margin-bottom: 8px;
-      line-height: 1.5;
-    }
+    .approval-body, .clarify-body { font-size: 13px; line-height: 1.5; margin-bottom: 10px; }
     .approval-preview {
-      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-      font-size: 12px;
-      color: var(--text-muted);
-      background: var(--surface-2);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      padding: 7px 10px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--ink-2);
+      background: var(--paper-2);
+      border-left: 2px solid var(--rule-2);
+      padding: 7px 9px;
       margin-bottom: 12px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .approval-actions { display: flex; gap: 8px; }
 
-    /* ─── Clarify card ───────────────────────────────────────────────── */
-    .clarify-card {
-      background: var(--surface);
-      border: 1px solid var(--brand-primary);
-      border-left: 3px solid var(--brand-primary);
-      border-radius: var(--radius-lg);
-      box-shadow: var(--shadow);
-      padding: 14px 16px;
-      max-width: 92%;
-      align-self: flex-start;
-      animation: msg-enter 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-    }
-    .clarify-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    .clarify-badge {
-      background: var(--brand-primary);
-      color: #fff;
-      font-family: 'Poppins', sans-serif;
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      padding: 3px 8px;
-      border-radius: 999px;
-    }
-    .clarify-body {
-      font-size: 13px;
-      color: var(--text);
-      margin-bottom: 12px;
-      line-height: 1.5;
-    }
-    .clarify-input-row {
-      display: flex;
-      gap: 8px;
-      align-items: stretch;
-    }
+    .clarify-input-row { display: flex; gap: 8px; align-items: stretch; }
     .clarify-input {
       flex: 1;
-      font-family: 'Inter', sans-serif;
+      font-family: var(--font-ui);
       font-size: 13px;
-      color: var(--text);
-      background: var(--surface-1);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 9px 11px;
+      color: var(--ink);
+      background: var(--paper-2);
+      border: 1px solid var(--rule-2);
+      padding: 8px 10px;
       resize: none;
-      min-height: 38px;
+      min-height: 36px;
       max-height: 96px;
       outline: none;
-      transition: border-color 0.15s;
+      transition: border-color var(--t);
     }
-    .clarify-input:focus { border-color: var(--brand-primary); box-shadow: 0 0 0 3px var(--brand-primary-soft); }
-    .clarify-input::placeholder { color: var(--text-faint); }
+    .clarify-input:focus { border-color: var(--ink); border-width: 2px; }
+    .clarify-input::placeholder { color: var(--ink-3); }
     .clarify-send-btn {
-      background: var(--brand-primary);
-      color: #fff;
-      border: none;
-      border-radius: var(--radius);
+      background: var(--ink);
+      color: var(--paper);
+      border: 1px solid var(--ink);
       padding: 0 16px;
-      font-family: 'Inter', sans-serif;
-      font-size: 12px;
-      font-weight: 600;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
       cursor: pointer;
-      transition: background 0.15s;
+      transition: background var(--t), color var(--t);
     }
-    .clarify-send-btn:hover { background: var(--brand-primary-hover); }
-    .clarify-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .clarify-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .clarify-send-btn:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
+    .clarify-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-    /* ─── Inline logs (inside assistant bubbles) ─────────────────────── */
     .inline-log {
-      font-size: 12px;
-      color: var(--text-faint);
-      font-style: italic;
-      margin-top: 4px;
-      padding-top: 4px;
-      border-top: 1px solid var(--border-soft);
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: var(--ink-3);
+      margin-top: 5px;
+      padding-top: 5px;
+      border-top: 1px solid var(--rule);
     }
 
-    /* ─── Buttons ────────────────────────────────────────────────────── */
+    /* ─── Buttons: 1px ink border, invert on hover ──────────────────────
+       Primary and secondary differ only by which side of the inversion
+       they start on — the reference's core interaction idiom. */
     .btn {
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--border);
-      background: var(--surface-2);
-      color: var(--text);
-      font-family: 'Inter', sans-serif;
-      font-size: 12px;
-      font-weight: 600;
+      border: 1px solid var(--ink);
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
       cursor: pointer;
-      transition: var(--transition);
+      transition: background var(--t), color var(--t);
       white-space: nowrap;
     }
     .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .btn:hover:not(:disabled) { background: var(--surface-3); border-color: var(--brand-light); }
+    .btn:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
+    .btn-sm { padding: 7px 12px; }
 
-    .btn-sm { padding: 7px 13px; }
+    .btn-primary { background: var(--ink); color: var(--paper); }
+    .btn-primary:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
 
-    .btn-primary {
-      background: var(--brand-primary);
-      border-color: var(--brand-primary);
-      color: #fff;
+    .btn-danger { border-color: var(--bad); color: var(--bad); background: var(--paper); }
+    .btn-danger:hover:not(:disabled) { background: var(--bad); color: var(--paper); }
+
+    .btn-ghost { border-color: transparent; color: var(--ink-2); }
+    .btn-ghost:hover:not(:disabled) { background: var(--paper-2); color: var(--ink); border-color: var(--rule-2); }
+
+    /* ─── Toast ─────────────────────────────────────────────────────────
+       For events that happen and leave no other trace — the server going
+       away on open, an action sent. Sits above the composer, below the
+       overlay (100) and below the grain (999) so the texture still falls
+       across it. Square like everything else; the kind is carried by the
+       left rule, never by a radius. */
+    .toast {
+      position: fixed;
+      left: 14px;
+      right: 14px;
+      bottom: 86px;
+      z-index: 90;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 11px;
+      background: var(--paper);
+      border: 1px solid var(--ink);
+      border-left: 3px solid var(--ink);
+      color: var(--ink);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      animation: msg-enter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    .btn-primary:hover:not(:disabled) {
-      background: var(--brand-primary-hover);
-      border-color: var(--brand-primary-hover);
-    }
-
-    .btn-danger {
-      background: var(--red-soft);
-      border-color: rgba(220, 38, 38, 0.25);
-      color: var(--red);
-    }
-    .btn-danger:hover:not(:disabled) { background: var(--red); color: #fff; border-color: var(--red); }
-
-    .btn-ghost { background: transparent; border-color: transparent; }
+    .toast.bad { border-left-color: var(--bad); color: var(--bad); }
+    .toast.leaving { animation: msg-leave 0.18s ease forwards; }
+    /* The composer is 89px, but "+ New task" (33px) sits above it on a
+       terminal task — step over both rather than landing on the button. */
+    #newTaskBtn.visible ~ .toast { bottom: 144px; }
 
     /* ─── Input area (bottom) ─────────────────────────────────────────── */
     #inputArea {
-      background: var(--surface);
-      border-top: 1px solid var(--border);
-      padding: 12px 16px 16px;
+      background: var(--paper);
+      border-top: 2px solid var(--ink);
+      padding: 10px 14px 12px;
       flex-shrink: 0;
     }
 
-    .input-row {
-      display: flex;
-      gap: 8px;
-      align-items: flex-end;
-    }
+    .input-row { display: flex; gap: 8px; align-items: stretch; }
 
     #goal {
       flex: 1;
-      min-height: 44px;
+      min-height: 42px;
       max-height: 120px;
-      padding: 11px 13px;
-      border-radius: var(--radius);
-      border: 1px solid var(--border);
-      background: var(--surface-1);
-      color: var(--text);
-      font-family: 'Inter', sans-serif;
+      padding: 11px 12px;
+      border: 1px solid var(--rule-2);
+      background: var(--paper-2);
+      color: var(--ink);
+      font-family: var(--font-ui);
       font-size: 14px;
       resize: none;
       outline: none;
-      line-height: 1.5;
-      transition: var(--transition);
+      line-height: 1.45;
+      transition: border-color var(--t);
     }
-    #goal:focus {
-      border-color: var(--brand-primary);
-      box-shadow: 0 0 0 3px var(--brand-primary-soft);
-    }
-    #goal::placeholder { color: var(--text-faint); }
+    #goal:focus { border-color: var(--ink); border-width: 2px; }
+    #goal::placeholder { color: var(--ink-3); }
 
     #sendBtn {
       width: 42px;
-      height: 42px;
-      border-radius: var(--radius);
-      border: none;
-      background: var(--brand-primary);
-      color: #fff;
+      border: 1px solid var(--ink);
+      background: var(--ink);
+      color: var(--paper);
       cursor: pointer;
       display: grid;
       place-items: center;
       flex-shrink: 0;
-      transition: var(--transition);
+      transition: background var(--t), color var(--t);
     }
-    #sendBtn:hover:not(:disabled) {
-      background: var(--brand-primary-hover);
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(0, 82, 204, 0.30);
-    }
-    #sendBtn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-    #sendBtn svg { width: 16px; height: 16px; pointer-events: none; }
+    #sendBtn:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
+    #sendBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+    #sendBtn svg { width: 15px; height: 15px; pointer-events: none; }
 
     .input-hint {
-      font-size: 11px;
-      color: var(--text-faint);
-      margin-top: 6px;
-      padding: 0 2px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.06em;
+      color: var(--ink-3);
+      margin-top: 7px;
     }
 
-    /* ─── Status pill (header) — dot only ──────────────────────────────── */
-    /* ponytail: text label was dropped — too much header chrome for the
-       available width. State is conveyed by dot colour and the title
-       attribute (hover tooltip / aria). */
+    /* ─── Status pill: a square, not a dot ────────────────────────────── */
     .status-pill {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       width: 14px;
       height: 14px;
-      border-radius: 50%;
       background: transparent;
       border: 0;
       padding: 0;
@@ -1084,203 +1009,169 @@
       flex-shrink: 0;
     }
     .status-pill .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: var(--text-faint, #999);
+      width: 8px;
+      height: 8px;
+      background: var(--ink-3);
       display: block;
-      transition: background 0.2s;
+      transition: background var(--t);
     }
-    .status-pill.connected    .dot { background: var(--green, #16a34a); }
-    .status-pill.reconnecting .dot { background: var(--amber, #d97706); animation: pulse 1.4s ease-in-out infinite; }
-    .status-pill.error        .dot { background: var(--red, #dc2626); }
+    .status-pill.connected    .dot { background: var(--ink); }
+    .status-pill.reconnecting .dot { background: var(--wait); animation: pulse 1.4s ease-in-out infinite; }
+    .status-pill.error        .dot { background: var(--bad); }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
-      50%      { opacity: 0.35; }
+      50%      { opacity: 0.25; }
     }
 
-    /* ─── Tool subtitle (inside step bubbles) ───────────────────────── */
     .tool-subtitle {
       margin-top: 6px;
-      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-      font-size: 11px;
-      color: var(--text-faint);
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      line-height: 1.5;
+      color: var(--ink-3);
       word-break: break-all;
     }
 
-    /* ─── Final answer / facts ───────────────────────────────────────── */
-    .final-answer { font-size: 14px; line-height: 1.5; padding: 4px 0 12px; color: var(--text); }
-    .final-answer-text { font-weight: 500; }
-    /* Final-answer toolbar — 4 icon buttons at the bottom (Copy, Good,
-       Bad, Retry). Replaces the old "Task completed · N steps" caption. */
-    .final-answer-toolbar {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-      margin-top: 8px;
-    }
+    /* ─── Final answer ────────────────────────────────────────────────── */
+    .final-answer { font-size: 13.5px; line-height: 1.55; padding: 4px 0 10px; }
+    .final-answer-text { font-weight: 400; }
+    .final-answer-toolbar { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
     .final-answer-icon-btn {
-      width: 24px;
-      height: 24px;
-      border-radius: 12px;
+      width: 26px;
+      height: 26px;
       background: transparent;
-      border: 1px solid var(--border);
-      color: var(--text-muted);
+      border: 1px solid var(--rule-2);
+      color: var(--ink-3);
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 0;
       line-height: 1;
-      font-family: 'Inter', sans-serif;
-      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      transition: background var(--t), color var(--t), border-color var(--t);
     }
-    .final-answer-icon-btn svg {
-      width: 13px;
-      height: 13px;
-      display: block;
-    }
-    .final-answer-icon-btn:hover {
-      background: var(--surface-2);
-      color: var(--text);
-    }
-    .final-answer-icon-btn.clicked {
-      background: var(--green-soft);
-      border-color: var(--green);
-      color: var(--green);
-    }
-    /* ponytail: persistent rated states for good/bad. The clicked
-       class is a brief flash; rated-good / rated-bad stay until the
-       user clicks again (toggle). They're mutually exclusive. */
-    .final-answer-icon-btn.rated-good {
-      background: var(--green-soft);
-      border-color: var(--green);
-      color: var(--green);
-    }
-    .final-answer-icon-btn.rated-bad {
-      background: var(--red-soft);
-      border-color: var(--red);
-      color: var(--red);
-    }
-    /* Markdown rendered inside the final answer (and any other bubble).
-       Compact chat-friendly sizes — not document defaults. */
+    .final-answer-icon-btn svg { width: 13px; height: 13px; display: block; }
+    .final-answer-icon-btn:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+    /* .clicked is the 1.2s copy confirmation flash, before any rating. */
+    .final-answer-icon-btn.rated-good,
+    .final-answer-icon-btn.clicked  { border-color: var(--ok); color: var(--ok); }
+    .final-answer-icon-btn.rated-good:hover { background: var(--ok); color: var(--paper); }    .final-answer-icon-btn.rated-bad { border-color: var(--bad); color: var(--bad); }
+    .final-answer-icon-btn.rated-bad:hover { background: var(--bad); color: var(--paper); }
+
+    /* ─── Markdown inside bubbles: chat-scaled, not document-scaled ──── */
     .bubble h1, .bubble h2, .bubble h3, .bubble h4 {
       margin: 10px 0 4px;
       font-weight: 600;
-      line-height: 1.25;
-      color: var(--text);
+      line-height: 1.3;
+      letter-spacing: -0.014em;
     }
-    .bubble h1 { font-size: 17px; }
-    .bubble h2 { font-size: 15px; }
-    .bubble h3 { font-size: 14px; }
+    .bubble h1 { font-size: 16px; }
+    .bubble h2 { font-size: 14.5px; }
+    .bubble h3 { font-size: 13.5px; }
     .bubble h4 { font-size: 13px; }
-    .bubble ul, .bubble ol {
-      margin: 4px 0 4px 0;
-      padding-left: 22px;
-    }
-    .bubble li { margin: 2px 0; line-height: 1.4; }
+    .bubble ul, .bubble ol { margin: 4px 0; padding-left: 20px; }
+    .bubble li { margin: 2px 0; line-height: 1.45; }
     .bubble blockquote {
       margin: 6px 0;
-      padding: 4px 12px;
-      border-left: 3px solid var(--border);
-      color: var(--text-muted);
-      background: var(--surface-2);
-      border-radius: 0 4px 4px 0;
+      padding: 2px 0 2px 11px;
+      border-left: 2px solid var(--rule-2);
+      color: var(--ink-2);
     }
-    .bubble hr {
-      border: 0;
-      border-top: 1px solid var(--border);
-      margin: 10px 0;
-    }
+    .bubble hr { border: 0; border-top: 1px solid var(--rule); margin: 10px 0; }
     .bubble pre {
-      background: var(--surface-2);
+      background: var(--paper-2);
       padding: 8px 10px;
-      border-radius: 4px;
-      font-family: ui-monospace, monospace;
-      font-size: 12px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.5;
       overflow-x: auto;
       margin: 6px 0;
+      border-left: 2px solid var(--rule-2);
     }
-    .bubble pre code {
-      background: transparent;
-      padding: 0;
-      font-size: inherit;
-    }
+    .bubble pre code { background: transparent; padding: 0; font-size: inherit; }
 
     .step-page-chip {
       display: flex;
       align-items: center;
       gap: 6px;
       font-size: 11px;
-      color: var(--text-faint);
-      padding: 3px 0 6px;
-      border-bottom: 1px dashed var(--border);
-      margin-bottom: 4px;
+      color: var(--ink-3);
+      padding: 4px 0 6px;
+      border-bottom: 1px solid var(--rule);
+      margin-bottom: 5px;
       overflow: hidden;
-      text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .step-page-chip-icon { color: var(--brand-primary); flex-shrink: 0; }
-    .step-page-chip-url { font-family: ui-monospace, 'SF Mono', Menlo, monospace; color: var(--text-muted); font-style: italic; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .step-page-chip-title { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+    .step-page-chip-icon { color: var(--ink); flex-shrink: 0; }
+    .step-page-chip-url {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: var(--ink-2);
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .step-page-chip-title { color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
 
     .facts {
       display: flex;
       flex-direction: column;
-      gap: 6px;
-      margin: 4px 0 10px;
-      padding: 9px 11px;
-      background: var(--surface-2);
-      border-radius: 8px;
-      border: 1px solid var(--border-soft);
+      gap: 7px;
+      margin: 5px 0 10px;
+      padding: 9px 10px;
+      background: var(--paper-2);
+      border-left: 2px solid var(--rule-2);
     }
     .facts-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
-    .facts-label {
-      font-family: 'Poppins', sans-serif;
-      color: var(--text-faint);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      font-size: 9px;
-      min-width: 64px;
-      font-weight: 700;
-    }
+    .facts-label { color: var(--ink-3); min-width: 62px; }
     .facts-link {
-      color: var(--brand-primary);
-      text-decoration: none;
+      color: var(--ink);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      text-decoration-color: var(--ink-3);
       word-break: break-all;
-      padding: 2px 7px;
-      background: var(--brand-primary-soft);
-      border-radius: 4px;
       font-weight: 500;
     }
-    .facts-link:hover { text-decoration: underline; }
+    .facts-link:hover { text-decoration-color: var(--ink); }
     .facts-code {
-      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-      background: var(--surface);
-      padding: 2px 7px;
-      border-radius: 4px;
-      color: var(--text);
-      border: 1px solid var(--border-soft);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      padding: 1px 6px;
+      color: var(--ink);
     }
-    .facts-date { padding: 2px 7px; background: var(--surface); border-radius: 4px; color: var(--text); border: 1px solid var(--border-soft); }
+    .facts-date {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      padding: 1px 6px;
+      color: var(--ink);
+    }
 
     .done-caption {
-      font-size: 11px;
-      color: var(--text-faint);
-      margin-top: 4px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.04em;
+      color: var(--ink-3);
+      margin-top: 5px;
       display: flex;
       align-items: center;
-      gap: 4px;
+      gap: 5px;
     }
-    .done-icon { font-size: 14px; color: var(--green); }
+    .done-icon { color: var(--ok); }
   </style>
 </head>
 <body>
 
+<!-- Grain: scanlines + noise. Pure white alone reads as clinical. -->
+<div class="grain" aria-hidden="true"></div>
+
 <!-- ── Header ────────────────────────────────────────────────────────── -->
 <header>
   <div class="brand">
-    <img id="brandLogo" class="brand-logo" src="assets/logo.svg" alt="Inventic">
+    <img id="brandLogo" class="brand-logo" src="assets/logo.svg" alt="">
     <span class="brand-name">Brotto</span>
   </div>
 
@@ -1294,14 +1185,23 @@
     <span id="statusDot" class="dot"></span>
   </div>
 
-  <div id="workingIndicator" aria-live="polite">
-    <div class="spinner"></div>
-    <span>Working</span>
+  <!-- Model pill: the agent's identity, always visible. The square spinner
+       rides inside it and appears only while a task is running. -->
+  <div id="modelPill" class="model-pill" title="Model">
+    <span id="modelSpinner" class="spinner"></span>
+    <span id="modelPillName" class="model-pill-name">—</span>
   </div>
 
   <div class="hdr-actions">
     <button id="stopBtn" class="btn-icon btn-stop" title="Stop" style="display:none" aria-label="Stop task">
       <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+    </button>
+    <button id="historyBtn" class="btn-icon" title="Session history" aria-label="Session history">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.4 12a8.6 8.6 0 1 0 2.7-6.2"></path>
+        <path d="M3.1 4.4v4.4h4.4"></path>
+        <path d="M12 7.7V12l3 1.8"></path>
+      </svg>
     </button>
     <button id="settingsBtn" class="btn-icon" title="Settings" aria-label="Open settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -1322,7 +1222,7 @@
 <span id="stepCount" style="display:none">0 steps</span>
 <span id="timer" style="display:none"></span>
 
-<!-- ── Status bar (steps + timer + tabs) ──────────────────────────── -->
+<!-- ── Status bar (2x2: steps, time / tabs, context) ─────────────── -->
 <div id="statusBar" aria-live="polite">
   <div class="cell">
     <span class="label">Steps</span>
@@ -1332,7 +1232,7 @@
     <span class="label">Time</span>
     <span class="value" id="timerActive">0.0s</span>
   </div>
-  <div class="cell" id="tabCountCell" hidden>
+  <div class="cell" id="tabCountCell">
     <span class="label">Tabs</span>
     <span class="value" id="tabCountActive">0</span>
   </div>
@@ -1342,23 +1242,14 @@
   </div>
 </div>
 
-<!-- ── Tab lifecycle ──────────────────────────────────────────────── -->
-<div id="tabBar" class="tab-bar" aria-live="polite" hidden>
-  <div class="tab-bar-header">
-    <span class="tab-bar-title">Tabs opened</span>
-    <button type="button" id="tabBarToggle" class="tab-bar-toggle" aria-expanded="true">−</button>
-  </div>
-  <div class="tab-bar-body" id="tabBarBody"></div>
-</div>
-
 <!-- ── Chat messages ──────────────────────────────────────────────── -->
 <main id="messages" aria-live="polite">
   <div class="empty-state" id="emptyState">
     <div class="empty-mark">
-      <img src="assets/logo.svg" alt="Inventic" class="brand-logo brand-logo--lg">
+      <img src="assets/logo.svg" alt="" class="brand-logo brand-logo--lg">
     </div>
     <div class="empty-title">Brotto</div>
-    <div class="empty-sub">Describe what you'd like to do in your browser and Brotto will get it done for you.</div>
+    <div class="empty-sub">Tell Brotto what to do in this tab. It navigates, clicks, and fills things in — you approve anything sensitive.</div>
   </div>
 </main>
 
@@ -1382,15 +1273,17 @@
 </section>
 
 <!-- ── Settings overlay ─────────────────────────────────────────── -->
-<div id="settingsOverlay" role="dialog" aria-modal="true" aria-label="Settings">
-  <div id="settingsPanel">
-    <button id="settingsClose" class="btn-icon" aria-label="Close settings">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-        <line x1="18" y1="6" x2="6" y2="18"></line>
-        <line x1="6" y1="6" x2="18" y2="18"></line>
-      </svg>
-    </button>
-    <div class="settings-title">Settings</div>
+<div id="settingsOverlay" class="overlay" role="dialog" aria-modal="true" aria-label="Settings">
+  <div id="settingsPanel" class="overlay-panel">
+    <div class="settings-head">
+      <div class="settings-title">Settings</div>
+      <button id="settingsClose" class="btn-icon" aria-label="Close settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
     <div class="settings-section">
       <label for="plannerUrlSetting">Orchestrator URL</label>
       <input id="plannerUrlSetting" class="input" type="url" placeholder="http://localhost:8000">
@@ -1421,7 +1314,7 @@
       <h3>Model</h3>
       <label>
         Provider
-        <select id="model-provider">
+        <select id="model-provider" class="input">
           <option value="anthropic">Anthropic</option>
           <option value="openai">OpenAI</option>
           <option value="minimax">MiniMax (Anthropic-compat)</option>
@@ -1429,29 +1322,46 @@
       </label>
       <label>
         Model
-        <select id="model-name">
+        <select id="model-name" class="input">
           <!-- populated from JS based on provider selection -->
         </select>
       </label>
       <label>
         API key
-        <input id="model-api-key" type="password" placeholder="Leave blank to use server default" autocomplete="off" />
+        <input id="model-api-key" class="input" type="password" placeholder="Leave blank to use server default" autocomplete="off" />
       </label>
       <div class="settings-actions-row">
-        <button id="model-save" class="input" type="button">Save model</button>
+        <button id="model-save" class="btn" type="button">Save model</button>
         <span id="model-save-status" class="settings-hint"></span>
       </div>
     </div>
     <div class="settings-section">
       <div class="settings-actions-row">
-        <button id="refreshPolicyBtn" class="input settings-btn-secondary"
+        <button id="refreshPolicyBtn" class="btn settings-btn-secondary"
                 type="button" title="Re-fetch the effective policy from the server">
-          ↻ Refresh from server
+          Refresh from server
         </button>
-        <button id="saveSettingsBtn" class="input" type="button">Save</button>
+        <button id="saveSettingsBtn" class="btn btn-primary" type="button">Save</button>
       </div>
       <p id="settingsVerifyStatus" class="settings-hint settings-verify">Verifying server…</p>
     </div>
+  </div>
+</div>
+
+<!-- ── Session history ───────────────────────────────────────────────
+     Same overlay idiom as settings: it slides over the panel rather than
+     replacing it, so opening it mid-task can't cost you the run. -->
+<div id="historyOverlay" class="overlay" role="dialog" aria-modal="true" aria-label="Session history">
+  <div id="historyPanel" class="overlay-panel">
+    <div class="settings-head">
+      <span class="settings-title">Session history</span>
+      <button id="historyClose" class="btn-icon" aria-label="Close history">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <path d="M5 5l14 14M19 5L5 19"></path>
+        </svg>
+      </button>
+    </div>
+    <div id="historyList" class="history-list"></div>
   </div>
 </div>
 
