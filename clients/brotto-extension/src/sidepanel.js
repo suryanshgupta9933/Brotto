@@ -419,7 +419,7 @@ async function hydrateSettingsPanel() {
   securityModeSetting.value = mode;
   const localBlacklist = Array.isArray(s.blacklist) ? s.blacklist : [];
   if (notifyBlockingSetting) notifyBlockingSetting.checked = s.notifyBlocking !== false;
-  if (notifyResultsSetting) notifyResultsSetting.checked = s.notifyResults === true;
+  if (notifyResultsSetting) notifyResultsSetting.checked = s.notifyResults !== false;
 
   // Floor (locked) — always rendered from the server when available.
   // Build via DOM APIs (not innerHTML) so a malicious floor file can't
@@ -553,7 +553,7 @@ if (saveSettingsBtn) {
       mode: securityModeSetting.value === 'secure' ? 'secure' : 'normal',
       blacklist: merged,
       notifyBlocking: notifyBlockingSetting ? notifyBlockingSetting.checked : true,
-      notifyResults: notifyResultsSetting ? notifyResultsSetting.checked : false,
+      notifyResults: notifyResultsSetting ? notifyResultsSetting.checked : true,
     };
     await chrome.storage.local.set({ settings });
     plannerUrlEl.value = settings.serverUrl;
@@ -854,6 +854,27 @@ function deriveReasoningFromAction(title, iconKind) {
 // second task silently no-ops, side panel stays idle. Reconnect on
 // disconnect (SW crash, manual reload from chrome://extensions).
 let swKeepAlive = null;
+
+// ponytail: the panel is open for the whole run whether or not anyone is
+// looking at it, and Brotto's whole premise is that you switch away while it
+// works. A bare port cannot tell those apart, so it reports focus as well as
+// liveness — otherwise a task that finishes while you are in another app reads
+// as "panel connected, someone's watching" and stays silent.
+//
+// Driven by the events rather than by polling hasFocus(): focus and blur are
+// unambiguous, and they fire for both cases the user cares about — leaving for
+// another app, and switching to another Chrome tab with the panel left open.
+// That second one is the common case, and it is not the same as closing the
+// panel, which is all a liveness port can see.
+//
+// Registered here, not inside connectSwKeepAlive: that re-runs on every service
+// worker restart, so per-connect listeners would accumulate one pair at a time.
+function reportWatching(watching) {
+  try { swKeepAlive?.postMessage({ watching }); } catch { /* port closing */ }
+}
+document.addEventListener('focus', () => reportWatching(true));
+document.addEventListener('blur',   () => reportWatching(false));
+
 function connectSwKeepAlive() {
   try {
     swKeepAlive = chrome.runtime.connect({ name: "brotto-sidepanel" });
@@ -862,6 +883,10 @@ function connectSwKeepAlive() {
     setTimeout(connectSwKeepAlive, 1000);
     return;
   }
+  // Seeded once per connect: a panel that opens into an already-blurred window
+  // (restored session, reopened from a notification) never sees a focus event
+  // at all, and the background has to learn it is unwatched from somewhere.
+  reportWatching(document.hasFocus());
   swKeepAlive.onDisconnect.addListener(() => {
     swKeepAlive = null;
     // ponytail: brief delay so we don't spin if the SW is genuinely gone.

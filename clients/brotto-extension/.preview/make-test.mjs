@@ -11,6 +11,7 @@ window.__bag = {
   modelConfig: { provider: 'anthropic', model: 'MiniMax-M3.1-Flash-Preview', context_window: 1000000 },
 };
 window.__forceFail = null;
+window.__portMsgs = [];
 const area = (bag) => ({
   get: (k) => Promise.resolve(typeof k === 'string' ? (k in bag ? { [k]: bag[k] } : {}) : { ...bag }),
   set: (o) => { Object.assign(bag, o); return Promise.resolve(); },
@@ -35,7 +36,15 @@ window.chrome = {
       if (!cb) return out;
       return undefined;
     },
-    connect: () => ({ onMessage: { addListener(){} }, onDisconnect: { addListener(){} }, postMessage(){}, disconnect(){} }),
+    connect: () => ({
+      onMessage: { addListener(){} },
+      onDisconnect: { addListener(){} },
+      disconnect(){},
+      // ponytail: the panel reports whether it is being looked at on this
+      // port, and the background gates its result notification on that. The
+      // stub has to keep the messages or the behaviour is untestable.
+      postMessage: (m) => { window.__portMsgs.push(JSON.parse(JSON.stringify(m))); },
+    }),
   },
   storage: { local: area(window.__bag), session: area(window.__session = window.__session || {}) },
   debugger: { attach(){}, detach(){} },

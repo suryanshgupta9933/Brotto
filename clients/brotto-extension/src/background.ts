@@ -22,6 +22,9 @@ const BADGE_IDLE   = "#6b7280";
 
 let ws: WebSocket | null = null;
 let activeTabId: number | null = null;
+// The window the task is running in, so a notification click can bring that
+// window forward rather than whatever happens to be focused at the time.
+let activeWindowId: number | null = null;
 let tabStack: number[] = []; // opener history for back-navigation
 let sessionId: string | null = null;
 let serverUrl: string = DEFAULT_SERVER;
@@ -111,11 +114,11 @@ async function hydrateUserPolicy(): Promise<void> {
       | { mode?: string; blacklist?: unknown; notifyBlocking?: boolean; notifyResults?: boolean }
       | undefined;
     if (!s) return;
-    // Blocking prompts notify unless explicitly turned off; finished/failed
-    // results only notify once the user asks for them. A task ending is the
-    // most frequent event Brotto emits, so it earns the higher bar.
+    // Both notify unless explicitly turned off. Brotto's premise is that you
+    // leave it running and come back later, so "the task ended" is the event
+    // the whole thing exists to deliver.
     notifyBlocking = s.notifyBlocking !== false;
-    notifyResults = s.notifyResults === true;
+    notifyResults = s.notifyResults !== false;
     userPolicy = {
       mode: s.mode === "secure" ? "secure" : "normal",
       blacklist: Array.isArray(s.blacklist)
@@ -166,6 +169,7 @@ async function clearSession(): Promise<void> {
   await chrome.storage.session.clear();
   sessionId = null;
   activeTabId = null;
+  activeWindowId = null;
   waitingForLogin = false;
   currentPrompt = null;
   lastObservedUrl = "";
@@ -383,8 +387,14 @@ function notifyUi(event: Record<string, unknown>): void {
 // answerable from the notification and everything else just clears.
 
 let panelConnected = false;
+// Whether the open panel is actually being looked at. Distinct from
+// panelConnected: Brotto is meant to be left open while the user works in
+// another app, and a result landing on an unattended panel is exactly the one
+// worth announcing. Defaults true until the panel reports, so a cold service
+// worker treats "connected" as "watched" and stays quiet rather than guessing.
+let panelWatching = true;
 let notifyBlocking = true;
-let notifyResults = false;
+let notifyResults = true;
 
 type NotificationSpec = {
   title: string;
@@ -418,8 +428,13 @@ function notify(id: string, spec: NotificationSpec): void {
 function maybeNotify(event: Record<string, unknown>): void {
   const t = event.type as string;
 
-  // Blocking prompts: always speak up, even with the panel open — the user
-  // has usually wandered off precisely because the panel looks idle.
+  // Blocking prompts: speak up even with the panel open — the user has usually
+  // wandered off precisely because the panel looks idle. Gated by the setting,
+  // which until now was written on every save and read nowhere, so unchecking
+  // "When Brotto is waiting for you" changed nothing at all.
+  if (!notifyBlocking && (t === "approval_request" || t === "login_required" || t === "clarify_request")) {
+    return;
+  }
   if (t === "approval_request") {
     const id = String(event.id ?? "");
     notify(`approval:${id}`, {
@@ -450,9 +465,10 @@ function maybeNotify(event: Record<string, unknown>): void {
     return;
   }
 
-  // Terminal results: only when the panel is closed. If it's open, the user
-  // is already looking at the answer and a popup is pure noise.
-  if (panelConnected) return;
+  // Terminal results: only when nobody is watching. An open panel the user has
+  // tabbed away from is not watching — that is the normal state for a task
+  // that takes ten minutes.
+  if (panelConnected && panelWatching) return;
   if (t === "task_completed" && notifyResults) {
     notify("done", {
       title: "Brotto finished",
@@ -522,6 +538,7 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
 
   if (!tab.id) throw new Error("No usable tab");
   activeTabId = tab.id;
+  activeWindowId = tab.windowId ?? null;
   tabStack    = [];
   stepIndex   = 0;
   void persistSession();
@@ -952,7 +969,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             // Notification prefs ride along on Save rather than growing their
             // own message type — they live in the same settings object.
             notifyBlocking = s.notifyBlocking !== false;
-            notifyResults = s.notifyResults === true;
+            notifyResults = s.notifyResults !== false;
           }
           sendResponse({ success: true });
           break;
@@ -1085,7 +1102,10 @@ async function initialize(): Promise<void> {
     // The panel's keep-alive port is also its liveness signal: a closed panel
     // disconnects the port, which is what lets a finished task notify.
     panelConnected = true;
-    port.onMessage.addListener(() => { /* keep-alive */ });
+    panelWatching = true;
+    port.onMessage.addListener((msg: { watching?: unknown }) => {
+      if (typeof msg?.watching === "boolean") panelWatching = msg.watching;
+    });
     port.onDisconnect.addListener(() => { panelConnected = false; });
   });
 
@@ -1121,9 +1141,15 @@ async function initialize(): Promise<void> {
   });
 
   // Deliberately does NOT call chrome.sidePanel.open() — see the note above
-  // maybeNotify. Dismissing and updating the badge is all a click can do.
+  // maybeNotify. It needs a user gesture that a notification click does not
+  // provide. Focusing the window has no such restriction, and a click on a
+  // notification is unambiguously "I am coming back to this" — clearing it
+  // and leaving the user where they were made the notification a dead end.
   chrome.notifications?.onClicked.addListener((id) => {
     void chrome.notifications.clear(id);
+    if (activeWindowId !== null) {
+      void chrome.windows.update(activeWindowId, { focused: true }).catch(() => undefined);
+    }
   });
 
   chrome.runtime.onInstalled.addListener((details) => {
