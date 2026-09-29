@@ -8,7 +8,6 @@
 // pay-as-you-go with separate credits.
 const MODEL_CATALOG = {
   anthropic: [
-    { model: "MiniMax-M3.1-Flash-Preview", context_window: 1000000 },
     { model: "claude-3-5-sonnet-latest", context_window: 200000 },
   ],
   openai: [
@@ -61,6 +60,7 @@ if ($modelSave) {
         ? chrome.storage.session.set({ modelApiKey: $modelKey.value.trim() })
         : chrome.storage.session.remove('modelApiKey'),
     ]);
+    setModelPill(model);
     if ($modelStatus) {
       $modelStatus.textContent = 'Saved.';
       setTimeout(() => { $modelStatus.textContent = ''; }, 2000);
@@ -68,14 +68,59 @@ if ($modelSave) {
   });
 }
 
+// ponytail: the header pill names the model the agent is actually running.
+// Storage is the only source the panel has — the server's resolved config
+// (env var, per-IP file) isn't visible from here, so the pill shows what
+// this browser last saved and nothing more.
+function setModelPill(model) {
+  if (!modelPillName) return;
+  const label = model || 'Default';
+  // Two copies of the name: the track travels exactly one copy's width, so
+  // the tail hands off to the head without a visible seam.
+  const track = document.createElement('div');
+  track.className = 'model-pill-track';
+  for (let i = 0; i < 2; i++) {
+    const copy = document.createElement('span');
+    copy.textContent = label;
+    // Only the head is content; the tail exists to hand off visually and
+    // would otherwise be announced as a second model name.
+    if (i) copy.setAttribute('aria-hidden', 'true');
+    track.appendChild(copy);
+  }
+  modelPillName.replaceChildren(track);
+  if (modelPill) modelPill.title = `${model ? 'Model: ' + model : 'Model: server default'} — open settings to change it`;
+  fitModelPill();
+  // Geist may still be loading when this first runs, which would measure the
+  // fallback face and under-report the overflow.
+  document.fonts?.ready.then(fitModelPill);
+}
+
+// A name that fits sits dead still; only an overflowing one travels. Measuring
+// beats guessing — a marquee that always runs makes "gpt-4o" drift pointlessly.
+// Compare one copy (plus the gap it needs to hand off) against the window, so
+// the decision never depends on the two-copy track's own width.
+function fitModelPill() {
+  const copy = modelPillName?.firstElementChild?.firstElementChild;
+  if (!copy) return;
+  const gap = parseFloat(getComputedStyle(copy).paddingRight) || 0;
+  modelPillName.classList.toggle('marquee', copy.offsetWidth + gap > modelPillName.clientWidth);
+}
+
 async function hydrateModelSettings() {
-  if (!$modelProvider) return;
   const stored = await chrome.storage.local.get('modelConfig');
-  const v = stored.modelConfig;
-  if (v && v.model_config) {
-    $modelProvider.value = v.model_config.provider;
+  const raw = stored.modelConfig;
+  // The stored shape has been flat since the migration in model_config.ts;
+  // the nested form is what a pre-migration install left behind. Reading
+  // only the nested shape meant a freshly saved config never came back, so
+  // the pill read "Default" and re-saving the API key reverted the model.
+  const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
+  if (cfg) {
+    if ($modelProvider) $modelProvider.value = cfg.provider;
     populateModelOptions();
-    $modelName.value = v.model_config.model;
+    if ($modelName) $modelName.value = cfg.model;
+    setModelPill(cfg.model);
+  } else {
+    setModelPill(null);
   }
   // Don't re-hydrate the API key field — it's in chrome.storage.session
   // and we deliberately don't surface it in the UI (no plaintext display).
@@ -87,7 +132,10 @@ const emptyState   = document.getElementById('emptyState');
 const goalEl       = document.getElementById('goal');
 const sendBtn      = document.getElementById('sendBtn');
 const stopBtn      = document.getElementById('stopBtn');
-const workingInd   = document.getElementById('workingIndicator');
+const composerHint = document.getElementById('composerHint');
+const modelPill    = document.getElementById('modelPill');
+const modelSpinner = document.getElementById('modelSpinner');
+const modelPillName = document.getElementById('modelPillName');
 const settingsBtn  = document.getElementById('settingsBtn');
 const settingsOverlay = document.getElementById('settingsOverlay');
 const settingsPanel   = document.getElementById('settingsPanel');
@@ -109,11 +157,7 @@ const timerActiveEl   = document.getElementById('timerActive');
 const newTaskBtn      = document.getElementById('newTaskBtn');
 const connectionMeta  = document.getElementById('connectionMeta');
 const statusPill      = document.getElementById('statusPill');
-// ponytail: tab-bar handles — render each lifecycle event (open/close/nav/
-// focus) as a row so the user sees what the agent touched in their browser.
-const tabBar         = document.getElementById('tabBar');
-const tabBarBody     = document.getElementById('tabBarBody');
-const tabBarToggle   = document.getElementById('tabBarToggle');
+const connLabelEl     = document.getElementById('connLabel');
 
 // ponytail: soft length cap on user task input. Tasks over this many chars
 // trigger a confirm() before send; matching server warning at the same
@@ -124,73 +168,21 @@ const MAX_TASK_CHARS = 1000;
 // ── Settings panel ────────────────────────────────────────────────────────
 // (handlers below — reads chrome.storage.local, writes on Save)
 
-// ponytail: tab-bar — collapsed/expanded by default. Each row shows badge
-// (kind), title (or url), and a one-line context line.
+// ponytail: the TABS cell is the only tab surface — the old "Tabs opened"
+// lifecycle list was removed, but the events still feed the count.
 const seenTabs = new Map(); // tabId → {kind, url, title, lastUpdate}
-let tabBarCollapsed = false;
-function renderTabBar() {
-  // ponytail: tab bar is hidden — the new TABS status cell handles the
-  // count, and the tab lifecycle rows were noisy (badge + title + URL +
-  // tab id, with the badge floating outside the pill). We keep the
-  // function around so the tab lifecycle still feeds the cell, but the
-  // panel itself is no longer rendered.
-  if (tabBar) tabBar.hidden = true;
-  return;
-  tabBarBody.replaceChildren();
-  if (seenTabs.size === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'tab-row-empty';
-    empty.textContent = 'No tabs opened by the agent.';
-    tabBarBody.appendChild(empty);
-    return;
-  }
-  // ponytail: render in event order; we keep insertion order via Map. Most
-  // recent row at the bottom by appending as we iterate.
-  for (const [, row] of seenTabs) {
-    const row_el = document.createElement('div');
-    row_el.className = 'tab-row';
-    const badge = document.createElement('span');
-    badge.className = 'tab-row-badge ' + row.kind;
-    badge.textContent = row.kind;
-    row_el.appendChild(badge);
-    const info = document.createElement('div');
-    info.className = 'tab-row-info';
-    const titleEl = document.createElement('div');
-    titleEl.className = 'tab-row-title';
-    titleEl.textContent = row.title || row.url || '(no title)';
-    titleEl.title = row.title || row.url || '';
-    info.appendChild(titleEl);
-    const urlEl = document.createElement('div');
-    urlEl.className = 'tab-row-url';
-    urlEl.textContent = row.url || '—';
-    urlEl.title = row.url || '';
-    info.appendChild(urlEl);
-    row_el.appendChild(info);
-    tabBarBody.appendChild(row_el);
-  }
-  // tabBar.hidden = false removed — the new TABS status cell owns the count.
-  // The lifecycle rows are still built (so the data path stays intact for
-  // any future debug tool) but the panel itself never renders.
-}
 function recordTabEvent(ev) {
   if (!ev) return;
-  // ponytail: "closed" removes the row; everything else updates in place.
   if (ev.kind === 'closed') {
     seenTabs.delete(ev.tabId);
   } else {
     seenTabs.set(ev.tabId, { tabId: ev.tabId, kind: ev.kind, url: ev.url, title: ev.title });
   }
-  renderTabBar();
   updateTabCount();
 }
 function updateTabCount() {
-  const cell = document.getElementById('tabCountCell');
   const value = document.getElementById('tabCountActive');
-  if (!cell || !value) return;
-  const n = seenTabs.size;
-  value.textContent = String(n);
-  // Hide the cell when zero — empty stats are noise.
-  cell.hidden = n === 0;
+  if (value) value.textContent = String(seenTabs.size);
 }
 
 // ponytail: context utilization cell — backend is the source of truth.
@@ -237,14 +229,6 @@ async function fetchContextWindow() {
     updateContextUsage();
   } catch { /* offline / not running — backend will fill it in */ }
 }
-if (tabBarToggle) {
-  tabBarToggle.addEventListener('click', () => {
-    tabBarCollapsed = !tabBarCollapsed;
-    tabBar.classList.toggle('collapsed', tabBarCollapsed);
-    tabBarToggle.textContent = tabBarCollapsed ? '+' : '−';
-    tabBarToggle.setAttribute('aria-expanded', String(!tabBarCollapsed));
-  });
-}
 settingsClose.addEventListener('click', () => settingsOverlay.classList.remove('open'));
 settingsOverlay.addEventListener('click', (e) => {
   if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');
@@ -253,6 +237,113 @@ plannerUrlSetting.addEventListener('input', () => {
   plannerUrlEl.value = plannerUrlSetting.value;
 });
 
+// ── Session history ────────────────────────────────────────────────────────
+const historyBtn     = document.getElementById('historyBtn');
+const historyOverlay = document.getElementById('historyOverlay');
+const historyClose   = document.getElementById('historyClose');
+const historyList    = document.getElementById('historyList');
+
+historyBtn.addEventListener('click', async () => {
+  historyOverlay.classList.add('open');
+  await renderHistory();
+});
+historyClose.addEventListener('click', () => historyOverlay.classList.remove('open'));
+historyOverlay.addEventListener('click', (e) => {
+  if (e.target === historyOverlay) historyOverlay.classList.remove('open');
+});
+
+// ponytail: sessions are a flat chrome.storage.local list, newest first,
+// capped so the panel's boot read stays trivial. The list is read on every
+// history open rather than held in memory — the whole point is that it
+// survives the panel being closed.
+const SESSION_LIMIT = 20;
+const SESSIONS_KEY = 'sessions';
+
+async function listSessions() {
+  const { sessions } = await chrome.storage.local.get(SESSIONS_KEY);
+  return Array.isArray(sessions) ? sessions : [];
+}
+
+// ponytail: one writer, one reader, one shape. Called from both terminal
+// handlers; `status` is what renderHistory maps to the row's mark.
+async function saveSession({ status, steps, elapsed }) {
+  const task = (state.lastGoal || '').trim();
+  if (!task) return;
+  const sessions = await listSessions();
+  // Every panel open replays the run's buffered events, so the terminal event
+  // arrives again for a task already recorded — 20 opens was enough to evict
+  // every real task from the list. The session id is the only identifier that
+  // survives the replay; state.startTime does not, because it is set in
+  // startTask and never re-run.
+  if (state.sessionId && sessions[0]?.sessionId === state.sessionId) return;
+  sessions.unshift({
+    task,
+    status,
+    sessionId: state.sessionId || null,
+    steps: steps || state.stepCount || 0,
+    elapsed: elapsed || '—',
+    startedAt: state.startTime || Date.now(),
+  });
+  await chrome.storage.local.set({ [SESSIONS_KEY]: sessions.slice(0, SESSION_LIMIT) });
+}
+
+function formatSessionTime(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const clock = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const sameDay = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (sameDay) return `Today · ${clock}`;
+  if (d.toDateString() === yesterday.toDateString()) return `Yesterday · ${clock}`;
+  return `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} · ${clock}`;
+}
+
+async function renderHistory() {
+  const sessions = await listSessions();
+  if (sessions.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'history-empty';
+    empty.innerHTML = '<strong>No tasks yet</strong>Every task you finish is listed here. '
+      + 'Click one to put it back in the box.';
+    historyList.replaceChildren(empty);
+    return;
+  }
+  historyList.replaceChildren(...sessions.map((s) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'history-item';
+    row.dataset.status = s.status || 'done';
+    row.innerHTML = '<span class="history-mark"></span><span><span class="history-task"></span>'
+      + '<span class="history-meta"></span></span>';
+    row.querySelector('.history-task').textContent = s.task || '(no task text)';
+    // A row you can't act on is a lie about what history is for. Clicking
+    // refills the composer with that task — enough to run it again without
+    // retyping, which is what "pick one back up" has to mean here.
+    row.title = 'Put this task back in the box';
+    row.addEventListener('click', () => {
+      goalEl.value = s.task || '';
+      historyOverlay.classList.remove('open');
+      goalEl.focus();
+    });
+    const bits = [s.steps + ' steps', s.elapsed || '—', formatSessionTime(s.startedAt)];
+    const meta = row.querySelector('.history-meta');
+    bits.forEach((b, i) => {
+      if (i) {
+        const sep = document.createElement('span');
+        sep.className = 'sep';
+        sep.textContent = '/';
+        meta.appendChild(sep);
+      }
+      const span = document.createElement('span');
+      span.textContent = b;
+      if (i === bits.length - 1) span.className = 'when';
+      meta.appendChild(span);
+    });
+    return row;
+  }));
+}
+
 // ── Settings: load + save (first chrome.storage.local writes — today the
 // SW only reads `get("settings")`, so this is the seed for that key).
 const securityModeSetting = document.getElementById('securityModeSetting');
@@ -260,6 +351,17 @@ const blacklistSetting    = document.getElementById('blacklistSetting');
 const floorBlacklistEl    = document.getElementById('floorBlacklist');
 const saveSettingsBtn     = document.getElementById('saveSettingsBtn');
 const refreshPolicyBtn    = document.getElementById('refreshPolicyBtn');
+const notifyBlockingSetting = document.getElementById('notifyBlockingSetting');
+const notifyResultsSetting  = document.getElementById('notifyResultsSetting');
+const replaySetupBtn        = document.getElementById('replaySetupBtn');
+
+// setOptions re-points the panel; it has no gesture requirement, so the
+// wizard replaces this page on the next open rather than in a new tab.
+if (replaySetupBtn) {
+  replaySetupBtn.addEventListener('click', () => {
+    void chrome.sidePanel.setOptions({ path: 'welcome.html' });
+  });
+}
 
 // ponytail: on Settings open, fetch the EFFECTIVE policy from the server
 // so the sidepanel shows what the server is actually enforcing (floor +
@@ -270,6 +372,14 @@ settingsBtn.addEventListener('click', async () => {
   await hydrateSettingsPanel();
   settingsOverlay.classList.add('open');
   renderVerifyStatus();
+});
+
+// ponytail: the pill names the model, and the model is set in Settings —
+// making the only place that shows it a way in to the only place that
+// changes it. Same handler as the gear, so the two can't drift.
+modelPill.addEventListener('click', () => settingsBtn.click());
+modelPill.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); settingsBtn.click(); }
 });
 
 // ponytail: Q1 — extracted so the Refresh button can re-run the same
@@ -311,6 +421,8 @@ async function hydrateSettingsPanel() {
   const mode = s.mode === 'secure' ? 'secure' : 'normal';
   securityModeSetting.value = mode;
   const localBlacklist = Array.isArray(s.blacklist) ? s.blacklist : [];
+  if (notifyBlockingSetting) notifyBlockingSetting.checked = s.notifyBlocking !== false;
+  if (notifyResultsSetting) notifyResultsSetting.checked = s.notifyResults === true;
 
   // Floor (locked) — always rendered from the server when available.
   // Build via DOM APIs (not innerHTML) so a malicious floor file can't
@@ -325,13 +437,13 @@ async function hydrateSettingsPanel() {
       const empty = document.createElement('div');
       empty.className = 'floor-empty floor-unreachable';
       empty.textContent =
-        '⚠ Could not reach server — organisation policy list unknown. ' +
+        '⚠ Could not reach the server — its blocked-sites list is unknown. ' +
         'Your saved entries below are still active locally.';
       floorBlacklistEl.appendChild(empty);
     } else if (floorList.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'floor-empty';
-      empty.textContent = 'No organisation-wide entries.';
+      empty.textContent = 'None set by the server.';
       floorBlacklistEl.appendChild(empty);
     } else {
       for (const d of floorList) {
@@ -341,7 +453,7 @@ async function hydrateSettingsPanel() {
         const name = document.createTextNode(d + ' ');
         const tag = document.createElement('span');
         tag.className = 'floor-tag';
-        tag.textContent = 'organisation policy';
+        tag.textContent = 'server policy';
         row.appendChild(lock);
         row.appendChild(name);
         row.appendChild(tag);
@@ -443,6 +555,8 @@ if (saveSettingsBtn) {
       serverUrl: plannerUrlSetting.value || 'http://localhost:8000',
       mode: securityModeSetting.value === 'secure' ? 'secure' : 'normal',
       blacklist: merged,
+      notifyBlocking: notifyBlockingSetting ? notifyBlockingSetting.checked : true,
+      notifyResults: notifyResultsSetting ? notifyResultsSetting.checked : false,
     };
     await chrome.storage.local.set({ settings });
     plannerUrlEl.value = settings.serverUrl;
@@ -455,7 +569,12 @@ if (saveSettingsBtn) {
     try {
       const ack = await chrome.runtime.sendMessage({
         type: 'policy_changed',
-        settings: { mode: settings.mode, blacklist: settings.blacklist },
+        settings: {
+          mode: settings.mode,
+          blacklist: settings.blacklist,
+          notifyBlocking: settings.notifyBlocking,
+          notifyResults: settings.notifyResults,
+        },
       });
       swOk = !!(ack && ack.success);
       if (!swOk) console.warn('[brotto] SW ack missing or unsuccessful:', ack);
@@ -520,6 +639,15 @@ const state = {
 };
 
 let timerInterval = null;
+let timerPausedAt = 0;
+// A DOM flag can't guard this: setPhase recomputes stopBtn.disabled from the
+// phase, so `stopTask`'s own `disabled = true` was undone in the same tick and
+// the guard never held. setPhase clears this when a new run starts.
+let stopping = false;
+
+// One timer for every pause. Armed and cleared inside setPhase, which is the
+// only place the phase changes.
+let pauseWatchdog = null;
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -549,9 +677,10 @@ function makeIconBtn(svgContent, title, onClick) {
   return btn;
 }
 
-// ponytail: store feedback (good/bad) per task in localStorage so the
-// user has a record of what they rated. The orchestrator can read this
-// later if needed.
+// ponytail: record the rating in localStorage. Nothing reads it — there is
+// no telemetry and the orchestrator never sees it. It exists so the rating
+// survives a panel close, and the button tooltips say as much rather than
+// implying a feedback channel that doesn't exist.
 function recordFeedback(kind) {
   try {
     const stored = JSON.parse(localStorage.getItem('brotto-feedback') || '[]');
@@ -582,19 +711,19 @@ function retryLastTask() {
   });
 }
 
-// ponytail: clean a URL for chip display. Strips query strings and hash
-// (often auth tokens, session IDs — visually noisy and sometimes
-// sensitive). Falls back to the raw URL if parsing fails. Truncates
-// long paths so the chip stays one line.
-function cleanUrl(url, maxLen = 56) {
-  if (!url) return '';
+// ponytail: split a URL into the two parts the step card shows. Query string
+// and hash are dropped (often auth tokens, session IDs — visually noisy and
+// sometimes sensitive), and a leading "www." goes because it costs width and
+// names nothing. Returns null when there is nothing worth showing.
+function splitUrl(url) {
+  if (!url) return null;
   try {
     const u = new URL(url);
-    let s = u.hostname + u.pathname;
-    if (s.length > maxLen) s = s.slice(0, maxLen - 1) + '…';
-    return s;
+    const host = u.hostname.replace(/^www\./, '');
+    if (!host) return null;
+    return { host, path: u.pathname || '/', raw: u.origin + u.pathname };
   } catch {
-    return url;
+    return null;
   }
 }
 
@@ -744,7 +873,6 @@ connectSwKeepAlive();
 // ── Button handlers (preserved verbatim) ─────────────────────────────────
 if (connectBtn) connectBtn.addEventListener('click', () => void connect());
 if (disconnectBtn) disconnectBtn.addEventListener('click', () => void disconnect());
-if (startBtn) startBtn.addEventListener('click', () => void startTask());
 stopBtn.addEventListener('click', () => void stopTask());
 if (refreshBtn) refreshBtn.addEventListener('click', () => void refresh());
 
@@ -756,10 +884,29 @@ goalEl.addEventListener('keydown', (e) => {
     e.preventDefault();
     void sendUserMessage();
   }
+  // ↑ in an empty box brings back the last task. Re-running a task you
+  // already described is the common follow-up ("now do it properly"), and
+  // retyping it is the alternative.
+  if (e.key === 'ArrowUp' && !goalEl.value.trim() && state.lastGoal) {
+    e.preventDefault();
+    goalEl.value = state.lastGoal;
+    goalEl.dispatchEvent(new Event('input'));
+  }
 });
 goalEl.addEventListener('input', () => {
   goalEl.style.height = 'auto';
   goalEl.style.height = Math.min(goalEl.scrollHeight, 120) + 'px';
+});
+// ponytail: Esc stops, matching every terminal and every browser. Stop is
+// already on screen while a task runs, so this is a shortcut for the mouse,
+// not the only way out.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (settingsOverlay && settingsOverlay.classList.contains('open')) return;
+  if (historyOverlay && historyOverlay.classList.contains('open')) return;
+  if (!stopBtn || stopBtn.style.display === 'none' || stopBtn.disabled) return;
+  e.preventDefault();
+  void stopTask();
 });
 
 // ponytail: render the CONTEXT cell once on load so the value is owned
@@ -785,15 +932,15 @@ async function sendUserMessage() {
   // default, prompt the user" UX spec.
   if (text.length > MAX_TASK_CHARS
       && !window.confirm(
-        `This task is ${text.length} characters. Long prompts increase the risk of prompt injection. Send anyway?`)) {
+        `This task is ${text.length} characters. Long instructions are more likely to contain something Brotto shouldn't follow. Send anyway?`)) {
     return;
   }
   // ponytail: clear prior conversation so each task starts fresh.
   clearMessages();
-  // ponytail: clear previous task's tab-bar (the loop's tabEvent subscriptions
-  // are rebounded inside the local-driver for every run_local_task).
+  // ponytail: clear the previous task's tab tally (the loop's tabEvent
+  // subscriptions are rebounded inside the local-driver for every run_local_task).
   seenTabs.clear();
-  if (tabBar) tabBar.hidden = true;
+  updateTabCount();
   appendMessage({ role: 'user', text });
   state.lastGoal = text;
   goalEl.value = '';
@@ -812,9 +959,10 @@ async function sendUserMessage() {
   }
 
   // ponytail: start the timer the moment the user kicks off a task. Earlier
-  // wiring only started the timer inside startTask() (bound to a hidden
-  // #startBtn), so sendUserMessage's actual run_local_task path never
-  // started the counter — the user always saw 0.0s.
+  // wiring only started the timer inside startTask(), which was reachable
+  // solely from a hidden #startBtn nobody can click — so sendUserMessage's
+  // actual run_local_task path never started the counter and the user always
+  // saw 0.0s. The hidden button is gone; this is the only start path.
   startTimer();
   // ponytail: send the goal to the background. The background opens a
   // new tab, captures observations, calls the planner, dispatches actions
@@ -824,6 +972,8 @@ async function sendUserMessage() {
     stopTimer();
     setPhase('error', `Failed to start: ${response.error || 'unknown error'}`);
     appendMessage({ role: 'error', text: `Failed to start: ${response.error || 'unknown error'}` });
+  } else {
+    void chrome.storage.session.remove('draft');
   }
 }
 
@@ -846,11 +996,9 @@ async function resetForNewTask() {
   // posting a new goal.
   state.lastGoal = '';
   state.stepCount = 0;
-  // ponytail: drop the previous task's tab-bar state so each task starts
-  // with a fresh journal of what was opened.
+  // ponytail: drop the previous task's tab tally so each task starts at zero.
   seenTabs.clear();
-  renderTabBar();
-  if (tabBar) tabBar.hidden = true;
+  updateTabCount();
   clearMessages();
   stopTimer();
   setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Ready' : 'Ready');
@@ -868,11 +1016,39 @@ function logSilently(message) {
 }
 
 // ── Phase / UI helpers ────────────────────────────────────────────────────
+// ponytail: a task emits more than one terminal event — the cancel path sends
+// its own pair, and the loop's .then() can deliver another one afterwards.
+// Without this guard a failure was rendered and then overwritten by a green
+// "Task complete", which is the one thing a user cannot be allowed to see.
+// Every terminal handler asks first; the phases are the same set the
+// composer treats as sendable.
+const TERMINAL_PHASES = new Set(['done', 'error', 'completed', 'cancelled', 'disconnected', 'failed']);
+function alreadyTerminal(label) {
+  if (!TERMINAL_PHASES.has(state.phase)) return false;
+  logSilently(`${label} arrived after terminal phase ${state.phase}; ignored`);
+  return true;
+}
+
 function setPhase(phase, message) {
+  const wasPaused = state.phase === 'paused';
   state.phase = phase;
   const running = phase === 'executing' || phase === 'paused';
-  workingInd.classList.toggle('active', running);
+  modelSpinner.classList.toggle('active', running);
+  // ponytail: the clock measures agent work, not wall time. Every
+  // user-blocking wait (approval / login / clarify) arrives as phase
+  // 'paused', so pausing and resuming here — not at each of the six call
+  // sites — keeps the blocked window out of the total. Resume shifts the
+  // start time forward by the paused duration rather than resetting it.
+  if (phase === 'paused') pauseTimer();
+  else if (wasPaused) resumeTimer();
   stopBtn.style.display = running ? '' : 'none';
+  // Esc only stops while something is running. Advertising it when there is
+  // nothing to stop is a shortcut that does nothing.
+  if (composerHint) {
+    composerHint.textContent = running
+      ? 'Press Enter to send · Shift+Enter for newline · Esc to stop'
+      : 'Press Enter to send · Shift+Enter for newline';
+  }
   // ponytail: re-enable the composer explicitly when the task ends so a
   // "done" / "error" / "cancelled" / "disconnected" / "failed" phase
   // always makes the goal input re-usable. setPhase is the single source
@@ -883,22 +1059,62 @@ function setPhase(phase, message) {
   // so the user knows the loop stopped on purpose, not from a network
   // error. The actual message is rendered by the task_failed handler.
   if (phase === 'done' || phase === 'error') {
-    stopTimer();
-    // ponytail: clear any lingering login prompt so the bubble + button
-    // don't survive into the terminal state. (Auto-resume paths also call
-    // clearLoginPrompt directly, so it's idempotent.)
-    clearLoginPrompt();
+    // ponytail: clear every prompt the task was blocked on so no card
+    // survives into the terminal state. clearLoginPrompt alone left an
+    // approval or clarify card live and clickable on a finished task.
+    clearBlockingCards();
+  }
+  // ponytail: the clock belongs to a run. Every terminal phase stops it,
+  // not just done/error — a bar that kept counting after a failed or
+  // cancelled task would be reporting time that isn't passing. Keyed on
+  // TERMINAL_PHASES, not on `!running`: answering a clarifying question moves
+  // paused → connected, and stopping on anything non-running killed the
+  // interval that the line above had just restarted, so ACTIVE stayed frozen
+  // at the answer for the rest of the run.
+  if (TERMINAL_PHASES.has(phase)) stopTimer();
+  // ponytail: the live "still working" bubble must stop blinking the moment
+  // the agent stops producing — which includes 'paused', because a pause is
+  // the agent asking for approval, a login, or an answer, not the agent
+  // working. finishAssistantMessage was the intended closer but had no call
+  // site, so the caret blinked for the life of the panel and every later
+  // step merged into that one bubble.
+  if (phase !== 'executing' && currentAssistantMsg) {
+    finishAssistantMessage({ title: currentAssistantMsg.textNode.nodeValue });
+  }
+  // ponytail: a pause is the agent blocked on the *user* (approval, login,
+  // clarify) or on a site that never answers. There are five setPhase('paused')
+  // call sites and no timeout on any of them, so a reply that never arrives
+  // left the panel silent — no prompt, no composer, no explanation. Armed here
+  // rather than at each site so all five are covered by construction. It only
+  // prints: forcing a terminal phase would under-report a task that is still
+  // alive server-side, and Stop is already visible throughout a pause.
+  clearTimeout(pauseWatchdog);
+  if (phase === 'paused') {
+    pauseWatchdog = setTimeout(() => {
+      pauseWatchdog = null;
+      if (state.phase !== 'paused') return;
+      appendMessage({
+        role: 'system',
+        text: 'Brotto has not moved on. If nothing happens, press Stop to end the task.',
+      });
+    }, 60000);
   }
   // ponytail: status pill is visible in the header. Updates text + color
   // class so the user can read connection state at a glance (Idle by default).
   if (connectBtn) connectBtn.disabled = phase === 'connecting' || phase === 'connected' || phase === 'executing';
   if (disconnectBtn) disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
-  if (startBtn) startBtn.disabled = phase === 'connecting';
-  stopBtn.disabled = !(phase === 'executing' || phase === 'paused');
+  // The `stopping` latch has to be read here, not just inside stopTask: this
+  // line recomputes the button on every phase change, and the server keeps
+  // sending `canonical_status: executing` while a cancel is in flight. Without
+  // it the button was re-enabled a click after Stop, and the click silently
+  // no-op'd on the `stopping` guard — a live-looking control that does nothing.
+  stopBtn.disabled = stopping || !(phase === 'executing' || phase === 'paused');
   if (refreshBtn) refreshBtn.disabled = phase === 'connecting';
-  // ponytail: status bar (steps + timer) shows during running/paused/done.
-  // Hidden in idle/connected/error so the panel stays clean.
-  const showBar = phase === 'executing' || phase === 'paused' || phase === 'done';
+  // ponytail: the bar belongs to a task, not to a moment. It appears on the
+  // first step and stays through every terminal phase — a run that failed is
+  // exactly when you want to read how far it got. Only the pre-task states
+  // hide it, and New task clears it via clearMessages.
+  const showBar = phase !== 'idle' && phase !== 'connected' && phase !== 'disconnected' && phase !== 'connecting';
   if (statusBarEl) statusBarEl.classList.toggle('active', showBar);
   // ponytail: New Task button shows after done or error so the user can
   // start fresh without reloading.
@@ -921,19 +1137,41 @@ function setPhase(phase, message) {
 
 function clearTimer() {
   if (timerInterval !== null) { clearInterval(timerInterval); timerInterval = null; }
+  timerPausedAt = 0;
   state.startTime = 0;
   timerEl.textContent = '0.0s';
   if (timerActiveEl) timerActiveEl.textContent = '0.0s';
 }
 
+function renderElapsed() {
+  const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
+  if (timerEl) timerEl.textContent = elapsed;
+  if (timerActiveEl) timerActiveEl.textContent = elapsed;
+}
+
 function startTimer() {
   clearTimer();
   state.startTime = Date.now();
-  timerInterval = setInterval(() => {
-    const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
-    if (timerEl) timerEl.textContent = elapsed;
-    if (timerActiveEl) timerActiveEl.textContent = elapsed;
-  }, 100);
+  timerInterval = setInterval(renderElapsed, 100);
+}
+
+// ponytail: freeze the clock while the agent waits on the user. Guarded on
+// timerInterval so a pause arriving outside a run (e.g. 'Stopping…' before
+// the task ever started) is a no-op rather than a stuck resume.
+function pauseTimer() {
+  if (timerInterval === null || timerPausedAt) return;
+  renderElapsed();
+  clearInterval(timerInterval);
+  timerInterval = null;
+  timerPausedAt = Date.now();
+}
+
+function resumeTimer() {
+  if (!timerPausedAt) return;
+  state.startTime += Date.now() - timerPausedAt;
+  timerPausedAt = 0;
+  timerInterval = setInterval(renderElapsed, 100);
+  renderElapsed();
 }
 
 function stopTimer() {
@@ -941,41 +1179,26 @@ function stopTimer() {
     clearInterval(timerInterval);
     timerInterval = null;
   }
+  timerPausedAt = 0;
   // ponytail: write the final time to BOTH elements every call. Earlier code
   // only updated the hidden header timer and skipped the visible status bar
   // on stopTimer, so the user kept seeing the last interval value rather than
   // the locked final time. Idempotent — safe to call after the interval is
   // already cleared.
-  if (state.startTime > 0) {
-    const finalElapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
-    if (timerEl) timerEl.textContent = finalElapsed;
-    if (timerActiveEl) timerActiveEl.textContent = finalElapsed;
-  }
+  if (state.startTime > 0) renderElapsed();
 }
 
 function updateStepCount() {
   const label = state.stepCount + (state.stepCount === 1 ? ' step' : ' steps');
   stepCountEl.textContent = label;
   if (stepCountActive) stepCountActive.textContent = String(state.stepCount);
-}
-
-function clearMessages() {
-  messagesEl.replaceChildren();
-  state.stepCount = 0;
-  updateStepCount();
-  stopTimer();
-  // ponytail: reset to initial empty-state by adding the empty-state
-  // placeholder back so the panel doesn't look empty.
-  if (!document.getElementById('emptyState')) {
-    const empty = document.createElement('div');
-    empty.id = 'emptyState';
-    empty.className = 'empty-state';
-    empty.innerHTML =
-      '<div class="empty-mark"><img src="assets/logo.svg" alt="Inventic" class="brand-logo brand-logo--lg"></div>' +
-      '<div class="empty-title">Brotto</div>' +
-      '<div class="empty-sub">Describe what you\'d like to do in your browser and Brotto will get it done for you.</div>';
-    messagesEl.appendChild(empty);
-  }
+  // Flash the cell so a step landing is felt, not just read. The class has to
+  // be removed and re-added or the animation won't restart on repeat steps.
+  const cell = stepCountActive?.closest('.cell');
+  if (!cell) return;
+  cell.classList.remove('flash');
+  void cell.offsetWidth;
+  cell.classList.add('flash');
 }
 
 // ── Core logic (preserved verbatim) ───────────────────────────────────────
@@ -1011,9 +1234,40 @@ function setConnPill(stateName, tooltipLabel) {
   if (!statusPill) return;
   statusPill.classList.remove('connected', 'reconnecting', 'error');
   if (stateName) statusPill.classList.add(stateName);
-  // The visible dot only changes colour. The label is in the tooltip
-  // (hover / screen-reader / aria-live).
+  if (connLabelEl) connLabelEl.textContent = tooltipLabel;
   statusPill.title = `Connection: ${tooltipLabel}`;
+}
+
+// ponytail: transient notice for events that leave no other trace. One
+// element at a time — a second toast replaces the first rather than
+// stacking, because a stack of them is just a slower chat message.
+// Removal runs on its own timer instead of `animationend`, which never
+// fires under prefers-reduced-motion (the animation is set to `none`)
+// and would strand the toast on screen.
+let toastTimer = null;
+let toastGoneTimer = null;
+function toast(text, kind, ms = 2600) {
+  clearTimeout(toastTimer);
+  clearTimeout(toastGoneTimer);
+  document.querySelector('.toast')?.remove();
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  el.setAttribute('role', 'status');
+  el.textContent = text;
+  // Clear whatever is actually at the bottom of the panel, measured rather
+  // than guessed. The input area grows when "+ New task" appears, and a
+  // hardcoded offset lands the toast on top of the composer the moment
+  // either height moves — it did, by 5px.
+  const top = Math.min(
+    ...[newTaskBtn, document.getElementById('inputArea')]
+      .filter((e) => e && e.offsetParent !== null)
+      .map((e) => e.getBoundingClientRect().top),
+  );
+  el.style.bottom = `${Math.round(window.innerHeight - top + 8)}px`;
+  document.body.appendChild(el);
+  toastTimer = setTimeout(() => el.classList.add('leaving'), ms);
+  // 200ms covers the 180ms leave animation with a little slack.
+  toastGoneTimer = setTimeout(() => el.remove(), ms + 200);
 }
 
 async function startTask() {
@@ -1029,6 +1283,12 @@ async function startTask() {
   }
   clearMessages();
   state.sessionId = 'session-' + Date.now();
+  // A fresh run re-arms Stop, which a previous stopTask left latched. This
+  // belongs here and not in setPhase: `canonical_status: executing` arrives on
+  // every step, so clearing it on the phase re-armed Stop while the cancel was
+  // still in flight and let a second click through.
+  stopping = false;
+  stopBtn.disabled = false;
   setPhase('executing', 'Starting...');
   startTimer();
   appendMessage({ role: 'system', text: `Starting task: ${goal.slice(0, 80)}${goal.length > 80 ? '…' : ''}` });
@@ -1049,19 +1309,34 @@ async function stopTask() {
   // ponytail: guard against double-click. The cancel handler may finish
   // before the user releases the button, and a second click would post
   // 'cancel_local_task' which then returns 'No local task is running'.
+  if (stopping) return;
   if (state.phase !== 'executing' && state.phase !== 'paused') return;
+  stopping = true;
   stopBtn.disabled = true;
   // ponytail: surface immediate "Stopped" feedback so the user sees their
   // click took effect. The background's cancel emits a terminal event
   // synchronously now, so the side panel exits 'Working' within ~1 tick.
   appendMessage({ role: 'system', text: 'Stopped by user — finishing current step…' });
+  // ponytail: Stop only moved the phase; an approval / clarify card stayed on
+  // screen and clickable, so the user could still approve a purchase on a task
+  // they had just cancelled. Same cleanup setPhase does on a terminal phase.
+  clearBlockingCards();
   setPhase('paused', 'Stopping…');
+  // setPhase recomputes the button from the phase, so re-disable after it —
+  // otherwise Stop stays clickable-looking while the guard silently no-ops.
+  stopBtn.disabled = true;
   const response = await sendMessage({ type: 'cancel_local_task' });
   if (!response.success) {
     // ponytail: cancel after the loop already terminated (the user's
     // second click). The terminal event is already on the way; do not
     // show an error bubble that contradicts it.
     logSilently(`cancel_local_task returned: ${response.error || 'unknown'}`);
+    // …but no terminal event is actually guaranteed here, so if the task is
+    // still running re-arm Stop rather than stranding it permanently off.
+    if (state.phase === 'executing' || state.phase === 'paused') {
+      stopping = false;
+      stopBtn.disabled = false;
+    }
   }
 }
 
@@ -1085,18 +1360,21 @@ function sendMessage(message) {
 }
 
 // ── Chat rendering ────────────────────────────────────────────────────────
-// ponytail: a single clearMessages is enough — the previous second
-// declaration (lines 456-461 in the old file) shadowed this one and skipped
-// the empty-state placeholder + timer reset, leaving the panel blank after
-// the first task ended. Keep this implementation canonical; remove any
-// duplicate.
 function clearMessages() {
   messagesEl.replaceChildren();
   state.stepCount = 0;
   updateStepCount();
   stopTimer();
+  // The bar now survives the end of a task, so it has to be dropped
+  // explicitly here or a fresh task opens showing the last run's numbers.
+  statusBarEl?.classList.remove('active');
+  // The CONTEXT cell lives in that bar, so it needs the same treatment — a
+  // fresh task used to open showing the previous run's percentage until its
+  // own first step landed.
+  state.lastContext = null;
+  updateContextUsage();
   seenTabs.clear();
-  if (tabBar) tabBar.hidden = true;
+  updateTabCount();
   // ponytail: clean up any lingering login-pause fallback buttons from a
   // previous task — a leftover Continue button is confusing once the user
   // is starting fresh.
@@ -1107,11 +1385,13 @@ function clearMessages() {
   // the panel doesn't look empty.
   if (!document.getElementById("emptyState")) {
     messagesEl.appendChild(createEmptyState());
+    void refreshEmptyState();
   }
 }
 
 function appendEmptyState() {
   messagesEl.appendChild(createEmptyState());
+  void refreshEmptyState();
 }
 
 // ponytail: helper to fade out + remove the login_required bubble and
@@ -1129,15 +1409,202 @@ function clearLoginPrompt() {
   }, 200);
 }
 
+// ponytail: every prompt a task can be blocked on. Terminal events and Stop
+// must clear all of them, not just the login bubble — an approval card that
+// outlives its task means the user can still approve a purchase on something
+// that is no longer running. Not folded into clearLoginPrompt: the auto-resume
+// paths call that on every step, where a live approval card must survive.
+function clearBlockingCards() {
+  clearLoginPrompt();
+  messagesEl.querySelectorAll('.approval-card, .clarify-card').forEach((el) => el.remove());
+}
+
+// ponytail: the copy below is duplicated verbatim in sidepanel.html for first
+// paint, before this runs. Two copies, not three — keep them identical.
+// alt is empty on purpose: the mark is decorative and "Brotto" is rendered as
+// the visible title right underneath it, so naming it twice just makes a
+// screen reader say the word twice.
 function createEmptyState() {
   const div = document.createElement('div');
   div.className = 'empty-state';
-  div.innerHTML = `
-    <div class="empty-mark"><img src="assets/logo.svg" alt="Inventic" class="brand-logo brand-logo--lg"></div>
-    <div class="empty-title">Brotto</div>
-    <div class="empty-sub">Describe what you'd like to do in your browser and Brotto will get it done for you.</div>
-  `;
+
+  const mark = document.createElement('div');
+  mark.className = 'empty-mark';
+  const logo = document.createElement('img');
+  logo.src = 'assets/logo.svg';
+  logo.alt = '';
+  logo.className = 'brand-logo brand-logo--lg';
+  mark.appendChild(logo);
+
+  const where = document.createElement('div');
+  where.className = 'empty-where';
+  where.id = 'emptyWhere';
+  where.hidden = true;
+  const whereLabel = document.createElement('span');
+  whereLabel.textContent = 'On';
+  const whereHost = document.createElement('b');
+  whereHost.id = 'emptyHost';
+  where.append(whereLabel, whereHost);
+
+  const sub = document.createElement('div');
+  sub.className = 'empty-sub';
+  sub.textContent = 'Tell Brotto what to do in this tab. It navigates, clicks, and fills things in — you approve anything sensitive.';
+
+  const suggestions = document.createElement('div');
+  suggestions.className = 'suggestions';
+  suggestions.id = 'suggestions';
+
+  div.append(mark, where, sub, suggestions);
   return div;
+}
+
+// ─── Page-aware suggestions ──────────────────────────────────────────────
+// The panel is bound to a tab, so the idle page should know which one. Keyed
+// by registrable-ish suffix; first match wins, so order the specific entries
+// before the general ones.
+const SITE_SUGGESTIONS = [
+  ['mail.google.com', [
+    'Draft a reply to the last unread email and let me read it before sending.',
+    'Find every email from this week that has an attachment and list them.',
+  ]],
+  ['outlook.com', [
+    'Draft a reply to the last unread email and let me read it before sending.',
+    'Find every email from this week that has an attachment and list them.',
+  ]],
+  ['github.com', [
+    'Summarise the open pull requests I can review.',
+    'Find issues assigned to me that nobody has commented on in a week.',
+  ]],
+  ['amazon.', [
+    'Find the price history on the top result and tell me when it was cheapest.',
+    'Compare the first three results on price and delivery.',
+  ]],
+  ['booking.', [
+    'Find a non-stop flight for my dates under $600 and put the cheapest in cart.',
+    'Find a hotel in the city centre under $150 a night for my dates.',
+  ]],
+  ['airbnb.', [
+    'Find a place in the city centre for my dates and tell me the total with fees.',
+  ]],
+  ['linkedin.', [
+    'Find the jobs I saved that are still open and summarise what each needs.',
+  ]],
+  ['reddit.', [
+    'Summarise what the top comments on this thread actually disagree about.',
+  ]],
+  ['youtube.', [
+    'Collect the titles and durations of the videos on this page.',
+  ]],
+  ['netflix.', [
+    'Find what was added and removed from my list in the last month.',
+  ]],
+  ['docs.google.com', [
+    'Summarise this document and list anything that needs a decision.',
+  ]],
+  ['notion.', [
+    'Summarise this page and list anything that needs a decision.',
+  ]],
+  ['weather.', [
+    'What is the weather here tomorrow morning, and will I need a coat?',
+  ]],
+  ['maps.google.', [
+    'How long is the drive to the airport on a Tuesday morning?',
+  ]],
+  ['stackoverflow.', [
+    'Summarise the top answers to this question and say which one holds up.',
+  ]],
+  ['indeed.', [
+    'Find roles matching my saved search and tell me which are new this week.',
+  ]],
+];
+
+// Always available, whatever the tab — the floor that keeps the panel useful
+// on a blank page or a site not worth specialising for.
+const GENERIC_SUGGESTIONS = [
+  'Summarise what is on this page.',
+  'Find the thing on this page I asked about last time and open it.',
+  'Compare what is on this page against what I have saved elsewhere.',
+];
+
+function suggestionsFor(host, title) {
+  const h = (host || '').toLowerCase();
+  for (const [needle, list] of SITE_SUGGESTIONS) {
+    if (h.includes(needle)) return list;
+  }
+  // No table entry: the page title is still better than nothing, because a
+  // specific prompt beats three generic ones. Only with a real host — the
+  // title of a blank tab is browser chrome ("New Tab"), not a page.
+  const clean = (title || '').trim();
+  if (h && clean.length > 2) {
+    return [`Work through this page and tell me what it means: “${clean.slice(0, 80)}”.`, ...GENERIC_SUGGESTIONS.slice(0, 2)];
+  }
+  return GENERIC_SUGGESTIONS;
+}
+
+let lastSuggestionHost = null;
+let lastSuggestionTitle = '';
+
+async function currentTab() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab || null;
+  } catch {
+    return null;
+  }
+}
+
+// Fills the composer rather than sending. A suggestion is a starting point
+// the user still owns; running a task the moment it's read is the wrong
+// default for anything that clicks.
+function fillComposer(text) {
+  goalEl.value = text;
+  goalEl.focus();
+  goalEl.dispatchEvent(new Event('input'));
+}
+
+function paintSuggestions() {
+  const box = document.getElementById('suggestions');
+  if (!box) return;
+  box.textContent = '';
+  for (const text of suggestionsFor(lastSuggestionHost, lastSuggestionTitle)) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'suggestion';
+    btn.textContent = text;
+    btn.addEventListener('click', () => fillComposer(text));
+    box.appendChild(btn);
+  }
+}
+
+async function refreshEmptyState() {
+  // Only ever paint the idle page. Once a task starts, the transcript owns
+  // the panel and a tab change must not disturb it.
+  const box = document.getElementById('suggestions');
+  if (!box) return;
+  const tab = await currentTab();
+  let host = '';
+  try {
+    // hostname is '' for about: and chrome:// pages, so the empty-host case
+    // needs no special-casing.
+    host = tab?.url ? new URL(tab.url).hostname : '';
+  } catch { host = ''; }
+  const where = document.getElementById('emptyWhere');
+  const whereHost = document.getElementById('emptyHost');
+  if (whereHost) whereHost.textContent = host;
+  if (where) where.hidden = !host;
+  lastSuggestionHost = host;
+  lastSuggestionTitle = tab?.title || '';
+  paintSuggestions();
+}
+
+// First paint in sidepanel.html ships without a suggestions box filled; this
+// fills it once the tab is known.
+void refreshEmptyState();
+if (chrome.tabs?.onActivated) {
+  chrome.tabs.onActivated.addListener(() => { void refreshEmptyState(); });
+  chrome.tabs.onUpdated.addListener((_id, info) => {
+    if (info.status === 'complete') void refreshEmptyState();
+  });
 }
 
 // ponytail: extract structured facts from the model's finalAnswer so
@@ -1257,7 +1724,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
     // Click toggles its own state — clicking the other deactivates the
     // first. The .rated-good / .rated-bad classes stay until the user
     // clicks again to clear.
-    const goodBtn = makeIconBtn(LUCIDE_ICONS.thumbsUp, 'Good response', () => {
+    const goodBtn = makeIconBtn(LUCIDE_ICONS.thumbsUp, 'Good response — saved on this device only', () => {
       if (goodBtn.classList.contains('rated-good')) {
         goodBtn.classList.remove('rated-good');
         return;
@@ -1268,7 +1735,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
     });
     toolbar.appendChild(goodBtn);
 
-    const badBtn = makeIconBtn(LUCIDE_ICONS.thumbsDown, 'Bad response', () => {
+    const badBtn = makeIconBtn(LUCIDE_ICONS.thumbsDown, 'Bad response — saved on this device only', () => {
       if (badBtn.classList.contains('rated-bad')) {
         badBtn.classList.remove('rated-bad');
         return;
@@ -1394,6 +1861,19 @@ function appendPlanCard({ title, sites, steps }) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// Copies the same address the row displays, not the raw one: the query
+// string can carry a session token and the row deliberately hides it. The
+// scheme is restored, because the row drops it for width and the clipboard
+// has to keep it or the pasted value won't open.
+function wireCopyUrl(el, copyValue) {
+  el.addEventListener('click', () => {
+    navigator.clipboard.writeText(copyValue).then(
+      () => toast('Address copied'),
+      () => toast('Could not copy — select the text instead', 'bad'),
+    );
+  });
+}
+
 // ponytail: step bubble that tucks the raw tool call behind a "details"
 // toggle so the chat reads naturally while still letting the operator
 // drill in when debugging. Reasoning stays as the bubble title.
@@ -1410,27 +1890,6 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, action
   const bubble = document.createElement('div');
   bubble.className = 'bubble step-bubble';
 
-  // ponytail: page/action chips. The page chip shows the URL the agent
-  // was on (cleanUrl strips query/hash to avoid tokens in the chat).
-  // The action chip shows the URL the agent was navigating to. When
-  // navigated across the same domain to a different path, both chips
-  // still differentiate via the path — keeping the host-only render
-  // would have collapsed them to the same string.
-  const pageClean = cleanUrl(pageUrl);
-  const actionClean = cleanUrl(actionTarget);
-  if (pageClean) {
-    const chip = document.createElement('div');
-    chip.className = 'step-page-chip';
-    chip.innerHTML = `<span class="step-page-chip-icon">&#9655;</span><span class="step-page-chip-url">${escapeHtml(pageClean)}</span>`;
-    bubble.appendChild(chip);
-  }
-  if (actionClean && actionClean !== pageClean) {
-    const dest = document.createElement('div');
-    dest.className = 'step-page-chip';
-    dest.innerHTML = `<span class="step-page-chip-icon">&#8594;</span><span class="step-page-chip-url">${escapeHtml(actionClean)}</span>`;
-    bubble.appendChild(dest);
-  }
-
   const head = document.createElement('div');
   head.className = 'step-head';
   if (icon) {
@@ -1444,6 +1903,64 @@ function appendStepWithDetails({ icon, text, details, pageUrl, pageTitle, action
   stepTextEl.innerHTML = renderMarkdown(text || 'Working…');
   head.appendChild(stepTextEl);
   bubble.appendChild(head);
+
+  // ponytail: the address goes under the step, not above it, and only the
+  // host is boxed — it is the fragment that names the site rather than the
+  // page. A move within one site is the common case, so the host is drawn
+  // once and both paths share its line; crossing sites falls back to two
+  // rows, because one boxed host would then be lying about the second URL.
+  // Order is always source then destination, on both paths.
+  const page = splitUrl(pageUrl);
+  const action = splitUrl(actionTarget);
+  const sameSite = page && action && page.host === action.host;
+  const primary = page || action;
+  if (page || action) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'step-url-row step-url-row--copy';
+    row.title = 'Copy this address';
+
+    const box = document.createElement('span');
+    box.className = 'step-url-host';
+    box.textContent = primary.host;
+    row.appendChild(box);
+
+    const path = document.createElement('span');
+    path.className = 'step-url-path';
+    if (sameSite) {
+      const arrow = document.createElement('span');
+      arrow.className = 'step-url-arrow';
+      arrow.textContent = ' → ';
+      const from = document.createElement('span');
+      from.textContent = page.path;
+      const to = document.createElement('span');
+      to.textContent = action.path;
+      path.append(from, arrow, to);
+    } else {
+      path.textContent = primary.path;
+    }
+    row.appendChild(path);
+
+    // Copy the destination — where the agent ended up is the address worth
+    // pasting, not where it started.
+    wireCopyUrl(row, (action || page).raw);
+    bubble.appendChild(row);
+  }
+  if (page && action && !sameSite) {
+    const other = document.createElement('button');
+    other.type = 'button';
+    other.className = 'step-url-row step-url-row--copy';
+    other.title = 'Copy this address';
+    const box = document.createElement('span');
+    box.className = 'step-url-host';
+    box.textContent = action.host;
+    const path = document.createElement('span');
+    path.className = 'step-url-path';
+    path.textContent = action.path;
+    other.append(box, path);
+    wireCopyUrl(other, action.raw);
+    bubble.appendChild(other);
+  }
 
   if (details && details.length > 0) {
     const wrap = document.createElement('div');
@@ -1496,8 +2013,12 @@ function appendApprovalCard({ id, reason, action }) {
   // internal, or question action. The server filters these too; if it
   // ever stops doing so, the user shouldn't see a button to "Approve
   // cannot_complete".
-  if (NON_APPROVABLE_ACTIONS.has(action)) {
-    console.warn('[brotto] suppressed approval card for non-approvable action:', action);
+  //
+  // Match on action.type, not action — the payload is {type, url}, so
+  // passing the object to a Set of strings was always false and this
+  // guard never fired.
+  if (NON_APPROVABLE_ACTIONS.has(action?.type)) {
+    console.warn('[brotto] suppressed approval card for non-approvable action:', action?.type);
     // Still need to ACK so the server's queue doesn't hang. Send deny
     // so the harness aborts cleanly if it was awaiting this reply.
     if (id) void sendMessage({ type: 'submit_approval', id, approved: false });
@@ -1505,7 +2026,11 @@ function appendApprovalCard({ id, reason, action }) {
   }
 
   const card = document.createElement('div');
-  card.className = 'approval-card';
+  // .blocking breathes the left rule — the card is waiting on the user.
+  card.className = 'approval-card blocking';
+  // Stamped so `approval_resolved` can retire exactly this card when the
+  // prompt is answered from the OS notification instead of from here.
+  if (id) card.dataset.approvalId = String(id);
 
   const header = document.createElement('div');
   header.className = 'approval-header';
@@ -1532,27 +2057,35 @@ function appendApprovalCard({ id, reason, action }) {
   const denyBtn = document.createElement('button');
   denyBtn.className = 'btn btn-danger btn-sm';
   denyBtn.textContent = 'Deny';
-  denyBtn.addEventListener('click', () => {
+  denyBtn.addEventListener('click', async () => {
+    denyBtn.disabled = true;
+    const res = await sendMessage({ type: 'submit_approval', id, approved: false });
+    // ponytail: the card used to be removed *before* the send, and sendMessage
+    // resolves {success:false} rather than rejecting — so a dropped message
+    // (SW asleep, task gone) left the agent blocked on a queue reply that would
+    // never come, with no card on screen to answer. Re-arm instead.
+    if (!res.success) return reArmApproval(card, denyBtn, approveBtn, res.error);
     appendMessage({ role: 'assistant', text: 'Action denied.' });
     card.remove();
-    void sendMessage({ type: 'submit_approval', id, approved: false });
   });
   actions.appendChild(denyBtn);
 
   const approveBtn = document.createElement('button');
   approveBtn.className = 'btn btn-primary btn-sm';
   approveBtn.textContent = 'Approve';
-  approveBtn.addEventListener('click', () => {
+  approveBtn.addEventListener('click', async () => {
+    approveBtn.disabled = true;
+    const res = await sendMessage({ type: 'submit_approval', id, approved: true });
+    if (!res.success) return reArmApproval(card, denyBtn, approveBtn, res.error);
     appendMessage({ role: 'assistant', text: 'Action approved.' });
     card.remove();
-    void sendMessage({ type: 'submit_approval', id, approved: true });
     // ponytail: 5s post-approval revoke window. Show a small inline
     // affordance below the action bubble. If the user changes their
     // mind, the extension sends `revoke` to the server, which clears
     // approved_domains / seen_first_time so the next step re-prompts.
     const revoke = document.createElement('button');
     revoke.className = 'btn btn-secondary btn-sm revoke-btn';
-    revoke.textContent = 'Revoke (5s)';
+    revoke.textContent = 'Clear approval (5s)';
     let remaining = 5;
     const tick = setInterval(() => {
       remaining -= 1;
@@ -1560,14 +2093,18 @@ function appendApprovalCard({ id, reason, action }) {
         clearInterval(tick);
         revoke.remove();
       } else {
-        revoke.textContent = `Revoke (${remaining}s)`;
+        revoke.textContent = `Clear approval (${remaining}s)`;
       }
     }, 1000);
     revoke.addEventListener('click', () => {
       clearInterval(tick);
       revoke.remove();
       void sendMessage({ type: 'send_to_server', payload: { type: 'revoke' } });
-      appendMessage({ role: 'assistant', text: 'Approval revoked — next step will re-prompt.' });
+      appendMessage({
+        role: 'assistant',
+        text: 'Approval cleared — Brotto will ask again next time. '
+            + 'Anything the task already submitted is not undone.',
+      });
     });
     // Insert after the last assistant message bubble.
     const lastBubble = messagesEl.querySelector('.message.assistant:last-child') || messagesEl;
@@ -1577,6 +2114,24 @@ function appendApprovalCard({ id, reason, action }) {
 
   card.appendChild(actions);
   messagesEl.appendChild(card);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// ponytail: an approval whose reply never reached the server is still pending
+// on the server, so the card has to come back — the alternative is a task
+// blocked on a queue entry with nothing on screen to answer it. Re-enables
+// both buttons and says why, so the user can tell a retry from a real error.
+function reArmApproval(card, denyBtn, approveBtn, error) {
+  denyBtn.disabled = false;
+  approveBtn.disabled = false;
+  card.classList.add('blocking');
+  let note = card.querySelector('.approval-send-failed');
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'approval-body approval-send-failed';
+    card.insertBefore(note, card.querySelector('.approval-actions'));
+  }
+  note.textContent = `That didn't reach Brotto (${error || 'no response'}). Try again.`;
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -1590,7 +2145,7 @@ function appendClarifyCard({ id, question, reason }) {
   if (prior) prior.remove();
 
   const card = document.createElement('div');
-  card.className = 'clarify-card';
+  card.className = 'clarify-card blocking';
   card.dataset.clarifyId = id;
 
   const header = document.createElement('div');
@@ -1713,8 +2268,13 @@ function startAssistantMessage({ icon, title, meta }) {
   iconEl.innerHTML = icon || '&#8594;';
 
   const textNode = document.createTextNode(title || 'Working…');
+  // The caret is the only "still typing" signal the chat has. finishAssistant-
+  // Message rewrites the bubble's innerHTML, so it clears itself.
+  const caret = document.createElement('span');
+  caret.className = 'caret';
   bubble.appendChild(iconEl);
   bubble.appendChild(textNode);
+  bubble.appendChild(caret);
 
   msg.appendChild(bubble);
   messagesEl.appendChild(msg);
@@ -1778,11 +2338,10 @@ function renderPolicyFailureCard(message) {
   if (reason === 'policy_blocked') {
     const blockedDomain = summaryText.match(/Blocked by policy:\s*(\S+)/)?.[1] || '(unknown)';
     return {
-      title: "Action blocked by your organisation's security policy",
+      title: "Action blocked by your Brotto server's policy",
       body:
-        "This task attempted to interact with a domain on your organisation's restricted list. "
-        + "The action was stopped to protect company data. "
-        + "If you need access for legitimate work, contact your IT administrator.",
+        "This task tried to use a domain your Brotto server blocks. Brotto stopped it "
+        + "rather than continue. Ask whoever runs that server to remove the domain.",
       footer: 'Blocked domain: ' + blockedDomain,
     };
   }
@@ -1790,13 +2349,12 @@ function renderPolicyFailureCard(message) {
     return {
       title: 'Task stopped — approval not granted',
       body:
-        'You declined an approval prompt during this task. The agent has stopped rather than continuing '
-        + 'with an action you did not authorise. Start a new task to retry, or contact your administrator '
-        + 'if you need help.',
+        'You declined an approval prompt during this task. Brotto has stopped rather than continuing '
+        + 'with an action you did not approve. Start a new task to retry.',
     };
   }
   if (reason === 'policy_preflight') {
-    // ponypnail: Agent declined upfront after seeing the org blacklist in
+    // ponytail: Agent declined upfront after seeing the org blacklist in
     // its preamble. The harness's `summary` is the agent's own reason
     // ("The organisation's security policy explicitly blacklists
     // mail.google.com. Navigating there would violate your organisation's
@@ -1810,11 +2368,10 @@ function renderPolicyFailureCard(message) {
     // so the footer surfaces it without the user having to read the body.
     const blockedDomain = summaryText.match(/blacklists?\s+([^\s.,;]+)/i)?.[1] || '';
     return {
-      title: "Task not permitted by your organisation's security policy",
+      title: "Task not permitted by your Brotto server's policy",
       body: summaryText ||
-        "Brotto's policy preamble listed this task as out of scope for secure mode. "
-        + "The agent declined the request before navigating anywhere. "
-        + "Contact your IT administrator if you believe this is in error.",
+        "This task is out of scope for secure mode. Brotto declined it before navigating "
+        + "anywhere. Ask whoever runs your Brotto server if you think this is wrong.",
       footer: blockedDomain ? `Blocked domain: ${blockedDomain}` : '',
     };
   }
@@ -1826,18 +2383,28 @@ function renderPolicyFailureCard(message) {
     // the server is back.
     return {
       title: 'Connection to server lost',
-      body: "The agent lost contact with the Brotto server mid-task and can't continue from here. "
+      body: "Brotto lost contact with the server mid-task and can't continue from here. "
         + "Your browser is unaffected — start a new task once the server is back.",
     };
   }
   return null;
 }
 
-chrome.runtime.onMessage.addListener((message) => {
+function handleEvent(message) {
   switch (message.type) {
 
     case 'session_started':
       state.sessionId = message.sessionId || state.sessionId;
+      break;
+
+    // ponytail: logged by the background at run_local_task but never
+    // broadcast, so this only fires on replay — its job is to put the user's
+    // own question back at the top of a restored transcript.
+    case 'task_started':
+      if (message.task && !messagesEl.querySelector('.message.user')) {
+        appendMessage({ role: 'user', text: message.task });
+        state.lastGoal = message.task;
+      }
       break;
 
     // ponytail: Bug 3 — WS closed. The background emits a separate
@@ -1845,8 +2412,16 @@ chrome.runtime.onMessage.addListener((message) => {
     // in-flight, so the timer stops and the failure bubble renders via
     // the existing task_failed handler. Here we just update the
     // connection pill; nothing else needs to happen on this event.
+    //
+    // This must not claim "Reconnecting…". Whether a reconnect actually
+    // follows is the background's call — it declines whenever no task is
+    // in flight, which is exactly what a task that just ended cleanly
+    // looks like. The pill used to sit on a reconnect that was never
+    // going to happen. Going neutral is always true, and the
+    // `reconnect_attempt` event below overwrites it in the same tick if a
+    // reconnect really is coming, so there is nothing to wait for.
     case 'disconnected':
-      setConnPill('reconnecting', 'Reconnecting…');
+      setConnPill(null, 'Idle');
       break;
 
     // ponytail: Bug 4 — backoff state machine surfaces each attempt to
@@ -1867,16 +2442,13 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'canonical_status': {
       // ponytail: normalize canonical lifecycle (completed / failed / cancelled /
       // disconnected / cancelling / waiting_for_approval) into the side-panel
-      // phase enum so the UI doesn't get stuck in unmapped states. Do NOT
-      // regress from a terminal phase ('error' / 'done') — the cancel
-      // handler emits its own task_failed/canonical_status pair and a
-      // late-arriving canonical_status from the loop's .then() must not
-      // overwrite the already-correct terminal pill.
+      // phase enum so the UI doesn't get stuck in unmapped states. The
+      // alreadyTerminal guard covers the case this originally special-cased:
+      // the cancel handler emits its own task_failed/canonical_status pair and
+      // a late event from the loop's .then() must not overwrite a terminal
+      // phase that is already correct.
       const raw = String(message.status || '');
-      if (state.phase === 'error' || state.phase === 'done') {
-        logSilently(`canonical_status ${raw} arrived after terminal phase ${state.phase}; ignored`);
-        break;
-      }
+      if (alreadyTerminal(`canonical_status ${raw}`)) break;
       const mapped = (raw === 'completed' || raw === 'cancelled' || raw === 'disconnected') ? 'done'
         : raw === 'failed' ? 'error'
         : raw === 'cancelling' ? 'paused'
@@ -1991,6 +2563,17 @@ chrome.runtime.onMessage.addListener((message) => {
       messagesEl.scrollTop = messagesEl.scrollHeight;
       break;
 
+    // ponytail: the harness detects a stall (N steps on the same page with no
+    // progress) and the service worker forwards it, but the panel had no case
+    // for it — so the user watched an unexplained spinner while the agent
+    // looped. Say what happened, and that it is still working on it.
+    case 'stagnation_warning':
+      appendMessage({
+        role: 'system',
+        text: `Not making progress${message.reason ? ` — ${message.reason}` : ''}. Still trying. Stop the task if this doesn't clear.`,
+      });
+      break;
+
     case 'context_update': {
       // ponytail: scratchpad-only step (no external action visible to
       // bubble). Backend still emits context so the CONTEXT cell updates
@@ -2003,9 +2586,12 @@ chrome.runtime.onMessage.addListener((message) => {
     }
 
     case 'task_completed':
+      if (alreadyTerminal('task_completed')) break;
       // ponytail: clear any lingering login prompt — task is ending, no
       // point leaving the user looking at a "Waiting for sign-in" bubble.
-      clearLoginPrompt();
+      clearBlockingCards();
+      // Captured before stopTimer, which resets the counter.
+      void saveSession({ status: 'done', steps: message.steps, elapsed: timerActiveEl && timerActiveEl.textContent });
       stopTimer();
       setPhase('done', message.summary ? message.summary.slice(0, 60) : 'Task complete');
       state.stepCount = message.steps || state.stepCount;
@@ -2037,10 +2623,12 @@ chrome.runtime.onMessage.addListener((message) => {
       break;
 
     case 'task_failed':
+      if (alreadyTerminal('task_failed')) break;
       // ponytail: same as task_completed — clean up login prompt on any
       // terminal event so the user never sees a stale "Waiting" bubble
       // after the task has failed / been cancelled.
-      clearLoginPrompt();
+      clearBlockingCards();
+      void saveSession({ status: 'failed', elapsed: timerActiveEl && timerActiveEl.textContent });
       stopTimer();
       // ponytail: structured failure bubble (title + body + footer) for
       // policy failures; falls back to the harness's `summary` for everything
@@ -2078,10 +2666,10 @@ chrome.runtime.onMessage.addListener((message) => {
       // before the new clarify card appears so the transition reads as
       // a single flow, not two stacked bubbles.
       clearLoginPrompt();
-      setPhase('paused', 'Clarifying question from agent');
+      setPhase('paused', 'Brotto has a question');
       appendClarifyCard({
         id: message.id,
-        question: message.question || 'The agent needs your guidance.',
+        question: message.question || 'Brotto needs your guidance.',
         reason: message.reason || '',
       });
       break;
@@ -2097,9 +2685,28 @@ chrome.runtime.onMessage.addListener((message) => {
       const preview = a.url ? `${a.type ?? 'action'} → ${a.url}` : (a.type ?? 'action');
       appendApprovalCard({
         id: message.id,
-        reason: message.reason || 'The agent wants to perform an action that needs your approval.',
+        reason: message.reason || 'Brotto wants to perform an action that needs your approval.',
         action: { type: a.type, url: a.url },
       });
+      break;
+    }
+
+    // ponytail: the approval can be answered from the OS notification, which
+    // the service worker resolves without the panel's help. Without this the
+    // card sat on screen with two dead buttons until the next step arrived.
+    case 'approval_resolved': {
+      const card = message.id
+        ? messagesEl.querySelector(`.approval-card[data-approval-id="${CSS.escape(String(message.id))}"]`)
+        : null;
+      if (!card) break;
+      card.remove();
+      appendMessage({
+        role: 'assistant',
+        text: message.approved ? 'Action approved.' : 'Action denied.',
+      });
+      // The task is unblocked, so the clock has to start counting again —
+      // setPhase('paused') is what stopped it, and nothing else resumes it.
+      if (state.phase === 'paused') setPhase('executing', 'Working…');
       break;
     }
 
@@ -2113,6 +2720,12 @@ chrome.runtime.onMessage.addListener((message) => {
         || 'Working on it…';
       if (!currentAssistantMsg) {
         startAssistantMessage({ icon, title: titleText });
+      } else {
+        // Each heartbeat supersedes the last: the bubble is one live "still
+        // working" line, not one message per step. Previously this branch
+        // did nothing, so every step's text was dropped.
+        currentAssistantMsg.textNode.nodeValue = titleText;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
       }
       break;
     }
@@ -2124,16 +2737,17 @@ chrome.runtime.onMessage.addListener((message) => {
       setPhase('paused', 'Agent is requesting approval');
       appendApprovalCard({
         id: req.actionId || 'unknown',
-        reason: 'The agent is requesting approval for a sensitive action.',
+        reason: 'Brotto is requesting approval for a sensitive action.',
         action: { type: req.action?.type },
       });
       break;
     }
 
     case 'canonical_terminal': {
+      if (alreadyTerminal('canonical_terminal')) break;
       // ponytail: terminal event from the canonical stream — clean up
       // any login prompt so it doesn't survive past the task ending.
-      clearLoginPrompt();
+      clearBlockingCards();
       stopTimer();
       const m = message.message || {};
       if (m.type === 'task.completed') {
@@ -2143,8 +2757,11 @@ chrome.runtime.onMessage.addListener((message) => {
         setPhase('error', m.message || 'Task failed');
         appendMessage({ role: 'error', text: m.message || 'Task failed.' });
       } else {
-        setPhase('done', 'Task ended');
-        appendMessage({ role: 'done', text: 'Task ended.' });
+        // ponytail: this used to render a green "Task ended." for *any*
+        // other type, so a cancellation showed as a success. Anything that
+        // isn't a completion ends the task without claiming it worked.
+        setPhase('error', 'Task ended');
+        appendMessage({ role: 'error', text: m.message || 'The task ended before it finished.' });
       }
       break;
     }
@@ -2175,39 +2792,67 @@ chrome.runtime.onMessage.addListener((message) => {
       break;
     }
   }
-});
+}
+
+// ponytail: the panel's own listener and the replay of a closed-panel log go
+// through the same handler, so a reopened panel renders exactly what the live
+// one did instead of a second rendering path that can drift.
+chrome.runtime.onMessage.addListener(handleEvent);
 
 // ── Initial state ────────────────────────────────────────────────────────
 setPhase('idle', 'Ready');
 goalEl.focus();
 
-// Auto-probe health on open — marks the planner as reachable if the server responds.
+// ponytail: a task lives in the service worker, so closing the panel mid-task
+// left the next open blank while the agent kept working. The background
+// buffers this run's events; replay them through the same handler. The
+// `canonical_status` the SW already pushed is in the log too, so phase and
+// timer come back on their own.
 (async () => {
+  const res = await sendMessage({ type: 'get_panel_log' });
+  const events = res && res.events;
+  if (!Array.isArray(events) || events.length === 0) return;
+  for (const e of events) handleEvent(e);
+})();
+
+// ponytail: an unsent task is the most expensive thing to lose to an
+// accidental panel close, and there is exactly one place the user can type
+// it. Same store as the API key — one run's worth, not a document.
+(async () => {
+  const { draft } = await chrome.storage.session.get('draft');
+  if (typeof draft === 'string' && draft.trim()) goalEl.value = draft;
+  goalEl.addEventListener('input', () => {
+    void chrome.storage.session.set({ draft: goalEl.value });
+  });
+})();
+
+(async () => {
+  // ponytail: the hidden plannerUrl input was only ever written by an explicit
+  // Save, so on a fresh open it held the localhost default and the panel probed
+  // /health and fetched /v1/policy against localhost while the service worker
+  // used the saved URL — the panel and the SW could disagree about which server
+  // the task was on. Hydrate both fields from storage first; everything below
+  // and every other call site reads plannerUrlEl, so this one read covers them.
+  const { settings } = await chrome.storage.local.get('settings');
+  const saved = (settings && typeof settings.serverUrl === 'string') ? settings.serverUrl.trim() : '';
+  if (saved) {
+    plannerUrlEl.value = saved;
+    plannerUrlSetting.value = saved;
+  }
   const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
   try {
     const res = await fetch(url + '/health', { method: 'GET' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.plannerUrl = url;
   } catch {
-    // ponytail: Bug 9 — server unreachable on open. Surface a one-line
-    // toast so the user knows their UI isn't actually wired to a live
-    // server. Auto-dismiss after 5s. Don't mark plannerUrl so the
-    // connection pill stays in the default "Idle" state.
+    // ponytail: Bug 9 — server unreachable on open. A toast, not a chat
+    // message: this is a transient condition, not part of the transcript,
+    // and the connection pill already says it. The previous version posted
+    // a role:'error' message then tried to remove it with '.message-error'
+    // — but appendMessage writes class "message error" (a space), so the
+    // selector never matched and the notice sat in the chat forever.
     state.serverReachable = false;
     setConnPill(null, 'Server unreachable');
-    appendMessage({ role: 'error',
-      text: '⚠ Server unreachable — settings still work locally. Will auto-reconnect when it returns.',
-    });
-    // Don't keep the toast around forever; remove the most-recent error
-    // message after 5s so the chat stays clean for the next prompt.
-    setTimeout(() => {
-      const messages = messagesEl.querySelectorAll('.message-error');
-      if (messages.length) {
-        const oldest = messages[0];
-        if (oldest.textContent && oldest.textContent.includes('Server unreachable')) {
-          oldest.remove();
-        }
-      }
-    }, 5000);
+    toast('Server unreachable — settings still work locally', 'bad', 5000);
   }
 })();

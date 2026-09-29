@@ -121,9 +121,14 @@ async function hydrateUserPolicy(): Promise<void> {
   try {
     const stored = await chrome.storage.local.get("settings");
     const s = stored.settings as
-      | { mode?: string; blacklist?: unknown }
+      | { mode?: string; blacklist?: unknown; notifyBlocking?: boolean; notifyResults?: boolean }
       | undefined;
     if (!s) return;
+    // Blocking prompts notify unless explicitly turned off; finished/failed
+    // results only notify once the user asks for them. A task ending is the
+    // most frequent event Brotto emits, so it earns the higher bar.
+    notifyBlocking = s.notifyBlocking !== false;
+    notifyResults = s.notifyResults === true;
     userPolicy = {
       mode: s.mode === "secure" ? "secure" : "normal",
       blacklist: Array.isArray(s.blacklist)
@@ -157,6 +162,7 @@ async function persistSession(): Promise<void> {
 async function restoreSession(): Promise<void> {
   const s = await chrome.storage.session.get([
     "sessionId", "activeTabId", "serverUrl", "waitingForLogin", "currentPrompt", "lastObservedUrl",
+    PANEL_LOG_KEY,
   ]);
   if (typeof s.sessionId === "string") sessionId = s.sessionId;
   if (typeof s.activeTabId === "number") activeTabId = s.activeTabId;
@@ -166,6 +172,7 @@ async function restoreSession(): Promise<void> {
     currentPrompt = s.currentPrompt;
   }
   if (typeof s.lastObservedUrl === "string") lastObservedUrl = s.lastObservedUrl;
+  if (Array.isArray(s[PANEL_LOG_KEY])) panelLog = s[PANEL_LOG_KEY] as Record<string, unknown>[];
 }
 
 async function clearSession(): Promise<void> {
@@ -188,6 +195,19 @@ function signalResume(): void {
 
 // ── AX tree capture ─────────────────────────────────────────────────────────
 
+// Mirrors PAGE_TEXT_MAX in agent/ax_filter.py.
+const PAGE_TEXT_MAX = 20000;
+
+// A link's destination lives in a CDP "url" property, not a top-level field.
+function propUrl(node: any): string | undefined {
+  for (const p of node.properties ?? []) {
+    if (p.name !== "url") continue;
+    const v = p.value;
+    return (typeof v === "object" ? v?.value : v) || undefined;
+  }
+  return undefined;
+}
+
 async function extractAx(tabId: number): Promise<object[]> {
   await dbg.sendCommand(tabId, { method: "Accessibility.enable" });
   const raw = await dbg.sendCommand(tabId, {
@@ -196,12 +216,41 @@ async function extractAx(tabId: number): Promise<object[]> {
   const nodes = raw.nodes ?? [];
   const targets: object[] = [];
 
+  // The server indents by kept-ancestor depth, so it needs the parent
+  // chain. Send the nearest *kept* ancestor and let it derive depth — one
+  // implementation for both capture paths, not one per language. A link's
+  // immediate parent is usually a generic container that never survives
+  // KEEP_ROLES, so resolving only the direct parent yields depth 0.
+  const kept = new Set<number>();
+  const parentOf = new Map<number, number>();
   for (const node of nodes) {
+    if (typeof node.nodeId === "number" && typeof node.parentId === "number") {
+      parentOf.set(node.nodeId, node.parentId);
+    }
     if (node.ignored) continue;
     const role = (node.role?.value ?? "").toLowerCase();
     if (!KEEP_ROLES.has(role)) continue;
+    kept.add(node.nodeId);
+  }
+
+  const keptAncestor = (nodeId: number): number | undefined => {
+    const seen = new Set<number>();
+    let cur = parentOf.get(nodeId);
+    while (cur !== undefined && !kept.has(cur)) {
+      if (seen.has(cur)) return undefined;
+      seen.add(cur);
+      cur = parentOf.get(cur);
+    }
+    return cur;
+  };
+
+  for (const node of nodes) {
+    if (!kept.has(node.nodeId)) continue;
+    const role = (node.role?.value ?? "").toLowerCase();
     const name  = node.name?.value?.trim() ?? "";
     const value = node.value?.value ?? undefined;
+    const href  = propUrl(node);
+    const parentId = keptAncestor(node.nodeId);
     const backendId = node.backendDOMNodeId;
     let x: number | undefined, y: number | undefined;
     if (backendId) {
@@ -220,6 +269,8 @@ async function extractAx(tabId: number): Promise<object[]> {
     targets.push({
       ref: node.nodeId, role, name,
       ...(value !== undefined ? { value } : {}),
+      ...(href    !== undefined ? { href }    : {}),
+      ...(parentId !== undefined ? { parent: parentId } : {}),
       ...(x !== undefined    ? { x, y }   : {}),
     });
   }
@@ -230,11 +281,19 @@ async function extractAx(tabId: number): Promise<object[]> {
 async function captureObservation(tabId: number) {
   await waitForPageReady(tabId);
 
+  // Page text rides along with url/title in the evaluate that already runs
+  // every step — no extra round trip. innerText is the only place numbers
+  // like "Star 50" exist; the accessibility tree often omits them entirely.
   const ps = await dbg.sendCommand(tabId, {
     method: "Runtime.evaluate",
-    params: { expression: "({url:location.href,title:document.title})", returnByValue: true },
-  }) as { result?: { value?: { url: string; title: string } } };
-  const { url = "", title = "" } = ps.result?.value ?? {};
+    params: {
+      expression:
+        `({url:location.href,title:document.title,` +
+        `text:((document.body&&document.body.innerText)||'').replace(/\\s+/g,' ').slice(0,${PAGE_TEXT_MAX})})`,
+      returnByValue: true,
+    },
+  }) as { result?: { value?: { url: string; title: string; text: string } } };
+  const { url = "", title = "", text: pageText = "" } = ps.result?.value ?? {};
 
   let axTargets = await extractAx(tabId);
 
@@ -244,7 +303,7 @@ async function captureObservation(tabId: number) {
     axTargets = await extractAx(tabId);
   }
 
-  return { url, title, axTargets };
+  return { url, title, pageText, axTargets };
 }
 
 // ── Action execution ─────────────────────────────────────────────────────────
@@ -297,8 +356,138 @@ async function waitForPageReady(tabId: number, maxWaitMs = 10_000): Promise<void
 
 // ── Sidepanel notifications ──────────────────────────────────────────────────
 
+// ponytail: the task outlives the panel — the WebSocket lives here, not in
+// the side panel — so closing the panel mid-task used to leave the next open
+// blank while the agent kept working. Buffering events here and replaying
+// them into the panel's own handler restores the transcript for free.
+// storage.session, not local: this is one run's log and must not survive a
+// browser restart, same reasoning as the API key.
+const PANEL_LOG_KEY = "panelLog";
+const PANEL_LOG_MAX = 200;
+let panelLog: Record<string, unknown>[] = [];
+
+function logToPanel(event: Record<string, unknown>): void {
+  // tab_event fires on every navigation and would push real transcript — the
+  // user's question, a pending approval — out of a capped log. The panel only
+  // tallies them, so keep the latest and accept an approximate count on a
+  // restored panel; a wrong tab tally beats a missing task.
+  if (event.type === "tab_event") panelLog = panelLog.filter((e) => e.type !== "tab_event");
+  panelLog.push(event);
+  if (panelLog.length > PANEL_LOG_MAX) panelLog = panelLog.slice(-PANEL_LOG_MAX);
+  void chrome.storage.session.set({ [PANEL_LOG_KEY]: panelLog }).catch(() => undefined);
+}
+
 function notifyUi(event: Record<string, unknown>): void {
+  logToPanel(event);
+  maybeNotify(event);
   void chrome.runtime.sendMessage(event).catch(() => undefined);
+}
+
+// ── OS notifications ────────────────────────────────────────────────────────
+// A task can sit blocked on an approval or a login for as long as the user
+// ignores it, and the only thing saying so is a panel they have to remember
+// to open. The panel's keep-alive port already tells us whether it is open,
+// so we only speak up when nobody is watching.
+//
+// ponytail: chrome.sidePanel.open() is NOT called from a notification click.
+// It requires a user gesture and a notification click is not a documented
+// one — chromium bug 40929586 reproduces exactly this and is still open.
+// Notification *buttons* have no such limit, which is why approvals are
+// answerable from the notification and everything else just clears.
+
+let panelConnected = false;
+let notifyBlocking = true;
+let notifyResults = false;
+
+type NotificationSpec = {
+  title: string;
+  message: string;
+  buttons?: chrome.notifications.ButtonOptions[];
+  blocking?: boolean;
+};
+
+function notify(id: string, spec: NotificationSpec): void {
+  if (!chrome.notifications) return;
+  chrome.notifications.create(id, {
+    type: "basic",
+    iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
+    title: spec.title,
+    message: spec.message,
+    priority: spec.blocking ? 2 : 1,
+    // A blocked task that silently disappears after a few seconds is the exact
+    // failure this feature exists to prevent.
+    requireInteraction: spec.blocking === true,
+    buttons: spec.buttons,
+  } as chrome.notifications.NotificationOptions<true>, () => {
+    // A notification that never appears is indistinguishable from one that was
+    // never fired unless we say which. Chrome swallows the reason otherwise.
+    const err = chrome.runtime.lastError;
+    if (err) console.error("[brotto] notification failed:", id, err.message);
+    else console.log("[brotto] notification shown:", id, spec.title);
+  });
+}
+
+/** Fires a notification for an event the panel also renders, if warranted. */
+function maybeNotify(event: Record<string, unknown>): void {
+  const t = event.type as string;
+
+  // Blocking prompts: always speak up, even with the panel open — the user
+  // has usually wandered off precisely because the panel looks idle.
+  if (t === "approval_request") {
+    const id = String(event.id ?? "");
+    notify(`approval:${id}`, {
+      title: "Brotto needs your approval",
+      message: String(event.reason || "Confirm this action to let the task continue."),
+      buttons: [
+        { title: "Approve" },
+        { title: "Not now" },
+      ],
+      blocking: true,
+    });
+    return;
+  }
+  if (t === "login_required") {
+    notify("login", {
+      title: "Brotto is waiting for you to sign in",
+      message: `Sign in on ${String(event.domain || "the site")} and Brotto will pick the task back up.`,
+      blocking: true,
+    });
+    return;
+  }
+  if (t === "clarify_request") {
+    notify("clarify", {
+      title: "Brotto has a question",
+      message: String(event.question || "It needs an answer before it can continue."),
+      blocking: true,
+    });
+    return;
+  }
+
+  // Terminal results: only when the panel is closed. If it's open, the user
+  // is already looking at the answer and a popup is pure noise.
+  if (panelConnected) return;
+  if (t === "task_completed" && notifyResults) {
+    notify("done", {
+      title: "Brotto finished",
+      message: String(event.finalAnswer || event.summary || "Task complete."),
+    });
+    return;
+  }
+  if (t === "task_failed" && notifyResults) {
+    notify("failed", {
+      title: "Brotto stopped",
+      message: String(event.summary || "The task could not be completed."),
+    });
+    return;
+  }
+  // Only the three above are gated; anything else reaching here was never a
+  // candidate. Logged so "no notification appeared" has an answer in the
+  // console — the default for results is off, which is otherwise invisible.
+  if (t === "task_completed" || t === "task_failed") {
+    console.log(
+      `[brotto] no notification for ${t}: notifyResults=${notifyResults} panelConnected=${panelConnected}`,
+    );
+  }
 }
 
 async function setBadge(active: boolean): Promise<void> {
@@ -716,9 +905,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           waitingForLogin = false;
           currentPrompt = null;
           lastObservedUrl = "";
+          panelLog = [];
 
           const goal = String(message.task ?? "").trim();
           if (!goal) { sendResponse({ success: false, error: "task is empty" }); return; }
+
+          // Logged, not broadcast: the live panel already renders the user's
+          // own message before it sends. This only exists so a reopened panel
+          // can put the question back at the top of the transcript.
+          logToPanel({ type: "task_started", task: goal });
 
           const stored = await chrome.storage.local.get("settings");
           const plannerUrl: string =
@@ -743,6 +938,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             });
 
           sendResponse({ success: true });
+          break;
+        }
+
+        case "get_panel_log": {
+          sendResponse({ success: true, events: panelLog });
           break;
         }
 
@@ -798,7 +998,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         case "submit_approval": {
           const res = pendingApprovalResolvers.get(String(message.id));
-          if (res) { pendingApprovalResolvers.delete(String(message.id)); res(message.approved === true); }
+          if (!res) {
+            // The resolver map is in memory only and does not survive service
+            // worker eviction, so a card replayed from panelLog can name a
+            // prompt nobody is waiting on any more. Reporting success here
+            // removed the card and showed a green tick for an agent that is
+            // still blocked. Failure sends the panel back through reArmApproval.
+            sendResponse({ success: false, error: "That approval is no longer waiting — the task has moved on." });
+            break;
+          }
+          pendingApprovalResolvers.delete(String(message.id));
+          res(message.approved === true);
           sendResponse({ success: true });
           break;
         }
@@ -821,13 +1031,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           // full settings object to chrome.storage.local; here we just
           // update the in-memory mirror used on the next task_start.
           const s = message.settings as
-            | { mode?: string; blacklist?: string[] }
+            | { mode?: string; blacklist?: string[]; notifyBlocking?: boolean; notifyResults?: boolean }
             | undefined;
           if (s) {
             userPolicy = {
               mode: s.mode === "secure" ? "secure" : "normal",
               blacklist: Array.isArray(s.blacklist) ? s.blacklist : [],
             };
+            // Notification prefs ride along on Save rather than growing their
+            // own message type — they live in the same settings object.
+            notifyBlocking = s.notifyBlocking !== false;
+            notifyResults = s.notifyResults === true;
           }
           sendResponse({ success: true });
           break;
@@ -946,10 +1160,56 @@ async function initialize(): Promise<void> {
 
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== "brotto-sidepanel") return;
+    // The panel's keep-alive port is also its liveness signal: a closed panel
+    // disconnects the port, which is what lets a finished task notify.
+    panelConnected = true;
     port.onMessage.addListener(() => { /* keep-alive */ });
+    port.onDisconnect.addListener(() => { panelConnected = false; });
   });
 
-  chrome.runtime.onInstalled.addListener(() => { void setBadge(false); });
+  // Approve / Not now, answered from the OS notification without opening the
+  // panel. Routed through the same resolver map the panel's own buttons use,
+  // so there is one way to answer an approval rather than two.
+  chrome.notifications?.onButtonClicked.addListener((id, index) => {
+    if (!id.startsWith("approval:")) return;
+    const promptId = id.slice("approval:".length);
+    const resolve = pendingApprovalResolvers.get(promptId);
+    if (!resolve) {
+      // The task moved on while the notification sat there. Say so rather
+      // than letting the button look like it did something.
+      void chrome.notifications.clear(id);
+      return;
+    }
+    // Delete before resolving, exactly as submit_approval does. Leaving the
+    // entry live meant the in-panel card could resolve it a second time, and
+    // that second human_reply is consumed by the *next* prompt — approving an
+    // action the user never saw.
+    pendingApprovalResolvers.delete(promptId);
+    resolve(index === 0);
+    // The panel still shows the card; it was never told. Without this it
+    // sits on "Approval needed" for a prompt that is already answered.
+    notifyUi({ type: "approval_resolved", id: promptId, approved: index === 0 });
+    void chrome.notifications.clear(id);
+  });
+
+  // Deliberately does NOT call chrome.sidePanel.open() — see the note above
+  // maybeNotify. Dismissing and updating the badge is all a click can do.
+  chrome.notifications?.onClicked.addListener((id) => {
+    void chrome.notifications.clear(id);
+  });
+
+  chrome.runtime.onInstalled.addListener((details) => {
+    void setBadge(false);
+    // First run points the panel at the setup wizard; the wizard's own "Start"
+    // points it back at sidepanel.html. reason === 'install' only, so an
+    // update never drops an existing user back into setup.
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    if (details.reason === "install") {
+      void chrome.storage.local.get("settings").then((s) => {
+        if (!s.settings?.onboarded) chrome.sidePanel.setOptions({ path: "welcome.html" });
+      });
+    }
+  });
 
   // Auto-resume after manual login: when the active tab navigates, push a
   // fresh observation AND unblock the server's login wait. Top-frame only —

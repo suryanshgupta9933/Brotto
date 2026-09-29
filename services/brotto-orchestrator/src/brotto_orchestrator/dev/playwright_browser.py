@@ -97,7 +97,10 @@ class PlaywrightBrowser(BrowserInterface):
 
         try:
             cdp_session = await self.page.context.new_cdp_session(self.page)
-            targets = await AXTreeExtractor.extract_targets(cdp_session, max_targets=50)
+            # Not the perception budget — agent/ax_filter.py's MAX_CHARS=6000
+            # is, and it must be what the benchmark trips. A cap low enough to
+            # bite first turns every large-page fixture into a lookup miss.
+            targets = await AXTreeExtractor.extract_targets(cdp_session, max_targets=2000)
             return targets
         except Exception as e:
             print(f"Warning: Failed to extract targets via CDP: {e}")
@@ -189,21 +192,20 @@ class PlaywrightBrowser(BrowserInterface):
             }
 
         try:
-            if target.backend_node_id:
-                await self.page.click(
-                    f'[data-backend-node-id="{target.backend_node_id}"]',
-                    timeout=5000,
-                )
+            # ponytail: coordinates, not backend_node_id. There is no
+            # `[data-backend-node-id]` attribute in the DOM — that selector
+            # belongs to Playwright's aria snapshot, not to a real page — so
+            # the old branch always burned its 5s timeout and failed. The
+            # extractor already resolves each node's box via DOM.getBoxModel.
+            coords = target.coordinates
+            if coords and "x" in coords and "y" in coords:
+                await self.page.mouse.click(coords["x"], coords["y"])
             else:
-                coords = target.coordinates
-                if coords and "x" in coords and "y" in coords:
-                    await self.page.mouse.click(coords["x"], coords["y"])
-                else:
-                    return {
-                        "ok": False,
-                        "error": "No coordinates or backend_node_id for target",
-                        "action_type": "left_click",
-                    }
+                return {
+                    "ok": False,
+                    "error": "No coordinates on target's box model",
+                    "action_type": "left_click",
+                }
 
             return {"ok": True, "action_type": "left_click"}
         except Exception as e:
@@ -237,16 +239,18 @@ class PlaywrightBrowser(BrowserInterface):
             }
 
         try:
-            if target.backend_node_id:
-                await self.page.fill(
-                    f'[data-backend-node-id="{target.backend_node_id}"]',
-                    text,
-                    timeout=5000,
-                )
+            # ponytail: click, then type — same reason as _handle_left_click.
+            # `page.fill` needs a locator and there is no backend-node-id
+            # selector to build one from, so a focused element is the only
+            # route to the text. The harness clears the field first.
+            coords = target.coordinates
+            if coords and "x" in coords and "y" in coords:
+                await self.page.mouse.click(coords["x"], coords["y"])
+                await self.page.keyboard.type(text)
             else:
                 return {
                     "ok": False,
-                    "error": "No selector for target",
+                    "error": "No coordinates on target's box model",
                     "action_type": "insert_text",
                 }
 

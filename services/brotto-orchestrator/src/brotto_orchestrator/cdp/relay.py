@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Callable
 
+from ..agent.ax_filter import PAGE_TEXT_MAX
 from ..dev.ax_tree_extractor import SemanticTarget
+
+log = logging.getLogger(__name__)
 
 
 class CDPRelay:
@@ -24,7 +28,14 @@ class CDPRelay:
         await asyncio.sleep(0.5)  # brief settle after navigation
 
     async def get_targets(self) -> list[SemanticTarget]:
-        return await self._browser._extract_semantic_targets()
+        # Publish the map as a side effect. The harness observes with this
+        # call and dispatches its next action against `target_map`, and
+        # nothing else had filled it: refresh_target_map only runs *after* a
+        # navigate/click/scroll, so the first action of every task failed with
+        # "Target not found". observe() already does this; mirror it here.
+        targets = await self._browser._extract_semantic_targets()
+        self._browser.target_map = {t.ref_id: t for t in targets}
+        return targets
 
     async def get_current_url(self) -> str:
         if self._browser.page:
@@ -35,6 +46,19 @@ class CDPRelay:
         if self._browser.page:
             return await self._browser.page.title()
         return ""
+
+    async def get_page_text(self) -> str:
+        if not self._browser.page:
+            return ""
+        try:
+            text = await self._browser.page.evaluate(
+                f"((document.body&&document.body.innerText)||'').replace(/\\s+/g,' ')"
+                f".slice(0, {PAGE_TEXT_MAX})"
+            )
+            return str(text or "")
+        except Exception as e:
+            log.debug("get_page_text failed: %s", e)
+            return ""
 
     async def click_ref(self, ref: str) -> str:
         target = self._browser.target_map.get(ref)

@@ -26,8 +26,9 @@ from brotto_orchestrator.model.resolver import resolve_model_config
 from .context import (
     AgentDeps, AgentDecision, AgentTurn, ActionCall,
     StepSummary, TaskResult, Scratchpad, MemoryEntry, DIGEST_LEN,
+    ScriptTargetUnresolved,
 )
-from .ax_filter import filter_ax_targets
+from .ax_filter import budget_for_window, filter_ax_targets
 from .ax_diff import compute_ax_diff
 from .stagnation import check_stagnation
 from .guardrails import check_login_page, check_critical_action, check_sensitive_action
@@ -40,8 +41,14 @@ _HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
 
 # Per-action approval prompt reasons, surfaced to the user via WS
 # `reasoning` and to policy.log for audit.
-_REASON_FIRST_TIME = "First time on {domain}: agent wants to {action}. Continue?"
-_REASON_CRITICAL = "Critical action: {action}. Continue?"
+#
+# {action} is the human label from _ACTION_LABEL, never the tool name.
+_REASON_FIRST_TIME = "First time on {domain}: the agent wants to {action}. Continue?"
+# {thought} is the model's `thought` field, which the system prompt already
+# contracts as one sentence of user-facing plain English. `reasoning` must
+# NOT be used here — the prompt marks it "NEVER shown to the user", and an
+# approval card is exactly that.
+_REASON_CRITICAL = "{thought} This can't be undone from here — continue?"
 
 # ponytail: every user-facing prompt in the harness routes through these
 # helpers so the "deny → abort task" contract is enforced exactly once.
@@ -62,9 +69,30 @@ _TERMINAL_ACTIONS = {"task_complete", "cannot_complete"}
 # Card UI is different (no Approve/Deny buttons).
 _QUESTION_ACTIONS = {"ask_human"}
 # Combined set: actions that should NEVER appear inside an approval card
-# (terminal + internal + question). Reused by sensitive-action,
-# first-time-seen, and the sidepanel card filter.
+# (terminal + internal + question). Every card-emitting loop filters on this
+# before deciding whether to prompt — the internal four are the reason: their
+# args are model-written prose, and check_critical_action regexes those, so a
+# note reading "...to confirm star counts" tripped the gate on the word
+# "confirm". See tests/test_agent_e2e.py.
 _NEVER_APPROVE = _TERMINAL_ACTIONS | _INTERNAL_ACTIONS | _QUESTION_ACTIONS
+
+# What the user sees in the card instead of the tool name. "click" and
+# "type_text" are developer-facing; these are the only action names that can
+# reach a card, and every one of them is a thing a person recognises doing.
+_ACTION_LABEL = {
+    "navigate": "open a page",
+    "click": "click something on the page",
+    "type_text": "type into a field",
+    "scroll": "scroll the page",
+    "find_element": "look up an element",
+    "read_page_text": "read text off the page",
+}
+
+
+def _card_label(action: str, action_args: dict) -> str:
+    """Human phrasing for an approval card. Prefers what the model wrote
+    about the target (a click's `description`) over the generic verb."""
+    return str(action_args.get("description") or _ACTION_LABEL.get(action, "do something"))
 
 # ponytail: after the user clicks Approve on a policy/approval card, they
 # have REVOKE_WINDOW_SECS to change their mind by sending human_reply
@@ -170,6 +198,16 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
 
     diff_section = f"\n### What changed after last action\n{turn.ax_diff}\n" if turn.ax_diff else ""
 
+    # Placed after the tree, before the question: it is the last thing read,
+    # and the values it carries (counts, prices, totals) are exactly what a
+    # read-only question is answered from.
+    text_section = (
+        f"\n### Page text (values the tree above may not carry)\n"
+        f"<page_text untrusted url=\"{turn.current_url}\">\n{turn.page_text}\n</page_text>\n"
+        if turn.page_text
+        else ""
+    )
+
     # ponytail: secure-mode preamble is injected here, not at Agent
     # construction, so we don't need to rebuild the Agent per-task. The
     # test-helper reads `_TEST_DEPS` (a module global); the harness loop
@@ -210,7 +248,7 @@ Title: {turn.current_page_title}
 <page_content untrusted url="{turn.current_url}">
 {turn.ax_tree}
 </page_content>
-
+{text_section}
 ## What is your next action(s)?
 """
 
@@ -686,17 +724,128 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, run_log=None) -> st
         return f"Error executing {action}: {e}"
 
 
+def _scripted_decision(deps: AgentDeps, turn: AgentTurn) -> AgentDecision | None:
+    """Return a scripted decision, or None to use the model as normal.
+
+    Kept as a separate function so the branch is unit-testable without
+    driving the full observe→plan→act loop.
+    """
+    planner = getattr(deps, "scripted_planner", None)
+    if planner is None:
+        return None
+    return planner.next(turn)
+
+
+async def _plan_step(
+    deps: AgentDeps, turn: AgentTurn, agent: Agent
+) -> tuple[AgentDecision, int, object] | None:
+    """Return (decision, context_window, pydantic-ai result), or None to
+    abandon the step.
+
+    Extracted from AgentHarness.run so the branch — scripted planner vs
+    model path vs error mapping — is unit-testable without driving the full
+    observe→plan→act loop. None means "deps.result is set, loop continues";
+    the timing bucket is deliberately not charged for those steps.
+    """
+    global _CURRENT_DEPS
+    _CURRENT_DEPS = deps
+    try:
+        # Resolve model_config first so we have context_window for the
+        # CONTEXT cell regardless of which branch below runs.
+        # AGENT_MODEL="test" is a pydantic-ai sentinel for TestModel;
+        # bypass the resolver's env-fallback (which would reject "test")
+        # by reading the env var directly for context_window only.
+        scripted = _scripted_decision(deps, turn)
+        if scripted is not None:
+            # Test/dev path: no model, no key, no network. result is
+            # left None so the shared assignment below stays valid.
+            context_window = _CONTEXT_WINDOW_TOKENS
+            result = None
+        elif os.getenv("AGENT_MODEL") == "test":
+            context_window = _CONTEXT_WINDOW_TOKENS
+            result = await agent.run(_turn_to_prompt(turn), deps=deps)
+        else:
+            cfg, creds = resolve_model_config(
+                client_ip=getattr(deps, "client_ip", "127.0.0.1"),
+                inline_config=getattr(deps, "model_config", None),
+                inline_creds=(
+                    UserCredentials(api_key=deps.api_key, base_url=None)
+                    if getattr(deps, "api_key", None)
+                    else None
+                ),
+            )
+            context_window = cfg.context_window
+            factory = PROVIDER_REGISTRY[cfg.provider]
+            if not factory.validate_model_id(cfg.model):
+                raise UserError(
+                    f"Unknown model {cfg.provider}:{cfg.model}"
+                )
+            _per_task_model = factory.build(cfg.model, creds)
+            result = await agent.run(_turn_to_prompt(turn), deps=deps, model=_per_task_model)
+        decision: AgentDecision = (
+            scripted if scripted is not None else result.output
+        )
+        deps.context_window = context_window
+    except ScriptTargetUnresolved as e:
+        # A scripted ref that will not resolve means the target the
+        # script asked for is not in the AX tree the agent sees —
+        # that is the Wave 0 gap itself, not an infrastructure fault.
+        # Catches only this type: a KeyError from the model path
+        # (bad provider in PROVIDER_REGISTRY) is a production
+        # misconfiguration, not a perception gap, and must propagate.
+        deps.result = TaskResult(
+            status="failed",
+            summary=f"scripted target not found: {e}",
+            failure_reason=f"scripted target did not resolve: {e}",
+            policy_mode=_policy_mode(deps),
+        )
+        return None
+    except UserError as e:
+        # Convert "Unknown model" failures to a model_not_found
+        # TaskResult. The next iteration's abort gate returns it.
+        if "Unknown model" in str(e):
+            deps.result = _make_model_not_found_result(
+                provider=cfg.provider, model_id=cfg.model, deps=deps,
+            )
+            return None
+        # pydantic-ai auto-detect failures on bare model names —
+        # raise with a hint that names the fix without hard-coding.
+        raise UserError(
+            f"{e}. Set AGENT_MODEL to '<provider>:<model>' "
+            f"to route to the correct provider."
+        ) from e
+    except ModelHTTPError as http_err:
+        # 401 / 403 → auth_failed. Don't echo any key in the summary.
+        if http_err.status_code in (401, 403):
+            deps.result = _make_auth_failed_result(
+                provider=cfg.provider, deps=deps,
+            )
+            return None
+        raise
+    finally:
+        # _turn_to_prompt reads _CURRENT_DEPS for the secure-mode
+        # preamble; clear it after the call so it doesn't leak
+        # across tasks (the loop is sequential but the value
+        # outlives this iteration otherwise).
+        _CURRENT_DEPS = None
+    return decision, context_window, result
+
+
 class AgentHarness:
     MAX_STEPS = 30
     STAGNATION_WINDOW = 3
 
     async def run(self, deps: AgentDeps) -> TaskResult:
-        global _CURRENT_DEPS
         timings: dict[str, float] = {b: 0.0 for b in TIMING_BUCKETS}
         # Snapshot of `timings` taken at the start of each step iteration —
         # lets us report a per-step breakdown without instrumenting every
         # early-exit (continue) site in the loop.
         cumulative_snapshots: list[dict[str, float]] = []
+        # Provider-reported token usage, summed across steps and reported in
+        # the timing dict so the benchmark runner can price the run. The
+        # scripted-planner path never calls `agent.run`, so these stay 0
+        # there — a real fact (no model ran), not missing data.
+        tokens: dict[str, int] = {"in": 0, "out": 0}
         steps_run = 0
         task_start = time.perf_counter()
 
@@ -706,6 +855,8 @@ class AgentHarness:
                 summary="CDP not healthy at task start",
                 failure_reason="cdp_preflight_failed",
                 policy_mode=_policy_mode(deps),
+                # Pre-observe: no URL was ever observed, so this is "".
+                final_url=deps.step_url,
             )
 
         if not deps.task_id:
@@ -743,7 +894,17 @@ class AgentHarness:
             if deps.result is not None:
                 deps.result.timing = self._log_timings(
                     deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
+                    tokens=tokens,
                 )
+                # deps.step_url is the URL observed at the top of the last
+                # step this loop entered — pre-step, not post-action. It is
+                # "" until the first observe, which is what the abort gate
+                # can return on.
+                deps.result.final_url = deps.step_url
+                # The gate is the single point every terminal result passes
+                # through, so it is the one place steps_taken can be counted
+                # right: built elsewhere it is 0-indexed, step+1, or unset.
+                deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
                 return deps.result
 
             steps_run += 1
@@ -754,6 +915,10 @@ class AgentHarness:
             targets = await deps.cdp.get_targets()
             current_url = await deps.cdp.get_current_url()
             page_title = await deps.cdp.get_page_title()
+            # Free on the extension path (already in the cached observation);
+            # one evaluate on the dev path. Shipped every step because the
+            # accessibility tree often omits the value a question is about.
+            page_text = await deps.cdp.get_page_text()
             # ponytail: stash for the click cross-domain gate (Change 3).
             # The click handler runs inside this same step and needs to
             # compare pre-click URL to post-click URL.
@@ -761,8 +926,13 @@ class AgentHarness:
             t1 = time.perf_counter()
             timings["observe"] += t1 - t0
 
-            filtered_ax = filter_ax_targets(targets)
-            ax_diff = compute_ax_diff(deps.prev_targets, targets)
+            # Budget scales with the model actually in use — deps.context_window
+            # is set by _plan_step once the per-task config resolves, so step 1
+            # falls back to the env default, which is where that number came
+            # from anyway.
+            budget = budget_for_window(getattr(deps, "context_window", None))
+            filtered_ax = filter_ax_targets(targets, max_chars=budget)
+            ax_diff = compute_ax_diff(deps.prev_targets, targets, max_chars=budget // 10)
             timings["filter"] += time.perf_counter() - t1
 
             # Guardrail: domain policy (secure mode only). No-op in normal
@@ -784,6 +954,7 @@ class AgentHarness:
                     timing_report = self._log_timings(
                         deps.user_id, timings, steps_run,
                         time.perf_counter() - task_start, cumulative_snapshots,
+                        tokens=tokens,
                     )
                     return TaskResult(
                         status="failed",
@@ -792,10 +963,17 @@ class AgentHarness:
                         steps_taken=steps_run,
                         timing=timing_report,
                         policy_mode=_policy_mode(deps),
+                        final_url=deps.step_url,
                     )
 
-            # Guardrail: login detection
-            if check_login_page(page_title, filtered_ax, current_url):
+            # Guardrail: login detection. Skipped under a scripted planner:
+            # there is no human to ask, the script carries its own login
+            # steps, and /run has no reply channel to answer on — without
+            # this the guardrail blocks 300s per step and every run records
+            # a timeout instead of a measurement.
+            if deps.scripted_planner is None and check_login_page(
+                page_title, filtered_ax, current_url
+            ):
                 t_lp = time.perf_counter()
                 await deps.ws_send({
                     "type": "login_required",
@@ -811,13 +989,14 @@ class AgentHarness:
                     continue
                 if str(reply).lower() == "skip":
                     timings["login_pause"] += time.perf_counter() - t_lp
-                    timing_report = self._log_timings(deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots)
+                    timing_report = self._log_timings(deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots, tokens=tokens)
                     return TaskResult(
                         status="failed",
                         summary="User skipped login",
                         failure_reason="user_skipped_login",
                         timing=timing_report,
                         policy_mode=_policy_mode(deps),
+                        final_url=deps.step_url,
                     )
                 # reply == "resume" (or anything else): loop continues,
                 # next step re-runs check_login_page to confirm we're out.
@@ -832,7 +1011,10 @@ class AgentHarness:
                 await deps.ws_send({"type": "stagnation_warning", "reason": reason})
             timings["stagnation"] += time.perf_counter() - t_sg
             stagnation_note = (
-                f"\n\n⚠ STAGNATION DETECTED: {reason}\nYou MUST either try a completely different approach or call cannot_complete now."
+                f"\n\n⚠ STAGNATION DETECTED: {reason}\n"
+                "Do not try another variation of what just failed. Either report what "
+                "you have — a well-established 'none exist' is a complete answer — or, "
+                "if a genuinely different path exists, take it now and say why it differs."
                 if stagnated else ""
             )
 
@@ -847,6 +1029,7 @@ class AgentHarness:
                 ax_tree=filtered_ax + stagnation_note,
                 ax_diff=ax_diff,
                 step_summaries=deps.step_summaries,
+                page_text=page_text,
             )
 
             log.info("[%s] step %d  url=%s  ax_elements=%d  memory_entries=%d",
@@ -855,65 +1038,11 @@ class AgentHarness:
             # Plan
             t_plan = time.perf_counter()
             log.debug("[%s] calling model...", deps.user_id)
-            _CURRENT_DEPS = deps
-            try:
-                # Resolve model_config first so we have context_window for the
-                # CONTEXT cell regardless of which branch below runs.
-                # AGENT_MODEL="test" is a pydantic-ai sentinel for TestModel;
-                # bypass the resolver's env-fallback (which would reject "test")
-                # by reading the env var directly for context_window only.
-                if os.getenv("AGENT_MODEL") == "test":
-                    context_window = _CONTEXT_WINDOW_TOKENS
-                    result = await agent.run(_turn_to_prompt(turn), deps=deps)
-                else:
-                    cfg, creds = resolve_model_config(
-                        client_ip=getattr(deps, "client_ip", "127.0.0.1"),
-                        inline_config=getattr(deps, "model_config", None),
-                        inline_creds=(
-                            UserCredentials(api_key=deps.api_key, base_url=None)
-                            if getattr(deps, "api_key", None)
-                            else None
-                        ),
-                    )
-                    context_window = cfg.context_window
-                    factory = PROVIDER_REGISTRY[cfg.provider]
-                    if not factory.validate_model_id(cfg.model):
-                        raise UserError(
-                            f"Unknown model {cfg.provider}:{cfg.model}"
-                        )
-                    _per_task_model = factory.build(cfg.model, creds)
-                    result = await agent.run(_turn_to_prompt(turn), deps=deps, model=_per_task_model)
-                decision: AgentDecision = result.output
-            except UserError as e:
-                # Convert "Unknown model" failures to a model_not_found
-                # TaskResult. The next iteration's abort gate returns it.
-                if "Unknown model" in str(e):
-                    deps.result = _make_model_not_found_result(
-                        provider=cfg.provider, model_id=cfg.model, deps=deps,
-                    )
-                    _CURRENT_DEPS = None
-                    continue
-                # pydantic-ai auto-detect failures on bare model names —
-                # raise with a hint that names the fix without hard-coding.
-                raise UserError(
-                    f"{e}. Set AGENT_MODEL to '<provider>:<model>' "
-                    f"to route to the correct provider."
-                ) from e
-            except ModelHTTPError as http_err:
-                # 401 / 403 → auth_failed. Don't echo any key in the summary.
-                if http_err.status_code in (401, 403):
-                    deps.result = _make_auth_failed_result(
-                        provider=cfg.provider, deps=deps,
-                    )
-                    _CURRENT_DEPS = None
-                    continue
-                raise
-            finally:
-                # _turn_to_prompt reads _CURRENT_DEPS for the secure-mode
-                # preamble; clear it after the call so it doesn't leak
-                # across tasks (the loop is sequential but the value
-                # outlives this iteration otherwise).
-                _CURRENT_DEPS = None
+            planned = await _plan_step(deps, turn, agent)
+            if planned is None:
+                # deps.result is set; skip the rest of this step.
+                continue
+            decision, context_window, result = planned
             timings["model_plan"] += time.perf_counter() - t_plan
             actions_summary = ", ".join(f"{c.action}" for c in decision.actions) or "(none)"
             log.info("[%s] step %d  actions=[%s]", deps.user_id, step, actions_summary)
@@ -937,11 +1066,11 @@ class AgentHarness:
                     )
                     await deps.ws_send({
                         "type": "approval_required",
-                        "action": c.action,
+                        "action": _card_label(c.action, c.action_args),
                         "args": c.action_args,
                         "reasoning": (
-                            f"Sensitive action (org policy): {c.action}. "
-                            f"Continue?"
+                            f"Sensitive action (org policy): the agent wants to "
+                            f"{_card_label(c.action, c.action_args)}. Continue?"
                         ),
                     })
                     reply = await deps.human_input_queue.get()
@@ -976,16 +1105,21 @@ class AgentHarness:
             # actions later in the batch ran unchecked). Deny on ANY
             # critical action aborts the entire task — the user's plan was
             # wrong, the agent shouldn't try a different angle.
+            #
+            # _NEVER_APPROVE first: the internal four carry model-written
+            # prose in their args and check_critical_action regexes those,
+            # so a scratchpad note could raise a card on its own.
             critical_actions = [
                 c for c in decision.actions
-                if check_critical_action(c.action, c.action_args)
+                if c.action not in _NEVER_APPROVE
+                and check_critical_action(c.action, c.action_args)
             ]
             for c in critical_actions:
                 await deps.ws_send({
                     "type": "approval_required",
-                    "action": c.action,
+                    "action": _card_label(c.action, c.action_args),
                     "args": c.action_args,
-                    "reasoning": decision.reasoning,
+                    "reasoning": _REASON_CRITICAL.format(thought=decision.thought),
                 })
                 reply = await deps.human_input_queue.get()
                 if str(reply).lower() not in APPROVE_SET:
@@ -1046,10 +1180,10 @@ class AgentHarness:
                     )
                     await deps.ws_send({
                         "type": "approval_required",
-                        "action": c.action,
+                        "action": _card_label(c.action, c.action_args),
                         "args": c.action_args,
                         "reasoning": _REASON_FIRST_TIME.format(
-                            domain=domain, action=c.action,
+                            domain=domain, action=_card_label(c.action, c.action_args),
                         ),
                     })
                     reply2 = await deps.human_input_queue.get()
@@ -1102,6 +1236,9 @@ class AgentHarness:
             try:
                 usage = result.usage
                 tokens_used = usage.input_tokens if usage else None
+                if usage is not None:
+                    tokens["in"] += usage.input_tokens
+                    tokens["out"] += usage.output_tokens
             except Exception:
                 tokens_used = None
             context = _build_context(tokens_used, window=context_window)
@@ -1203,11 +1340,22 @@ class AgentHarness:
             if deps.result is not None:
                 deps.result.timing = self._log_timings(
                     deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
+                    tokens=tokens,
                 )
+                # deps.step_url is the URL observed at the top of the last
+                # step this loop entered — pre-step, not post-action. It is
+                # "" until the first observe, which is what the abort gate
+                # can return on.
+                deps.result.final_url = deps.step_url
+                # The gate is the single point every terminal result passes
+                # through, so it is the one place steps_taken can be counted
+                # right: built elsewhere it is 0-indexed, step+1, or unset.
+                deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
                 return deps.result
 
         timing_report = self._log_timings(
             deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
+            tokens=tokens,
         )
         return TaskResult(
             status="failed",
@@ -1216,6 +1364,7 @@ class AgentHarness:
             steps_taken=self.MAX_STEPS,
             timing=timing_report,
             policy_mode=_policy_mode(deps),
+            final_url=deps.step_url,
         )
 
     @staticmethod
@@ -1225,6 +1374,7 @@ class AgentHarness:
         steps: int,
         wall: float,
         snapshots: list[dict[str, float]] | None = None,
+        tokens: dict[str, int] | None = None,
     ) -> dict:
         """Emit a per-component timing summary at task end.
 
@@ -1270,6 +1420,7 @@ class AgentHarness:
                 }
                 per_step.append(delta)
 
+        tok = tokens or {}
         return {
             "steps": steps,
             "wall_s": round(wall, 3),
@@ -1277,4 +1428,7 @@ class AgentHarness:
             "human_pause_s": round(human_pause_total, 3),
             "components": {k: round(timings[k], 3) for k in TIMING_BUCKETS},
             "per_step": per_step,
+            # Consumed by testing/runner.py, which pops these to price the run.
+            "tokens_in": tok.get("in", 0),
+            "tokens_out": tok.get("out", 0),
         }

@@ -10,12 +10,65 @@ KEEP_ROLES = {
     "checkbox", "radio", "menuitem", "tab", "listitem",
     "heading", "dialog", "alert", "form", "main", "nav",
     "option", "switch", "slider", "spinbutton", "gridcell",
+    # Record containers. Nameless ones never reach the output (see the
+    # name/value guard below) but they are what a row's fields indent under,
+    # and they must match the extractor's kept set or depth comes out 0.
+    "row", "rowgroup", "table", "list",
 }
 
 STRIP_ROLES = {"generic", "none", "presentation", "separator"}
 
+# Character budget for the rendered tree. Derived from the model's context
+# window by the caller (see `budget_for_window`) — a flat 6000 next to a 1M
+# window truncated a real GitHub list page at 6041 chars and cost the agent a
+# scroll step to see the rest. FLOOR keeps a small-window model bounded.
 MAX_CHARS = 6000
+BUDGET_FLOOR = 8000
+BUDGET_CEIL = 60000
+WINDOW_DIVISOR = 20
+
+# innerText cap. This is the only source for values the AX tree omits
+# (a repo's star count, a price, a counter), so it earns its place in every
+# observation. Must match PAGE_TEXT_MAX in the extension's background.ts.
+PAGE_TEXT_MAX = 20000
+
+# Indent steps. Deeper nesting flattens anyway once the extra levels are
+# generic containers the model never sees.
+MAX_DEPTH = 4
+
 ROW_Y_THRESHOLD = 30  # px — elements within this y-band are considered "same row"
+
+
+def budget_for_window(window: int | None) -> int:
+    """How many chars of AX tree a model with this context window gets.
+
+    Scales rather than hardcodes: the tree is one section of a prompt that
+    also carries history and memory, so a twentieth of the window leaves
+    room and still bounds a runaway page.
+    """
+    if not window:
+        return MAX_CHARS
+    return max(BUDGET_FLOOR, min(BUDGET_CEIL, window // WINDOW_DIVISOR))
+
+
+def _depths(targets: list["SemanticTarget"]) -> dict[str, int]:
+    """Depth of each target among its *kept* ancestors.
+
+    The flat list loses the parent chain, so on a list page a repo's star
+    count lands N lines away from its name and the model has to guess which
+    record it belongs to — that guessing is the wandering. Generic
+    containers between them never reach the model, so they don't count.
+    """
+    parent = {t.ref_id: t.parent_ref_id for t in targets if t.parent_ref_id}
+    depth: dict[str, int] = {}
+    for t in targets:
+        n, seen, cur = 0, {t.ref_id}, t.parent_ref_id
+        while cur and cur not in seen and n < MAX_DEPTH:
+            seen.add(cur)
+            n += 1
+            cur = parent.get(cur)
+        depth[t.ref_id] = n
+    return depth
 
 
 def _group_by_row(targets: list["SemanticTarget"]) -> dict[int, list["SemanticTarget"]]:
@@ -80,6 +133,7 @@ def _compute_annotations(targets: list["SemanticTarget"]) -> dict[str, str]:
 def filter_ax_targets(
     targets: list["SemanticTarget"],
     viewport_coords: tuple[int, int, int, int] | None = None,
+    max_chars: int = MAX_CHARS,
 ) -> str:
     """Filter SemanticTargets to a token-capped AX tree string.
 
@@ -88,9 +142,13 @@ def filter_ax_targets(
     Elements are annotated to clarify their action:
     - [→ open] — primary action for this row (click to open/select the item)
     - [☐ select-only] — bulk-selection control (never opens the item)
+
+    Over budget, whole lines are dropped rather than sliced, so what survives
+    is still a coherent tree instead of one that ends mid-element.
     """
     # Compute spatial annotations (marks primary actions and selection controls)
     annotations = _compute_annotations(targets)
+    depth = _depths(targets)
 
     # Fallback suppression for elements without coordinates (extension path).
     # Keep the name-match heuristic as a secondary guard.
@@ -106,6 +164,7 @@ def filter_ax_targets(
 
     lines: list[str] = []
     offscreen: list[str] = []
+    dropped = 0
 
     for t in targets:
         if t.ref_id in shadow_checkboxes:
@@ -123,28 +182,44 @@ def filter_ax_targets(
             line += f' "{t.name[:80]}"'
         if t.value:
             line += f' value="{str(t.value)[:80]}"'
+        if t.href:
+            line += f"  {t.href[:160]}"
         # Append action annotation if computed
         ann = annotations.get(t.ref_id)
         if ann:
             line += f"  {ann}"
 
+        pad = "  " * depth.get(t.ref_id, 0)
+        if pad:
+            line = pad + line
+
+        # Off-screen elements are appended after the visible tree, so a long
+        # page's tail spends budget last.
         if viewport_coords and t.coordinates:
             vx, vy, vw, vh = viewport_coords
             cx, cy = t.coordinates.get("x", 0), t.coordinates.get("y", 0)
-            in_viewport = vx <= cx <= vx + vw and vy <= cy <= vy + vh
-            if not in_viewport:
+            if not (vx <= cx <= vx + vw and vy <= cy <= vy + vh):
                 offscreen.append(f"[off-screen] {line}")
                 continue
 
         lines.append(line)
 
-    result = "\n".join(lines)
-    remaining = MAX_CHARS - len(result)
-    if remaining > 0 and offscreen:
-        off_block = "\n".join(offscreen)[:remaining - 1]
-        result = result + "\n" + off_block
+    # Visible tree first, then off-screen. Drop whole lines: slicing mid-line
+    # used to end the tree on a half-rendered element.
+    ordered = lines + offscreen
+    kept: list[str] = []
+    used = 0
+    for line in ordered:
+        if kept and used + len(line) + 1 > max_chars:
+            dropped += 1
+            continue
+        kept.append(line)
+        used += len(line) + 1
 
-    if len(result) >= MAX_CHARS:
-        result = result[:MAX_CHARS] + "\n[tree truncated — scroll to reveal more]"
-
+    result = "\n".join(kept)
+    if dropped:
+        result += (
+            f"\n[{dropped} more element(s) not shown — scroll, or read_page_text "
+            f"for this page's content]"
+        )
     return result

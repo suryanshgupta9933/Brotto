@@ -85,6 +85,10 @@ class AgentTurn(BaseModel):
     ax_tree: str
     ax_diff: str
     step_summaries: list[StepSummary]
+    # innerText of the current page. Ships every step rather than waiting for
+    # a read_page_text call: the accessibility tree routinely omits the values
+    # a question is actually about (a star count, a price, a total).
+    page_text: str = ""
 
 
 class ActionCall(BaseModel):
@@ -105,6 +109,20 @@ class AgentDecision(BaseModel):
     actions: list[ActionCall]
 
 
+class ScriptTargetUnresolved(LookupError):
+    """A scripted action arg could not be resolved in the current AX tree.
+
+    Subclasses LookupError so existing `except LookupError` callers keep
+    working, but the harness catches this name specifically: a bare
+    LookupError from the model path (e.g. PROVIDER_REGISTRY[cfg.provider]
+    raising KeyError on a bad provider) is a production misconfiguration and
+    must not be reported as a scripted-perception failure.
+
+    Lives here, not in testing/, because the production harness raises and
+    catches it — see AgentDeps.scripted_planner's comment.
+    """
+
+
 class TaskResult(BaseModel):
     status: Literal["completed", "failed", "awaiting_human", "stagnated"]
     summary: str
@@ -117,6 +135,12 @@ class TaskResult(BaseModel):
     # badge for the duration of the task_result bubble. Optional so
     # existing callers/tests don't have to populate it.
     policy_mode: str | None = None
+    # ponytail: set by the harness to the URL observed at the start of the
+    # final step, so a benchmark record can tell "navigated then failed"
+    # apart from "never left the start page". Approximation: pre-step, not
+    # post-action — upgrade to a post-action read if a task that ends with a
+    # click ever matters. Optional so existing callers/tests don't change.
+    final_url: str = ""
 
 
 @dataclass
@@ -135,8 +159,21 @@ class AgentDeps:
     step_summaries: list[StepSummary] = field(default_factory=list)
     step_number: int = 0
     result: TaskResult | None = None
+    # URL observed at the top of the current step, before its actions run.
+    # Read by the click cross-domain gate and stamped onto TaskResult.
+    # final_url as "where the task ended up" — see TaskResult.final_url.
+    step_url: str = ""
+    # Context window of the model actually in use, set by _plan_step once the
+    # per-task config resolves. Read at observation time to size the AX tree
+    # budget; absent on step 1, where the env default is correct anyway.
+    context_window: int | None = None
     prev_targets: list = field(default_factory=list)  # AX targets from previous step for diffing
     policy: object = None  # Policy (services/brotto_orchestrator/policy/schema.Policy). Lazy import.
+    # Test/dev only: a brotto_orchestrator.testing.ScriptedPlanner that
+    # replaces agent.run() so perception and action work can be exercised
+    # with no model, no key, and no network. Typed loosely to keep the
+    # production package free of a dependency on testing/.
+    scripted_planner: object = None
     # (etld1, action_type) tuples seen this session — used to gate the
     # first-time-seen prompt so it fires once per pair. Added on both
     # approve AND deny: on deny, the task is aborted anyway, but if a

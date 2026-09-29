@@ -4,84 +4,89 @@ import asyncio
 import re
 
 
-# URL path fragments that indicate a real login/auth flow.
+# URL path fragments that indicate a real login/auth flow: the sign-in and
+# sign-up steps, and the second-factor steps that follow them (2FA, OTP,
+# challenge, passcode). Sign-up is in the same set as sign-in because both
+# leave the user mid-authentication with nothing the agent can click.
+#
+# No "/verif": email/account verification pages are caught by their title
+# ("Verify your email address"), and the bare fragment also matches ordinary
+# routes like /guides/verify-your-backup. No "/register" or "/join" either —
+# both are at least as likely to be event registration or "join a call" as
+# account creation, and sign-up is caught by title ("Sign up", "Create
+# account") anyway. A false positive halts a signed-in user, so this list
+# stays unambiguous.
 LOGIN_URL_PATTERNS = (
-    "/login", "/signin", "/auth", "/sso", "/session/",
-    "/sign-in", "/log-in", "/oauth/",
-)
-
-# Strong markers in page content — these indicate a real login page.
-# Anything matching here is enough when paired with a URL or title signal.
-STRONG_CONTENT_MARKERS = (
-    r"password",
-    r"authenticate",
-    r"sso",
-    r"saml",
-    r"oauth",
-    r"azure.*ad",
-    r"microsoft.*login",
-)
-
-# Weak markers in page content — "Sign in" buttons in signed-in menus,
-# "credentials" mentions, etc. NEVER trigger on their own.
-WEAK_CONTENT_MARKERS = (
-    r"sign.?in",
-    r"log.?in",
-    r"username",
-    r"credentials",
+    "/login", "/signin", "/sign-in", "/log-in", "/auth", "/sso", "/session/",
+    "/signup", "/sign-up",
+    "/oauth/",
+    "/2fa", "/two-factor", "/twofactor", "/mfa",
+    "/totp", "/otp", "/passcode", "/challenge",
+    "/step-up", "/second-factor",
 )
 
 # Force-trigger: a session-expired message means the user was logged out,
 # even on a page that otherwise looks normal.
 _SESSION_EXPIRED_RE = re.compile(r"session.*expired", re.I)
 
-# Patterns that match a login-flavoured page title.
-_LOGIN_TITLE_RE = re.compile(r"sign.?in|log.?in|authenticate", re.I)
+# Force-trigger: a second-factor prompt means the login is still in progress,
+# so the user is not done authenticating even if the page looks otherwise
+# ordinary. Scoped to phrases that ask for a code rather than merely naming
+# the feature: a signed-in Security-settings page whose heading is "Two-factor
+# authentication" must not pause the agent, so `two.?factor` lives in the
+# title and URL signals instead, where a matching value is a prompt by
+# definition. "security code" is excluded because at checkout it is a card
+# CVV.
+_MULTISTEP_AUTH_RE = re.compile(
+    r"enter (the |your )?(verification |one.?time |two.?factor )?code"
+    r"|code (from|sent to|you (received|entered))"
+    r"|one.?time (password|passcode)"
+    r"|verification code"
+    r"|(sms|text message) code",
+    re.I,
+)
 
-_STRONG_RE = [re.compile(p, re.I) for p in STRONG_CONTENT_MARKERS]
+# Patterns that match a login-flavoured or verification-flavoured page title.
+_LOGIN_TITLE_RE = re.compile(
+    r"sign.?in|log.?in|authenticate"
+    r"|sign.?up|create (an |your )?account"
+    r"|two.?factor|two.?step|second factor|passcode"
+    r"|one.?time (password|code|passcode)"
+    r"|verification code|verify (your|identity|the|it)"
+    r"|enter (the |your )?code|check your (phone|device|inbox)"
+    r"|\b2fa\b|\botp\b",
+    re.I,
+)
 
 
 def check_login_page(page_title: str, ax_tree: str, url: str) -> bool:
-    """Detect a login page. Returns True when the agent should pause for login.
+    """Detect a login or second-factor page. True → pause for the human.
 
     Title and URL are each independently authoritative — a page titled
-    "Sign in" IS a login page, and a URL on a known login path is too.
+    "Sign in" IS a login page, and a URL on a known auth path is too.
+    Both cover the second factor (2FA / OTP / passcode / challenge),
+    because those steps arrive on their own pages after the password is
+    already accepted; catching only the password step means the agent
+    resumes into a verification prompt it cannot answer.
 
-    An AX-tree STRONG marker alone is NOT sufficient: "password" appears
-    on Google Search via the password manager, "oauth" appears in Gmail
-    from analytics/integration tags, and "Sign in" links live in headers
-    of already-signed-in pages like GitHub. Firing on those yields a
-    false-positive login pause mid-task. A strong marker only counts
-    when paired with corroboration from title or URL.
+    Two content phrases force-trigger regardless of title or URL, because
+    they mean the same thing on any site: "session expired" (logged out
+    mid-page) and an explicit second-factor prompt.
 
-    "Session expired" in the content force-triggers regardless, since
-    that means the user was logged out from a modal on the current page.
+    Deliberately NOT a general content scan. "password" appears on Google
+    Search via the password manager and "oauth" appears in Gmail from
+    integration tags; combined with the "Sign in" link in Google's own AX
+    tree, any marker-plus-corroboration rule flags both of those signed-in
+    pages as login pages. So the only content signal is the narrow
+    second-force-trigger above — see tests/test_agent_e2e.py.
     """
-    # Force-trigger: session expired is unambiguous.
-    if _SESSION_EXPIRED_RE.search(ax_tree):
+    if _SESSION_EXPIRED_RE.search(ax_tree) or _MULTISTEP_AUTH_RE.search(ax_tree):
         return True
 
-    # Page title is authoritative — a login page is titled "Sign in" / "Log in".
     if _LOGIN_TITLE_RE.search(page_title):
         return True
 
-    # URL on a known login path is authoritative.
-    url_lower = url.lower()
-    if any(p in url_lower for p in LOGIN_URL_PATTERNS):
-        return True
-
-    # AX tree strong marker alone is too noisy — require corroboration.
-    # If title/URL above matched, we already returned True; reaching here
-    # means neither matched, so a lone "password" / "oauth" / etc. is
-    # treated as incidental and does not pause the agent.
-    if any(r.search(ax_tree) for r in _STRONG_RE):
-        if _LOGIN_TITLE_RE.search(page_title):
-            return True
-        if any(p in url_lower for p in LOGIN_URL_PATTERNS):
-            return True
-        return False
-
-    return False
+    return any(p in url.lower() for p in LOGIN_URL_PATTERNS)
 
 
 CRITICAL_PATTERNS = [

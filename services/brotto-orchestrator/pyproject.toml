@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["brotto_orchestrator"]
+packages = ["brotto_orchestrator", "brotto_orchestrator.testing"]
 package-dir = {"" = "src"}
 
 [tool.pytest.ini_options]

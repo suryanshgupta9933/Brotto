@@ -10,6 +10,11 @@ import uuid
 
 from dotenv import load_dotenv
 
+# Load .env FIRST — before the dev defaults below. It used to run after
+# them, so os.environ.setdefault won the race and an AGENT_MODEL in .env
+# was silently ignored in favour of the dev default.
+load_dotenv()
+
 # Token Plan compat: pydantic-ai's AnthropicProvider only reads
 # ANTHROPIC_API_KEY; Token Plan users have ANTHROPIC_AUTH_TOKEN. Propagate
 # unconditionally (idempotent — only fires if API_KEY is unset) so this
@@ -26,14 +31,15 @@ if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
 if os.getenv("BROTTO_ENV", "dev") == "dev":
     # Token Plan covers MiniMax-M3.1-Flash-Preview. M3 is pay-as-you-go and
     # returns 402 insufficient_balance for Token Plan users.
-    os.environ.setdefault("AGENT_MODEL", "anthropic:MiniMax-M3.1-Flash-Preview")
+    # Provider is `minimax`, not `anthropic` — the minimax factory carries
+    # the https://api.minimax.io/anthropic base URL. `anthropic:` here
+    # would post a MiniMax model name to api.anthropic.com.
+    os.environ.setdefault("AGENT_MODEL", "minimax:MiniMax-M3.1-Flash-Preview")
     os.environ.setdefault("CONTEXT_WINDOW_TOKENS", "1000000")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-load_dotenv()
 
 from .agent.context import AgentDeps
 from .agent.harness import AgentHarness
@@ -599,6 +605,7 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
                 session.cancel_current_task()
                 task_text = msg.get("task", "")
                 start_url = msg.get("start_url", "about:blank")
+                script_request = msg.get("script")
                 user_policy_payload = msg.get("user_policy")
                 user_policy: Policy | None = None
                 if isinstance(user_policy_payload, dict):
@@ -620,6 +627,23 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
                     try:
                         await browser.launch(headless=False, url=start_url or "about:blank")
                         cdp = CDPRelay(browser)
+                        # Test/dev only. Honor `script` solely in dev so a production
+                        # server can never be driven by a client-supplied decision
+                        # sequence. Opt-out, not opt-in: a deploy that forgets to
+                        # set BROTTO_ENV must get the prod behaviour.
+                        scripted_planner = None
+                        script_name = script_request
+                        if script_name:
+                            if os.getenv("BROTTO_ENV", "dev") != "dev":
+                                log.warning("[%s] ignoring task_start script in prod  name=%s",
+                                            user_id, script_name)
+                            else:
+                                from .testing.scripts import SCRIPT_NAMES, build_script
+                                if script_name not in SCRIPT_NAMES:
+                                    log.warning("[%s] unknown script %r — closing", user_id, script_name)
+                                    await websocket.close(code=4000)
+                                    return
+                                scripted_planner = build_script(script_name)
                         deps = AgentDeps(
                             user_id=user_id,
                             task=task,
@@ -628,6 +652,7 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
                             ws_send=ws_send,
                             human_input_queue=human_input_queue,
                             policy=effective_policy,
+                            scripted_planner=scripted_planner,
                         )
                         watchdog = CDPWatchdog(cdp, on_dead=lambda: ws_send({"type": "cdp_dead"}))
                         await watchdog.start()
@@ -692,6 +717,21 @@ async def run_task(request: Request):
         await browser.launch(headless=True, url=start_url)
         cdp = CDPRelay(browser)
         task_id = str(uuid.uuid4())
+        # Test/dev only, same guard as the websocket path: a production server
+        # must never be driven by a client-supplied decision sequence.
+        scripted_planner = None
+        script_name = body.get("script")
+        if script_name:
+            if os.getenv("BROTTO_ENV", "dev") != "dev":
+                log.warning("/run: ignoring script in prod  name=%s", script_name)
+            else:
+                from .testing.scripts import SCRIPT_NAMES, build_script
+                if script_name not in SCRIPT_NAMES:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": f"unknown script {script_name!r}"},
+                    )
+                scripted_planner = build_script(script_name)
         deps = AgentDeps(
             user_id="http-dev",
             task=task,
@@ -699,6 +739,7 @@ async def run_task(request: Request):
             cdp=cdp,
             ws_send=ws_send,
             policy=effective_policy,
+            scripted_planner=scripted_planner,
         )
         result = await harness.run(deps)
         return JSONResponse(content=result.model_dump())

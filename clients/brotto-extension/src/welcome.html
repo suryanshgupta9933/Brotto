@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set up Brotto</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="panel-tokens.css">
+  <style>
+    /* Same system as the panel (panel-tokens.css owns the tokens), scoped to
+       one job: get three answers and get out of the way. */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--font-ui);
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body { display: flex; flex-direction: column; }
+
+    :focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+    /* ── Head ───────────────────────────────────────────────────────────── */
+    #head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--rule-ink);
+      flex-shrink: 0;
+    }
+    .mark { width: 22px; height: 22px; display: block; }
+    #stepCount {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-2);
+    }
+
+    /* ── Steps ──────────────────────────────────────────────────────────── */
+    #steps { flex: 1; min-height: 0; overflow-y: auto; }
+    .step { display: none; padding: 20px 16px; }
+    .step.active { display: block; }
+
+    .step h1 {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      margin-bottom: 6px;
+    }
+    .step > p { color: var(--ink-2); line-height: 1.5; margin-bottom: 18px; }
+
+    /* The three states, drawn in the system rather than described in prose:
+       a rule-weight sample per state, so the shape is recognisable before
+       the user has ever seen a task run. */
+    .states { border: 1px solid var(--rule-2); }
+    .state {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 12px;
+    }
+    .state + .state { border-top: 1px solid var(--rule); }
+    .state-mark {
+      width: 3px;
+      align-self: stretch;
+      background: var(--rule-2);
+      flex-shrink: 0;
+    }
+    .state.live .state-mark { background: var(--ok); }
+    .state.wait .state-mark { background: var(--wait); }
+    .state.done .state-mark { background: var(--ink); }
+    .state-name {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      margin-bottom: 3px;
+    }
+    .state.live .state-name { color: var(--ok); }
+    .state.wait .state-name { color: var(--wait); }
+    .state-body { color: var(--ink-2); line-height: 1.45; }
+
+    /* ── Fields ─────────────────────────────────────────────────────────── */
+    fieldset { border: 0; display: block; }
+    .field { margin-bottom: 16px; }
+    .field > label {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-2);
+      margin-bottom: 6px;
+    }
+    .input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--rule-2);
+      background: var(--paper-2);
+      color: var(--ink);
+      font-family: var(--font-ui);
+      font-size: 13px;
+      outline: none;
+      transition: border-color var(--t);
+    }
+    .input:focus { border-color: var(--ink); border-width: 2px; }
+    select.input { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; }
+    textarea.input { resize: vertical; font-family: var(--font-ui); line-height: 1.5; }
+    .hint { color: var(--ink-3); font-size: 11.5px; line-height: 1.45; margin-top: 5px; }
+
+    #serverStatus {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-top: 8px;
+      color: var(--ink-3);
+    }
+    #serverStatus.ok { color: var(--ok); }
+    #serverStatus.bad { color: var(--bad); }
+
+    /* ── Foot ───────────────────────────────────────────────────────────── */
+    #foot {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border-top: 1px solid var(--rule-ink);
+      flex-shrink: 0;
+    }
+    .btn {
+      border: 1px solid var(--ink);
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      cursor: pointer;
+      padding: 8px 14px;
+      transition: background var(--t), color var(--t);
+    }
+    .btn:hover { background: var(--paper-3); }
+    .btn-primary { background: var(--ink); color: var(--paper); }
+    .btn-primary:hover { background: var(--ink); color: var(--paper); border-color: var(--ink-2); }
+    .btn-primary:disabled { background: var(--paper-3); border-color: var(--rule-2); color: var(--ink-3); cursor: not-allowed; }
+    .btn[hidden] { display: none; }
+    #footSpacer { flex: 1; }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+  <div id="head">
+    <svg class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="7"></rect>
+      <rect x="14" y="3" width="7" height="7"></rect>
+      <rect x="3" y="14" width="7" height="7"></rect>
+      <rect x="14" y="14" width="7" height="7"></rect>
+    </svg>
+    <span id="stepCount">Step 1 of 3</span>
+  </div>
+
+  <div id="steps">
+
+    <section class="step active" data-step="1" aria-labelledby="s1h">
+      <h1 id="s1h">Brotto drives this browser</h1>
+      <p>You describe a task in your own words. Brotto works through it and tells you when it needs a decision from you.</p>
+      <div class="states">
+        <div class="state live">
+          <span class="state-mark"></span>
+          <div>
+            <div class="state-name">Working</div>
+            <div class="state-body">Browsing, reading, filling in forms. You can keep using other tabs.</div>
+          </div>
+        </div>
+        <div class="state wait">
+          <span class="state-mark"></span>
+          <div>
+            <div class="state-name">Needs you</div>
+            <div class="state-body">An approval, a sign-in, or a question. Brotto stops and waits — you decide.</div>
+          </div>
+        </div>
+        <div class="state done">
+          <span class="state-mark"></span>
+          <div>
+            <div class="state-name">Done</div>
+            <div class="state-body">The answer, with what it did and what it found.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="step" data-step="2" aria-labelledby="s2h">
+      <h1 id="s2h">Where should tasks go?</h1>
+      <p>Brotto is model-agnostic. The server you point at decides which model runs.</p>
+      <div class="field">
+        <label for="serverUrl">Server address</label>
+        <input id="serverUrl" class="input" type="url" placeholder="http://localhost:8000" spellcheck="false" />
+        <p class="hint">Leave this as-is if you're using the Brotto service. Change it only if you run your own server.</p>
+        <div id="serverStatus"></div>
+      </div>
+    </section>
+
+    <section class="step" data-step="3" aria-labelledby="s3h">
+      <h1 id="s3h">Bring your own key</h1>
+      <p>Brotto needs a key to reach your model provider. It goes to your Brotto server and nowhere else.</p>
+      <div class="field">
+        <label for="provider">Provider</label>
+        <select id="provider" class="input">
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+          <option value="minimax">MiniMax (Anthropic-compat)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="model">Model</label>
+        <select id="model" class="input"></select>
+      </div>
+      <div class="field">
+        <label for="apiKey">API key</label>
+        <input id="apiKey" class="input" type="password" placeholder="Leave blank to use server default" autocomplete="off" />
+        <p class="hint">Stored for this browser session only, and cleared when you quit. If your server already has a key, you can leave this blank.</p>
+      </div>
+    </section>
+
+  </div>
+
+  <div id="foot">
+    <button id="backBtn" class="btn" type="button" hidden>Back</button>
+    <span id="footSpacer"></span>
+    <button id="skipBtn" class="btn" type="button">Skip</button>
+    <button id="nextBtn" class="btn btn-primary" type="button">Next</button>
+  </div>
+
+  <script src="welcome.js"></script>
+</body>
+</html>

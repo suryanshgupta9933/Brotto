@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Brotto fixture — iframe</title></head>
+<body>
+  <h1>Sign in</h1>
+  <form id="login" onsubmit="event.preventDefault();enter()">
+    <label for="u">Email</label><input id="u" type="email">
+    <label for="p">Password</label><input id="p" type="password">
+    <button type="submit">Sign in</button>
+  </form>
+  <div id="app"></div>
+  <script>
+    function enter() {
+      document.getElementById('app').innerHTML =
+        '<h2>Payment</h2>' +
+        '<iframe src="http://127.0.0.1:8812/form.html" width="420" height="140"></iframe>';
+    }
+  </script>
+</body></html>

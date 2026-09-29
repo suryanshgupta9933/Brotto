@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Brotto fixture — canvas</title></head>
+<body>
+  <h1>Sign in</h1>
+  <form id="login" onsubmit="event.preventDefault();enter()">
+    <label for="u">Email</label><input id="u" type="email">
+    <label for="p">Password</label><input id="p" type="password">
+    <button type="submit">Sign in</button>
+  </form>
+  <div id="app"></div>
+  <script>
+    function enter() {
+      document.getElementById('app').innerHTML = '<canvas id="c" width="420" height="160"></canvas>';
+      const g = document.getElementById('c').getContext('2d');
+      g.fillStyle = '#eee'; g.fillRect(0, 0, 420, 160);
+      g.fillStyle = '#111'; g.font = '16px system-ui';
+      g.fillText('Board', 20, 40);
+      g.fillRect(20, 70, 200, 44);
+      g.fillText('Draw', 90, 98);
+    }
+  </script>
+</body></html>
