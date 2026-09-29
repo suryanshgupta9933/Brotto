@@ -1459,89 +1459,230 @@ function createEmptyState() {
 }
 
 // ─── Page-aware suggestions ──────────────────────────────────────────────
-// The panel is bound to a tab, so the idle page should know which one. Keyed
-// by registrable-ish suffix; first match wins, so order the specific entries
-// before the general ones.
-const SITE_SUGGESTIONS = [
-  ['mail.google.com', [
-    'Draft a reply to the last unread email and let me read it before sending.',
-    'Find every email from this week that has an attachment and list them.',
-  ]],
-  ['outlook.com', [
-    'Draft a reply to the last unread email and let me read it before sending.',
-    'Find every email from this week that has an attachment and list them.',
-  ]],
-  ['github.com', [
-    'Summarise the open pull requests I can review.',
-    'Find issues assigned to me that nobody has commented on in a week.',
-  ]],
-  ['amazon.', [
-    'Find the price history on the top result and tell me when it was cheapest.',
-    'Compare the first three results on price and delivery.',
-  ]],
-  ['booking.', [
-    'Find a non-stop flight for my dates under $600 and put the cheapest in cart.',
-    'Find a hotel in the city centre under $150 a night for my dates.',
-  ]],
-  ['airbnb.', [
-    'Find a place in the city centre for my dates and tell me the total with fees.',
-  ]],
-  ['linkedin.', [
-    'Find the jobs I saved that are still open and summarise what each needs.',
-  ]],
-  ['reddit.', [
-    'Summarise what the top comments on this thread actually disagree about.',
-  ]],
-  ['youtube.', [
-    'Collect the titles and durations of the videos on this page.',
-  ]],
-  ['netflix.', [
-    'Find what was added and removed from my list in the last month.',
-  ]],
-  ['docs.google.com', [
-    'Summarise this document and list anything that needs a decision.',
-  ]],
-  ['notion.', [
-    'Summarise this page and list anything that needs a decision.',
-  ]],
-  ['weather.', [
-    'What is the weather here tomorrow morning, and will I need a coat?',
-  ]],
-  ['maps.google.', [
-    'How long is the drive to the airport on a Tuesday morning?',
-  ]],
-  ['stackoverflow.', [
-    'Summarise the top answers to this question and say which one holds up.',
-  ]],
-  ['indeed.', [
-    'Find roles matching my saved search and tell me which are new this week.',
-  ]],
+// The panel is bound to a tab, so the idle page should know which one.
+//
+// This was a 17-entry table of hostname substrings with three generic
+// fallbacks. Only ~17 site families matched, so almost every page landed on
+// the fallback and got the same two sentences — which is exactly what it
+// looked like. Nothing here is generated and no model is involved; the
+// variety now comes from reading the page's own URL and title.
+
+// Path segments that name a section, not a subject. Kept out of the subject
+// slot so /mail/u/0 does not read "the messages in mail".
+const NOT_A_SUBJECT = new Set([
+  'index', 'home', 'en', 'en-us', 'en-gb', 'us', 'uk', 'www', 'www2', 'app',
+  'main', 'mail', 'inbox', 'u', 'user', 'users', 'p', 'c', 'r', 'd', 'v', 'b',
+  'feed', 'explore', 'browse', 'watch', 'queue', 'new', 'old', 'view', 'mode',
+  'sort', 'filter', 'q', 'page', 'ref', 'utm-source', 'item', 'items', 'list',
+]);
+
+// Matched against the last two path segments and the host, whole-segment only.
+// Substring matching put Netflix's /browse/queue in profile (it contains "u"),
+// so every needle here has to equal the segment.
+const KIND_RULES = [
+  ['inbox',     ['inbox', 'mail', 'messages', 'dm', 'chats', 'notifications', 'unread']],
+  ['checkout',  ['checkout', 'cart', 'basket', 'bag', 'payment', 'order', 'orders', 'basket']],
+  ['results',   ['searchresults', 'search', 'results', 'flights', 'hotels', 'deals', 'jobs', 's', 'q']],
+  ['thread',    ['thread', 'conversation', 'pull', 'pulls', 'issue', 'issues', 'discussion', 'post', 'comments', 'item']],
+  ['doc',       ['blob', 'readme', 'article', 'docs', 'wiki', 'notes', 'edit', 'document']],
+  ['settings',  ['settings', 'preferences', 'account', 'billing', 'security', 'profile', 'billing']],
+  ['repo',      ['repos', 'pulls', 'issues', 'commits', 'wiki']],
+  ['list',      ['watchlist', 'saved', 'favorites', 'favourites', 'bookmarks', 'collections', 'playlist', 'queue', 'list']],
 ];
 
-// Always available, whatever the tab — the floor that keeps the panel useful
-// on a blank page or a site not worth specialising for.
-const GENERIC_SUGGESTIONS = [
-  'Summarise what is on this page.',
-  'Find the thing on this page I asked about last time and open it.',
-  'Compare what is on this page against what I have saved elsewhere.',
+// One anchor per kind — the line that could only be written for this page.
+// The other two come from SHARED, so a page type is not capped at three lines
+// that it then shows in full every day. That cap was the repetition complaint
+// arriving through a different door.
+const KIND_ANCHORS = {
+  inbox: [
+    'Draft a reply to the newest message and show it to me before it sends.',
+    'Find the messages here that are still waiting on a reply from me.',
+  ],
+  list: [
+    'Go through this list and tell me which entries actually need me.',
+    'What has changed in this list since I was last here?',
+  ],
+  detail: [
+    'Tell me what is on this page and what it means for me.',
+    'Check the details here and flag anything that looks off.',
+  ],
+  results: [
+    'Compare the top three results and tell me which you would pick and why.',
+    'Find the option with the best total cost once fees are included.',
+  ],
+  search: [
+    'Search this site again, more precisely, and tell me what turns up.',
+    'Go past the search results and find the actual answer on the site.',
+  ],
+  doc: [
+    'Summarise this in a way I could repeat to someone else.',
+    'Pull out anything here that contradicts what I told you earlier.',
+  ],
+  thread: [
+    'What do the replies here actually disagree about?',
+    'Read the last few replies and tell me where this ended up.',
+  ],
+  profile: [
+    'Summarise what this account is about and what changed recently.',
+    'What is worth following here?',
+  ],
+  settings: [
+    'Review these settings and flag anything risky or surprising.',
+    'What is changed here from the default?',
+  ],
+  checkout: [
+    'Check this order before I commit to it and tell me the total cost.',
+    'Is there anything here I would regret paying for?',
+  ],
+  dashboard: [
+    'What on this page changed in a way I would want to know about?',
+    'Is anything here asking for a decision?',
+  ],
+  repo: [
+    'What is going on here that needs my attention?',
+    'Find what has changed since I was last in this repository.',
+  ],
+  generic: [
+    'Tell me what is on this page and what it means for me.',
+    'What is the one thing here worth acting on?',
+  ],
+};
+
+// The de-slugged subject can be any noun at all, so it is only ever dropped
+// into a frame that stays grammatical for one. "the messages in {subject}"
+// produced "the messages in mail"; "everything on this page about {subject}"
+// survives anything a URL can contain.
+const SUBJECT_TEMPLATES = [
+  'Everything on this page about {subject}, in one list.',
+  'What I should know about {subject}, based on what is here.',
+  'Compare what this page says about {subject} with what I already know.',
+  'What this page tells me about {subject}, and what it leaves out.',
+  'Turn this into the short version about {subject} that I would repeat to someone.',
 ];
 
-function suggestionsFor(host, title) {
-  const h = (host || '').toLowerCase();
-  for (const [needle, list] of SITE_SUGGESTIONS) {
-    if (h.includes(needle)) return list;
-  }
-  // No table entry: the page title is still better than nothing, because a
-  // specific prompt beats three generic ones. Only with a real host — the
-  // title of a blank tab is browser chrome ("New Tab"), not a page.
-  const clean = (title || '').trim();
-  if (h && clean.length > 2) {
-    return [`Work through this page and tell me what it means: “${clean.slice(0, 80)}”.`, ...GENERIC_SUGGESTIONS.slice(0, 2)];
-  }
-  return GENERIC_SUGGESTIONS;
+// The shared pool. Deliberately much larger than the two lines drawn from it —
+// this is where day-to-day variety actually comes from.
+const SHARED_TEMPLATES = [
+  'Go through this page and flag anything that needs a decision.',
+  'What is the one thing here I should do next?',
+  'Read this in three sentences a stranger would understand.',
+  'What would I regret not asking about this page?',
+  'Is there anything here that contradicts what I already know?',
+  'What is missing from this page that I would want?',
+  'How does this compare with the last time I looked at it?',
+  'Give me the short version and then the part that would surprise me.',
+  'What is the most useful thing on this page?',
+  'Is anything on this page out of date?',
+  'What would you do with this page that I would not think to do?',
+  'Pull out the numbers, names and dates here into one list.',
+  'What does this page want me to do?',
+  'What would I need to know to be confident about this?',
+  'Is this page telling me everything it knows, or is something hidden?',
+  'What is the weakest part of what is shown here?',
+  'What would you check on another site to confirm this?',
+  'What is the cost of acting on this, and of not?',
+];
+
+const seg = (s) => s.replace(/[-_]+/g, ' ').replace(/%[0-9A-Fa-f]{2}/g, ' ').trim();
+
+// Any word that is already a kind is a route label, not a subject. "What this
+// page tells me about pulls" is what you get if you let one through.
+const KIND_WORDS = new Set(KIND_RULES.flatMap(([, needles]) => needles));
+
+// A subject has to read as a noun. These are the shapes that survive a URL
+// slug but mean nothing on their own: bare ids, hex blobs, and file names.
+const isSubject = (s) => {
+  const w = s.toLowerCase();
+  if (w.length < 3) return false;
+  if (NOT_A_SUBJECT.has(w) || KIND_WORDS.has(w)) return false;
+  if (/\.(html?|php|aspx?|json|xml|pdf|md|txt|php)$/i.test(w)) return false;  // searchresults.html
+  if (/^[0-9a-f]{8,}$/i.test(w)) return false;                                 // 1AbCdEf12, deadbeef
+  // Google Doc ids are short and mixed-case (1AbC), so the hex rule above
+  // misses them. A slug that opens with a digit is an id, not a name.
+  if (/^\d/.test(w)) return false;
+  if (!/[a-z]/i.test(w)) return false;                                         // 1234
+  return true;
+};
+
+function pageSignals(url, title) {
+  let host = '', path = '', query = '';
+  try {
+    const u = new URL(url);
+    // about:blank and chrome:// parse fine but carry nothing worth suggesting
+    // from — a "page" of browser chrome would get a page-shaped prompt.
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { host: '', segments: [], subject: '', title: '' };
+    host = u.hostname;
+    path = u.pathname;
+    // Search pages keep the query, not the path. /s?k=standing+desk names the
+    // thing far better than "s" does, and these pages are the ones a user is
+    // most likely to want help with.
+    query = u.searchParams.get('q') || u.searchParams.get('k') || u.searchParams.get('query') || '';
+  } catch { host = ''; }
+
+  const rawSegments = path.split('/').filter(Boolean);
+  // Kept unfiltered for kind matching: /s is a one-character route that says
+  // "search" and nothing else, so filtering it out lost the whole kind.
+  const segments = rawSegments.map(seg).filter(s => s.length > 1);
+  const fromPath = [...segments].reverse().find(isSubject);
+
+  // A search box beat the last path segment; a real title beat a de-slugged
+  // fragment, so both are only considered when the path said nothing.
+  const subject = (isSubject(seg(query)) ? seg(query) : '') || fromPath || '';
+
+  return { host, segments, rawSegments, subject, title: (title || '').trim() };
 }
 
-let lastSuggestionHost = null;
+function kindFor(sig) {
+  if (!sig.host) return 'generic';
+  const probe = sig.rawSegments.slice(-2).map(s => s.toLowerCase());
+  for (const [kind, needles] of KIND_RULES) {
+    if (probe.some(p => needles.includes(p))) return kind;
+  }
+  const t = sig.title.toLowerCase();
+  if (/\b(issue|pull request|discussion|forum|thread|post)\b/.test(t)) return 'thread';
+  if (/\b(inbox|unread|starred|sent|drafts)\b/.test(t)) return 'inbox';
+  if (/\b(search|results?|find)\b/.test(t)) return 'results';
+  if (/\b(cart|checkout|payment|order)\b/.test(t)) return 'checkout';
+  if (/\b(settings|preferences|account)\b/.test(t)) return 'settings';
+  if (sig.segments.length) return 'detail';
+  return 'generic';
+}
+
+// Day-seeded so a page you keep re-opening does not hand you the same lines
+// forever, but is stable if you alt-tab back to it this afternoon.
+function seedOf(sig) {
+  const day = new Date().toISOString().slice(0, 10);
+  const s = `${sig.host}${sig.segments.join('/')}${sig.subject}${day}`;
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function suggestionsFor(url, title) {
+  const sig = pageSignals(url, title);
+  const kind = kindFor(sig);
+  const seed = seedOf(sig);
+  const anchors = KIND_ANCHORS[kind] || KIND_ANCHORS.generic;
+
+  // One specific line, then two more from a per-page offset into a large pool.
+  // The stride is coprime with the pool size so consecutive picks never land
+  // adjacent, and the offset includes the page identity, so two pages open at
+  // the same time land in different places.
+  const out = [anchors[seed % anchors.length]];
+  const stride = 7;
+  const start = seed % SHARED_TEMPLATES.length;
+  out.push(SHARED_TEMPLATES[start]);
+  if (sig.subject) {
+    // A named page gets one line built around what it is about; that is the
+    // only part of the three that could not be written for any other page.
+    out[1] = SUBJECT_TEMPLATES[(seed >> 3) % SUBJECT_TEMPLATES.length].replace('{subject}', sig.subject);
+  }
+  out.push(SHARED_TEMPLATES[(start + stride) % SHARED_TEMPLATES.length]);
+  return out;
+}
+
+let lastSuggestionUrl = '';
 let lastSuggestionTitle = '';
 
 async function currentTab() {
@@ -1566,7 +1707,7 @@ function paintSuggestions() {
   const box = document.getElementById('suggestions');
   if (!box) return;
   box.textContent = '';
-  for (const text of suggestionsFor(lastSuggestionHost, lastSuggestionTitle)) {
+  for (const text of suggestionsFor(lastSuggestionUrl, lastSuggestionTitle)) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'suggestion';
@@ -1592,7 +1733,8 @@ async function refreshEmptyState() {
   const whereHost = document.getElementById('emptyHost');
   if (whereHost) whereHost.textContent = host;
   if (where) where.hidden = !host;
-  lastSuggestionHost = host;
+  // The composer reads the path and query, not just the host.
+  lastSuggestionUrl = tab?.url || '';
   lastSuggestionTitle = tab?.title || '';
   paintSuggestions();
 }
