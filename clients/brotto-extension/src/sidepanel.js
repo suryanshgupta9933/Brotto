@@ -240,6 +240,11 @@ const historyBtn     = document.getElementById('historyBtn');
 const historyOverlay = document.getElementById('historyOverlay');
 const historyClose   = document.getElementById('historyClose');
 const historyList    = document.getElementById('historyList');
+const transcriptEl   = document.getElementById('historyTranscript');
+const transcriptBody = document.getElementById('transcriptBody');
+const transcriptMeta = document.getElementById('transcriptMeta');
+const transcriptBack = document.getElementById('transcriptBack');
+const transcriptRun  = document.getElementById('transcriptRun');
 
 historyBtn.addEventListener('click', async () => {
   historyOverlay.classList.add('open');
@@ -270,16 +275,23 @@ async function saveSession({ status, steps, elapsed }) {
   const sessions = await listSessions();
   // Every panel open replays the run's buffered events, so the terminal event
   // arrives again for a task already recorded — 20 opens was enough to evict
-  // every real task from the list. The run's start time is the identifier that
-  // survives the replay: it is restored from the replayed `task_started`. The
-  // server's session id cannot be used here — the panel never receives it.
-  if (state.startTime && sessions[0]?.startedAt === state.startTime) return;
+  // every real task from the list. `session_id` is the real identity and
+  // survives the replay; `startedAt` stays the fallback for rows written
+  // before the panel ever saw a session id, so upgrading doesn't duplicate
+  // every existing entry.
+  const sid = state.sessionId;
+  if (sid) {
+    if (sessions.some((s) => s.session_id === sid)) return;
+  } else if (state.startTime && sessions[0]?.startedAt === state.startTime) {
+    return;
+  }
   sessions.unshift({
     task,
     status,
     steps: steps || state.stepCount || 0,
     elapsed: elapsed || '—',
     startedAt: state.startTime || Date.now(),
+    session_id: sid || null,
   });
   await chrome.storage.local.set({ [SESSIONS_KEY]: sessions.slice(0, SESSION_LIMIT) });
 }
@@ -297,12 +309,16 @@ function formatSessionTime(ts) {
 }
 
 async function renderHistory() {
+  // Reopening history always lands on the list, never back into whatever
+  // transcript the last row click opened.
+  transcriptEl.hidden = true;
+  historyList.hidden = false;
   const sessions = await listSessions();
   if (sessions.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'history-empty';
     empty.innerHTML = '<strong>No tasks yet</strong>Every task you finish is listed here. '
-      + 'Click one to put it back in the box.';
+      + 'Click one to see what it did.';
     historyList.replaceChildren(empty);
     return;
   }
@@ -314,15 +330,11 @@ async function renderHistory() {
     row.innerHTML = '<span class="history-mark"></span><span><span class="history-task"></span>'
       + '<span class="history-meta"></span></span>';
     row.querySelector('.history-task').textContent = s.task || '(no task text)';
-    // A row you can't act on is a lie about what history is for. Clicking
-    // refills the composer with that task — enough to run it again without
-    // retyping, which is what "pick one back up" has to mean here.
-    row.title = 'Put this task back in the box';
-    row.addEventListener('click', () => {
-      goalEl.value = s.task || '';
-      historyOverlay.classList.remove('open');
-      goalEl.focus();
-    });
+    // A row you can't act on is a lie about what history is for. The document
+    // on the server holds everything the run produced, so the click opens it;
+    // the Re-run button inside carries the composer refill this used to be.
+    row.title = s.session_id ? 'Open this session' : 'Put this task back in the box';
+    row.addEventListener('click', () => void openTranscript(s));
     const bits = [s.steps + ' steps', s.elapsed || '—', formatSessionTime(s.startedAt)];
     const meta = row.querySelector('.history-meta');
     bits.forEach((b, i) => {
@@ -340,6 +352,228 @@ async function renderHistory() {
     return row;
   }));
 }
+
+// ── Session transcript ─────────────────────────────────────────────────────
+// The detail half of history. The index is deliberately a summary, so this
+// is the one place the panel talks to the server to read what a run actually
+// did, and the one place a failure has to stay survivable: a row click that
+// cannot reach the server must still put the task back in the box, because
+// losing the ability to re-run something is a regression, not a degradation.
+
+function txEl(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+// ponytail: a 8k-char audit field is a page of page text, and the panel is
+// 340px wide. Show the head and say so. Upgrade path if someone wants the
+// rest: a <details> that mounts the full string on demand.
+function txPreview(value, limit = 400) {
+  const s = String(value || '');
+  if (s.length <= limit) return s;
+  return s.slice(0, limit) + `… +${s.length - limit} chars`;
+}
+
+function txBlock(label, text, className) {
+  const block = txEl('div', 'tx-block');
+  block.appendChild(txEl('div', 'label', label));
+  block.appendChild(txEl('div', 'tx-text' + (className ? ' ' + className : ''), text));
+  return block;
+}
+
+function txMetaLine(parts) {
+  const meta = txEl('div', 'history-meta');
+  parts.filter(Boolean).forEach((b, i) => {
+    if (i) meta.appendChild(txEl('span', 'sep', '/'));
+    meta.appendChild(txEl('span', null, b));
+  });
+  return meta;
+}
+
+function refillComposer(task) {
+  goalEl.value = task || '';
+  historyOverlay.classList.remove('open');
+  transcriptEl.hidden = true;
+  historyList.hidden = false;
+  goalEl.focus();
+}
+
+async function fetchAudit(sessionId) {
+  // Same base as the panel's other server calls (fetchSuggestions, settings
+  // verify): the settings field is the source of truth, and state.plannerUrl
+  // is empty until a task has connected at least once in this panel.
+  const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
+  const res = await fetch(`${base}/v1/sessions/${encodeURIComponent(sessionId)}/audit`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+let transcriptRequest = 0;
+
+async function openTranscript(entry) {
+  if (!entry.session_id) {
+    // A row written before the panel ever saw a session id. Nothing to fetch,
+    // so do exactly what the row always did.
+    refillComposer(entry.task);
+    return;
+  }
+  const request = ++transcriptRequest;
+  let doc;
+  try {
+    doc = await fetchAudit(entry.session_id);
+  } catch {
+    toast('Could not load session — putting the task back in the box', 'bad', 4000);
+    refillComposer(entry.task);
+    return;
+  }
+  // A superseded click must not paint over the one the user is waiting on.
+  if (request !== transcriptRequest) return;
+  if (!doc || doc.found === false) {
+    toast('Session not found on the server — putting the task back in the box', 'bad', 4000);
+    refillComposer(entry.task);
+    return;
+  }
+  historyList.hidden = true;
+  transcriptEl.hidden = false;
+  renderTranscript(doc, entry);
+}
+
+function renderTranscript(doc, entry) {
+  const totals = doc.totals || {};
+  const status = String(doc.status || 'unknown');
+  transcriptMeta.textContent = status + (totals.steps ? ` · ${totals.steps} steps` : '');
+  transcriptBody.replaceChildren();
+
+  transcriptRun.onclick = () => refillComposer((doc.goal || entry.task || '').trim());
+
+  if (doc.corrupt) {
+    transcriptBody.appendChild(txEl(
+      'div', 'tx-empty', 'This session is damaged — its log could not be read back.',
+    ));
+  } else {
+    if (doc.goal) transcriptBody.appendChild(txBlock('Task', doc.goal));
+    const turns = Array.isArray(doc.turns) ? doc.turns : [];
+    if (!turns.length) {
+      transcriptBody.appendChild(txEl('div', 'tx-empty', 'This session recorded no steps.'));
+    }
+    turns.forEach((t) => transcriptBody.appendChild(renderTurn(t)));
+    if (doc.result) transcriptBody.appendChild(renderResult(doc.result));
+  }
+
+  // Writer failures and run failures share `errors`, and both carry an
+  // error_id — six characters that tie the line here to the server log and
+  // to a support report.
+  (Array.isArray(doc.errors) ? doc.errors : []).forEach((e) => {
+    const block = txBlock(
+      'Error' + (e.error_id ? ` · ${e.error_id}` : ''),
+      `${e.code || 'error'}${e.where ? ` · ${e.where}` : ''}\n${txPreview(e.message)}`,
+      'tx-bad',
+    );
+    block.querySelector('.tx-text').style.whiteSpace = 'pre-wrap';
+    transcriptBody.appendChild(block);
+  });
+
+  const bits = [
+    totals.tokens_in || totals.tokens_out
+      ? `${totals.tokens_in || 0} in / ${totals.tokens_out || 0} out tokens`
+      : null,
+    totals.wall_s ? `${Number(totals.wall_s).toFixed(1)}s wall` : null,
+    totals.prompts ? `${totals.prompts} prompts` : null,
+  ];
+  if (bits.filter(Boolean).length) {
+    transcriptBody.appendChild(txMetaLine(bits));
+  }
+}
+
+function renderTurn(turn) {
+  const block = txEl('div', 'tx-block');
+  const obs = turn.observation || {};
+  const m = turn.model;
+
+  // `ended_at` is null until the turn closes, so a run killed mid-step reads
+  // as interrupted rather than as a turn that never happened.
+  const interrupted = !turn.ended_at;
+  block.appendChild(txEl(
+    'div', 'label', `Step ${(turn.step ?? 0) + 1}` + (interrupted ? ' · interrupted' : ''),
+  ));
+  if (obs.page_title || obs.url) {
+    block.appendChild(txEl('div', 'tx-url', txPreview(obs.url || obs.page_title, 120)));
+  }
+  if (m && (m.thought || m.reasoning)) {
+    block.appendChild(txEl('div', 'tx-text', txPreview(m.thought || m.reasoning)));
+  }
+  if (m) {
+    block.appendChild(txMetaLine([
+      m.model || null,
+      m.tokens_in || m.tokens_out ? `${m.tokens_in || 0}/${m.tokens_out || 0} tok` : null,
+      m.latency_ms ? `${m.latency_ms}ms` : null,
+      m.context_pct ? `${Math.round(m.context_pct * 100)}% ctx` : null,
+    ]));
+  }
+
+  // Causal order within a turn is model → prompts → actions: a prompt is
+  // raised after the model decides and before the action runs.
+  (Array.isArray(turn.prompts) ? turn.prompts : []).forEach((p) => {
+    const card = txEl('div', 'tx-prompt');
+    card.dataset.status = p.status || '';
+    card.dataset.decision = p.decision || '';
+    card.appendChild(txEl(
+      'div', 'label',
+      `${(p.kind || 'prompt').replace(/_/g, ' ')} · ${p.action || 'action'}`,
+    ));
+    if (p.reason) card.appendChild(txEl('div', 'tx-text', txPreview(p.reason)));
+    // A prompt still "pending" is a socket that died between raising and
+    // answering — not a denial, and it must not read as one.
+    const outcome = p.status === 'pending'
+      ? 'never answered'
+      : (p.decision || p.status || '—');
+    const line = outcome + (p.response ? ` · “${txPreview(p.response, 160)}”` : '');
+    const cls = p.status === 'pending' ? 'tx-wait' : p.decision === 'denied' ? 'tx-bad' : '';
+    card.appendChild(txEl('div', 'tx-text ' + cls, line));
+    block.appendChild(card);
+  });
+
+  (Array.isArray(turn.actions) ? turn.actions : []).forEach((a) => {
+    const line = txEl('div', 'tx-text', `${a.action || 'action'}${a.outcome ? ` — ${txPreview(a.outcome, 200)}` : ''}`);
+    if (a.ok === false) line.classList.add('tx-bad');
+    block.appendChild(line);
+  });
+
+  if (turn.error) {
+    block.appendChild(txEl(
+      'div', 'tx-text tx-bad',
+      `${turn.error.code || 'error'}${turn.error.error_id ? ` · ${turn.error.error_id}` : ''} — ${txPreview(turn.error.message)}`,
+    ));
+  }
+  return block;
+}
+
+function renderResult(result) {
+  const block = txEl('div', 'tx-block');
+  const failed = result.status && result.status !== 'completed';
+  block.appendChild(txEl(
+    'div', 'label', failed ? `Result · ${result.status}` : 'Result',
+  ));
+  // The same thing the live path shows, from the same field: the summary for
+  // a completed run, the failure reason for anything else, plus the error id
+  // when the run produced one.
+  const text = (failed
+    ? (result.failure_reason || result.summary || 'Task failed')
+    : (result.summary || 'Task complete'));
+  block.appendChild(txEl('div', 'tx-text' + (failed ? ' tx-bad' : ''), text));
+  if (result.error_id) {
+    block.appendChild(txEl('div', 'tx-url', `error ${result.error_id}`));
+  }
+  if (result.final_url) {
+    block.appendChild(txEl('div', 'tx-url', txPreview(result.final_url, 120)));
+  }
+  return block;
+}
+
+transcriptBack.addEventListener('click', () => void renderHistory());
+
 
 // ── Settings: load + save (first chrome.storage.local writes — today the
 // SW only reads `get("settings")`, so this is the seed for that key).
@@ -412,66 +646,25 @@ async function hydrateSettingsPanel() {
   state.lastVerifiedAt = effective ? Date.now() : (state.lastVerifiedAt || null);
   state.serverReachable = !!effective;
 
-  // Mode + blacklist come from LOCAL storage. The server view is used
-  // only to display the locked floor list — it never overrides the
-  // user's saved settings here.
+  // Mode + blacklist come from LOCAL storage — chrome.storage.local is what
+  // the SW ships on the next task_start, so that is what the field has to
+  // show. The server fetch above is a reachability probe, not a second
+  // source of truth.
   const mode = s.mode === 'secure' ? 'secure' : 'normal';
   securityModeSetting.value = mode;
   const localBlacklist = Array.isArray(s.blacklist) ? s.blacklist : [];
   if (notifyBlockingSetting) notifyBlockingSetting.checked = s.notifyBlocking !== false;
   if (notifyResultsSetting) notifyResultsSetting.checked = s.notifyResults !== false;
 
-  // Floor (locked) — always rendered from the server when available.
-  // Build via DOM APIs (not innerHTML) so a malicious floor file can't
-  // smuggle markup into the sidepanel.
-  const floorList = Array.isArray(effective?.source?.floor) ? effective.source.floor : [];
-  if (floorBlacklistEl) {
-    while (floorBlacklistEl.firstChild) floorBlacklistEl.removeChild(floorBlacklistEl.firstChild);
-    if (!effective) {
-      // ponytail: Bug 6 — server unreachable. Don't pretend there are
-      // no org entries. Be explicit so the user knows their saved list
-      // is shown below but the org floor is unknown right now.
-      const empty = document.createElement('div');
-      empty.className = 'floor-empty floor-unreachable';
-      empty.textContent =
-        '⚠ Could not reach the server — its blocked-sites list is unknown. ' +
-        'Your saved entries below are still active locally.';
-      floorBlacklistEl.appendChild(empty);
-    } else if (floorList.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'floor-empty';
-      empty.textContent = 'None set by the server.';
-      floorBlacklistEl.appendChild(empty);
-    } else {
-      for (const d of floorList) {
-        const row = document.createElement('div');
-        row.className = 'floor-item';
-        const lock = document.createTextNode('🔒 ');
-        const name = document.createTextNode(d + ' ');
-        const tag = document.createElement('span');
-        tag.className = 'floor-tag';
-        tag.textContent = 'server policy';
-        row.appendChild(lock);
-        row.appendChild(name);
-        row.appendChild(tag);
-        floorBlacklistEl.appendChild(row);
-      }
-    }
-  }
-
-  // ponytail: textarea shows user-ONLY entries (the local blacklist
-  // minus the floor). The floor is locked above; the user can't "edit"
-  // a locked entry by deleting it — on Save we re-union and persist.
-  const userOnly = localBlacklist.filter((d) => !floorList.includes(d));
-  blacklistSetting.value = userOnly.join('\n');
+  blacklistSetting.value = localBlacklist.join('\n');
 
   // Header line: how many domains the user has saved (local view).
-  // Floor is rendered separately above; this count matches what the SW
-  // will actually ship on the next task_start.
+  // This count matches what the SW will actually ship on the next
+  // task_start.
   const headerEl = document.getElementById('policyModeHeader');
   if (headerEl) {
     if (mode === 'secure') {
-      headerEl.textContent = `Mode: secure · ${localBlacklist.length} domain${localBlacklist.length === 1 ? '' : 's'} saved locally.`;
+      headerEl.textContent = `Mode: secure · ${localBlacklist.length} domain${localBlacklist.length === 1 ? '' : 's'} saved.`;
       headerEl.classList.add('secure');
     } else {
       headerEl.textContent = 'Mode: normal — secure mode not active.';
@@ -541,17 +734,14 @@ if (saveSettingsBtn) {
     // the button copy.
     const taskRunning = state.phase === 'executing' || state.phase === 'paused';
 
-    // Read what the user has in their editable list; the floor list is
-    // locked and not editable here. On Save we POST only the user portion
-    // — the server merges it with the floor on next task_start.
-    const userListRaw = blacklistSetting.value.split('\n').map((s) => s.trim()).filter(Boolean);
-    // Re-derive the union by pulling the floor from the visible lock list.
-    const floorList = Array.isArray(state.lastEffective?.source?.floor) ? state.lastEffective.source.floor : [];
-    const merged = Array.from(new Set([...floorList, ...userListRaw]));
+    // The blacklist is the user's list, whole. There is no server-side
+    // floor to re-union on Save — the panel shows what will be enforced,
+    // and that is exactly these lines.
+    const blacklist = blacklistSetting.value.split('\n').map((s) => s.trim()).filter(Boolean);
     const settings = {
       serverUrl: plannerUrlSetting.value || 'http://localhost:8000',
       mode: securityModeSetting.value === 'secure' ? 'secure' : 'normal',
-      blacklist: merged,
+      blacklist,
       notifyBlocking: notifyBlockingSetting ? notifyBlockingSetting.checked : true,
       notifyResults: notifyResultsSetting ? notifyResultsSetting.checked : true,
     };
@@ -633,6 +823,9 @@ const state = {
   startTime: 0,
   stepCount: 0,
   pendingClarifyId: null,
+  // The server's session id, from `task_started`. History rows carry it so a
+  // click can fetch the session document the run actually produced.
+  sessionId: null,
 };
 
 let timerInterval = null;
@@ -1052,6 +1245,10 @@ async function resetForNewTask() {
   // posting a new goal.
   state.lastGoal = '';
   state.stepCount = 0;
+  // Cleared so a run that never got a task_started writes session_id: null
+  // and falls back to the startedAt dedupe, rather than inheriting the last
+  // run's id.
+  state.sessionId = null;
   // ponytail: drop the previous task's tab tally so each task starts at zero.
   seenTabs.clear();
   updateTabCount();
@@ -2456,6 +2653,22 @@ function handleEvent(message) {
       // missing. It is also the only identifier that survives the replay; see
       // saveSession, which dedupes on it.
       if (message.startedAt && !state.startTime) startTimer(message.startedAt);
+      // The server's session id rides along with it. The panel used to have no
+      // way to learn this, which is why the history index could only keep the
+      // task string; see saveSession and openTranscript.
+      if (message.sessionId || message.session_id) {
+        state.sessionId = message.sessionId || message.session_id;
+      }
+      break;
+
+    // The server mints the session id during startRelay, which is *after*
+    // the task_started event is logged — and that log is written to storage
+    // only, never broadcast, so a panel that launched the run never receives
+    // it. Without this the run finishes with session_id: null in the history
+    // index and its transcript is unreachable. Carries no task content, so
+    // nothing re-renders; it only supplies the id.
+    case 'session_bound':
+      if (message.session_id) state.sessionId = message.session_id;
       break;
 
     // ponytail: Bug 3 — WS closed. The background emits a separate

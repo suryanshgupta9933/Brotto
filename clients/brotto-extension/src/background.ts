@@ -22,6 +22,13 @@ const BADGE_IDLE   = "#6b7280";
 
 let ws: WebSocket | null = null;
 let activeTabId: number | null = null;
+// The tab this run is driving, kept even when activeTabId is momentarily null
+// (the user closed the task tab with no opener to fall back to). Server frames
+// still need a target id to do anything useful, and dropping them was how a
+// task_result disappeared while the user was watching the run finish.
+let lastKnownTabId: number | null = null;
+// One notification per run for "a frame arrived with no tab to act on".
+let noTabWarned = false;
 // The window the task is running in, so a notification click can bring that
 // window forward rather than whatever happens to be focused at the time.
 let activeWindowId: number | null = null;
@@ -136,6 +143,36 @@ const pendingApprovalResolvers = new Map<string, (approved: boolean) => void>();
 let reqCounter = 0;
 function newId(prefix: string) { return `${prefix}-${Date.now().toString(36)}-${++reqCounter}`; }
 
+/**
+ * Answer a prompt whose resolver is gone — the maps are in memory and die with
+ * the service worker, while the card the user is clicking was replayed from
+ * panelLog. Returning success without delivering left the agent blocked on
+ * `human_input_queue` forever behind a green tick.
+ *
+ * The `currentPrompt` gate is the whole safety argument: a human_reply that
+ * arrives when the server is waiting on something *else* is consumed by that
+ * prompt, which is how an answer once approved an action the user never saw.
+ * currentPrompt is nulled whenever a prompt resolves and reset at the start of
+ * every task, so a match means "still blocked on this kind of prompt".
+ *
+ * Returns false when the gate says the task has moved on — the caller then
+ * reports the miss instead of sending a reply nobody is waiting for.
+ * ponytail: the server has no handle on our local prompt ids, so this
+ * re-answers rather than re-asking. If a server-side re-prompt ever lands,
+ * swap the send for it.
+ */
+function deliverLostPrompt(kind: "clarify" | "approval", id: string, content: string): boolean {
+  if (currentPrompt !== kind || !ws || ws.readyState !== WebSocket.OPEN) {
+    console.warn(`[brotto] ${kind} answer for ${id} has no live prompt — dropped`);
+    return false;
+  }
+  ws.send(JSON.stringify({ type: "human_reply", content }));
+  currentPrompt = null;
+  void persistSession();
+  console.log(`[brotto] ${kind} answer for ${id} delivered without its resolver (worker restarted)`);
+  return true;
+}
+
 // ── Session persistence (survives SW suspension/restart) ────────────────────
 
 async function persistSession(): Promise<void> {
@@ -165,8 +202,16 @@ async function restoreSession(): Promise<void> {
   if (Array.isArray(s[PANEL_LOG_KEY])) panelLog = s[PANEL_LOG_KEY] as Record<string, unknown>[];
 }
 
+// ponytail: clear run state by key, not storage.session.clear(). A blanket
+// clear also took panelLog with it, so a run that ended via socket close lost
+// the transcript the panel replays on reopen — a run that finished and then had
+// nothing to show for it. serverUrl stays: it is configuration, not run state.
+const SESSION_KEYS = [
+  "sessionId", "activeTabId", "waitingForLogin", "currentPrompt", "lastObservedUrl",
+] as const;
+
 async function clearSession(): Promise<void> {
-  await chrome.storage.session.clear();
+  await chrome.storage.session.remove([...SESSION_KEYS]);
   sessionId = null;
   activeTabId = null;
   activeWindowId = null;
@@ -263,6 +308,11 @@ async function extractAx(tabId: number): Promise<object[]> {
       ...(href    !== undefined ? { href }    : {}),
       ...(parentId !== undefined ? { parent: parentId } : {}),
       ...(x !== undefined    ? { x, y }   : {}),
+      // The server cannot tell a password field from an email field without
+      // the DOM node, and this is the only place the id is available — the
+      // getBoxModel call above already used it. One int on a target that is
+      // already being sent.
+      ...(backendId !== undefined ? { backendNodeId: backendId } : {}),
     });
   }
   await dbg.sendCommand(tabId, { method: "Accessibility.disable" });
@@ -365,13 +415,47 @@ function logToPanel(event: Record<string, unknown>): void {
   if (event.type === "tab_event") panelLog = panelLog.filter((e) => e.type !== "tab_event");
   panelLog.push(event);
   if (panelLog.length > PANEL_LOG_MAX) panelLog = panelLog.slice(-PANEL_LOG_MAX);
-  void chrome.storage.session.set({ [PANEL_LOG_KEY]: panelLog }).catch(() => undefined);
+  void chrome.storage.session.set({ [PANEL_LOG_KEY]: panelLog }).catch((e: unknown) => {
+    // A log that never lands means a reopened panel has no transcript to
+    // replay, which is indistinguishable from a task that never ran.
+    console.warn("[brotto] panelLog write failed:", e);
+  });
 }
 
 function notifyUi(event: Record<string, unknown>): void {
   logToPanel(event);
   maybeNotify(event);
-  void chrome.runtime.sendMessage(event).catch(() => undefined);
+  void chrome.runtime.sendMessage(event).catch((e: unknown) => {
+    const detail = chrome.runtime.lastError?.message
+      ?? (e instanceof Error ? e.message : String(e));
+    // A closed panel is the normal case — the run outlives the panel, which
+    // is the whole reason panelLog exists. Any other failure is a delivery
+    // that did not happen while someone was watching, and used to vanish.
+    if (typeof detail === "string" && detail.includes("Receiving end does not exist")) return;
+    console.error("[brotto] panel delivery failed for", event.type, detail);
+  });
+}
+
+// The session id is minted by POST /v1/sessions, which runs inside
+// startRelay — after the panel has already logged task_started. Patch the
+// logged event in place rather than emitting a second one for the panel to
+// dedupe; without it the run has no way to name the transcript to fetch.
+function attachSessionIdToPanelLog(id: string): void {
+  for (let i = panelLog.length - 1; i >= 0; i--) {
+    if (panelLog[i].type !== "task_started") continue;
+    if (!panelLog[i].session_id) {
+      panelLog[i].session_id = id;
+      void chrome.storage.session.set({ [PANEL_LOG_KEY]: panelLog }).catch(() => undefined);
+    }
+    break;
+  }
+  // The stored log is not enough. logToPanel only writes storage — it does
+  // not broadcast — so the panel that started this run never sees the
+  // task_started event and would carry session_id: null into the history
+  // index, leaving the row with no transcript to fetch. One targeted
+  // message, carrying no task content, so nothing re-renders.
+  void chrome.runtime.sendMessage({ type: "session_bound", session_id: id })
+    .catch(() => undefined);
 }
 
 // ── OS notifications ────────────────────────────────────────────────────────
@@ -516,6 +600,12 @@ async function sendObservation(tabId: number): Promise<void> {
   }
 }
 
+function sendObservationError(reason: string): void {
+  console.warn(`[brotto] observation failed: ${reason}`);
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "observation_error", error: reason }));
+}
+
 // ── Main relay ───────────────────────────────────────────────────────────────
 
 async function startRelay(goal: string, plannerUrl: string, startingUrl?: string): Promise<void> {
@@ -538,9 +628,11 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
 
   if (!tab.id) throw new Error("No usable tab");
   activeTabId = tab.id;
+  lastKnownTabId = tab.id;
   activeWindowId = tab.windowId ?? null;
   tabStack    = [];
   stepIndex   = 0;
+  noTabWarned = false;
   void persistSession();
 
   // Re-query to get live title — the tab object from create/query may be stale
@@ -583,13 +675,34 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
   const { session_id, websocket_url } = session;
   sessionId = session_id;
   observationSeq = 0;
+  attachSessionIdToPanelLog(session_id);
 
   const wsUrl = websocket_url.startsWith("ws") ? websocket_url : websocket_url.replace(/^http/, "ws");
   ws = new WebSocket(wsUrl);
 
   ws.onopen = async () => {
     startHeartbeat();
-    const stored = await getStoredModelConfig();
+    // Without this the socket is open, nothing is sent, and the run is
+    // invisible: the server never receives a task_start, so it never asks for
+    // an observation, so the panel shows a spinner with no task under it.
+    let stored: { model_config?: unknown; api_key?: string };
+    try {
+      stored = await getStoredModelConfig();
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      console.error("[brotto] getStoredModelConfig failed:", e);
+      taskInFlight = false;
+      taskTerminalEmitted = true;
+      void setBadge(false);
+      try { ws?.close(); } catch { /* ignore */ }
+      notifyUi({
+        type: "task_failed",
+        failure_reason: "START_FAILED",
+        summary: `Couldn't read the saved model settings, so the task never started: ${reason}`,
+      });
+      notifyUi({ type: "canonical_status", status: "failed" });
+      return;
+    }
     const payload: Record<string, unknown> = {
       type: "task_start",
       task: goal,
@@ -602,16 +715,52 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
   };
 
   ws.onmessage = async (ev) => {
-    if (!activeTabId) return;
     const msg = JSON.parse(ev.data as string) as any;
-    const tid = activeTabId;
+    // ponytail: fall back to the tab this run is driving rather than
+    // dropping the frame. This used to `return` on a null activeTabId, which
+    // threw away every server frame in that state — including task_result, so
+    // a run the user was watching just vanished. Ceiling: lastKnownTabId is a
+    // single id, not a tab stack; a frame needing a live debugger session on
+    // a *different* tab still cannot be served.
+    const tid = activeTabId ?? lastKnownTabId;
+    if (activeTabId === null) {
+      console.warn("[brotto] server frame with no attached tab:", msg.type);
+      // Speak up only mid-run: a task_result arriving after the tab was
+      // closed is a result the user is waiting for, not a problem.
+      if (!noTabWarned && taskInFlight) {
+        noTabWarned = true;
+        notify("no-tab", {
+          title: "Brotto lost track of the tab",
+          message: "The tab this task was using was closed or detached, so actions on it can't run.",
+          blocking: true,
+        });
+      }
+    }
 
     switch (msg.type) {
       case "observe":
+        if (tid === null) { sendObservationError("no tab attached"); break; }
         await sendObservation(tid);
         break;
 
       case "action":
+        if (tid === null) {
+          // Say so. An action that is skipped without a word leaves the task
+          // looping on a step that will never complete.
+          sendObservationError("action skipped: no tab attached");
+          if (!taskTerminalEmitted) {
+            taskTerminalEmitted = true;
+            taskInFlight = false;
+            void setBadge(false);
+            notifyUi({
+              type: "task_failed",
+              failure_reason: "NO_ACTIVE_TAB",
+              summary: "The tab Brotto was driving was closed, so the next action can't run.",
+            });
+            notifyUi({ type: "canonical_status", status: "failed" });
+          }
+          break;
+        }
         await executeAction(tid, msg.action);
         await sendObservation(tid);
         break;
@@ -731,6 +880,7 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
 
       case "evaluate": {
         try {
+          if (tid === null) throw new Error("no tab attached");
           const r = await dbg.sendCommand(tid, {
             method: "Runtime.evaluate",
             params: { expression: msg.expression ?? "''", returnByValue: true },
@@ -741,17 +891,59 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
         }
         break;
       }
+
+      // Backs password redaction on the server. The server waits 2s for this
+      // and treats silence as failure, so it is answered even when the CDP
+      // call cannot be made — {} is its "no attributes" answer, and it falls
+      // back to the accessible-name check.
+      case "get_attributes": {
+        let attributes: Record<string, string> = {};
+        try {
+          if (tid === null) throw new Error("no tab attached");
+          const r = await dbg.sendCommand(tid, {
+            method: "DOM.getAttributes",
+            params: { backendNodeId: msg.backend_node_id },
+          }) as { attributes?: unknown };
+          // CDP replies with a flat [name, value, name, value, ...] array.
+          const flat = Array.isArray(r.attributes) ? r.attributes : [];
+          for (let i = 0; i + 1 < flat.length; i += 2) {
+            if (typeof flat[i] === "string") attributes[flat[i]] = String(flat[i + 1] ?? "");
+          }
+        } catch (e) {
+          // Node is gone, the tab moved, or the debugger is detached. The
+          // server's name check covers it — log so the cause is not invisible.
+          console.warn("[brotto] get_attributes failed for", msg.ref, e);
+        }
+        try {
+          ws!.send(JSON.stringify({
+            type: "get_attributes_result",
+            ref: msg.ref,
+            attributes,
+          }));
+        } catch (e) {
+          console.error("[brotto] could not send get_attributes_result:", e);
+        }
+        break;
+      }
+
+      default:
+        // A server message this build predates. Silent here is how a protocol
+        // change ships and nobody finds out for a week.
+        console.debug("[brotto] ignoring unknown server message:", msg.type);
+        break;
     }
   };
 
-  ws.onerror = () => {
+  ws.onerror = (ev: Event) => {
+    const detail = (ev as ErrorEvent).message || "WebSocket connection error";
+    console.error("[brotto] websocket error:", detail, ev);
     if (!taskTerminalEmitted) {
       taskTerminalEmitted = true;
       taskInFlight = false;
       void setBadge(false);
       // ponytail: failure_reason + summary field names — see the
       // matching note on the task_result handler.
-      notifyUi({ type: "task_failed", failure_reason: "WS_ERROR", summary: "WebSocket connection error" });
+      notifyUi({ type: "task_failed", failure_reason: "WS_ERROR", summary: `WebSocket connection error: ${detail}` });
       notifyUi({ type: "canonical_status", status: "failed" });
     }
   };
@@ -799,7 +991,7 @@ async function cleanup(): Promise<void> {
   lastObservedUrl = "";
   if (tid !== null) void dbg.detachFromTab(tid).catch(() => undefined);
   void setBadge(false);
-  void chrome.storage.session.clear();
+  void chrome.storage.session.remove([...SESSION_KEYS]);
 }
 
 function stopRelay(): void {
@@ -811,7 +1003,7 @@ function stopRelay(): void {
   waitingForLogin = false;
   currentPrompt = null;
   if (tid !== null) void dbg.detachFromTab(tid).catch(() => undefined);
-  void chrome.storage.session.clear();
+  void chrome.storage.session.remove([...SESSION_KEYS]);
 }
 
 // ── Message handler ──────────────────────────────────────────────────────────
@@ -847,7 +1039,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           // `startedAt` is that anchor: without it a reopened panel has no
           // start time, so ACTIVE reads 0.0s for the rest of the run and
           // every reopen writes a duplicate history row.
-          logToPanel({ type: "task_started", task: goal, startedAt: Date.now() });
+          logToPanel({ type: "task_started", task: goal, startedAt: Date.now(), session_id: sessionId });
 
           const stored = await chrome.storage.local.get("settings");
           const plannerUrl: string =
@@ -918,24 +1110,37 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         case "submit_clarification": {
-          const res = pendingClarifyResolvers.get(String(message.id));
-          if (res) { pendingClarifyResolvers.delete(String(message.id)); res(String(message.answer ?? "")); }
+          const id = String(message.id);
+          const res = pendingClarifyResolvers.get(id);
+          if (res) { pendingClarifyResolvers.delete(id); res(String(message.answer ?? "")); }
+          else if (!deliverLostPrompt("clarify", id, String(message.answer ?? ""))) {
+            // Used to answer {success:true} on a miss: the answer was dropped
+            // and the user was told it landed, while the agent stayed blocked.
+            sendResponse({ success: false, error: "That question is no longer waiting — the task has moved on." });
+            return;
+          }
           sendResponse({ success: true });
           break;
         }
 
         case "submit_approval": {
-          const res = pendingApprovalResolvers.get(String(message.id));
+          const id = String(message.id);
+          const res = pendingApprovalResolvers.get(id);
           if (!res) {
             // The resolver map is in memory only and does not survive service
             // worker eviction, so a card replayed from panelLog can name a
             // prompt nobody is waiting on any more. Reporting success here
             // removed the card and showed a green tick for an agent that is
             // still blocked. Failure sends the panel back through reArmApproval.
-            sendResponse({ success: false, error: "That approval is no longer waiting — the task has moved on." });
+            if (!deliverLostPrompt("approval", id, message.approved === true ? "yes" : "no")) {
+              sendResponse({ success: false, error: "That approval is no longer waiting — the task has moved on." });
+              return;
+            }
+            notifyUi({ type: "approval_resolved", id, approved: message.approved === true });
+            sendResponse({ success: true });
             break;
           }
-          pendingApprovalResolvers.delete(String(message.id));
+          pendingApprovalResolvers.delete(id);
           res(message.approved === true);
           sendResponse({ success: true });
           break;
@@ -1044,6 +1249,7 @@ chrome.tabs.onCreated.addListener((tab) => {
 
   tabStack.push(oldTabId);
   activeTabId = newTabId;
+  lastKnownTabId = newTabId;
 
   sleep(400).then(async () => {
     try {

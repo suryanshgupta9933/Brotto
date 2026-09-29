@@ -461,6 +461,84 @@
       margin-bottom: 7px;
     }
 
+    /* ─── Session transcript ───────────────────────────────────────────────
+       The detail half of history, inside the same overlay panel. A back
+       arrow stands in for the close X while a transcript is up, and the
+       Re-run button carries the composer refill the row click used to do.
+       Same ledger rhythm as the list: hairline between blocks, no box, no
+       radius. A prompt is indented under its turn with a left rule rather
+       than given its own row, because it is part of that turn's story. */
+    /* The list and the transcript swap via the `hidden` property, and both
+       carry a display rule below. The UA's [hidden] { display: none } loses
+       to a class selector, so without this neither one would ever hide. */
+    [hidden] { display: none !important; }
+
+    .history-transcript { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+
+    .transcript-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid var(--ink);
+    }
+    .transcript-head .settings-title { flex: 1; min-width: 0; }
+    /* Status + step count, the same mono fact line the history rows use. */
+    .transcript-meta {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-3);
+    }
+
+    .transcript-body { display: flex; flex-direction: column; }
+    .transcript-body > .history-meta { padding: 10px 0 0; }
+
+    .tx-block { padding: 12px 0; border-bottom: 1px solid var(--rule); }
+    .tx-block:last-child { border-bottom: 0; }
+    .tx-block > .label { display: block; color: var(--ink-3); margin-bottom: 6px; }
+
+    .tx-text {
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--ink-2);
+      /* Audit fields carry page text and URLs; neither has a width. */
+      overflow-wrap: anywhere;
+    }
+    .tx-url {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      line-height: 1.5;
+      color: var(--ink-3);
+      overflow-wrap: anywhere;
+    }
+
+    .tx-prompt {
+      margin-top: 8px;
+      padding: 8px 0 8px 10px;
+      border-left: 2px solid var(--rule-2);
+    }
+    .tx-prompt > .label { display: block; color: var(--ink-3); margin-bottom: 5px; }
+    /* Same three signals the history mark already uses: allowed, refused,
+       still waiting on an answer that never came. */
+    .tx-prompt[data-decision="approved"] { border-left-color: var(--ok); }
+    .tx-prompt[data-decision="denied"]   { border-left-color: var(--bad); }
+    .tx-prompt[data-status="pending"]   { border-left-color: var(--wait); }
+
+    .tx-ok   { color: var(--ok); }
+    .tx-bad  { color: var(--bad); }
+    .tx-wait { color: var(--wait); }
+
+    .tx-empty {
+      padding: 30px 8px;
+      text-align: center;
+      color: var(--ink-3);
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+
     /* Labels that wrap their own control stack instead of running inline. */
     .settings-section label:has(> select),
     .settings-section label:has(> input) { display: flex; flex-direction: column; gap: 5px; }
@@ -1535,6 +1613,24 @@
       </button>
     </div>
     <div id="historyList" class="history-list"></div>
+
+    <!-- Transcript view. Hidden until a row is clicked; Re-run is the
+         composer refill the row click used to be. -->
+    <div id="historyTranscript" class="history-transcript" hidden>
+      <div class="transcript-head">
+        <button id="transcriptBack" class="btn-icon" aria-label="Back to session history">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 5l-7 7 7 7"></path>
+          </svg>
+        </button>
+        <span class="settings-title">Session</span>
+        <span id="transcriptMeta" class="transcript-meta"></span>
+        <button id="transcriptRun" class="btn btn-sm" type="button"
+                title="Put this task back in the box">Re-run</button>
+      </div>
+      <div id="transcriptBody" class="transcript-body"></div>
+    </div>
   </div>
 </div>
 
