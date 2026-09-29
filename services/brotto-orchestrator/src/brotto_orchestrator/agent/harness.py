@@ -790,7 +790,12 @@ async def _plan_step(
                     f"Unknown model {cfg.provider}:{cfg.model}"
                 )
             _per_task_model = factory.build(cfg.model, creds)
-            result = await agent.run(_turn_to_prompt(turn), deps=deps, model=_per_task_model)
+            result = await agent.run(
+                _turn_to_prompt(turn),
+                deps=deps,
+                model=_per_task_model,
+                model_settings=factory.model_settings(cfg.model),
+            )
         decision: AgentDecision = (
             scripted if scripted is not None else result.output
         )

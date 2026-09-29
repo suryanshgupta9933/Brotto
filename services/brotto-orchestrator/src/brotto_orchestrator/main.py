@@ -29,12 +29,18 @@ if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
 # .env, AGENT_MODEL, etc.) and raises "no model configuration" if
 # nothing resolves.
 if os.getenv("BROTTO_ENV", "dev") == "dev":
-    # Token Plan covers MiniMax-M3.1-Flash-Preview. M3 is pay-as-you-go and
-    # returns 402 insufficient_balance for Token Plan users.
+    # MiniMax-M3, not M3.1-Flash-Preview. The Flash model *requires*
+    # thinking — it 400s on thinking.type="disabled" and reasons on every
+    # step, which measured ~6.1s per call against ~1.5s here. The agent
+    # loop is latency-bound (the user is watching a step counter), so
+    # reasoning it does not need is pure UI cost.
+    # Trade-off: M3 is pay-as-you-go and returns 402 for a Token Plan key
+    # with no M3 credits. M3.1-Flash-Preview is the Token Plan model, so a
+    # subscription-only user must set AGENT_MODEL in .env to get M3.1 back.
     # Provider is `minimax`, not `anthropic` — the minimax factory carries
     # the https://api.minimax.io/anthropic base URL. `anthropic:` here
     # would post a MiniMax model name to api.anthropic.com.
-    os.environ.setdefault("AGENT_MODEL", "minimax:MiniMax-M3.1-Flash-Preview")
+    os.environ.setdefault("AGENT_MODEL", "minimax:MiniMax-M3")
     os.environ.setdefault("CONTEXT_WINDOW_TOKENS", "1000000")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request

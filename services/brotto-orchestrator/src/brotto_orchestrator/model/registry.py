@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from typing import Any
+
 from pydantic_ai.models import Model
 
 from brotto_orchestrator.model.config import UserCredentials
@@ -12,6 +14,36 @@ class ProviderFactory(Protocol):
     def build(self, model_id: str, creds: UserCredentials) -> Model: ...
     def default_models(self) -> list[tuple[str, int]]: ...
     def validate_model_id(self, model_id: str) -> bool: ...
+    def model_settings(self, model_id: str) -> dict[str, Any]: ...
+
+
+# pydantic-ai falls back to max_tokens=4096 when a request does not set it.
+# 4096 is below what a reasoning turn can produce, and the failure is silent
+# from the caller's side: the API returns stop_reason="max_tokens" with no
+# text content, which pydantic-ai reports as "Model token limit exceeded
+# before any response was generated" — naming a prompt-length problem that
+# does not exist. max_tokens is a ceiling, not a reservation, so a generous
+# cap costs nothing on the steps that do not use it.
+_OUTPUT_TOKEN_CAP = 32_000
+
+# MiniMax-M3.1-Flash-Preview refuses any attempt to turn thinking off:
+# sending thinking.type="disabled" returns HTTP 400 ("requires adaptive
+# thinking"). Measured, not documented. Every other MiniMax model accepts
+# it, and M3 does not think by default anyway — the param is here so a
+# provider-side default change cannot silently turn reasoning back on for
+# a UI that pays 0.8s per extra second of it.
+_THINKING_REQUIRED = frozenset({"MiniMax-M3.1-Flash-Preview"})
+
+
+def _anthropic_settings(model_id: str) -> dict[str, Any]:
+    settings: dict[str, Any] = {"max_tokens": _OUTPUT_TOKEN_CAP}
+    if model_id not in _THINKING_REQUIRED:
+        settings["anthropic_thinking"] = {"type": "disabled"}
+    return settings
+
+
+def _openai_settings(model_id: str) -> dict[str, Any]:
+    return {"max_tokens": _OUTPUT_TOKEN_CAP}
 
 
 # Catalog order = preference. MiniMax-M3.1-Flash-Preview is the Token Plan
@@ -44,6 +76,9 @@ class AnthropicFactory:
     def validate_model_id(self, model_id: str) -> bool:
         return any(mid == model_id for mid, _ in _DEFAULT_ANTHROPIC_MODELS)
 
+    def model_settings(self, model_id: str) -> dict[str, Any]:
+        return _anthropic_settings(model_id)
+
     def build(self, model_id: str, creds: UserCredentials) -> Model:
         from pydantic_ai.models.anthropic import AnthropicModel
         from pydantic_ai.providers.anthropic import AnthropicProvider
@@ -65,6 +100,9 @@ class OpenAIFactory:
 
     def validate_model_id(self, model_id: str) -> bool:
         return any(mid == model_id for mid, _ in _DEFAULT_OPENAI_MODELS)
+
+    def model_settings(self, model_id: str) -> dict[str, Any]:
+        return _openai_settings(model_id)
 
     def build(self, model_id: str, creds: UserCredentials) -> Model:
         from pydantic_ai.models.openai import OpenAIChatModel

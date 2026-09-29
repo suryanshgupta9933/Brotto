@@ -52,17 +52,22 @@ Full navigation in `docs/product/README.md`.
 2. per-user JSON file keyed by client IP
 3. env vars (`AGENT_MODEL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`)
 
-**MiniMax billing** (the gotcha that wastes an hour if you miss it):
-- `MiniMax-M3.1-Flash-Preview` — Token Plan (covered by Claude Code Token Plan subscriptions)
-- `MiniMax-M3` — pay-as-you-go, requires separate credits; using without credits returns 402 insufficient_balance
-- Dev default is M3.1-Flash-Preview for this reason
+**MiniMax model choice** — latency, not billing, is the deciding factor:
+- `MiniMax-M3` — accepts `thinking.type="disabled"`. Measured 2–5s/step end-to-end. Dev default.
+- `MiniMax-M3.1-Flash-Preview` — **requires** adaptive thinking; sending `thinking.type="disabled"` returns HTTP 400. Measured 4.5s / 11s / 26.5s across three runs of the same prompt, with a `ThinkingPart` on all but the first. It is the Token Plan model, so a subscription-only user who has no M3 credits has to fall back to it and pay that latency.
+
+**`max_tokens` and thinking are set in `registry.py`, not the harness.** Each factory exposes `model_settings(model_id)`, wired at the `agent.run` call in `harness.py`:
+- `_OUTPUT_TOKEN_CAP = 32_000` on every provider. pydantic-ai's own default is 4096, below what a reasoning turn produces, and the failure names a *prompt-length* problem that does not exist ("simplify the prompt to result in a shorter response"). A cap is a ceiling, not a reservation, so a generous one costs nothing.
+- `anthropic_thinking={"type":"disabled"}` on every model except `_THINKING_REQUIRED` (`MiniMax-M3.1-Flash-Preview`). Don't send it to OpenAI providers.
+
+Both are pinned by `tests/model/test_registry_settings.py`, which fails with the reason in the test name.
 
 ## Dev mode
 
 `.env` is loaded first at `main.py` module load (before the dev defaults below, so an `AGENT_MODEL` in `.env` wins over the built-in one), then:
 
 `BROTTO_ENV=dev` (default) pre-populates env vars:
-- `AGENT_MODEL` defaults to `minimax:MiniMax-M3.1-Flash-Preview` — provider is `minimax`, not `anthropic`, because the `minimax` factory carries the `https://api.minimax.io/anthropic` base URL
+- `AGENT_MODEL` defaults to `minimax:MiniMax-M3` — provider is `minimax`, not `anthropic`, because the `minimax` factory carries the `https://api.minimax.io/anthropic` base URL. **The `setdefault` is inert whenever `.env` names a model**, so a stale `AGENT_MODEL` in `.env` silently outranks this and pins the slow path.
 - `CONTEXT_WINDOW_TOKENS` defaults to `1000000`
 - `ANTHROPIC_AUTH_TOKEN` → `ANTHROPIC_API_KEY` propagation (idempotent; Token Plan users have AUTH_TOKEN, pydantic-ai reads API_KEY)
 
@@ -132,6 +137,44 @@ There is also a per-navigation gate in `<how_to_think>`: *do I already have an a
 
 **Not done:** cross-task memory. `Scratchpad` is per-task — persisted to `logs/runs/<id>/` for resume within a task and gone otherwise, so `github.com/<user>/issues/assigned` (the entry point discovered on that run) is relearned every run. The obvious durable content is *where things live on a site and which routes are dead*: a per-user JSON store in the shape of `model/store.py`, injected at the top of every task. Unbuilt.
 
+## Idle-page suggestions
+
+The three task suggestions on the idle panel are **written by the model**, not
+by a table. `POST /v1/suggestions` → `agent/suggest.py` → a standalone
+`Agent` with `output_type=Suggestions`, given the page's URL and title.
+
+Three hand-written versions came and went first: a 17-hostname table, then a
+bigger one (15 page classes × 6 lines, 20 object kinds × 2 lines, ~130 lines of
+copy). Both were correct on the sites someone had thought of and generic
+everywhere else — the same failure, twice, at two scales. **The moment you
+want to improve these, fix the prompt. Adding a site table is the bug.**
+
+Four things that are load-bearing:
+
+- **HTTP, not the WebSocket.** The socket is created in `startRelay`
+  (`background.ts:505`) and only exists while a task is in flight — which is
+  exactly when the panel does *not* need suggestions. `/v1/policy_ack` set the
+  precedent for idle-time actions.
+- **URL and title only.** No content script, `host_permissions` is
+  `<all_urls>`, so page text would mean permanently injecting Brotto into
+  every site the user visits.
+- **A standalone Agent**, not the harness's. That one is bound to
+  `AgentDecision` with a `SYSTEM_PROMPT` whose identity is "you are not a
+  chatbot" — wrong for a suggestion writer, which is why `SUGGESTION_PROMPT` is
+  a separate constant rather than a section of `SYSTEM_PROMPT`.
+- **The fallback stays site-agnostic.** Four lines in `FALLBACK_SUGGESTIONS`.
+  The good path is a cache hit most of the time, so if the fallback grew a site
+  table the failure would be invisible — it would just look like a cache.
+
+Cache key is `host + pathShape + YYYY-MM-DD` in `chrome.storage.local`, with
+numeric and UUID path segments collapsed to `:id`, capped at 40. The panel
+paints the fallback first and swaps in the generated set when it lands, so the
+box is never empty and never waits on a model call.
+
+**Read the real output before believing a change here.** Diff inspection found
+nothing wrong with either table version. Both were only caught by running
+suggestions against real URLs and reading the sentences.
+
 ## Extension storage
 
 - `model_config` (provider, model, context_window) → `chrome.storage.local` — persists across browser restarts (not sensitive)
@@ -148,7 +191,9 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-./.venv/bin/python -m pytest tests/ -q     # 320 tests (2 skipped)
+../../.venv/bin/python -m pytest tests/ -q     # 335 tests (2 skipped)
+# The pytest install lives in the REPO-ROOT venv, not services/brotto-orchestrator/.venv
+# (which has pydantic-ai but no pytest). Run it from services/brotto-orchestrator/.
 
 # Smoke test (real API call, exercises full model adapter; reads .env)
 .venv/bin/python scripts/smoke_minimax_endtoend.py
