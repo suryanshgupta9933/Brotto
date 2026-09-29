@@ -1053,12 +1053,15 @@ function setPhase(phase, message) {
   // so the user knows the loop stopped on purpose, not from a network
   // error. The actual message is rendered by the task_failed handler.
   if (phase === 'done' || phase === 'error') {
-    stopTimer();
     // ponytail: clear every prompt the task was blocked on so no card
     // survives into the terminal state. clearLoginPrompt alone left an
     // approval or clarify card live and clickable on a finished task.
     clearBlockingCards();
   }
+  // ponytail: the clock belongs to a run. Every terminal phase stops it,
+  // not just done/error — a bar that kept counting after a failed or
+  // cancelled task would be reporting time that isn't passing.
+  if (!running) stopTimer();
   // ponytail: the live "still working" bubble must stop blinking the moment
   // the agent stops producing — which includes 'paused', because a pause is
   // the agent asking for approval, a login, or an answer, not the agent
@@ -1097,9 +1100,11 @@ function setPhase(phase, message) {
   if (disconnectBtn) disconnectBtn.disabled = !(phase === 'connected' || phase === 'executing' || phase === 'paused');
   stopBtn.disabled = !(phase === 'executing' || phase === 'paused');
   if (refreshBtn) refreshBtn.disabled = phase === 'connecting';
-  // ponytail: status bar (steps + timer) shows during running/paused/done.
-  // Hidden in idle/connected/error so the panel stays clean.
-  const showBar = phase === 'executing' || phase === 'paused' || phase === 'done';
+  // ponytail: the bar belongs to a task, not to a moment. It appears on the
+  // first step and stays through every terminal phase — a run that failed is
+  // exactly when you want to read how far it got. Only the pre-task states
+  // hide it, and New task clears it via clearMessages.
+  const showBar = phase !== 'idle' && phase !== 'connected' && phase !== 'disconnected' && phase !== 'connecting';
   if (statusBarEl) statusBarEl.classList.toggle('active', showBar);
   // ponytail: New Task button shows after done or error so the user can
   // start fresh without reloading.
@@ -1349,6 +1354,9 @@ function clearMessages() {
   state.stepCount = 0;
   updateStepCount();
   stopTimer();
+  // The bar now survives the end of a task, so it has to be dropped
+  // explicitly here or a fresh task opens showing the last run's numbers.
+  statusBarEl?.classList.remove('active');
   seenTabs.clear();
   updateTabCount();
   // ponytail: clean up any lingering login-pause fallback buttons from a

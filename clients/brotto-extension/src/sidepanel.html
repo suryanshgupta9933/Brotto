@@ -203,9 +203,12 @@
       flex-direction: column;
       gap: 2px;
     }
-    /* Hairlines follow the grid: one under the top row, one between columns. */
-    #statusBar .cell:nth-child(-n+2) { border-bottom: 1px solid var(--rule); }
-    #statusBar .cell:nth-child(even) { border-left: 1px solid var(--rule); }
+    /* The cross follows the grid: one under the top row, one between
+       columns. Medium, not hairline — the bar's own surface is --paper-3
+       (#EBEBEB), and a --rule hairline on it is six values of difference,
+       which reads as four numbers floating rather than one grid. */
+    #statusBar .cell:nth-child(-n+2) { border-bottom: 1px solid var(--rule-2); }
+    #statusBar .cell:nth-child(even) { border-left: 1px solid var(--rule-2); }
     #statusBar .label { color: var(--ink-2); }
     #statusBar .value {
       font-weight: 500;
