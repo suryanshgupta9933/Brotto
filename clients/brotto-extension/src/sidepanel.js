@@ -344,6 +344,8 @@ const blacklistSetting    = document.getElementById('blacklistSetting');
 const floorBlacklistEl    = document.getElementById('floorBlacklist');
 const saveSettingsBtn     = document.getElementById('saveSettingsBtn');
 const refreshPolicyBtn    = document.getElementById('refreshPolicyBtn');
+const notifyBlockingSetting = document.getElementById('notifyBlockingSetting');
+const notifyResultsSetting  = document.getElementById('notifyResultsSetting');
 
 // ponytail: on Settings open, fetch the EFFECTIVE policy from the server
 // so the sidepanel shows what the server is actually enforcing (floor +
@@ -403,6 +405,8 @@ async function hydrateSettingsPanel() {
   const mode = s.mode === 'secure' ? 'secure' : 'normal';
   securityModeSetting.value = mode;
   const localBlacklist = Array.isArray(s.blacklist) ? s.blacklist : [];
+  if (notifyBlockingSetting) notifyBlockingSetting.checked = s.notifyBlocking !== false;
+  if (notifyResultsSetting) notifyResultsSetting.checked = s.notifyResults === true;
 
   // Floor (locked) — always rendered from the server when available.
   // Build via DOM APIs (not innerHTML) so a malicious floor file can't
@@ -535,6 +539,8 @@ if (saveSettingsBtn) {
       serverUrl: plannerUrlSetting.value || 'http://localhost:8000',
       mode: securityModeSetting.value === 'secure' ? 'secure' : 'normal',
       blacklist: merged,
+      notifyBlocking: notifyBlockingSetting ? notifyBlockingSetting.checked : true,
+      notifyResults: notifyResultsSetting ? notifyResultsSetting.checked : false,
     };
     await chrome.storage.local.set({ settings });
     plannerUrlEl.value = settings.serverUrl;
@@ -547,7 +553,12 @@ if (saveSettingsBtn) {
     try {
       const ack = await chrome.runtime.sendMessage({
         type: 'policy_changed',
-        settings: { mode: settings.mode, blacklist: settings.blacklist },
+        settings: {
+          mode: settings.mode,
+          blacklist: settings.blacklist,
+          notifyBlocking: settings.notifyBlocking,
+          notifyResults: settings.notifyResults,
+        },
       });
       swOk = !!(ack && ack.success);
       if (!swOk) console.warn('[brotto] SW ack missing or unsuccessful:', ack);

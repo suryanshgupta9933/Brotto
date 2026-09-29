@@ -121,9 +121,14 @@ async function hydrateUserPolicy(): Promise<void> {
   try {
     const stored = await chrome.storage.local.get("settings");
     const s = stored.settings as
-      | { mode?: string; blacklist?: unknown }
+      | { mode?: string; blacklist?: unknown; notifyBlocking?: boolean; notifyResults?: boolean }
       | undefined;
     if (!s) return;
+    // Blocking prompts notify unless explicitly turned off; finished/failed
+    // results only notify once the user asks for them. A task ending is the
+    // most frequent event Brotto emits, so it earns the higher bar.
+    notifyBlocking = s.notifyBlocking !== false;
+    notifyResults = s.notifyResults === true;
     userPolicy = {
       mode: s.mode === "secure" ? "secure" : "normal",
       blacklist: Array.isArray(s.blacklist)
@@ -374,7 +379,100 @@ function logToPanel(event: Record<string, unknown>): void {
 
 function notifyUi(event: Record<string, unknown>): void {
   logToPanel(event);
+  maybeNotify(event);
   void chrome.runtime.sendMessage(event).catch(() => undefined);
+}
+
+// ── OS notifications ────────────────────────────────────────────────────────
+// A task can sit blocked on an approval or a login for as long as the user
+// ignores it, and the only thing saying so is a panel they have to remember
+// to open. The panel's keep-alive port already tells us whether it is open,
+// so we only speak up when nobody is watching.
+//
+// ponytail: chrome.sidePanel.open() is NOT called from a notification click.
+// It requires a user gesture and a notification click is not a documented
+// one — chromium bug 40929586 reproduces exactly this and is still open.
+// Notification *buttons* have no such limit, which is why approvals are
+// answerable from the notification and everything else just clears.
+
+let panelConnected = false;
+let notifyBlocking = true;
+let notifyResults = false;
+
+type NotificationSpec = {
+  title: string;
+  message: string;
+  buttons?: chrome.notifications.ButtonOptions[];
+  blocking?: boolean;
+};
+
+function notify(id: string, spec: NotificationSpec): void {
+  if (!chrome.notifications) return;
+  chrome.notifications.create(id, {
+    type: "basic",
+    iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
+    title: spec.title,
+    message: spec.message,
+    priority: spec.blocking ? 2 : 1,
+    // A blocked task that silently disappears after a few seconds is the exact
+    // failure this feature exists to prevent.
+    requireInteraction: spec.blocking === true,
+    buttons: spec.buttons,
+  } as chrome.notifications.NotificationOptions<true>, () => void chrome.runtime.lastError);
+}
+
+/** Fires a notification for an event the panel also renders, if warranted. */
+function maybeNotify(event: Record<string, unknown>): void {
+  const t = event.type as string;
+
+  // Blocking prompts: always speak up, even with the panel open — the user
+  // has usually wandered off precisely because the panel looks idle.
+  if (t === "approval_request") {
+    const id = String(event.id ?? "");
+    notify(`approval:${id}`, {
+      title: "Brotto needs your approval",
+      message: String(event.reason || "Confirm this action to let the task continue."),
+      buttons: [
+        { title: "Approve" },
+        { title: "Not now" },
+      ],
+      blocking: true,
+    });
+    return;
+  }
+  if (t === "login_required") {
+    notify("login", {
+      title: "Brotto is waiting for you to sign in",
+      message: `Sign in on ${String(event.domain || "the site")} and Brotto will pick the task back up.`,
+      blocking: true,
+    });
+    return;
+  }
+  if (t === "clarify_request") {
+    notify("clarify", {
+      title: "Brotto has a question",
+      message: String(event.question || "It needs an answer before it can continue."),
+      blocking: true,
+    });
+    return;
+  }
+
+  // Terminal results: only when the panel is closed. If it's open, the user
+  // is already looking at the answer and a popup is pure noise.
+  if (panelConnected) return;
+  if (t === "task_completed" && notifyResults) {
+    notify("done", {
+      title: "Brotto finished",
+      message: String(event.finalAnswer || event.summary || "Task complete."),
+    });
+    return;
+  }
+  if (t === "task_failed" && notifyResults) {
+    notify("failed", {
+      title: "Brotto stopped",
+      message: String(event.summary || "The task could not be completed."),
+    });
+  }
 }
 
 async function setBadge(active: boolean): Promise<void> {
@@ -908,13 +1006,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           // full settings object to chrome.storage.local; here we just
           // update the in-memory mirror used on the next task_start.
           const s = message.settings as
-            | { mode?: string; blacklist?: string[] }
+            | { mode?: string; blacklist?: string[]; notifyBlocking?: boolean; notifyResults?: boolean }
             | undefined;
           if (s) {
             userPolicy = {
               mode: s.mode === "secure" ? "secure" : "normal",
               blacklist: Array.isArray(s.blacklist) ? s.blacklist : [],
             };
+            // Notification prefs ride along on Save rather than growing their
+            // own message type — they live in the same settings object.
+            notifyBlocking = s.notifyBlocking !== false;
+            notifyResults = s.notifyResults === true;
           }
           sendResponse({ success: true });
           break;
@@ -1033,7 +1135,33 @@ async function initialize(): Promise<void> {
 
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== "brotto-sidepanel") return;
+    // The panel's keep-alive port is also its liveness signal: a closed panel
+    // disconnects the port, which is what lets a finished task notify.
+    panelConnected = true;
     port.onMessage.addListener(() => { /* keep-alive */ });
+    port.onDisconnect.addListener(() => { panelConnected = false; });
+  });
+
+  // Approve / Not now, answered from the OS notification without opening the
+  // panel. Routed through the same resolver map the panel's own buttons use,
+  // so there is one way to answer an approval rather than two.
+  chrome.notifications?.onButtonClicked.addListener((id, index) => {
+    if (!id.startsWith("approval:")) return;
+    const resolve = pendingApprovalResolvers.get(id.slice("approval:".length));
+    if (!resolve) {
+      // The task moved on while the notification sat there. Say so rather
+      // than letting the button look like it did something.
+      void chrome.notifications.clear(id);
+      return;
+    }
+    resolve(index === 0);
+    void chrome.notifications.clear(id);
+  });
+
+  // Deliberately does NOT call chrome.sidePanel.open() — see the note above
+  // maybeNotify. Dismissing and updating the badge is all a click can do.
+  chrome.notifications?.onClicked.addListener((id) => {
+    void chrome.notifications.clear(id);
   });
 
   chrome.runtime.onInstalled.addListener(() => { void setBadge(false); });
