@@ -41,8 +41,14 @@ _HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
 
 # Per-action approval prompt reasons, surfaced to the user via WS
 # `reasoning` and to policy.log for audit.
-_REASON_FIRST_TIME = "First time on {domain}: agent wants to {action}. Continue?"
-_REASON_CRITICAL = "Critical action: {action}. Continue?"
+#
+# {action} is the human label from _ACTION_LABEL, never the tool name.
+_REASON_FIRST_TIME = "First time on {domain}: the agent wants to {action}. Continue?"
+# {thought} is the model's `thought` field, which the system prompt already
+# contracts as one sentence of user-facing plain English. `reasoning` must
+# NOT be used here — the prompt marks it "NEVER shown to the user", and an
+# approval card is exactly that.
+_REASON_CRITICAL = "{thought} This can't be undone from here — continue?"
 
 # ponytail: every user-facing prompt in the harness routes through these
 # helpers so the "deny → abort task" contract is enforced exactly once.
@@ -63,9 +69,30 @@ _TERMINAL_ACTIONS = {"task_complete", "cannot_complete"}
 # Card UI is different (no Approve/Deny buttons).
 _QUESTION_ACTIONS = {"ask_human"}
 # Combined set: actions that should NEVER appear inside an approval card
-# (terminal + internal + question). Reused by sensitive-action,
-# first-time-seen, and the sidepanel card filter.
+# (terminal + internal + question). Every card-emitting loop filters on this
+# before deciding whether to prompt — the internal four are the reason: their
+# args are model-written prose, and check_critical_action regexes those, so a
+# note reading "...to confirm star counts" tripped the gate on the word
+# "confirm". See tests/test_agent_e2e.py.
 _NEVER_APPROVE = _TERMINAL_ACTIONS | _INTERNAL_ACTIONS | _QUESTION_ACTIONS
+
+# What the user sees in the card instead of the tool name. "click" and
+# "type_text" are developer-facing; these are the only action names that can
+# reach a card, and every one of them is a thing a person recognises doing.
+_ACTION_LABEL = {
+    "navigate": "open a page",
+    "click": "click something on the page",
+    "type_text": "type into a field",
+    "scroll": "scroll the page",
+    "find_element": "look up an element",
+    "read_page_text": "read text off the page",
+}
+
+
+def _card_label(action: str, action_args: dict) -> str:
+    """Human phrasing for an approval card. Prefers what the model wrote
+    about the target (a click's `description`) over the generic verb."""
+    return str(action_args.get("description") or _ACTION_LABEL.get(action, "do something"))
 
 # ponytail: after the user clicks Approve on a policy/approval card, they
 # have REVOKE_WINDOW_SECS to change their mind by sending human_reply
@@ -1015,11 +1042,11 @@ class AgentHarness:
                     )
                     await deps.ws_send({
                         "type": "approval_required",
-                        "action": c.action,
+                        "action": _card_label(c.action, c.action_args),
                         "args": c.action_args,
                         "reasoning": (
-                            f"Sensitive action (org policy): {c.action}. "
-                            f"Continue?"
+                            f"Sensitive action (org policy): the agent wants to "
+                            f"{_card_label(c.action, c.action_args)}. Continue?"
                         ),
                     })
                     reply = await deps.human_input_queue.get()
@@ -1054,16 +1081,21 @@ class AgentHarness:
             # actions later in the batch ran unchecked). Deny on ANY
             # critical action aborts the entire task — the user's plan was
             # wrong, the agent shouldn't try a different angle.
+            #
+            # _NEVER_APPROVE first: the internal four carry model-written
+            # prose in their args and check_critical_action regexes those,
+            # so a scratchpad note could raise a card on its own.
             critical_actions = [
                 c for c in decision.actions
-                if check_critical_action(c.action, c.action_args)
+                if c.action not in _NEVER_APPROVE
+                and check_critical_action(c.action, c.action_args)
             ]
             for c in critical_actions:
                 await deps.ws_send({
                     "type": "approval_required",
-                    "action": c.action,
+                    "action": _card_label(c.action, c.action_args),
                     "args": c.action_args,
-                    "reasoning": decision.reasoning,
+                    "reasoning": _REASON_CRITICAL.format(thought=decision.thought),
                 })
                 reply = await deps.human_input_queue.get()
                 if str(reply).lower() not in APPROVE_SET:
@@ -1124,10 +1156,10 @@ class AgentHarness:
                     )
                     await deps.ws_send({
                         "type": "approval_required",
-                        "action": c.action,
+                        "action": _card_label(c.action, c.action_args),
                         "args": c.action_args,
                         "reasoning": _REASON_FIRST_TIME.format(
-                            domain=domain, action=c.action,
+                            domain=domain, action=_card_label(c.action, c.action_args),
                         ),
                     })
                     reply2 = await deps.human_input_queue.get()

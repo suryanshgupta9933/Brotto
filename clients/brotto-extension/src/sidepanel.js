@@ -1496,8 +1496,12 @@ function appendApprovalCard({ id, reason, action }) {
   // internal, or question action. The server filters these too; if it
   // ever stops doing so, the user shouldn't see a button to "Approve
   // cannot_complete".
-  if (NON_APPROVABLE_ACTIONS.has(action)) {
-    console.warn('[brotto] suppressed approval card for non-approvable action:', action);
+  //
+  // Match on action.type, not action — the payload is {type, url}, so
+  // passing the object to a Set of strings was always false and this
+  // guard never fired.
+  if (NON_APPROVABLE_ACTIONS.has(action?.type)) {
+    console.warn('[brotto] suppressed approval card for non-approvable action:', action?.type);
     // Still need to ACK so the server's queue doesn't hang. Send deny
     // so the harness aborts cleanly if it was awaiting this reply.
     if (id) void sendMessage({ type: 'submit_approval', id, approved: false });
