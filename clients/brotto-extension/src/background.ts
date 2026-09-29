@@ -1087,9 +1087,15 @@ async function initialize(): Promise<void> {
     const promptId = id.slice("approval:".length);
     const resolve = pendingApprovalResolvers.get(promptId);
     if (!resolve) {
-      // The task moved on while the notification sat there. Say so rather
-      // than letting the button look like it did something.
-      void chrome.notifications.clear(id);
+      // The task moved on while the notification sat there. Clearing it in
+      // silence was the worst option: the user watched a button they had
+      // already pressed disappear, with no way to tell an answer from a
+      // timeout — and silence here reads as "approved". Updating the text in
+      // place works because approval notifications set requireInteraction, so
+      // this is the one path where an honest failure can actually be shown.
+      void chrome.notifications.update(id, {
+        message: "This approval is no longer waiting — the task has moved on.",
+      });
       return;
     }
     // Delete before resolving, exactly as submit_approval does. Leaving the
