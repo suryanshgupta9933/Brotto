@@ -82,6 +82,19 @@ Tiers: inline (extension) → per-user file → env. Two rules that aren't obvio
 - An inline config **without** a key is ignored and falls through. The extension stores `model_config` in `chrome.storage.local` (survives restart) but the key in `chrome.storage.session` (does not), so every browser restart it sends a config and no key. Honoring that gave a keyless provider and "Set `ANTHROPIC_API_KEY`" while shadowing a working `.env`.
 - A per-user config persists the *model* only, never a key — so after a browser restart it is unusable on its own and the resolver says so explicitly.
 
+## What the agent sees each step
+
+Four things arrive per step. All four were captured and thrown away at some point, and each omission cost real steps on a live run:
+
+- **Hierarchy** (`SemanticTarget.parent_ref_id`, resolved to the nearest *kept* ancestor). Rendered as indentation. Flat, a repo's star count sat eight lines from its name with nothing marking the record, and the model guessed which one it belonged to. Resolution walks the full `parentId` chain — a link's direct parent is almost always a `generic` container that gets filtered, so resolving only the direct parent yields depth 0 on most real pages. This is also why `listitem` / `row` / `gridcell` are in the extractor's kept set: they're nameless, never render, but they're the parent a record's fields resolve to.
+- **Hrefs** (`SemanticTarget.href`, from the CDP `url` property, links only). Without them the model cannot see a page's URL space at all and guesses at deep-link patterns. This is the general mechanism for "use deeplinks efficiently" — no site-specific knowledge anywhere.
+- **Page text** (`AgentTurn.page_text`, innerText, every step). The only source for values the AX tree omits — a repo's star count, a price. Costs nothing on the extension path (rides along in the `Runtime.evaluate` that already fetches url/title). `read_page_text` remains the targeted tool for a selector or `around` region.
+- **Budget** — `ax_filter.budget_for_window(context_window)`, a twentieth of the window, floored at 8K and capped at 60K. Over budget, whole lines are dropped and the count is reported; the tree is never sliced mid-element. The old flat `MAX_CHARS = 6000` truncated a real GitHub list page at 6041 chars.
+
+`context_window` is set on `deps` by `_plan_step` once the per-task config resolves, so step 1 falls back to the env default.
+
+Verified: the "find my most starred repo" task that took 8 steps went to 2 — one navigate to the star-sorted view (discovered from a visible href), then the answer.
+
 ## Extension storage
 
 - `model_config` (provider, model, context_window) → `chrome.storage.local` — persists across browser restarts (not sensitive)
@@ -98,7 +111,7 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-./.venv/bin/python -m pytest tests/ -q     # 308 tests (2 skipped)
+./.venv/bin/python -m pytest tests/ -q     # 314 tests (2 skipped)
 
 # Smoke test (real API call, exercises full model adapter; reads .env)
 .venv/bin/python scripts/smoke_minimax_endtoend.py

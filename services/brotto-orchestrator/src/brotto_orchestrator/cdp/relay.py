@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Callable
 
+from ..agent.ax_filter import PAGE_TEXT_MAX
 from ..dev.ax_tree_extractor import SemanticTarget
+
+log = logging.getLogger(__name__)
 
 
 class CDPRelay:
@@ -42,6 +46,19 @@ class CDPRelay:
         if self._browser.page:
             return await self._browser.page.title()
         return ""
+
+    async def get_page_text(self) -> str:
+        if not self._browser.page:
+            return ""
+        try:
+            text = await self._browser.page.evaluate(
+                f"((document.body&&document.body.innerText)||'').replace(/\\s+/g,' ')"
+                f".slice(0, {PAGE_TEXT_MAX})"
+            )
+            return str(text or "")
+        except Exception as e:
+            log.debug("get_page_text failed: %s", e)
+            return ""
 
     async def click_ref(self, ref: str) -> str:
         target = self._browser.target_map.get(ref)

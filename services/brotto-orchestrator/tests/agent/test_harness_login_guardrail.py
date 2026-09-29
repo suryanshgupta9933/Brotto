@@ -49,6 +49,7 @@ def _login_deps() -> AgentDeps:
         return_value=[SemanticTarget(ref_id="pw", tag="input", role="textbox", name="Password")]
     )
     cdp.get_current_url = AsyncMock(return_value="http://example.com/login")
+    cdp.get_page_text = AsyncMock(return_value="")
     cdp.get_page_title = AsyncMock(return_value="Sign in")
     cdp.refresh_target_map = AsyncMock()
 

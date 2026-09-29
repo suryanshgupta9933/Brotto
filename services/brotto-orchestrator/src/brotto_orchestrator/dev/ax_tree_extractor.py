@@ -23,6 +23,9 @@ class SemanticTarget:
     coordinates: dict[str, int] = None
     backend_node_id: Optional[int] = None
     parent_ref_id: Optional[str] = None
+    # Destination for links. Rendered next to the name so the agent can read
+    # the page's own link graph instead of guessing URL patterns.
+    href: Optional[str] = None
 
     def __post_init__(self):
         if self.coordinates is None:
@@ -32,11 +35,16 @@ class SemanticTarget:
 class AXTreeExtractor:
     """Extracts semantic targets from Chrome accessibility tree via CDP."""
 
-    # Interactive roles that should be targets for automation
+    # Interactive roles that should be targets for automation, plus the
+    # containers that delimit a record. The structural roles are kept even
+    # when nameless: they never render, but they are the parent a row's
+    # fields resolve to, and without them every field in a list renders
+    # flat at depth 0 with nothing marking where one record ends.
     INTERACTIVE_ROLES = {
         "button", "link", "menuitem", "tab", "textbox", "checkbox",
         "radio", "combobox", "listbox", "option", "slider", "searchbox",
         "spinbutton", "switch", "treeitem", "row", "cell", "gridcell",
+        "listitem", "list", "rowgroup", "table",
     }
 
     @staticmethod
@@ -86,6 +94,18 @@ class AXTreeExtractor:
         return str(role_obj).lower()
 
     @staticmethod
+    def _extract_href(ax_node: dict[str, Any]) -> Optional[str]:
+        """A link's destination lives in a CDP `url` property, not a
+        top-level field. Returned verbatim — never synthesised — so the
+        agent is reading the page's real link graph, not a guess."""
+        for prop in ax_node.get("properties", []) or []:
+            if prop.get("name") != "url":
+                continue
+            v = prop.get("value")
+            return str(v.get("value")) if isinstance(v, dict) and v.get("value") else None
+        return None
+
+    @staticmethod
     async def extract_targets(
         cdp_session: Any,
         max_targets: int = 100,
@@ -102,6 +122,11 @@ class AXTreeExtractor:
         """
         targets: list[SemanticTarget] = []
         node_id_to_ref: dict[str, str] = {}
+        # parentId for EVERY node, not just kept ones. A link's immediate
+        # parent is usually a generic container that gets filtered out, so
+        # resolving to the nearest *kept* ancestor is what makes the hierarchy
+        # survive the filter at all.
+        parent_of: dict[int, int] = {}
 
         try:
             # Enable accessibility domain
@@ -113,11 +138,12 @@ class AXTreeExtractor:
 
             # First pass: create refs for all nodes that should be targets
             for ax_node in ax_nodes:
-                if not AXTreeExtractor._should_include_node(ax_node):
-                    continue
-
                 node_id = ax_node.get("nodeId")
-                if not node_id:
+                if node_id is None:
+                    continue
+                if ax_node.get("parentId") is not None:
+                    parent_of[node_id] = ax_node["parentId"]
+                if not AXTreeExtractor._should_include_node(ax_node):
                     continue
 
                 # Generate stable ref_id based on node properties
@@ -171,8 +197,14 @@ class AXTreeExtractor:
                         pass  # Fallback to no coordinates
 
                 parent_ref_id = None
-                parent_id = ax_node.get("parentId")
-                if parent_id and parent_id in node_id_to_ref:
+                parent_id = parent_of.get(node_id)
+                seen: set = set()
+                while parent_id is not None and parent_id not in node_id_to_ref:
+                    if parent_id in seen:
+                        break  # malformed tree — don't spin
+                    seen.add(parent_id)
+                    parent_id = parent_of.get(parent_id)
+                if parent_id in node_id_to_ref:
                     parent_ref_id = node_id_to_ref[parent_id]
 
                 target = SemanticTarget(
@@ -184,6 +216,7 @@ class AXTreeExtractor:
                     coordinates=coordinates,
                     backend_node_id=backend_node_id,
                     parent_ref_id=parent_ref_id,
+                    href=AXTreeExtractor._extract_href(ax_node),
                 )
                 targets.append(target)
 

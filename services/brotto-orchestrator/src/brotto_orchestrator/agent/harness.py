@@ -28,7 +28,7 @@ from .context import (
     StepSummary, TaskResult, Scratchpad, MemoryEntry, DIGEST_LEN,
     ScriptTargetUnresolved,
 )
-from .ax_filter import filter_ax_targets
+from .ax_filter import budget_for_window, filter_ax_targets
 from .ax_diff import compute_ax_diff
 from .stagnation import check_stagnation
 from .guardrails import check_login_page, check_critical_action, check_sensitive_action
@@ -198,6 +198,16 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
 
     diff_section = f"\n### What changed after last action\n{turn.ax_diff}\n" if turn.ax_diff else ""
 
+    # Placed after the tree, before the question: it is the last thing read,
+    # and the values it carries (counts, prices, totals) are exactly what a
+    # read-only question is answered from.
+    text_section = (
+        f"\n### Page text (values the tree above may not carry)\n"
+        f"<page_text untrusted url=\"{turn.current_url}\">\n{turn.page_text}\n</page_text>\n"
+        if turn.page_text
+        else ""
+    )
+
     # ponytail: secure-mode preamble is injected here, not at Agent
     # construction, so we don't need to rebuild the Agent per-task. The
     # test-helper reads `_TEST_DEPS` (a module global); the harness loop
@@ -238,7 +248,7 @@ Title: {turn.current_page_title}
 <page_content untrusted url="{turn.current_url}">
 {turn.ax_tree}
 </page_content>
-
+{text_section}
 ## What is your next action(s)?
 """
 
@@ -775,6 +785,7 @@ async def _plan_step(
         decision: AgentDecision = (
             scripted if scripted is not None else result.output
         )
+        deps.context_window = context_window
     except ScriptTargetUnresolved as e:
         # A scripted ref that will not resolve means the target the
         # script asked for is not in the AX tree the agent sees —
@@ -904,6 +915,10 @@ class AgentHarness:
             targets = await deps.cdp.get_targets()
             current_url = await deps.cdp.get_current_url()
             page_title = await deps.cdp.get_page_title()
+            # Free on the extension path (already in the cached observation);
+            # one evaluate on the dev path. Shipped every step because the
+            # accessibility tree often omits the value a question is about.
+            page_text = await deps.cdp.get_page_text()
             # ponytail: stash for the click cross-domain gate (Change 3).
             # The click handler runs inside this same step and needs to
             # compare pre-click URL to post-click URL.
@@ -911,8 +926,13 @@ class AgentHarness:
             t1 = time.perf_counter()
             timings["observe"] += t1 - t0
 
-            filtered_ax = filter_ax_targets(targets)
-            ax_diff = compute_ax_diff(deps.prev_targets, targets)
+            # Budget scales with the model actually in use — deps.context_window
+            # is set by _plan_step once the per-task config resolves, so step 1
+            # falls back to the env default, which is where that number came
+            # from anyway.
+            budget = budget_for_window(getattr(deps, "context_window", None))
+            filtered_ax = filter_ax_targets(targets, max_chars=budget)
+            ax_diff = compute_ax_diff(deps.prev_targets, targets, max_chars=budget // 10)
             timings["filter"] += time.perf_counter() - t1
 
             # Guardrail: domain policy (secure mode only). No-op in normal
@@ -1006,6 +1026,7 @@ class AgentHarness:
                 ax_tree=filtered_ax + stagnation_note,
                 ax_diff=ax_diff,
                 step_summaries=deps.step_summaries,
+                page_text=page_text,
             )
 
             log.info("[%s] step %d  url=%s  ax_elements=%d  memory_entries=%d",

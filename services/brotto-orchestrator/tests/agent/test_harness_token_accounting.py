@@ -52,6 +52,7 @@ def _deps() -> AgentDeps:
         return_value=[SemanticTarget(ref_id="btn_ok", tag="button", role="button", name="OK")]
     )
     cdp.get_current_url = AsyncMock(return_value="http://example.com")
+    cdp.get_page_text = AsyncMock(return_value="")
     cdp.get_page_title = AsyncMock(return_value="Example Page")
     cdp.refresh_target_map = AsyncMock()
 

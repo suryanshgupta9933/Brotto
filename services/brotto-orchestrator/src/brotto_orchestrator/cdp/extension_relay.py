@@ -114,6 +114,12 @@ class ExtensionCDPRelay:
         log.debug("[%s] get_page_title → %r", self._sid, title)
         return title
 
+    async def get_page_text(self) -> str:
+        """innerText, captured by the service worker alongside url/title.
+        Free here — it's already in the cached observation."""
+        await self._ensure_fresh_obs()
+        return (self._cached_obs or {}).get("pageText", "") or ""
+
     async def navigate(self, url: str) -> None:
         log.info("[%s] navigate → %s", self._sid, url)
         await self._send_action({"type": "navigate", "url": url})
@@ -214,5 +220,9 @@ def _to_semantic(ax_targets: list[dict]) -> list[SemanticTarget]:
             name=t.get("name", ""),
             value=t.get("value"),
             coordinates=coords,
+            # The extension sends the raw CDP parentId; refs are node ids, so
+            # this is the same field the extractor fills with a ref hash.
+            parent_ref_id=str(t["parent"]) if t.get("parent") is not None else None,
+            href=t.get("href"),
         ))
     return result

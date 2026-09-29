@@ -185,6 +185,7 @@ async def test_approval_card_never_leaks_internals():
         return_value=[SemanticTarget(ref_id="btn_ok", tag="button", role="button", name="OK")]
     )
     cdp.get_current_url = AsyncMock(return_value="http://example.com")
+    cdp.get_page_text = AsyncMock(return_value="")
     cdp.get_page_title = AsyncMock(return_value="Example Page")
     cdp.refresh_target_map = AsyncMock()
 
@@ -259,6 +260,7 @@ async def test_approval_card_body_is_human_readable():
         return_value=[SemanticTarget(ref_id="btn_del", tag="button", role="button", name="Delete account")]
     )
     cdp.get_current_url = AsyncMock(return_value="http://example.com/account")
+    cdp.get_page_text = AsyncMock(return_value="")
     cdp.get_page_title = AsyncMock(return_value="Account")
     cdp.refresh_target_map = AsyncMock()
     cdp.click_ref = AsyncMock(return_value="clicked")
@@ -353,6 +355,7 @@ async def test_harness_completes_with_test_model():
     cdp.ping = AsyncMock(return_value=True)
     cdp.get_targets = AsyncMock(return_value=[fake_target])
     cdp.get_current_url = AsyncMock(return_value="http://example.com")
+    cdp.get_page_text = AsyncMock(return_value="")
     cdp.get_page_title = AsyncMock(return_value="Example Page")
     cdp.refresh_target_map = AsyncMock()
 
@@ -424,6 +427,7 @@ async def test_harness_blocks_on_approval_when_queue_is_empty():
         return_value=[SemanticTarget(ref_id="btn_del", tag="button", role="button", name="Delete account")]
     )
     cdp.get_current_url = AsyncMock(return_value="http://example.com/account")
+    cdp.get_page_text = AsyncMock(return_value="")
     cdp.get_page_title = AsyncMock(return_value="Account")
     cdp.refresh_target_map = AsyncMock()
     cdp.click_ref = AsyncMock(return_value="clicked")
@@ -490,6 +494,7 @@ async def test_harness_unblocks_when_approval_sentinel_is_queued():
         return_value=[SemanticTarget(ref_id="btn_del", tag="button", role="button", name="Delete account")]
     )
     cdp.get_current_url = AsyncMock(return_value="http://example.com/account")
+    cdp.get_page_text = AsyncMock(return_value="")
     cdp.get_page_title = AsyncMock(return_value="Account")
     cdp.refresh_target_map = AsyncMock()
     cdp.click_ref = AsyncMock(return_value="clicked")

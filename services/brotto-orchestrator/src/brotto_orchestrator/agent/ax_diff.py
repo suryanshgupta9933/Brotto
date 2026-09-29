@@ -8,7 +8,11 @@ if TYPE_CHECKING:
 MAX_DIFF_CHARS = 800
 
 
-def compute_ax_diff(prev: list["SemanticTarget"], curr: list["SemanticTarget"]) -> str:
+def compute_ax_diff(
+    prev: list["SemanticTarget"],
+    curr: list["SemanticTarget"],
+    max_chars: int = MAX_DIFF_CHARS,
+) -> str:
     if not prev:
         return ""
 
@@ -31,16 +35,27 @@ def compute_ax_diff(prev: list["SemanticTarget"], curr: list["SemanticTarget"]) 
         return "(no changes detected)"
 
     lines: list[str] = []
-    for t in added[:10]:
+    for t in added:
         lines.append(f"  + [{t.ref_id}] {t.role} \"{t.name or t.value}\"")
-    for t in removed[:10]:
+    for t in removed:
         lines.append(f"  - [{t.ref_id}] {t.role} \"{t.name or t.value}\"")
-    for old, new in modified[:10]:
+    for old, new in modified:
         old_text = old.name or str(old.value)
         new_text = new.name or str(new.value)
         lines.append(f"  ~ [{new.ref_id}] {new.role} \"{old_text}\" → \"{new_text}\"")
 
-    result = "\n".join(lines)
-    if len(result) > MAX_DIFF_CHARS:
-        result = result[:MAX_DIFF_CHARS] + "\n  [diff truncated]"
+    # A navigation swaps the whole page, so "first 10" hid nearly all of it
+    # and sliced the tenth entry mid-word. Drop whole lines, count the rest.
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > max_chars:
+            continue
+        kept.append(line)
+        used += len(line) + 1
+
+    result = "\n".join(kept)
+    hidden = len(lines) - len(kept)
+    if hidden:
+        result += f"\n  [{hidden} more change(s) not listed — see the AX tree below]"
     return result

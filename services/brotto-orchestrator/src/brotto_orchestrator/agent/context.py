@@ -85,6 +85,10 @@ class AgentTurn(BaseModel):
     ax_tree: str
     ax_diff: str
     step_summaries: list[StepSummary]
+    # innerText of the current page. Ships every step rather than waiting for
+    # a read_page_text call: the accessibility tree routinely omits the values
+    # a question is actually about (a star count, a price, a total).
+    page_text: str = ""
 
 
 class ActionCall(BaseModel):
@@ -159,6 +163,10 @@ class AgentDeps:
     # Read by the click cross-domain gate and stamped onto TaskResult.
     # final_url as "where the task ended up" — see TaskResult.final_url.
     step_url: str = ""
+    # Context window of the model actually in use, set by _plan_step once the
+    # per-task config resolves. Read at observation time to size the AX tree
+    # budget; absent on step 1, where the env default is correct anyway.
+    context_window: int | None = None
     prev_targets: list = field(default_factory=list)  # AX targets from previous step for diffing
     policy: object = None  # Policy (services/brotto_orchestrator/policy/schema.Policy). Lazy import.
     # Test/dev only: a brotto_orchestrator.testing.ScriptedPlanner that
