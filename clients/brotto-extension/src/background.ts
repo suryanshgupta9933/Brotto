@@ -666,18 +666,19 @@ async function startRelay(
   goal: string,
   plannerUrl: string,
   startingUrl?: string,
-  opts: { resume?: boolean } = {},
+  opts: { resume?: boolean; continueSession?: boolean } = {},
 ): Promise<void> {
   serverUrl = plannerUrl;
   currentGoal = goal;
   let session_id: string;
   let wsUrl: string;
 
-  if (opts.resume && sessionId !== null && activeTabId !== null) {
-    // Same tab, same session, by construction. Minting a new session here
-    // would make the reconnect a *second* task rather than a continuation
-    // of the first, and re-picking the tab could aim the resumed run at a
-    // different one than the one it had already been driving.
+  // A crash resume and a follow-up task both continue an existing session, so
+  // both reuse its id and its tab. Minting a new id here would make a
+  // follow-up a second conversation; re-picking the tab could aim it at a
+  // different one than the task before it was driving.
+  const continues = (opts.resume || opts.continueSession) === true;
+  if (continues && sessionId !== null && activeTabId !== null) {
     session_id = sessionId;
     wsUrl = `${serverUrl.replace(/^http/, "ws")}/ws/ext/${session_id}`;
   } else {
@@ -746,9 +747,10 @@ async function startRelay(
     session_id = session.session_id;
     sessionId = session_id;
     // Monotonic per session, and the server's tracker is per session too —
-    // so this resets only when a NEW session is minted. On a reconnect the
-    // sequence must keep climbing or every observation is a duplicate of one
-    // the server already accepted.
+    // so this resets only when a NEW session is minted. It stays reset-only
+    // here, never in the reuse branch: a follow-up task shares its session
+    // with the task before it, so its observations have to keep climbing or
+    // the server rejects them as duplicates of ones it already accepted.
     observationSeq = 0;
     attachSessionIdToPanelLog(session_id);
     wsUrl = session.websocket_url.startsWith("ws")
@@ -787,6 +789,10 @@ async function startRelay(
       type: "task_start",
       task: goal,
       session_id,
+      // Not `continues`: a follow-up and a resume share the session but do
+      // opposite things with the document, and this flag is the only thing
+      // the server has to tell them apart.
+      resume: opts.resume === true,
       user_policy: userPolicy,
     };
     if (stored.model_config) payload.model_config = stored.model_config;
@@ -1149,7 +1155,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           void setBadge(true);
           notifyUi({ type: "canonical_status", status: "executing" });
 
-          startRelay(goal, plannerUrl, message.startingUrl as string | undefined)
+          startRelay(goal, plannerUrl, message.startingUrl as string | undefined, {
+            continueSession: message.continueSession === true,
+          })
             .catch((err: unknown) => {
               void setBadge(false);
               taskInFlight = false;
