@@ -449,6 +449,36 @@ so this block is the only place prior context enters — and passing
 from two sources that could disagree. AX trees are never carried forward; each
 step's prompt holds only that step's tree.
 
+**A window is only worth having if there is a way back to what it dropped.**
+The block was first 2 + last 6 with a silent elision, and that is a one-way
+door: a model told a turn was dropped, with no way to read it, concludes the
+answer is unavailable and either guesses or asks the user. `recall_conversation(from_id, to_id)`
+is the missing half — the same digest/body shape `recall_memory` already had
+for the scratchpad. The block names the id range it dropped; the action fetches
+it. **Write, then Select** — the scratchpad got this right first time and the
+conversation did not.
+
+Two things follow, and the second is the one that was wrong first:
+
+- **Truncation is head+tail, not head.** A `task_complete` summary opens with
+  the method ("Here are the top stories:") and closes with the findings, and a
+  follow-up is asked about the findings. `content[:1200]` kept the preamble and
+  dropped the answer — worse than either end alone. It is now the same shape
+  `_turn_to_prompt` already windows step summaries with.
+- **The cap costs context, on purpose, and only because there is a fetch.** A
+  per-step re-upload of eight full deep-dive answers is a standing tax on every
+  action for the rest of the task. The window is the compression; the action is
+  what makes the compression safe. The *record* is never truncated — the cap is
+  rendering only, and `recall_conversation` returns the full text.
+
+**KV cache.** The cacheable prefix is `SYSTEM_PROMPT + secure_prefix +
+<conversation> + ## Task` — contiguous at the front, ~8–9.5K tokens, and
+byte-identical across every step of a task. The growing "## Steps completed"
+sits *after* that boundary, so history accumulating does not shrink the cache.
+The AX tree and page text (~12K tokens) are uncacheable every step and always
+were: the page genuinely changes. Nothing here wants reordering — a stable
+prefix is already stable.
+
 ### Resume
 
 `AgentHarness.run(deps, *, resume_from=0)`. This works because the harness is
@@ -490,7 +520,7 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-../../.venv/bin/python -m pytest tests/ -q     # 423 tests (2 skipped)
+../../.venv/bin/python -m pytest tests/ -q     # 457 tests (2 skipped)
 # The pytest install lives in the REPO-ROOT venv, not services/brotto-orchestrator/.venv
 # (which has pydantic-ai but no pytest). Run it from services/brotto-orchestrator/.
 

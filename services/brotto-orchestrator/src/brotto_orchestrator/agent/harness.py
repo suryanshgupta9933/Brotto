@@ -191,6 +191,11 @@ _CONV_TAIL = 6
 # pay to remember a conversation; without it one deep-dive answer is re-uploaded
 # on every action for the rest of the task.
 _CONV_MSG_CHARS = 1200
+# Ceiling on one `recall_conversation` result. The whole point of the action
+# is to reach a message the window dropped, not to become a way around the
+# window — a fetch is still one step's prompt, and an unbounded one would be
+# the largest thing in it.
+_CONV_RECALL_CHARS = 8000
 
 
 def _conversation_block(messages: list[dict], *, current_task: int) -> str:
@@ -214,12 +219,29 @@ def _conversation_block(messages: list[dict], *, current_task: int) -> str:
         who = "User" if m.get("role") == "user" else "Assistant"
         content = str(m.get("content", ""))
         if len(content) > _CONV_MSG_CHARS:
-            content = content[:_CONV_MSG_CHARS] + " …[truncated]"
+            # Head AND tail, the same shape `step_summaries` is windowed with.
+            # A long answer puts its method in the first paragraph and its
+            # findings in the last, and a follow-up is asked about the
+            # findings — head-only truncation would keep the preamble and
+            # drop the answer, which is the worst of both ends. The full text
+            # is never lost: recall_conversation fetches it by id.
+            head = _CONV_MSG_CHARS // 2
+            content = (content[:head] + " …[truncated, "
+                       + str(len(content) - _CONV_MSG_CHARS)
+                       + " chars — recall_conversation('"
+                       + str(m.get("id", "?")) + "') for the full text]… "
+                       + content[-(head - 1):])
         lines.append(f"{who}: {content}")
     if skipped:
-        # Named, not silent. A model told a turn was dropped and not told
-        # how many will assume the gap is small.
-        lines.insert(_CONV_HEAD, f"... {skipped} earlier messages omitted ...")
+        # Named, not silent, and addressable. A model told a turn was dropped
+        # and not told how many will assume the gap is small; a model told it
+        # was dropped but given no way back to the text will assume the
+        # answer is unavailable rather than go looking for it.
+        gap = earlier[_CONV_HEAD:len(earlier) - _CONV_TAIL]
+        lines.insert(_CONV_HEAD, (
+            f"... {skipped} earlier messages omitted "
+            f"({gap[0].get('id')}–{gap[-1].get('id')}) — "
+            "recall_conversation(from_id, to_id) to fetch any ..."))
     return ("\n## This conversation so far\n"
             + "\n".join(lines) + "\n")
 
@@ -839,6 +861,38 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 available = [e.id for e in deps.scratchpad.entries]
                 return f"Memory entry {entry_id!r} not found. Available: {available}"
             return entry.body
+
+        elif action == "recall_conversation":
+            # The window in `<conversation>` is head-2 + tail-6, so on a long
+            # conversation most of it is omitted. Without a way back, the
+            # model reads the omission as unavailability: the answer is not
+            # there, so it either guesses or asks the user. This is the same
+            # digest/body shape `recall_memory` already has for the
+            # scratchpad — everything stays on the document, only a slice is
+            # in the prompt.
+            msgs = [m for m in deps.conversation if m.get("id")]
+            lo = args.get("from_id") or args.get("message_id")
+            hi = args.get("to_id") or lo
+            ids = [m["id"] for m in msgs]
+            if not lo or lo not in ids:
+                return (f"Message {lo!r} not found. This conversation holds "
+                        f"{len(ids)} earlier messages: {ids[0]}–{ids[-1]}."
+                        if ids else
+                        "No earlier messages to recall.")
+            # min/max on indices, so a span reads the same either way round.
+            # An unknown to_id falls to the end, which is how a model asks for
+            # "from here to the end" without knowing where that is.
+            at = {m["id"]: i for i, m in enumerate(msgs)}
+            a, b = at[lo], at.get(hi, len(msgs) - 1)
+            fetched = msgs[min(a, b):max(a, b) + 1]
+            out = [f"{m['id']} {'User' if m.get('role') == 'user' else 'Assistant'}: "
+                   f"{m.get('content', '')}" for m in fetched]
+            text = "\n".join(out)
+            # Same ceiling the prompt window uses, so a fetch cannot be a way
+            # to smuggle an unbounded history into one step.
+            if len(text) > _CONV_RECALL_CHARS:
+                text = text[:_CONV_RECALL_CHARS] + "\n…[span too large, narrow it]"
+            return text
 
         elif action == "task_complete":
             deps.result = TaskResult(

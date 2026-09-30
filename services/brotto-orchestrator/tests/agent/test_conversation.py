@@ -329,6 +329,97 @@ def test_a_long_answer_is_capped_in_the_prompt_but_not_on_disk(sessions):
     assert "truncated" in block
     assert len(block) < _CONV_MSG_CHARS * 2
 
+
+def test_a_capped_answer_keeps_its_end_not_just_its_head():
+    """A follow-up is asked about the findings, and they are at the bottom.
+
+    Head-only truncation kept the model's "Here are the top stories:" and
+    dropped the stories — the preamble without the answer, which is worse
+    than either end alone. Same head+tail shape `_turn_to_prompt` already
+    uses for step summaries.
+    """
+    from brotto_orchestrator.agent.harness import _CONV_MSG_CHARS, _conversation_block
+
+    body = "PREAMBLE " + ("filler " * 900) + "THE-ACTUAL-ANSWER-IS-42"
+    block = _conversation_block(
+        [{"id": "m2", "role": "assistant", "content": body,
+          "task": 0, "turn": 0}],
+        current_task=1)
+    assert "THE-ACTUAL-ANSWER-IS-42" in block
+    assert "PREAMBLE" in block
+    # And it says how to get the rest, by name.
+    assert "recall_conversation('m2')" in block
+    assert len(block) < _CONV_MSG_CHARS * 2
+
+
+def _recall(args, messages):
+    import asyncio
+
+    from brotto_orchestrator.agent.context import ActionCall, AgentDeps
+    from brotto_orchestrator.agent.harness import _execute_action
+
+    deps = AgentDeps(user_id="u", task="t", cdp=None, ws_send=None,
+                     conversation=messages)
+    return asyncio.new_event_loop().run_until_complete(
+        _execute_action(ActionCall(action="recall_conversation",
+                                  action_args=args), deps))
+
+
+def test_recall_conversation_fetches_what_the_window_dropped():
+    msgs = [{"id": f"m{i}", "role": "user" if i % 2 else "assistant",
+             "content": f"msg{i}", "task": 0, "turn": None}
+            for i in range(1, 21)]
+    out = _recall({"from_id": "m5", "to_id": "m7"}, msgs)
+    assert "msg5" in out and "msg7" in out
+    assert "msg4" not in out and "msg8" not in out
+
+
+def test_recall_conversation_takes_a_reversed_span_and_an_overshoot():
+    msgs = [{"id": f"m{i}", "role": "assistant", "content": f"msg{i}",
+             "task": 0, "turn": None} for i in range(1, 6)]
+    assert "msg3" in _recall({"from_id": "m4", "to_id": "m2"}, msgs)
+    # Overshooting the end is how a model says "from here to the end".
+    assert "msg5" in _recall({"from_id": "m4", "to_id": "m99"}, msgs)
+
+
+def test_recall_conversation_on_a_bad_id_says_what_exists():
+    msgs = [{"id": "m1", "role": "user", "content": "hi", "task": 0,
+             "turn": None}]
+    out = _recall({"from_id": "m9"}, msgs)
+    assert "not found" in out and "m1" in out
+
+
+def test_recall_conversation_cannot_smuggle_the_whole_history():
+    """The window's ceiling, or a fetch becomes a way around the window."""
+    from brotto_orchestrator.agent.harness import _CONV_RECALL_CHARS
+
+    msgs = [{"id": f"m{i}", "role": "assistant", "content": "y" * 4000,
+             "task": 0, "turn": None} for i in range(1, 8)]
+    out = _recall({"from_id": "m1", "to_id": "m7"}, msgs)
+    assert "span too large" in out
+    assert len(out) < _CONV_RECALL_CHARS + 100
+
+
+def test_recall_conversation_with_nothing_earlier_is_not_an_error():
+    from brotto_orchestrator.agent.context import AgentDeps
+    from brotto_orchestrator.agent.context import ActionCall
+    from brotto_orchestrator.agent.harness import _execute_action
+    import asyncio
+
+    deps = AgentDeps(user_id="u", task="t", cdp=None, ws_send=None,
+                     conversation=[])
+    out = asyncio.new_event_loop().run_until_complete(
+        _execute_action(ActionCall(action="recall_conversation",
+                                   action_args={"from_id": "m1"}), deps))
+    assert "No earlier messages" in out
+
+
+def test_a_capped_answer_is_still_whole_on_disk(sessions):
+    """The cap is a rendering decision. Truncating the record would lose the
+    answer the transcript exists to preserve — and it is the only copy."""
+    from brotto_orchestrator.agent.harness import _CONV_MSG_CHARS
+
+    long_answer = "x" * (_CONV_MSG_CHARS * 4)
     t = AuditTrail("n5", dir=sessions)
     t.begin_task("deep dive")
     turn = t.begin_turn(step=0, url="https://x.test", page_title="X",

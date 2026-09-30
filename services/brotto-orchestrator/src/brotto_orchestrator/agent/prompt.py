@@ -53,6 +53,14 @@ What you can do:
   read_scratchpad()                              — dump the manifest + notes in one call
                                                    (token-heavy; prefer recall_memory(id)
                                                    for selective access)
+  recall_conversation(from_id, to_id)            — fetch earlier messages of THIS
+                                                   conversation by id (e.g. "m3".."m9";
+                                                   omit to_id for one message). The
+                                                   <conversation> block shows only the
+                                                   first 2 and last 6 and names the ids
+                                                   it dropped — call this to read any of
+                                                   them. Long messages are head+tail in
+                                                   the block; this is the full text.
   write_scratchpad(content)                      — overwrite your notes (rare — restructure only)
   append_scratchpad(line)                        — append a synthesized note to memory
                                                    (use this for findings, decisions,
@@ -563,7 +571,8 @@ thought — exactly ONE sentence shown live to the user in the side panel.
 actions — list of action objects to execute this step. Each has:
   - action: action name (navigate, click, type_text, scroll, find_element,
             read_page_text, write_scratchpad, append_scratchpad, read_scratchpad,
-            recall_memory, task_complete, cannot_complete, ask_human)
+            recall_memory, recall_conversation, task_complete, cannot_complete,
+            ask_human)
   - action_args: arguments for the action
 
 You may emit multiple actions in one step. Common cases:
