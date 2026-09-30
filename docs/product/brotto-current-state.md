@@ -43,23 +43,37 @@ Single-threaded observe→plan→act, max **30 steps** (`MAX_STEPS`). Per step:
 ## Audit trail (`agent/audit.py`)
 
 One nested-JSON document per session at `logs/sessions/<session_id>.json`.
-Shape: `turns[]`, each `observation → model → prompts[] → actions[]` in that
-causal order, plus root-level `totals`, `policy_events[]`, `errors[]`,
-`status`, and a `scratchpad` snapshot. Written atomically (tmp file +
-`os.replace`), so a crash mid-write leaves the last good document rather than
-a truncated one. **No database — the file is the record.**
+A **session is a conversation**: one `session_id` is reused for every task the
+user runs in it, not one per run. `schema_version: 2` therefore holds three
+collections — `tasks[]` (one entry per task, the segmentation), `messages[]`
+(the transcript a human reads, one per user message and one per completed
+turn), and `turns[]` (the audit, each turn carrying `task` so the transcript
+can be joined to its task). Each turn is
+`observation → model → prompts[] → actions[]` in that causal order, plus
+root-level `totals`, `policy_events[]`, `errors[]`, `status`, and a
+`scratchpad` snapshot. Written atomically (tmp file + `os.replace`), so a crash
+mid-write leaves the last good document rather than a truncated one.
+**No database — the file is the record.**
 
 Served by `GET /v1/sessions/{id}/audit`, listed by `GET /v1/sessions`, and
-rendered by the panel's transcript view, so a run can be replayed in the order
-it happened. Redaction of typed secrets happens at write time
-(`is_secret_field`), and the document is the only place a typed value lands.
+rendered by the panel's transcript view, so a conversation can be replayed in
+the order it happened, grouped by task. Redaction of typed secrets happens at
+write time (`is_secret_field`), and the document is the only place a typed
+value lands.
 
-Also the substrate for **resume**: `AgentHarness.run(deps, resume_from=…)`
-reconstructs `step_summaries` and `visited_domains` from the document and
-continues at the last *completed* turn. The extension reconnects with
-backoff, reusing the `session_id`; a user-cancelled run is sealed
-`cancelled` and never resumed, and a corrupt or already-finished document is
-reported as `interrupted` rather than silently restarted.
+`task_start` carries `resume: bool`, and it is the whole lifecycle fork:
+`true` is crash resume, `false` (including an absent field, since an extension
+predating the flag never reconnects with resume intent) appends a new task to
+the same conversation. `_conversation_state()` in the harness returns
+`new_task` / `resume` / `refuse` and is the only place that decides.
+
+**Resume** reconstructs `step_summaries` and `visited_domains` from the
+document and continues at the last *completed* turn. The extension reconnects
+with backoff, reusing the `session_id`; a user-cancelled run is sealed
+`cancelled` and never resumed — but the *conversation* survives it, so a
+message typed after a cancel starts a new task in the same session rather than
+a new session. A corrupt or already-finished document is reported as
+`interrupted` rather than silently restarted.
 
 This retired `agent/run_logger.py`, which wrote a `type_text` action's full
 args — including passwords — to `steps.jsonl` in the clear.
@@ -92,7 +106,7 @@ Two modes: `normal` (no gates) and `secure` (gates fire). Floor policy from `BRO
 
 ## UX surface (extension)
 
-Side panel renders: task input + Start/Cancel, tab bar, Settings panel (server URL + provider/model/key form + policy editor), live step cards (action icon, thought, URL, expand-to-show actions[]), context utilization %, "SECURE" badge, approval cards, login pause card, task completed/failed bubbles with `extracted_data`, per-component timing breakdown (`observe`, `model_plan`, `execute`, `login_pause`, `approval_pause`), a session-history list, and a per-session transcript overlay that swaps the list for the run's turns/prompts/actions in order. "Reconnecting, attempt N" banner on a dropped socket (6 attempts, full jitter, 1s→30s). No telemetry. No account UI. No onboarding.
+Side panel renders: task input + Start/Cancel, tab bar, Settings panel (server URL + provider/model/key form + policy editor), live step cards (action icon, thought, URL, expand-to-show actions[]), context utilization %, "SECURE" badge, approval cards, login pause card, task completed/failed bubbles with `extracted_data`, per-component timing breakdown (`observe`, `model_plan`, `execute`, `login_pause`, `approval_pause`), a session-history list (one row per conversation, with its task count), and a per-session transcript overlay that swaps the list for the conversation's messages, grouped by task, in order. "Reconnecting, attempt N" banner on a dropped socket (6 attempts, full jitter, 1s→30s). No telemetry. No account UI. No onboarding.
 
 Service worker owns: tab lifecycle (`tab.openerTabId`), debugger attach/detach per active tab, heartbeat (20s ping / 30s deadline), session persistence in `chrome.storage.session`, user-policy hydration on init.
 

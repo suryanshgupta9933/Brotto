@@ -377,6 +377,54 @@ on every flush, so a second writer read-modify-writing the path gets clobbered
 by the next flush. `append_policy_event` routes through the live instance for
 this reason, and `close()` deregisters — only on a terminal path.
 
+### A session is a conversation
+
+`schema_version: 2` splits the document into three collections, because "one
+session" used to mean "one run" and now means "one conversation":
+
+- `tasks[]` — one entry per task, i.e. per user message in the conversation.
+  This is the segmentation.
+- `messages[]` — the transcript a human reads: one entry per user message and
+  one per completed turn. This is what the panel renders.
+- `turns[]` — the audit, unchanged from v1, each turn carrying `task` (the
+  index into `tasks[]`) so the join `messages[].turn → turns[]` and
+  `turns[].task → tasks[]` can group a multi-task conversation.
+
+**Who writes `messages[]` matters, and it is not one place.** The user message
+is written at `task_start`, not at the first turn, so a run cancelled at step 0
+still keeps what the user asked. The assistant message is written when a turn
+ends, so an in-flight turn has no answer in the transcript — which is true.
+
+**`task_start` carries a `resume: bool`, and it is the whole lifecycle fork.**
+A frame without it is a follow-up, and defaults to follow-up: an extension
+predating the flag never reconnects with resume intent, so defaulting the other
+way would let a new task silently restart an approved run. `resume: true` is
+crash resume; `resume: false` on a terminal document is a new task appended to
+the same conversation. `_conversation_state(session_id, *, resume)` returns
+`new_task` / `resume` / `refuse` and is the only place that decides.
+
+Three things that are easy to get wrong and were:
+
+- **`resume_task()` exists because hardcoding `0` is wrong.** A crash in the
+  *second* task of a conversation would write its turns and messages into the
+  first task's segment. 0 is right for a first task and for a v1 document,
+  which is exactly why it survives casual testing.
+- **`interrupted` is in `_TERMINAL_DOC_STATUSES`.** It is written only by a
+  resume *refusal*, over the terminal status it was refusing to resume from.
+  Without it, one refusal made a second attempt resume a finished run.
+- **A cancel releases the run, not the conversation.** `stopRelay()` used to
+  drop the tab, the session id and the debugger, so a message typed after a
+  cancel found nothing to continue and minted a new session. The clean-finish
+  path already kept them; the cancel path now matches, and a genuinely new
+  conversation detaches in `startRelay`'s mint branch.
+
+**The model sees prior turns through `<conversation>`, not `message_history`.**
+First 2 + last 6 messages, rendered as text. The harness is stateless per step,
+so this block is the only place prior context enters — and passing
+`message_history` *as well* would show the model the same conversation twice
+from two sources that could disagree. AX trees are never carried forward; each
+step's prompt holds only that step's tree.
+
 ### Resume
 
 `AgentHarness.run(deps, *, resume_from=0)`. This works because the harness is
