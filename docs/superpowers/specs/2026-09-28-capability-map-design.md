@@ -36,7 +36,7 @@ Wave 0 is foundational because of verified gaps, not intuition. As of this date:
 
 | Finding | Evidence | Consequence |
 |---|---|---|
-| No shadow DOM traversal | Repo-wide grep for `shadowRoot` returns nothing | Every component-library site (React/Shadow, design systems) is invisible |
+| ~~No shadow DOM traversal~~ **Retracted — never existed** | **Measured 2026-10-01.** `tests/fixtures/perception-probe.json`, fixture `auth-shadow`: the target inside an *open* shadow root comes back from a plain top-frame `Accessibility.getFullAXTree` (`in_ax_tree: true`, verdict `OK`). Chrome traverses open shadow roots natively. The original evidence was a repo-wide grep for `shadowRoot` returning nothing, which proved only that *our source* contains no such identifier — a fact about us, not about Chrome. | None. The first-listed 0A finding was a category error, and the most confident one in the table. |
 | No iframe traversal | Only hit for `iframe` is `agent/prompt.py:68`, a prompt line conceding cross-origin iframes are unseen | Payment fields, reCAPTCHA, third-party embeds, embedded players are invisible |
 | No canvas / image fallback | No `canvas` handling anywhere; no `Page.captureScreenshot` despite README claiming it | Canvas-rendered and image-only surfaces are unreachable |
 | No `aria-hidden` reconciliation | No handling; AX tree is consumed as-is | Elements hidden from AX but present in DOM are neither seen nor targeted |
@@ -45,6 +45,30 @@ Wave 0 is foundational because of verified gaps, not intuition. As of this date:
 | No JS tests, no real-browser tests | `tests/` is Python-only and fully mocked | None of the above would be caught by the existing suite |
 
 The user research states the category-level version of this: *"any task with login + 3+ steps breaks on every screenshot-driven approach."* That is a perception-and-grounding failure, and it is the thing Brotto's architecture is supposed to be immune to. It currently is not.
+
+### What the measurement changed
+
+`scripts/probe_perception.py` re-derived every remaining row in this table
+against a real Chrome AX tree (`tests/fixtures/perception-probe.json`):
+
+| Fixture | Verdict | Fix it implies |
+|---|---|---|
+| `auth-iframe` | `GAP_FRAMES` | traverse frames — the one genuine reach gap |
+| `auth-aria-hidden` | `GAP_ARIA` | DOM supplement for what the AX tree drops on purpose |
+| `auth-canvas` | `GAP_UNREACHABLE` | none. Pixels, not nodes — a product decision, not a task |
+| `auth-slowjs` | `GAP_TIMING` | mutation-quiet wait; the target measures **5s** to appear |
+| `auth-inbox` | `GAP_RENDER` | relevance-ranked selection; the target is present and past the budget |
+| `auth-popup`, `auth-tabbed` | `OK` | none — Wave 1/2 problems, as the map already said |
+| `auth-shadow` | `OK` | none — the gap was ours to believe in, not real |
+
+It also settled a CDP detail the 0A design had left open: **`Accessibility.getFullAXTree`
+accepts a `frameId` and reaches cross-origin frame content in-process** (the
+`auth-iframe` probe enumerated 2 frames with zero errors). No target-attach
+dance, and no script executed in a foreign realm.
+
+Every other row in the table still stands, and each now names the stage that
+fails rather than a gap someone inferred from a grep.
+
 
 ## The map
 
@@ -61,7 +85,7 @@ The user research states the category-level version of this: *"any task with log
 
 ### Workstream contents
 
-**0A — Perception hardening.** Shadow DOM (pierce open roots); iframe traversal (same-origin plus cross-origin via the CDP frame tree); `aria-hidden` reconciliation between AX tree and DOM; canvas/image fallback via `Page.captureScreenshot`; virtualized and scroll-loaded content; dynamic stability waits (mutation-quiet period and/or network idle); replace hard truncation with relevance-ranked selection so dense pages are representable.
+**0A — Perception hardening.** Iframe traversal (same-origin plus cross-origin via the CDP frame tree — `getFullAXTree` takes a `frameId` and reads cross-origin frames in-process, measured); `aria-hidden` reconciliation between AX tree and DOM; virtualized and scroll-loaded content; dynamic stability waits (mutation-quiet period and/or network idle); replace hard truncation with relevance-ranked selection so dense pages are representable. **Shadow DOM is not in this list** — it was retracted above. Canvas/image fallback via `Page.captureScreenshot` also stays out: `auth-canvas` measures `GAP_UNREACHABLE`, which is a product decision about whether Brotto takes a vision dependency, not a perception task.
 
 **0B — Benchmark.** A scored set of real chore tasks on real logged-in sites, runnable repeatedly, tracking completion rate, abort rate, step count, and cost per task. Includes a competitor-comparable subset so "beats Operator/Skyvern" is falsifiable rather than asserted.
 

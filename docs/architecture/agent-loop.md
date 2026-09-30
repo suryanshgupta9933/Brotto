@@ -16,6 +16,41 @@ Four things arrive per step. All four were captured and thrown away at some poin
 
 Verified: the "find my most starred repo" task that took 8 steps went to 2 — one navigate to the star-sorted view (discovered from a visible href), then the answer.
 
+### What the AX tree does not contain — measured, not inferred
+
+Everything above describes what we do with the tree we get. Whether the tree
+*has* the control is a separate question, and it is answered by measurement,
+not by reading our own source.
+
+`scripts/probe_perception.py` loads each fixture site in a real Chrome and
+records four routes per target: top-frame `Accessibility.getFullAXTree`, the
+same per frame from `Page.getFrameTree`, a DOM walk that recurses into open
+shadow roots, and whether the target reached the model at all (read from
+`tests/fixtures/baseline.json`). Output is committed to
+`tests/fixtures/perception-probe.json`; `tests/test_perception_probe.py` pins
+the verdicts.
+
+Two results worth carrying into any change here:
+
+- **Shadow DOM is not a gap.** A control inside an *open* shadow root comes
+  back from a plain top-frame `getFullAXTree`. The capability map listed it as
+  its first 0A finding, justified by a repo-wide grep for `shadowRoot`
+  returning nothing — which proved that *our source* has no such identifier and
+  said nothing about Chrome. Retracted 2026-10-01. If you are about to write
+  shadow-DOM traversal, do not: re-run the probe and read it first.
+- **`getFullAXTree` takes a `frameId` and reads cross-origin frames
+  in-process.** The `auth-iframe` probe enumerated 2 frames with zero errors.
+  Traversal is therefore one call per frame, with no target-attach, and
+  critically with no script evaluated in a foreign realm — reading AX nodes and
+  geometry only.
+
+The remaining five fixtures each fail at a *different* stage, which is the
+point of the artifact: `GAP_FRAMES` (iframe), `GAP_ARIA` (present in the DOM,
+dropped from the AX tree by `aria-hidden`), `GAP_UNREACHABLE` (canvas — no
+nodes, no text, a product decision rather than a fix), `GAP_TIMING` (the
+target takes 5s to appear and we read the tree at an arbitrary instant), and
+`GAP_RENDER` (present, in the tree, and past the character budget).
+
 ## Mid-task steering
 
 The only way to redirect a running task was Stop, which discards the transcript. Now the composer stays live while `executing`: it posts `{"type":"steer"}` and the correction lands on the next turn.

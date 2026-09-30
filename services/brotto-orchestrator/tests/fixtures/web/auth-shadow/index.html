@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Brotto fixture — shadow</title></head>
+<body>
+  <h1>Sign in</h1>
+  <form id="login" onsubmit="event.preventDefault();enter()">
+    <label for="u">Email</label><input id="u" type="email">
+    <label for="p">Password</label><input id="p" type="password">
+    <button type="submit">Sign in</button>
+  </form>
+  <div id="host"></div>
+  <script>
+    // The target lives inside an *open* shadow root. Every component library
+    // on the web does this, which is why the capability map lists shadow DOM
+    // as its first 0A gap — but the fixture did not exist, so the claim had
+    // never been measured. It had been justified by a grep of our own source
+    // finding no "shadowRoot" identifier, which says nothing about Chrome.
+    //
+    // mode:'open' is deliberate. A closed root is genuinely unreachable by
+    // design and is a different question; if the probe finds the target
+    // through a plain getFullAXTree here, the gap was ours all along.
+    function enter() {
+      const root = document.getElementById('host').attachShadow({mode: 'open'});
+      root.innerHTML = '<h2>Report</h2><button>Shadowed</button>';
+    }
+  </script>
+</body></html>

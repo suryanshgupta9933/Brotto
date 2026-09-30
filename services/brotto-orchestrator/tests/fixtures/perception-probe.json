@@ -1,0 +1,120 @@
+{
+  "rows": [
+    {
+      "fixture": "auth-iframe",
+      "targets_gap": "iframe",
+      "target_name": "Confirm",
+      "render_delay_ms": null,
+      "obstacles_cleared": [],
+      "frames": 2,
+      "frame_errors": [],
+      "in_ax_tree": false,
+      "in_ax_tree_all_frames": true,
+      "in_pierced_dom": false,
+      "in_rendered_output": false,
+      "verdict": "GAP_FRAMES"
+    },
+    {
+      "fixture": "auth-aria-hidden",
+      "targets_gap": "aria_hidden",
+      "target_name": "Publish",
+      "render_delay_ms": 0,
+      "obstacles_cleared": [],
+      "frames": 1,
+      "frame_errors": [],
+      "in_ax_tree": false,
+      "in_ax_tree_all_frames": false,
+      "in_pierced_dom": true,
+      "in_rendered_output": false,
+      "verdict": "GAP_ARIA"
+    },
+    {
+      "fixture": "auth-canvas",
+      "targets_gap": "canvas",
+      "target_name": "Draw",
+      "render_delay_ms": null,
+      "obstacles_cleared": [],
+      "frames": 1,
+      "frame_errors": [],
+      "in_ax_tree": false,
+      "in_ax_tree_all_frames": false,
+      "in_pierced_dom": false,
+      "in_rendered_output": false,
+      "verdict": "GAP_UNREACHABLE"
+    },
+    {
+      "fixture": "auth-slowjs",
+      "targets_gap": "slow_js",
+      "target_name": "Loaded",
+      "render_delay_ms": 5000,
+      "obstacles_cleared": [],
+      "frames": 1,
+      "frame_errors": [],
+      "in_ax_tree": true,
+      "in_ax_tree_all_frames": true,
+      "in_pierced_dom": true,
+      "in_rendered_output": false,
+      "verdict": "GAP_TIMING"
+    },
+    {
+      "fixture": "auth-inbox",
+      "targets_gap": "truncation",
+      "target_name": "Message 400",
+      "render_delay_ms": 0,
+      "obstacles_cleared": [],
+      "frames": 1,
+      "frame_errors": [],
+      "in_ax_tree": true,
+      "in_ax_tree_all_frames": true,
+      "in_pierced_dom": true,
+      "in_rendered_output": false,
+      "verdict": "GAP_RENDER"
+    },
+    {
+      "fixture": "auth-popup",
+      "targets_gap": "popup",
+      "target_name": "Delete account",
+      "render_delay_ms": 0,
+      "obstacles_cleared": [
+        "Accept"
+      ],
+      "frames": 1,
+      "frame_errors": [],
+      "in_ax_tree": true,
+      "in_ax_tree_all_frames": true,
+      "in_pierced_dom": true,
+      "in_rendered_output": true,
+      "verdict": "OK"
+    },
+    {
+      "fixture": "auth-tabbed",
+      "targets_gap": "tabbed",
+      "target_name": "Restore Draft",
+      "render_delay_ms": 0,
+      "obstacles_cleared": [
+        "Archived"
+      ],
+      "frames": 1,
+      "frame_errors": [],
+      "in_ax_tree": true,
+      "in_ax_tree_all_frames": true,
+      "in_pierced_dom": true,
+      "in_rendered_output": true,
+      "verdict": "OK"
+    },
+    {
+      "fixture": "auth-shadow",
+      "targets_gap": "shadow_dom",
+      "target_name": "Shadowed",
+      "render_delay_ms": 0,
+      "obstacles_cleared": [],
+      "frames": 1,
+      "frame_errors": [],
+      "in_ax_tree": true,
+      "in_ax_tree_all_frames": true,
+      "in_pierced_dom": true,
+      "in_rendered_output": null,
+      "verdict": "OK"
+    }
+  ]
+}

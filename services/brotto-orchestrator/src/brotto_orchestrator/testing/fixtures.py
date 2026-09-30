@@ -33,6 +33,8 @@ FIXTURES: list[FixtureDef] = [
                target_name="Delete account", targets_gap="popup"),
     FixtureDef(name="auth-tabbed", path="/auth-tabbed/", port=MAIN_PORT,
                target_name="Restore Draft", targets_gap="tabbed"),
+    FixtureDef(name="auth-shadow", path="/auth-shadow/", port=MAIN_PORT,
+               target_name="Shadowed", targets_gap="shadow_dom"),
 ]
 
 _BY_NAME = {f.name: f for f in FIXTURES}

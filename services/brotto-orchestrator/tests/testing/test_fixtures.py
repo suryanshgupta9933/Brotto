@@ -16,10 +16,11 @@ EXPECTED = {
     "auth-inbox": "truncation",
     "auth-popup": "popup",
     "auth-tabbed": "tabbed",
+    "auth-shadow": "shadow_dom",
 }
 
 
-def test_all_seven_fixtures_registered():
+def test_all_fixtures_registered():
     assert {f.name for f in FIXTURES} == set(EXPECTED)
 
 

@@ -259,11 +259,14 @@ that was workstream 0C and it shipped.
 What is new:
 
 **The probe** (Task 1) is a new script, `scripts/probe_perception.py`, which loads each
-fixture in the real-extension browser harness and records per gap: node present in the
-AX tree? present in the pierced DOM? present in the rendered output? Its output is a
+fixture in a real Chrome and records per gap: present in the top-frame AX tree? in any
+frame's? in the pierced DOM? and how long the target took to appear. Its output is a
 committed artifact, `tests/fixtures/perception-probe.json`, because it is what the
-remaining tasks are ordered against. If shadow DOM comes back "already present", the
-map's headline 0A finding is corrected in the same commit and no shadow work is built.
+remaining tasks are ordered against. It shipped, and it came back **against the map on
+its headline finding**: shadow DOM is `OK`, so no shadow work is built and the map's
+first 0A row is retracted. The remaining five fixtures each resolve to one stage of the
+pipeline above — `GAP_FRAMES`, `GAP_ARIA`, `GAP_UNREACHABLE`, `GAP_TIMING`,
+`GAP_RENDER` — and no two share a cause.
 
 **Each fix is written failing-first against its fixture**, in the existing style, and the
 baseline is re-recorded only after the fixtures it changes are green — the fixtures README
@@ -286,13 +289,21 @@ and only via the probe and the fixtures.
 ## Open items for the successor
 
 - **Canvas.** A canvas-rendered UI has no accessibility nodes and no text, by
-  construction. The honest options are a vision fallback (abandons the "AX tree, no
-  vision model" position that is on the moat list in `brotto-current-state.md`, and costs
-  tokens per observation) or telling the model plainly that the page renders via canvas
-  and the named control was not found. The probe will show whether `auth-canvas` has an
-  a11y mirror, which is common in practice and would make this free. **This is a product
-  decision, not a task in a list**, and it is deliberately left open here.
-- **Whether `getFullAXTree` takes a `frameId`** — resolved empirically by the probe, and
-  it decides whether Task 4 is one call per frame or a target-attach dance.
-- **Whether the pierced DOM's `backendNodeId` space matches `getFullAXTree`'s** — same.
-  If it does not, the bulk-geometry plan needs a different join key and Task 5 grows.
+  construction. The probe measured it: `auth-canvas` is `GAP_UNREACHABLE`, so there is
+  no a11y mirror to be had for free. The honest options are a vision fallback (abandons
+  the "AX tree, no vision model" position that is on the moat list in
+  `brotto-current-state.md`, and costs tokens per observation) or telling the model
+  plainly that the page renders via canvas and the named control was not found. **This
+  is a product decision, not a task in a list**, and it is deliberately left open here.
+- ~~**Whether `getFullAXTree` takes a `frameId`**~~ — **answered by the probe.** It does,
+  and cross-origin frame content comes back in-process: the `auth-iframe` probe
+  enumerated 2 frames with zero errors and found "Confirm" in a subframe's AX tree. Task
+  4 is one call per frame — no target-attach dance, and no script evaluated in a foreign
+  realm, so the sharpest constraint in the Security section costs nothing.
+- ~~**Whether shadow DOM is a 0A gap**~~ — **answered, and it is not.** `auth-shadow`
+  comes back from a plain top-frame `getFullAXTree`. The capability map's headline 0A
+  finding is retracted in the same commit; see the table in
+  `2026-09-28-capability-map-design.md`.
+- **Whether the pierced DOM's `backendNodeId` space matches `getFullAXTree`'s** — still
+  open; the probe does not test it. If it does not, the bulk-geometry plan needs a
+  different join key and Task 5 grows.
