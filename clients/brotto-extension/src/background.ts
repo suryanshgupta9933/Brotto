@@ -35,6 +35,10 @@ let activeWindowId: number | null = null;
 let tabStack: number[] = []; // opener history for back-navigation
 let sessionId: string | null = null;
 let serverUrl: string = DEFAULT_SERVER;
+// The task currently being driven, kept so a reconnect can re-send task_start
+// without the panel having to be open. Module state, not storage.session:
+// a service-worker restart drops the in-flight run anyway.
+let currentGoal = "";
 let taskTerminalEmitted = false;
 let stepIndex = 0;
 // ponytail: distinguish "task running, server died" from "task finished
@@ -99,7 +103,8 @@ let lastObservedUrl = "";
 
 // User-side policy: persisted in chrome.storage.local (settings key) and
 // refreshed in-memory on `policy_changed` from the sidepanel. Sent as
-// `user_policy` on each task_start; the server merges with the floor.
+// `user_policy` on each task_start. It is the whole policy — the server has
+// no operator-set floor to merge into it.
 // ponytail: write-on-save only — no debounce, no reactivity layer.
 // ponytail: whitelist was removed in the enterprise redesign — secure
 // mode now means "hard-block blacklisted + first-time-seen prompts on
@@ -608,80 +613,155 @@ function sendObservationError(reason: string): void {
 
 // ── Main relay ───────────────────────────────────────────────────────────────
 
-async function startRelay(goal: string, plannerUrl: string, startingUrl?: string): Promise<void> {
-  serverUrl = plannerUrl;
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const activeTab = tabs[0];
+// ponytail: reconnect instead of dropping the run. A live task whose socket
+// dies is not lost — the server holds the run in its audit document and
+// picks it up at the last completed step when the same session_id comes
+// back. Full jitter over a plain exponential, so a fleet of clients that all
+// lost the same server doesn't retry in lockstep and knock it over again on
+// the way up. Ceiling: the attempts are not rescheduled past
+// RECONNECT_MAX_ATTEMPTS; past that the run ends as connection-lost.
+const RECONNECT_MAX_ATTEMPTS = 6;
+const RECONNECT_BASE_MS = 1_000;
+const RECONNECT_CAP_MS = 30_000;
 
-  let tab: chrome.tabs.Tab;
-  let needsNavigate = !!startingUrl;
+let reconnectAttempt = 0;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  if (activeTab?.id && activeTab.url && /^https?:\/\//i.test(activeTab.url)) {
-    tab = activeTab;
-  } else {
-    // Non-HTTP tab (chrome://, about:blank, etc.) — open a new one
-    const initialUrl = startingUrl ?? "https://www.google.com";
-    tab = await chrome.tabs.create({ url: initialUrl, active: true });
-    await sleep(1500);
-    needsNavigate = false; // already at startingUrl (or google as default)
+function cancelReconnect(): void {
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   }
+  reconnectAttempt = 0;
+}
 
-  if (!tab.id) throw new Error("No usable tab");
-  activeTabId = tab.id;
-  lastKnownTabId = tab.id;
-  activeWindowId = tab.windowId ?? null;
-  tabStack    = [];
-  stepIndex   = 0;
-  noTabWarned = false;
-  void persistSession();
-
-  // Re-query to get live title — the tab object from create/query may be stale
-  const liveTab = await chrome.tabs.get(tab.id);
-  notifyUi({ type: "tab_event", event: { kind: "focused", tabId: tab.id, url: liveTab.url ?? tab.url ?? "", title: liveTab.title ?? tab.title ?? "" } });
-
-  await dbg.attachToTab(tab.id);
-  await dbg.sendCommand(tab.id, { method: "Page.enable" });
-
-  if (needsNavigate && startingUrl) {
-    await dbg.sendCommand(tab.id, { method: "Page.navigate", params: { url: startingUrl } });
-    await sleep(1500);
-    notifyUi({ type: "tab_event", event: { kind: "opened", tabId: tab.id, url: startingUrl, title: startingUrl } });
-  }
-
-  // Create orchestrator session. This is the one call that fails when the
-  // server is down, so the retry lives here rather than in a reconnect
-  // probe: a probe's socket would be overwritten by the `new WebSocket`
-  // below and never carry a task_start, so it could not serve the next task.
-  let session: { session_id: string; websocket_url: string } | null = null;
-  for (let attempt = 1; attempt <= SESSION_ATTEMPTS; attempt++) {
-    if (attempt > 1) {
-      notifyUi({ type: "server_unreachable", attempt, of: SESSION_ATTEMPTS });
-      await sleep(SESSION_RETRY_MS);
-    }
-    try {
-      const resp = await fetch(`${serverUrl}/v1/sessions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
+/**
+ * Reconnect the live run, or report that we are out of attempts.
+ *
+ * Returns true when a retry is scheduled — the caller must then leave the
+ * tab, the debugger session and the session id exactly as they are, since
+ * the resumed run needs all three.
+ */
+function scheduleReconnect(): boolean {
+  if (reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) return false;
+  reconnectAttempt += 1;
+  const ceiling = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** (reconnectAttempt - 1));
+  const delay = Math.floor(Math.random() * ceiling);
+  notifyUi({ type: "server_unreachable", attempt: reconnectAttempt, of: RECONNECT_MAX_ATTEMPTS });
+  console.warn(`[brotto] socket lost mid-task — reconnect attempt ${reconnectAttempt}/${RECONNECT_MAX_ATTEMPTS} in ${delay}ms`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void startRelay(currentGoal, serverUrl, undefined, { resume: true })
+      .catch((err: unknown) => {
+        // A socket that was never built raises here instead of firing
+        // onclose, so this is the only place that path gets a retry.
+        console.warn("[brotto] reconnect attempt threw:", err);
+        scheduleReconnect();
       });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      session = await resp.json() as { session_id: string; websocket_url: string };
-      break;
-    } catch (err) {
-      console.warn(`[brotto] session create attempt ${attempt}/${SESSION_ATTEMPTS} failed:`, err);
-    }
-  }
-  if (!session) throw new Error(`Can't reach ${serverUrl} after ${SESSION_ATTEMPTS} attempts. Is the server running?`);
-  const { session_id, websocket_url } = session;
-  sessionId = session_id;
-  observationSeq = 0;
-  attachSessionIdToPanelLog(session_id);
+  }, delay);
+  return true;
+}
 
-  const wsUrl = websocket_url.startsWith("ws") ? websocket_url : websocket_url.replace(/^http/, "ws");
+async function startRelay(
+  goal: string,
+  plannerUrl: string,
+  startingUrl?: string,
+  opts: { resume?: boolean } = {},
+): Promise<void> {
+  serverUrl = plannerUrl;
+  currentGoal = goal;
+  let session_id: string;
+  let wsUrl: string;
+
+  if (opts.resume && sessionId !== null && activeTabId !== null) {
+    // Same tab, same session, by construction. Minting a new session here
+    // would make the reconnect a *second* task rather than a continuation
+    // of the first, and re-picking the tab could aim the resumed run at a
+    // different one than the one it had already been driving.
+    session_id = sessionId;
+    wsUrl = `${serverUrl.replace(/^http/, "ws")}/ws/ext/${session_id}`;
+  } else {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const activeTab = tabs[0];
+
+    let tab: chrome.tabs.Tab;
+    let needsNavigate = !!startingUrl;
+
+    if (activeTab?.id && activeTab.url && /^https?:\/\//i.test(activeTab.url)) {
+      tab = activeTab;
+    } else {
+      // Non-HTTP tab (chrome://, about:blank, etc.) — open a new one
+      const initialUrl = startingUrl ?? "https://www.google.com";
+      tab = await chrome.tabs.create({ url: initialUrl, active: true });
+      await sleep(1500);
+      needsNavigate = false; // already at startingUrl (or google as default)
+    }
+
+    if (!tab.id) throw new Error("No usable tab");
+    activeTabId = tab.id;
+    lastKnownTabId = tab.id;
+    activeWindowId = tab.windowId ?? null;
+    tabStack    = [];
+    stepIndex   = 0;
+    noTabWarned = false;
+    void persistSession();
+
+    // Re-query to get live title — the tab object from create/query may be stale
+    const liveTab = await chrome.tabs.get(tab.id);
+    notifyUi({ type: "tab_event", event: { kind: "focused", tabId: tab.id, url: liveTab.url ?? tab.url ?? "", title: liveTab.title ?? tab.title ?? "" } });
+
+    await dbg.attachToTab(tab.id);
+    await dbg.sendCommand(tab.id, { method: "Page.enable" });
+
+    if (needsNavigate && startingUrl) {
+      await dbg.sendCommand(tab.id, { method: "Page.navigate", params: { url: startingUrl } });
+      await sleep(1500);
+      notifyUi({ type: "tab_event", event: { kind: "opened", tabId: tab.id, url: startingUrl, title: startingUrl } });
+    }
+
+    // Create orchestrator session. This is the one call that fails when the
+    // server is down, so the retry lives here rather than in a reconnect
+    // probe: a probe's socket would be overwritten by the `new WebSocket`
+    // below and never carry a task_start, so it could not serve the next task.
+    let session: { session_id: string; websocket_url: string } | null = null;
+    for (let attempt = 1; attempt <= SESSION_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        notifyUi({ type: "server_unreachable", attempt, of: SESSION_ATTEMPTS });
+        await sleep(SESSION_RETRY_MS);
+      }
+      try {
+        const resp = await fetch(`${serverUrl}/v1/sessions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        session = await resp.json() as { session_id: string; websocket_url: string };
+        break;
+      } catch (err) {
+        console.warn(`[brotto] session create attempt ${attempt}/${SESSION_ATTEMPTS} failed:`, err);
+      }
+    }
+    if (!session) throw new Error(`Can't reach ${serverUrl} after ${SESSION_ATTEMPTS} attempts. Is the server running?`);
+    session_id = session.session_id;
+    sessionId = session_id;
+    // Monotonic per session, and the server's tracker is per session too —
+    // so this resets only when a NEW session is minted. On a reconnect the
+    // sequence must keep climbing or every observation is a duplicate of one
+    // the server already accepted.
+    observationSeq = 0;
+    attachSessionIdToPanelLog(session_id);
+    wsUrl = session.websocket_url.startsWith("ws")
+      ? session.websocket_url
+      : session.websocket_url.replace(/^http/, "ws");
+  }
+
   ws = new WebSocket(wsUrl);
 
   ws.onopen = async () => {
     startHeartbeat();
+    // The socket is back: the backoff cycle is over.
+    reconnectAttempt = 0;
     // Without this the socket is open, nothing is sent, and the run is
     // invisible: the server never receives a task_start, so it never asks for
     // an observation, so the panel shows a spinner with no task under it.
@@ -937,6 +1017,10 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
   ws.onerror = (ev: Event) => {
     const detail = (ev as ErrorEvent).message || "WebSocket connection error";
     console.error("[brotto] websocket error:", detail, ev);
+    // A failed reconnect attempt is not a failed task. End-of-run lives on
+    // the close handler, which owns the retry; failing the run here would
+    // kill the task over a blip the backoff was built to ride out.
+    if (reconnectAttempt > 0) return;
     if (!taskTerminalEmitted) {
       taskTerminalEmitted = true;
       taskInFlight = false;
@@ -948,7 +1032,15 @@ async function startRelay(goal: string, plannerUrl: string, startingUrl?: string
     }
   };
 
-  ws.onclose = () => { void cleanup(); };
+  ws.onclose = () => {
+    // A run that is still live when its socket dies is the reconnect case,
+    // not a lost task. `taskTerminalEmitted` is set by stopRelay and by the
+    // cancel handler BEFORE either closes the socket, so a stopped or
+    // cancelled task never reaches here — a cancelled task must not come
+    // back, and the backoff is the thing that would bring it back.
+    if (taskInFlight && !taskTerminalEmitted && scheduleReconnect()) return;
+    void cleanup();
+  };
 }
 
 async function cleanup(): Promise<void> {
@@ -996,6 +1088,9 @@ async function cleanup(): Promise<void> {
 
 function stopRelay(): void {
   taskTerminalEmitted = true;
+  // A pending reconnect is a run about to come back from the dead. The user
+  // just said stop; drop it on the floor.
+  cancelReconnect();
   ws?.close();
   ws = null;
   const tid = activeTabId;
@@ -1018,6 +1113,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             sendResponse({ success: false, error: "A task is already running" });
             return;
           }
+          // A new task supersedes any reconnect still in backoff — otherwise
+          // that timer fires mid-run and re-connects the *old* session over
+          // the new one.
+          cancelReconnect();
           taskTerminalEmitted = false;
           // ponytail: mark a task as in-flight so cleanup() knows the lost
           // socket cost the user a running task, not a clean ending.
@@ -1073,6 +1172,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         case "cancel_local_task": {
+          // Say goodbye before the socket goes. The server sees a closed
+          // socket for a cancel and for the server dying, and only one of
+          // those two may be resumed — so the intent travels as a frame
+          // rather than being inferred from the disconnect.
+          if (ws?.readyState === WebSocket.OPEN) {
+            try { ws.send(JSON.stringify({ type: "cancel" })); } catch { /* ignore */ }
+          }
           taskTerminalEmitted = true;
           taskInFlight = false;
           stopRelay();

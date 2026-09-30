@@ -34,7 +34,9 @@ from .guardrails import check_login_page, check_critical_action, check_sensitive
 from ..policy.gate import GateDecision, check_domain_policy, check_first_time_seen
 from ..policy.domains import etld1
 from .prompt import SYSTEM_PROMPT, secure_mode_preamble
-from .audit import AuditTrail, REDACTED, is_secret_field, load_scratchpad
+from .audit import (
+    SCHEMA_VERSION, AuditTrail, REDACTED, is_secret_field, load_scratchpad, read,
+)
 
 _HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
 
@@ -959,10 +961,160 @@ async def _plan_step(
     return decision, context_window, result
 
 
+# A document in one of these states describes a run that is over. Resuming
+# one is the same mistake as re-running an approved action: the user already
+# got their answer, or already stopped the thing.
+_TERMINAL_DOC_STATUSES = {
+    "completed", "failed", "awaiting_human", "stagnated", "cancelled",
+}
+
+
+def _resume_state(session_id: str) -> dict:
+    """Rebuild this session's history from its own audit document.
+
+    The loop is stateless per step — `agent.run` is handed a freshly built
+    prompt and no message_history — so `step_summaries` and `scratchpad`
+    ARE the model's entire history, and the document holds both. That is
+    what makes resume sound rather than a guess.
+
+    Only turns that ENDED are history. A turn in flight when the socket
+    died describes actions that may or may not have run, so it is re-run
+    from scratch rather than half-recorded — an action the user approved
+    but that never executed must not look like it did.
+
+    Returns {doc, summaries, visited, first_step, why}. A non-empty `why`
+    means the document cannot be trusted: the caller must report the
+    session as interrupted rather than run it again from step 0.
+    """
+    doc = read(session_id)
+    if not doc.get("found"):
+        return {"doc": None, "summaries": [], "visited": set(),
+                "first_step": 0, "why": ""}
+    if doc.get("corrupt"):
+        return {"doc": doc, "summaries": [], "visited": set(), "first_step": 0,
+                "why": "the audit document could not be parsed"}
+    if doc.get("schema_version") != SCHEMA_VERSION:
+        return {"doc": doc, "summaries": [], "visited": set(), "first_step": 0,
+                "why": (f"the audit document is schema_version "
+                        f"{doc.get('schema_version')!r}, this server writes "
+                        f"{SCHEMA_VERSION}")}
+    if doc.get("status") in _TERMINAL_DOC_STATUSES:
+        return {"doc": doc, "summaries": [], "visited": set(), "first_step": 0,
+                "why": f"the run already ended ({doc.get('status')})"}
+
+    completed = [t for t in (doc.get("turns") or [])
+                 if t.get("ended_at") is not None]
+    if not completed:
+        # Nothing completed means nothing approved has been re-run, so a
+        # fresh start is a start, not a replay.
+        return {"doc": doc, "summaries": [], "visited": set(),
+                "first_step": 0, "why": ""}
+
+    summaries: list[StepSummary] = []
+    for turn in completed:
+        actions = turn.get("actions") or []
+        outcomes = "; ".join(str(a.get("outcome") or "") for a in actions)
+        summaries.append(StepSummary(
+            step=int(turn.get("step", 0)),
+            url=str((turn.get("observation") or {}).get("url") or ""),
+            # Tool names, not the live path's scrubbed trace strings. The
+            # history line is read by the model, not by a human, and the
+            # document is what survived the crash.
+            action_taken="; ".join(str(a.get("action") or "?") for a in actions)
+                         or "no action",
+            outcome=outcomes[:120] or "no action",
+        ))
+    # Only domains the user APPROVED get into visited_domains on the live
+    # path, so only those are restored — re-adding a domain they never
+    # approved would skip the prompt that exists to ask them.
+    visited = {
+        e["domain"] for e in (doc.get("policy_events") or [])
+        if e.get("kind") == "first_navigation"
+        and e.get("user_decision") == "approved" and e.get("domain")
+    }
+    return {"doc": doc, "summaries": summaries, "visited": visited,
+            "first_step": int(completed[-1].get("step", 0)) + 1, "why": ""}
+
+
+def _adopt_document(audit: AuditTrail, doc: dict) -> None:
+    """Carry a previous run's record into a fresh trail.
+
+    AuditTrail always opens an empty document, so without this a resume
+    truncates the record at the reconnect — `GET /v1/sessions/{id}/audit`
+    would show a run whose first turn is step 7 with nothing before it.
+
+    The whole previous document rather than a named list of fields: the
+    list is a list that has to be extended every time the schema grows,
+    and each omission is a silently lost key. `status` is the one field the
+    fresh document owns, because the run is live again by the time this
+    is called.
+    """
+    previous = audit._doc  # noqa: SLF001 — audit.py exposes no adopt path
+    status = previous["status"]
+    audit._doc.clear()
+    audit._doc.update(doc)
+    audit._doc["status"] = status
+    # `read` adds a lookup hint that is not part of the written shape.
+    audit._doc.pop("found", None)
+    audit._doc.pop("corrupt", None)
+    # A document this server did not write — a hand-edited file, or one from
+    # a schema version whose collections are named differently — may be
+    # missing the lists the record methods append to. Creating them here is
+    # cheaper than a KeyError on the first write, and the audit never
+    # raises into the loop.
+    for key in ("turns", "prompts", "actions", "policy_events", "errors"):
+        audit._doc.setdefault(key, [])
+    audit._doc.setdefault("totals", {})
+
+
+# Sessions the user explicitly stopped. A cancel reaches the server as a
+# closed socket, which is indistinguishable from the server dying, and only
+# one of those two may be resumed — so the client says which it was over a
+# `cancel` frame instead of the server guessing from the disconnect.
+# ponytail: a set of session ids, one entry per cancel, consumed by the
+# sealing callback. Upgrade path if this ever grows unbounded: store the
+# flag on the session registry instead.
+_USER_CANCELLED: set[str] = set()
+
+
+def mark_cancelled(task_id: str) -> None:
+    """Record that the user stopped this task, so it is never resumed."""
+    _USER_CANCELLED.add(task_id)
+
+
+def _seal_if_cancelled(audit: AuditTrail):
+    """Seal a user-cancelled run as `cancelled`, not `running`.
+
+    Installed as a done-callback rather than an `except` around the loop:
+    every terminal path out of the loop is a `return`, and re-indenting 500
+    lines to add a handler buys nothing. The flag above is what separates
+    "the user stopped this" from "the socket died and this can be picked
+    back up" — a document left reading `running` after a stop is the one
+    thing a later reconnect would happily resume.
+
+    The open turn is deliberately left open. It really did not finish, and
+    an open turn is what a crashed run looks like — the status is what
+    separates the two.
+    """
+
+    def _done(task: asyncio.Task) -> None:
+        if not task.cancelled():
+            return  # already sealed by a normal return
+        if audit.session_id not in _USER_CANCELLED:
+            return  # a dropped socket, not a stop — resume it
+        _USER_CANCELLED.discard(audit.session_id)
+        log.warning("[audit] task cancelled by the user — sealing %s",
+                    audit.session_id)
+        audit.set_status("cancelled")
+        audit.close()
+
+    return _done
+
+
 class AgentHarness:
     MAX_STEPS = 30
 
-    async def run(self, deps: AgentDeps) -> TaskResult:
+    async def run(self, deps: AgentDeps, *, resume_from: int = 0) -> TaskResult:
         timings: dict[str, float] = {b: 0.0 for b in TIMING_BUCKETS}
         # Snapshot of `timings` taken at the start of each step iteration —
         # lets us report a per-step breakdown without instrumenting every
@@ -988,13 +1140,65 @@ class AgentHarness:
 
         if not deps.task_id:
             deps.task_id = str(uuid.uuid4())
+
+        # Resume. A reconnect for a live session_id re-enters run() with the
+        # same document on disk; without this the task starts again at step 0
+        # and re-runs actions the user already approved.
+        #
+        # Read BEFORE the trail is built: its first flush (set_goal, below)
+        # rewrites the file, and a resume that read it afterwards would find
+        # its own empty document and conclude there is nothing to resume.
+        state = _resume_state(deps.task_id)
+        first_step = max(resume_from, state["first_step"])
+
         audit = AuditTrail(deps.task_id)
+        _task = asyncio.current_task()
+        if _task is not None:
+            _task.add_done_callback(_seal_if_cancelled(audit))
         # Index of the current step's turn in the audit document, -1 before
         # the first begin_turn. Every audit call takes it; -1 means "no turn
         # yet", which record_prompt/record_action drop rather than guess at.
         a_turn = -1
 
+        # Adopt before the first flush, so the file is never briefly truncated
+        # at the reconnect point. Gated on "there is a document" and not "there
+        # is something to resume": a run that already ended still has to keep
+        # its turns when the refusal below is recorded on top of it.
+        if state["doc"] and not state["doc"].get("corrupt"):
+            _adopt_document(audit, state["doc"])
+        if state["summaries"]:
+            deps.step_summaries.extend(state["summaries"])
+            deps.visited_domains |= state["visited"]
+            log.info("[%s] resuming at step %d  summaries=%d  domains=%d",
+                     deps.user_id, first_step, len(state["summaries"]),
+                     len(state["visited"]))
+
+        # A document we cannot resume from is reported, never silently run
+        # again: a fresh run would re-do work the user already approved.
+        # Ahead of set_goal, because set_goal is this trail's first flush and
+        # that flush overwrites the file.
+        if state["why"]:
+            log.error("[%s] cannot resume: %s", deps.user_id, state["why"])
+            if state["doc"] and not state["doc"].get("corrupt"):
+                audit.record_error(code="resume_refused", where="run",
+                                   message=state["why"])
+                audit.set_status("interrupted")
+                audit.close()
+            # A corrupt document is left exactly as found. Rewriting it would
+            # replace the only copy of a broken run with a valid empty one,
+            # and the corruption is the thing a human would need to see.
+            return TaskResult(
+                status="failed",
+                summary=f"Interrupted: {state['why']}.",
+                failure_reason="resume_unavailable",
+                policy_mode=_policy_mode(deps),
+                # No step ran, so this is the same pre-observe "" the CDP
+                # preflight return carries.
+                final_url=deps.step_url,
+            )
+
         audit.set_goal(deps.task)
+
         if deps.policy is not None:
             # The effective policy in force for the whole task, once.
             audit.set_policy(deps.policy.model_dump()
@@ -1016,7 +1220,7 @@ class AgentHarness:
         if loaded.entries or loaded.notes:
             deps.scratchpad = loaded
 
-        for step in range(self.MAX_STEPS):
+        for step in range(first_step, self.MAX_STEPS):
             deps.step_number = step
             # Close the previous turn here rather than at each exit: every
             # path that skips the bottom of the loop is a `continue`, and

@@ -49,7 +49,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .agent.context import AgentDeps
-from .agent.harness import AgentHarness
+from .agent.harness import AgentHarness, mark_cancelled
 from .cdp.relay import CDPRelay
 from .cdp.extension_relay import ExtensionCDPRelay
 from .cdp.watchdog import CDPWatchdog
@@ -514,6 +514,40 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         await websocket.close(code=4000)
         return
 
+    # One agent per live session. This handler starts a harness per accepted
+    # socket, so a second socket for a session whose agent is still running
+    # would put two agents on one browser — two agents, one tab, each with
+    # half the page and both able to click the thing the other is clicking.
+    #
+    # A task that is already unwinding does not count: the reconnect that
+    # beats its own socket's teardown is the ordinary case, not an attack,
+    # and refusing it would kill the one run that was recoverable.
+    _state = registry.get_or_create(session_id)
+    _live = _state.current_task
+    if (_live is not None and not _live.done() and not _live.cancelling()):
+        log.error(
+            "[%s] task_start while an agent is already running — refused",
+            session_id,
+        )
+        from .agent.audit import append_policy_event
+        append_policy_event(
+            session_id, step=None, kind="duplicate_task_start",
+            domain=None, action=None,
+            decision="refused: an agent is already driving this session",
+        )
+        await ws_send({
+            "type": "task_failed",
+            "status": "interrupted",
+            "failure_reason": "duplicate_task_start",
+            "summary": (
+                "Refused: this session already has a running agent. "
+                "Starting a second one would put two agents on one browser."
+            ),
+        })
+        await ws_send({"type": "canonical_status", "status": "interrupted"})
+        await websocket.close(code=4009)
+        return
+
     eval_queue: asyncio.Queue = asyncio.Queue()
     relay = ExtensionCDPRelay(ws_send, obs_queue, eval_queue, session_id)
 
@@ -663,6 +697,15 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                 elif t == "human_reply":
                     log.info("[%s] ← human_reply", session_id)
                     await human_queue.put(incoming.get("content", ""))
+                elif t == "cancel":
+                    # The user stopped the task. Nothing else here can tell a
+                    # cancel from a dropped socket — the socket closes either
+                    # way — and only one of the two may be resumed, so the
+                    # client says which. Consumed by the harness's sealing
+                    # callback; this frame is not an answer to anything.
+                    log.warning("[%s] ← cancel (user stopped the task)",
+                                session_id)
+                    mark_cancelled(session_id)
                 elif t == "steer":
                     # A distinct type, not human_reply. That one means "reply
                     # to a prompt that is currently outstanding" and its
