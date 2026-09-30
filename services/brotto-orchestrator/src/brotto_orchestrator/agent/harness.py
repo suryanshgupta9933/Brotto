@@ -67,6 +67,38 @@ _INTERNAL_ACTIONS = {
 }
 # Actions that short-circuit the rest of the multi-action list.
 _TERMINAL_ACTIONS = {"task_complete", "cannot_complete"}
+
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r"}
+
+
+def _unescape(text: str) -> str:
+    """Turn literal backslash-escapes in model prose into real characters.
+
+    MiniMax-M3 double-escapes: it writes `\\n` inside a JSON string argument,
+    so the value decodes to a backslash followed by 'n' rather than a newline.
+    Measured on a completed job-alerts run — the task_complete summary and an
+    append_scratchpad line both arrived holding literal escapes, and the panel
+    rendered them verbatim as one wall of text. The thoughts on those same turns
+    were clean, so this is the model writing JSON-shaped prose inside a string
+    it was already inside.
+
+    Fixed here rather than in the panel because the damage is not only visual:
+    append_scratchpad feeds the agent's own memory, so a later step reading its
+    notes back sees the escapes too.
+    """
+    if "\\" not in text:
+        return text
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text) and text[i + 1] in _ESCAPES:
+            out.append(_ESCAPES[text[i + 1]])
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 # ponytail: ask_human is metadata too — it pauses for user input but the
 # user is not "approving" an agent action, they're answering a question.
 # Card UI is different (no Approve/Deny buttons).
@@ -913,11 +945,11 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             return f"Element matching '{desc}' not found in {len(targets)} targets"
 
         elif action == "append_scratchpad":
-            deps.scratchpad = deps.scratchpad.append_note(args.get("line", ""))
+            deps.scratchpad = deps.scratchpad.append_note(_unescape(args.get("line", "")))
             return "Memory note appended"
 
         elif action == "write_scratchpad":
-            deps.scratchpad = deps.scratchpad.write_notes(args.get("content", ""))
+            deps.scratchpad = deps.scratchpad.write_notes(_unescape(args.get("content", "")))
             return "Memory notes rewritten"
 
         elif action == "read_scratchpad":
@@ -1002,7 +1034,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
         elif action == "task_complete":
             deps.result = TaskResult(
                 status="completed",
-                summary=args.get("summary", ""),
+                summary=_unescape(args.get("summary", "")),
                 extracted_data=args.get("extracted_data"),
                 steps_taken=deps.step_number,
                 policy_mode=_policy_mode(deps),
@@ -1010,7 +1042,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             return "Task complete"
 
         elif action == "cannot_complete":
-            reason = args.get("reason", "") or ""
+            reason = _unescape(args.get("reason", "") or "")
             tried = args.get("tried", [])
             # ponytail: in secure mode, if the agent declines upfront
             # (the preamble told it to), surface it as a POLICY PREFLIGHT

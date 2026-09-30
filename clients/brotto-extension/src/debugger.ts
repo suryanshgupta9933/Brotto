@@ -156,15 +156,46 @@ export function getDebuggerUrl(tabId: number): string {
 }
 
 /**
- * Check if debugger is attached to a specific tab
+ * Is the debugger really attached to this tab?
+ *
+ * Asks Chrome, not DEBUGGER_TARGETS. That map is our own record of what we
+ * did, and it dies with the service worker — so after any SW restart it
+ * reports "not attached" for a tab Chrome is in fact driving, and "attached"
+ * is equally unprovable. getTargets() is the only source of truth here, and
+ * it was exported with no caller until the task preflight needed it.
  */
-export function isAttached(tabId: number): boolean {
-  for (const session of DEBUGGER_TARGETS.values()) {
-    if (session.tabId === tabId) {
-      return true;
-    }
+export async function isAttached(tabId: number): Promise<boolean> {
+  const targets = await getTargets();
+  return targets.some((t) => t.tabId === tabId && t.attached);
+}
+
+/**
+ * Make a tab usable for driving, and report whether that was possible.
+ *
+ * "gone" is a real answer and not a failure: the tab was closed, and the
+ * caller's response is to pick a different one, which is why this returns
+ * rather than throwing.
+ */
+export async function ensureAttached(tabId: number): Promise<"attached" | "gone"> {
+  try {
+    await chrome.tabs.get(tabId);
+  } catch {
+    return "gone";
   }
-  return false;
+
+  if (await isAttached(tabId)) return "attached";
+
+  try {
+    await attachToTab(tabId);
+    await rawSendCommand(tabId, { method: "Page.enable" });
+    return "attached";
+  } catch (err) {
+    // A tab that exists but will not take a debugger — chrome:// and the
+    // Chrome Web Store block it. Same shape as gone for the caller's
+    // purposes: this tab cannot be driven, so pick another.
+    console.warn(`[brotto] cannot attach to tab ${tabId}:`, err);
+    return "gone";
+  }
 }
 
 /**
