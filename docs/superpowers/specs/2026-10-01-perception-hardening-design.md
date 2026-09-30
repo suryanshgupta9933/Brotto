@@ -342,13 +342,17 @@ and only via the probe and the fixtures.
 
 ## Open items for the successor
 
-- **Canvas.** A canvas-rendered UI has no accessibility nodes and no text, by
+- ~~**Canvas.**~~ — **Decided 2026-10-01: report the limitation, do not add
+  pixels.** Decision record:
+  `docs/product/decisions/2026-10-01-canvas-report-dont-add-pixels.md`.
+  A canvas-rendered UI has no accessibility nodes and no text, by
   construction. The probe measured it: `auth-canvas` is `GAP_UNREACHABLE`, so there is
   no a11y mirror to be had for free. The honest options are a vision fallback (abandons
   the "AX tree, no vision model" position that is on the moat list in
   `brotto-current-state.md`, and costs tokens per observation) or telling the model
   plainly that the page renders via canvas and the named control was not found. **This
-  is a product decision, not a task in a list**, and it is deliberately left open here.
+  is a product decision, not a task in a list** — and it is now made; see the decision
+  record linked above.
   The external evidence tilts it. Agents with a vision fallback do not
   dominate text-driven ones on real surfaces — on WebArena-Infinity, Gemini-3-Flash
   scores 69.3% where vision-based Kimi-K2.5 scores 45.9% and Qwen-3.5-Plus 49.1%
