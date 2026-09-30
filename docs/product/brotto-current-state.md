@@ -7,7 +7,7 @@ Code-grounded audit of what's actually built today. **Read when working on the c
 - **Python orchestrator** — `services/brotto-orchestrator/`
   - `main.py` (~715 LOC) — FastAPI app + WebSocket handlers
   - `agent/harness.py` (1,280 LOC) — observe→plan→act loop
-  - `agent/context.py` — action vocabulary (14 actions, see below)
+  - `agent/context.py` — action vocabulary (16 actions, see below)
   - `model/{config,registry,store,resolver}.py` — provider-agnostic model adapter
   - `policy/` — secure-mode policy + persistence
 - **Chrome MV3 extension** — `clients/brotto-extension/`
@@ -27,7 +27,7 @@ HTTP: `POST /v1/sessions`, `POST /v1/policy_ack`, `GET /v1/policy`, `GET /contex
 
 ## Agent loop (`agent/harness.py`)
 
-Single-threaded observe→plan→act, max **30 steps** (`MAX_STEPS`). Per step:
+Single-threaded observe→plan→act, `MAX_STEPS = 150` — a runaway backstop, **not** a limit on the user. Per step:
 1. Observe — `get_targets()` (AX tree from extension) + URL + title. Filtered/diffed.
 2. Guardrail — `check_login_page` regex (4 strong + 4 weak markers; title/URL-authoritative). On hit: emit `login_required`, pause 300s, await "resume"/"skip".
 3. ~~Stagnation~~ — removed. Both of its observed effects were harmful (it
@@ -78,9 +78,11 @@ a new session. A corrupt or already-finished document is reported as
 This retired `agent/run_logger.py`, which wrote a `type_text` action's full
 args — including passwords — to `steps.jsonl` in the clear.
 
-## Action vocabulary (15 actions, `agent/context.py:100-106`)
+## Action vocabulary (16 actions, `agent/context.py:100-106`)
 
-`navigate`, `click`, `type_text`, `scroll`, `find_element`, `read_page_text`, `write_scratchpad`, `append_scratchpad`, `read_scratchpad`, `recall_memory`, `recall_conversation`, `recall_steps`, `task_complete`, `cannot_complete`, `ask_human`. No `fill_form`, no `select_option`, no `hover`, no `drag`. `type_text` is char-by-char via `Input.dispatchKeyEvent`.
+`navigate`, `click`, `type_text`, `press_key`, `scroll`, `find_element`, `read_page_text`, `write_scratchpad`, `append_scratchpad`, `read_scratchpad`, `recall_memory`, `recall_conversation`, `recall_steps`, `task_complete`, `cannot_complete`, `ask_human`. No `fill_form`, no `select_option`, no `hover`, no `drag`. `type_text` is char-by-char via `Input.dispatchKeyEvent`.
+
+`press_key` exists because `type_text` only inserts. A combobox — Gmail's search box is the canonical one — commits on Enter, and an agent with no way to press it reads the same results forever. Both it and `clear_ref` send CDP's modifier bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8); the extension forwards it, and an earlier version dropped it, so `clear_ref` typed a literal `a` instead of selecting the field.
 
 The three retrieval actions exist for the same reason: the harness is stateless per step, so the prompt re-sends a *window* every step and the full text has to be reachable on demand. `recall_memory` fetches a scratchpad entry body by id; `recall_conversation` fetches earlier messages of the session's conversation by id or id span; `recall_steps` fetches a step range of the current task. The `<conversation>` block ships first 2 + last 6 messages, head+tail within each at 1200 chars, and names the id range it dropped. The step-history block ships first 3 + last 9 summaries and names the step range it dropped. A window with no way back to what it dropped is a one-way door.
 
@@ -88,7 +90,7 @@ The three retrieval actions exist for the same reason: the harness is stateless 
 
 ## Policy model
 
-Two modes: `normal` (no gates) and `secure` (gates fire). Floor policy from `BROTTO_POLICY_FILE` or `./policy.json` (JSON only — YAML `NotImplementedError`). User policy per `task_start`/`policy_acknowledged`; merged via `merge()` — secure sticky upward, blacklists union.
+Two modes: `normal` (no gates) and `secure` (gates fire). Domain blocking is **one list — the user's**. There is no server floor: `FLOOR_POLICY` and `BROTTO_POLICY_FILE` are gone, because a self-hosted install never shipped a `policy.json`, so the floor was always empty and every three-way union described a distinction that never occurred. User policy per `task_start`/`policy_acknowledged`. `Policy`/`UserPolicy` keep their old field names so files written against `whitelist`/`block_blacklisted` still parse.
 
 **Secure-mode gates (in order):**
 - Observe-phase `check_domain_policy(url)` against eTLD+1 — `BLOCK` ends task.
@@ -125,7 +127,7 @@ Three hardcoded providers in `model/registry.py`:
 
 `model_config` → `chrome.storage.local` (persists); `api_key` → `chrome.storage.session` (in-memory, dies on browser restart — intentional, "disk leak avoided"). On `task_start`, both sent over WS inline. Server validates provider is in registry; builds pydantic-ai `Model`. Per-user config (`remember_key=true`) persisted to `logs/user_configs/<ip_hash>.json` keyed by IP. Env fallback: `AGENT_MODEL=provider:model`, `ANTHROPIC_API_KEY` / `AUTH_TOKEN`.
 
-Dev default: `anthropic:MiniMax-M3.1-Flash-Preview`, 1M context. `BROTTO_ENV=prod` opts out. `AUTH_TOKEN → API_KEY` propagation for Token Plan users.
+Dev default: `minimax:MiniMax-M3`, 1M context. `BROTTO_ENV=prod` opts out. `AUTH_TOKEN → API_KEY` propagation for Token Plan users. M3, not M3.1-Flash-Preview: Flash *requires* adaptive thinking and rejects `thinking.type="disabled"` with a 400.
 
 ## What's well-built (the moat ingredients)
 
@@ -169,7 +171,7 @@ Verified by repo-wide grep on 2026-09-28. These gate the "works on the sites beh
 | 8 | Limited action surface | No `hover`, `drag`, `select_option`, native `fill_form` | Brittle on real apps |
 | 9 | No multi-tab parallelism | `activeTabId` is single; "A task is already running" rejected | Hard ceiling on power use |
 | 10 | WS URL bug | `startRelay` ignores user-supplied `serverUrl` for WS URL | Remote users silently hit localhost |
-| 11 | No extension tests, no real-browser integration | 423 Python tests, but no JS runner and nothing that loads the panel | Regression risk on the UI half |
+| 11 | No real-browser integration | 497 Python tests plus two Node suites (`test-replay.test.js`, `test-key-dispatch.test.js`) that extract the shipped functions by brace matching and eval them — but nothing loads the panel in a browser | Panel layout, reconnect and CSS regressions still only findable by hand |
 | 12 | Stale docs | `decisions.md` describes Playwright-only architecture; README refs non-existent `crypto.ts`, `pairing.ts`, `popup.tsx` | Misleading for new contributors |
 | 13 | Unused code | `contracts.py` `ObservationV1`/`BrowserAction`, `domain/`, `context/` subpackages unused | Dead code rot |
 
