@@ -29,6 +29,7 @@ services/brotto-orchestrator/  — server: FastAPI + pydantic-ai + Playwright
     policy/                  — the user's secure-mode policy (no server floor)
 clients/brotto-extension/   — Chrome extension (TS, manifest v3)
   src/{background,sidepanel,model_config}.ts
+  src/observation/          — the observation pipeline behind captureObservation()
 docs/architecture/             — per-subsystem design reasoning (read on demand)
 docs/superpowers/{specs,plans}/ — formal feature specs
 docs/product/                  — product strategy docs
