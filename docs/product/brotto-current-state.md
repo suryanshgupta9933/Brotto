@@ -143,19 +143,22 @@ Dev default: `minimax:MiniMax-M3`, 1M context. `BROTTO_ENV=prod` opts out. `AUTH
 - **A conversation survives any stop** — a dropped socket, a restart, Stop, or a result. A new message in the same session always continues the conversation; `resume` re-enters a run only while it is genuinely unfinished, and refuses a finished or cancelled one. A document left `running` by a crash is treated as abandoned, not in flight, because the socket-level guard has already proved nothing is live.
 - **`defer_model_check=True`** — per-task model from factory; no Agent rebuild.
 
-## Wave 0 blockers — perception (found 2026-09-28)
+## Wave 0 blockers — perception
 
-Verified by repo-wide grep on 2026-09-28. These gate the "works on the sites behind your login" claim and block Wave 0A. Detail in `docs/superpowers/specs/2026-09-28-capability-map-design.md`.
+**Re-derived by measurement on 2026-10-01** — `scripts/probe_perception.py`, output
+committed to `tests/fixtures/perception-probe.json`. These gate the "works on the
+sites behind your login" claim and block Wave 0A. Detail in
+`docs/superpowers/specs/2026-09-28-capability-map-design.md`.
 
-| Gap | Evidence |
-|---|---|
-| No shadow DOM traversal | `grep -rn "shadowRoot"` returns nothing. Component-library sites are invisible |
-| No iframe traversal | Only `iframe` hit is `agent/prompt.py:68`, a prompt line conceding cross-origin iframes are unseen. Payment fields, reCAPTCHA, third-party embeds unreachable |
-| No canvas / screenshot fallback | No `canvas` handling; no `Page.captureScreenshot` despite README claiming it |
-| No `aria-hidden` reconciliation | AX tree consumed as-is; elements hidden from AX but present in DOM are neither seen nor targetable |
-| No dynamic-stability wait | No `MutationObserver` / `networkIdle` / `DOMContentLoaded` handling. AX tree read at an arbitrary instant on heavy-JS pages |
-| Observation hard-capped | `ax_filter.py:17` `MAX_CHARS = 6000` (truncated with "scroll to reveal more"); `dev/playwright_browser.py:100` `max_targets=50`; `read_page_text` caps at 2000 chars. Structurally blind past the first screen on inboxes/dashboards/tables |
-| Auth code present but unwired | `session/auth.py` has `validate_token`, but `/ws/ext/{session_id}` never calls it and `AGENT_AUTH_DISABLED` defaults to `"true"` |
+| Gap | Verdict | Evidence |
+|---|---|---|
+| ~~No shadow DOM traversal~~ | **Retracted — never existed** | A control inside an *open* shadow root comes back from a plain top-frame `getFullAXTree` (`auth-shadow`, `OK`). Chrome traverses open roots itself. The 2026-09-28 evidence was a grep for `shadowRoot` returning nothing, which described *our source*, not Chrome |
+| No iframe traversal | `GAP_FRAMES` | The target is in a cross-origin frame and only the top frame's tree is read. Payment fields, reCAPTCHA, third-party embeds unreachable |
+| No canvas / screenshot fallback | `GAP_UNREACHABLE` | No `canvas` handling, no `Page.captureScreenshot`. The fixture has no a11y mirror, so this is a **product decision** (vision dependency vs. reporting the limitation), not a perception task |
+| No `aria-hidden` reconciliation | `GAP_ARIA` | The control is in the DOM and absent from the AX tree by design. The AX tree is consumed as-is, so it is neither seen nor targetable |
+| No dynamic-stability wait | `GAP_TIMING` | Target measured at **5000ms** to appear; the tree is read on a `readyState` poll that completes before a SPA renders anything |
+| Observation hard-capped | `GAP_RENDER` | `budget_for_window` is window/20, 8K–60K, decaying to 30% by step 15, and cuts on line count. The target is present and past the cut — a ranking problem, not a size one |
+| Auth code present but unwired | Confirmed | `session/auth.py` has `validate_token`, but `/ws/ext/{session_id}` never calls it and `AGENT_AUTH_DISABLED` defaults to `"true"`. `GET /v1/sessions` and `GET /v1/sessions/{id}/audit` are unauthenticated and return full run transcripts |
 
 ## Real gaps (in priority order)
 
