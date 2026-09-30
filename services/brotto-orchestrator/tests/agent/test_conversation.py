@@ -49,8 +49,21 @@ def _cdp():
 
 def _followup(sessions, session_id, task):
     """Drive a real run() at an existing session as a follow-up message."""
+    return _drive(session_id, task, resume=False)
+
+
+def _first_run(sessions, session_id, task):
+    """Drive a real run() at a session that has nothing on disk yet."""
+    return _drive(session_id, task, resume=False)
+
+
+def _resume(sessions, session_id, task="carrying on"):
+    """Drive a real run() as a crash resume — `resume=True` on the wire."""
+    return _drive(session_id, task, resume=True)
+
+
+def _drive(session_id, task, *, resume):
     import asyncio
-    from unittest.mock import AsyncMock
 
     from brotto_orchestrator.agent.context import ActionCall, AgentDeps
     from brotto_orchestrator.agent.harness import AgentHarness
@@ -71,7 +84,7 @@ def _followup(sessions, session_id, task):
                      scripted_planner=planner)
 
     async def _go():
-        return await AgentHarness().run(deps)
+        return await AgentHarness().run(deps, resume=resume)
 
     return asyncio.new_event_loop().run_until_complete(_go()), deps
 
@@ -223,3 +236,103 @@ def test_a_resume_of_a_later_task_keeps_its_turns_in_the_right_segment(sessions)
     doc = _doc(sessions, "c8")
     assert doc["turns"][-1]["task"] == 1
     assert doc["messages"][-1]["task"] == 1
+
+
+# ── what a run actually writes ──────────────────────────────────────────────
+# Every test above drives a decision function or a hand-built document. The
+# three below drive `run()` twice against one real document, because each of
+# them was a live defect that all of the above passed straight over.
+
+
+def test_the_first_task_of_a_fresh_session_is_recorded(sessions):
+    """A brand-new session still gets tasks[0], and a title.
+
+    The branch used to require an existing document, so a first run wrote no
+    task at all — which left the *second* run to claim index 0 and pushed the
+    first task out of the conversation's own segmentation.
+    """
+    _first_run(sessions, "n1", "research the top 5 repos")
+    doc = _doc(sessions, "n1")
+    assert [t["index"] for t in doc["tasks"]] == [0]
+    assert doc["tasks"][0]["goal"] == "research the top 5 repos"
+    assert doc["title"] == "research the top 5 repos"
+
+
+def test_a_followup_to_the_first_task_is_given_that_task(sessions):
+    """The first follow-up is the case the empty-task bug broke.
+
+    With no tasks[0], the follow-up's task_index was 0, the
+    `task < task_index` filter matched nothing, and the model answered a
+    follow-up with no memory of the exchange it was following up on.
+    """
+    _first_run(sessions, "n2", "research the top 5 repos")
+    _, deps = _followup(sessions, "n2", "write a post about the top one")
+    assert [m["content"] for m in deps.conversation] == [
+        "research the top 5 repos", "ok",
+    ]
+
+
+def test_seq_keeps_climbing_across_runs_in_one_session(sessions):
+    """`seq` is the document's ordering key, so it cannot restart.
+
+    One AuditTrail is built per run and its counter starts at 0, so without
+    adopting the previous maximum, two runs both write a turn called seq 1 and
+    a reader sorting on seq interleaves them.
+    """
+    _first_run(sessions, "n3", "first goal")
+    _followup(sessions, "n3", "second goal")
+    doc = _doc(sessions, "n3")
+    seqs = [t["seq"] for t in doc["turns"]]
+    assert len(seqs) == len(set(seqs)), seqs
+    assert seqs == sorted(seqs), seqs
+
+
+def test_a_resume_carries_the_conversation_that_came_before_it(sessions):
+    """`step_summaries` covers the run being continued, not the earlier tasks.
+
+    A crash in the second task used to resume with step summaries and nothing
+    else, so the model forgot the first task entirely.
+    """
+    from brotto_orchestrator.agent.audit import AuditTrail as _AT
+    t = _AT("n4", dir=sessions)
+    t.begin_task("first goal")
+    t.add_message(role="user", content="first goal", task=0, turn=None)
+    turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
+                        ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+    t.add_message(role="assistant", content="the answer", task=0, turn=turn)
+    t.end_turn(turn, timings={})
+    t.begin_task("second goal")
+    t.add_message(role="user", content="second goal", task=1, turn=None)
+    t.set_status("running")
+    t.close()
+
+    # Left `running` with an unfinished turn, which is what a dropped socket
+    # leaves behind — the one state a resume is allowed to act on.
+    result, deps = _resume(sessions, "n4")
+    assert result.status == "completed"
+    assert [m["content"] for m in deps.conversation] == [
+        "first goal", "the answer",
+    ]
+
+
+def test_a_long_answer_is_capped_in_the_prompt_but_not_on_disk(sessions):
+    """The harness re-sends this block on EVERY step, so it cannot be the
+    model's full long-form answer. The stored message is untouched — the cap
+    is a rendering decision, and truncating the record would lose the answer
+    the transcript exists to preserve."""
+    from brotto_orchestrator.agent.harness import _CONV_MSG_CHARS, _conversation_block
+
+    long_answer = "x" * (_CONV_MSG_CHARS * 4)
+    block = _conversation_block(
+        [{"role": "assistant", "content": long_answer, "task": 0, "turn": 0}],
+        current_task=1)
+    assert "truncated" in block
+    assert len(block) < _CONV_MSG_CHARS * 2
+
+    t = AuditTrail("n5", dir=sessions)
+    t.begin_task("deep dive")
+    turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
+                        ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+    t.add_message(role="assistant", content=long_answer, task=0, turn=turn)
+    t.close()
+    assert _doc(sessions, "n5")["messages"][-1]["content"] == long_answer

@@ -183,6 +183,14 @@ agent = _build_agent()
 # remember how this started and what just happened, not to re-read the log.
 _CONV_HEAD = 2
 _CONV_TAIL = 6
+# Per message, in the prompt only. The audit already caps what it stores, but
+# a `task_complete` summary is the model's own long-form answer and can be
+# several thousand characters — and the harness is stateless per step, so this
+# block is re-sent on EVERY step of the follow-up task, not once. Eight
+# messages at this cap is a standing ~9K chars, which is what a step should
+# pay to remember a conversation; without it one deep-dive answer is re-uploaded
+# on every action for the rest of the task.
+_CONV_MSG_CHARS = 1200
 
 
 def _conversation_block(messages: list[dict], *, current_task: int) -> str:
@@ -204,7 +212,10 @@ def _conversation_block(messages: list[dict], *, current_task: int) -> str:
     lines = []
     for m in shown:
         who = "User" if m.get("role") == "user" else "Assistant"
-        lines.append(f"{who}: {m.get('content', '')}")
+        content = str(m.get("content", ""))
+        if len(content) > _CONV_MSG_CHARS:
+            content = content[:_CONV_MSG_CHARS] + " …[truncated]"
+        lines.append(f"{who}: {content}")
     if skipped:
         # Named, not silent. A model told a turn was dropped and not told
         # how many will assume the gap is small.
@@ -1160,6 +1171,18 @@ def _adopt_document(audit: AuditTrail, doc: dict) -> None:
     # `read` adds a lookup hint that is not part of the written shape.
     audit._doc.pop("found", None)
     audit._doc.pop("corrupt", None)
+    # The seq counter is per-AuditTrail, and a new one is built for every run,
+    # so without this a continuation restarts numbering at 1 and the document
+    # ends up with three turns called seq 1. `seq` is the document's ordering
+    # key, so a reader sorting on it gets the runs interleaved. errors[] draws
+    # on the same counter, so it is scanned too.
+    audit._seq = max(
+        (int(e.get("seq", 0))
+         for key in ("turns", "errors")
+         for e in (doc.get(key) or [])
+         if isinstance(e, dict)),
+        default=0,
+    )
     # A document this server did not write — a hand-edited file, or one from
     # a schema version whose collections are named differently — may be
     # missing the lists the record methods append to. Creating them here is
@@ -1307,10 +1330,14 @@ class AgentHarness:
         # step 0 has no turns, and the prompt they typed is the one thing that
         # must survive it. Only a new task writes one — a resume is the same
         # task continuing, and its prompt is already on disk.
-        if state["action"] == "new_task" and state["doc"]:
+        if state["action"] == "new_task":
+            # Every new task, including the first one on a session that has no
+            # document yet. Skipping it for a fresh session left `tasks[]`
+            # empty, so the SECOND task became index 0 — the conversation's
+            # own segmentation lost its first task, and the first follow-up
+            # saw an empty `deps.conversation` and answered with no memory of
+            # what came before.
             task_index = audit.begin_task(deps.task)
-        elif state["action"] == "new_task":
-            task_index = 0
         else:
             # A resume continues whatever task the document was last running.
             # Hardcoding 0 would put a crash in the second task's turns and
@@ -1320,11 +1347,14 @@ class AgentHarness:
         if state["action"] == "new_task":
             audit.add_message(role="user", content=deps.task, task=task_index,
                               turn=None)
-            # Only earlier tasks. The current goal is in the prompt already, and
-            # showing it twice is both noise and a chance for the two copies to
-            # disagree.
-            deps.conversation = [m for m in audit.conversation()
-                                 if m.get("task", 0) < task_index]
+        # Earlier tasks, on both paths. Only *earlier*: the current goal is in
+        # the prompt already, and showing it twice is both noise and a chance
+        # for the two copies to disagree. A resume needs this as much as a new
+        # task does — `step_summaries` covers the run being continued, not the
+        # tasks that came before it, so without it a crash in the second task
+        # of a conversation resumed with no memory of the first.
+        deps.conversation = [m for m in audit.conversation()
+                             if m.get("task", 0) < task_index]
 
         audit.set_goal(deps.task)
 
