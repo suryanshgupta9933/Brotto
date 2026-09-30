@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from brotto_orchestrator.agent.audit import AuditTrail
+from brotto_orchestrator.agent.audit import SCHEMA_VERSION, AuditTrail
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ def test_audit_endpoint_returns_the_document(client, sessions_dir):
     _write(sessions_dir, "s1", "find it")
     doc = client.get("/v1/sessions/s1/audit").json()
     assert doc["goal"] == "find it"
-    assert doc["schema_version"] == 1
+    assert doc["schema_version"] == SCHEMA_VERSION
 
 
 def test_unknown_session_is_404_not_500(client):

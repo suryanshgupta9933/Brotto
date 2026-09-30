@@ -34,7 +34,7 @@ from .context import MemoryEntry, Scratchpad
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # A single scalar is capped so one pathological page cannot produce a
 # multi-megabyte document. The cap is recorded rather than silent.
@@ -263,6 +263,13 @@ class AuditTrail:
             "updated_at": _now(),
             "status": "running",
             "goal": "",
+            # A session is a conversation. `title` labels it in the history
+            # list and is fixed by the first task; `tasks` segments it; and
+            # `messages` is the transcript a human reads. `turns` below stays
+            # the audit, joined to the rest by turns[].task.
+            "title": "",
+            "tasks": [],
+            "messages": [],
             "client": {},
             "model": {},
             "policy": {},
@@ -419,6 +426,47 @@ class AuditTrail:
 
     def _set_status(self, status: str) -> None:
         self._doc["status"] = status
+
+    # ── conversation ───────────────────────────────────────────
+    def begin_task(self, goal: str) -> int:
+        idx = self._record(self._begin_task, goal)
+        return -1 if idx is None else idx
+
+    def _begin_task(self, goal: str) -> int:
+        tasks = self._doc.setdefault("tasks", [])
+        entry: dict = {"index": len(tasks)}
+        _text(entry, "goal", goal)
+        entry["started_at"] = _now()
+        entry["ended_at"] = None
+        entry["status"] = "running"
+        entry["steps"] = 0
+        tasks.append(entry)
+        # Named after how the conversation started, not how it ended: the
+        # history list needs one stable label for the whole session.
+        if not self._doc.get("title"):
+            _text(self._doc, "title", goal)
+        return entry["index"]
+
+    def add_message(self, *, role: str, content: str, task: int,
+                    turn: int | None) -> str:
+        mid = self._record(self._add_message, role=role, content=content,
+                           task=task, turn=turn)
+        return mid or ""
+
+    def _add_message(self, *, role: str, content: str, task: int,
+                     turn: int | None) -> str:
+        messages = self._doc.setdefault("messages", [])
+        mid = f"m{len(messages) + 1}"
+        entry: dict = {"id": mid, "role": role, "at": _now()}
+        _text(entry, "content", content)
+        entry["task"] = task
+        entry["turn"] = turn
+        messages.append(entry)
+        return mid
+
+    def conversation(self) -> list[dict]:
+        with self._lock:
+            return copy.deepcopy(self._doc.get("messages") or [])
 
     # ── turns ───────────────────────────────────────────────────
     def begin_turn(self, *, step: int, url: str, page_title: str,
@@ -679,7 +727,9 @@ def list_sessions(*, dir: Path | None = None) -> list[dict]:
         doc = read(p.stem, dir=d)
         out.append({
             "session_id": doc.get("session_id", p.stem),
-            "task": doc.get("goal", ""),
+            "title": doc.get("title") or doc.get("goal", ""),
+            "task_count": len(doc.get("tasks") or []) or 1,
+            "task": doc.get("title") or doc.get("goal", ""),
             "status": doc.get("status", "unknown"),
             "steps": doc.get("totals", {}).get("steps", 0),
             "started_at": doc.get("created_at"),

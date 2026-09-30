@@ -1062,9 +1062,11 @@ def _adopt_document(audit: AuditTrail, doc: dict) -> None:
     # missing the lists the record methods append to. Creating them here is
     # cheaper than a KeyError on the first write, and the audit never
     # raises into the loop.
-    for key in ("turns", "prompts", "actions", "policy_events", "errors"):
+    for key in ("turns", "prompts", "actions", "policy_events", "errors",
+                "tasks", "messages"):
         audit._doc.setdefault(key, [])
     audit._doc.setdefault("totals", {})
+    audit._doc.setdefault("title", "")
 
 
 # Sessions the user explicitly stopped. A cancel reaches the server as a

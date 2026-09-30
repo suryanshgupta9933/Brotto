@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 
 from brotto_orchestrator.agent.audit import (
-    MAX_FIELD_CHARS, REDACTED, AuditTrail, is_secret_field, list_sessions,
-    load_scratchpad, read,
+    MAX_FIELD_CHARS, REDACTED, SCHEMA_VERSION, AuditTrail, is_secret_field,
+    list_sessions, load_scratchpad, read,
 )
 from brotto_orchestrator.agent.context import MemoryEntry, Scratchpad
 
@@ -33,7 +33,7 @@ def test_document_is_valid_json_after_every_record(trail, tmp_path):
                        context_pct=0.15, latency_ms=1820)
     # Readable by an outside reader at every instant, not just at the end.
     doc = read("s1", dir=tmp_path)
-    assert doc["schema_version"] == 1
+    assert doc["schema_version"] == SCHEMA_VERSION
     assert doc["turns"][0]["model"]["tokens_in"] == 1500
 
 
