@@ -17,7 +17,7 @@ if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
     os.environ["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_AUTH_TOKEN"]
 
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import UserError, ModelHTTPError
+from pydantic_ai.exceptions import UserError, ModelHTTPError, UnexpectedModelBehavior
 
 from brotto_orchestrator.model.config import UserCredentials
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
@@ -261,7 +261,14 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         for s in shown
     ]
     if skipped:
-        history_lines.insert(3, f"  ... {skipped} steps omitted ...")
+        gap = summaries[3:len(summaries) - (_HISTORY_WINDOW - 3)]
+        # Names WHICH steps, not just how many: "…steps omitted" gave the
+        # model nothing to act on, and a model told a step is gone with no
+        # way to read it concludes the answer is unavailable.
+        history_lines.insert(3, (
+            f"  ... {skipped} steps omitted (steps "
+            f"{gap[0].step}–{gap[-1].step}) — recall_steps(from, to) "
+            f"to fetch any ..."))
     history = "\n".join(history_lines) or "(none yet)"
 
     diff_section = f"\n### What changed after last action\n{turn.ax_diff}\n" if turn.ax_diff else ""
@@ -496,6 +503,27 @@ def _make_auth_failed_result(provider: str, deps: AgentDeps | None = None) -> Ta
         status="failed",
         summary=f"Authentication failed for {provider}. Check the API key in extension settings.",
         failure_reason="auth_failed",
+        policy_mode=_policy_mode(deps),
+    )
+
+
+def _make_bad_decision_result(provider: str, model_id: str,
+                              deps: AgentDeps | None = None) -> TaskResult:
+    """The model returned something that is not a valid AgentDecision.
+
+    pydantic-ai retries the call and then gives up with
+    UnexpectedModelBehavior. Unhandled, that propagated out of `run()`,
+    so the document kept `status: running` with an open turn, the trail
+    was never closed, and the panel got a bare "Exceeded maximum output
+    retries (2)" naming neither the model nor what to do about it.
+    """
+    return TaskResult(
+        status="failed",
+        summary=(f"{provider}:{model_id} could not produce a valid action "
+                 f"after 3 attempts. Try a different model, or rephrase the "
+                 f"task."),
+        failure_reason="invalid_decision",
+        steps_taken=deps.step_number if deps else 0,
         policy_mode=_policy_mode(deps),
     )
 
@@ -894,6 +922,30 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 text = text[:_CONV_RECALL_CHARS] + "\n…[span too large, narrow it]"
             return text
 
+        elif action == "recall_steps":
+            # The other half of the step-summary window. A window is only
+            # worth having if what it dropped can be fetched back.
+            summaries = deps.step_summaries
+            if not summaries:
+                return "No steps recorded yet."
+            lo = args.get("from_step", args.get("from"))
+            hi = args.get("to_step", args.get("to", lo))
+            lo = summaries[0].step if lo is None else int(lo)
+            hi = lo if hi is None else int(hi)
+            if lo > hi:
+                lo, hi = hi, lo
+            got = [s for s in summaries if lo <= s.step <= hi]
+            if not got:
+                return (f"No steps in range {lo}-{hi}. This task has steps "
+                        f"{summaries[0].step}-{summaries[-1].step}.")
+            text = "\n".join(
+                f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}"
+                + (f" [extracted: {s.extracted}]" if s.extracted else "")
+                for s in got)
+            if len(text) > _CONV_RECALL_CHARS:
+                text = text[:_CONV_RECALL_CHARS] + "\n…[range too large, narrow it]"
+            return text
+
         elif action == "task_complete":
             deps.result = TaskResult(
                 status="completed",
@@ -996,7 +1048,7 @@ def _resolve_model(deps: AgentDeps) -> tuple:
 
 
 async def _plan_step(
-    deps: AgentDeps, turn: AgentTurn, agent: Agent
+    deps: AgentDeps, turn: AgentTurn, agent: Agent, audit=None
 ) -> tuple[AgentDecision, int, object] | None:
     """Return (decision, context_window, pydantic-ai result), or None to
     abandon the step.
@@ -1078,6 +1130,24 @@ async def _plan_step(
             )
             return None
         raise
+    except UnexpectedModelBehavior as e:
+        # The model failed output validation three times. Unhandled, this
+        # propagates out of run(): the document keeps status=running with an
+        # open turn, the trail is never closed, and the panel gets a bare
+        # "Exceeded maximum output retries (2)" that names no model and no fix.
+        deps.result = _make_bad_decision_result(
+            provider=cfg.provider, model_id=cfg.model, deps=deps,
+        )
+        if audit is not None:
+            audit.record_error(
+                code="invalid_decision",
+                where="plan_step",
+                message=f"{cfg.provider}:{cfg.model} could not produce a valid "
+                        f"action after 3 attempts",
+                detail={"retries": 2, "step": deps.step_number,
+                        "detail": str(e)[:500]},
+            )
+        return None
     finally:
         # _turn_to_prompt reads _CURRENT_DEPS for the secure-mode
         # preamble; clear it after the call so it doesn't leak
@@ -1313,7 +1383,19 @@ def _seal_if_cancelled(audit: AuditTrail):
 
 
 class AgentHarness:
-    MAX_STEPS = 30
+    # A runaway backstop, not a task limit. The user is not bounded on how
+    # long a session runs — context is managed by the age-scaled tree budget
+    # and the windowed history blocks, neither of which needs a step ceiling.
+    #
+    # This used to be 30, and it reported "Max steps reached" on tasks that
+    # were still working — the one thing a user must never be told. Progress
+    # detection was tried in its place (URL then page-fingerprint hashing,
+    # see git history) and removed: it fired falsely on two live runs that
+    # both went on to succeed, and "stuck" is not separable from "working on
+    # a slow-loading page" by hashing the top of a DOM. 150 is far enough out
+    # that reaching it means the loop is genuinely spinning, and the message
+    # below says exactly that rather than blaming the step policy.
+    MAX_STEPS = 150
 
     async def run(self, deps: AgentDeps, *, resume_from: int = 0,
                   resume: bool = False) -> TaskResult:
@@ -1521,7 +1603,7 @@ class AgentHarness:
             # is set by _plan_step once the per-task config resolves, so step 1
             # falls back to the env default, which is where that number came
             # from anyway.
-            budget = budget_for_window(getattr(deps, "context_window", None))
+            budget = budget_for_window(getattr(deps, "context_window", None), step=step)
             filtered_ax = filter_ax_targets(targets, max_chars=budget)
             ax_diff = compute_ax_diff(deps.prev_targets, targets, max_chars=budget // 10)
             # Published here, not at the bottom of the loop: the diff above
@@ -1664,7 +1746,7 @@ class AgentHarness:
             # Plan
             t_plan = time.perf_counter()
             log.debug("[%s] calling model...", deps.user_id)
-            planned = await _plan_step(deps, turn, agent)
+            planned = await _plan_step(deps, turn, agent, audit)
             if planned is None:
                 # deps.result is set; skip the rest of this step.
                 continue
@@ -1988,8 +2070,8 @@ class AgentHarness:
         )
         deps.result = TaskResult(
             status="failed",
-            summary="Max steps reached",
-            failure_reason="max_steps_exceeded",
+            summary=f"Stopped after {self.MAX_STEPS} steps without finishing",
+            failure_reason="runaway_backstop",
             steps_taken=self.MAX_STEPS,
             timing=timing_report,
             policy_mode=_policy_mode(deps),

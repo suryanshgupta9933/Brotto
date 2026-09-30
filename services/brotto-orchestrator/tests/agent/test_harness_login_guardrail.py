@@ -60,7 +60,7 @@ def _login_deps() -> AgentDeps:
 
 
 def _stub_plan(monkeypatch) -> None:
-    async def _fake_plan(deps, turn, agent):
+    async def _fake_plan(deps, turn, agent, audit=None):
         return _COMPLETE, 400_000, _EmptyResult()
 
     monkeypatch.setattr(harness_mod, "_plan_step", _fake_plan)

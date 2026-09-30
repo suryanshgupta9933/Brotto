@@ -104,7 +104,7 @@ Four things arrive per step. All four were captured and thrown away at some poin
 - **Hierarchy** (`SemanticTarget.parent_ref_id`, resolved to the nearest *kept* ancestor). Rendered as indentation. Flat, a repo's star count sat eight lines from its name with nothing marking the record, and the model guessed which one it belonged to. Resolution walks the full `parentId` chain — a link's direct parent is almost always a `generic` container that gets filtered, so resolving only the direct parent yields depth 0 on most real pages. This is also why `listitem` / `row` / `gridcell` are in the extractor's kept set: they're nameless, never render, but they're the parent a record's fields resolve to.
 - **Hrefs** (`SemanticTarget.href`, from the CDP `url` property, links only). Without them the model cannot see a page's URL space at all and guesses at deep-link patterns. This is the general mechanism for "use deeplinks efficiently" — no site-specific knowledge anywhere.
 - **Page text** (`AgentTurn.page_text`, innerText, every step). The only source for values the AX tree omits — a repo's star count, a price. Costs nothing on the extension path (rides along in the `Runtime.evaluate` that already fetches url/title). `read_page_text` remains the targeted tool for a selector or `around` region.
-- **Budget** — `ax_filter.budget_for_window(context_window)`, a twentieth of the window, floored at 8K and capped at 60K. Over budget, whole lines are dropped and the count is reported; the tree is never sliced mid-element. The old flat `MAX_CHARS = 6000` truncated a real GitHub list page at 6041 chars.
+- **Budget** — `ax_filter.budget_for_window(context_window, step)`, a twentieth of the window, floored at 8K and capped at 60K. Over budget, whole lines are dropped and the count is reported; the tree is never sliced mid-element. The old flat `MAX_CHARS = 6000` truncated a real GitHub list page at 6041 chars. **The budget decays with the step** — to 30% by step 15 — because the tree is worth most at step 0, where the model is surveying the page to decide what to try at all; by step 15 it is executing a plan it already holds, and most of the tree is pages it has already rejected. The tree is uncacheable every step (the page genuinely changes), so every char saved here is a per-step saving for the rest of the task: ~35K chars off every step past 15 at a 1M window. The floor is the *window* budget, not `MAX_CHARS`, so a late step that needs to re-find something still gets a real page. See the "stagnation" section below for why the tree's floor is a floor and not a fraction.
 
 `context_window` is read at the **top** of a step and written at the **bottom** of one, which is a step behind the tree it sizes. It is now resolved by `_resolve_model(deps)` before the loop, so step 0 is budgeted against the model that will actually read it. Before that, step 0 called `budget_for_window(None)` and got the 6K `MAX_CHARS` floor while every step after it got the real window — a fifth to an eighth of the page on the step that decides what a task tries first, and the step a user reads as "the pause before it starts."
 
@@ -163,7 +163,7 @@ not specific to Google News — the detector is structurally blind to everything
 below the cut, which is most of any long page.
 
 **The deeper argument is that the warning was never earning its keep.** It is a
-hint, not a safety net — `MAX_STEPS = 30` is the net. The run that motivated
+hint, not a safety net — `MAX_STEPS` is the net. The run that motivated
 adding it (17 steps to conclude something the agent had at step 5) was actually
 fixed by the `<convergence>` prompt work above, not by the detector. Meanwhile
 its two observed effects were both harmful: it pushed a working agent toward
@@ -179,6 +179,62 @@ its own step history. Only the harness's external verdict is gone.
 `testing/outcome.py` keeps its `"stagnat"` needle on purpose: it classifies
 *recorded* runs, and the runs recorded before this removal still contain those
 strings.
+
+### No step limit — `MAX_STEPS` is a runaway backstop
+
+The user is **not** bounded on how long a session runs. `MAX_STEPS` was 30, and
+it reported `Max steps reached` on tasks that were still working — the one
+thing a user must never be told, because a user reads it as "your task was too
+big", not "the loop is spinning".
+
+It is now 150, and the terminal result says what it actually means:
+`failure_reason="runaway_backstop"`, `summary="Stopped after 150 steps without
+finishing"`. The string `max_steps_exceeded` appears nowhere in `harness.py`,
+and a test asserts that.
+
+**What actually keeps the context bounded is the three age-scaled blocks, not a
+turn ceiling.** Claude Code's compaction is the reference: its breakers are
+*three consecutive compaction failures* and *three rapid refills within three
+turns* — never a turn count — and its full compact is transcript surgery on a
+growing message array. This harness is stateless per step, so it already *has*
+the compression (windowed `<conversation>`, windowed step summaries, decaying AX
+budget) and was missing only a bound. The failure mode at high step counts is
+**silent amnesia, not overflow**, and amnesia is what `recall_steps` and
+`recall_conversation` now address directly.
+
+Note the parallel to the stagnation removal above: a *detector* that guesses
+"this run is going nowhere" is unreliable, and its false positives cost more
+than the runaway it catches. The backstop reports nothing until it fires.
+
+### A model that cannot decide fails the run
+
+`agent.run(retries=2)` at `harness.py:173`. When the model fails output
+validation three times, pydantic-ai raises `UnexpectedModelBehavior` and
+`str(exc)` is literally the string **`Exceeded maximum output retries (2)`**.
+
+The `except` chain in `_plan_step` covered only `ScriptTargetUnresolved`,
+`UserError` and `ModelHTTPError`, so this one propagated out of `run()`. Three
+things were wrong at once: the three attempts were **discarded**, so the
+document said `errors: []` while visibly broken; the document kept
+`status: running` with an **open turn** (`ended_at: null`) and `audit.close()`
+never ran, so a later reconnect would try to resume a dead run and the in-memory
+trail that rewrites the file on every flush would leak; and the panel got a
+bare message naming neither the model nor a fix.
+
+`_plan_step` now takes the live `audit` and catches it, setting `deps.result`
+through `_make_bad_decision_result` (`status: "failed"`,
+`failure_reason: "invalid_decision"`, summary naming `provider:model` and
+saying "Try a different model, or rephrase the task") and writing
+`code: "invalid_decision"` into `errors[]` with the retry count, the step, and
+`str(e)` — truncated to 500 chars, which is not the sensitive part. Returning
+`None` makes the loop's existing abort gate pick the result up on the next
+iteration, exactly as `auth_failed` and `model_not_found` already do.
+
+**What the handler still cannot tell you is *why* validation failed** — the
+raw model output is not in the document, and adding it is not free (it is
+untrusted page-influenced text at volume). Two tests pin what is observable:
+`test_an_undecidable_model_fails_the_run_instead_of_hanging` and
+`test_plan_step_catches_it_and_records_why`.
 
 **Not done:** cross-task memory. `Scratchpad` is per-task — persisted to `logs/runs/<id>/` for resume within a task and gone otherwise, so `github.com/<user>/issues/assigned` (the entry point discovered on that run) is relearned every run. The obvious durable content is *where things live on a site and which routes are dead*: a per-user JSON store in the shape of `model/store.py`, injected at the top of every task. Unbuilt.
 
@@ -458,6 +514,15 @@ for the scratchpad. The block names the id range it dropped; the action fetches
 it. **Write, then Select** — the scratchpad got this right first time and the
 conversation did not.
 
+**`recall_steps` is the same fix for step summaries, which had the same hole.**
+`_HISTORY_WINDOW` is 12 (first 3 + last 9), so any task past step 12 silently
+lost its middle — and the elision said only *"...steps omitted"*, naming neither
+which ones nor a way to reach them. Both halves are now present: the block says
+`... 8 steps omitted (steps 3–10) — recall_steps(from, to) to fetch any ...`,
+and `recall_steps(from, to)` returns that range from `deps.step_summaries`,
+capped at `_CONV_RECALL_CHARS`. A reversed range reads the same either way
+round, and an out-of-range request names what the task actually has.
+
 Two things follow, and the second is the one that was wrong first:
 
 - **Truncation is head+tail, not head.** A `task_complete` summary opens with
@@ -520,7 +585,7 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-../../.venv/bin/python -m pytest tests/ -q     # 457 tests (2 skipped)
+../../.venv/bin/python -m pytest tests/ -q     # 473 tests (2 skipped)
 # The pytest install lives in the REPO-ROOT venv, not services/brotto-orchestrator/.venv
 # (which has pydantic-ai but no pytest). Run it from services/brotto-orchestrator/.
 

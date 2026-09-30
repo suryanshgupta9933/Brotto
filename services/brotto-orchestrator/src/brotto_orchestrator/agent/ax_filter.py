@@ -36,10 +36,15 @@ PAGE_TEXT_MAX = 20000
 # generic containers the model never sees.
 MAX_DEPTH = 4
 
+# Steps over which the tree budget decays to LATE_BUDGET_FRACTION. See
+# budget_for_window for why the tree gets less useful as a task ages.
+BUDGET_DECAY_STEPS = 15
+LATE_BUDGET_FRACTION = 0.3
+
 ROW_Y_THRESHOLD = 30  # px — elements within this y-band are considered "same row"
 
 
-def budget_for_window(window: int | None) -> int:
+def budget_for_window(window: int | None, step: int = 0) -> int:
     """How many chars of AX tree a model with this context window gets.
 
     Scales rather than hardcodes: the tree is one section of a prompt that
@@ -48,7 +53,24 @@ def budget_for_window(window: int | None) -> int:
     """
     if not window:
         return MAX_CHARS
-    return max(BUDGET_FLOOR, min(BUDGET_CEIL, window // WINDOW_DIVISOR))
+    budget = max(BUDGET_FLOOR, min(BUDGET_CEIL, window // WINDOW_DIVISOR))
+    if step > 0:
+        # The tree is worth most at step 0, where the model has to survey a
+        # page to decide what to try at all. By step 15 it is executing a
+        # plan it already holds in the step summaries, and most of the tree
+        # is pages it has already rejected. Decaying the budget is the only
+        # lever that touches this: the tree is uncacheable every step, so
+        # every char saved here is a char the provider does not re-read on
+        # every remaining action of the task.
+        #
+        # The floor is the model's window budget, not MAX_CHARS — a late step
+        # that needs to re-find something still gets a real tree, and
+        # filter_ax_targets reports what it dropped so the miss is visible
+        # rather than silent.
+        span = min(1.0, step / BUDGET_DECAY_STEPS)
+        keep = 1.0 - (1.0 - LATE_BUDGET_FRACTION) * span
+        budget = max(BUDGET_FLOOR, int(budget * keep))
+    return budget
 
 
 def _depths(targets: list["SemanticTarget"]) -> dict[str, int]:

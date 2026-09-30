@@ -101,7 +101,7 @@ class ActionCall(BaseModel):
         "navigate", "click", "type_text", "scroll",
         "find_element", "read_page_text",
         "write_scratchpad", "append_scratchpad", "read_scratchpad", "recall_memory",
-        "recall_conversation",
+        "recall_conversation", "recall_steps",
         "task_complete", "cannot_complete", "ask_human",
     ]
     action_args: dict

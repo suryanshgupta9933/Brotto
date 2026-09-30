@@ -67,7 +67,7 @@ def _stub_plan(monkeypatch, usages: list[_Usage | None]) -> None:
     last one once exhausted."""
     seq = list(usages)
 
-    async def _fake_plan(deps, turn, agent):
+    async def _fake_plan(deps, turn, agent, audit=None):
         usage = seq[min(len(seq) - 1, getattr(_fake_plan, "n", 0))] if seq else None
         _fake_plan.n = getattr(_fake_plan, "n", 0) + 1
         return _COMPLETE, 400_000, _PlanResult(usage)
@@ -100,7 +100,7 @@ async def test_usage_accumulates_across_steps(monkeypatch):
     ])
     usages = iter([_Usage(1_000, 100), _Usage(2_000, 200)])
 
-    async def _fake_plan(deps, turn, agent):
+    async def _fake_plan(deps, turn, agent, audit=None):
         return next(seq), 400_000, _PlanResult(next(usages))
 
     monkeypatch.setattr(harness_mod, "_plan_step", _fake_plan)
@@ -119,7 +119,7 @@ async def test_step_without_usage_leaves_totals_unchanged(monkeypatch):
         def usage(self):
             raise RuntimeError("no usage on this result")
 
-    async def _fake_plan(deps, turn, agent):
+    async def _fake_plan(deps, turn, agent, audit=None):
         return _COMPLETE, 400_000, _Exploding()
 
     monkeypatch.setattr(harness_mod, "_plan_step", _fake_plan)

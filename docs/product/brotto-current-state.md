@@ -78,11 +78,11 @@ a new session. A corrupt or already-finished document is reported as
 This retired `agent/run_logger.py`, which wrote a `type_text` action's full
 args — including passwords — to `steps.jsonl` in the clear.
 
-## Action vocabulary (14 actions, `agent/context.py:100-106`)
+## Action vocabulary (15 actions, `agent/context.py:100-106`)
 
-`navigate`, `click`, `type_text`, `scroll`, `find_element`, `read_page_text`, `write_scratchpad`, `append_scratchpad`, `read_scratchpad`, `recall_memory`, `recall_conversation`, `task_complete`, `cannot_complete`, `ask_human`. No `fill_form`, no `select_option`, no `hover`, no `drag`. `type_text` is char-by-char via `Input.dispatchKeyEvent`.
+`navigate`, `click`, `type_text`, `scroll`, `find_element`, `read_page_text`, `write_scratchpad`, `append_scratchpad`, `read_scratchpad`, `recall_memory`, `recall_conversation`, `recall_steps`, `task_complete`, `cannot_complete`, `ask_human`. No `fill_form`, no `select_option`, no `hover`, no `drag`. `type_text` is char-by-char via `Input.dispatchKeyEvent`.
 
-`recall_memory` and `recall_conversation` are the two retrieval actions, and they exist for the same reason: the harness is stateless per step, so the prompt re-sends a *window* every step and the full text has to be reachable on demand. `recall_memory` fetches a scratchpad entry body by id; `recall_conversation` fetches earlier messages of the session's conversation by id or id span. The `<conversation>` block ships first 2 + last 6 messages, head+tail within each at 1200 chars, and names the id range it dropped.
+The three retrieval actions exist for the same reason: the harness is stateless per step, so the prompt re-sends a *window* every step and the full text has to be reachable on demand. `recall_memory` fetches a scratchpad entry body by id; `recall_conversation` fetches earlier messages of the session's conversation by id or id span; `recall_steps` fetches a step range of the current task. The `<conversation>` block ships first 2 + last 6 messages, head+tail within each at 1200 chars, and names the id range it dropped. The step-history block ships first 3 + last 9 summaries and names the step range it dropped. A window with no way back to what it dropped is a one-way door.
 
 **CDP commands actually sent** (`background.ts:252-275`): `Page.navigate`, `Input.dispatchMouseEvent` (pressed/released/wheel), `Input.dispatchKeyEvent` (char/keyDown/keyUp). Read: `Accessibility.getFullAXTree` + `DOM.getBoxModel` + `Runtime.evaluate`. **No `Page.captureScreenshot`** despite README claiming it.
 

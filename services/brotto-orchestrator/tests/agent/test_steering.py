@@ -62,7 +62,7 @@ def _deps() -> AgentDeps:
 
 
 def _stub_plan_capturing(monkeypatch, seen: list[AgentTurn]) -> None:
-    async def _fake_plan(deps, turn, agent):
+    async def _fake_plan(deps, turn, agent, audit=None):
         seen.append(turn)
         return _COMPLETE, 400_000, _EmptyResult()
 

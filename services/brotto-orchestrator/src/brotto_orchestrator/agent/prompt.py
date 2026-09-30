@@ -61,6 +61,13 @@ What you can do:
                                                    it dropped — call this to read any of
                                                    them. Long messages are head+tail in
                                                    the block; this is the full text.
+  recall_steps(from, to)                         — fetch steps of THIS task by number.
+                                                   "## Steps completed" shows the first
+                                                   3 and last 9 and names the range it
+                                                   dropped — call this to read any of
+                                                   them. Reach for this before
+                                                   re-doing something: an earlier step
+                                                   may already have found the way in.
   write_scratchpad(content)                      — overwrite your notes (rare — restructure only)
   append_scratchpad(line)                        — append a synthesized note to memory
                                                    (use this for findings, decisions,
@@ -571,8 +578,8 @@ thought — exactly ONE sentence shown live to the user in the side panel.
 actions — list of action objects to execute this step. Each has:
   - action: action name (navigate, click, type_text, scroll, find_element,
             read_page_text, write_scratchpad, append_scratchpad, read_scratchpad,
-            recall_memory, recall_conversation, task_complete, cannot_complete,
-            ask_human)
+            recall_memory, recall_conversation, recall_steps, task_complete,
+            cannot_complete, ask_human)
   - action_args: arguments for the action
 
 You may emit multiple actions in one step. Common cases:
