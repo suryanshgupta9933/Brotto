@@ -1,16 +1,18 @@
-"""Policy: domain whitelist/blacklist + secure mode gate.
+"""Policy: user domain blacklist + secure mode gate.
 
-Loaded by the orchestrator at startup (floor) and from the extension on
-each task (user_policy). Merged into a single effective policy that the
-harness consults at three checkpoints.
+The blacklist is whatever the user set in the panel, full stop. There is no
+operator-set floor: a server-side list could only ever *add* sites the user
+cannot remove, and on a self-hosted install it was a file nobody ships —
+`policy.json` was absent in practice, so the whole floor path (load, merge,
+a locked read-only block in the panel) cost real code and rendered nothing.
+The harness consults the policy at three checkpoints.
 
 No new deps; stdlib only. See module docstrings for upgrade paths.
 """
 
-from .config import load_policy
 from .domains import MULTI_PART_SUFFIXES, domain_matches, etld1
 from .gate import GateDecision, check_domain_policy, check_first_time_seen
-from .schema import Policy, UserPolicy, merge
+from .schema import Policy, UserPolicy
 
 __all__ = [
     "GateDecision",
@@ -21,6 +23,4 @@ __all__ = [
     "check_first_time_seen",
     "domain_matches",
     "etld1",
-    "load_policy",
-    "merge",
 ]

@@ -579,7 +579,6 @@ transcriptBack.addEventListener('click', () => void renderHistory());
 // SW only reads `get("settings")`, so this is the seed for that key).
 const securityModeSetting = document.getElementById('securityModeSetting');
 const blacklistSetting    = document.getElementById('blacklistSetting');
-const floorBlacklistEl    = document.getElementById('floorBlacklist');
 const saveSettingsBtn     = document.getElementById('saveSettingsBtn');
 const refreshPolicyBtn    = document.getElementById('refreshPolicyBtn');
 const notifyBlockingSetting = document.getElementById('notifyBlockingSetting');
@@ -594,10 +593,9 @@ if (replaySetupBtn) {
   });
 }
 
-// ponytail: on Settings open, fetch the EFFECTIVE policy from the server
-// so the sidepanel shows what the server is actually enforcing (floor +
-// user merged), not the user's local cache. The user's saved edits still
-// drive the editable textarea; the floor is rendered read-only above it.
+// ponytail: on Settings open, confirm the server is reachable so the
+// footer can say whether these settings are grounded in a live server or
+// are sitting in a local cache against a dead one.
 settingsBtn.addEventListener('click', async () => {
   plannerUrlSetting.value = plannerUrlEl.value || 'http://localhost:8000';
   await hydrateSettingsPanel();
@@ -617,28 +615,22 @@ modelPill.addEventListener('keydown', (e) => {
 // fetch + render flow without re-opening the panel.
 async function hydrateSettingsPanel() {
   // ponytail: chrome.storage.local is the AUTHORITATIVE source for what
-  // the SW will ship on the next task_start. The server's /v1/policy
-  // view is only used to render the org-floor (locked) list — it must
-  // NOT override the user's locally-saved mode/blacklist, or the UI
-  // lies about what's actually enforced. Without this, a user could
-  // think they're in normal mode while the SW still ships yesterday's
-  // secure+blacklist saved in storage.
+  // the SW will ship on the next task_start, so the fields are filled from
+  // it and never from the server's view — otherwise the panel could show
+  // normal mode while the SW still ships yesterday's secure+blacklist.
   const stored = await chrome.storage.local.get('settings');
   const s = stored.settings || {};
   const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
 
-  // Fetch server's effective policy in parallel with reading local cache.
+  // Reachability probe for the footer. Nothing the user edits comes from
+  // here.
   let effective = null;
   try {
     const r = await fetch(`${base}/v1/policy`);
     if (r.ok) effective = await r.json();
-    console.log('[brotto] policy from server:', effective);
   } catch (e) {
-    console.warn('[brotto] could not fetch /v1/policy, using local cache:', e);
+    console.warn('[brotto] could not reach server for policy check:', e);
   }
-  // Cache the fetched effective policy so the Save handler can read the
-  // floor list from it (we don't want to re-fetch on every Save).
-  state.lastEffective = effective;
   // Track when we last successfully verified policy with the server.
   // Used to render a "Last verified N seconds ago" footer so the user
   // knows whether the sidepanel is grounded in fresh server state or

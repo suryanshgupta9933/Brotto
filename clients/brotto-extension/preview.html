@@ -155,15 +155,13 @@ setModelPill('MiniMax-M3.1-Flash-Preview');
 document.getElementById('settingsOverlay').classList.add('open');
 document.getElementById('securityModeSetting').value = 'secure';
 var pmh = document.getElementById('policyModeHeader');
-pmh.textContent = 'Secure mode is on. Three sites are blocked.';
+pmh.textContent = 'Mode: secure — 3 domains refused.';
 pmh.classList.add('secure');
 var vs = document.getElementById('settingsVerifyStatus');
 vs.className = 'settings-hint settings-verify ok';
 vs.innerHTML = '<span class="dot"></span>Policy verified 2 seconds ago';
-document.getElementById('floorBlacklist').innerHTML =
-  '<div class="floor-item">mail.internal.acme.com <span class="floor-tag">SSO</span></div>' +
-  '<div class="floor-item">github.com <span class="floor-tag">Source</span></div>' +
-  '<div class="floor-item">okta.acme.com <span class="floor-tag">SSO</span></div>';
+document.getElementById('blacklistSetting').value =
+  'mail.internal.acme.com\ngithub.com\nokta.acme.com';
 </script>
 
 <script>

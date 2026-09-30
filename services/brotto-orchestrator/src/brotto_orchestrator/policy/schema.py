@@ -1,15 +1,13 @@
-"""Policy schema + merge.
+"""Policy schema.
 
-`Policy` is the floor (server-side config file). `UserPolicy` is what the
-extension sends per task. `merge(floor, user)` returns the effective
-policy: secure wins over normal; blacklist is unioned. Effective policy is
-always a `Policy`.
+One document, set by the user in the panel and sent per task. There is no
+server-side floor to merge into it — see the package docstring.
 
 # ponytail: whitelist + block_blacklisted were removed in the enterprise
 # redesign — blacklist match is always a hard block in secure mode, and
 # "allow only these sites" is impractical to maintain (admins can't
 # enumerate every safe site). The schema reads pydantic-defaults for the
-# dropped fields, so old policy files on disk still parse without error.
+# dropped fields, so old payloads on disk still parse without error.
 """
 
 from __future__ import annotations
@@ -44,20 +42,6 @@ class Policy(BaseModel):
 
 # ponytail: UserPolicy is currently identical to Policy — kept as a
 # separate type so the extension payload can evolve independently of the
-# server's floor schema (e.g. extension-only toggles).
+# server's schema (e.g. extension-only toggles).
 class UserPolicy(Policy):
     pass
-
-
-def merge(floor: Policy | None, user: Policy | None) -> Policy:
-    """Floor ∪ user. Secure mode is sticky upward; blacklist is unioned;
-    first_time_seen_prompt is OR."""
-    if floor is None and user is None:
-        return Policy()
-    f = floor or Policy()
-    u = user or Policy()
-    return Policy(
-        mode="secure" if f.mode == "secure" or u.mode == "secure" else "normal",
-        blacklist=sorted(set(f.blacklist) | set(u.blacklist)),
-        first_time_seen_prompt=f.first_time_seen_prompt or u.first_time_seen_prompt,
-    )

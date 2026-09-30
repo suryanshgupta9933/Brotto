@@ -336,6 +336,17 @@
       gap: 9px;
       padding: 8px 0;
       cursor: pointer;
+      /* The bare `label` rule below styles a field NAME — mono, uppercase,
+         9.5px. A toggle's label is a sentence the user reads, so it opts out
+         of that here and sets the panel's sentence type instead. Without
+         these four it inherited mono + uppercase and rendered as two
+         shouting captions. */
+      font-family: var(--font-ui);
+      font-size: 13px;
+      font-weight: 400;
+      letter-spacing: normal;
+      text-transform: none;
+      color: var(--ink);
     }
     .settings-toggle + .settings-toggle { border-top: 1px solid var(--rule); }
     .settings-toggle input {
@@ -540,8 +551,11 @@
     }
 
     /* Labels that wrap their own control stack instead of running inline. */
-    .settings-section label:has(> select),
-    .settings-section label:has(> input) { display: flex; flex-direction: column; gap: 5px; }
+    /* A toggle is excluded: its text sits BESIDE the box, not under it.
+       Specificity alone is not enough to save it — this selector is
+       `.settings-section label:has(...)`, which outranks `.settings-toggle`. */
+    .settings-section label:not(.settings-toggle):has(> select),
+    .settings-section label:not(.settings-toggle):has(> input) { display: flex; flex-direction: column; gap: 5px; }
 
     /* Hint copy. Was referenced in markup but never defined — it was
        inheriting 16px body text and breaking the settings rhythm. */
@@ -557,35 +571,19 @@
       padding: 1px 4px;
     }
 
-    .floor-blacklist {
-      background: var(--paper-2);
-      border: 1px solid var(--rule);
-      padding: 8px 10px;
-      font-size: 12px;
-      max-height: 110px;
-      overflow-y: auto;
-    }
-    .floor-item { padding: 2px 0; color: var(--ink-2); }
-    .floor-tag {
-      display: inline-block;
-      margin-left: 4px;
-      padding: 1px 5px;
-      font-family: var(--font-mono);
-      font-size: 8.5px;
-      font-weight: 500;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      background: var(--ink);
-      color: var(--paper);
-    }
-    .floor-empty { color: var(--ink-3); }
-    /* "Could not reach server" is a warning, not an empty state. */
-    .floor-unreachable { color: var(--wait); }
-
     #policyModeHeader.secure { color: var(--ok); font-weight: 500; }
 
     .settings-actions-row { display: flex; gap: 8px; align-items: stretch; }
-    .settings-actions-row .settings-btn-secondary { flex: 1; }
+    /* `flex: 1` alone leaves the children's min-width at the size of their
+       nowrap text, so the two secondary labels together push Save past the
+       panel edge instead of sharing the row. */
+    .settings-actions-row .settings-btn-secondary { flex: 1; min-width: 0; white-space: normal; }
+    /* The global reset at the top of this file zeroes padding on every
+       element, UA button padding included, and `.btn` never puts it back — so
+       these rendered 14px tall with the label flush against the border. Only
+       the settings row is fixed; the rest of the panel sizes its own buttons
+       with `.btn-sm` and looks right. */
+    .settings-actions-row .btn { padding: 9px 14px; }
     .settings-verify { display: flex; align-items: center; gap: 6px; min-height: 16px; }
     .settings-verify .dot { width: 7px; height: 7px; background: var(--ink-3); flex-shrink: 0; }
     .settings-verify.ok    { color: var(--ok); }
@@ -1528,17 +1526,10 @@
       <p id="policyModeHeader" class="settings-hint">Loading current policy…</p>
     </div>
     <div class="settings-section">
-      <label>Blocked by your Brotto server</label>
-      <div id="floorBlacklist" class="floor-blacklist" aria-live="polite">
-        <div class="floor-empty">Loading…</div>
-      </div>
-      <p class="settings-hint">Set by whoever runs your Brotto server, and you can't remove them here. In secure mode Brotto refuses these sites outright.</p>
-    </div>
-    <div class="settings-section">
-      <label for="blacklistSetting">Your additional blocked domains</label>
+      <label for="blacklistSetting">Domains Brotto refuses</label>
       <textarea id="blacklistSetting" class="input" rows="3"
         placeholder="competitor.com&#10;mail.personal.com"></textarea>
-      <p class="settings-hint">One domain per line. Wildcard <code>*.example.com</code> allowed. These are added on top of the server's list.</p>
+      <p class="settings-hint">One domain per line. Wildcard <code>*.example.com</code> allowed. In secure mode Brotto refuses these sites outright.</p>
     </div>
     <div class="settings-section">
       <h3>Model</h3>
