@@ -16,9 +16,10 @@ from brotto_orchestrator.dev.ax_tree_extractor import (
 )
 
 
-def _t(ref, role, name, parent=None, href=None):
+def _t(ref, role, name, parent=None, href=None, value=None):
     return SemanticTarget(
-        ref_id=ref, tag=role, role=role, name=name, parent_ref_id=parent, href=href,
+        ref_id=ref, tag=role, role=role, name=name, parent_ref_id=parent,
+        href=href, value=value,
     )
 
 
@@ -82,6 +83,49 @@ def test_truncation_drops_whole_lines_and_says_how_many():
         ref = line.lstrip()[1 : line.lstrip().index("]")]
         name = next(t.name for t in targets if t.ref_id == ref)
         assert f'"{name}"' in line
+
+
+def _inbox(heading_count=200):
+    """A long list of nameless headings, then the one control worth having.
+
+    Mirrors the `auth-inbox` fixture, which failed with GAP_RENDER: the target
+    is in the tree and past the character cut. Document order puts it last.
+    """
+    targets = [_t(f"h{i}", "heading", f"Message from sender {i}") for i in range(heading_count)]
+    targets.append(_t("msg", "button", "Message 400"))
+    return targets
+
+
+def test_a_later_interactive_control_outranks_nameless_headings():
+    """Review Focus #5. Ranking is by actionability: the one button on the
+    page survives a budget that 200 nameless headings would have eaten."""
+    tree = filter_ax_targets(_inbox(), max_chars=1200)
+    assert "Message 400" in tree
+    assert "not shown" in tree  # the headings lost, and it says so
+
+
+def test_a_nameless_but_valued_control_still_outranks_headings():
+    """Criterion 3 only bites where a name is absent but a value is not —
+    a filled field renders `value="…"` with no name at all, and is still the
+    thing the agent can act on."""
+    targets = [_t(f"h{i}", "heading", f"Message from sender {i}") for i in range(200)]
+    targets.append(_t("q", "textbox", "", value="quarterly-report"))
+    assert "quarterly-report" in filter_ax_targets(targets, max_chars=1200)
+
+
+def test_ranking_never_hides_a_target_the_budget_can_hold():
+    """Under a generous budget nothing is dropped — the ranked cut is a cut,
+    not a filter."""
+    out = filter_ax_targets(_inbox(heading_count=20), max_chars=100_000)
+    assert "not shown" not in out
+    for i in range(20):
+        assert f"sender {i}" in out
+
+
+def test_the_budget_still_scales_with_the_window():
+    """Ranking changes which lines survive, never how many."""
+    assert len(filter_ax_targets(_inbox(), max_chars=2000)) > \
+           len(filter_ax_targets(_inbox(), max_chars=1000))
 
 
 def test_budget_scales_with_the_context_window():

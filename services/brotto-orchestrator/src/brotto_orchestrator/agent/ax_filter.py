@@ -18,6 +18,14 @@ KEEP_ROLES = {
 
 STRIP_ROLES = {"generic", "none", "presentation", "separator"}
 
+# Roles the agent can act on *now*. Cut from a page's tail, these are the
+# lines worth the budget; a heading is orientation, a control is a task.
+# `searchbox` is a textbox in all but name.
+ACTIONABLE_ROLES = {
+    "button", "link", "textbox", "searchbox", "combobox", "checkbox",
+    "radio", "tab", "menuitem", "option", "switch", "slider", "spinbutton",
+}
+
 # Character budget for the rendered tree. Derived from the model's context
 # window by the caller (see `budget_for_window`) — a flat 6000 next to a 1M
 # window truncated a real GitHub list page at 6041 chars and cost the agent a
@@ -165,8 +173,10 @@ def filter_ax_targets(
     - [→ open] — primary action for this row (click to open/select the item)
     - [☐ select-only] — bulk-selection control (never opens the item)
 
-    Over budget, whole lines are dropped rather than sliced, so what survives
-    is still a coherent tree instead of one that ends mid-element.
+    Over budget, whole lines are dropped rather than sliced, and the lowest
+    ranked go first: an actionable control, in-viewport, named, shallow —
+    over the same four in that order. Truncation is a ranking problem, not a
+    size problem; the budget itself is the caller's and is untouched.
     """
     # Compute spatial annotations (marks primary actions and selection controls)
     annotations = _compute_annotations(targets)
@@ -184,8 +194,7 @@ def filter_ax_targets(
         and has_list_rows
     }
 
-    lines: list[str] = []
-    offscreen: list[str] = []
+    lines: list[tuple[tuple, str]] = []
     dropped = 0
 
     for t in targets:
@@ -215,23 +224,34 @@ def filter_ax_targets(
         if pad:
             line = pad + line
 
-        # Off-screen elements are appended after the visible tree, so a long
-        # page's tail spends budget last.
+        # Off-screen still ranks below in-viewport, and says so on the line.
+        offscreen = False
         if viewport_coords and t.coordinates:
             vx, vy, vw, vh = viewport_coords
             cx, cy = t.coordinates.get("x", 0), t.coordinates.get("y", 0)
-            if not (vx <= cx <= vx + vw and vy <= cy <= vy + vh):
-                offscreen.append(f"[off-screen] {line}")
-                continue
+            offscreen = not (vx <= cx <= vx + vw and vy <= cy <= vy + vh)
+            if offscreen:
+                line = f"[off-screen] {line}"
 
-        lines.append(line)
+        # Rank by what is actionable now. A stable sort keeps document order
+        # within a rank, so a page that fits is unchanged. This is why the
+        # inbox fixture's lone button survived a budget 200 headings had
+        # eaten: the budget was never the problem, the ordering was.
+        lines.append((
+            (
+                role not in ACTIONABLE_ROLES,
+                offscreen,
+                not t.name,
+                depth.get(t.ref_id, 0),
+            ),
+            line,
+        ))
 
-    # Visible tree first, then off-screen. Drop whole lines: slicing mid-line
-    # used to end the tree on a half-rendered element.
-    ordered = lines + offscreen
+    # Drop whole lines, lowest rank first: slicing mid-line used to end the
+    # tree on a half-rendered element.
     kept: list[str] = []
     used = 0
-    for line in ordered:
+    for _, line in sorted(lines, key=lambda p: p[0]):
         if kept and used + len(line) + 1 > max_chars:
             dropped += 1
             continue
