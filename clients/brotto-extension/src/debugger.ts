@@ -98,6 +98,28 @@ export async function sendCommand(
   tabId: number,
   command: CdpCommand
 ): Promise<unknown> {
+  try {
+    return await rawSendCommand(tabId, command);
+  } catch (err) {
+    // A chrome.debugger attachment ends on its own. Chrome documents two
+    // reasons on onDetach — the tab was closed, or DevTools was opened for
+    // that tab — and neither raised anything here, so the run went on
+    // believing it had a debugger and only found out at this command: after
+    // the server had already spent 30s waiting for an observation that
+    // could not arrive, and after the model had been handed an empty page
+    // and failed to decide anything from it. Re-attach once and retry; a
+    // second failure is real and propagates.
+    if (!/not attached/i.test(String(err))) throw err;
+    await attachToTab(tabId);
+    await rawSendCommand(tabId, { method: "Page.enable" });
+    return rawSendCommand(tabId, command);
+  }
+}
+
+function rawSendCommand(
+  tabId: number,
+  command: CdpCommand
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (chrome.debugger.sendCommand as any)({ tabId }, command.method, command.params, (result: unknown, error: unknown) => {
