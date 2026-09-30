@@ -153,6 +153,7 @@ const statusBarEl     = document.getElementById('statusBar');
 const stepCountActive = document.getElementById('stepCountActive');
 const timerActiveEl   = document.getElementById('timerActive');
 const newTaskBtn      = document.getElementById('newTaskBtn');
+const outcomeCell     = document.getElementById('outcomeCell');
 const connectionMeta  = document.getElementById('connectionMeta');
 const statusPill      = document.getElementById('statusPill');
 const connLabelEl     = document.getElementById('connLabel');
@@ -165,23 +166,6 @@ const MAX_TASK_CHARS = 1000;
 
 // ── Settings panel ────────────────────────────────────────────────────────
 // (handlers below — reads chrome.storage.local, writes on Save)
-
-// ponytail: the TABS cell is the only tab surface — the old "Tabs opened"
-// lifecycle list was removed, but the events still feed the count.
-const seenTabs = new Map(); // tabId → {kind, url, title, lastUpdate}
-function recordTabEvent(ev) {
-  if (!ev) return;
-  if (ev.kind === 'closed') {
-    seenTabs.delete(ev.tabId);
-  } else {
-    seenTabs.set(ev.tabId, { tabId: ev.tabId, kind: ev.kind, url: ev.url, title: ev.title });
-  }
-  updateTabCount();
-}
-function updateTabCount() {
-  const value = document.getElementById('tabCountActive');
-  if (value) value.textContent = String(seenTabs.size);
-}
 
 // ponytail: context utilization cell — backend is the source of truth.
 // The harness emits `{tokens, window, pct}` per step (pct is the actual
@@ -240,11 +224,6 @@ const historyBtn     = document.getElementById('historyBtn');
 const historyOverlay = document.getElementById('historyOverlay');
 const historyClose   = document.getElementById('historyClose');
 const historyList    = document.getElementById('historyList');
-const transcriptEl   = document.getElementById('historyTranscript');
-const transcriptBody = document.getElementById('transcriptBody');
-const transcriptMeta = document.getElementById('transcriptMeta');
-const transcriptBack = document.getElementById('transcriptBack');
-const transcriptRun  = document.getElementById('transcriptRun');
 
 historyBtn.addEventListener('click', async () => {
   historyOverlay.classList.add('open');
@@ -326,16 +305,13 @@ function formatSessionTime(ts) {
 }
 
 async function renderHistory() {
-  // Reopening history always lands on the list, never back into whatever
-  // transcript the last row click opened.
-  transcriptEl.hidden = true;
   historyList.hidden = false;
   const sessions = await listSessions();
   if (sessions.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'history-empty';
     empty.innerHTML = '<strong>No tasks yet</strong>Every task you finish is listed here. '
-      + 'Click one to see what it did.';
+      + 'Click one to pick it back up.';
     historyList.replaceChildren(empty);
     return;
   }
@@ -347,11 +323,12 @@ async function renderHistory() {
     row.innerHTML = '<span class="history-mark"></span><span><span class="history-task"></span>'
       + '<span class="history-meta"></span></span>';
     row.querySelector('.history-task').textContent = s.task || '(no task text)';
-    // A row you can't act on is a lie about what history is for. The document
-    // on the server holds everything the run produced, so the click opens it;
-    // the Re-run button inside carries the composer refill this used to be.
-    row.title = s.session_id ? 'Open this session' : 'Put this task back in the box';
-    row.addEventListener('click', () => void openTranscript(s));
+    // A row you can't act on is a lie about what history is for. Clicking one
+    // puts that conversation back in the chat so you can carry on with it.
+    row.title = s.session_id
+      ? 'Bring this conversation back and keep going'
+      : 'Put this task back in the box';
+    row.addEventListener('click', () => void replaySession(s));
     // A row written before tasks existed carries no count, and "1 task" beside
     // the task's own text says nothing the text did not.
     const bits = [
@@ -377,49 +354,21 @@ async function renderHistory() {
   }));
 }
 
-// ── Session transcript ─────────────────────────────────────────────────────
-// The detail half of history. The index is deliberately a summary, so this
-// is the one place the panel talks to the server to read what a run actually
-// did, and the one place a failure has to stay survivable: a row click that
-// cannot reach the server must still put the task back in the box, because
-// losing the ability to re-run something is a regression, not a degradation.
+// ── Replaying a session from history ──────────────────────────────────────
+// A history row is a conversation, not a report, so clicking one puts that
+// conversation back in the chat and leaves the composer live. What it used to
+// do — open a read-only list of steps, prompts and token counts — answered a
+// question the panel was never asked, and left no way to carry on.
+//
+// A row that cannot be read back must still be actionable, so the failure
+// path falls back to putting the task back in the composer. Losing the ability
+// to re-run something is a regression, not a degradation.
 
-function txEl(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined && text !== null) node.textContent = String(text);
-  return node;
-}
-
-// ponytail: a 8k-char audit field is a page of page text, and the panel is
-// 340px wide. Show the head and say so. Upgrade path if someone wants the
-// rest: a <details> that mounts the full string on demand.
-function txPreview(value, limit = 400) {
-  const s = String(value || '');
-  if (s.length <= limit) return s;
-  return s.slice(0, limit) + `… +${s.length - limit} chars`;
-}
-
-function txBlock(label, text, className) {
-  const block = txEl('div', 'tx-block');
-  block.appendChild(txEl('div', 'label', label));
-  block.appendChild(txEl('div', 'tx-text' + (className ? ' ' + className : ''), text));
-  return block;
-}
-
-function txMetaLine(parts) {
-  const meta = txEl('div', 'history-meta');
-  parts.filter(Boolean).forEach((b, i) => {
-    if (i) meta.appendChild(txEl('span', 'sep', '/'));
-    meta.appendChild(txEl('span', null, b));
-  });
-  return meta;
-}
+let replayRequest = 0;
 
 function refillComposer(task) {
   goalEl.value = task || '';
   historyOverlay.classList.remove('open');
-  transcriptEl.hidden = true;
   historyList.hidden = false;
   goalEl.focus();
 }
@@ -434,203 +383,253 @@ async function fetchAudit(sessionId) {
   return res.json();
 }
 
-let transcriptRequest = 0;
-
-async function openTranscript(entry) {
+async function replaySession(entry) {
   if (!entry.session_id) {
     // A row written before the panel ever saw a session id. Nothing to fetch,
     // so do exactly what the row always did.
     refillComposer(entry.task);
     return;
   }
-  const request = ++transcriptRequest;
+  const request = ++replayRequest;
   let doc;
   try {
     doc = await fetchAudit(entry.session_id);
   } catch {
-    toast('Could not load session — putting the task back in the box', 'bad', 4000);
+    toast('Could not load that session — putting the task back in the box', 'bad', 4000);
     refillComposer(entry.task);
     return;
   }
   // A superseded click must not paint over the one the user is waiting on.
-  if (request !== transcriptRequest) return;
+  if (request !== replayRequest) return;
   if (!doc || doc.found === false) {
     toast('Session not found on the server — putting the task back in the box', 'bad', 4000);
     refillComposer(entry.task);
     return;
   }
-  historyList.hidden = true;
-  transcriptEl.hidden = false;
-  renderTranscript(doc, entry);
+
+  historyOverlay.classList.remove('open');
+  historyList.hidden = false;
+  // Emptied first so clearMessages does not re-create the idle placeholder: a
+  // panel holding a replayed thread is not idle, and the placeholder is what
+  // triggers a suggestions fetch against the current tab.
+  messagesEl.replaceChildren();
+  clearMessages({ keepTranscript: true });
+  stopTimer();
+
+  // The audit already holds every element the live transcript is built from,
+  // so the replay rebuilds the conversation out of the same parts rather than
+  // flattening it to text. Walking `messages[]` alone lost all of them: the
+  // step bubbles lost their address rows, the questions the agent asked were
+  // gone, and the final answer read as an ordinary reply.
+  renderTranscript(doc);
+
+  // No "this one: ERROR" line. The outcome cell already carries the word, the
+  // transcript already carries the reason, and a third copy in the chat said
+  // the same thing three lines below the error it was describing.
+
+  // What makes the next message continue this conversation rather than start
+  // a new one. Sent to the background with the follow-up; the server appends
+  // to the same document, so the audit keeps one thread.
+  state.sessionId = entry.session_id;
+  state.taskCount = (doc.tasks?.length) || 1;
+  // Set before setPhase, which is what lets the status bar appear at all: a
+  // replay ends on `connected`, and `connected` is one of the phases that
+  // hides the bar.
+  state.replaying = true;
+  renderReplayMetrics(doc);
+  setPhase(state.plannerUrl ? 'connected' : 'idle', 'Ready');
+  goalEl.focus();
 }
 
-function renderTranscript(doc, entry) {
-  const totals = doc.totals || {};
-  const status = String(doc.status || 'unknown');
-  transcriptMeta.textContent = status + (totals.steps ? ` · ${totals.steps} steps` : '');
-  transcriptBody.replaceChildren();
+// A replayed run's bar is a receipt, not an instrument: the numbers the run
+// ended on, read straight off the document. Taken from `turns[]` rather than
+// `totals` so a v1 document — which recorded turns only — reads the same.
+function renderReplayMetrics(doc) {
+  const turns = Array.isArray(doc.turns) ? doc.turns : [];
+  state.stepCount = turns.length;
+  updateStepCount();
 
-  transcriptRun.onclick = () => refillComposer((doc.goal || entry.task || '').trim());
+  const wall = doc.totals?.wall_s;
+  if (timerActiveEl && typeof wall === 'number' && wall > 0) {
+    timerActiveEl.textContent = `${wall.toFixed(1)}s`;
+    timerActiveEl.title = 'Time this run spent working.';
+  }
 
-  if (doc.corrupt) {
-    transcriptBody.appendChild(txEl(
-      'div', 'tx-empty', 'This session is damaged — its log could not be read back.',
-    ));
-  } else {
-    const tasks = (doc.schema_version >= 2 && Array.isArray(doc.tasks)) ? doc.tasks : null;
-    if (tasks && tasks.length) {
-      // ponytail: the task header *is* the user message — the server writes
-      // the same string to both — so it is shown once, as the heading. The
-      // join is messages[].turn → turns[]; both ways the join can leave
-      // something behind (a turn whose step was aborted never got a message,
-      // a message can point at a turn that isn't there) are swept after it,
-      // because the alternative is silently losing audit detail this panel
-      // has always shown.
-      const messages = (Array.isArray(doc.messages) ? doc.messages : [])
-        .filter((m) => m.role === 'assistant');
-      const turns = Array.isArray(doc.turns) ? doc.turns : [];
-      const joined = new Set();
-      tasks.forEach((task, i) => {
-        const index = task.index ?? i;
-        const group = txEl('div', 'tx-block');
-        group.appendChild(txEl('div', 'label', `Task ${index + 1}`));
-        group.appendChild(txEl('div', 'tx-text', task.goal || ''));
-        transcriptBody.appendChild(group);
-        messages.filter((m) => (m.task ?? 0) === index).forEach((m) => {
-          if (m.turn != null && turns[m.turn]) {
-            joined.add(m.turn);
-            transcriptBody.appendChild(renderTurn(turns[m.turn]));
-          } else {
-            transcriptBody.appendChild(txBlock('Reply', txPreview(m.content)));
-          }
-        });
-        turns.forEach((t, n) => {
-          if ((t.task ?? 0) === index && !joined.has(n)) transcriptBody.appendChild(renderTurn(t));
-        });
-      });
-      if (doc.result) transcriptBody.appendChild(renderResult(doc.result));
-    } else {
-      if (doc.goal) transcriptBody.appendChild(txBlock('Task', doc.goal));
-      const turns = Array.isArray(doc.turns) ? doc.turns : [];
-      if (!turns.length) {
-        transcriptBody.appendChild(txEl('div', 'tx-empty', 'This session recorded no steps.'));
+  const pct = turns[turns.length - 1]?.model?.context_pct;
+  if (typeof pct === 'number') {
+    const value = document.getElementById('contextValue');
+    if (value) value.textContent = `${+pct.toFixed(1)}%`;
+  }
+
+  setOutcome(doc.status, doc.result?.summary);
+}
+
+// Actions the harness treats as its own bookkeeping. The server filters them
+// before it emits `step_progress`, so a turn built only from these produced no
+// bubble when it ran — and must produce none when it is replayed, or the
+// transcript gains steps the user never saw.
+const INTERNAL_ACTIONS = new Set([
+  'write_scratchpad', 'append_scratchpad', 'read_scratchpad', 'recall_memory',
+]);
+
+// The external action the live step bubble was built from: the first one, which
+// is the same `external[0]` the harness picks before it sends the frame.
+function leadAction(turn) {
+  for (const a of turn.actions || []) {
+    if (!INTERNAL_ACTIONS.has(a.action)) return a;
+  }
+  return null;
+}
+
+// Rebuilds the conversation in the order it happened. Document order is
+// causal order — `tasks[]`, `turns[]` and each turn's `prompts[]`/`actions[]`
+// are all append-only — so nothing here has to sort.
+function renderTranscript(doc) {
+  const messages = Array.isArray(doc.messages) ? doc.messages : [];
+  const turns = Array.isArray(doc.turns) ? doc.turns : [];
+
+  // A run that did not finish has no answer — it has a reason. The closing
+  // message is drawn in the success bubble purely because it is last, so a
+  // failed task rendered its own error text inside a green tick: the panel
+  // saying the run worked while the words underneath said the opposite.
+  const closingRole = (status) => (status && status !== 'completed' ? 'error' : 'done');
+
+  // v1 documents recorded turns only, and for those the run's own goal is the
+  // whole conversation, so that is what is shown.
+  if (!messages.length) {
+    if (doc.goal) appendMessage({ role: 'user', text: doc.goal });
+    for (const turn of turns) {
+      const lead = leadAction(turn);
+      if (lead) appendStepForTurn(turn, lead);
+    }
+    if (doc.result?.summary) {
+      state.lastGoal = doc.goal || '';
+      const summary = doc.result.summary;
+      if (closingRole(doc.status) === 'error') {
+        appendMessage({ role: 'error', text: closingText(doc.result?.failure_reason, summary) });
+      } else {
+        appendMessage({ role: 'done', finalAnswer: summary });
       }
-      turns.forEach((t) => transcriptBody.appendChild(renderTurn(t)));
-      if (doc.result) transcriptBody.appendChild(renderResult(doc.result));
+    }
+    return;
+  }
+
+  const taskIndexes = Array.isArray(doc.tasks) && doc.tasks.length
+    ? doc.tasks.map((_, i) => i)
+    : [...new Set(messages.map((m) => (typeof m.task === 'number' ? m.task : 0)))];
+
+  for (const taskIndex of taskIndexes) {
+    const mine = messages.filter((m) => (typeof m.task === 'number' ? m.task : 0) === taskIndex);
+    // Each task carries its own end. Only the last one falls back to the
+    // document's status, which is the only status a v1-style document has —
+    // reading it for every task would label an earlier finished task by how
+    // the whole conversation happened to end.
+    const taskStatus = doc.tasks?.[taskIndex]?.status
+      || (taskIndex === taskIndexes[taskIndexes.length - 1] ? doc.status : null);
+
+    for (const m of mine.filter((x) => x.role === 'user')) {
+      state.lastGoal = m.content || '';
+      appendMessage({ role: 'user', text: m.content || '' });
+    }
+
+    // A task's final answer is the last assistant message of that task —
+    // `_close` writes `result.summary` as one, after the per-turn thoughts.
+    // The exception is an aborted turn, which never reaches `_close` and so
+    // ends on a thought; that is told apart by the text being the same one
+    // its turn is already titled with.
+    const assistants = mine.filter((x) => x.role === 'assistant');
+    let finalAnswer = assistants.pop();
+    if (finalAnswer && isTurnThought(finalAnswer, turns)) finalAnswer = null;
+
+    for (const turn of turns.filter((t) => (typeof t.task === 'number' ? t.task : 0) === taskIndex)) {
+      for (const p of turn.prompts || []) appendPromptCard(p);
+      const lead = leadAction(turn);
+      if (lead) {
+        appendStepForTurn(turn, lead);
+        continue;
+      }
+      // A scratchpad-only turn drew no bubble when it ran. Its thought is
+      // still the only record of what the agent did that step.
+      const thought = turn.model?.thought || turn.model?.reasoning || '';
+      if (thought) appendMessage({ role: 'assistant', text: thought });
+    }
+
+    if (finalAnswer?.content) {
+      if (closingRole(taskStatus) === 'error') {
+        appendMessage({
+          role: 'error',
+          text: closingText(
+            taskIndex === taskIndexes[taskIndexes.length - 1] ? doc.result?.failure_reason : null,
+            finalAnswer.content,
+          ),
+        });
+      } else {
+        appendMessage({ role: 'done', finalAnswer: finalAnswer.content });
+      }
     }
   }
 
-  // Writer failures and run failures share `errors`, and both carry an
-  // error_id — six characters that tie the line here to the server log and
-  // to a support report.
-  (Array.isArray(doc.errors) ? doc.errors : []).forEach((e) => {
-    const block = txBlock(
-      'Error' + (e.error_id ? ` · ${e.error_id}` : ''),
-      `${e.code || 'error'}${e.where ? ` · ${e.where}` : ''}\n${txPreview(e.message)}`,
-      'tx-bad',
-    );
-    block.querySelector('.tx-text').style.whiteSpace = 'pre-wrap';
-    transcriptBody.appendChild(block);
-  });
-
-  const bits = [
-    totals.tokens_in || totals.tokens_out
-      ? `${totals.tokens_in || 0} in / ${totals.tokens_out || 0} out tokens`
-      : null,
-    totals.wall_s ? `${Number(totals.wall_s).toFixed(1)}s wall` : null,
-    totals.prompts ? `${totals.prompts} prompts` : null,
-  ];
-  if (bits.filter(Boolean).length) {
-    transcriptBody.appendChild(txMetaLine(bits));
-  }
+  state.stepCount = turns.length;
+  updateStepCount();
 }
 
-function renderTurn(turn) {
-  const block = txEl('div', 'tx-block');
-  const obs = turn.observation || {};
-  const m = turn.model;
-
-  // `ended_at` is null until the turn closes, so a run killed mid-step reads
-  // as interrupted rather than as a turn that never happened.
-  const interrupted = !turn.ended_at;
-  block.appendChild(txEl(
-    'div', 'label', `Step ${(turn.step ?? 0) + 1}` + (interrupted ? ' · interrupted' : ''),
-  ));
-  if (obs.page_title || obs.url) {
-    block.appendChild(txEl('div', 'tx-url', txPreview(obs.url || obs.page_title, 120)));
-  }
-  if (m && (m.thought || m.reasoning)) {
-    block.appendChild(txEl('div', 'tx-text', txPreview(m.thought || m.reasoning)));
-  }
-  if (m) {
-    block.appendChild(txMetaLine([
-      m.model || null,
-      m.tokens_in || m.tokens_out ? `${m.tokens_in || 0}/${m.tokens_out || 0} tok` : null,
-      m.latency_ms ? `${m.latency_ms}ms` : null,
-      m.context_pct ? `${Math.round(m.context_pct * 100)}% ctx` : null,
-    ]));
-  }
-
-  // Causal order within a turn is model → prompts → actions: a prompt is
-  // raised after the model decides and before the action runs.
-  (Array.isArray(turn.prompts) ? turn.prompts : []).forEach((p) => {
-    const card = txEl('div', 'tx-prompt');
-    card.dataset.status = p.status || '';
-    card.dataset.decision = p.decision || '';
-    card.appendChild(txEl(
-      'div', 'label',
-      `${(p.kind || 'prompt').replace(/_/g, ' ')} · ${p.action || 'action'}`,
-    ));
-    if (p.reason) card.appendChild(txEl('div', 'tx-text', txPreview(p.reason)));
-    // A prompt still "pending" is a socket that died between raising and
-    // answering — not a denial, and it must not read as one.
-    const outcome = p.status === 'pending'
-      ? 'never answered'
-      : (p.decision || p.status || '—');
-    const line = outcome + (p.response ? ` · “${txPreview(p.response, 160)}”` : '');
-    const cls = p.status === 'pending' ? 'tx-wait' : p.decision === 'denied' ? 'tx-bad' : '';
-    card.appendChild(txEl('div', 'tx-text ' + cls, line));
-    block.appendChild(card);
-  });
-
-  (Array.isArray(turn.actions) ? turn.actions : []).forEach((a) => {
-    const line = txEl('div', 'tx-text', `${a.action || 'action'}${a.outcome ? ` — ${txPreview(a.outcome, 200)}` : ''}`);
-    if (a.ok === false) line.classList.add('tx-bad');
-    block.appendChild(line);
-  });
-
-  if (turn.error) {
-    block.appendChild(txEl(
-      'div', 'tx-text tx-bad',
-      `${turn.error.code || 'error'}${turn.error.error_id ? ` · ${turn.error.error_id}` : ''} — ${txPreview(turn.error.message)}`,
-    ));
-  }
-  return block;
+// True when a message is the per-turn thought rather than a task's closing
+// summary. Both are written with a `turn`; only the content tells them apart,
+// because a thought is the same string `turns[].model.thought` holds.
+function isTurnThought(message, turns) {
+  const turn = turns[message.turn];
+  if (!turn?.model?.thought) return false;
+  return (turn.model.thought || '') === (message.content || '');
 }
 
-function renderResult(result) {
-  const block = txEl('div', 'tx-block');
-  const failed = result.status && result.status !== 'completed';
-  block.appendChild(txEl(
-    'div', 'label', failed ? `Result · ${result.status}` : 'Result',
-  ));
-  // The same thing the live path shows, from the same field: the summary for
-  // a completed run, the failure reason for anything else, plus the error id
-  // when the run produced one.
-  const text = (failed
-    ? (result.failure_reason || result.summary || 'Task failed')
-    : (result.summary || 'Task complete'));
-  block.appendChild(txEl('div', 'tx-text' + (failed ? ' tx-bad' : ''), text));
-  if (result.error_id) {
-    block.appendChild(txEl('div', 'tx-url', `error ${result.error_id}`));
-  }
-  if (result.final_url) {
-    block.appendChild(txEl('div', 'tx-url', txPreview(result.final_url, 120)));
-  }
-  return block;
+function appendStepForTurn(turn, lead) {
+  const text = (turn.model?.thought || turn.model?.reasoning || '').trim()
+    || deriveReasoningFromAction(lead.action || '', lead.action);
+  appendStep({
+    icon: iconFor(lead.action || ''),
+    text,
+    pageUrl: turn.observation?.url || '',
+    // Same rule the harness applies when it builds the frame: only a
+    // navigation has a destination address worth drawing.
+    actionTarget: lead.action === 'navigate' ? (lead.args?.url ?? null) : null,
+  });
 }
 
-transcriptBack.addEventListener('click', () => void renderHistory());
+// The question the agent asked and what came back, as the same card the user
+// answered live — already resolved, because in a replay there is nothing left
+// to answer.
+function appendPromptCard(p) {
+  const args = p.args || {};
+  if (p.kind === 'ask_human') {
+    appendClarifyCard({
+      id: p.id,
+      question: p.reason || args.question || 'Brotto needs your guidance.',
+      resolved: p.status === 'answered' ? (p.response ?? '') : 'skipped',
+    });
+    return;
+  }
+  if (p.kind === 'login_required') {
+    appendLoginCard({
+      domain: p.domain || 'this site',
+      outcome: loginOutcome(p),
+    });
+    return;
+  }
+  appendApprovalCard({
+    id: p.id,
+    reason: p.reason || 'Brotto wanted approval for this action.',
+    action: { type: p.action, url: args.url },
+    resolved: p.decision || 'denied',
+  });
+}
+
+function loginOutcome(p) {
+  if (p.status !== 'answered') return 'Never answered — the task moved on.';
+  const d = String(p.decision || '').toLowerCase();
+  if (d === 'timeout') return 'Timed out — Brotto carried on and the task did not stop.';
+  if (d === 'skipped') return 'Skipped — the task was given up on.';
+  return 'Signed in, and the task carried on.';
+}
 
 
 // ── Settings: load + save (first chrome.storage.local writes — today the
@@ -880,6 +879,10 @@ const state = {
   // ever set by a send this panel watched happen, which is what separates a
   // new task from a reopened panel replaying the last run's terminal event.
   taskCount: 0,
+  // True only while a history session is on screen with no task behind it. It
+  // is the one case where the status bar has something to say and no phase
+  // that admits it, so setPhase consults it.
+  replaying: false,
 };
 
 let timerInterval = null;
@@ -980,86 +983,201 @@ function splitUrl(url) {
   }
 }
 
-// Minimal markdown renderer for agent output.
-// HTML-escapes first so injected HTML stays literal; only our own tags get through.
-// Block-level: headers, lists, blockquote, hr. Inline: bold, italic, code, links.
-function renderMarkdown(raw) {
-  if (!raw) return '';
-  const esc = escapeHtml(String(raw));
-  const lines = esc.split('\n');
-  const out = [];
-  let i = 0;
+// ── Markdown ──────────────────────────────────────────────────────────────
+// Renders the agent's output. Security model: escape every byte first, then
+// emit only tags generated here. No model or page string reaches an attribute
+// unescaped, and a link href must match https?:// explicitly — `javascript:`
+// fails that test and is left as visible text.
+//
+// Two passes, and the order is the whole point. Blocks are parsed from the RAW
+// lines, so a `#` inside a fence is a fence rather than a heading, and each
+// block's text then goes through inline() on its own. The previous version ran
+// the inline regexes over the joined HTML, which meant `**` inside a code span
+// was bolded, an unclosed `**` ran past the end of its block, and a bare URL
+// inside a generated tag was fair game. Real model output hit all three.
+
+// Split on a backtick run, and keep the body verbatim: nothing inside a code
+// span is emphasis, a link, or a URL. The placeholder is NUL-delimited:
+// the only input is escaped text, and no printable delimiter would be
+// safe to restore against without eating a real " 12 " in a price.
+function renderInline(text) {
+  const spans = [];
+  let s = escapeHtml(String(text)).replace(/(`+)([^`]*?)\1/g, (_, _ticks, body) => {
+    spans.push(`<code class="md-ci">${body}</code>`);
+    return `\u0000${spans.length - 1}\u0000`;
+  });
+
+  // Markdown links first, so the autolink below cannot reach the URL that is
+  // already the href of the anchor we just made. An image collapses to its alt
+  // text rather than leaving a stray leading `!`.
+  s = s.replace(/!?\[([^\]]*)\]\(([^)\s]+)\)/g, (whole, label, href) =>
+    /^https?:\/\//i.test(href)
+      ? `<a href="${href}" target="_blank" rel="noreferrer">${label || href}</a>`
+      : whole);
+
+  // Bare URLs the model wrote as plain text. The lookbehind is what keeps it
+  // off the href and the label of the anchors above.
+  s = s.replace(/(?<![">])(https?:\/\/[^\s<]+)/g, (whole) => {
+    const trail = whole.match(/[.,;:!?)\]]+$/);
+    const url = trail ? whole.slice(0, -trail[0].length) : whole;
+    if (!url) return whole;
+    const dot = trail ? trail[0] : '';
+    return `<a href="${url}" target="_blank" rel="noreferrer">${url}</a>${dot}`;
+  });
+
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  s = s.replace(/(^|[^*\w])\*([^*\n]+)\*/g, '$1<i>$2</i>');
+  s = s.replace(/~~([^~]+)~~/g, '<s>$1</s>');
+
+  return s.replace(/\u0000(\d+)\u0000/g, (_, n) => spans[Number(n)]);
+}
+
+// A `|` row followed by a `|---|:--:|` row is a table. Models use these for
+// exactly the "findings" shape the panel is worst at showing as prose.
+function isTableDivider(line) {
+  return /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(line) && line.includes('-');
+}
+
+function splitRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '')
+    .split('|').map((c) => c.trim());
+}
+
+function renderTable(lines, start) {
+  const header = splitRow(lines[start]);
+  const align = splitRow(lines[start + 1]).map((c) =>
+    /^:-+:$/.test(c) ? 'center' : (/-+:$/.test(c) ? 'right' : 'left'));
+  let i = start + 2;
+  let body = '';
+  while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
+    const cells = splitRow(lines[i]);
+    body += '<tr>' + header.map((_, c) =>
+      `<td class="md-td md-td-${align[c] || 'left'}">${renderInline(cells[c] || '')}</td>`).join('') + '</tr>';
+    i++;
+  }
+  const head = '<tr>' + header.map((h, c) =>
+    `<th class="md-th md-td-${align[c] || 'left'}">${renderInline(h)}</th>`).join('') + '</tr>';
+  // The panel is 320px. A wide table scrolls sideways rather than being
+  // squeezed into unreadable two-character columns.
+  return [`<div class="md-table-wrap"><table class="md-table">${head}<tbody>${body}</tbody></table></div>`, i];
+}
+
+// One list level. `base` is the indent of the first marker, so a deeper run
+// recurses and a shallower one returns to the caller.
+function renderList(lines, start) {
+  const first = lines[start].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+  const base = first[1].replace(/\t/g, '  ').length;
+  const tag = /\d/.test(first[2]) ? 'ol' : 'ul';
+  const items = [];
+  let i = start;
+
   while (i < lines.length) {
-    const trimmed = lines[i].trim();
-    // Headers: #, ##, ### (up to ######)
-    const h = trimmed.match(/^(#{1,6})\s+(.+)$/);
-    if (h) {
-      const level = h[1].length;
-      out.push(`<h${level}>${h[2]}</h${level}>`);
+    const m = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (!m) {
+      if (!lines[i].trim()) break;
+      // A plain line under a marker is a lazy continuation of that item.
+      if (!items.length) break;
+      items[items.length - 1].text += '\n' + lines[i].trim();
       i++;
       continue;
     }
-    // Horizontal rule
-    if (/^(-{3,}|_{3,}|\*{3,})\s*$/.test(trimmed)) {
-      out.push('<hr>');
-      i++;
+    const indent = m[1].replace(/\t/g, '  ').length;
+    if (indent < base) break;
+    if (indent > base) {
+      const [nested, next] = renderList(lines, i);
+      if (items.length) items[items.length - 1].nested += nested;
+      i = next;
       continue;
     }
-    // Unordered list — group consecutive `- ` / `* ` / `+ ` items
-    if (/^[-*+]\s+/.test(trimmed)) {
-      const items = [];
-      while (i < lines.length && /^[-*+]\s+/.test(lines[i].trim())) {
-        items.push(lines[i].trim().replace(/^[-*+]\s+/, ''));
-        i++;
-      }
-      out.push('<ul>' + items.map((it) => `<li>${it}</li>`).join('') + '</ul>');
-      continue;
-    }
-    // Ordered list — group consecutive `1. ` items
-    if (/^\d+\.\s+/.test(trimmed)) {
-      const items = [];
-      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
-        items.push(lines[i].trim().replace(/^\d+\.\s+/, ''));
-        i++;
-      }
-      out.push('<ol>' + items.map((it) => `<li>${it}</li>`).join('') + '</ol>');
-      continue;
-    }
-    // Blockquote
-    if (/^>\s+/.test(trimmed)) {
-      const bq = [];
-      while (i < lines.length && /^>\s+/.test(lines[i].trim())) {
-        bq.push(lines[i].trim().replace(/^>\s+/, ''));
-        i++;
-      }
-      out.push('<blockquote>' + bq.join('<br>') + '</blockquote>');
-      continue;
-    }
-    // Empty line — paragraph break
-    if (trimmed === '') {
-      out.push('');
-      i++;
-      continue;
-    }
-    // Default: pass the line through (paragraph)
-    out.push(lines[i]);
+    const task = m[3].match(/^\[([ xX])\]\s*(.*)$/);
+    items.push(task
+      ? { text: task[2], nested: '', task: task[1] !== ' ' }
+      : { text: m[3], nested: '', task: null });
     i++;
   }
 
-  let html = out.join('\n');
+  const body = items.map((it) => {
+    const box = it.task === null ? ''
+      : `<span class="md-box${it.task ? ' on' : ''}"></span>`;
+    return `<li${it.task === null ? '' : ' class="md-task"'}>${box}${renderInline(it.text)}${it.nested}</li>`;
+  }).join('');
+  return [`<${tag} class="md-list">${body}</${tag}>`, i];
+}
 
-  // Inline replacements
-  html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-  html = html.replace(/\*(.+?)\*/g, '<i>$1</i>');
-  html = html.replace(/`([^`\n]+)`/g,
-    // ponytail: --surface-2 does not exist, so this rendered as no chip at
-    // all. --paper-2 is the sunken token, and the system is square — the 3px
-    // radius was the only rounded corner in the panel.
-    '<code style="background:var(--paper-2);padding:1px 4px;font-size:0.88em;font-family:ui-monospace,monospace">$1</code>');
-  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+function renderMarkdown(raw) {
+  if (!raw) return '';
+  const lines = String(raw).replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+  let i = 0;
 
-  return html;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Fenced code. Opened with ``` or ~~~, closed by a run of the same
+    // character at least as long. The body is escaped and never parsed.
+    const fence = trimmed.match(/^(`{3,}|~{3,})\s*([\w+-]*)\s*$/);
+    if (fence) {
+      const marker = fence[1][0];
+      const close = new RegExp(`^\\s*${marker}{${fence[1].length},}\\s*$`);
+      const body = [];
+      i++;
+      while (i < lines.length && !close.test(lines[i])) { body.push(lines[i]); i++; }
+      i++; // the closing fence
+      out.push(
+        '<div class="md-code">' +
+        (fence[2] ? `<span class="md-code-lang">${escapeHtml(fence[2])}</span>` : '') +
+        `<pre><code>${escapeHtml(body.join('\n'))}</code></pre></div>`,
+      );
+      continue;
+    }
+
+    if (!trimmed) { i++; continue; }
+
+    const h = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (h) { out.push(`<h${h[1].length} class="md-h">${renderInline(h[2])}</h${h[1].length}>`); i++; continue; }
+
+    if (/^(-{3,}|_{3,}|\*{3,})$/.test(trimmed)) { out.push('<hr>'); i++; continue; }
+
+    if (trimmed.startsWith('|') && i + 1 < lines.length && isTableDivider(lines[i + 1])) {
+      const [html, next] = renderTable(lines, i);
+      out.push(html);
+      i = next;
+      continue;
+    }
+
+    if (/^([-*+]|\d+[.)])\s+/.test(trimmed)) {
+      const [html, next] = renderList(lines, i);
+      out.push(html);
+      i = next;
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      const quoted = [];
+      while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
+        quoted.push(lines[i].trim().replace(/^>\s?/, ''));
+        i++;
+      }
+      out.push(`<blockquote>${renderInline(quoted.join('\n')).replace(/\n/g, '<br>')}</blockquote>`);
+      continue;
+    }
+
+    // Paragraph: run to the next blank line. A single newline stays a line
+    // break — that is what a model means by it, and the panel always did.
+    const para = [];
+    while (i < lines.length && lines[i].trim()
+           && !/^(`{3,}|~{3,})/.test(lines[i].trim())
+           && !/^#{1,6}\s+/.test(lines[i].trim())
+           && !/^([-*+]|\d+[.)])\s+/.test(lines[i].trim())
+           && !/^>\s?/.test(lines[i].trim())) {
+      para.push(lines[i].trim());
+      i++;
+    }
+    out.push(`<p>${renderInline(para.join('\n')).replace(/\n/g, '<br>')}</p>`);
+  }
+
+  return out.join('');
 }
 
 // ponytail: if the model skipped `reasoning`, derive a sentence from the raw
@@ -1259,11 +1377,18 @@ async function sendUserMessage() {
   // "Connect" step. setPhase('connecting') shows the spinner briefly,
   // then we move to 'connected' and kick off the task.
   setPhase('connecting', `Connecting to ${state.plannerUrl || 'planner'}…`);
+  // The bar reads WORKING from here, not from `task_started`. That event
+  // arrives a round-trip later, and a send that shows a blank outcome cell
+  // until then reads as "nothing is happening" — which is the one thing the
+  // user is watching for at that moment.
+  setOutcome('running');
   try {
     await ensureConnected();
   } catch (err) {
-    setPhase('error', `Connect failed: ${err instanceof Error ? err.message : String(err)}`);
-    appendMessage({ role: 'error', text: `Connect failed: ${err instanceof Error ? err.message : String(err)}` });
+    const note = failureNote(isOffline(err) ? 'offline' : 'connect_failed', err);
+    setPhase('error', note);
+    setOutcome('failed', note, 'connect_failed');
+    appendMessage({ role: 'error', text: note });
     return;
   }
 
@@ -1278,11 +1403,19 @@ async function sendUserMessage() {
     type: 'run_local_task',
     task: text,
     continueSession: continuing,
+    // Which conversation to append to. Null on a first task; otherwise the id
+    // of the session this panel is showing, including one picked back out of
+    // history, which the background would otherwise not know about.
+    session_id: continuing ? state.sessionId : null,
   });
   if (!response.success) {
     stopTimer();
-    setPhase('error', `Failed to start: ${response.error || 'unknown error'}`);
-    appendMessage({ role: 'error', text: `Failed to start: ${response.error || 'unknown error'}` });
+    const note = /background|service worker/i.test(response.error || '')
+      ? FAILURE_NOTE.service_worker
+      : failureNote('internal', response.error);
+    setPhase('error', note);
+    setOutcome('failed', note, 'internal');
+    appendMessage({ role: 'error', text: note });
   } else {
     void chrome.storage.session.remove('draft');
   }
@@ -1312,9 +1445,7 @@ async function resetForNewTask() {
   // and falls back to the startedAt dedupe, rather than inheriting the last
   // run's id.
   state.sessionId = null;
-  // ponytail: drop the previous task's tab tally so each task starts at zero.
-  seenTabs.clear();
-  updateTabCount();
+  setOutcome(null);
   state.taskInFlight = false;
   clearMessages();
   stopTimer();
@@ -1436,13 +1567,32 @@ function setPhase(phase, message) {
   // ponytail: the bar belongs to a task, not to a moment. It appears on the
   // first step and stays through every terminal phase — a run that failed is
   // exactly when you want to read how far it got. Only the pre-task states
-  // hide it, and New task clears it via clearMessages.
+  // hide it, and New chat clears it via clearMessages.
+  //
+  // A reopened history session is the one case with no task behind it and
+  // still a conversation to read, and it parks on `connected` — so it needs its
+  // own condition. The bar belongs to whatever is on screen, not to whether it
+  // is running: a replayed run shows the numbers it ended on, frozen.
   const showBar = phase !== 'idle' && phase !== 'connected' && phase !== 'disconnected' && phase !== 'connecting';
-  if (statusBarEl) statusBarEl.classList.toggle('active', showBar);
-  // ponytail: New Task button shows after done or error so the user can
-  // start fresh without reloading.
-  const showNewTask = phase === 'done' || phase === 'error';
+  if (statusBarEl) statusBarEl.classList.toggle('active', showBar || state.replaying);
+  // ponytail: New chat shows whenever there is a conversation to leave. Keying
+  // it to a phase made it structurally impossible to reach from a replay,
+  // which ends on `connected` — a session id is the honest condition, and both
+  // a finished run and a reopened one already set it.
+  const showNewTask = state.sessionId !== null;
   if (newTaskBtn) newTaskBtn.classList.toggle('visible', showNewTask);
+  // The outcome cell tracks the run the same way every other part of the bar
+  // does, so it reads phase here rather than at the six places that produce
+  // it. Only the two live phases are touched — a terminal phase must not
+  // clobber the verdict the terminal event already wrote.
+  //
+  // `stopping` matters because a stop *is* a pause: stopTask sets the phase to
+  // 'paused' so the composer and buttons behave, and without the guard the
+  // line below stamped WAITING FOR YOU over the STOPPED BY YOU that stopTask
+  // had just written — a run the user had killed, announcing it was waiting
+  // on them.
+  if (phase === 'paused' && !stopping) setOutcome('awaiting_human');
+  else if (phase === 'executing' && outcomeCell?.dataset.state === 'waiting') setOutcome('running');
   if (message) connectionMeta.textContent = message;
   // ponytail: Bug 2 — drive the header connection pill from phase.
   // Mid-task disconnects are handled separately via `case 'disconnected'`
@@ -1529,6 +1679,126 @@ function updateStepCount() {
   cell.classList.add('flash');
 }
 
+// ── Outcome cell ───────────────────────────────────────────────────────────
+// One word saying how a run ended, and nothing else. Every other cell in the
+// bar is a quantity, so this is the only place the panel reports a judgement —
+// and it is the one you want first, because a run that died at step 2 and a
+// run that died at step 40 look identical without it.
+//
+// ERROR is the base for anything that went wrong, but the status alone cannot
+// carry it: the server reports `failed` for a run the *user* stopped, a login
+// they skipped, and a loop that ran past the backstop as readily as for a dead
+// socket. One word for all four would call two of them a fault, so the reason
+// refines the word and status only decides the default.
+const OUTCOME_WORD = {
+  completed: ['done', 'DONE'],
+  failed: ['error', 'ERROR'],
+  cancelled: ['stopped', 'STOPPED BY YOU'],
+  interrupted: ['ended', 'ENDED BY ITSELF'],
+  awaiting_human: ['waiting', 'WAITING FOR YOU'],
+  running: ['working', 'WORKING'],
+  // Recorded but never written any more. `stagnated` is a pre-removal status
+  // from the detector the harness deleted, so it lands in runs already on disk;
+  // `corrupt` and `unknown` are what a document the panel cannot read reports.
+  // Both are real ends, not missing data, so they get a word.
+  stagnated: ['error', 'ERROR'],
+  corrupt: ['ended', 'ENDED BY ITSELF'],
+  unknown: ['ended', 'ENDED BY ITSELF'],
+};
+
+// The endings that are not faults, so they must not read as one. Data state
+// tracks the word, not the blame: a skipped login is still a run that produced
+// nothing, so it keeps the hollow mark.
+const OUTCOME_BY_REASON = {
+  user_denied: ['stopped', 'STOPPED BY YOU'],
+  user_skipped_login: ['stopped', 'STOPPED BY YOU'],
+  runaway_backstop: ['gave-up', 'TOO LONG'],
+  task_refused: ['error', 'COULD NOT RESUME'],
+  policy_blocked: ['blocked', 'BLOCKED'],
+  policy_preflight: ['blocked', 'BLOCKED'],
+};
+
+function outcomeEntry(status, reason) {
+  return (status === 'failed' && OUTCOME_BY_REASON[reason]) || OUTCOME_WORD[status];
+}
+
+function setOutcome(status, summary, reason) {
+  const value = document.getElementById('outcomeValue');
+  if (!outcomeCell || !value) return;
+  const entry = outcomeEntry(status, reason);
+  if (!entry) {
+    outcomeCell.removeAttribute('data-state');
+    outcomeCell.removeAttribute('title');
+    value.textContent = '—';
+    return;
+  }
+  outcomeCell.dataset.state = entry[0];
+  value.textContent = entry[1];
+  outcomeCell.title = summary || '';
+}
+
+// A run's closing words, whether they arrive live or are read back off disk.
+// Same two parts in both places: the sentence naming which family it was, then
+// the harness's own detail. A replay that re-derived this would drift from the
+// live panel the first time either half was reworded — and the two sit in the
+// same transcript, so a user scrolling up would read Brotto contradicting
+// itself.
+function closingText(reason, summary) {
+  const detail = (summary || '').trim();
+  if (!detail) return failureNote(reason, null);
+  const note = failureNote(reason, detail);
+  return detail.startsWith(note) ? detail : `${note}\n\n${detail}`;
+}
+
+// ── What went wrong, in the user's terms ───────────────────────────────────
+// The server's failure_reason is a code for the log. Nothing the user does with
+// a code is read it, so every one of them is translated here into a sentence
+// and a next step. The harness's own `summary` still carries the detail — this
+// is the part that says which of the three families it was, because "network
+// drop / model / Brotto's server" is exactly the question a user cannot answer
+// from a transcript and does not know they are asking.
+const FAILURE_NOTE = {
+  // ── Could not reach Brotto ──
+  offline: "Brotto could not reach its server. Check that it's running, then send the task again.",
+  connect_failed: "Brotto could not reach its server. Check that it's running, then send the task again.",
+  disconnected: "The connection to Brotto dropped mid-task. Sending it again picks up where this left off.",
+  service_worker: 'Brotto\'s background stopped responding. Reload the extension and try again.',
+
+  // ── The model, or the key for it ──
+  auth_failed: "Your model key was rejected. Open Settings and check the key.",
+  model_not_found: "That model isn't available on your key. Pick a different one in Settings.",
+  invalid_decision: 'The model could not produce a usable next step. Try rephrasing the task, or switch models in Settings.',
+  model_http: 'The model provider rejected the request. Try again in a moment, or switch models in Settings.',
+
+  // ── Brotto's own server ──
+  internal: "Brotto's server hit an error. The details are in its log.",
+  cdp_preflight_failed: 'Brotto could not attach to the browser tab. Close DevTools on that page and try again.',
+  policy_preflight: 'Brotto refused the task: the site is on your blocked list.',
+  policy_blocked: 'Brotto stopped: the task was blocked by your security policy.',
+
+  // ── The run, not the software ──
+  runaway_backstop: 'Brotto stopped after 150 steps without finishing. Try a smaller task.',
+  task_refused: "Brotto could not continue that conversation. Start a new chat to try again.",
+  duplicate_task_start: 'A task is already running on this conversation.',
+  user_denied: 'You declined the action, so Brotto stopped.',
+  user_skipped_login: 'You skipped the sign-in, so Brotto stopped.',
+};
+
+// A fetch to a server that is not there rejects with the same TypeError on
+// every browser, and the raw message ("Failed to fetch") tells the user
+// nothing. One family, one sentence — the transport cannot distinguish "the
+// server is down" from "you are offline", so the copy must not pretend to.
+function isOffline(err) {
+  return err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(String(err && err.message));
+}
+
+function failureNote(reason, detail) {
+  const note = FAILURE_NOTE[reason];
+  if (note) return note;
+  if (isOffline(detail)) return FAILURE_NOTE.offline;
+  return 'Something went wrong. The details are in Brotto\'s log.';
+}
+
 // ── Core logic (preserved verbatim) ───────────────────────────────────────
 // ponytail: `connect`/`disconnect` are gone. The panel connects implicitly on
 // the first send (ensureConnected), so the explicit connect step had no
@@ -1563,7 +1833,7 @@ function toast(text, kind, ms = 2600) {
   el.setAttribute('role', 'status');
   el.textContent = text;
   // Clear whatever is actually at the bottom of the panel, measured rather
-  // than guessed. The input area grows when "+ New task" appears, and a
+  // than guessed. The input area grows when "+ New chat" appears, and a
   // hardcoded offset lands the toast on top of the composer the moment
   // either height moves — it did, by 5px.
   const top = Math.min(
@@ -1586,10 +1856,17 @@ async function stopTask() {
   if (state.phase !== 'executing' && state.phase !== 'paused') return;
   stopping = true;
   stopBtn.disabled = true;
+  // The outcome turns here rather than waiting for the terminal event, because
+  // it answers "who ended this" and the answer is already true — the click is
+  // the fact, and the server finishing the current step tidily afterwards
+  // changes nothing about it. Waiting left the cell on WORKING until a
+  // `canonical_status: cancelled` that a stop mid-pause never sends, so a run
+  // the user had plainly killed sat claiming to still be working.
+  setOutcome('cancelled');
   // ponytail: surface immediate "Stopped" feedback so the user sees their
   // click took effect. The background's cancel emits a terminal event
   // synchronously now, so the side panel exits 'Working' within ~1 tick.
-  appendMessage({ role: 'system', text: 'Stopped by user — finishing current step…' });
+  appendMessage({ role: 'system', text: 'Stopping after this step.' });
   // ponytail: Stop only moved the phase; an approval / clarify card stayed on
   // screen and clickable, so the user could still approve a purchase on a task
   // they had just cancelled. Same cleanup setPhase does on a terminal phase.
@@ -1654,8 +1931,9 @@ function clearMessages({ keepTranscript = false } = {}) {
   // own first step landed.
   state.lastContext = null;
   updateContextUsage();
-  seenTabs.clear();
-  updateTabCount();
+  setOutcome(null);
+  // A replayed session re-arms this immediately after, in replaySession.
+  state.replaying = false;
   // ponytail: clean up any lingering login-pause fallback buttons from a
   // previous task — a leftover Continue button is confusing once the user
   // is starting fresh.
@@ -1663,8 +1941,11 @@ function clearMessages({ keepTranscript = false } = {}) {
     document.querySelectorAll(".login-continue-btn").forEach((el) => el.remove());
   }
   // ponytail: reset to initial empty-state by re-creating the placeholder so
-  // the panel doesn't look empty.
-  if (!document.getElementById("emptyState")) {
+  // the panel doesn't look empty. Skipped when a transcript is being kept —
+  // the placeholder is the idle-panel's invitation to type a task, and
+  // dropping one into the middle of a replayed conversation both read wrong
+  // and fired a suggestions fetch for a panel that is not idle.
+  if (!keepTranscript && !document.getElementById("emptyState")) {
     messagesEl.appendChild(createEmptyState());
     void currentTab().then(refreshEmptyState);
   }
@@ -1682,7 +1963,7 @@ function appendEmptyState() {
 // error / fail). The fade matches the CSS .removing keyframe (180ms);
 // DOM removal happens 20ms later so the fade isn't cut short.
 function clearLoginPrompt() {
-  const els = document.querySelectorAll('.login-required-msg, .login-continue-btn');
+  const els = document.querySelectorAll('.login-required-msg:not(.resolved), .login-continue-btn');
   if (els.length === 0) return;
   els.forEach((el) => el.classList.add('removing'));
   setTimeout(() => {
@@ -1768,7 +2049,7 @@ const SUGGESTION_TTL_CONTEXT_MS = 10 * 60 * 1000;
 const SUGGESTION_TTL_DEFAULT_MS = 24 * 60 * 60 * 1000;
 // The server caps at the same number. Applied here so a 200KB document never
 // crosses the wire only to be truncated on arrival.
-const PAGE_TEXT_CHARS = 8000;
+const PAGE_TEXT_CHARS = 2000;
 
 // Read on demand, and only while the panel is open. A permanently injected
 // content script would put Brotto into every site the user visits, and the
@@ -1990,7 +2271,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   if (role === 'assistant' || role === 'user') {
     // Bubble wrapper
     const bubble = document.createElement('div');
-    bubble.className = 'bubble';
+    bubble.className = 'bubble md';
     bubble.innerHTML = renderMarkdown(text);
     msg.appendChild(bubble);
 
@@ -2019,7 +2300,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
       const fa = document.createElement('div');
       fa.className = 'final-answer';
       const faText = document.createElement('div');
-      faText.className = 'final-answer-text';
+      faText.className = 'final-answer-text md';
       faText.innerHTML = renderMarkdown(finalAnswer);
       fa.appendChild(faText);
       bubble.appendChild(fa);
@@ -2122,7 +2403,7 @@ function appendFailureBubble({ title, body, footer }) {
 
   if (body) {
     const bodyEl = document.createElement('div');
-    bodyEl.className = 'failure-body';
+    bodyEl.className = 'failure-body md';
     bodyEl.innerHTML = renderMarkdown(body);
     bubble.appendChild(bodyEl);
   }
@@ -2150,13 +2431,23 @@ function appendPlanCard({ title, sites, steps }) {
 
   const header = document.createElement('div');
   header.className = 'plan-header';
-  header.innerHTML = `<span class="plan-badge">${title || "Brotto's plan"}</span>`;
+  // textContent, not innerHTML: `title` and `step.text` are the model's own
+  // words, and the model's words are steerable by whatever text is on the page
+  // it is reading. Escaping is not enough to be tidy here — it is the only
+  // thing standing between a page and this panel's DOM.
+  const badge = document.createElement('span');
+  badge.className = 'plan-badge';
+  badge.textContent = title || "Brotto's plan";
+  header.appendChild(badge);
   card.appendChild(header);
 
   if (sites && sites.length > 0) {
     const sitesDiv = document.createElement('div');
     sitesDiv.className = 'plan-sites';
-    sitesDiv.innerHTML = `Allow actions on: <strong>${sites.join(', ')}</strong>`;
+    sitesDiv.appendChild(document.createTextNode('Allow actions on: '));
+    const allowed = document.createElement('strong');
+    allowed.textContent = sites.join(', ');
+    sitesDiv.appendChild(allowed);
     card.appendChild(sitesDiv);
   }
 
@@ -2170,7 +2461,13 @@ function appendPlanCard({ title, sites, steps }) {
     ol.className = 'plan-steps';
     for (const step of steps) {
       const li = document.createElement('li');
-      li.innerHTML = `<span class="plan-step-num">${step.index}.</span><span>${step.text}</span>`;
+      const num = document.createElement('span');
+      num.className = 'plan-step-num';
+      num.textContent = `${step.index}.`;
+      const text = document.createElement('span');
+      text.className = 'md';
+      text.innerHTML = renderMarkdown(step.text || '');
+      li.append(num, text);
       ol.appendChild(li);
     }
     card.appendChild(ol);
@@ -2241,6 +2538,7 @@ function appendStep({ icon, text, pageUrl, actionTarget }) {
     head.appendChild(document.createTextNode(' '));
   }
   const stepTextEl = document.createElement('span');
+  stepTextEl.className = 'md';
   stepTextEl.innerHTML = renderMarkdown(text || 'Working…');
   head.appendChild(stepTextEl);
   bubble.appendChild(head);
@@ -2322,7 +2620,7 @@ const NON_APPROVABLE_ACTIONS = new Set([
   'recall_memory',
 ]);
 
-function appendApprovalCard({ id, reason, action }) {
+function appendApprovalCard({ id, reason, action, resolved }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
@@ -2334,7 +2632,7 @@ function appendApprovalCard({ id, reason, action }) {
   // Match on action.type, not action — the payload is {type, url}, so
   // passing the object to a Set of strings was always false and this
   // guard never fired.
-  if (NON_APPROVABLE_ACTIONS.has(action?.type)) {
+  if (!resolved && NON_APPROVABLE_ACTIONS.has(action?.type)) {
     console.warn('[brotto] suppressed approval card for non-approvable action:', action?.type);
     // Still need to ACK so the server's queue doesn't hang. Send deny
     // so the harness aborts cleanly if it was awaiting this reply.
@@ -2344,14 +2642,18 @@ function appendApprovalCard({ id, reason, action }) {
 
   const card = document.createElement('div');
   // .blocking breathes the left rule — the card is waiting on the user.
-  card.className = 'approval-card blocking';
+  // A resolved card stops waiting, so it never carries the class.
+  card.className = resolved ? 'approval-card resolved' : 'approval-card blocking';
   // Stamped so `approval_resolved` can retire exactly this card when the
   // prompt is answered from the OS notification instead of from here.
   if (id) card.dataset.approvalId = String(id);
 
   const header = document.createElement('div');
   header.className = 'approval-header';
-  header.innerHTML = `<span class="approval-badge">Approval needed</span>`;
+  const badge = document.createElement('span');
+  badge.className = 'approval-badge';
+  badge.textContent = resolved ? 'Approval' : 'Approval needed';
+  header.appendChild(badge);
   card.appendChild(header);
 
   if (reason) {
@@ -2368,6 +2670,12 @@ function appendApprovalCard({ id, reason, action }) {
   preview.title = previewText;
   card.appendChild(preview);
 
+  if (resolved) {
+    resolveCard(card, 'approval-decision', decisionLabel(resolved));
+    messagesEl.appendChild(card);
+    return;
+  }
+
   const actions = document.createElement('div');
   actions.className = 'approval-actions';
 
@@ -2382,8 +2690,7 @@ function appendApprovalCard({ id, reason, action }) {
     // (SW asleep, task gone) left the agent blocked on a queue reply that would
     // never come, with no card on screen to answer. Re-arm instead.
     if (!res.success) return reArmApproval(card, denyBtn, approveBtn, res.error);
-    appendMessage({ role: 'assistant', text: 'Action denied.' });
-    card.remove();
+    resolveCard(card, 'approval-decision', 'Denied');
   });
   actions.appendChild(denyBtn);
 
@@ -2394,8 +2701,7 @@ function appendApprovalCard({ id, reason, action }) {
     approveBtn.disabled = true;
     const res = await sendMessage({ type: 'submit_approval', id, approved: true });
     if (!res.success) return reArmApproval(card, denyBtn, approveBtn, res.error);
-    appendMessage({ role: 'assistant', text: 'Action approved.' });
-    card.remove();
+    resolveCard(card, 'approval-decision', 'Approved');
     // ponytail: 5s post-approval revoke window. Show a small inline
     // affordance below the action bubble. If the user changes their
     // mind, the extension sends `revoke` to the server, which clears
@@ -2434,6 +2740,35 @@ function appendApprovalCard({ id, reason, action }) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// A question that the user answered used to vanish, leaving their reply
+// sitting in the transcript with nothing it was a reply to. The card is the
+// record of what was asked; what changes on answering is that it is no longer
+// waiting. So the controls go and the answer takes their place, and the card
+// stays in the conversation where a reader can see the exchange as a whole.
+function resolveCard(card, outcomeClass, text) {
+  card.classList.remove('blocking');
+  card.classList.add('resolved');
+  for (const sel of ['.clarify-input-row', '.input-hint', '.clarify-actions', '.approval-actions', '.login-continue-btn']) {
+    for (const el of card.querySelectorAll(sel)) el.remove();
+  }
+  let outcome = card.querySelector(`.${outcomeClass}`);
+  if (!outcome) {
+    outcome = document.createElement('div');
+    outcome.className = outcomeClass;
+    card.appendChild(outcome);
+  }
+  outcome.textContent = text;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function decisionLabel(decision) {
+  const d = String(decision || '').toLowerCase();
+  if (d.startsWith('den')) return 'Denied';
+  if (d === 'timeout') return 'Timed out — the task carried on without it';
+  if (d === 'skipped') return 'Skipped';
+  return 'Approved';
+}
+
 // ponytail: an approval whose reply never reached the server is still pending
 // on the server, so the card has to come back — the alternative is a task
 // blocked on a queue entry with nothing on screen to answer it. Re-enables
@@ -2453,28 +2788,40 @@ function reArmApproval(card, denyBtn, approveBtn, error) {
 }
 
 // ── Clarify request card ─────────────────────────────────────────────────
-function appendClarifyCard({ id, question, reason }) {
+function appendClarifyCard({ id, question, reason, resolved }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
-  // Remove any prior pending clarify card so we don't end up with stacked inputs.
-  const prior = messagesEl.querySelector('.clarify-card');
+  // Remove any prior *pending* clarify card so we don't end up with stacked
+  // inputs. A resolved one stays: it is the record of a question the user
+  // already answered, and it is what their answer in the transcript reads
+  // against.
+  const prior = messagesEl.querySelector('.clarify-card.blocking');
   if (prior) prior.remove();
 
   const card = document.createElement('div');
-  card.className = 'clarify-card blocking';
-  card.dataset.clarifyId = id;
+  card.className = resolved ? 'clarify-card resolved' : 'clarify-card blocking';
+  if (id) card.dataset.clarifyId = String(id);
 
   const header = document.createElement('div');
   header.className = 'clarify-header';
-  header.innerHTML = `<span class="clarify-badge">Your input</span>`;
+  const badge = document.createElement('span');
+  badge.className = 'clarify-badge';
+  badge.textContent = 'Your input';
+  header.appendChild(badge);
   card.appendChild(header);
 
   if (question) {
     const body = document.createElement('div');
-    body.className = 'clarify-body';
+    body.className = 'clarify-body md';
     body.innerHTML = renderMarkdown(question);
     card.appendChild(body);
+  }
+
+  if (resolved) {
+    resolveCard(card, 'clarify-answer', answerLabel(resolved));
+    messagesEl.appendChild(card);
+    return;
   }
 
   // Real text input INSIDE the card — previous version told the user to use
@@ -2518,9 +2865,8 @@ function appendClarifyCard({ id, question, reason }) {
   skipBtn.className = 'btn btn-sm';
   skipBtn.textContent = 'Skip';
   skipBtn.addEventListener('click', () => {
-    appendMessage({ role: 'system', text: 'Skipped clarifying question.' });
     void sendMessage({ type: 'submit_clarification', id, answer: '' });
-    card.remove();
+    resolveCard(card, 'clarify-answer', 'Skipped');
     state.pendingClarifyId = null;
     setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Resuming…' : 'Idle');
   });
@@ -2539,12 +2885,80 @@ function appendClarifyCard({ id, question, reason }) {
       inputEl.focus();
       return;
     }
-    appendMessage({ role: 'user', text: answer });
-    cardEl.remove();
+    resolveCard(cardEl, 'clarify-answer', answer);
     state.pendingClarifyId = null;
     setPhase('connected', 'Resuming…');
     await sendMessage({ type: 'submit_clarification', id, answer });
   }
+}
+
+// The answer is the user's own words, so it goes in as text — the same
+// reasoning `appendPlanCard` uses for the model's strings.
+function answerLabel(answer) {
+  const a = String(answer ?? '').trim();
+  return a ? `You: ${a}` : 'No answer — Brotto carried on with what it had';
+}
+
+// ── Login required ────────────────────────────────────────────────────────
+// A function rather than inline markup because the history replay draws the
+// same card, resolved, out of the audit's `login_required` prompt.
+function appendLoginCard({ domain, outcome }) {
+  const empty = messagesEl.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const msg = document.createElement('div');
+  // `.resolved` is what keeps this out of clearLoginPrompt's sweep: a
+  // replayed sign-in wall is part of the record, and a live prompt arriving
+  // later must not fade out the history behind it.
+  msg.className = outcome
+    ? 'message assistant login-required-msg resolved'
+    : 'message assistant login-required-msg';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  const badge = document.createElement('div');
+  badge.className = 'login-required-badge';
+  badge.textContent = outcome ? `Sign-in needed · ${domain}` : `Waiting for sign-in · ${domain}`;
+
+  const body = document.createElement('div');
+  body.className = 'login-required-body';
+  if (outcome) {
+    body.textContent = outcome;
+  } else {
+    body.textContent = 'Sign in manually in the browser tab. The task resumes automatically once the post-login page loads. Use Continue only if auto-resume does not fire.';
+  }
+  bubble.append(badge, body);
+  msg.appendChild(bubble);
+  messagesEl.appendChild(msg);
+
+  if (outcome) return;
+
+  // ponytail: safety-net Continue button. Primary resume path is
+  // webNavigation.onCommitted firing off the login domain, but that
+  // misses some SPAs and OAuth callback flows. The button is a manual
+  // override — clicking it fades both bubble + button out and signals
+  // resume to the loop. Cleaned up automatically on next step / task
+  // end so it never lingers into the next task.
+  const continueBtn = document.createElement('button');
+  continueBtn.type = 'button';
+  continueBtn.className = 'login-continue-btn';
+  continueBtn.textContent = 'Continue';
+  continueBtn.addEventListener('click', () => {
+    continueBtn.disabled = true;
+    // ponytail: clearLoginPrompt runs in the same render frame as the
+    // click, so the bubble + button fade out together. The local_login_complete
+    // signal goes out in parallel — the loop unblocks as soon as the
+    // SW relays the human_reply, and the next step_card will arrive
+    // immediately after with no gap.
+    clearLoginPrompt();
+    try {
+      chrome.runtime.sendMessage({ type: 'local_login_complete' }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch { /* SW gone — user can re-trigger */ }
+  });
+  messagesEl.appendChild(continueBtn);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 // ── Icon helpers (for step cards rendered as assistant messages) ───────────
@@ -2726,10 +3140,15 @@ function handleEvent(message) {
       if (message.startedAt && !state.startTime) startTimer(message.startedAt);
       // The server's session id rides along with it. The panel used to have no
       // way to learn this, which is why the history index could only keep the
-      // task string; see saveSession and openTranscript.
+      // task string; see saveSession and replaySession.
       if (message.sessionId || message.session_id) {
         state.sessionId = message.sessionId || message.session_id;
       }
+      // A real run is under way, so the bar is live again whatever it was
+      // showing — including the frozen numbers of a session reopened from
+      // history that this message is now continuing.
+      state.replaying = false;
+      setOutcome('running');
       break;
 
     // The server mints the session id during startRelay, which is *after*
@@ -2749,6 +3168,14 @@ function handleEvent(message) {
     // connection pill; nothing else needs to happen on this event.
     case 'disconnected':
       setConnPill(null, 'Idle');
+      // A socket that dies mid-task reports nothing through task_failed
+      // unless the background got far enough to synthesise it, and the
+      // outcome cell is the only place that would have said so — it was
+      // left on WORKING, claiming a run that had already stopped.
+      if (state.taskInFlight) {
+        setOutcome('failed', FAILURE_NOTE.disconnected, 'disconnected');
+        setPhase('error', FAILURE_NOTE.disconnected);
+      }
       break;
 
     // ponytail: the session-create retry in startRelay. A server that is
@@ -2784,6 +3211,7 @@ function handleEvent(message) {
       // rather than "I stopped it".
       if (raw === 'cancelled') {
         void saveSession({ status: 'cancelled', elapsed: timerActiveEl && timerActiveEl.textContent });
+        setOutcome('cancelled');
       }
       setPhase(mapped, meta);
       break;
@@ -2833,47 +3261,7 @@ function handleEvent(message) {
       // fade out instead of being yanked from the layout (which causes a
       // visible jump when the next bubble appears).
       clearLoginPrompt();
-      const domain = message.domain || 'this site';
-      const loginMsg = document.createElement('div');
-      loginMsg.className = 'message assistant login-required-msg';
-      const bubble = document.createElement('div');
-      bubble.className = 'bubble';
-      const badge = document.createElement('div');
-      badge.className = 'login-required-badge';
-      badge.textContent = `Waiting for sign-in · ${domain}`;
-      const body = document.createElement('div');
-      body.className = 'login-required-body';
-      body.textContent = 'Sign in manually in the browser tab. The task resumes automatically once the post-login page loads. Use Continue only if auto-resume does not fire.';
-      bubble.appendChild(badge);
-      bubble.appendChild(body);
-      loginMsg.appendChild(bubble);
-      messagesEl.appendChild(loginMsg);
-      // ponytail: safety-net Continue button. Primary resume path is
-      // webNavigation.onCommitted firing off the login domain, but that
-      // misses some SPAs and OAuth callback flows. The button is a manual
-      // override — clicking it fades both bubble + button out and signals
-      // resume to the loop. Cleaned up automatically on next step / task
-      // end so it never lingers into the next task.
-      const continueBtn = document.createElement('button');
-      continueBtn.type = 'button';
-      continueBtn.className = 'login-continue-btn';
-      continueBtn.textContent = 'Continue';
-      continueBtn.addEventListener('click', () => {
-        continueBtn.disabled = true;
-        // ponytail: clearLoginPrompt runs in the same render frame as the
-        // click, so the bubble + button fade out together. The local_login_complete
-        // signal goes out in parallel — the loop unblocks as soon as the
-        // SW relays the human_reply, and the next step_card will arrive
-        // immediately after with no gap.
-        clearLoginPrompt();
-        try {
-          chrome.runtime.sendMessage({ type: 'local_login_complete' }, () => {
-            void chrome.runtime.lastError;
-          });
-        } catch { /* SW gone — user can re-trigger */ }
-      });
-      messagesEl.appendChild(continueBtn);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      appendLoginCard({ domain: message.domain || 'this site' });
       break;
 
     case 'context_update': {
@@ -2894,6 +3282,7 @@ function handleEvent(message) {
       clearBlockingCards();
       // Captured before stopTimer, which resets the counter.
       void saveSession({ status: 'done', steps: message.steps, elapsed: timerActiveEl && timerActiveEl.textContent });
+      setOutcome('completed', message.summary);
       stopTimer();
       setPhase('done', message.summary ? message.summary.slice(0, 60) : 'Task complete');
       state.stepCount = message.steps || state.stepCount;
@@ -2931,6 +3320,7 @@ function handleEvent(message) {
       // after the task has failed / been cancelled.
       clearBlockingCards();
       void saveSession({ status: 'failed', elapsed: timerActiveEl && timerActiveEl.textContent });
+      setOutcome('failed', message.summary, message.failure_reason);
       stopTimer();
       // ponytail: structured failure bubble (title + body + footer) for
       // policy failures; falls back to the harness's `summary` for everything
@@ -2952,13 +3342,16 @@ function handleEvent(message) {
           footer: policyMsg.footer,
         });
       } else {
-        // Non-policy failure: surface the harness's `summary` verbatim so
-        // the user sees the actual reason (e.g. network error, model
-        // refusal, missing login). Falls back to the failure_reason code
-        // only when the harness didn't include a summary.
-        const failMsg = message.summary || message.failure_reason || 'Task failed';
-        setPhase('error', message.failure_reason ? `Task failed (${message.failure_reason})` : 'Task failed');
-        appendMessage({ role: 'error', text: failMsg });
+        // Non-policy failure. The note says which family it was and what to
+        // try; the harness's `summary` keeps the detail underneath it, because
+        // it is the only thing that names this run specifically. The code
+        // never reaches the user — `Task failed (auth_failed)` in the meta
+        // line told someone nothing and looked like a bug.
+        const note = failureNote(message.failure_reason, message.summary);
+        const detail = (message.summary || '').trim();
+        setPhase('error', note);
+        setOutcome('failed', detail || note, message.failure_reason);
+        appendMessage({ role: 'error', text: closingText(message.failure_reason, detail) });
       }
       break;
 
@@ -3001,11 +3394,7 @@ function handleEvent(message) {
         ? messagesEl.querySelector(`.approval-card[data-approval-id="${CSS.escape(String(message.id))}"]`)
         : null;
       if (!card) break;
-      card.remove();
-      appendMessage({
-        role: 'assistant',
-        text: message.approved ? 'Action approved.' : 'Action denied.',
-      });
+      resolveCard(card, 'approval-decision', message.approved ? 'Approved' : 'Denied');
       // The task is unblocked, so the clock has to start counting again —
       // setPhase('paused') is what stopped it, and nothing else resumes it.
       if (state.phase === 'paused') setPhase('executing', 'Working…');
@@ -3054,22 +3443,32 @@ function handleEvent(message) {
       const m = message.message || {};
       if (m.type === 'task.completed') {
         setPhase('done', m.summary || 'Task complete');
+        setOutcome('completed', m.summary);
         appendMessage({ role: 'done', text: m.summary || 'Task completed successfully.', finalAnswer: m.finalAnswer });
       } else if (m.type === 'task.failed') {
-        setPhase('error', m.message || 'Task failed');
-        appendMessage({ role: 'error', text: m.message || 'Task failed.' });
+        const note = failureNote(m.failure_reason, m.message);
+        setPhase('error', note);
+        setOutcome('failed', m.message || note, m.failure_reason);
+        appendMessage({ role: 'error', text: note });
       } else {
         // ponytail: this used to render a green "Task ended." for *any*
         // other type, so a cancellation showed as a success. Anything that
         // isn't a completion ends the task without claiming it worked.
         setPhase('error', 'Task ended');
+        setOutcome('cancelled');
         appendMessage({ role: 'error', text: m.message || 'The task ended before it finished.' });
       }
       break;
     }
 
     case 'canonical_error':
-      appendMessage({ role: 'error', text: `${message.code}: ${message.message}` });
+      // The code is a log handle, not a message. Same treatment as every
+      // other failure: a sentence naming the family, and the server's own
+      // text kept underneath it where it can be more specific.
+      appendMessage({
+        role: 'error',
+        text: `${failureNote(message.code, message.message)}\n\n${message.message || ''}`.trim(),
+      });
       break;
 
     // ── Plan preview (from orchestrator) ─────────────────────────────────
@@ -3085,8 +3484,8 @@ function handleEvent(message) {
     }
 
     case 'tab_event': {
-      // ponytail: local-driver tab lifecycle — render to the tabs row.
-      recordTabEvent(message.event);
+      // The status bar has no tab cell — the outcome cell took its place, and
+      // nothing else in the panel reads tab lifecycle.
       break;
     }
   }

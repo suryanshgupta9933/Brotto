@@ -224,6 +224,33 @@
       from { background: var(--paper); }
       to   { background: transparent; }
     }
+    /* The outcome cell is a word, not a measurement, so it drops the
+       tabular figures the other three use and takes a state mark instead.
+       Filled means you got an answer, hollow means you did not — that
+       difference is legible on its own, so the colour only repeats it and
+       the word is never the only carrier. */
+    #statusBar .outcome {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-variant-numeric: normal;
+      color: var(--state, var(--ink));
+    }
+    #statusBar .outcome-mark {
+      width: 7px; height: 7px; flex: 0 0 7px;
+      background: var(--fill, transparent);
+      border: 1.5px solid var(--state, var(--ink-3));
+    }
+    #outcomeCell[data-state="done"]   { --state: var(--ok);    --fill: var(--ok); }
+    #outcomeCell[data-state="error"]   { --state: var(--bad);   --fill: transparent; }
+    #outcomeCell[data-state="gave-up"] { --state: var(--bad);   --fill: transparent; }
+    #outcomeCell[data-state="blocked"] { --state: var(--wait);  --fill: transparent; }
+    #outcomeCell[data-state="stopped"] { --state: var(--ink-3); --fill: transparent; }
+    #outcomeCell[data-state="ended"]   { --state: var(--bad);   --fill: transparent; }
+    #outcomeCell[data-state="waiting"] { --state: var(--wait);  --fill: transparent; }
+    #outcomeCell[data-state="working"] { --state: var(--ink-2); --fill: transparent; }
+    /* Motion means exactly one thing here: a run is live right now. */
+    #outcomeCell[data-state="working"] .outcome-mark { animation: pulse 1.4s ease-in-out infinite; }
 
     /* ─── New task button ─────────────────────────────────────────────── */
     .new-task-btn {
@@ -472,83 +499,10 @@
       margin-bottom: 7px;
     }
 
-    /* ─── Session transcript ───────────────────────────────────────────────
-       The detail half of history, inside the same overlay panel. A back
-       arrow stands in for the close X while a transcript is up, and the
-       Re-run button carries the composer refill the row click used to do.
-       Same ledger rhythm as the list: hairline between blocks, no box, no
-       radius. A prompt is indented under its turn with a left rule rather
-       than given its own row, because it is part of that turn's story. */
-    /* The list and the transcript swap via the `hidden` property, and both
-       carry a display rule below. The UA's [hidden] { display: none } loses
-       to a class selector, so without this neither one would ever hide. */
+    /* The history list and the replayed chat swap in the same overlay, so
+       [hidden] still has to beat a class selector — the UA's
+       `[hidden] { display: none }` loses to both of them. */
     [hidden] { display: none !important; }
-
-    .history-transcript { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
-
-    .transcript-head {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding-bottom: 10px;
-      border-bottom: 2px solid var(--ink);
-    }
-    .transcript-head .settings-title { flex: 1; min-width: 0; }
-    /* Status + step count, the same mono fact line the history rows use. */
-    .transcript-meta {
-      font-family: var(--font-mono);
-      font-size: 9.5px;
-      font-weight: 500;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--ink-3);
-    }
-
-    .transcript-body { display: flex; flex-direction: column; }
-    .transcript-body > .history-meta { padding: 10px 0 0; }
-
-    .tx-block { padding: 12px 0; border-bottom: 1px solid var(--rule); }
-    .tx-block:last-child { border-bottom: 0; }
-    .tx-block > .label { display: block; color: var(--ink-3); margin-bottom: 6px; }
-
-    .tx-text {
-      font-size: 12.5px;
-      line-height: 1.5;
-      color: var(--ink-2);
-      /* Audit fields carry page text and URLs; neither has a width. */
-      overflow-wrap: anywhere;
-    }
-    .tx-url {
-      font-family: var(--font-mono);
-      font-size: 10.5px;
-      line-height: 1.5;
-      color: var(--ink-3);
-      overflow-wrap: anywhere;
-    }
-
-    .tx-prompt {
-      margin-top: 8px;
-      padding: 8px 0 8px 10px;
-      border-left: 2px solid var(--rule-2);
-    }
-    .tx-prompt > .label { display: block; color: var(--ink-3); margin-bottom: 5px; }
-    /* Same three signals the history mark already uses: allowed, refused,
-       still waiting on an answer that never came. */
-    .tx-prompt[data-decision="approved"] { border-left-color: var(--ok); }
-    .tx-prompt[data-decision="denied"]   { border-left-color: var(--bad); }
-    .tx-prompt[data-status="pending"]   { border-left-color: var(--wait); }
-
-    .tx-ok   { color: var(--ok); }
-    .tx-bad  { color: var(--bad); }
-    .tx-wait { color: var(--wait); }
-
-    .tx-empty {
-      padding: 30px 8px;
-      text-align: center;
-      color: var(--ink-3);
-      font-size: 12.5px;
-      line-height: 1.5;
-    }
 
     /* Labels that wrap their own control stack instead of running inline. */
     /* A toggle is excluded: its text sits BESIDE the box, not under it.
@@ -818,7 +772,12 @@
 
     /* ─── Step bubble ─────────────────────────────────────────────────── */
     .step-bubble { display: flex; flex-direction: column; gap: 5px; }
-    .step-head { font-size: 13.5px; line-height: 1.45; }
+    /* The icon is a bare span beside a <span class="md">, and renderMarkdown
+       fills that with a <p> — which is a block. Without this the icon lands
+       in an anonymous block of its own and the step title starts a line
+       below it. Flex puts them back in one line, baseline-aligned. */
+    .step-head { font-size: 13.5px; line-height: 1.45; display: flex; gap: 6px; align-items: baseline; }
+    .step-head > .md { min-width: 0; }
 
     .msg-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
     .msg-name { color: var(--ink-3); }
@@ -905,6 +864,25 @@
     }
     .approval-card { border-left-color: var(--wait); }
     .clarify-card  { border-left-color: var(--ink-2); }
+
+    /* An answered card settles back to the neutral rule and stops waiting.
+       It keeps the question it asked: the card is the record of what Brotto
+       wanted, and a transcript that drops it leaves the user's reply
+       answering nothing. */
+    .approval-card.resolved { border-left-color: var(--ink-2); }
+    .clarify-card.resolved  { border-left-color: var(--ink-2); }
+    .clarify-answer, .approval-decision {
+      border-top: 1px solid var(--rule);
+      padding-top: 9px;
+      margin-top: 2px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--ink-2);
+      word-break: break-word;
+    }
+    /* The answer is the user's own words and reads as the reply it is, so it
+       takes the ink; a decision is a status, not prose, so it stays muted. */
+    .clarify-answer { color: var(--ink); }
 
     /* The 3px left rule breathes while the card is blocking on the user. This
        is the one place in the panel where motion is a prompt rather than
@@ -1078,7 +1056,7 @@
     .toast.leaving { animation: msg-leave 0.18s ease forwards; }
     /* The vertical offset is set by toast() from the measured height of
        whatever sits at the bottom of the panel, so it cannot go stale when
-       the input area or "+ New task" changes size. */
+       the input area or "+ New chat" changes size. */
 
     /* ─── Input area (bottom) ─────────────────────────────────────────── */
     #inputArea {
@@ -1213,37 +1191,103 @@
     .final-answer-icon-btn.rated-good:hover { background: var(--ok); color: var(--paper); }    .final-answer-icon-btn.rated-bad { border-color: var(--bad); color: var(--bad); }
     .final-answer-icon-btn.rated-bad:hover { background: var(--bad); color: var(--paper); }
 
-    /* ─── Markdown inside bubbles: chat-scaled, not document-scaled ──── */
-    .bubble h1, .bubble h2, .bubble h3, .bubble h4 {
-      margin: 10px 0 4px;
+    /* ─── Markdown: chat-scaled, not document-scaled ────────────────────
+       Scoped to `.md`, which every renderMarkdown() host carries, so the
+       rules describe one parser's output rather than being spread across
+       whatever element each host happens to use. */
+    .md > :first-child { margin-top: 0; }
+    .md > :last-child { margin-bottom: 0; }
+
+    .md p { margin: 0 0 7px; }
+    .md b { font-weight: 600; }
+    .md s { color: var(--ink-3); }
+
+    .md .md-h {
+      margin: 12px 0 5px;
       font-weight: 600;
       line-height: 1.3;
       letter-spacing: -0.014em;
     }
-    .bubble h1 { font-size: 16px; }
-    .bubble h2 { font-size: 14.5px; }
-    .bubble h3 { font-size: 13.5px; }
-    .bubble h4 { font-size: 13px; }
-    .bubble ul, .bubble ol { margin: 4px 0; padding-left: 20px; }
-    .bubble li { margin: 2px 0; line-height: 1.45; }
-    .bubble blockquote {
-      margin: 6px 0;
-      padding: 2px 0 2px 11px;
-      border-left: 2px solid var(--rule-2);
-      color: var(--ink-2);
+    .md h1.md-h { font-size: 16px; }
+    .md h2.md-h { font-size: 14.5px; }
+    .md h3.md-h { font-size: 13.5px; }
+    .md h4.md-h, .md h5.md-h, .md h6.md-h { font-size: 13px; }
+
+    /* An agent's answer is usually a finding list, so the list is the
+       structure, not an ornament. `list-style: none` plus a drawn marker
+       keeps it square and lets the nesting read at 320px. */
+    .md .md-list { margin: 0 0 7px; padding: 0; list-style: none; }
+    .md .md-list .md-list { margin: 2px 0 0; padding-left: 13px; }
+    .md .md-list > li { position: relative; padding-left: 15px; margin: 3px 0; line-height: 1.45; }
+    .md ul.md-list > li::before {
+      content: ''; position: absolute; left: 2px; top: 0.62em;
+      width: 4px; height: 1px; background: var(--ink-3);
     }
-    .bubble hr { border: 0; border-top: 1px solid var(--rule); margin: 10px 0; }
-    .bubble pre {
-      background: var(--paper-2);
-      padding: 8px 10px;
-      font-family: var(--font-mono);
-      font-size: 11px;
-      line-height: 1.5;
-      overflow-x: auto;
-      margin: 6px 0;
-      border-left: 2px solid var(--rule-2);
+    .md ol.md-list { counter-reset: md-ol; }
+    .md ol.md-list > li { counter-increment: md-ol; }
+    .md ol.md-list > li::before {
+      content: counter(md-ol) '.'; position: absolute; left: 0; top: 0;
+      font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-3);
     }
-    .bubble pre code { background: transparent; padding: 0; font-size: inherit; }
+
+    /* Task list: a drawn square, not a glyph. ☑/☒ are rounded and would be
+       the only non-Ink-and-Rule shapes in the panel. */
+    .md .md-task { padding-left: 17px; }
+    .md .md-box {
+      position: absolute; left: 0; top: 0.28em;
+      width: 10px; height: 10px; border: 1px solid var(--ink-3);
+    }
+    .md .md-box.on { border-color: var(--ink); background: var(--ink); }
+    .md .md-box.on::after {
+      content: ''; position: absolute; left: 2px; top: 2px;
+      width: 4px; height: 1px; background: var(--paper);
+      box-shadow: 0 3px 0 var(--paper);
+    }
+
+    .md .md-ci {
+      background: var(--paper-2); padding: 1px 4px;
+      font-family: var(--font-mono); font-size: 0.88em;
+    }
+    .md .md-code { position: relative; margin: 0 0 8px; }
+    .md .md-code pre {
+      background: var(--paper-2); padding: 8px 10px;
+      font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
+      overflow-x: auto; border-left: 2px solid var(--rule-2);
+    }
+    .md .md-code code { background: transparent; padding: 0; font-size: inherit; }
+    .md .md-code-lang {
+      position: absolute; top: 0; right: 0; z-index: 1;
+      padding: 1px 6px; background: var(--paper-2);
+      font-family: var(--font-mono); font-size: 9px;
+      letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
+    }
+
+    /* The panel is 320px. A wide table scrolls sideways rather than being
+       squeezed into unreadable two-character columns. */
+    .md .md-table-wrap { overflow-x: auto; margin: 0 0 8px; }
+    .md .md-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    .md .md-th {
+      font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+      letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-2);
+      text-align: left; padding: 4px 10px 4px 0; white-space: nowrap;
+      border-bottom: 1px solid var(--ink);
+    }
+    .md .md-td { padding: 4px 10px 4px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+    .md .md-td-left { text-align: left; }
+    .md .md-td-center { text-align: center; }
+    .md .md-td-right { text-align: right; }
+    .md .md-table tr:last-child .md-td { border-bottom: 0; }
+
+    .md blockquote {
+      margin: 0 0 7px; padding: 2px 0 2px 11px;
+      border-left: 2px solid var(--rule-2); color: var(--ink-2);
+    }
+    .md hr { border: 0; border-top: 1px solid var(--rule); margin: 11px 0; }
+    .md a { color: inherit; border-bottom: 1px solid var(--ink-3); }
+    .md a:hover { border-bottom-color: var(--ink); }
+    /* An agent bubbles on a dark surface in the user role; an ink underline
+       on ink is invisible, so the link re-inherits the paper underline. */
+    .message.user .md a { border-bottom-color: color-mix(in srgb, var(--paper) 55%, transparent); }
 
     /* The step text is the content; the address is context. So the address
        sits under it on one 10px line, and the only part given a box is the
@@ -1377,6 +1421,7 @@
          selectors above, so they have to be named here too */
       .approval-card.blocking, .clarify-card.blocking,
       .status-pill.reconnecting .dot,
+      #outcomeCell[data-state="working"] .outcome-mark,
       .toast,
       .toast.leaving,
       .login-required-badge::before { animation: none; }
@@ -1444,7 +1489,7 @@
 <span id="stepCount" style="display:none">0 steps</span>
 <span id="timer" style="display:none"></span>
 
-<!-- ── Status bar (2x2: steps, time / tabs, context) ─────────────── -->
+<!-- ── Status bar (2x2: steps, time / context, outcome) ─────────────── -->
 <!-- Not a live region: the ACTIVE clock is rewritten ten times a second, and
      aria-live would have a screen reader re-announce the elapsed time on every
      one of them for the whole run. The run's progress is already announced by
@@ -1458,13 +1503,13 @@
     <span class="label">Active</span>
     <span class="value" id="timerActive">0.0s</span>
   </div>
-  <div class="cell" id="tabCountCell">
-    <span class="label">Tabs</span>
-    <span class="value" id="tabCountActive">0</span>
-  </div>
   <div class="cell" id="contextCell">
     <span class="label">Context</span>
     <span class="value" id="contextValue">0%</span>
+  </div>
+  <div class="cell" id="outcomeCell">
+    <span class="label">Outcome</span>
+    <span class="value outcome"><i class="outcome-mark" aria-hidden="true"></i><span id="outcomeValue">—</span></span>
   </div>
 </div>
 
@@ -1482,8 +1527,8 @@
 </main>
 
 <!-- ── New task button ──────────────────────────────────────────── -->
-<button class="new-task-btn" id="newTaskBtn" title="Start a new conversation">
-  New conversation
+<button class="new-task-btn" id="newTaskBtn" title="Start a new chat">
+  + New chat
 </button>
 
 <!-- ── Input area ────────────────────────────────────────────────── -->
@@ -1605,23 +1650,6 @@
     </div>
     <div id="historyList" class="history-list"></div>
 
-    <!-- Transcript view. Hidden until a row is clicked; Re-run is the
-         composer refill the row click used to be. -->
-    <div id="historyTranscript" class="history-transcript" hidden>
-      <div class="transcript-head">
-        <button id="transcriptBack" class="btn-icon" aria-label="Back to session history">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M15 5l-7 7 7 7"></path>
-          </svg>
-        </button>
-        <span class="settings-title">Session</span>
-        <span id="transcriptMeta" class="transcript-meta"></span>
-        <button id="transcriptRun" class="btn btn-sm" type="button"
-                title="Put this task back in the box">Re-run</button>
-      </div>
-      <div id="transcriptBody" class="transcript-body"></div>
-    </div>
   </div>
 </div>
 

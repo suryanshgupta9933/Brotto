@@ -33,6 +33,12 @@ let noTabWarned = false;
 // window forward rather than whatever happens to be focused at the time.
 let activeWindowId: number | null = null;
 let tabStack: number[] = []; // opener history for back-navigation
+// When Brotto last moved focus itself, so tabs.onActivated can tell that apart
+// from the user clicking away. Deliberately a timestamp and not a flag: a flag
+// has to be cleared by something that can be missed, and a stuck flag would
+// leave every genuine tab switch uncounted.
+let lastSelfFocusAt = 0;
+const SELF_FOCUS_GRACE_MS = 1500;
 let sessionId: string | null = null;
 let serverUrl: string = DEFAULT_SERVER;
 // The task currently being driven, kept so a reconnect can re-send task_start
@@ -375,8 +381,14 @@ async function executeAction(tabId: number, action: any): Promise<void> {
     });
     await sleep(300);
   } else if (t === "key") {
-    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyDown", key: action.key } });
-    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp",   key: action.key } });
+    // `modifiers` is CDP's bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8). It was
+    // being sent by the relay and dropped here, so Control+A — the clear
+    // that clear_ref issues — arrived as a bare "a" and typed a letter into
+    // the field instead of selecting it.
+    const mods = action.modifiers;
+    const base = { key: action.key, ...(mods ? { modifiers: mods } : {}) };
+    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyDown", ...base } });
+    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp",   ...base } });
   }
 }
 
@@ -582,9 +594,24 @@ function maybeNotify(event: Record<string, unknown>): void {
   }
 }
 
-async function setBadge(active: boolean): Promise<void> {
-  await chrome.action.setBadgeBackgroundColor({ color: active ? BADGE_ACTIVE : BADGE_IDLE });
-  await chrome.action.setBadgeText({ text: active ? "ON" : "" });
+type BadgeState = "idle" | "active" | "done";
+
+// Clearing the badge is a *negative* signal — the user learns nothing from a
+// missing "ON". On a run that finishes with the panel closed that is the only
+// thing they would have seen, and an OS notification is a channel we do not
+// control (Do Not Disturb swallows it silently, and there is no way to tell
+// that from a create() that failed). The badge demonstrably works, so a result
+// nobody is watching marks itself here instead. Cleared when the panel
+// reconnects, because the panel replays panelLog and the user has then seen it.
+async function setBadge(state: BadgeState): Promise<void> {
+  const text = state === "active" ? "ON" : state === "done" ? "•" : "";
+  const color = state === "active" ? BADGE_ACTIVE : BADGE_IDLE;
+  await chrome.action.setBadgeBackgroundColor({ color });
+  await chrome.action.setBadgeText({ text });
+}
+
+function setBadgeForResult(): void {
+  void setBadge(panelConnected ? "idle" : "done");
 }
 
 // ── WebSocket observation sender ─────────────────────────────────────────────
@@ -678,8 +705,28 @@ async function startRelay(
   // follow-up a second conversation; re-picking the tab could aim it at a
   // different one than the task before it was driving.
   const continues = (opts.resume || opts.continueSession) === true;
-  if (continues && sessionId !== null && activeTabId !== null) {
-    session_id = sessionId;
+  // A session reopened from history has no attached tab — the run that owned
+  // it finished long ago, and the debugger was released when it did. The tab
+  // still has to be picked and attached below, so what is carried over is the
+  // ID alone; that is what makes the server append to the same conversation
+  // rather than start a new one. The tab-id condition below is only about
+  // whether the attachment can be reused as-is.
+  const keepSession = continues && sessionId !== null;
+  // Attachment is an invariant that has to be re-asserted, not a fact that
+  // happened once. This branch used to do nothing at all on the assumption
+  // that a continuing session still had its debugger — an assumption a
+  // crashed run, a closed tab, or a DevTools detour all break, and the next
+  // message then inherited a tab that could not be driven.
+  //
+  // Falling through to the else branch is not a failure. It re-picks a tab and
+  // attaches, and the session id is carried independently of the tab, so the
+  // conversation survives the tab changing underneath it. The tab id never
+  // reaches the server — sendObservation sends url/title/AX only — so
+  // whichever tab answers the first observation simply becomes the tab the run
+  // continues on.
+  if (keepSession && activeTabId !== null
+      && await dbg.ensureAttached(activeTabId) === "attached") {
+    session_id = sessionId as string;
     wsUrl = `${serverUrl.replace(/^http/, "ws")}/ws/ext/${session_id}`;
   } else {
     // A conversation that ended cleanly leaves its debugger attached — that
@@ -701,6 +748,7 @@ async function startRelay(
     } else {
       // Non-HTTP tab (chrome://, about:blank, etc.) — open a new one
       const initialUrl = startingUrl ?? "https://www.google.com";
+      lastSelfFocusAt = Date.now();
       tab = await chrome.tabs.create({ url: initialUrl, active: true });
       await sleep(1500);
       needsNavigate = false; // already at startingUrl (or google as default)
@@ -732,28 +780,35 @@ async function startRelay(
     // server is down, so the retry lives here rather than in a reconnect
     // probe: a probe's socket would be overwritten by the `new WebSocket`
     // below and never carry a task_start, so it could not serve the next task.
+    // Skipped when resuming a session: the conversation already exists, and
+    // POSTing would fork it into a new one carrying the same words.
     let session: { session_id: string; websocket_url: string } | null = null;
-    for (let attempt = 1; attempt <= SESSION_ATTEMPTS; attempt++) {
-      if (attempt > 1) {
-        notifyUi({ type: "server_unreachable", attempt, of: SESSION_ATTEMPTS });
-        await sleep(SESSION_RETRY_MS);
+    if (keepSession) {
+      session_id = sessionId as string;
+      wsUrl = `${serverUrl.replace(/^http/, "ws")}/ws/ext/${session_id}`;
+    } else {
+      for (let attempt = 1; attempt <= SESSION_ATTEMPTS; attempt++) {
+        if (attempt > 1) {
+          notifyUi({ type: "server_unreachable", attempt, of: SESSION_ATTEMPTS });
+          await sleep(SESSION_RETRY_MS);
+        }
+        try {
+          const resp = await fetch(`${serverUrl}/v1/sessions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          session = await resp.json() as { session_id: string; websocket_url: string };
+          break;
+        } catch (err) {
+          console.warn(`[brotto] session create attempt ${attempt}/${SESSION_ATTEMPTS} failed:`, err);
+        }
       }
-      try {
-        const resp = await fetch(`${serverUrl}/v1/sessions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        session = await resp.json() as { session_id: string; websocket_url: string };
-        break;
-      } catch (err) {
-        console.warn(`[brotto] session create attempt ${attempt}/${SESSION_ATTEMPTS} failed:`, err);
-      }
+      if (!session) throw new Error(`Can't reach ${serverUrl} after ${SESSION_ATTEMPTS} attempts. Is the server running?`);
+      session_id = session.session_id;
+      sessionId = session_id;
     }
-    if (!session) throw new Error(`Can't reach ${serverUrl} after ${SESSION_ATTEMPTS} attempts. Is the server running?`);
-    session_id = session.session_id;
-    sessionId = session_id;
     // Monotonic per session, and the server's tracker is per session too —
     // so this resets only when a NEW session is minted. It stays reset-only
     // here, never in the reuse branch: a follow-up task shares its session
@@ -783,7 +838,7 @@ async function startRelay(
       console.error("[brotto] getStoredModelConfig failed:", e);
       taskInFlight = false;
       taskTerminalEmitted = true;
-      void setBadge(false);
+      setBadgeForResult();
       try { ws?.close(); } catch { /* ignore */ }
       notifyUi({
         type: "task_failed",
@@ -845,7 +900,7 @@ async function startRelay(
           if (!taskTerminalEmitted) {
             taskTerminalEmitted = true;
             taskInFlight = false;
-            void setBadge(false);
+            setBadgeForResult();
             notifyUi({
               type: "task_failed",
               failure_reason: "NO_ACTIVE_TAB",
@@ -898,7 +953,7 @@ async function startRelay(
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
         taskInFlight = false;
-        void setBadge(false);
+        setBadgeForResult();
         const r = msg.result ?? {};
         if (r.status === "completed") {
           notifyUi({ type: "task_completed", summary: r.summary ?? "", steps: stepIndex, finalAnswer: r.summary ?? "", extracted_data: r.extracted_data, timing: r.timing ?? null });
@@ -925,7 +980,7 @@ async function startRelay(
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
         taskInFlight = false;
-        void setBadge(false);
+        setBadgeForResult();
         // ponytail: failure_reason + summary field names — see the
         // matching note on the task_result handler.
         notifyUi({ type: "task_failed", failure_reason: "TASK_ERROR", summary: msg.error ?? "Unknown error" });
@@ -1038,7 +1093,7 @@ async function startRelay(
     if (!taskTerminalEmitted) {
       taskTerminalEmitted = true;
       taskInFlight = false;
-      void setBadge(false);
+      void setBadge("idle");
       // ponytail: failure_reason + summary field names — see the
       // matching note on the task_result handler.
       notifyUi({ type: "task_failed", failure_reason: "WS_ERROR", summary: `WebSocket connection error: ${detail}` });
@@ -1071,7 +1126,7 @@ async function cleanup(): Promise<void> {
   if (lost) {
     taskTerminalEmitted = true;
     taskInFlight = false;
-    void setBadge(false);
+    void setBadge("idle");
     notifyUi({
       type: "task_failed",
       failure_reason: "CONNECTION_LOST",
@@ -1103,7 +1158,7 @@ async function cleanup(): Promise<void> {
   waitingForLogin = false;
   currentPrompt = null;
   lastObservedUrl = "";
-  void setBadge(false);
+  void setBadge("idle");
 }
 
 function stopRelay(): void {
@@ -1159,6 +1214,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           const goal = String(message.task ?? "").trim();
           if (!goal) { sendResponse({ success: false, error: "task is empty" }); return; }
 
+          // A session the panel picked back out of history. Adopting it here
+          // is what makes the follow-up append to THAT conversation on the
+          // server; without it the panel would show the old thread and the
+          // run would land in a different one. Only honoured when the panel
+          // also asked to continue, so a stale id can never resurrect a
+          // session the user has moved on from.
+          if (message.continueSession === true && typeof message.session_id === "string" && message.session_id) {
+            sessionId = message.session_id;
+          }
+
           // Logged, not broadcast: the live panel already renders the user's
           // own message before it sends. This only exists so a reopened panel
           // can put the question back at the top of the transcript, resume
@@ -1174,14 +1239,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             (stored.settings as any)?.serverUrl ||
             DEFAULT_SERVER;
 
-          void setBadge(true);
+          void setBadge("active");
           notifyUi({ type: "canonical_status", status: "executing" });
 
           startRelay(goal, plannerUrl, message.startingUrl as string | undefined, {
             continueSession: message.continueSession === true,
           })
             .catch((err: unknown) => {
-              void setBadge(false);
+              void setBadge("idle");
               taskInFlight = false;
               if (!taskTerminalEmitted) {
                 taskTerminalEmitted = true;
@@ -1413,6 +1478,47 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
+// A chrome.debugger attachment ends on its own, and Chrome documents exactly
+// two reasons: the tab was closed, or DevTools was invoked for it. The first
+// is onRemoved's job. The second was silent until now, so the run kept
+// believing it had a debugger — no CDP events, so chrome.webNavigation
+// never reported the click, so the server sat 30s waiting on an observation
+// that could not arrive, and then failed on an empty page in a way that
+// named the model rather than the cause. Swapping tabs does NOT do this;
+// there is no focus-related detach reason and no onActivated listener.
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId !== activeTabId) return;
+  if (reason === "target_closed" || !taskInFlight) return;
+  console.warn("[brotto] debugger detached from tab", source.tabId, reason);
+  notify("debugger-detached", {
+    title: "Brotto lost control of the tab",
+    message: "Chrome ended the debugging session — opening DevTools on the tab does that. Close DevTools and Brotto will pick the task back up.",
+    blocking: true,
+  });
+});
+
+// Whether the user is looking at what Brotto is doing, which is NOT the same
+// question as whether the panel has OS focus. The side panel is docked to the
+// window, not the tab, so it stays focused while the user switches to another
+// tab in that same window — Brotto reads "watched" and swallows the result
+// notification for a task that just finished. The signal that actually tracks
+// the user is whether the tab being driven is the one on screen.
+//
+// Notification only. This must never touch the debugger: switching tabs does
+// not end a chrome.debugger attachment, and wiring it up that way would trade
+// a cosmetic bug for a task that dies every time someone looks at YouTube.
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  if (activeTabId === null) return;
+  // Brotto focuses tabs on the user's behalf (opening one when the active tab
+  // is not a real page). That fires this same event, and reading it as the
+  // user looking away would mark them gone at the moment we just gave them
+  // something to look at.
+  if (Date.now() - lastSelfFocusAt < SELF_FOCUS_GRACE_MS) return;
+  panelWatching = tabId === activeTabId;
+  void chrome.runtime.sendMessage({ type: "watching_changed", watching: panelWatching })
+    .catch(() => undefined);
+});
+
 // Auto-resume after manual login: when the active tab's URL actually
 // changes (top-frame navigation or pushState / title-only update), unblock
 // the server's human_input_queue with "resume". The server then re-runs
@@ -1444,7 +1550,15 @@ async function initialize(): Promise<void> {
     // The panel's keep-alive port is also its liveness signal: a closed panel
     // disconnects the port, which is what lets a finished task notify.
     panelConnected = true;
-    panelWatching = true;
+    // The panel replays panelLog on open, so a result that landed while it was
+    // closed is on screen now. Leaving the unread marker up would claim there
+    // is something unseen, which at that point is false.
+    void setBadge("idle");
+    // Deliberately not `panelWatching = true` here. That would undo the
+    // tab-derived value from tabs.onActivated: a panel reopened while the user
+    // is on a different tab would declare them watching anyway. The declared
+    // default of true already covers the case where no activation has been
+    // seen yet, which is exactly the case where the panel really is on screen.
     port.onMessage.addListener((msg: { watching?: unknown }) => {
       if (typeof msg?.watching === "boolean") panelWatching = msg.watching;
     });
@@ -1495,7 +1609,7 @@ async function initialize(): Promise<void> {
   });
 
   chrome.runtime.onInstalled.addListener((details) => {
-    void setBadge(false);
+    void setBadge("idle");
     // First run points the panel at the setup wizard; the wizard's own "Start"
     // points it back at sidepanel.html. reason === 'install' only, so an
     // update never drops an existing user back into setup.
