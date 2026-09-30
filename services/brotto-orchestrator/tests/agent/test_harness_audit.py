@@ -45,8 +45,8 @@ def _cdp(targets, *, attributes: dict | None = None,
     cdp.get_page_text = AsyncMock(return_value="")
     cdp.get_page_title = AsyncMock(return_value="Sign in")
     cdp.refresh_target_map = AsyncMock()
-    cdp.focus_ref = AsyncMock()
-    cdp.clear_ref = AsyncMock()
+    cdp.focus_ref = AsyncMock(return_value="ok")
+    cdp.clear_ref = AsyncMock(return_value="ok")
     cdp.type_text_to_ref = AsyncMock(return_value="ok")
     cdp.click_ref = AsyncMock(return_value="clicked")
     cdp.get_attributes = AsyncMock(

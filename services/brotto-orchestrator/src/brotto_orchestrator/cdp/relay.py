@@ -60,25 +60,38 @@ class CDPRelay:
             log.debug("get_page_text failed: %s", e)
             return ""
 
+    # ponytail: `Error executing:` prefix is the contract — harness.py
+    # derives `ok` from it, so an unresolvable ref must not read as success.
+
     async def click_ref(self, ref: str) -> str:
         target = self._browser.target_map.get(ref)
         if not target:
-            return f"ref {ref} not found"
+            return f"Error executing: ref {ref!r} is not in the current target map"
         result = await self._browser._handle_left_click({"type": "left_click", "target_id": ref})
-        return "ok" if result.get("ok") else result.get("error", "failed")
+        if not result.get("ok"):
+            return f"Error executing: ref {ref!r} {result.get('error', 'failed')}"
+        return "ok"
 
-    async def focus_ref(self, ref: str) -> None:
-        await self.click_ref(ref)
+    async def focus_ref(self, ref: str) -> str:
+        return await self.click_ref(ref)
 
-    async def clear_ref(self, ref: str) -> None:
+    async def clear_ref(self, ref: str) -> str:
+        focused = await self.focus_ref(ref)
+        if focused.startswith("Error executing"):
+            return focused
         if self._browser.page:
             await self._browser.page.keyboard.press("Control+A")
+        return "ok"
 
     async def type_text_to_ref(self, ref: str, text: str) -> str:
+        if ref not in self._browser.target_map:
+            return f"Error executing: ref {ref!r} is not in the current target map"
         result = await self._browser._handle_insert_text(
             {"type": "insert_text", "target_id": ref, "text": text}
         )
-        return "ok" if result.get("ok") else result.get("error", "failed")
+        if not result.get("ok"):
+            return f"Error executing: ref {ref!r} {result.get('error', 'failed')}"
+        return "ok"
 
     async def press_key(self, key: str, modifiers: int = 0) -> str:
         """`modifiers` is CDP's bitmask; Playwright wants "Control+a"."""

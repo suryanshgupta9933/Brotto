@@ -906,8 +906,16 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             return f"Clicked [{args['ref']}]: {result}"
 
         elif action == "type_text":
-            await cdp.focus_ref(args["ref"])
-            await cdp.clear_ref(args["ref"])
+            # focus/clear used to be fire-and-forget, so a ref that resolved to
+            # nothing still typed the text into whatever was focused before —
+            # the model saw "Typed into [0:99]" and moved on. Bail on the first
+            # failure so the audit records it.
+            focused = await cdp.focus_ref(args["ref"])
+            if focused.startswith("Error executing"):
+                return focused
+            cleared = await cdp.clear_ref(args["ref"])
+            if cleared.startswith("Error executing"):
+                return cleared
             result = await cdp.type_text_to_ref(args["ref"], args["text"])
             return f"Typed into [{args['ref']}]: {result}"
 

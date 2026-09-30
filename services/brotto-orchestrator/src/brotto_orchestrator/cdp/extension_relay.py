@@ -80,13 +80,24 @@ class ExtensionCDPRelay:
             self._sid, obs.get("url", "")[:80], len(obs.get("axTargets", [])),
         )
 
-    def _coords(self, ref: str) -> dict | None:
+    def _locate(self, ref: str) -> tuple[dict | None, str]:
+        """Resolve a ref to click coordinates. Returns (coords, reason);
+        reason is "" on success.
+
+        The two failure states are kept apart because only one is a grounding
+        error. Absent from `axTargets` means the model named a ref this page
+        does not have; present-but-no-box means it named a real element that is
+        off-screen. Collapsing them made a hallucination indistinguishable from
+        a correct guess at something scrolled out of view.
+        """
         if not self._cached_obs:
-            return None
+            return None, "cannot resolve: no observation captured yet"
         for t in self._cached_obs.get("axTargets", []):
-            if str(t.get("ref")) == str(ref) and "x" in t:
-                return {"x": t["x"], "y": t["y"]}
-        return None
+            if str(t.get("ref")) == str(ref):
+                if "x" in t and "y" in t:
+                    return {"x": t["x"], "y": t["y"]}, ""
+                return None, "is off-screen (no box model in the last observation)"
+        return None, "is not in the current AX tree"
 
     # ---------- CDPRelay interface ----------
 
@@ -141,29 +152,46 @@ class ExtensionCDPRelay:
     async def refresh_target_map(self) -> None:
         pass  # next get_targets() will re-observe
 
+    # ponytail: every ref-taking method below reports an unresolvable ref
+    # with this prefix, because harness.py derives `ok` from
+    # `not outcome.startswith("Error executing")`. A friendly sentence here
+    # is written to the audit as a successful action.
+
     async def click_ref(self, ref: str) -> str:
-        coords = self._coords(ref)
+        coords, why = self._locate(ref)
         if not coords:
-            log.warning("[%s] click_ref %r — no coords (off-screen or missing)", self._sid, ref)
-            return f"No coordinates for ref {ref!r} — element may be off-screen"
+            log.warning("[%s] click_ref %r — %s", self._sid, ref, why)
+            return f"Error executing: ref {ref!r} {why}"
         log.info("[%s] click_ref %r at (%d,%d)", self._sid, ref, coords["x"], coords["y"])
         await self._send_action({"type": "click", **coords})
         return f"Clicked [{ref}]"
 
-    async def focus_ref(self, ref: str) -> None:
-        coords = self._coords(ref)
-        if coords:
-            log.debug("[%s] focus_ref %r", self._sid, ref)
-            await self._ws_send({"type": "action", "action": {"type": "click", **coords}})
+    async def focus_ref(self, ref: str) -> str:
+        coords, why = self._locate(ref)
+        if not coords:
+            log.warning("[%s] focus_ref %r — %s", self._sid, ref, why)
+            return f"Error executing: ref {ref!r} {why}"
+        log.debug("[%s] focus_ref %r", self._sid, ref)
+        await self._ws_send({"type": "action", "action": {"type": "click", **coords}})
+        return f"Focused [{ref}]"
 
-    async def clear_ref(self, ref: str) -> None:
-        coords = self._coords(ref)
-        if coords:
-            log.debug("[%s] clear_ref %r — click + select-all", self._sid, ref)
-            await self._ws_send({"type": "action", "action": {"type": "click", **coords}})
-            await self._ws_send({"type": "action", "action": {"type": "key", "key": "a", "modifiers": 2}})
+    async def clear_ref(self, ref: str) -> str:
+        coords, why = self._locate(ref)
+        if not coords:
+            log.warning("[%s] clear_ref %r — %s", self._sid, ref, why)
+            return f"Error executing: ref {ref!r} {why}"
+        log.debug("[%s] clear_ref %r — click + select-all", self._sid, ref)
+        await self._ws_send({"type": "action", "action": {"type": "click", **coords}})
+        await self._ws_send({"type": "action", "action": {"type": "key", "key": "a", "modifiers": 2}})
+        return f"Cleared [{ref}]"
 
     async def type_text_to_ref(self, ref: str, text: str) -> str:
+        # Types into whatever holds focus, so an unresolvable ref means the
+        # text lands in some *other* field. Guard before dispatching.
+        coords, why = self._locate(ref)
+        if not coords:
+            log.warning("[%s] type_text_to_ref %r — %s", self._sid, ref, why)
+            return f"Error executing: ref {ref!r} {why}"
         log.info("[%s] type_text_to_ref %r  len=%d", self._sid, ref, len(text))
         await self._send_action({"type": "type", "text": text})
         return f"Typed into [{ref}]"

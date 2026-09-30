@@ -128,15 +128,14 @@ top session. For a same-process cross-origin frame that works. For an
 need. `frameId` is on the target so that path exists when it does. Not
 verified in a browser.
 
-## Choosing a target — the largest single lever we have not pulled
+## Choosing a target — and what choosing actually costs
 
 Everything above is about *what the model is shown*. This is about *how it is
-allowed to refer to it*, and the external evidence says we are currently
-running the worst-performing mode available.
+allowed to refer to it*.
 
 Measured on web agent action spaces, the rate at which the model refers to a
 target that does not exist, by how the reference is expressed
-(arXiv:2603.14248):
+(arXiv:2603.14248, Table 4):
 
 | Reference form | Hallucination rate |
 |---|---|
@@ -144,28 +143,91 @@ target that does not exist, by how the reference is expressed
 | Expanded — model describes it, then resolves | 3.0% |
 | Action ID — model *selects* from a list it was given | **2.0%** |
 
-That is a 17× spread, and it is not about model quality — the same models
-produce both numbers. It is about how much of the referent we deny the model
-the chance to invent.
+**Two axes, and the 17× spread only sits on one of them.** Action ID was
+measured over a *restricted primitive verb set* — click, type, select, hover.
+"Expanded" is the expressive verb set (`google_search`, `goto`, `click`,
+`fill_form`, `get_final_answer`) that is much closer to Brotto's, and it scores
+3.0%. So the honest target for a Brotto-shaped action space is 3%, not 2%, and
+the headline number was borrowed from a column that is not ours.
 
-Brotto is at 34%. `find_element` takes a free-text `name`, and the model is
-invited throughout the prompt to talk about controls by name ("click the Send
-button") before it has a `ref` to spend. The name it produces is its own
-construction; the ref is ours. Every intermediate step between "I want a
-control called Send" and "I have `ref=e42`" is a hallucination surface, and
-the whole run can die on one.
+**Brotto is not in the Action Object column, and the recorded history says so.**
+An earlier version of this file claimed "Brotto is at 34%." It was wrong, and
+wrong in a way worth keeping: it read the capability map, saw that
+`find_element` takes a free-text `name`, and inferred the whole action surface
+was name-based. The observation is real but it is one verb with **0 call sites
+in 75 recorded actions across 7 sessions**. `click` and `type_text` take a
+`ref` from the AX tree the model was just shown, which is the Action ID shape
+already.
 
-**The fix is a schema change, not a prompt change.** Make the model *choose*
-rather than *name*: present candidate refs with their rendered names and roles,
-and have the output carry a ref that must be one of them. A model that can only
-pick from a menu cannot invent a tenth dish. This is a two-way street — it also
-kills `find_element`'s open-ended retry loop, since a named miss has no
-grounded candidate to retry against.
+Counted over every audit document on disk — 41 documents, 168 executable
+actions, using the failure strings both relays have always returned:
 
-It is recorded against Wave 1, not 0A, because it is an action-surface change
-and does not depend on the perception work. But it is the highest
-expected-value change on the board, and it should be planned before 1A's verb
-list, because `fill_form` and friends inherit its output schema.
+**0 grounding failures. The model never once named a ref that did not resolve.**
+
+Three things that number does *not* say, all of which matter more than the
+number:
+
+- **It is the Playwright path only.** All 41 documents came from `/run` or dev
+  mode. The extension relay — the product — has never written one, so its
+  grounding behaviour is *unmeasured*, not measured-as-clean.
+- **It counts resolution, not validity.** A ref that hallucinates *into* a real
+  but wrong element resolves, clicks, and reads as `ok: true`. That is an
+  action-validity failure wearing a grounding failure's clothes, and no
+  ref-resolution check can see it.
+- **The paper's own caveat applies.** Its recommendation #3: action IDs "reduce
+  invalid actions but often reflect uncertainty as random errors." A menu does
+  not stop a model guessing — it makes the guess indistinguishable from a
+  decision. The second bullet above is that failure arriving.
+
+### A grounding failure was being recorded as a success
+
+`harness.py` computes `ok = not outcome.startswith("Error executing")`. The
+relays returned a *friendly sentence* for a ref that resolved to nothing:
+
+```
+"No coordinates for ref '0:99' — element may be off-screen"
+```
+
+which does not start with the magic prefix, so `ok: true`, so the audit holds
+`ok: true` for an action that did not happen. The grounding failure rate was not
+merely unmeasured — it was **actively recorded as clean**, which is why the
+first attempt to measure it returned "94% of refs resolved" and that number was
+a tautology of the bug. `focus_ref` and `clear_ref` were worse: they returned
+`None` and silently no-opped, so a `type_text` into a hallucinated ref typed
+into whatever was focused *before* — the HDFC failure class, where the model
+typed six queries into a field it never successfully addressed.
+
+Fixed at the shared point both relays route through:
+
+- `_coords` → `_locate`, returning `(coords, reason)`. "Not in `axTargets`" and
+  "present but has no box model" are now different strings, because only the
+  first is a grounding error — the second is a correct guess at something
+  scrolled out of view.
+- Every ref-taking method returns the `Error executing:` prefix when the ref
+  does not resolve, on both `extension_relay.py` and `relay.py`. `ok` is then
+  correct with no change to `harness.py`, because the prefix was already the
+  contract and only the callers were violating it.
+- `type_text` in the harness bails if `focus_ref` or `clear_ref` reports
+  failure, instead of typing into a field the model never named.
+
+Pinned by `tests/test_grounding_outcome.py` (5 tests, both relays).
+
+**The measurement is the audit, not a probe script.** Rung two of the ladder:
+the record already exists and every run already writes it. A future
+grounding failure is now countable in `logs/sessions/*.json` by counting
+`ok: false` actions. The one thing it still cannot see is the validity failure
+in the second bullet, and that needs a different check — did the click land on
+the element the model *meant* — which needs a name to compare against and so
+comes back to `find_element`, the one verb that does have free text.
+
+**What this does to 1A′.** The workstream was justified as "replace name-based
+action objects with target selection, because Action Object hallucinates at
+34.0% and we are doing Action Object." The premise is wrong: we were already
+doing the 2–3% thing, and the measured cost of it is zero. The remaining
+questions under 1A′ are real but different — is a *validity* failure rate
+measurably non-zero, and is `find_element` the right shape for the case where
+it is. That is a measurement before it is a schema change, and it is not
+picked from a benchmark table.
 
 ## Mid-task steering
 

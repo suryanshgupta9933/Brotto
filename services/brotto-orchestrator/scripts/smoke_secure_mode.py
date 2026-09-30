@@ -75,11 +75,11 @@ class FakeCDP:
         self.clicked.append(ref)
         return f"clicked {ref}"
 
-    async def focus_ref(self, ref: str) -> None:
-        pass
+    async def focus_ref(self, ref: str) -> str:
+        return f"focused {ref}"
 
-    async def clear_ref(self, ref: str) -> None:
-        pass
+    async def clear_ref(self, ref: str) -> str:
+        return f"cleared {ref}"
 
     async def type_text_to_ref(self, ref: str, text: str) -> str:
         self.typed.append((ref, text))

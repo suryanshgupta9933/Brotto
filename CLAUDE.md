@@ -98,6 +98,31 @@ What the model sees is half of it; the other half is `prompt.py`'s `<convergence
 
 **A model that omits `actions` cannot be told twice** (2 of 6 runs on a Gmail prompt, and it repeated the omission all three attempts). pydantic-ai's own retry prompt is a schema diff — `{'type': 'missing', 'loc': ('actions',)}` — which is not actionable to a model that has already written prose. So `actions` **defaults to empty** and `harness._require_actions` raises `ModelRetry` with an instruction instead, naming `task_complete`/`ask_human`/`cannot_complete` as appropriate. Defaulting is load-bearing: while the field was required, pydantic-ai rejected the call before any validator could run, leaving only the prompt that does not work. The budget is unchanged — raising `ModelRetry` spends one of `retries=2`.
 
+### A ref that resolves to nothing is now a recorded failure
+
+`ok` is derived from a string prefix: `not outcome.startswith("Error executing")`.
+The relays used to return a *friendly sentence* for an unresolvable ref
+(`"No coordinates for ref '0:99' — element may be off-screen"`), which does not
+match, so the audit wrote **`ok: true` for an action that never happened** —
+and the grounding failure rate was not merely unmeasured, it was recorded as
+clean. `focus_ref`/`clear_ref` returned `None` and no-opped silently, so a
+`type_text` into a hallucinated ref typed into whatever was focused before.
+
+Every ref-taking method on **both** relays now returns the `Error executing:`
+prefix when the ref does not resolve, and `_coords` is `_locate`, returning
+`(coords, reason)` so "not in the AX tree" (a grounding error) is separable
+from "no box model" (a correct guess at something off-screen). `type_text`
+bails if focus or clear reports failure. Pinned by
+`tests/test_grounding_outcome.py`.
+
+**Counted over all 41 audit documents / 168 executable actions: 0 grounding
+failures.** Read that narrowly — it is the Playwright path only (the extension
+has never written a document), and it counts *resolution*, not *validity*: a
+ref that hallucinates into a real but wrong element resolves and records
+`ok: true`. The measurement is the audit, not a probe script — count `ok: false`
+actions in `logs/sessions/`. Full reasoning, including why "1A′: we are at
+34.0% Action Object" was wrong, in `docs/architecture/agent-loop.md`.
+
 ### The model could not press a key
 
 A 19-step HDFC UPI run burned 158s and ~19 model calls without executing a
