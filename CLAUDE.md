@@ -11,8 +11,9 @@ services/brotto-orchestrator/  — server: FastAPI + pydantic-ai + Playwright
   src/brotto_orchestrator/
     main.py                 — entry: WS handler, dev-mode env defaults
     agent/harness.py         — observe→plan→act loop
+    agent/audit.py           — per-session audit document (nested JSON, files)
     model/{config,registry,store,resolver}.py — provider-agnostic model adapter
-    policy/                  — secure-mode policy + persistence
+    policy/                  — the user's secure-mode policy (no server floor)
 clients/brotto-extension/   — Chrome extension (TS, manifest v3)
   src/{background,sidepanel,model_config}.ts
 docs/superpowers/{specs,plans}/ — formal feature specs (force-add with -f)
@@ -268,6 +269,145 @@ against real page shapes and reading the sentences.
 - `api_key` → `chrome.storage.session` — in-memory only, cleared on browser restart; mirrors the existing pause-state pattern
 - The first read after an extension update runs a one-shot migration that re-saves any legacy `{modelConfig: {model_config, api_key}}` shape into the new layout
 
+## Domain blocking — one list, the user's
+
+The blacklist is whatever the user typed in the panel, whole. There is no
+server-side floor, no `policy.json`, no `merge()`.
+
+There was a whole second code path for it and **it rendered nothing**: a
+self-hosted install never shipped a `policy.json` for `load_policy()` to find,
+so `FLOOR_POLICY` was always an empty `Policy`, and the panel's "Brotto refuses
+these too" list always came back empty. Every three-way union
+(`floor ∪ user ∪ ?`) and every "source: floor / server / user" label existed to
+describe a distinction that never occurred. Deleted: `policy/config.py`,
+`merge()`, `FLOOR_POLICY`, the `/health` `policy` key, the `source` block on
+`/v1/policy`, and the panel's floor section.
+
+`Policy` / `UserPolicy` stay, and `UserPolicy` is still a `Policy` subclass, so
+an old policy file on disk with the removed `whitelist` / `block_blacklisted`
+fields still parses — pydantic 2 drops unknown fields rather than rejecting them.
+That is pinned by `tests/test_policy_schema.py`.
+
+## Notifications
+
+Two classes, and they gate on **different** things, which is the whole point:
+
+- **Blocking** (`approval_request`, `login_required`, `clarify_request`) —
+  always speaks up, panel open or not. The user has usually wandered off
+  precisely because the panel looks idle. `notifyBlocking` gates it.
+- **Results** (`task_completed`, `task_failed`) — only when nobody is
+  watching. `notifyResults` gates it. Default **on**, and this is a product
+  judgement worth knowing about: Brotto's premise is that you leave it running
+  and come back later, so "the task ended" is the event the whole thing exists
+  to deliver. Flip it if that reads as too loud.
+
+"Watching" is a **boolean on the keep-alive port**, not port liveness. A bare
+`chrome.runtime.connect` cannot tell an open-and-watched panel from an
+open-and-forgotten one, and the second is the normal state for a ten-minute
+task. `sidepanel.js` drives it from `focus`/`blur` events — not by polling
+`hasFocus()`, which **is forced `true` under CDP focus emulation** and so cannot
+be tested in the browser harness at all. Those listeners are registered at
+module scope, not inside `connectSwKeepAlive`, which re-runs on every service
+worker restart and would accumulate a pair of listeners per reconnect. The
+background defaults `panelWatching` to `true`, so a cold service worker reads
+"connected" as "watched" and stays quiet rather than guessing.
+
+A notification click focuses `activeWindowId` and clears. It deliberately does
+**not** call `chrome.sidePanel.open()` — that needs a user gesture a
+notification click does not provide (chromium bug 40929586, still open), and a
+click that clears the notification and leaves you where you were is a dead
+end. `chrome.windows.update(id, {focused: true})` has no such restriction.
+
+**A setting that is written and read nowhere is worse than no setting.**
+`notifyBlocking` was persisted in three places and consulted in zero, so
+unchecking it changed nothing at all. Both toggles are now read in
+`maybeNotify`.
+
+Not built, and cheap if wanted: a "waiting on you" badge on the panel icon.
+`currentPrompt` is already tracked in the background.
+
+## Audit trail
+
+Every run writes one nested-JSON document per session to
+`logs/sessions/<session_id>.json`: `turns[]`, each with
+`observation → model → prompts[] → actions[]`, plus root-level `totals`,
+`policy_events[]`, `errors[]`, and a `scratchpad` snapshot. `GET
+/v1/sessions/{id}/audit` serves it and the panel's transcript view renders
+it. There is no database; the file is the record.
+
+**Atomic write, and that is the whole durability mechanism.** `json.dump` to
+`<id>.json.tmp` then `os.replace`, which is atomic on POSIX — a crash
+mid-write leaves the previous valid document, never a truncated one. It was
+chosen over append-only JSONL specifically because a JSONL trail does not
+form a nested document until a task ends *cleanly*, i.e. it holds nothing
+exactly when you want the audit.
+
+Five things that are load-bearing, and each is a way this could have been
+quietly wrong:
+
+- **Key order inside a turn is causal and the tests assert it** —
+  `model → prompts → actions`, because that is the order they happen in and
+  the order a replay walks. Dict ordering survives the JSON round trip
+  because `json.dump` does not sort by default.
+- **A turn with `ended_at: null` is unfinished, never a resume point.** A
+  turn in flight when the socket died describes actions that may or may not
+  have run, so it is re-run from scratch rather than half-recorded. This is
+  the same reason an approved-but-unexecuted action is not replayed as if it
+  had.
+- **Writes never raise.** A failed flush increments `dropped_writes`, counts
+  into `totals["errors"]`, and logs — the loop never sees an audit failure.
+  So the log line carries the exception *type* and not its message: a
+  serialization error quotes the value that failed, and that value is the
+  document. `pytest` still exercises the failure path by standing a file
+  where the sessions directory must be.
+- **The scratchpad is per session** (`<session_id>.scratchpad.txt`). `dir`
+  is the root that holds *every* session, so a bare `scratchpad.txt` there
+  would let concurrent tasks overwrite each other's memory and read each
+  other's.
+- **`is_secret_field` lives in exactly one place.** A `type=password` check
+  misses an API-key field, because those are usually `type=text` or
+  `type=email` — so the accessible name is the only signal left, and the
+  Playwright relay and the extension relay must not be able to disagree
+  about it. Over-redacting costs a replay that says `[redacted]`; under-
+  redacting costs a plaintext credential on disk forever, and every
+  ambiguous branch resolves toward redact.
+
+A live `AuditTrail` holds the document in memory and rewrites the whole file
+on every flush, so a second writer read-modify-writing the path gets clobbered
+by the next flush. `append_policy_event` routes through the live instance for
+this reason, and `close()` deregisters — only on a terminal path.
+
+### Resume
+
+`AgentHarness.run(deps, *, resume_from=0)`. This works because the harness is
+**stateless per step**: `agent.run` is called with a freshly rebuilt prompt and
+no `message_history`, so `step_summaries` + `scratchpad` ARE the model's entire
+history. The document has both, which makes resume a reconstruction rather
+than a guess. `visited_domains` is restored from the *approved* first-navigation
+events only — re-adding a domain the user never approved would skip the prompt
+that exists to ask them.
+
+A stopped task and a dropped socket look identical to the server: the agent
+task is cancelled either way, and only one of them may be resumed. So the
+client says which it was in a `cancel` frame rather than leaving the server to
+infer it from the disconnect, and a user-cancelled run is sealed `cancelled`
+(never resumable) while a dropped one is left `running`.
+
+A document that is corrupt, is at another `schema_version`, or belongs to a run
+that already ended is reported as `status: "interrupted"` with the reason —
+never silently restarted, because a silent restart re-runs actions the user
+approved. Two consequences worth keeping: the refusal is recorded **on top of**
+the existing record rather than replacing it, and a corrupt file is left
+byte-for-byte as found. It is the only copy of a run nobody can read, and "we
+cannot read it" is not a reason to delete it.
+
+The extension reconnects with full jitter (1s base, ×2, 30s cap, 6 attempts)
+reusing the `session_id`. `stopRelay` and a cancel never reconnect — a
+cancelled task must not resurrect.
+
+**Not verified in a browser.** The reconnect path, the transcript view, and
+the offline-history fallback are unit-tested logic only.
+
 ## Commands
 
 ```bash
@@ -278,7 +418,7 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-../../.venv/bin/python -m pytest tests/ -q     # 346 tests (2 skipped)
+../../.venv/bin/python -m pytest tests/ -q     # 423 tests (2 skipped)
 # The pytest install lives in the REPO-ROOT venv, not services/brotto-orchestrator/.venv
 # (which has pydantic-ai but no pytest). Run it from services/brotto-orchestrator/.
 
