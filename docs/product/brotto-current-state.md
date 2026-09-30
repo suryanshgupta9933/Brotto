@@ -160,6 +160,51 @@ sites behind your login" claim and block Wave 0A. Detail in
 | Observation hard-capped | `GAP_RENDER` | `budget_for_window` is window/20, 8K–60K, decaying to 30% by step 15, and cuts on line count. The target is present and past the cut — a ranking problem, not a size one |
 | Auth code present but unwired | Confirmed | `session/auth.py` has `validate_token`, but `/ws/ext/{session_id}` never calls it and `AGENT_AUTH_DISABLED` defaults to `"true"`. `GET /v1/sessions` and `GET /v1/sessions/{id}/audit` are unauthenticated and return full run transcripts |
 
+## The ceiling, measured externally
+
+Brotto has no reliability number of its own — the 2-of-7 fixture score is
+adversarial by construction, and the only real-site evidence is one failed
+19-step Gmail run. So the honest comparison is against the published numbers
+for this class of system, which bound what any version of Brotto can do:
+
+| Benchmark | Number | What it means for us |
+|---|---|---|
+| OSWorld | humans **72.4%**, best agent **12.2%** | The gap is not closing quickly, and it is not a perception problem alone |
+| WebArena → production | **78% → 22%** | Benchmarks overstate. Assume our fixture wins are worth less than they read |
+| Mind2Web-Live | best **36.4%**, *with human-authored plans* | The realistic end-to-end target, not 100% |
+| WebAIM Million (Feb 2026) | AX defects on **95.9%** of home pages, +22.5% complexity/yr | The parsing substrate is degrading under us |
+
+**So: not "bulletproof to all websites", and no engineering effort changes
+that.** Two of the three asks, though, are largely solvable, and the research
+says so with numbers — see the two sections below. The third (never
+hallucinate) has a specific architectural fix worth ~17× and is the highest
+expected-value change available.
+
+### Where the research says we are right
+
+**Not using vision is measured, not dogma.** On 358 OSWorld tasks, raw
+screenshot 7.0%, linearized AX tree 15.6%, **compressed** AX tree 20.7%
+(A11y-Compressor, arXiv:2605.00551). The no-vision line on the moat list
+holds, and compression beating linearization is exactly the direction of
+`GAP_RENDER`'s fix. On WebArena-Infinity, Gemini-3-Flash reaches 69.3% where
+vision-based Kimi-K2.5 gets 45.9% and Qwen-3.5-Plus 49.1% — adding pixels
+would be a regression on the pages we already read.
+
+### The largest lever we have not pulled
+
+How the model *refers* to a control decides how often it refers to one that
+does not exist (arXiv:2603.14248): naming it 34.0%, expanded-then-resolve
+3.0%, **selecting from a presented list 2.0%**. Brotto is in the 34% column —
+`find_element` takes free text. Constraining the output to a ref drawn from
+offered candidates is a schema change, not a prompt change. Filed as **1A′**
+in the capability map; it gates the verb work rather than following it.
+
+### What no amount of work fixes
+
+Canvas and image-only surfaces (`GAP_UNREACHABLE` — pixels, not nodes),
+genuinely broken site markup, and irreversible actions taken on a page that
+changed underneath the agent. These are reported, not solved.
+
 ## Real gaps (in priority order)
 
 | # | Gap | Evidence | Impact |

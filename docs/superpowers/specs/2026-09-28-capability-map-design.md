@@ -95,6 +95,18 @@ fails rather than a gap someone inferred from a grep.
 
 **1A — Verbs.** `fill_form` (one native CDP call, not N keystrokes), `select_option`, `hover`, `drag`, `upload_file`, `key_combo`, scroll-to-element. Today: 13 actions, `type_text` is char-by-char via `Input.dispatchKeyEvent`, no `hover`/`drag`/`select_option`/`fill_form`.
 
+**1A′ — Target selection, which should be planned *before* 1A.** How the model
+refers to an element is worth more than which verbs it has. Measured hallucination
+rate for references to elements that do not exist (arXiv:2603.14248): naming the
+element 34.0%, expanded-then-resolve 3.0%, **selecting from a presented list
+2.0%**. Brotto sits at 34% — `find_element` takes free text and the prompt
+invites the model to reason about controls by name before it spends a `ref`.
+The fix is a schema that only permits a ref drawn from offered candidates.
+It gates 1A because `fill_form` and `select_option` inherit the same output
+schema, and it is the single highest expected-value change on this map. Full
+evidence and the argument in `docs/architecture/agent-loop.md`, under "Choosing
+a target".
+
 **1B — Did it land.** After click/type, confirm the intended element actually changed state — not merely that the URL moved. Catches mis-targeted clicks on dense pages.
 
 **1C — Stale-ref re-resolution.** Refs are invalidated constantly by dynamic pages. Re-resolve by role+accessible-name immediately before acting.

@@ -190,6 +190,20 @@ Drop the lowest rank until the budget is met, and report what was dropped. The
 age (`budget_for_window`), and that behaviour is untouched — this changes *which* lines
 survive, not how many.
 
+**External evidence that this is the right direction, and that less tree is
+better.** On 358 OSWorld tasks, three observation modes over the same tasks
+(A11y-Compressor, arXiv:2605.00551) scored: raw screenshot 7.0%, linearized AX
+tree 15.6%, **compressed** AX tree 20.7%. Two results here. The no-vision
+position on the moat list is measured, not assumed — the screenshot condition
+was 8× worse. And *compressing* the tree improved on passing it through,
+which is precisely what ranking under a budget does: less tree, better tree,
+same source. `GAP_RENDER` is not a "we need a bigger window" problem.
+
+The same work finds the web degrading as a target. WebAIM's Million (Feb 2026)
+puts AX defects on 95.9% of home pages, with page complexity growing ~22.5% a
+year. Ranking is not a stopgap against today's pages; it is what keeps the
+observation proportionate as the floor rises under us.
+
 ## Scalability
 
 Every one of these is an unbounded-resource risk if specified casually. Bounds are part
@@ -295,6 +309,12 @@ and only via the probe and the fixtures.
   `brotto-current-state.md`, and costs tokens per observation) or telling the model
   plainly that the page renders via canvas and the named control was not found. **This
   is a product decision, not a task in a list**, and it is deliberately left open here.
+  The external evidence tilts it. Agents with a vision fallback do not
+  dominate text-driven ones on real surfaces — on WebArena-Infinity, Gemini-3-Flash
+  scores 69.3% where vision-based Kimi-K2.5 scores 45.9% and Qwen-3.5-Plus 49.1%
+  — so the cost of a vision path is not only tokens, it is a measurable
+  regression on exactly the pages Brotto already reads well. Report the
+  limitation; do not add pixels.
 - ~~**Whether `getFullAXTree` takes a `frameId`**~~ — **answered by the probe.** It does,
   and cross-origin frame content comes back in-process: the `auth-iframe` probe
   enumerated 2 frames with zero errors and found "Confirm" in a subframe's AX tree. Task

@@ -51,6 +51,45 @@ nodes, no text, a product decision rather than a fix), `GAP_TIMING` (the
 target takes 5s to appear and we read the tree at an arbitrary instant), and
 `GAP_RENDER` (present, in the tree, and past the character budget).
 
+## Choosing a target — the largest single lever we have not pulled
+
+Everything above is about *what the model is shown*. This is about *how it is
+allowed to refer to it*, and the external evidence says we are currently
+running the worst-performing mode available.
+
+Measured on web agent action spaces, the rate at which the model refers to a
+target that does not exist, by how the reference is expressed
+(arXiv:2603.14248):
+
+| Reference form | Hallucination rate |
+|---|---|
+| Action Object — model *names* the element | **34.0%** |
+| Expanded — model describes it, then resolves | 3.0% |
+| Action ID — model *selects* from a list it was given | **2.0%** |
+
+That is a 17× spread, and it is not about model quality — the same models
+produce both numbers. It is about how much of the referent we deny the model
+the chance to invent.
+
+Brotto is at 34%. `find_element` takes a free-text `name`, and the model is
+invited throughout the prompt to talk about controls by name ("click the Send
+button") before it has a `ref` to spend. The name it produces is its own
+construction; the ref is ours. Every intermediate step between "I want a
+control called Send" and "I have `ref=e42`" is a hallucination surface, and
+the whole run can die on one.
+
+**The fix is a schema change, not a prompt change.** Make the model *choose*
+rather than *name*: present candidate refs with their rendered names and roles,
+and have the output carry a ref that must be one of them. A model that can only
+pick from a menu cannot invent a tenth dish. This is a two-way street — it also
+kills `find_element`'s open-ended retry loop, since a named miss has no
+grounded candidate to retry against.
+
+It is recorded against Wave 1, not 0A, because it is an action-surface change
+and does not depend on the perception work. But it is the highest
+expected-value change on the board, and it should be planned before 1A's verb
+list, because `fill_form` and friends inherit its output schema.
+
 ## Mid-task steering
 
 The only way to redirect a running task was Stop, which discards the transcript. Now the composer stays live while `executing`: it posts `{"type":"steer"}` and the correction lands on the next turn.
@@ -116,6 +155,17 @@ What replaced it is nothing. The model still self-assesses in
 `<stagnation_and_failure>` — same URL, same action twice, three failed
 approaches — which is the part that was always sound, because the model can see
 its own step history. Only the harness's external verdict is gone.
+
+**The external literature agrees, which is a relief and a caution.** Redundancy
+is defined there as *valid actions that produce no state change* — literally
+the fingerprint we removed, hash and all. But it is reported as an **offline
+metric over recorded runs**, never as a runtime detector, and the prescribed
+remedy for a redundant run is **replanning**, not detection. Nobody ships a
+runtime stuck-detector, because "this step changed nothing" and "this step is
+loading" are not separable without a model in the loop — and a model in the
+loop is just the model self-assessing, which is what `<convergence>` already
+does. The removal was correct; if stagnation comes back, it should arrive as
+a replan prompt fed by a recorded metric, not as a hash.
 
 `testing/outcome.py` keeps its `"stagnat"` needle on purpose: it classifies
 *recorded* runs, and the runs recorded before this removal still contain those
