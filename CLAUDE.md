@@ -106,7 +106,7 @@ Four things arrive per step. All four were captured and thrown away at some poin
 - **Page text** (`AgentTurn.page_text`, innerText, every step). The only source for values the AX tree omits — a repo's star count, a price. Costs nothing on the extension path (rides along in the `Runtime.evaluate` that already fetches url/title). `read_page_text` remains the targeted tool for a selector or `around` region.
 - **Budget** — `ax_filter.budget_for_window(context_window)`, a twentieth of the window, floored at 8K and capped at 60K. Over budget, whole lines are dropped and the count is reported; the tree is never sliced mid-element. The old flat `MAX_CHARS = 6000` truncated a real GitHub list page at 6041 chars.
 
-`context_window` is set on `deps` by `_plan_step` once the per-task config resolves, so step 1 falls back to the env default.
+`context_window` is read at the **top** of a step and written at the **bottom** of one, which is a step behind the tree it sizes. It is now resolved by `_resolve_model(deps)` before the loop, so step 0 is budgeted against the model that will actually read it. Before that, step 0 called `budget_for_window(None)` and got the 6K `MAX_CHARS` floor while every step after it got the real window — a fifth to an eighth of the page on the step that decides what a task tries first, and the step a user reads as "the pause before it starts."
 
 Verified: the "find my most starred repo" task that took 8 steps went to 2 — one navigate to the star-sorted view (discovered from a visible href), then the answer.
 
@@ -394,6 +394,30 @@ session" used to mean "one run" and now means "one conversation":
 is written at `task_start`, not at the first turn, so a run cancelled at step 0
 still keeps what the user asked. The assistant message is written when a turn
 ends, so an in-flight turn has no answer in the transcript — which is true.
+
+**Every new task calls `begin_task`, including the first one on a fresh
+session.** The branch used to be gated on a document already existing, so a
+first run recorded no task at all and the *second* run claimed index 0 — the
+conversation's own segmentation lost its first task, and the first follow-up
+matched nothing in the `task < task_index` filter and answered with no memory
+of what it was following up on. Three tests in `test_conversation.py` drive
+`run()` twice against one real document rather than a decision function,
+because the decision-function tests passed straight over all of it.
+
+**`seq` is restored on adopt.** The counter is per-`AuditTrail` and a trail is
+built per run, so a continuation restarted numbering at 1 and a document could
+hold three turns called `seq 1` — and `seq` is what a reader sorts on to
+replay. `_adopt_document` now takes the previous maximum over `turns[]` and
+`errors[]`, which draw on the same counter.
+
+**Both paths carry the conversation, and the prompt caps what a message
+contributes.** A resume has `step_summaries` for the run it is continuing, not
+for the tasks before it, so it gets the same `task < task_index` filter as a new
+task. Per message the prompt truncates at `_CONV_MSG_CHARS` (1200) because the
+harness is stateless per step — the block is re-sent on *every* step of the
+follow-up, so a long-form answer is thousands of characters times every action.
+The stored message is untouched; the cap is a rendering decision, and truncating
+the record would lose the answer the transcript exists to preserve.
 
 **`task_start` carries a `resume: bool`, and it is the whole lifecycle fork.**
 A frame without it is a follow-up, and defaults to follow-up: an extension
