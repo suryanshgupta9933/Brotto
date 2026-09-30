@@ -660,6 +660,46 @@ cancelled task must not resurrect.
 **Not verified in a browser.** The reconnect path, the transcript view, and
 the offline-history fallback are unit-tested logic only.
 
+### The debugger can vanish mid-run
+
+`chrome.debugger` attachments end on their own and **nothing is raised on the
+sending side** — the next `sendCommand` is where it surfaces, as `Debugger is
+not attached to the tab with id: N`. Chrome's `onDetach` documents exactly two
+reasons, and there are only two: `target_closed` and `canceled_by_user`, the
+latter being *"Chrome DevTools is being invoked for the attached tab."* So the
+cause of a mid-run drop is DevTools being opened on the driven tab, or the tab
+being closed. **Switching to another tab in the same window does not drop
+it** — there is no focus-related detach reason, `activeTabId` is pinned for
+the run, and there is no `chrome.tabs.onActivated` listener.
+
+The failure looked like a model fault, and the cascade is the reason that
+matters:
+
+- Post-action observations are driven by `chrome.webNavigation.onCommitted`,
+  not by `Page.enable`. A dead debugger produces no CDP events, so no
+  navigation event, so the server's post-action wait ran to its 30s timeout.
+- It then handed the model an **empty observation** — `url=""`, 0 targets —
+  as if it were a page. MiniMax-M3 failed to produce a valid action from it
+  three times, and the document recorded `invalid_decision`.
+
+Two halves, in `debugger.ts` and `background.ts`:
+
+- `sendCommand` catches `/not attached/i`, re-attaches once, re-sends
+  `Page.enable`, and retries. A second failure is real and propagates.
+- `background.ts` reports a `canceled_by_user` detach during a task with a
+  blocking notification, because the re-attach above takes the tab back from
+  DevTools and the user deserves to know that's what happened.
+
+**Not fixed, deliberately:** the empty observation is still handed to the
+model as a page. The re-attach stops the cascade at its source; teaching the
+harness to treat `ax_elements == 0` as a perception failure is a separate
+judgment call. Also uncharged: a failed step's `model_plan` seconds and tokens
+never reach `timings` or `result.usage`, because both are recorded only when
+`planned is not None` — so a 3-attempt failure's ~19s is charged to nothing.
+
+**Not verified in a browser.** Both halves are read-and-reasoned, not run.
+
+
 ## Commands
 
 ```bash
