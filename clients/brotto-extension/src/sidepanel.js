@@ -279,9 +279,25 @@ async function saveSession({ status, steps, elapsed }) {
   // survives the replay; `startedAt` stays the fallback for rows written
   // before the panel ever saw a session id, so upgrading doesn't duplicate
   // every existing entry.
+  //
+  // A conversation is one row, so a follow-up task finds the row its first
+  // task wrote and updates it. `state.taskCount` is what tells that apart
+  // from the replay above: it is set only by a send this panel watched
+  // happen, and a replay on a freshly opened panel has none.
   const sid = state.sessionId;
   if (sid) {
-    if (sessions.some((s) => s.session_id === sid)) return;
+    const existing = sessions.find((s) => s.session_id === sid);
+    if (existing) {
+      if (!state.taskCount) return;
+      // `task` is left alone: a conversation is named after how it started,
+      // which is also what the server's own session index reports.
+      existing.task_count = state.taskCount;
+      existing.status = status;
+      existing.steps = steps || state.stepCount || 0;
+      existing.elapsed = elapsed || '—';
+      await chrome.storage.local.set({ [SESSIONS_KEY]: sessions });
+      return;
+    }
   } else if (state.startTime && sessions[0]?.startedAt === state.startTime) {
     return;
   }
@@ -292,6 +308,7 @@ async function saveSession({ status, steps, elapsed }) {
     elapsed: elapsed || '—',
     startedAt: state.startTime || Date.now(),
     session_id: sid || null,
+    task_count: state.taskCount || 1,
   });
   await chrome.storage.local.set({ [SESSIONS_KEY]: sessions.slice(0, SESSION_LIMIT) });
 }
@@ -335,7 +352,14 @@ async function renderHistory() {
     // the Re-run button inside carries the composer refill this used to be.
     row.title = s.session_id ? 'Open this session' : 'Put this task back in the box';
     row.addEventListener('click', () => void openTranscript(s));
-    const bits = [s.steps + ' steps', s.elapsed || '—', formatSessionTime(s.startedAt)];
+    // A row written before tasks existed carries no count, and "1 task" beside
+    // the task's own text says nothing the text did not.
+    const bits = [
+      s.task_count > 1 ? `${s.task_count} tasks` : null,
+      s.steps + ' steps',
+      s.elapsed || '—',
+      formatSessionTime(s.startedAt),
+    ].filter(Boolean);
     const meta = row.querySelector('.history-meta');
     bits.forEach((b, i) => {
       if (i) {
@@ -453,13 +477,47 @@ function renderTranscript(doc, entry) {
       'div', 'tx-empty', 'This session is damaged — its log could not be read back.',
     ));
   } else {
-    if (doc.goal) transcriptBody.appendChild(txBlock('Task', doc.goal));
-    const turns = Array.isArray(doc.turns) ? doc.turns : [];
-    if (!turns.length) {
-      transcriptBody.appendChild(txEl('div', 'tx-empty', 'This session recorded no steps.'));
+    const tasks = (doc.schema_version >= 2 && Array.isArray(doc.tasks)) ? doc.tasks : null;
+    if (tasks && tasks.length) {
+      // ponytail: the task header *is* the user message — the server writes
+      // the same string to both — so it is shown once, as the heading. The
+      // join is messages[].turn → turns[]; both ways the join can leave
+      // something behind (a turn whose step was aborted never got a message,
+      // a message can point at a turn that isn't there) are swept after it,
+      // because the alternative is silently losing audit detail this panel
+      // has always shown.
+      const messages = (Array.isArray(doc.messages) ? doc.messages : [])
+        .filter((m) => m.role === 'assistant');
+      const turns = Array.isArray(doc.turns) ? doc.turns : [];
+      const joined = new Set();
+      tasks.forEach((task, i) => {
+        const index = task.index ?? i;
+        const group = txEl('div', 'tx-block');
+        group.appendChild(txEl('div', 'label', `Task ${index + 1}`));
+        group.appendChild(txEl('div', 'tx-text', task.goal || ''));
+        transcriptBody.appendChild(group);
+        messages.filter((m) => (m.task ?? 0) === index).forEach((m) => {
+          if (m.turn != null && turns[m.turn]) {
+            joined.add(m.turn);
+            transcriptBody.appendChild(renderTurn(turns[m.turn]));
+          } else {
+            transcriptBody.appendChild(txBlock('Reply', txPreview(m.content)));
+          }
+        });
+        turns.forEach((t, n) => {
+          if ((t.task ?? 0) === index && !joined.has(n)) transcriptBody.appendChild(renderTurn(t));
+        });
+      });
+      if (doc.result) transcriptBody.appendChild(renderResult(doc.result));
+    } else {
+      if (doc.goal) transcriptBody.appendChild(txBlock('Task', doc.goal));
+      const turns = Array.isArray(doc.turns) ? doc.turns : [];
+      if (!turns.length) {
+        transcriptBody.appendChild(txEl('div', 'tx-empty', 'This session recorded no steps.'));
+      }
+      turns.forEach((t) => transcriptBody.appendChild(renderTurn(t)));
+      if (doc.result) transcriptBody.appendChild(renderResult(doc.result));
     }
-    turns.forEach((t) => transcriptBody.appendChild(renderTurn(t)));
-    if (doc.result) transcriptBody.appendChild(renderResult(doc.result));
   }
 
   // Writer failures and run failures share `errors`, and both carry an
@@ -818,6 +876,10 @@ const state = {
   // The server's session id, from `task_started`. History rows carry it so a
   // click can fetch the session document the run actually produced.
   sessionId: null,
+  // How many tasks this conversation holds, for the history row's label. Only
+  // ever set by a send this panel watched happen, which is what separates a
+  // new task from a reopened panel replaying the last run's terminal event.
+  taskCount: 0,
 };
 
 let timerInterval = null;
@@ -1180,12 +1242,14 @@ async function sendUserMessage() {
   stopping = false;
   stopBtn.disabled = false;
   state.taskInFlight = true;
-  // ponytail: clear prior conversation so each task starts fresh.
-  clearMessages();
-  // ponytail: clear the previous task's tab tally (the loop's tabEvent
-  // subscriptions are rebounded inside the local-driver for every run_local_task).
-  seenTabs.clear();
-  updateTabCount();
+  // A message continues the conversation unless the user asked for a new one.
+  // Clearing the session here is what made every follow-up look like a fresh
+  // run to both the panel and the server. What still resets is the *run* — the
+  // clock, the step and tab tallies, the status bar — because a follow-up is
+  // a new run inside the same conversation.
+  const continuing = state.sessionId !== null;
+  state.taskCount = continuing ? (state.taskCount || 1) + 1 : 1;
+  clearMessages({ keepTranscript: continuing });
   appendMessage({ role: 'user', text });
   state.lastGoal = text;
   goalEl.value = '';
@@ -1208,7 +1272,13 @@ async function sendUserMessage() {
   // ponytail: send the goal to the background. The background opens a
   // new tab, captures observations, calls the planner, dispatches actions
   // via chrome.debugger. The side panel just renders events.
-  const response = await sendMessage({ type: 'run_local_task', task: text });
+  // ponytail: `continuing` was read before the send cleared anything, and the
+  // background reuses its session only when this is true.
+  const response = await sendMessage({
+    type: 'run_local_task',
+    task: text,
+    continueSession: continuing,
+  });
   if (!response.success) {
     stopTimer();
     setPhase('error', `Failed to start: ${response.error || 'unknown error'}`);
@@ -1232,11 +1302,12 @@ async function ensureConnected() {
 }
 
 async function resetForNewTask() {
-  // ponytail: clear chat stream, reset counters, reset task state.
-  // Used by "New task" button and by sendUserMessage to clear before
-  // posting a new goal.
+  // ponytail: clear chat stream, reset counters, reset task state. This is
+  // the only way a new conversation starts now — sendUserMessage no longer
+  // comes through here.
   state.lastGoal = '';
   state.stepCount = 0;
+  state.taskCount = 0;
   // Cleared so a run that never got a task_started writes session_id: null
   // and falls back to the startedAt dedupe, rather than inheriting the last
   // run's id.
@@ -1548,6 +1619,11 @@ async function refresh() {
   const response = await sendMessage({ type: 'reset_session' });
   if (!response.success) appendMessage({ role: 'error', text: `Reset failed: ${response.error || 'unknown error'}` });
   state.plannerUrl = '';
+  // The background drops the tab on reset and the next task mints a fresh
+  // session; without this the panel would still be counting itself mid-
+  // conversation and the history row would start at 2.
+  state.sessionId = null;
+  state.taskCount = 0;
   setPhase('idle', 'Ready');
 }
 
@@ -1562,8 +1638,11 @@ function sendMessage(message) {
 }
 
 // ── Chat rendering ────────────────────────────────────────────────────────
-function clearMessages() {
-  messagesEl.replaceChildren();
+// `keepTranscript` is what makes a conversation a conversation: a follow-up
+// task resets everything about the run without taking away what the run before
+// it said. Every other caller wants a blank panel.
+function clearMessages({ keepTranscript = false } = {}) {
+  if (!keepTranscript) messagesEl.replaceChildren();
   state.stepCount = 0;
   updateStepCount();
   stopTimer();
