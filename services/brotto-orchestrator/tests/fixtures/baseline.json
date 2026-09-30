@@ -1,7 +1,7 @@
 {
   "records": [
     {
-      "task_id": "auth-iframe-210ee836",
+      "task_id": "auth-iframe-c93af6df",
       "fixture": "auth-iframe",
       "outcome": "PERCEPTION_FAILURE",
       "steps_taken": 4,
@@ -11,54 +11,49 @@
       "timing": {
         "steps": 4,
         "wall_s": 0.573,
-        "wall_agent_s": 0.572,
+        "wall_agent_s": 0.573,
         "human_pause_s": 0.0,
         "components": {
           "observe": 0.034,
           "filter": 0.0,
           "login_pause": 0.0,
-          "stagnation": 0.0,
           "model_plan": 0.0,
           "approval_pause": 0.0,
-          "execute": 0.533,
+          "execute": 0.525,
           "ws_send_progress": 0.0
         },
         "per_step": [
           {
-            "observe": 0.005,
+            "observe": 0.008,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.009,
+            "execute": 0.011,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.015,
+            "observe": 0.017,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.005,
+            "execute": 0.006,
             "ws_send_progress": 0.0
           },
           {
             "observe": 0.004,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.519,
+            "execute": 0.508,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.011,
+            "observe": 0.005,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
             "execute": 0.0,
@@ -68,151 +63,11 @@
       },
       "final_url": "http://127.0.0.1:8811/auth-iframe/",
       "approval_requested": false,
-      "reason": "scripted target did not resolve: scripted action arg 'ref' did not resolve in the current AX tree"
+      "reason": "scripted target did not resolve: scripted action arg 'ref' (target 'Confirm') did not resolve in the current AX tree"
     },
     {
-      "task_id": "auth-aria-hidden-fa39635c",
+      "task_id": "auth-aria-hidden-314d4ad9",
       "fixture": "auth-aria-hidden",
-      "outcome": "PERCEPTION_FAILURE",
-      "steps_taken": 4,
-      "tokens_in": 0,
-      "tokens_out": 0,
-      "usd": 0.0,
-      "timing": {
-        "steps": 4,
-        "wall_s": 0.571,
-        "wall_agent_s": 0.571,
-        "human_pause_s": 0.0,
-        "components": {
-          "observe": 0.023,
-          "filter": 0.0,
-          "login_pause": 0.0,
-          "stagnation": 0.0,
-          "model_plan": 0.0,
-          "approval_pause": 0.0,
-          "execute": 0.542,
-          "ws_send_progress": 0.0
-        },
-        "per_step": [
-          {
-            "observe": 0.005,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.019,
-            "ws_send_progress": 0.0
-          },
-          {
-            "observe": 0.004,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.01,
-            "ws_send_progress": 0.0
-          },
-          {
-            "observe": 0.004,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.514,
-            "ws_send_progress": 0.0
-          },
-          {
-            "observe": 0.01,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.0,
-            "ws_send_progress": 0.0
-          }
-        ]
-      },
-      "final_url": "http://127.0.0.1:8811/auth-aria-hidden/",
-      "approval_requested": false,
-      "reason": "scripted target did not resolve: scripted action arg 'ref' did not resolve in the current AX tree"
-    },
-    {
-      "task_id": "auth-canvas-3451c728",
-      "fixture": "auth-canvas",
-      "outcome": "PERCEPTION_FAILURE",
-      "steps_taken": 4,
-      "tokens_in": 0,
-      "tokens_out": 0,
-      "usd": 0.0,
-      "timing": {
-        "steps": 4,
-        "wall_s": 0.569,
-        "wall_agent_s": 0.569,
-        "human_pause_s": 0.0,
-        "components": {
-          "observe": 0.023,
-          "filter": 0.0,
-          "login_pause": 0.0,
-          "stagnation": 0.0,
-          "model_plan": 0.0,
-          "approval_pause": 0.0,
-          "execute": 0.541,
-          "ws_send_progress": 0.0
-        },
-        "per_step": [
-          {
-            "observe": 0.006,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.02,
-            "ws_send_progress": 0.0
-          },
-          {
-            "observe": 0.004,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.004,
-            "ws_send_progress": 0.0
-          },
-          {
-            "observe": 0.003,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.518,
-            "ws_send_progress": 0.0
-          },
-          {
-            "observe": 0.01,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.0,
-            "ws_send_progress": 0.0
-          }
-        ]
-      },
-      "final_url": "http://127.0.0.1:8811/auth-canvas/",
-      "approval_requested": false,
-      "reason": "scripted target did not resolve: scripted action arg 'ref' did not resolve in the current AX tree"
-    },
-    {
-      "task_id": "auth-slowjs-0b4b8256",
-      "fixture": "auth-slowjs",
       "outcome": "PERCEPTION_FAILURE",
       "steps_taken": 4,
       "tokens_in": 0,
@@ -224,51 +79,176 @@
         "wall_agent_s": 0.565,
         "human_pause_s": 0.0,
         "components": {
-          "observe": 0.022,
+          "observe": 0.031,
           "filter": 0.0,
           "login_pause": 0.0,
-          "stagnation": 0.0,
           "model_plan": 0.0,
           "approval_pause": 0.0,
-          "execute": 0.537,
+          "execute": 0.524,
           "ws_send_progress": 0.0
         },
         "per_step": [
           {
-            "observe": 0.005,
+            "observe": 0.007,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.019,
+            "execute": 0.012,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.015,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.005,
             "ws_send_progress": 0.0
           },
           {
             "observe": 0.004,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.004,
+            "execute": 0.508,
             "ws_send_progress": 0.0
           },
           {
             "observe": 0.004,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.515,
+            "execute": 0.0,
+            "ws_send_progress": 0.0
+          }
+        ]
+      },
+      "final_url": "http://127.0.0.1:8811/auth-aria-hidden/",
+      "approval_requested": false,
+      "reason": "scripted target did not resolve: scripted action arg 'ref' (target 'Publish') did not resolve in the current AX tree"
+    },
+    {
+      "task_id": "auth-canvas-747493f7",
+      "fixture": "auth-canvas",
+      "outcome": "PERCEPTION_FAILURE",
+      "steps_taken": 4,
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "usd": 0.0,
+      "timing": {
+        "steps": 4,
+        "wall_s": 0.564,
+        "wall_agent_s": 0.564,
+        "human_pause_s": 0.0,
+        "components": {
+          "observe": 0.03,
+          "filter": 0.0,
+          "login_pause": 0.0,
+          "model_plan": 0.0,
+          "approval_pause": 0.0,
+          "execute": 0.523,
+          "ws_send_progress": 0.0
+        },
+        "per_step": [
+          {
+            "observe": 0.007,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.011,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.009,
+            "observe": 0.015,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.005,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.004,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.507,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.004,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.0,
+            "ws_send_progress": 0.0
+          }
+        ]
+      },
+      "final_url": "http://127.0.0.1:8811/auth-canvas/",
+      "approval_requested": false,
+      "reason": "scripted target did not resolve: scripted action arg 'ref' (target 'Draw') did not resolve in the current AX tree"
+    },
+    {
+      "task_id": "auth-slowjs-73579a4d",
+      "fixture": "auth-slowjs",
+      "outcome": "PERCEPTION_FAILURE",
+      "steps_taken": 4,
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "usd": 0.0,
+      "timing": {
+        "steps": 4,
+        "wall_s": 0.566,
+        "wall_agent_s": 0.566,
+        "human_pause_s": 0.0,
+        "components": {
+          "observe": 0.022,
+          "filter": 0.0,
+          "login_pause": 0.0,
+          "model_plan": 0.0,
+          "approval_pause": 0.0,
+          "execute": 0.535,
+          "ws_send_progress": 0.0
+        },
+        "per_step": [
+          {
+            "observe": 0.008,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.023,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.006,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.005,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.004,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.506,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.004,
+            "filter": 0.0,
+            "login_pause": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
             "execute": 0.0,
@@ -278,67 +258,71 @@
       },
       "final_url": "http://127.0.0.1:8811/auth-slowjs/",
       "approval_requested": false,
-      "reason": "scripted target did not resolve: scripted action arg 'ref' did not resolve in the current AX tree"
+      "reason": "scripted target did not resolve: scripted action arg 'ref' (target 'Loaded') did not resolve in the current AX tree"
     },
     {
-      "task_id": "auth-inbox-032fbea8",
+      "task_id": "auth-inbox-b71fa505",
       "fixture": "auth-inbox",
-      "outcome": "PERCEPTION_FAILURE",
-      "steps_taken": 4,
+      "outcome": "PASS",
+      "steps_taken": 5,
       "tokens_in": 0,
       "tokens_out": 0,
       "usd": 0.0,
       "timing": {
-        "steps": 4,
-        "wall_s": 0.903,
-        "wall_agent_s": 0.903,
+        "steps": 5,
+        "wall_s": 1.778,
+        "wall_agent_s": 1.777,
         "human_pause_s": 0.0,
         "components": {
-          "observe": 0.191,
-          "filter": 0.0,
+          "observe": 0.31,
+          "filter": 0.001,
           "login_pause": 0.0,
-          "stagnation": 0.0,
-          "model_plan": 0.0,
+          "model_plan": 0.001,
           "approval_pause": 0.0,
-          "execute": 0.706,
+          "execute": 1.455,
           "ws_send_progress": 0.0
         },
         "per_step": [
           {
-            "observe": 0.006,
+            "observe": 0.008,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.021,
+            "execute": 0.012,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.015,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.006,
             "ws_send_progress": 0.0
           },
           {
             "observe": 0.004,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.003,
+            "execute": 0.701,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.024,
+            "observe": 0.14,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
+            "model_plan": 0.001,
             "approval_pause": 0.0,
-            "execute": 0.682,
+            "execute": 0.736,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.158,
-            "filter": 0.0,
+            "observe": 0.142,
+            "filter": 0.001,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
             "execute": 0.0,
@@ -348,10 +332,10 @@
       },
       "final_url": "http://127.0.0.1:8811/auth-inbox/",
       "approval_requested": false,
-      "reason": "scripted target did not resolve: scripted action arg 'ref' did not resolve in the current AX tree"
+      "reason": ""
     },
     {
-      "task_id": "auth-popup-c05d3424",
+      "task_id": "auth-popup-2e8d7ffd",
       "fixture": "auth-popup",
       "outcome": "PASS",
       "steps_taken": 6,
@@ -360,75 +344,68 @@
       "usd": 0.0,
       "timing": {
         "steps": 6,
-        "wall_s": 1.64,
-        "wall_agent_s": 1.64,
+        "wall_s": 1.599,
+        "wall_agent_s": 1.599,
         "human_pause_s": 0.0,
         "components": {
-          "observe": 0.059,
+          "observe": 0.039,
           "filter": 0.0,
           "login_pause": 0.0,
-          "stagnation": 0.001,
           "model_plan": 0.0,
           "approval_pause": 0.0,
-          "execute": 1.575,
+          "execute": 1.545,
           "ws_send_progress": 0.0
         },
         "per_step": [
           {
+            "observe": 0.006,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.011,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.014,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.005,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.004,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.509,
+            "ws_send_progress": 0.0
+          },
+          {
             "observe": 0.005,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.01,
+            "execute": 0.512,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.017,
+            "observe": 0.005,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.004,
+            "execute": 0.507,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.003,
+            "observe": 0.004,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.518,
-            "ws_send_progress": 0.0
-          },
-          {
-            "observe": 0.012,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.52,
-            "ws_send_progress": 0.0
-          },
-          {
-            "observe": 0.012,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
-            "model_plan": 0.0,
-            "approval_pause": 0.0,
-            "execute": 0.523,
-            "ws_send_progress": 0.0
-          },
-          {
-            "observe": 0.009,
-            "filter": 0.0,
-            "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
             "execute": 0.0,
@@ -441,7 +418,7 @@
       "reason": ""
     },
     {
-      "task_id": "auth-tabbed-6b36e8b5",
+      "task_id": "auth-tabbed-f5aac04d",
       "fixture": "auth-tabbed",
       "outcome": "PASS",
       "steps_taken": 6,
@@ -450,75 +427,68 @@
       "usd": 0.0,
       "timing": {
         "steps": 6,
-        "wall_s": 1.634,
-        "wall_agent_s": 1.634,
+        "wall_s": 1.604,
+        "wall_agent_s": 1.604,
         "human_pause_s": 0.0,
         "components": {
-          "observe": 0.047,
+          "observe": 0.033,
           "filter": 0.0,
           "login_pause": 0.0,
-          "stagnation": 0.0,
           "model_plan": 0.0,
           "approval_pause": 0.0,
-          "execute": 1.579,
+          "execute": 1.557,
           "ws_send_progress": 0.0
         },
         "per_step": [
           {
-            "observe": 0.005,
+            "observe": 0.007,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.019,
+            "execute": 0.023,
             "ws_send_progress": 0.0
           },
           {
             "observe": 0.004,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.004,
+            "execute": 0.005,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.003,
+            "observe": 0.004,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.518,
+            "execute": 0.508,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.01,
+            "observe": 0.005,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.52,
+            "execute": 0.512,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.014,
+            "observe": 0.007,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
-            "execute": 0.519,
+            "execute": 0.508,
             "ws_send_progress": 0.0
           },
           {
-            "observe": 0.011,
+            "observe": 0.005,
             "filter": 0.0,
             "login_pause": 0.0,
-            "stagnation": 0.0,
             "model_plan": 0.0,
             "approval_pause": 0.0,
             "execute": 0.0,
@@ -529,10 +499,84 @@
       "final_url": "http://127.0.0.1:8811/auth-tabbed/",
       "approval_requested": false,
       "reason": ""
+    },
+    {
+      "task_id": "auth-shadow-8655f27a",
+      "fixture": "auth-shadow",
+      "outcome": "PASS",
+      "steps_taken": 5,
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "usd": 0.0,
+      "timing": {
+        "steps": 5,
+        "wall_s": 1.1,
+        "wall_agent_s": 1.1,
+        "human_pause_s": 0.0,
+        "components": {
+          "observe": 0.043,
+          "filter": 0.0,
+          "login_pause": 0.0,
+          "model_plan": 0.0,
+          "approval_pause": 0.0,
+          "execute": 1.044,
+          "ws_send_progress": 0.0
+        },
+        "per_step": [
+          {
+            "observe": 0.007,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.012,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.016,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.006,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.004,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.509,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.008,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.517,
+            "ws_send_progress": 0.0
+          },
+          {
+            "observe": 0.008,
+            "filter": 0.0,
+            "login_pause": 0.0,
+            "model_plan": 0.0,
+            "approval_pause": 0.0,
+            "execute": 0.0,
+            "ws_send_progress": 0.0
+          }
+        ]
+      },
+      "final_url": "http://127.0.0.1:8811/auth-shadow/",
+      "approval_requested": false,
+      "reason": ""
     }
   ],
   "tally": {
-    "PERCEPTION_FAILURE": 5,
-    "PASS": 2
+    "PERCEPTION_FAILURE": 4,
+    "PASS": 4
   }
 }
