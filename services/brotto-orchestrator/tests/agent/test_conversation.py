@@ -140,16 +140,71 @@ def test_a_followup_into_a_v1_document_is_refused_with_a_reason(sessions):
     assert "v1" in state["why"] or "schema" in state["why"]
 
 
-def test_a_followup_into_a_live_run_is_refused(sessions):
-    """Review focus 5: a crashed run's approval is not replayed silently."""
+def test_a_followup_into_an_abandoned_run_is_allowed(sessions):
+    """Review focus 5, the load-bearing half.
+
+    A dropped socket or a restart leaves the document `running` with a turn
+    still open. Nothing is driving it — `main.py` already refused a
+    task_start while an agent was live — so refusing the user's prompt here
+    locked them out of their own conversation with "a run is still in
+    flight". It has to be a new task.
+    """
     t = AuditTrail("c4", dir=sessions)
     t.begin_task("go")
     t.begin_turn(step=0, url="https://x.test", page_title="X",
                  ax_targets=1, ax_chars=10, ax_diff="", page_text_chars=0)
     t.close()
     state = harness_mod._conversation_state("c4", resume=False)
-    assert state["action"] == "refuse"
-    assert "running" in state["why"]
+    assert state["action"] == "new_task"
+    assert state["task_index"] == 1
+    assert state["orphaned"] == 0
+    assert state["why"] == ""
+
+
+def test_an_abandoned_run_does_not_get_its_approvals_replayed(sessions):
+    """What the refusal was actually protecting, now protected by the
+    split instead: the follow-up starts a *new* task from step 0, so the
+    open turn's actions are not history and cannot look like they ran."""
+    t = AuditTrail("c4b", dir=sessions)
+    t.begin_task("go")
+    turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
+                        ax_targets=1, ax_chars=10, ax_diff="", page_text_chars=0)
+    t.record_action(turn, action="click", args={"ref": "e3"},
+                    outcome="approved and clicked", ok=True, redacted=False,
+                    duration_ms=1)
+    t.close()
+    state = harness_mod._conversation_state("c4b", resume=False)
+    # A new task carries no step summaries and starts at step 0, so nothing
+    # from the crashed run reaches the model as something it already did.
+    assert state["summaries"] == []
+    assert state["first_step"] == 0
+    result, _ = _followup(sessions, "c4b", "actually, do this instead")
+    assert result.status == "completed"
+    # And the crashed turn was never closed off as if it had finished —
+    # ended_at stays null, which is the honest record of an abandoned turn.
+    crashed = _doc(sessions, "c4b")["turns"][0]
+    assert crashed["ended_at"] is None
+
+
+def test_the_abandoned_task_is_sealed_and_its_record_kept(sessions):
+    """Sealed on top, not in place of: the turns and the prompt the user
+    typed are the only record of what they asked for."""
+    t = AuditTrail("c4c", dir=sessions)
+    t.begin_task("the original ask")
+    t.add_message(role="user", content="the original ask", task=0, turn=None)
+    t.begin_turn(step=0, url="https://x.test", page_title="X",
+                 ax_targets=1, ax_chars=10, ax_diff="", page_text_chars=0)
+    t.close()
+    result, _ = _followup(sessions, "c4c", "second thing")
+    assert result.status == "completed"
+
+    doc = _doc(sessions, "c4c")
+    assert [t_["status"] for t_ in doc["tasks"]] == ["interrupted", "completed"]
+    assert doc["tasks"][0]["ended_at"] is not None
+    assert doc["tasks"][0]["goal"] == "the original ask"
+    assert [m["role"] for m in doc["messages"]] == [
+        "user", "user", "assistant",
+    ]
 
 
 def test_a_crash_resume_still_resumes(sessions):
@@ -180,6 +235,54 @@ def test_interrupted_is_terminal_so_a_second_resume_still_refuses(sessions):
     (sessions / "c7.json").write_text(json.dumps(doc))
     second = harness_mod._conversation_state("c7", resume=True)
     assert second["action"] == "refuse"
+
+
+@pytest.mark.parametrize("status,open_turn", [
+    ("", True),    # dropped socket mid-step
+    ("", False),   # dropped before anything was in flight
+    ("cancelled", False),
+    ("completed", False),
+    ("failed", False),
+    ("awaiting_human", False),
+])
+def test_a_new_prompt_works_after_any_stop_reason(sessions, status, open_turn):
+    """The whole matrix, in one test.
+
+    Whatever ended the run — a dropped socket, a restart, Stop, a result —
+    the user must be able to say something else in the same conversation.
+    Before this, a dropped socket left the document `running` and the
+    follow-up was refused as "a run is still in flight", which is both
+    untrue (main.py already proved nothing was live) and a dead end.
+    """
+    t = AuditTrail("mx", dir=sessions)
+    t.begin_task("the ask")
+    turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
+                        ax_targets=1, ax_chars=10, ax_diff="",
+                        page_text_chars=0)
+    if not open_turn:
+        t.end_turn(turn, timings={})
+    if status:
+        t.set_status(status)
+    t.close()
+    state = harness_mod._conversation_state("mx", resume=False)
+    assert state["action"] == "new_task", state["why"]
+
+
+def test_only_an_unfinished_run_can_be_resumed(sessions):
+    """The other half of the matrix: resume re-enters a run, so it must not
+    reopen a finished or user-cancelled one. A cancelled task that resurrects
+    is the bug this guards."""
+    _finished_run(sessions, "my", "done", status="cancelled")
+    assert harness_mod._conversation_state("my", resume=True)["action"] == "refuse"
+
+    t = AuditTrail("mz", dir=sessions)
+    t.begin_task("ask")
+    turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
+                        ax_targets=1, ax_chars=10, ax_diff="",
+                        page_text_chars=0)
+    t.end_turn(turn, timings={})
+    t.close()
+    assert harness_mod._conversation_state("mz", resume=True)["action"] == "resume"
 
 
 def test_the_prompt_window_names_what_it_dropped():

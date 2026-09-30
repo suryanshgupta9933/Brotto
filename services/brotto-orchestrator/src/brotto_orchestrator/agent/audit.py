@@ -454,6 +454,24 @@ class AuditTrail:
             _text(self._doc, "title", goal)
         return entry["index"]
 
+    def seal_task(self, index: int, status: str) -> None:
+        """Mark a task that nothing is running any more as ended.
+
+        `begin_task` is the only other writer of `tasks[].status`, so a task
+        whose run was abandoned — a dropped socket, a server restart, a
+        killed process — would stay `running` forever and read in the history
+        list as a task still in progress. Recorded on top of the existing
+        task, never in place of it: the turns and the prompt stay.
+        """
+        self._record(self._seal_task, index, status)
+
+    def _seal_task(self, index: int, status: str) -> None:
+        for entry in self._doc.get("tasks") or []:
+            if entry.get("index") == index:
+                entry["status"] = status
+                entry["ended_at"] = _now()
+                return
+
     def resume_task(self) -> int:
         """Point at the task a crash-resume continues, without starting one.
 
@@ -711,6 +729,10 @@ class AuditTrail:
         status = result.get("status")
         if status:
             self._doc["status"] = status
+            # `begin_task` is the only other writer of `tasks[].status`, so
+            # without this every finished task still reads "running" and the
+            # history list cannot tell one from a run that was abandoned.
+            self._seal_task(self._task_index, status)
         wall = (result.get("timing") or {}).get("wall_s")
         if wall is not None:
             try:

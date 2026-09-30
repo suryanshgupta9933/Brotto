@@ -138,6 +138,7 @@ Dev default: `anthropic:MiniMax-M3.1-Flash-Preview`, 1M context. `BROTTO_ENV=pro
 - **Prompt-injection trust hierarchy** in system prompt.
 - **Memory = skills pattern** — `read_page_text` auto-captures 200-char digests; `recall_memory(id)` loads full body. Primitive that persistent-memory wishlist calls for.
 - **Per-session audit document** — every run's turns, prompts, approvals, actions, tokens and errors in one atomically-written nested JSON file. Replayable in the panel, and the substrate for resume, with no database to operate.
+- **A conversation survives any stop** — a dropped socket, a restart, Stop, or a result. A new message in the same session always continues the conversation; `resume` re-enters a run only while it is genuinely unfinished, and refuses a finished or cancelled one. A document left `running` by a crash is treated as abandoned, not in flight, because the socket-level guard has already proved nothing is live.
 - **`defer_model_check=True`** — per-task model from factory; no Agent rebuild.
 
 ## Wave 0 blockers — perception (found 2026-09-28)

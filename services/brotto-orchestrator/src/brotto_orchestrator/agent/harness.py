@@ -1174,7 +1174,7 @@ def _conversation_state(session_id: str, *, resume: bool) -> dict:
     """Decide what a task_start means for this document.
 
     Returns {"action": "new_task" | "resume" | "refuse", "doc", "summaries",
-    "visited", "first_step", "task_index", "why"}.
+    "visited", "first_step", "task_index", "orphaned", "why"}.
 
     The two paths do opposite things with the same document, which is why
     they cannot share one: `resume` continues an unfinished turn of a run the
@@ -1186,11 +1186,11 @@ def _conversation_state(session_id: str, *, resume: bool) -> dict:
         # Nothing to resume, so `resume: true` is answered the same way.
         return {"action": "new_task", "doc": None, "summaries": [],
                 "visited": set(), "first_step": 0, "task_index": 0,
-                "why": ""}
+                "orphaned": None, "why": ""}
     if doc.get("corrupt"):
         return {"action": "refuse", "doc": doc, "summaries": [],
                 "visited": set(), "first_step": 0, "task_index": 0,
-                "why": "the session document is corrupt"}
+                "orphaned": None, "why": "the session document is corrupt"}
 
     if resume:
         # A resume never starts a new task, so it never needs a segmentation
@@ -1200,30 +1200,44 @@ def _conversation_state(session_id: str, *, resume: bool) -> dict:
         return {"action": "refuse" if r["why"] else "resume", "doc": r["doc"],
                 "summaries": r["summaries"], "visited": r["visited"],
                 "first_step": r["first_step"], "task_index": 0,
-                "why": r["why"]}
+                "orphaned": None, "why": r["why"]}
 
-    status = doc.get("status")
-    if status in _TERMINAL_DOC_STATUSES:
-        if doc.get("schema_version", 1) < 2:
-            # Ordered after the terminal check on purpose: a v1 document is
-            # always terminal, and the refusal is about the schema, not about
-            # a run that ended.
-            return {"action": "refuse", "doc": doc, "summaries": [],
-                    "visited": set(), "first_step": 0, "task_index": 0,
-                    "why": (
-                        "this conversation is a schema v1 document, recorded "
-                        "before tasks were tracked, so there is no way to add "
-                        "a follow-up to it. Start a new conversation instead "
-                        "— the old one stays readable in history."
-                    )}
+    if doc.get("schema_version", 1) < 2:
+        # Checked before status, not after: a v1 document has no `tasks[]`
+        # to append a follow-up to whatever it is doing, so the schema is
+        # the reason — including when the run it recorded was abandoned.
+        return {"action": "refuse", "doc": doc, "summaries": [],
+                "visited": set(), "first_step": 0, "task_index": 0,
+                "orphaned": None,
+                "why": (
+                    "this conversation is a schema v1 document, recorded "
+                    "before tasks were tracked, so there is no way to add "
+                    "a follow-up to it. Start a new conversation instead "
+                    "— the old one stays readable in history."
+                )}
+
+    tasks = doc.get("tasks") or []
+    if doc.get("status") not in _TERMINAL_DOC_STATUSES:
+        # `status: running` on disk is NOT evidence of a live run. main.py
+        # already refuses a task_start while an agent is actually driving
+        # this session (`duplicate_task_start`), so reaching here with
+        # `running` means the previous run was ABANDONED — a dropped socket,
+        # a server restart, a killed process. Refusing the user's prompt here
+        # locked them out of their own conversation with "a run is still in
+        # flight", which is both untrue and unrecoverable-looking; and since
+        # the refusal also stamps the document `interrupted`, it destroyed
+        # the abandoned run's real status on the way, so only the *second*
+        # attempt got through.
         return {"action": "new_task", "doc": doc, "summaries": [],
-                "visited": set(), "first_step": 0,
-                "task_index": len(doc.get("tasks") or []), "why": ""}
+                "visited": set(), "first_step": 0, "task_index": len(tasks),
+                "orphaned": (tasks[-1].get("index")
+                             if tasks and tasks[-1].get("status") == "running"
+                             else None),
+                "why": ""}
 
-    return {"action": "refuse", "doc": doc, "summaries": [], "visited": set(),
-            "first_step": 0, "task_index": 0,
-            "why": (f"a run on this conversation is still in flight "
-                    f"(status={status})")}
+    return {"action": "new_task", "doc": doc, "summaries": [],
+            "visited": set(), "first_step": 0, "task_index": len(tasks),
+            "orphaned": None, "why": ""}
 
 
 def _resume_state(session_id: str) -> dict:
@@ -1492,6 +1506,12 @@ class AgentHarness:
             # own segmentation lost its first task, and the first follow-up
             # saw an empty `deps.conversation` and answered with no memory of
             # what came before.
+            if state["orphaned"] is not None:
+                # The run this conversation was left holding is over, and
+                # nothing is running it. Sealed before the new task so the
+                # history list stops showing it as in progress — recorded on
+                # top, so its turns and the prompt the user typed survive.
+                audit.seal_task(state["orphaned"], "interrupted")
             task_index = audit.begin_task(deps.task)
         else:
             # A resume continues whatever task the document was last running.

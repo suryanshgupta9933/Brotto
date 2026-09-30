@@ -498,6 +498,50 @@ Three things that are easy to get wrong and were:
   path already kept them; the cancel path now matches, and a genuinely new
   conversation detaches in `startRelay`'s mint branch.
 
+**`status: running` on disk is not evidence of a live run.** A dropped socket,
+a server restart or a killed process leaves the document `running` with a turn
+still open, and `_conversation_state` used to refuse the user's next message
+with *"a run on this conversation is still in flight"*. That was both untrue
+and a dead end: `main.py` has **already** refused a `task_start` while an agent
+is actually driving the session (`duplicate_task_start`, `websocket.close(4009)`),
+so by the time `_conversation_state` runs, `running` means *abandoned*. It
+re-derived liveness from a stale on-disk field, and the wrong derivation.
+
+It was worse than a wrong message, because the refusal path also stamps the
+document `interrupted`: the abandoned run's real status was destroyed on the
+way out, and only the *second* attempt got through — so a dropped socket read
+as flakiness rather than a bug. A non-terminal document is now a `new_task`,
+and the abandoned task is sealed `interrupted` via `audit.seal_task` before the
+new one is appended, so the history list stops showing it as in progress. The
+record is kept on top, never replaced: the turns and the prompt the user typed
+are the only trace of what they asked for.
+
+**What the refusal was actually protecting still holds, by a different
+mechanism.** A turn with `ended_at: null` is not history — `_resume_state`
+skips it — and a `new_task` starts at step 0 carrying no `step_summaries`, so
+an approved-but-unfinished action can never look like it ran. The split (one
+path re-enters, one path starts) is what protects it, not a status check.
+
+`tasks[].status` had a second, quieter bug: `begin_task` wrote `"running"` and
+**nothing ever updated it**, so every finished task in every document on disk
+also read `running`. `_finish` now seals the task it belongs to, which is what
+makes the orphaned-task check principled rather than a coincidence.
+
+The resulting matrix, pinned by
+`test_a_new_prompt_works_after_any_stop_reason` and
+`test_only_an_unfinished_run_can_be_resumed`: a new prompt works after
+**every** stop reason (drop, restart, Stop, completed, failed, awaiting
+human); resume works only for a genuinely unfinished run, and refuses a
+finished or cancelled one, because a cancelled task that resurrects is the
+worse bug.
+
+**A v1 document is still un-continuable**, and that is correct — it has no
+`tasks[]` to append to. It is checked *before* status, so a v1 document that
+was abandoned mid-run is refused on the schema rather than half-migrated. The
+22 v1 documents on disk were deleted rather than migrated: 21 were
+`fixture:auth-*` test runs and one was a manual check, and none had a
+follow-up anyone could add.
+
 **The model sees prior turns through `<conversation>`, not `message_history`.**
 First 2 + last 6 messages, rendered as text. The harness is stateless per step,
 so this block is the only place prior context enters — and passing
@@ -585,7 +629,7 @@ cd clients/brotto-extension && npm run build
 cd services/brotto-orchestrator && python start_server.py
 
 # Tests
-../../.venv/bin/python -m pytest tests/ -q     # 473 tests (2 skipped)
+../../.venv/bin/python -m pytest tests/ -q     # 482 tests (2 skipped)
 # The pytest install lives in the REPO-ROOT venv, not services/brotto-orchestrator/.venv
 # (which has pydantic-ai but no pytest). Run it from services/brotto-orchestrator/.
 
