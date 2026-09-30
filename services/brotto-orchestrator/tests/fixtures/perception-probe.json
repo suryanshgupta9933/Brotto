@@ -12,6 +12,85 @@
       "in_ax_tree_all_frames": true,
       "in_pierced_dom": false,
       "in_rendered_output": false,
+      "geometry": {
+        "ax_backend_ids": 31,
+        "pierced_nodes": 46,
+        "ax_ids_in_pierced_dom": 31,
+        "ax_ids_pathed": 12,
+        "sampled": 12,
+        "rect_agrees": 0,
+        "same_element": 12,
+        "x_agrees": 12,
+        "y_agrees": 0,
+        "content_quad_flat": 12,
+        "disagreements": [
+          {
+            "backendNodeId": 16,
+            "boxModel": [
+              640,
+              0
+            ],
+            "pathWalk": [
+              640,
+              162
+            ],
+            "nodeIs": "html",
+            "pathFound": "HTML"
+          },
+          {
+            "backendNodeId": 20,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              169
+            ],
+            "nodeIs": "body",
+            "pathFound": "BODY"
+          },
+          {
+            "backendNodeId": 21,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              40
+            ],
+            "nodeIs": "h1",
+            "pathFound": "H1"
+          },
+          {
+            "backendNodeId": 5,
+            "boxModel": [
+              640,
+              80
+            ],
+            "pathWalk": [
+              640,
+              91
+            ],
+            "nodeIs": "form",
+            "pathFound": "FORM"
+          },
+          {
+            "backendNodeId": 26,
+            "boxModel": [
+              640,
+              121
+            ],
+            "pathWalk": [
+              640,
+              219
+            ],
+            "nodeIs": "div",
+            "pathFound": "DIV"
+          }
+        ]
+      },
       "verdict": "GAP_FRAMES"
     },
     {
@@ -26,6 +105,85 @@
       "in_ax_tree_all_frames": false,
       "in_pierced_dom": true,
       "in_rendered_output": false,
+      "geometry": {
+        "ax_backend_ids": 23,
+        "pierced_nodes": 33,
+        "ax_ids_in_pierced_dom": 23,
+        "ax_ids_pathed": 12,
+        "sampled": 12,
+        "rect_agrees": 0,
+        "same_element": 12,
+        "x_agrees": 12,
+        "y_agrees": 0,
+        "content_quad_flat": 12,
+        "disagreements": [
+          {
+            "backendNodeId": 16,
+            "boxModel": [
+              640,
+              0
+            ],
+            "pathWalk": [
+              640,
+              99
+            ],
+            "nodeIs": "html",
+            "pathFound": "HTML"
+          },
+          {
+            "backendNodeId": 20,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              106
+            ],
+            "nodeIs": "body",
+            "pathFound": "BODY"
+          },
+          {
+            "backendNodeId": 21,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              40
+            ],
+            "nodeIs": "h1",
+            "pathFound": "H1"
+          },
+          {
+            "backendNodeId": 5,
+            "boxModel": [
+              640,
+              80
+            ],
+            "pathWalk": [
+              640,
+              91
+            ],
+            "nodeIs": "form",
+            "pathFound": "FORM"
+          },
+          {
+            "backendNodeId": 26,
+            "boxModel": [
+              640,
+              121
+            ],
+            "pathWalk": [
+              640,
+              156
+            ],
+            "nodeIs": "div",
+            "pathFound": "DIV"
+          }
+        ]
+      },
       "verdict": "GAP_ARIA"
     },
     {
@@ -40,6 +198,85 @@
       "in_ax_tree_all_frames": false,
       "in_pierced_dom": false,
       "in_rendered_output": false,
+      "geometry": {
+        "ax_backend_ids": 20,
+        "pierced_nodes": 29,
+        "ax_ids_in_pierced_dom": 20,
+        "ax_ids_pathed": 11,
+        "sampled": 11,
+        "rect_agrees": 0,
+        "same_element": 11,
+        "x_agrees": 11,
+        "y_agrees": 0,
+        "content_quad_flat": 11,
+        "disagreements": [
+          {
+            "backendNodeId": 16,
+            "boxModel": [
+              640,
+              0
+            ],
+            "pathWalk": [
+              640,
+              137
+            ],
+            "nodeIs": "html",
+            "pathFound": "HTML"
+          },
+          {
+            "backendNodeId": 20,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              143
+            ],
+            "nodeIs": "body",
+            "pathFound": "BODY"
+          },
+          {
+            "backendNodeId": 21,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              40
+            ],
+            "nodeIs": "h1",
+            "pathFound": "H1"
+          },
+          {
+            "backendNodeId": 5,
+            "boxModel": [
+              640,
+              80
+            ],
+            "pathWalk": [
+              640,
+              91
+            ],
+            "nodeIs": "form",
+            "pathFound": "FORM"
+          },
+          {
+            "backendNodeId": 26,
+            "boxModel": [
+              640,
+              101
+            ],
+            "pathWalk": [
+              640,
+              183
+            ],
+            "nodeIs": "div",
+            "pathFound": "DIV"
+          }
+        ]
+      },
       "verdict": "GAP_UNREACHABLE"
     },
     {
@@ -54,6 +291,85 @@
       "in_ax_tree_all_frames": true,
       "in_pierced_dom": true,
       "in_rendered_output": false,
+      "geometry": {
+        "ax_backend_ids": 23,
+        "pierced_nodes": 32,
+        "ax_ids_in_pierced_dom": 23,
+        "ax_ids_pathed": 12,
+        "sampled": 12,
+        "rect_agrees": 0,
+        "same_element": 12,
+        "x_agrees": 12,
+        "y_agrees": 0,
+        "content_quad_flat": 12,
+        "disagreements": [
+          {
+            "backendNodeId": 16,
+            "boxModel": [
+              640,
+              0
+            ],
+            "pathWalk": [
+              640,
+              99
+            ],
+            "nodeIs": "html",
+            "pathFound": "HTML"
+          },
+          {
+            "backendNodeId": 20,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              106
+            ],
+            "nodeIs": "body",
+            "pathFound": "BODY"
+          },
+          {
+            "backendNodeId": 21,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              40
+            ],
+            "nodeIs": "h1",
+            "pathFound": "H1"
+          },
+          {
+            "backendNodeId": 5,
+            "boxModel": [
+              640,
+              80
+            ],
+            "pathWalk": [
+              640,
+              91
+            ],
+            "nodeIs": "form",
+            "pathFound": "FORM"
+          },
+          {
+            "backendNodeId": 26,
+            "boxModel": [
+              640,
+              121
+            ],
+            "pathWalk": [
+              640,
+              156
+            ],
+            "nodeIs": "div",
+            "pathFound": "DIV"
+          }
+        ]
+      },
       "verdict": "GAP_TIMING"
     },
     {
@@ -68,6 +384,85 @@
       "in_ax_tree_all_frames": true,
       "in_pierced_dom": true,
       "in_rendered_output": false,
+      "geometry": {
+        "ax_backend_ids": 1221,
+        "pierced_nodes": 1230,
+        "ax_ids_in_pierced_dom": 1221,
+        "ax_ids_pathed": 18,
+        "sampled": 18,
+        "rect_agrees": 0,
+        "same_element": 18,
+        "x_agrees": 18,
+        "y_agrees": 0,
+        "content_quad_flat": 18,
+        "disagreements": [
+          {
+            "backendNodeId": 16,
+            "boxModel": [
+              632,
+              0
+            ],
+            "pathWalk": [
+              633,
+              3788
+            ],
+            "nodeIs": "html",
+            "pathFound": "HTML"
+          },
+          {
+            "backendNodeId": 20,
+            "boxModel": [
+              632,
+              21
+            ],
+            "pathWalk": [
+              633,
+              3795
+            ],
+            "nodeIs": "body",
+            "pathFound": "BODY"
+          },
+          {
+            "backendNodeId": 21,
+            "boxModel": [
+              632,
+              21
+            ],
+            "pathWalk": [
+              633,
+              40
+            ],
+            "nodeIs": "h1",
+            "pathFound": "H1"
+          },
+          {
+            "backendNodeId": 5,
+            "boxModel": [
+              632,
+              80
+            ],
+            "pathWalk": [
+              633,
+              91
+            ],
+            "nodeIs": "form",
+            "pathFound": "FORM"
+          },
+          {
+            "backendNodeId": 26,
+            "boxModel": [
+              632,
+              121
+            ],
+            "pathWalk": [
+              633,
+              3845
+            ],
+            "nodeIs": "div",
+            "pathFound": "DIV"
+          }
+        ]
+      },
       "verdict": "GAP_RENDER"
     },
     {
@@ -84,6 +479,85 @@
       "in_ax_tree_all_frames": true,
       "in_pierced_dom": true,
       "in_rendered_output": true,
+      "geometry": {
+        "ax_backend_ids": 23,
+        "pierced_nodes": 32,
+        "ax_ids_in_pierced_dom": 23,
+        "ax_ids_pathed": 12,
+        "sampled": 12,
+        "rect_agrees": 0,
+        "same_element": 12,
+        "x_agrees": 12,
+        "y_agrees": 0,
+        "content_quad_flat": 12,
+        "disagreements": [
+          {
+            "backendNodeId": 16,
+            "boxModel": [
+              640,
+              0
+            ],
+            "pathWalk": [
+              640,
+              99
+            ],
+            "nodeIs": "html",
+            "pathFound": "HTML"
+          },
+          {
+            "backendNodeId": 20,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              106
+            ],
+            "nodeIs": "body",
+            "pathFound": "BODY"
+          },
+          {
+            "backendNodeId": 21,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              40
+            ],
+            "nodeIs": "h1",
+            "pathFound": "H1"
+          },
+          {
+            "backendNodeId": 5,
+            "boxModel": [
+              640,
+              80
+            ],
+            "pathWalk": [
+              640,
+              91
+            ],
+            "nodeIs": "form",
+            "pathFound": "FORM"
+          },
+          {
+            "backendNodeId": 26,
+            "boxModel": [
+              640,
+              121
+            ],
+            "pathWalk": [
+              640,
+              156
+            ],
+            "nodeIs": "div",
+            "pathFound": "DIV"
+          }
+        ]
+      },
       "verdict": "OK"
     },
     {
@@ -100,6 +574,85 @@
       "in_ax_tree_all_frames": true,
       "in_pierced_dom": true,
       "in_rendered_output": true,
+      "geometry": {
+        "ax_backend_ids": 29,
+        "pierced_nodes": 38,
+        "ax_ids_in_pierced_dom": 29,
+        "ax_ids_pathed": 13,
+        "sampled": 13,
+        "rect_agrees": 0,
+        "same_element": 13,
+        "x_agrees": 13,
+        "y_agrees": 0,
+        "content_quad_flat": 13,
+        "disagreements": [
+          {
+            "backendNodeId": 16,
+            "boxModel": [
+              640,
+              0
+            ],
+            "pathWalk": [
+              640,
+              76
+            ],
+            "nodeIs": "html",
+            "pathFound": "HTML"
+          },
+          {
+            "backendNodeId": 20,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              83
+            ],
+            "nodeIs": "body",
+            "pathFound": "BODY"
+          },
+          {
+            "backendNodeId": 21,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              40
+            ],
+            "nodeIs": "h1",
+            "pathFound": "H1"
+          },
+          {
+            "backendNodeId": 5,
+            "boxModel": [
+              640,
+              80
+            ],
+            "pathWalk": [
+              640,
+              91
+            ],
+            "nodeIs": "form",
+            "pathFound": "FORM"
+          },
+          {
+            "backendNodeId": 26,
+            "boxModel": [
+              640,
+              101
+            ],
+            "pathWalk": [
+              640,
+              123
+            ],
+            "nodeIs": "div",
+            "pathFound": "DIV"
+          }
+        ]
+      },
       "verdict": "OK"
     },
     {
@@ -114,6 +667,85 @@
       "in_ax_tree_all_frames": true,
       "in_pierced_dom": true,
       "in_rendered_output": null,
+      "geometry": {
+        "ax_backend_ids": 23,
+        "pierced_nodes": 33,
+        "ax_ids_in_pierced_dom": 23,
+        "ax_ids_pathed": 10,
+        "sampled": 10,
+        "rect_agrees": 0,
+        "same_element": 10,
+        "x_agrees": 10,
+        "y_agrees": 0,
+        "content_quad_flat": 10,
+        "disagreements": [
+          {
+            "backendNodeId": 16,
+            "boxModel": [
+              640,
+              0
+            ],
+            "pathWalk": [
+              640,
+              99
+            ],
+            "nodeIs": "html",
+            "pathFound": "HTML"
+          },
+          {
+            "backendNodeId": 20,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              106
+            ],
+            "nodeIs": "body",
+            "pathFound": "BODY"
+          },
+          {
+            "backendNodeId": 21,
+            "boxModel": [
+              640,
+              21
+            ],
+            "pathWalk": [
+              640,
+              40
+            ],
+            "nodeIs": "h1",
+            "pathFound": "H1"
+          },
+          {
+            "backendNodeId": 5,
+            "boxModel": [
+              640,
+              80
+            ],
+            "pathWalk": [
+              640,
+              91
+            ],
+            "nodeIs": "form",
+            "pathFound": "FORM"
+          },
+          {
+            "backendNodeId": 26,
+            "boxModel": [
+              640,
+              121
+            ],
+            "pathWalk": [
+              640,
+              156
+            ],
+            "nodeIs": "div",
+            "pathFound": "DIV"
+          }
+        ]
+      },
       "verdict": "OK"
     }
   ]
