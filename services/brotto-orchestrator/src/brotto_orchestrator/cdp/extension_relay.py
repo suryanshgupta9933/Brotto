@@ -281,5 +281,9 @@ def _to_semantic(ax_targets: list[dict]) -> list[SemanticTarget]:
             # only place its id is available. Carrying it costs one int on a
             # target that is already being sent.
             backend_node_id=t.get("backendNodeId"),
+            # The extension's `aria-hidden` supplement. The site hid this from
+            # the accessibility tree, so it is rendered `[hidden]` and never
+            # pre-approved under secure mode.
+            hidden=bool(t.get("hidden", False)),
         ))
     return result

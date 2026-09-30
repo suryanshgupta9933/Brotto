@@ -173,6 +173,10 @@ def filter_ax_targets(
     - [→ open] — primary action for this row (click to open/select the item)
     - [☐ select-only] — bulk-selection control (never opens the item)
 
+    A `hidden` target is one the extension's `aria-hidden` supplement found in
+    the DOM and the accessibility tree deliberately omits. It renders as
+    `[hidden]` on its line, and harness never pre-approves one.
+
     Over budget, whole lines are dropped rather than sliced, and the lowest
     ranked go first: an actionable control, in-viewport, named, shallow —
     over the same four in that order. Truncation is a ranking problem, not a
@@ -209,6 +213,16 @@ def filter_ax_targets(
             continue
 
         line = f"[{t.ref_id}] {role}"
+        # A supplemented node: the site marked it `aria-hidden`, so it is absent
+        # from the accessibility tree by design — a screen-reader user cannot
+        # reach it either. We surface it because it is often still visible and
+        # clickable, and for "delete the draft" it is exactly the control meant.
+        # It is marked, not recovered: the model has to be able to see that the
+        # site tried to hide this before it acts on it. `getattr` because an
+        # older relay sends targets with no such field, and an unmarked hidden
+        # control is the one outcome that must never render.
+        if getattr(t, "hidden", False):
+            line += " [hidden]"
         if t.name:
             line += f' "{t.name[:80]}"'
         if t.value:

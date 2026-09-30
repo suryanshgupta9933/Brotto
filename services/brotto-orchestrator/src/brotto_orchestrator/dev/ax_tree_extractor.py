@@ -26,6 +26,10 @@ class SemanticTarget:
     # Destination for links. Rendered next to the name so the agent can read
     # the page's own link graph instead of guessing URL patterns.
     href: Optional[str] = None
+    # The site marked this `aria-hidden`, so it is absent from the accessibility
+    # tree by design and the extension surfaced it from the DOM instead. Read by
+    # ax_filter (renders `[hidden]`) and by the harness's approval gate.
+    hidden: bool = False
 
     def __post_init__(self):
         if self.coordinates is None:

@@ -16,11 +16,40 @@ from brotto_orchestrator.dev.ax_tree_extractor import (
 )
 
 
-def _t(ref, role, name, parent=None, href=None, value=None):
+def _t(ref, role, name, parent=None, href=None, value=None, hidden=False):
     return SemanticTarget(
         ref_id=ref, tag=role, role=role, name=name, parent_ref_id=parent,
-        href=href, value=value,
+        href=href, value=value, hidden=hidden,
     )
+
+
+def test_a_supplemented_control_renders_marked_hidden():
+    """The extension surfaces `aria-hidden` controls from the DOM, because a
+    control the site hid from assistive tech is often still the control the
+    user means. It is marked, not recovered: the model has to be able to see
+    that the site tried to hide this before it acts on it."""
+    out = filter_ax_targets(
+        [_t("0:-1", "button", "Delete account", hidden=True)], max_chars=100_000,
+    )
+    assert '[0:-1] button [hidden] "Delete account"' in out
+
+
+def test_a_normal_control_is_not_marked_hidden():
+    """The marker is a disclosure statement, not decoration. A line that says
+    `[hidden]` when the element is not is worse than no marker at all."""
+    out = filter_ax_targets(
+        [_t("0:4", "button", "Save draft")], max_chars=100_000,
+    )
+    assert "[hidden]" not in out
+
+
+def test_a_hidden_control_survives_the_budget():
+    """A hidden control is actionable by role, so ranking is unchanged — it is
+    dropped only on size, like any other button."""
+    targets = [_t(f"h{i}", "heading", f"Message from sender {i}") for i in range(200)]
+    targets.append(_t("0:-1", "button", "Delete account", hidden=True))
+    out = filter_ax_targets(targets, max_chars=1200)
+    assert "[hidden]" in out and "Delete account" in out
 
 
 def test_depth_indents_fields_under_their_record():

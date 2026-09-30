@@ -478,6 +478,110 @@ def test_check_sensitive_action_skips_internal_actions():
     assert check_sensitive_action("payment", {}, p) is True
 
 
+# ── the aria-hidden supplement is never pre-approved ────────────────────────
+#
+# Surfacing a control the site marked `aria-hidden` is a disclosure change: it
+# puts a deliberately-hidden control in front of an agent that will click it.
+# The first-time-seen prompt is the last thing between the model and the user
+# on that control, so it has to actually fire.
+
+
+def _hidden_target(ref="0:-1", role="button", name="Delete account"):
+    from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
+    return SemanticTarget(
+        ref_id=ref, tag=role, role=role, name=name, hidden=True,
+    )
+
+
+def _click(ref, description="a button on the page"):
+    from brotto_orchestrator.agent.context import ActionCall
+    return ActionCall(
+        action="click", action_args={"ref": ref, "description": description},
+    )
+
+
+def test_a_hidden_destructive_control_is_not_pre_approved():
+    """Review Focus #3. The user approved clicking *something* on this domain
+    twenty steps ago. The site then put a "Delete account" button where
+    assistive technology cannot see it. That button must not inherit the
+    earlier approval — which is the whole reason the supplement is safe to
+    ship at all."""
+    from brotto_orchestrator.agent.harness import _first_time_key
+    from brotto_orchestrator.policy import Policy
+    from brotto_orchestrator.policy.gate import check_first_time_seen
+
+    policy = Policy(mode="secure")
+    domain = "shop.example"
+    targets = [_hidden_target()]
+    call = _click("0:-1")
+
+    # The session has already been approved to click on this domain.
+    seen = {(domain, "click")}
+
+    key = _first_time_key(domain, call, targets)
+    assert key != (domain, "click"), "a hidden control reused a live approval"
+    # …and `check_first_time_seen` is what decides whether to prompt, so the
+    # question is not "is the key different" but "does this still prompt".
+    assert check_first_time_seen(key, seen, policy) is True, (
+        "a hidden destructive control was treated as pre-approved"
+    )
+
+
+def test_an_ordinary_control_still_reuses_its_domain_approval():
+    """The other half: the rule narrows to supplemented targets only. A normal
+    click on an already-approved domain must not start prompting again, or
+    every run on a real site would ask the user a dozen times a task."""
+    from brotto_orchestrator.agent.harness import _first_time_key
+    from brotto_orchestrator.policy.gate import check_first_time_seen
+    from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
+    from brotto_orchestrator.policy import Policy
+
+    visible = SemanticTarget(
+        ref_id="0:7", tag="button", role="button", name="Save draft",
+    )
+    key = _first_time_key("shop.example", _click("0:7"), [visible])
+    assert key == ("shop.example", "click")
+    assert check_first_time_seen(key, {("shop.example", "click")}, Policy(mode="secure")) is False
+
+
+def test_a_hidden_control_prompts_only_once():
+    """One extra prompt, not one per step. The key is added to the seen set
+    after the user answers, so a run that clicks a hidden control on every
+    step asks once — the same contract every other first-time action has."""
+    from brotto_orchestrator.agent.harness import _first_time_key
+    from brotto_orchestrator.policy.gate import check_first_time_seen
+    from brotto_orchestrator.policy import Policy
+
+    policy = Policy(mode="secure")
+    seen = set()
+    call = _click("0:-1")
+    targets = [_hidden_target()]
+    assert check_first_time_seen(_first_time_key("shop.example", call, targets), seen, policy) is True
+    seen.add(_first_time_key("shop.example", call, targets))
+    assert check_first_time_seen(_first_time_key("shop.example", call, targets), seen, policy) is False
+
+
+def test_an_unresolvable_ref_is_treated_as_ordinary():
+    """`getattr` rather than a hard attribute read, and a missing target falls
+    back to the plain key. A ref the observation no longer carries must not
+    crash the approval gate — and must not silently get the stronger rule
+    either, because a hidden control we cannot identify is one we cannot
+    describe to the user in the prompt."""
+    from brotto_orchestrator.agent.harness import _first_time_key
+    key = _first_time_key("shop.example", _click("9:9"), [])
+    assert key == ("shop.example", "click")
+
+
+def test_normal_mode_never_prompts_for_a_hidden_control():
+    """The gate is inert outside secure mode, hidden or not — the whole
+    secure-mode contract is that it changes nothing in normal mode."""
+    from brotto_orchestrator.agent.harness import _first_time_key
+    from brotto_orchestrator.policy.gate import check_first_time_seen
+    from brotto_orchestrator.policy import Policy
+    key = _first_time_key("shop.example", _click("0:-1"), [_hidden_target()])
+    assert check_first_time_seen(key, set(), Policy(mode="normal")) is False
+
+
 # ── click cross-domain approval (Change 3) ──────────────────────────────────
 
 

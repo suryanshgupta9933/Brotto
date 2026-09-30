@@ -705,6 +705,34 @@ def _guard_first_time_seen_blacklist(
     return True
 
 
+def _first_time_key(
+    domain: str, call: ActionCall, targets: list,
+) -> tuple[str, str]:
+    """The `(domain, action)` pair the first-time-seen prompt is keyed on.
+
+    One case gets its own key. A target the extension supplemented is one the
+    site marked `aria-hidden` — deliberately out of the accessibility tree, so
+    a screen-reader user cannot reach it either. It is very often still visible
+    and clickable, and for "delete the draft" it is exactly the control the
+    user means, which is why we surface it at all. But the site put it there
+    *on purpose*, and the approval the user already gave for ordinary clicks on
+    this domain was given without knowing that.
+
+    So a hidden target never rides an existing `(domain, action)` approval: it
+    gets a distinct key, which means one extra prompt the first time a run
+    touches a supplemented control on a domain, and none after that. The
+    alternative — treating it like any other click — is the failure mode this
+    whole task exists to prevent: a hidden "Delete account" button arriving at
+    the user pre-approved because the model had clicked something else on the
+    same site twenty steps earlier.
+    """
+    ref = call.action_args.get("ref")
+    target = next((t for t in targets if t.ref_id == ref), None)
+    if getattr(target, "hidden", False):
+        return (domain, f"{call.action}:hidden")
+    return (domain, call.action)
+
+
 async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                           turn: int = -1) -> str:
     """Execute a single action. Returns outcome string."""
@@ -2008,7 +2036,7 @@ class AgentHarness:
                     domain = etld1(current_url)
                     if domain is None:
                         continue
-                    key = (domain, c.action)
+                    key = _first_time_key(domain, c, deps.prev_targets)
                     if not check_first_time_seen(key, deps.seen_first_time, deps.policy):
                         continue
                     log.warning(
