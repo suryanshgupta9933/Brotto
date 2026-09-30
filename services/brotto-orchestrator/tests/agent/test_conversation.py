@@ -336,3 +336,34 @@ def test_a_long_answer_is_capped_in_the_prompt_but_not_on_disk(sessions):
     t.add_message(role="assistant", content=long_answer, task=0, turn=turn)
     t.close()
     assert _doc(sessions, "n5")["messages"][-1]["content"] == long_answer
+
+
+def test_step_0_is_budgeted_against_the_model_that_will_read_it(monkeypatch):
+    """The AX budget is read at the top of a step; the window is set at the
+    bottom of one. Left alone, step 0 budgeted against `budget_for_window(None)`
+    — the 6K floor — and step 1 onward against the model's real window, so the
+    step that decides what a task tries first saw a tenth of the page."""
+    from brotto_orchestrator.agent import ax_filter
+    from brotto_orchestrator.agent.harness import _resolve_model
+
+    class _Cfg:
+        context_window = 1_000_000
+
+    monkeypatch.setattr(
+        "brotto_orchestrator.agent.harness.resolve_model_config",
+        lambda **_kw: (_Cfg(), None),
+    )
+    monkeypatch.setenv("AGENT_MODEL", "minimax:MiniMax-M3")
+
+    class _Deps:
+        client_ip = "127.0.0.1"
+        model_config = None
+        api_key = None
+        context_window = None
+
+    deps = _Deps()
+    # Before the fix: 6000, the MAX_CHARS floor.
+    assert ax_filter.budget_for_window(deps.context_window) == ax_filter.MAX_CHARS
+
+    deps.context_window = _resolve_model(deps)[0].context_window
+    assert ax_filter.budget_for_window(deps.context_window) == 50_000

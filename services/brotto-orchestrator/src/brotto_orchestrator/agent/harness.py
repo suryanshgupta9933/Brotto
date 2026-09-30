@@ -914,6 +914,33 @@ def _scripted_decision(deps: AgentDeps, turn: AgentTurn) -> AgentDecision | None
     return planner.next(turn)
 
 
+def _resolve_model(deps: AgentDeps) -> tuple:
+    """The per-task model config, resolved once per run.
+
+    Two reasons this is not per step. The AX budget is read at the TOP of
+    every step, before `_plan_step` has run for the first time, so a window
+    set there is one step behind the tree it sizes: step 0 budgeted against
+    `budget_for_window(None)`, which is the 6K MAX_CHARS floor, and step 1
+    onward against the model's real window. On a dense page that is the step
+    deciding what the task tries first, shown a tenth of what every later step
+    sees. And the answer cannot change inside a run, so re-reading a file and
+    the environment on every step is pure cost.
+    """
+    cached = getattr(deps, "_model_config", None)
+    if cached is None:
+        cached = resolve_model_config(
+            client_ip=getattr(deps, "client_ip", "127.0.0.1"),
+            inline_config=getattr(deps, "model_config", None),
+            inline_creds=(
+                UserCredentials(api_key=deps.api_key, base_url=None)
+                if getattr(deps, "api_key", None)
+                else None
+            ),
+        )
+        deps._model_config = cached
+    return cached
+
+
 async def _plan_step(
     deps: AgentDeps, turn: AgentTurn, agent: Agent
 ) -> tuple[AgentDecision, int, object] | None:
@@ -943,15 +970,7 @@ async def _plan_step(
             context_window = _CONTEXT_WINDOW_TOKENS
             result = await agent.run(_turn_to_prompt(turn), deps=deps)
         else:
-            cfg, creds = resolve_model_config(
-                client_ip=getattr(deps, "client_ip", "127.0.0.1"),
-                inline_config=getattr(deps, "model_config", None),
-                inline_creds=(
-                    UserCredentials(api_key=deps.api_key, base_url=None)
-                    if getattr(deps, "api_key", None)
-                    else None
-                ),
-            )
+            cfg, creds = _resolve_model(deps)
             context_window = cfg.context_window
             factory = PROVIDER_REGISTRY[cfg.provider]
             if not factory.validate_model_id(cfg.model):
@@ -1378,6 +1397,18 @@ class AgentHarness:
         loaded = load_scratchpad(audit.scratchpad_path)
         if loaded.entries or loaded.notes:
             deps.scratchpad = loaded
+
+        # Size step 0's AX tree against the model that will actually read it.
+        # `_plan_step` resolves the same config a moment later and can report
+        # a bad model properly; this call only wants the window, so a failure
+        # is swallowed rather than handled twice — step 0 hits the identical
+        # error one line into `_plan_step` and takes the existing path.
+        if os.getenv("AGENT_MODEL") != "test" and deps.scripted_planner is None:
+            try:
+                deps.context_window = _resolve_model(deps)[0].context_window
+            except Exception as exc:
+                log.warning("[%s] model config unresolved before step 0: %s",
+                            deps.user_id, type(exc).__name__)
 
         for step in range(first_step, self.MAX_STEPS):
             deps.step_number = step

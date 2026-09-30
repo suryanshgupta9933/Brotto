@@ -185,9 +185,11 @@ class AgentDeps:
     # Read by the click cross-domain gate and stamped onto TaskResult.
     # final_url as "where the task ended up" — see TaskResult.final_url.
     step_url: str = ""
-    # Context window of the model actually in use, set by _plan_step once the
-    # per-task config resolves. Read at observation time to size the AX tree
-    # budget; absent on step 1, where the env default is correct anyway.
+    # Context window of the model actually in use, read at observation time to
+    # size the AX tree budget. Set before the loop by `_resolve_model`, not by
+    # `_plan_step`: the budget is read at the TOP of a step and _plan_step runs
+    # at the bottom of it, so a window set there is one step behind the tree it
+    # sizes.
     context_window: int | None = None
     prev_targets: list = field(default_factory=list)  # AX targets from previous step for diffing
     policy: object = None  # Policy (services/brotto_orchestrator/policy/schema.Policy). Lazy import.
