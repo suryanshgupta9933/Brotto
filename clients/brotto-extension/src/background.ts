@@ -1113,12 +1113,13 @@ function stopRelay(): void {
   cancelReconnect();
   ws?.close();
   ws = null;
-  const tid = activeTabId;
-  activeTabId = null;
+  // Only the run ends here. The tab, the session id and the attached
+  // debugger are the *conversation* — releasing them is what made a message
+  // after a cancel start a new conversation, because the follow-up found
+  // nothing left to continue. A genuinely new conversation detaches in
+  // startRelay's mint branch, so nothing is leaked by leaving it on.
   waitingForLogin = false;
   currentPrompt = null;
-  if (tid !== null) void dbg.detachFromTab(tid).catch(() => undefined);
-  void chrome.storage.session.remove([...SESSION_KEYS]);
 }
 
 // ── Message handler ──────────────────────────────────────────────────────────
