@@ -110,7 +110,14 @@ class ActionCall(BaseModel):
 class AgentDecision(BaseModel):
     reasoning: str
     thought: str
-    actions: list[ActionCall]
+    # Not required. MiniMax-M3 measures ~1 run in 3 that returns
+    # `final_result` with reasoning and thought and no `actions` key at
+    # all; while this was required, pydantic-ai rejected the call before
+    # any validator ran and sent a raw pydantic error back as the retry
+    # prompt, which the model then repeated verbatim until the run died.
+    # Defaulting it lets harness._require_actions re-ask with a message
+    # that says what to emit instead.
+    actions: list[ActionCall] = field(default_factory=list)
 
 
 class ScriptTargetUnresolved(LookupError):

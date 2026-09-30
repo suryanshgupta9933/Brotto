@@ -17,7 +17,9 @@ if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
     os.environ["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_AUTH_TOKEN"]
 
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import UserError, ModelHTTPError, UnexpectedModelBehavior
+from pydantic_ai.exceptions import (
+    UserError, ModelHTTPError, ModelRetry, UnexpectedModelBehavior,
+)
 
 from brotto_orchestrator.model.config import UserCredentials
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
@@ -176,6 +178,57 @@ def _build_agent() -> Agent[AgentDeps, AgentDecision]:
 
 
 agent = _build_agent()
+
+
+@agent.output_validator
+def _require_actions(ctx, decision: AgentDecision) -> AgentDecision:
+    """Re-ask when the model returns a decision with nothing in it.
+
+    Measured against MiniMax-M3: it frequently concludes a step and then
+    emits `final_result` carrying `reasoning` and `thought` with no
+    `actions` key at all. `actions` used to be required, so pydantic-ai
+    rejected the call before this validator could run and used pydantic's
+    own error as the retry prompt —
+    `[{'type': 'missing', 'loc': ('actions',), 'msg': 'Field required'}]`
+    — which the model repeated verbatim on all three attempts, until the
+    run died with "Exceeded maximum output retries (2)".
+
+    The retry budget is still the backstop: raising ModelRetry spends one
+    of `retries=2`, so a model that ignores the instruction three times
+    still ends the run rather than spinning. What changes is that the
+    model is told what to emit instead of being handed a schema diff.
+    """
+    if not decision.actions:
+        raise ModelRetry(
+            "Your decision had no actions, so there is nothing to do. Every "
+            "decision needs an `actions` list with at least one entry. If you "
+            "have finished the task, send "
+            "actions=[{'action': 'task_complete', 'action_args': {'summary': "
+            "<your answer>}}]. If you are blocked, use 'ask_human' or "
+            "'cannot_complete'. Otherwise send the action you meant to take, "
+            "e.g. actions=[{'action': 'read_page_text', 'action_args': {}}]."
+        )
+    return decision
+
+
+def _failure_detail(exc: BaseException, limit: int = 500) -> str:
+    """Flatten an exception's cause chain into one recorded string.
+
+    `str(exc)` on the failure this exists for is literally "Exceeded
+    maximum output retries (2)" — it names neither the model, the field,
+    nor the fix, and the cause chain is the only place that does. The
+    chain is walked rather than `exc.__cause__` alone read, because
+    pydantic-ai wraps the specific complaint (a validation error, a
+    ToolRetryError) one or two levels down.
+    """
+    parts: list[str] = []
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        parts.append(f"{type(cur).__name__}: {cur}")
+        cur = cur.__cause__
+    return " <- ".join(parts)[:limit]
 
 
 # A conversation message is a whole exchange, not one step's summary, so its
@@ -1145,7 +1198,7 @@ async def _plan_step(
                 message=f"{cfg.provider}:{cfg.model} could not produce a valid "
                         f"action after 3 attempts",
                 detail={"retries": 2, "step": deps.step_number,
-                        "detail": str(e)[:500]},
+                        "detail": _failure_detail(e)},
             )
         return None
     finally:

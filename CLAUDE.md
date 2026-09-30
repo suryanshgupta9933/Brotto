@@ -236,6 +236,47 @@ untrusted page-influenced text at volume). Two tests pin what is observable:
 `test_an_undecidable_model_fails_the_run_instead_of_hanging` and
 `test_plan_step_catches_it_and_records_why`.
 
+**Recording `str(e)` records the wrapper and nothing else.** Reproduced
+against the live model: `str(exc)` is `"Exceeded maximum output retries (2)"`
+while the useful text is one `__cause__` down. `_failure_detail` walks the
+chain (`Type: message <- Type: message`) and truncates at 500. That single
+line is the difference between a diagnosable failure and a guess — see
+"a model that omits `actions`" below, which is what it found.
+
+#### A model that omits `actions` cannot be told twice
+
+The dominant cause of that failure, measured on MiniMax-M3 against a Gmail
+search-results prompt: **2 of 6 runs called `final_result` with `reasoning`
+and `thought` and no `actions` key at all.** The two omitted-field cases
+were byte-identical to each other, and so were the retry attempts that
+followed — the model repeated the same omission three times.
+
+The retry prompt pydantic-ai sends is the reason it repeated:
+`[{'type': 'missing', 'loc': ('actions',), 'msg': 'Field required', ...}]`.
+A schema diff, to a model that has already written prose and is deciding it
+is finished. It is not wrong, and it is not actionable.
+
+So `actions` now defaults to empty and an output validator
+(`harness._require_actions`) raises `ModelRetry` with an instruction
+instead — naming `task_complete` with a `summary` for the conclude case,
+`ask_human` / `cannot_complete` for the blocked one, and the action it
+meant for everything else. **Defaulting the field is load-bearing**: while
+it was required, pydantic-ai rejected the tool call before any validator
+could run, so the only retry prompt available was the one that does not
+work.
+
+The budget is unchanged, and that is the point: raising `ModelRetry` spends
+one of `retries=2`, so a model that ignores the instruction three times
+still ends the run instead of spinning. What changed is what it is told.
+
+The second, rarer mode is a response with no text and no tool call at all,
+which pydantic-ai reports as `ToolRetryError: Please return text or include
+your response in a tool call.` That one usually recovers on its own — it
+appeared in 1 of 6 runs and the retry fixed it — and the same measurement
+run had the model recover from the `actions` omission on its second attempt
+too, which is why the instruction above has to be this explicit rather than
+merely different.
+
 **Not done:** cross-task memory. `Scratchpad` is per-task — persisted to `logs/runs/<id>/` for resume within a task and gone otherwise, so `github.com/<user>/issues/assigned` (the entry point discovered on that run) is relearned every run. The obvious durable content is *where things live on a site and which routes are dead*: a per-user JSON store in the shape of `model/store.py`, injected at the top of every task. Unbuilt.
 
 ## Idle-page suggestions
