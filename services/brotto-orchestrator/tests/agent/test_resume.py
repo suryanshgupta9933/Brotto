@@ -200,8 +200,11 @@ def _done_script():
 
 
 def _run_sync(deps: AgentDeps):
+    # resume=True: every caller here is exercising the crash-resume path. The
+    # default (resume=False) now means "a follow-up task", which starts at
+    # step 0 and refuses a document whose run is still in flight.
     async def _go():
-        return await AgentHarness().run(deps)
+        return await AgentHarness().run(deps, resume=True)
     return asyncio.new_event_loop().run_until_complete(_go())
 
 
@@ -237,8 +240,8 @@ def test_a_corrupt_document_runs_nothing(sessions_dir):
     deps = _deps(cdp, task_id="h2")
     result = _run_sync(deps)
 
-    assert result.failure_reason == "resume_unavailable"
-    assert "could not be parsed" in result.summary
+    assert result.failure_reason == "task_refused"
+    assert "corrupt" in result.summary
     # Left exactly as found. It is the only copy of a run nobody can read,
     # and rewriting it would replace that with a valid empty document —
     # reporting "interrupted" by destroying the thing being reported on.
@@ -261,7 +264,7 @@ def test_a_document_from_another_schema_version_runs_nothing(sessions_dir):
     deps = _deps(cdp, task_id="h3")
     result = _run_sync(deps)
 
-    assert result.failure_reason == "resume_unavailable"
+    assert result.failure_reason == "task_refused"
     assert "99" in result.summary
     doc = read("h3", dir=sessions_dir)
     assert doc["status"] == "interrupted"
@@ -269,7 +272,7 @@ def test_a_document_from_another_schema_version_runs_nothing(sessions_dir):
     # document is the only copy of this run, and "we cannot read it" is not a
     # reason to delete the turns that are in it.
     assert [t["step"] for t in doc["turns"]] == [0]
-    assert doc["errors"][0]["code"] == "resume_refused"
+    assert doc["errors"][0]["code"] == "task_refused"
     cdp.get_targets.assert_not_called()
 
 
@@ -290,7 +293,7 @@ def test_a_finished_run_keeps_its_turns_when_a_resume_is_refused(sessions_dir):
 
     result = _run_sync(_deps(_cdp(), task_id="h4"))
 
-    assert result.failure_reason == "resume_unavailable"
+    assert result.failure_reason == "task_refused"
     doc = read("h4", dir=sessions_dir)
     assert doc["status"] == "interrupted"
     assert [x["step"] for x in doc["turns"]] == [0, 1]
@@ -318,7 +321,7 @@ def _run_then_cancel(task_id: str) -> AgentDeps:
     deps = _deps(cdp, task_id=task_id)
 
     async def _go() -> AgentDeps:
-        task = asyncio.ensure_future(AgentHarness().run(deps))
+        task = asyncio.ensure_future(AgentHarness().run(deps, resume=True))
         await asyncio.sleep(0.01)  # let it reach the loop
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

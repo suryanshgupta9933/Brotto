@@ -153,6 +153,13 @@ class AgentDeps:
     cdp: object  # CDPRelay
     ws_send: object  # async callable: (dict) -> None
     task_id: str = ""  # set by harness for run logging
+    # Which `tasks[]` entry this run writes. -1 before the first
+    # `begin_task`, which is what a refusal path leaves behind.
+    task_index: int = -1
+    # The whole transcript, carried on deps so `_turn_to_prompt` can window
+    # it. Read through the existing `_CURRENT_DEPS` global for the same
+    # reason the secure-mode preamble is.
+    conversation: list = field(default_factory=list)
     # Per-task model selection (BYOK / extension-driven; see model/registry.py)
     model_config: object = None  # ModelConfig | None — typed loosely to avoid cycle
     api_key: str | None = None

@@ -178,6 +178,41 @@ def _build_agent() -> Agent[AgentDeps, AgentDecision]:
 agent = _build_agent()
 
 
+# A conversation message is a whole exchange, not one step's summary, so its
+# window is much smaller than _HISTORY_WINDOW. The goal is for the model to
+# remember how this started and what just happened, not to re-read the log.
+_CONV_HEAD = 2
+_CONV_TAIL = 6
+
+
+def _conversation_block(messages: list[dict], *, current_task: int) -> str:
+    """Render earlier tasks' messages into the prompt, windowed.
+
+    Returns "" when there is nothing earlier, which is the case for every
+    first task — so task 0's prompt is byte-identical to the one it got
+    before this feature existed.
+    """
+    earlier = [m for m in messages if m.get("task", 0) < current_task]
+    if not earlier:
+        return ""
+    if len(earlier) > _CONV_HEAD + _CONV_TAIL:
+        shown = earlier[:_CONV_HEAD] + earlier[-_CONV_TAIL:]
+        skipped = len(earlier) - (_CONV_HEAD + _CONV_TAIL)
+    else:
+        shown = earlier
+        skipped = 0
+    lines = []
+    for m in shown:
+        who = "User" if m.get("role") == "user" else "Assistant"
+        lines.append(f"{who}: {m.get('content', '')}")
+    if skipped:
+        # Named, not silent. A model told a turn was dropped and not told
+        # how many will assume the gap is small.
+        lines.insert(_CONV_HEAD, f"... {skipped} earlier messages omitted ...")
+    return ("\n## This conversation so far\n"
+            + "\n".join(lines) + "\n")
+
+
 def _turn_to_prompt(turn: AgentTurn) -> str:
     summaries = turn.step_summaries
     if len(summaries) > _HISTORY_WINDOW:
@@ -226,6 +261,13 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     if deps is not None and getattr(deps.policy, "mode", None) == "secure":
         secure_prefix = secure_mode_preamble(deps.policy) + "\n\n"
 
+    conv_section = ""
+    if deps is not None:
+        conv_section = _conversation_block(
+            getattr(deps, "conversation", []),
+            current_task=getattr(deps, "task_index", 0),
+        )
+
     # Memory manifest: small per-entry digest. Full bodies are loaded on
     # demand via recall_memory(id). This is the "skills" pattern — the
     # agent sees the description (digest) for free, fetches full content
@@ -237,7 +279,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         manifest_lines.append(f"- `{e.id}` step={e.step} sel={e.selector}{around}{trunc}: {e.digest}")
     manifest_section = "\n".join(manifest_lines) + "\n"
 
-    return f"""{secure_prefix}## Task
+    return f"""{secure_prefix}{conv_section}## Task
 {turn.task}
 
 ## Your memory (notes)
@@ -964,9 +1006,70 @@ async def _plan_step(
 # A document in one of these states describes a run that is over. Resuming
 # one is the same mistake as re-running an approved action: the user already
 # got their answer, or already stopped the thing.
+#
+# "interrupted" is written *only* on a resume refusal, and it overwrites the
+# terminal status it was refusing to resume from. Leaving it out means a
+# second resume attempt reads a finished run as resumable and starts it again.
 _TERMINAL_DOC_STATUSES = {
     "completed", "failed", "awaiting_human", "stagnated", "cancelled",
+    "interrupted",
 }
+
+
+def _conversation_state(session_id: str, *, resume: bool) -> dict:
+    """Decide what a task_start means for this document.
+
+    Returns {"action": "new_task" | "resume" | "refuse", "doc", "summaries",
+    "visited", "first_step", "task_index", "why"}.
+
+    The two paths do opposite things with the same document, which is why
+    they cannot share one: `resume` continues an unfinished turn of a run the
+    socket dropped, and `new_task` appends another thing the user asked for.
+    Only the first may re-enter a turn; only the second may start at step 0.
+    """
+    doc = read(session_id)
+    if not doc.get("found"):
+        # Nothing to resume, so `resume: true` is answered the same way.
+        return {"action": "new_task", "doc": None, "summaries": [],
+                "visited": set(), "first_step": 0, "task_index": 0,
+                "why": ""}
+    if doc.get("corrupt"):
+        return {"action": "refuse", "doc": doc, "summaries": [],
+                "visited": set(), "first_step": 0, "task_index": 0,
+                "why": "the session document is corrupt"}
+
+    if resume:
+        # A resume never starts a new task, so it never needs a segmentation
+        # the document does not have. `_resume_state` reports a refusal as a
+        # non-empty `why`; this is where that becomes an action.
+        r = _resume_state(session_id)
+        return {"action": "refuse" if r["why"] else "resume", "doc": r["doc"],
+                "summaries": r["summaries"], "visited": r["visited"],
+                "first_step": r["first_step"], "task_index": 0,
+                "why": r["why"]}
+
+    status = doc.get("status")
+    if status in _TERMINAL_DOC_STATUSES:
+        if doc.get("schema_version", 1) < 2:
+            # Ordered after the terminal check on purpose: a v1 document is
+            # always terminal, and the refusal is about the schema, not about
+            # a run that ended.
+            return {"action": "refuse", "doc": doc, "summaries": [],
+                    "visited": set(), "first_step": 0, "task_index": 0,
+                    "why": (
+                        "this conversation is a schema v1 document, recorded "
+                        "before tasks were tracked, so there is no way to add "
+                        "a follow-up to it. Start a new conversation instead "
+                        "— the old one stays readable in history."
+                    )}
+        return {"action": "new_task", "doc": doc, "summaries": [],
+                "visited": set(), "first_step": 0,
+                "task_index": len(doc.get("tasks") or []), "why": ""}
+
+    return {"action": "refuse", "doc": doc, "summaries": [], "visited": set(),
+            "first_step": 0, "task_index": 0,
+            "why": (f"a run on this conversation is still in flight "
+                    f"(status={status})")}
 
 
 def _resume_state(session_id: str) -> dict:
@@ -1116,7 +1219,8 @@ def _seal_if_cancelled(audit: AuditTrail):
 class AgentHarness:
     MAX_STEPS = 30
 
-    async def run(self, deps: AgentDeps, *, resume_from: int = 0) -> TaskResult:
+    async def run(self, deps: AgentDeps, *, resume_from: int = 0,
+                  resume: bool = False) -> TaskResult:
         timings: dict[str, float] = {b: 0.0 for b in TIMING_BUCKETS}
         # Snapshot of `timings` taken at the start of each step iteration —
         # lets us report a per-step breakdown without instrumenting every
@@ -1143,14 +1247,14 @@ class AgentHarness:
         if not deps.task_id:
             deps.task_id = str(uuid.uuid4())
 
-        # Resume. A reconnect for a live session_id re-enters run() with the
-        # same document on disk; without this the task starts again at step 0
-        # and re-runs actions the user already approved.
+        # A follow-up task and a crash resume arrive on the same frame and do
+        # opposite things with the same document, so the decision is made
+        # here, once, before anything is written.
         #
         # Read BEFORE the trail is built: its first flush (set_goal, below)
-        # rewrites the file, and a resume that read it afterwards would find
-        # its own empty document and conclude there is nothing to resume.
-        state = _resume_state(deps.task_id)
+        # rewrites the file, and a run that read it afterwards would find its
+        # own empty document and conclude there is nothing to read.
+        state = _conversation_state(deps.task_id, resume=resume)
         first_step = max(resume_from, state["first_step"])
 
         audit = AuditTrail(deps.task_id)
@@ -1175,14 +1279,14 @@ class AgentHarness:
                      deps.user_id, first_step, len(state["summaries"]),
                      len(state["visited"]))
 
-        # A document we cannot resume from is reported, never silently run
-        # again: a fresh run would re-do work the user already approved.
-        # Ahead of set_goal, because set_goal is this trail's first flush and
-        # that flush overwrites the file.
-        if state["why"]:
-            log.error("[%s] cannot resume: %s", deps.user_id, state["why"])
+        # A document we cannot act on is reported, never silently re-run: a
+        # fresh run would re-do work the user already approved. Ahead of
+        # set_goal, because set_goal is this trail's first flush and that
+        # flush overwrites the file.
+        if state["action"] == "refuse":
+            log.error("[%s] refused: %s", deps.user_id, state["why"])
             if state["doc"] and not state["doc"].get("corrupt"):
-                audit.record_error(code="resume_refused", where="run",
+                audit.record_error(code="task_refused", where="run",
                                    message=state["why"])
                 audit.set_status("interrupted")
                 audit.close()
@@ -1191,13 +1295,36 @@ class AgentHarness:
             # and the corruption is the thing a human would need to see.
             return TaskResult(
                 status="failed",
-                summary=f"Interrupted: {state['why']}.",
-                failure_reason="resume_unavailable",
+                summary=state["why"],
+                failure_reason="task_refused",
                 policy_mode=_policy_mode(deps),
                 # No step ran, so this is the same pre-observe "" the CDP
                 # preflight return carries.
                 final_url=deps.step_url,
             )
+
+        # The user's prompt is written here, not per turn: a run cancelled at
+        # step 0 has no turns, and the prompt they typed is the one thing that
+        # must survive it. Only a new task writes one — a resume is the same
+        # task continuing, and its prompt is already on disk.
+        if state["action"] == "new_task" and state["doc"]:
+            task_index = audit.begin_task(deps.task)
+        elif state["action"] == "new_task":
+            task_index = 0
+        else:
+            # Spelled out rather than a conditional expression because
+            # `_resume_state`'s dict has no "task_index" key at all: the
+            # resume action must not read it, and a `dict.get` would hide that.
+            task_index = 0
+        deps.task_index = task_index
+        if state["action"] == "new_task":
+            audit.add_message(role="user", content=deps.task, task=task_index,
+                              turn=None)
+            # Only earlier tasks. The current goal is in the prompt already, and
+            # showing it twice is both noise and a chance for the two copies to
+            # disagree.
+            deps.conversation = [m for m in audit.conversation()
+                                 if m.get("task", 0) < task_index]
 
         audit.set_goal(deps.task)
 
@@ -1252,7 +1379,8 @@ class AgentHarness:
                 # through, so it is the one place steps_taken can be counted
                 # right: built elsewhere it is 0-indexed, step+1, or unset.
                 deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
-                self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
+                self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
+                               task_index=deps.task_index)
                 return deps.result
 
             steps_run += 1
@@ -1319,7 +1447,8 @@ class AgentHarness:
                         policy_mode=_policy_mode(deps),
                     )
                     deps.result.final_url = deps.step_url
-                    self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
+                    self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
+                               task_index=deps.task_index)
                     return deps.result
 
             # The turn opens here — after the policy block, before the
@@ -1380,7 +1509,8 @@ class AgentHarness:
                         policy_mode=_policy_mode(deps),
                     )
                     deps.result.final_url = deps.step_url
-                    self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
+                    self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
+                               task_index=deps.task_index)
                     return deps.result
                 # reply == "resume" (or anything else): loop continues,
                 # next step re-runs check_login_page to confirm we're out.
@@ -1723,10 +1853,19 @@ class AgentHarness:
                 # through, so it is the one place steps_taken can be counted
                 # right: built elsewhere it is 0-indexed, step+1, or unset.
                 deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
-                self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
+                self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
+                               task_index=deps.task_index)
                 return deps.result
 
             audit.end_turn(a_turn, timings=_step_timings(timings, cumulative_snapshots))
+            # One assistant message per completed turn, not per action: the
+            # transcript is what a human reads, and a turn's outcome is the
+            # unit they can act on. A turn closed by the abort gate above
+            # never reaches here, so it gets none — an unfinished turn
+            # describes actions that may not have run.
+            if decision.thought:
+                audit.add_message(role="assistant", content=decision.thought,
+                                  task=deps.task_index, turn=a_turn)
 
         timing_report = self._log_timings(
             deps.user_id, timings, steps_run, time.perf_counter() - task_start, cumulative_snapshots,
@@ -1741,13 +1880,14 @@ class AgentHarness:
             policy_mode=_policy_mode(deps),
         )
         deps.result.final_url = deps.step_url
-        self._close(audit, a_turn, deps.result, cumulative_snapshots, timings)
+        self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
+                               task_index=deps.task_index)
         return deps.result
 
     @staticmethod
     def _close(audit, turn: int, result: TaskResult,
                snapshots: list[dict[str, float]],
-               timings: dict[str, float] | None = None) -> None:
+               timings: dict[str, float] | None, task_index: int) -> None:
         """End the open turn and seal the document.
 
         Every terminal path out of the loop ends here so no route can
@@ -1756,6 +1896,15 @@ class AgentHarness:
         """
         if turn >= 0:
             audit.end_turn(turn, timings=_step_timings(timings or {}, snapshots))
+            # The turn that ends the task is the one a human most wants to
+            # read back, and it never reaches the loop's end-of-turn line —
+            # it returns from here. Its outcome is the result summary: what
+            # was done, or why it could not be. `turn >= 0` is the abort
+            # gate's exclusion, since a turn that never opened describes
+            # actions that may not have run.
+            if result.summary:
+                audit.add_message(role="assistant", content=result.summary,
+                                  task=task_index, turn=turn)
         audit.finish(result.model_dump())
         audit.set_status(result.status)
         # Deregister last, and only on a terminal path. A live trail holds
