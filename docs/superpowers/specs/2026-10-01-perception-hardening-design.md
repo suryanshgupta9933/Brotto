@@ -266,6 +266,38 @@ than usual is visible after the fact.
 
 ## Test strategy
 
+> **Correction, 2026-10-01 (after Task 3).** The claim below that "the seven
+> fixtures are the regression suite, and `--check` against a re-recorded
+> baseline is the gate" is **true of the server path and false of the
+> extension path.** `run_benchmark.py` POSTs to `/run`, which builds a
+> `dev/playwright_browser.PlaywrightBrowser` and drives it through
+> `CDPRelay` — a separate Python CDP client. The extension is never loaded
+> and `observation/` never runs. So a `PASS` certifies the server, and
+> nothing else.
+>
+> Concretely: **Task 3** (`ax_filter` ranked selection) is server-side and
+> its `auth-inbox → PASS` is real. **Tasks 2, 4, 5 and 6** are all
+> extension-side and are invisible to the suite. Task 7's "re-record
+> `baseline.json` when the fixtures are green" would therefore certify four
+> fixes that were never exercised — worse than having no measurement, because
+> it reports success.
+>
+> **What this workstream does instead:** unit-test the pure logic of each
+> stage (the caps, the ranking, the teardown) and verify the extension path
+> by hand in a real browser. `baseline.json` re-records only movement the
+> suite can actually observe. Nothing in the extension is claimed as verified
+> on the strength of a fixture run.
+>
+> The probe's *verdicts* are unaffected — `GAP_FRAMES`, `GAP_TIMING`,
+> `GAP_ARIA` and `GAP_UNREACHABLE` are statements about what Chrome returns
+> through CDP, which is the same on both paths, and the probe drove a real
+> Chrome. What was conflated is the verdict (valid) with the benchmark
+> outcome used to confirm it (a different client).
+
+## Test strategy
+
+
+
 The seven fixtures are the regression suite, and `--check` against a re-recorded
 baseline is the gate. No new test infrastructure is needed for the fixes themselves —
 that was workstream 0C and it shipped.
