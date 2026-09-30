@@ -30,12 +30,39 @@ HTTP: `POST /v1/sessions`, `POST /v1/policy_ack`, `GET /v1/policy`, `GET /contex
 Single-threaded observe→plan→act, max **30 steps** (`MAX_STEPS`). Per step:
 1. Observe — `get_targets()` (AX tree from extension) + URL + title. Filtered/diffed.
 2. Guardrail — `check_login_page` regex (4 strong + 4 weak markers; title/URL-authoritative). On hit: emit `login_required`, pause 300s, await "resume"/"skip".
-3. Stagnation — 3-step window; emit `stagnation_warning` if URL/actions repeat.
-4. Plan — `agent.run(turn)` via pydantic-ai with `AgentDecision` Pydantic model. Per-task model via `resolve_model_config` (inline > per-user > env).
+3. ~~Stagnation~~ — removed. Both of its observed effects were harmful (it
+   pushed working agents toward reporting early, and warned during a task that
+   succeeded). The model self-assesses in the prompt instead. See the
+   "Stagnation detection — removed" section of `CLAUDE.md`.
+4. Plan — `agent.run(turn)` via pydantic-ai with `AgentDecision` Pydantic model. Per-task model via `resolve_model_config` (inline > per-user > env). **No `message_history`** — the prompt is rebuilt each step from `step_summaries` + `scratchpad`, which is what makes resume possible.
 5. Secure-mode approval — `sensitive_actions` list (default: `submit_form | delete_record | payment | transfer | change_password | revoke_access | publish | deploy | send_email | external_post | approve | reject`).
 7. First-time-seen `(domain, action)` cache — approval card.
 8. Execute — `_execute_action` for each action in batch.
-9. Persist — `RunLogger` writes `logs/runs/<task_id>/{step.jsonl, scratchpad.txt, policy.log}`.
+9. Persist — `AuditTrail` flushes the whole session document on every record (see below).
+
+## Audit trail (`agent/audit.py`)
+
+One nested-JSON document per session at `logs/sessions/<session_id>.json`.
+Shape: `turns[]`, each `observation → model → prompts[] → actions[]` in that
+causal order, plus root-level `totals`, `policy_events[]`, `errors[]`,
+`status`, and a `scratchpad` snapshot. Written atomically (tmp file +
+`os.replace`), so a crash mid-write leaves the last good document rather than
+a truncated one. **No database — the file is the record.**
+
+Served by `GET /v1/sessions/{id}/audit`, listed by `GET /v1/sessions`, and
+rendered by the panel's transcript view, so a run can be replayed in the order
+it happened. Redaction of typed secrets happens at write time
+(`is_secret_field`), and the document is the only place a typed value lands.
+
+Also the substrate for **resume**: `AgentHarness.run(deps, resume_from=…)`
+reconstructs `step_summaries` and `visited_domains` from the document and
+continues at the last *completed* turn. The extension reconnects with
+backoff, reusing the `session_id`; a user-cancelled run is sealed
+`cancelled` and never resumed, and a corrupt or already-finished document is
+reported as `interrupted` rather than silently restarted.
+
+This retired `agent/run_logger.py`, which wrote a `type_text` action's full
+args — including passwords — to `steps.jsonl` in the clear.
 
 ## Action vocabulary (13 actions, `agent/context.py:90-99`)
 
@@ -65,7 +92,7 @@ Two modes: `normal` (no gates) and `secure` (gates fire). Floor policy from `BRO
 
 ## UX surface (extension)
 
-Side panel renders: task input + Start/Cancel, tab bar, Settings panel (server URL + provider/model/key form + policy editor), live step cards (action icon, thought, URL, expand-to-show actions[]), context utilization %, "SECURE" badge, approval cards, login pause card, task completed/failed bubbles with `extracted_data`, per-component timing breakdown (`observe`, `model_plan`, `execute`, `login_pause`, `approval_pause`). Reconnect banner (3 × 5s). No telemetry. No account UI. No onboarding.
+Side panel renders: task input + Start/Cancel, tab bar, Settings panel (server URL + provider/model/key form + policy editor), live step cards (action icon, thought, URL, expand-to-show actions[]), context utilization %, "SECURE" badge, approval cards, login pause card, task completed/failed bubbles with `extracted_data`, per-component timing breakdown (`observe`, `model_plan`, `execute`, `login_pause`, `approval_pause`), a session-history list, and a per-session transcript overlay that swaps the list for the run's turns/prompts/actions in order. "Reconnecting, attempt N" banner on a dropped socket (6 attempts, full jitter, 1s→30s). No telemetry. No account UI. No onboarding.
 
 Service worker owns: tab lifecycle (`tab.openerTabId`), debugger attach/detach per active tab, heartbeat (20s ping / 30s deadline), session persistence in `chrome.storage.session`, user-policy hydration on init.
 
@@ -94,6 +121,7 @@ Dev default: `anthropic:MiniMax-M3.1-Flash-Preview`, 1M context. `BROTTO_ENV=pro
 - **Per-component timing** in `TaskResult.timing` — wall-time breakdown.
 - **Prompt-injection trust hierarchy** in system prompt.
 - **Memory = skills pattern** — `read_page_text` auto-captures 200-char digests; `recall_memory(id)` loads full body. Primitive that persistent-memory wishlist calls for.
+- **Per-session audit document** — every run's turns, prompts, approvals, actions, tokens and errors in one atomically-written nested JSON file. Replayable in the panel, and the substrate for resume, with no database to operate.
 - **`defer_model_check=True`** — per-task model from factory; no Agent rebuild.
 
 ## Wave 0 blockers — perception (found 2026-09-28)
@@ -118,13 +146,13 @@ Verified by repo-wide grep on 2026-09-28. These gate the "works on the sites beh
 | 2 | No multi-user / accounts | Identity = `request.client.host` → sha256[:32] | NAT collisions, shared IPs |
 | 3 | No billing / quota | MiniMax-M3 calls API with user key; server has no spend tracking | No revenue, no rate-limit |
 | 4 | No telemetry / analytics | Only `logging.basicConfig` to stdout | No observability into fleet |
-| 5 | No task history UI | JSONL in `logs/runs/<task_id>/` but no `/v1/tasks` endpoint, no replay | Users can't revisit past runs |
+| 5 | No task history UI | — **shipped.** `GET /v1/sessions/{id}/audit` + the panel transcript view. Session list is per-browser (`chrome.storage.local`), not per-account. | Users can't revisit past runs |
 | 6 | No onboarding | README handwaves "configure server URL"; no first-run wizard, no auth | 90% activation drop |
 | 7 | No Chrome Web Store dist | "From Chrome Web Store (when published)" stub | Sideloading only |
 | 8 | Limited action surface | No `hover`, `drag`, `select_option`, native `fill_form` | Brittle on real apps |
 | 9 | No multi-tab parallelism | `activeTabId` is single; "A task is already running" rejected | Hard ceiling on power use |
 | 10 | WS URL bug | `startRelay` ignores user-supplied `serverUrl` for WS URL | Remote users silently hit localhost |
-| 11 | 188 tests, no extension tests | Python only; no JS runner, no real-browser integration | Regression risk |
+| 11 | No extension tests, no real-browser integration | 423 Python tests, but no JS runner and nothing that loads the panel | Regression risk on the UI half |
 | 12 | Stale docs | `decisions.md` describes Playwright-only architecture; README refs non-existent `crypto.ts`, `pairing.ts`, `popup.tsx` | Misleading for new contributors |
 | 13 | Unused code | `contracts.py` `ObservationV1`/`BrowserAction`, `domain/`, `context/` subpackages unused | Dead code rot |
 
