@@ -682,6 +682,14 @@ async function startRelay(
     session_id = sessionId;
     wsUrl = `${serverUrl.replace(/^http/, "ws")}/ws/ext/${session_id}`;
   } else {
+    // A conversation that ended cleanly leaves its debugger attached — that
+    // tab is the session's, and the branch above hands it to the next task in
+    // the same conversation. Reaching here means a *new* session, and
+    // chrome.debugger refuses a second attach to a tab that already has one.
+    if (activeTabId !== null) {
+      await dbg.detachFromTab(activeTabId);
+      activeTabId = null;
+    }
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const activeTab = tabs[0];
 
@@ -1051,16 +1059,16 @@ async function startRelay(
 
 async function cleanup(): Promise<void> {
   const tid = activeTabId;
-  // ponytail: WS died mid-task → end the task with a connection-lost
-  // reason BEFORE the disconnected event. The harness on the server
-  // is stuck waiting on human_input_queue and can't recover from a
-  // dead WS, so the only thing we can do from this side is mark the
-  // task as failed so the UI stops the timer and shows the bubble.
-  // Without this, state.phase stays 'executing' on the sidepanel, the
-  // timer keeps running, and the task is effectively invisible-orphan.
-  // Reconnect attempts run in the background regardless — they're for
-  // the NEXT task.
-  if (taskInFlight && !taskTerminalEmitted) {
+  // The server runs one task per socket and closes it when that task ends, so
+  // a close that arrives *after* the terminal frame is the run finishing, not
+  // a failure. A close while the run is still live did lose it, and says so
+  // with a connection-lost reason before the disconnected event — the harness
+  // is stuck waiting on human_input_queue and can't recover from a dead WS,
+  // so the only thing to do from here is mark the task failed so the UI stops
+  // the timer and shows the bubble. Reconnect attempts run in the background
+  // regardless; they're for the NEXT task.
+  const lost = taskInFlight && !taskTerminalEmitted;
+  if (lost) {
     taskTerminalEmitted = true;
     taskInFlight = false;
     void setBadge(false);
@@ -1080,16 +1088,22 @@ async function cleanup(): Promise<void> {
   // heartbeat interval reads `ws.readyState` and would be a no-op anyway,
   // but explicit stop is easier to reason about.
   stopHeartbeat();
-  activeTabId = null;
-  tabStack = [];
   ws = null;
-  sessionId = null;
+  // Only a lost run gives the tab back. On a clean finish the tab and the
+  // session id *are* the conversation — releasing them here is what made
+  // every second message start a new one, because the follow-up found
+  // nothing left to continue.
+  if (lost) {
+    activeTabId = null;
+    tabStack = [];
+    sessionId = null;
+    void chrome.storage.session.remove([...SESSION_KEYS]);
+    if (tid !== null) void dbg.detachFromTab(tid).catch(() => undefined);
+  }
   waitingForLogin = false;
   currentPrompt = null;
   lastObservedUrl = "";
-  if (tid !== null) void dbg.detachFromTab(tid).catch(() => undefined);
   void setBadge(false);
-  void chrome.storage.session.remove([...SESSION_KEYS]);
 }
 
 function stopRelay(): void {
@@ -1124,6 +1138,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           // the new one.
           cancelReconnect();
           taskTerminalEmitted = false;
+          // Per-run, and a follow-up is a new run inside an existing session —
+          // the mint branch resets these for a new *session*, which a follow-up
+          // never reaches. The step count in particular is what the history
+          // row shows, and a conversation's second task reporting its first's
+          // steps is a number about a run that is over.
+          stepIndex = 0;
+          noTabWarned = false;
           // ponytail: mark a task as in-flight so cleanup() knows the lost
           // socket cost the user a running task, not a clean ending.
           taskInFlight = true;
