@@ -76,6 +76,15 @@ Providers: `anthropic`, `openai`, `minimax` (reuses AnthropicFactory with `https
 
 Four things per step — hierarchy (`parent_ref_id`, resolved to the nearest **kept** ancestor, or depth is 0 on most pages), hrefs (the model cannot see a page's URL space without them), page text, and `ax_filter.budget_for_window(context_window, step)` (window/20, floor 8K, cap 60K, **decaying to 30% by step 15**). `context_window` is resolved by `_resolve_model(deps)` *before* the loop so step 0 isn't budgeted against the wrong model. Full reasoning in `docs/architecture/agent-loop.md`.
 
+### Frames, and why a ref is composite
+
+The observation is the union of every frame's AX tree, not just the top frame's — the probe measured `GAP_FRAMES` on `auth-iframe`, and `getFullAXTree` takes a `frameId` and reads cross-origin frames in-process, so it is one call per frame and **no script in a foreign realm, ever**.
+
+- **A `nodeId` is unique only within one frame.** Two frames both return `42`. The ref is `<frameIndex>:<nodeId>` — the ordinal, not the 32-char CDP id, because a ref is printed on every rendered line; `frameId` rides on the target for dispatch. `parent` is composite too and `_depths` treats it as opaque, so the server is unchanged. Parent resolution is **per frame** — the `parentId` table is that frame's own.
+- **Caps are enforced in the walk: 12 frames, depth 4, 2000 nodes per tree.** Depth 4 because `MAX_DEPTH` for indentation is already 4 — anything deeper flattens out of the rendered tree anyway. A failing frame is recorded in `scan.failed` and skipped; a failed `Page.getFrameTree` falls back to the frameless main-frame read.
+- `frames` rides the observation frame and `main.py` warns when any cap trips. **The model isn't told about truncation yet** — that wants one line beside `render_ax_tree`'s "N more element(s) not shown".
+- **Not fixed:** a click still dispatches by coordinate on the top session. Fine for a same-process cross-origin frame; an **OOPIF** would need `Target.attachToTarget`, a privilege expansion the probe did not show we need. Not verified in a browser.
+
 ### Convergence and step count
 
 What the model sees is half of it; the other half is `prompt.py`'s `<convergence>` section, added after a live run took 17 steps to conclude something it had at step 5. Three gaps it closes: **a well-established "none exist" is a complete answer** (an empty list previously read as *failed to find*, licensing a wider search); **a rejected input gets one differently-worded retry, then it is a finding about the site**; and there is a per-navigation gate — *what specific evidence will this step add?* A step that cannot name it does not navigate.

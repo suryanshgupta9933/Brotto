@@ -51,6 +51,60 @@ nodes, no text, a product decision rather than a fix), `GAP_TIMING` (the
 target takes 5s to appear and we read the tree at an arbitrary instant), and
 `GAP_RENDER` (present, in the tree, and past the character budget).
 
+### Frames — a bounded union, and a ref that has to be composite
+
+`observation/surfaces.ts` walks `Page.getFrameTree` and calls
+`getFullAXTree({frameId})` once per selected frame. Three things about it are
+load-bearing:
+
+- **A `nodeId` is unique only within one frame.** Two frames both return
+  `nodeId: 42`, so the ref is `<frameIndex>:<nodeId>` — the *ordinal*, not
+  the 32-char CDP frame id, because a ref is printed on every line of the
+  rendered tree and 32 hex chars a line is not free. The real `frameId`
+  travels on the target as `frameId`, which is what dispatch routes with.
+  `parent` is the composite too, and the server's `_depths` treats it as an
+  opaque string, so a `1:41` → `1:7` chain indents exactly as bare node ids
+  did. **Parent resolution is per frame**: the `parentId` table is the
+  frame's own, so a link whose kept ancestor is `dialog` at node 1 resolves
+  to `1:1` in every frame, and a bare id would have made the wrong table
+  invisible.
+- **The caps are 12 frames, depth 4, 2000 nodes per tree, and they are
+  enforced in the walk**, not written down. Depth 4 because the server's
+  `MAX_DEPTH` for indentation is already 4 — a control four levels down
+  flattens out of the rendered tree, so traversing it spends a round trip on
+  something the model cannot use. The walk is breadth-first over an
+  index-pointer queue of *nodes* (not frames: `childFrames` is on the node,
+  the same wrapping that puts `id` there), so a 3000-deep bomb neither
+  recurses nor starves the shallow frames. `Page.getFrameTree` delivers the
+  whole tree in one call, so the cap is on the per-frame AX reads, which is
+  where the cost is; `total` still counts everything, because an honest
+  "12 of 3000" beats a cheap lie.
+- **No script is evaluated in a foreign realm.** Everything reads
+  accessibility nodes and geometry. `Runtime.evaluate` in a cross-origin
+  frame's execution context is a materially larger privilege than a read and
+  is not in this workstream.
+
+A frame that fails `getFullAXTree` is recorded in `scan.failed` and skipped;
+the main frame's targets are already in hand. A `Page.getFrameTree` that
+fails entirely (a tab mid-navigation) falls back to a single frameless
+surface — the main frame's tree is readable without a `frameId` — so the
+observation degrades to the pre-frames behaviour rather than to nothing.
+
+The scan (`frames` on the observation frame) records `traversed`, `total`,
+`crossOrigin`, the three cap flags and `failed`. `main.py` logs a warning when
+any of them trips, so a truncated or partly-unreadable observation is visible
+rather than silently partial. **The model is not told yet** — that wants one
+more line beside the "N more element(s) not shown" note at the end of
+`render_ax_tree`.
+
+**Not fixed, deliberately:** a click still dispatches by coordinate on the
+top session. For a same-process cross-origin frame that works. For an
+**OOPIF** — a frame in its own renderer process — the top session's
+`Input.dispatchMouseEvent` does not reach it, and routing it would mean
+`Target.attachToTarget`, a privilege expansion the probe did not show we
+need. `frameId` is on the target so that path exists when it does. Not
+verified in a browser.
+
 ## Choosing a target — the largest single lever we have not pulled
 
 Everything above is about *what the model is shown*. This is about *how it is

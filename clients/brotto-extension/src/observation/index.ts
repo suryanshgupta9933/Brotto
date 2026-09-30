@@ -9,6 +9,7 @@
 
 import * as dbg from "../debugger";
 import { waitForStable } from "./stability";
+import { anyCommand, enumerateSurfaces, makeRef, FrameScan, Surface } from "./surfaces";
 
 const KEEP_ROLES = new Set([
   "button","link","textbox","searchbox","combobox","checkbox","radio",
@@ -31,21 +32,34 @@ function propUrl(node: any): string | undefined {
   return undefined;
 }
 
-export async function extractAx(tabId: number): Promise<object[]> {
-  await dbg.sendCommand(tabId, { method: "Accessibility.enable" });
-  const raw = await dbg.sendCommand(tabId, {
-    method: "Accessibility.getFullAXTree",
-  }) as { nodes?: any[] };
-  const nodes = raw.nodes ?? [];
-  const targets: object[] = [];
+/**
+ * One frame's accessibility nodes, as targets.
+ *
+ * Written without local type annotations for the same reason as `anyCommand`:
+ * `scripts/test-observation-surfaces.test.js` extracts this body and
+ * evaluates it as plain JavaScript, and `: Set<number>` is a syntax error
+ * there. `tsconfig` has `strict: false`, so nothing is lost.
+ *
+ * The parent chain is resolved *within the frame* — `nodeId` is only
+ * meaningful next to its own frame's table — and only then turned into a
+ * composite ref on the way out. The server's `_depths` walks `parent`
+ * opaquely, so a `0:41` → `0:7` chain indents exactly as the bare node ids
+ * did before frames existed.
+ */
+export async function targetsForFrame(
+  tabId: number,
+  surface: Surface,
+): Promise<object[]> {
+  const nodes = surface.axNodes;
+  const targets = [];
 
   // The server indents by kept-ancestor depth, so it needs the parent
   // chain. Send the nearest *kept* ancestor and let it derive depth — one
   // implementation for both capture paths, not one per language. A link's
   // immediate parent is usually a generic container that never survives
   // KEEP_ROLES, so resolving only the direct parent yields depth 0.
-  const kept = new Set<number>();
-  const parentOf = new Map<number, number>();
+  const kept = new Set();
+  const parentOf = new Map();
   for (const node of nodes) {
     if (typeof node.nodeId === "number" && typeof node.parentId === "number") {
       parentOf.set(node.nodeId, node.parentId);
@@ -56,8 +70,8 @@ export async function extractAx(tabId: number): Promise<object[]> {
     kept.add(node.nodeId);
   }
 
-  const keptAncestor = (nodeId: number): number | undefined => {
-    const seen = new Set<number>();
+  const keptAncestor = (nodeId) => {
+    const seen = new Set();
     let cur = parentOf.get(nodeId);
     while (cur !== undefined && !kept.has(cur)) {
       if (seen.has(cur)) return undefined;
@@ -75,14 +89,14 @@ export async function extractAx(tabId: number): Promise<object[]> {
     const href  = propUrl(node);
     const parentId = keptAncestor(node.nodeId);
     const backendId = node.backendDOMNodeId;
-    let x: number | undefined, y: number | undefined;
+    let x, y;
     if (backendId) {
       try {
-        const box = await dbg.sendCommand(tabId, {
+        const box = await anyCommand(tabId, {
           method: "DOM.getBoxModel",
           params: { backendNodeId: backendId },
-        }) as { model?: { content?: number[] } };
-        const c = box.model?.content;
+        });
+        const c = box?.model?.content;
         if (c && c.length >= 4) {
           x = Math.round((c[0] + c[2]) / 2);
           y = Math.round((c[1] + c[3]) / 2);
@@ -90,11 +104,15 @@ export async function extractAx(tabId: number): Promise<object[]> {
       } catch { /* offscreen — skip coords */ }
     }
     targets.push({
-      ref: node.nodeId, role, name,
+      ref: makeRef(surface.frameIndex, node.nodeId), role, name,
       ...(value !== undefined ? { value } : {}),
       ...(href    !== undefined ? { href }    : {}),
-      ...(parentId !== undefined ? { parent: parentId } : {}),
+      ...(parentId !== undefined ? { parent: makeRef(surface.frameIndex, parentId) } : {}),
       ...(x !== undefined    ? { x, y }   : {}),
+      // The frame this node lives in, so a click can be routed to the right
+      // one. Refs are per-observation, so this travels with the target rather
+      // than being looked up later.
+      frameId: surface.frameId,
       // The server cannot tell a password field from an email field without
       // the DOM node, and this is the only place the id is available — the
       // getBoxModel call above already used it. One int on a target that is
@@ -102,8 +120,23 @@ export async function extractAx(tabId: number): Promise<object[]> {
       ...(backendId !== undefined ? { backendNodeId: backendId } : {}),
     });
   }
-  await dbg.sendCommand(tabId, { method: "Accessibility.disable" });
   return targets;
+}
+
+export async function extractAx(
+  tabId: number,
+): Promise<{ targets: object[]; frames: FrameScan }> {
+  await dbg.sendCommand(tabId, { method: "Accessibility.enable" });
+  const { surfaces, scan } = await enumerateSurfaces(tabId);
+  const targets: object[] = [];
+  // Sequential, not Promise.all: a frame bomb is capped, but a page that
+  // legitimately has a dozen frames should not have twelve `getFullAXTree`
+  // calls in flight against one debugger session.
+  for (const surface of surfaces) {
+    targets.push(...await targetsForFrame(tabId, surface));
+  }
+  await dbg.sendCommand(tabId, { method: "Accessibility.disable" });
+  return { targets, frames: scan };
 }
 
 export async function captureObservation(tabId: number) {
@@ -125,23 +158,32 @@ export async function captureObservation(tabId: number) {
   }) as { result?: { value?: { url: string; title: string; text: string } } };
   const { url = "", title = "", text: pageText = "" } = ps.result?.value ?? {};
 
-  let axTargets = await extractAx(tabId);
+  let { targets: axTargets, frames } = await extractAx(tabId);
 
   // Retry only while the tree is still moving. The old test was
   // `axTargets.length < 3`, which is wrong in both directions: a page that
   // rendered three useless targets stops retrying, and a merely-dense page
   // burns all four retries on itself. Two extra reads, stopping at the first
   // one that changes nothing.
+  //
+  // ponytail: this is now up to three full frame scans a step, so a page
+  // with a dozen frames pays 36 `getFullAXTree` calls. Worth caching the
+  // frame list across the retries if it ever shows up in a trace — the cap
+  // bounds it, it is not unbounded.
   const fingerprint = (ts: any[]) =>
     ts.map((t: any) => t.role + "|" + (t.name ?? "") + "|" + (t.value ?? "")).join("~");
   for (let i = 0, fp = fingerprint(axTargets); i < 2; i++) {
     await sleep(800);
     const next = await extractAx(tabId);
-    const nextFp = fingerprint(next);
-    axTargets = next;
+    const nextFp = fingerprint(next.targets);
+    axTargets = next.targets;
+    frames = next.frames;
     if (nextFp === fp) break;
     fp = nextFp;
   }
 
-  return { url, title, pageText, axTargets };
+  // `frames` rides the wire for free — `sendObservation` spreads the whole
+  // observation — so a truncated or cross-origin-reading step is visible in
+  // the server log and the audit without a second channel.
+  return { url, title, pageText, axTargets, frames };
 }

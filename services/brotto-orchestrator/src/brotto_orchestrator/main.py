@@ -689,6 +689,20 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                         session_id, incoming.get("url", "")[:80], n,
                     )
                     await obs_queue.put(incoming)
+                    # A capped or partly-failed frame walk is a partial
+                    # picture, and "nothing exists" on a truncated page is a
+                    # wrong answer the model cannot recover from. Say so out
+                    # loud rather than shipping the half silently.
+                    fr = incoming.get("frames") or {}
+                    caps = [k for k in ("frameCapped", "depthCapped", "nodeCapped") if fr.get(k)]
+                    if caps or fr.get("failed"):
+                        log.warning(
+                            "[%s] observation truncated: %s/%s frames (%s cross-origin), "
+                            "capped=%s unreadable=%s",
+                            session_id, fr.get("traversed", 0), fr.get("total", 0),
+                            fr.get("crossOrigin", 0), ",".join(caps) or "none",
+                            fr.get("failed") or "none",
+                        )
                 elif t == "observation_error":
                     log.warning("[%s] ← observation_error  err=%s", session_id, incoming.get("error"))
                     await obs_queue.put({"url": "", "title": "", "axTargets": []})
