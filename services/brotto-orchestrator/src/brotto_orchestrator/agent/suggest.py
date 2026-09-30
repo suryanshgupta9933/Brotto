@@ -31,9 +31,10 @@ MAX_CHARS = 110
 # Page text is the input that makes a real suggestion possible — a Gmail tab's
 # title says nothing and its contents say everything. Capped hard because this
 # is a three-line answer: past a few thousand characters the useful part of a
-# page is already in view and the rest is latency. The panel caps at the same
-# number before sending; this is the backstop for any other caller.
-MAX_PAGE_TEXT = 8_000
+# page is already in view and the rest is latency. 2K is ~500 tokens, and this
+# call fires on every idle page. The panel caps at the same number before
+# sending; this is the backstop for any other caller.
+MAX_PAGE_TEXT = 2_000
 
 # A suggestion is a one-tap line read before thinking. The prompt already
 # forbids proposing a change; this drops the ones that slip through. A net,

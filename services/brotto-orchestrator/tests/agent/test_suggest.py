@@ -14,9 +14,20 @@ from __future__ import annotations
 from brotto_orchestrator.agent.suggest import (
     MAX_CHARS,
     MAX_LINES,
+    MAX_PAGE_TEXT,
     _normalise,
     _parse,
 )
+
+
+def test_page_text_stays_a_token_budget_not_a_document():
+    """The suggestion answer is three short lines, so page text is an input
+    sample rather than the page. It is paid for on every idle page, which is
+    why this is a named cost decision and not an arbitrary slice."""
+    assert MAX_PAGE_TEXT <= 2_000, (
+        f"page text cap is {MAX_PAGE_TEXT} chars (~{MAX_PAGE_TEXT // 4} tokens) "
+        "per suggestion call"
+    )
 
 
 def test_numbered_and_bulleted_lines_lose_their_marker():
