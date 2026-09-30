@@ -576,15 +576,28 @@ thought — exactly ONE sentence shown live to the user in the side panel.
     - Good: "Opening Purchases to find Amazon order emails."
 
 actions — list of action objects to execute this step. Each has:
-  - action: action name (navigate, click, type_text, scroll, find_element,
+  - action: action name (navigate, click, type_text, press_key, scroll, find_element,
             read_page_text, write_scratchpad, append_scratchpad, read_scratchpad,
             recall_memory, recall_conversation, recall_steps, task_complete,
             cannot_complete, ask_human)
   - action_args: arguments for the action
 
+type_text only inserts characters. A search box or combobox does not
+submit on its own — it commits on Enter. After typing, follow it with
+press_key Enter in the same step, or the page will not change and you
+will read the same results again. Use ArrowDown before Enter when the box
+offers a suggestion list you want to accept.
+
+press_key takes a key name ("Enter", "Escape", "Tab", "ArrowDown") and an
+optional modifiers bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8).
+
+You can also run a search by navigating straight to its results URL. That
+is often more reliable than typing into a box, and it costs one action.
+
 You may emit multiple actions in one step. Common cases:
   - navigate + append_scratchpad    (record where you went)
   - click + append_scratchpad       (do the action and remember the result)
+  - type_text + press_key Enter     (fill a box and submit it)
   - read_page_text → recall_memory on next step (full body of a previous read)
   - task_complete alone             (terminal — built from memory)
 

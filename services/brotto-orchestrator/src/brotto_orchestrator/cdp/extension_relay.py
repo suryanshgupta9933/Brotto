@@ -168,6 +168,11 @@ class ExtensionCDPRelay:
         await self._send_action({"type": "type", "text": text})
         return f"Typed into [{ref}]"
 
+    async def press_key(self, key: str, modifiers: int = 0) -> str:
+        log.info("[%s] press_key %r modifiers=%d", self._sid, key, modifiers)
+        await self._send_action({"type": "key", "key": key, "modifiers": modifiers})
+        return "ok"
+
     async def read_page_text(
         self,
         selector: str = "body",

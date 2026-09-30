@@ -883,9 +883,17 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             result = await cdp.type_text_to_ref(args["ref"], args["text"])
             return f"Typed into [{args['ref']}]: {result}"
 
+        elif action == "press_key":
+            # modifiers is CDP's bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8).
+            # A search box commits on Enter; without this the model could
+            # type a query and never run it.
+            key = args["key"]
+            result = await cdp.press_key(key, args.get("modifiers", 0))
+            return f"Pressed {key}: {result}"
+
         elif action == "scroll":
             direction = args.get("direction", "down")
-            amount = args.get("amount_px", 300)
+            amount = args.get("amount", args.get("amount_px", 300))
             await cdp.scroll(direction, amount)
             await cdp.refresh_target_map()
             return f"Scrolled {direction}"

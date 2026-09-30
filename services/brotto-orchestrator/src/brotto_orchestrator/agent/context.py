@@ -98,7 +98,7 @@ class ActionCall(BaseModel):
     """One action in a multi-action decision. The agent may emit several of
     these per step (e.g. click + append_scratchpad)."""
     action: Literal[
-        "navigate", "click", "type_text", "scroll",
+        "navigate", "click", "type_text", "press_key", "scroll",
         "find_element", "read_page_text",
         "write_scratchpad", "append_scratchpad", "read_scratchpad", "recall_memory",
         "recall_conversation", "recall_steps",

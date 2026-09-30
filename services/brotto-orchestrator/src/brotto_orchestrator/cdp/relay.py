@@ -80,6 +80,18 @@ class CDPRelay:
         )
         return "ok" if result.get("ok") else result.get("error", "failed")
 
+    async def press_key(self, key: str, modifiers: int = 0) -> str:
+        """`modifiers` is CDP's bitmask; Playwright wants "Control+a"."""
+        if not self._browser.page:
+            return "no page"
+        names = [
+            name
+            for bit, name in ((1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift"))
+            if modifiers & bit
+        ]
+        await self._browser.page.keyboard.press("+".join(names + [key]))
+        return "ok"
+
     async def scroll(self, direction: str, amount: int = 300) -> None:
         await self._browser._handle_scroll({"type": "scroll", "direction": direction, "amount_px": amount})
 
