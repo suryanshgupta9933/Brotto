@@ -20,9 +20,11 @@ dependencies = [
     "playwright>=1.40.0",
 ]
 
-[tool.setuptools]
-packages = ["brotto_orchestrator", "brotto_orchestrator.testing"]
-package-dir = {"" = "src"}
+# ponytail: matches the root pyproject.toml, which is the one `uv sync` /
+# `pip install .` at the repo root uses. Two pyprojects describing one project
+# is a trap: they drift, and they already had.
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

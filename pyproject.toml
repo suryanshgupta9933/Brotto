@@ -18,9 +18,13 @@ dependencies = [
     "python-dotenv>=1.0.0",
 ]
 
-[tool.setuptools]
-packages = ["brotto_orchestrator"]
-package-dir = {"" = "services/brotto-orchestrator/src"}
+# ponytail: find, not an explicit list. An explicit list silently dropped
+# every subpackage (agent, model, policy, cdp, ...), so `pip install .`
+# produced a top-level-only package that ImportError'd on first use.
+# services/brotto-orchestrator/pyproject.toml declares the same project for
+# in-place installs; the two must agree.
+[tool.setuptools.packages.find]
+where = ["services/brotto-orchestrator/src"]
 
 [dependency-groups]
 dev = [
