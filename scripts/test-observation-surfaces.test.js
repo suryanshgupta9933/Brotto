@@ -91,7 +91,7 @@ function moduleFor(dbgImpl) {
        const enumerateSurfaces = (async function (tabId, limits) { ${BODIES.enumerateSurfaces} });
        const KEEP_ROLES = ${KEEP_ROLES_SRC.replace('const KEEP_ROLES = ', '')};
        const propUrl = (function (node) { ${BODIES.propUrl} });
-       const targetsForFrame = (async function (tabId, surface) { ${BODIES.targetsForFrame} });
+       const targetsForFrame = (async function (tabId, surface, boxes) { ${BODIES.targetsForFrame} });
        return { makeRef, originOf, selectFrames, enumerateSurfaces, targetsForFrame };
      })()`,
     sandbox,
@@ -246,7 +246,49 @@ function check(name, cond, detail) {
       `ref was ${targets[0].ref}`);
   }
 
-  // 4. A HOSTILE OR DEAD FRAME. One `getFullAXTree` rejects; the top frame's
+  // 4. THE BULK GEOMETRY WIRING. `boxMap` is tested on its own in
+  //    test-observation-geometry; what is untested is that `targetsForFrame`
+  //    actually *consumes* it. A silently-ignored map still passes every
+  //    geometry test and still costs a round trip per node.
+  {
+    let boxCalls = 0;
+    const mod2 = moduleFor(async (_t, cmd) => {
+      if (cmd.method === "DOM.getBoxModel") { boxCalls++; throw new Error("should not be called"); }
+      return {};
+    });
+    const frames = mod2.selectFrames(frameNode("root", "https://shop.example/checkout"));
+    const surface = { ...frames.surfaces[0], axNodes: [
+      axNode("button", "Pay", { backendId: 501 }),
+      axNode("link", "Cancel", { backendId: 502 }),
+    ] };
+    const targets = await mod2.targetsForFrame(7, surface, new Map([
+      [501, { x: 10, y: 20 }], [502, { x: 30, y: 40 }],
+    ]));
+    check("a supplied box map supplies the coordinates",
+      targets[0].x === 10 && targets[0].y === 20 && targets[1].x === 30 && targets[1].y === 40,
+      `got ${JSON.stringify(targets.map((t) => [t.x, t.y]))}`);
+    check("…and the per-node call is skipped entirely", boxCalls === 0,
+      `DOM.getBoxModel was called ${boxCalls} times`);
+
+    // The miss case is the one that must not regress silently: an id the map
+    // does not cover falls back to the per-node call, so an off-screen target
+    // and an unmeasured one stay different.
+    const mod3 = moduleFor(async (_t, cmd) => {
+      if (cmd.method === "DOM.getBoxModel") {
+        boxCalls++;
+        return { model: { content: [0, 0, 8, 4, 8, 4, 0, 0] } };
+      }
+      return {};
+    });
+    const partial = await mod3.targetsForFrame(7, surface, new Map([[501, { x: 1, y: 2 }]]));
+    check("an id the map misses falls back to one per-node call", boxCalls === 1,
+      `DOM.getBoxModel was called ${boxCalls} times`);
+    check("…and the mapped node still took its bulk coordinates",
+      partial[0].x === 1 && partial[1].x === 4,
+      `got ${JSON.stringify(partial.map((t) => [t.x, t.y]))}`);
+  }
+
+  // 5. A HOSTILE OR DEAD FRAME. One `getFullAXTree` rejects; the top frame's
   //    targets still come back. A frame that navigated out from under us
   //    must not cost the whole observation.
   {

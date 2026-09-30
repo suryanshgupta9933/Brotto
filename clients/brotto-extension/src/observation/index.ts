@@ -10,6 +10,8 @@
 import * as dbg from "../debugger";
 import { waitForStable } from "./stability";
 import { anyCommand, enumerateSurfaces, makeRef, FrameScan, Surface } from "./surfaces";
+import { boxMap, GeometryResult } from "./geometry";
+import { findHiddenTargets } from "./supplement";
 
 const KEEP_ROLES = new Set([
   "button","link","textbox","searchbox","combobox","checkbox","radio",
@@ -49,6 +51,7 @@ function propUrl(node: any): string | undefined {
 export async function targetsForFrame(
   tabId: number,
   surface: Surface,
+  boxes?: GeometryResult["boxes"],
 ): Promise<object[]> {
   const nodes = surface.axNodes;
   const targets = [];
@@ -91,17 +94,25 @@ export async function targetsForFrame(
     const backendId = node.backendDOMNodeId;
     let x, y;
     if (backendId) {
-      try {
-        const box = await anyCommand(tabId, {
-          method: "DOM.getBoxModel",
-          params: { backendNodeId: backendId },
-        });
-        const c = box?.model?.content;
-        if (c && c.length >= 4) {
-          x = Math.round((c[0] + c[2]) / 2);
-          y = Math.round((c[1] + c[3]) / 2);
-        }
-      } catch { /* offscreen — skip coords */ }
+      // Prefer the bulk map. A miss falls through to the per-node call rather
+      // than dropping coords — an off-screen target and an unmeasured one are
+      // different, and the fallback is what keeps that distinction honest.
+      const box = boxes?.get(backendId);
+      if (box) {
+        ({ x, y } = box);
+      } else {
+        try {
+          const one = await anyCommand(tabId, {
+            method: "DOM.getBoxModel",
+            params: { backendNodeId: backendId },
+          });
+          const c = one?.model?.content;
+          if (c && c.length >= 4) {
+            x = Math.round((c[0] + c[2]) / 2);
+            y = Math.round((c[1] + c[3]) / 2);
+          }
+        } catch { /* offscreen — skip coords */ }
+      }
     }
     targets.push({
       ref: makeRef(surface.frameIndex, node.nodeId), role, name,
@@ -128,12 +139,29 @@ export async function extractAx(
 ): Promise<{ targets: object[]; frames: FrameScan }> {
   await dbg.sendCommand(tabId, { method: "Accessibility.enable" });
   const { surfaces, scan } = await enumerateSurfaces(tabId);
+
+  // One geometry call for the whole union, not one per node per frame: the
+  // Gmail search page measured 608 targets, and the old per-node round trip
+  // made observation latency proportional to page size on every step.
+  const ids: number[] = [];
+  for (const surface of surfaces) {
+    for (const node of surface.axNodes ?? []) {
+      if (typeof node?.backendDOMNodeId === "number") ids.push(node.backendDOMNodeId);
+    }
+  }
+  const geometry = await boxMap(tabId, ids);
+
   const targets: object[] = [];
   // Sequential, not Promise.all: a frame bomb is capped, but a page that
   // legitimately has a dozen frames should not have twelve `getFullAXTree`
   // calls in flight against one debugger session.
   for (const surface of surfaces) {
-    targets.push(...await targetsForFrame(tabId, surface));
+    targets.push(...await targetsForFrame(tabId, surface, geometry.boxes));
+    // aria-hidden controls the AX tree dropped on purpose. They carry
+    // `hidden: true`, which is what stops the harness pre-approving one.
+    targets.push(...await findHiddenTargets(
+      tabId, surface, new Set(targets.map((t: any) => t.backendNodeId)),
+    ));
   }
   await dbg.sendCommand(tabId, { method: "Accessibility.disable" });
   return { targets, frames: scan };
