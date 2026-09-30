@@ -146,24 +146,34 @@ Dev default: `minimax:MiniMax-M3`, 1M context. `BROTTO_ENV=prod` opts out. `AUTH
 ## Wave 0 blockers — perception
 
 **Re-derived by measurement on 2026-10-01** — `scripts/probe_perception.py`, output
-committed to `tests/fixtures/perception-probe.json`. These gate the "works on the
-sites behind your login" claim and block Wave 0A. Detail in
-`docs/superpowers/specs/2026-09-28-capability-map-design.md`.
+committed to `tests/fixtures/perception-probe.json`. These gated the "works on the
+sites behind your login" claim and were Wave 0A. Design in
+`docs/superpowers/specs/2026-10-01-perception-hardening-design.md`.
 
-| Gap | Verdict | Evidence |
-|---|---|---|
-| ~~No shadow DOM traversal~~ | **Retracted — never existed** | A control inside an *open* shadow root comes back from a plain top-frame `getFullAXTree` (`auth-shadow`, `OK`). Chrome traverses open roots itself. The 2026-09-28 evidence was a grep for `shadowRoot` returning nothing, which described *our source*, not Chrome |
-| No iframe traversal | `GAP_FRAMES` | The target is in a cross-origin frame and only the top frame's tree is read. Payment fields, reCAPTCHA, third-party embeds unreachable |
-| No canvas / screenshot fallback | `GAP_UNREACHABLE` | No `canvas` handling, no `Page.captureScreenshot`. The fixture has no a11y mirror, so this is a **product decision** (vision dependency vs. reporting the limitation), not a perception task |
-| No `aria-hidden` reconciliation | `GAP_ARIA` | The control is in the DOM and absent from the AX tree by design. The AX tree is consumed as-is, so it is neither seen nor targetable |
-| No dynamic-stability wait | `GAP_TIMING` | Target measured at **5000ms** to appear; the tree is read on a `readyState` poll that completes before a SPA renders anything |
-| Observation hard-capped | `GAP_RENDER` | `budget_for_window` is window/20, 8K–60K, decaying to 30% by step 15, and cuts on line count. The target is present and past the cut — a ranking problem, not a size one |
-| Auth code present but unwired | Confirmed | `session/auth.py` has `validate_token`, but `/ws/ext/{session_id}` never calls it and `AGENT_AUTH_DISABLED` defaults to `"true"`. `GET /v1/sessions` and `GET /v1/sessions/{id}/audit` are unauthenticated and return full run transcripts |
+**What the score can and cannot attest.** `run_benchmark.py` POSTs to `/run`, which
+drives a Playwright CDP client — it never loads the extension. So the fixtures gate
+the *server* only. Of the five perception fixes, **ranked selection is the only
+server-side one**, and it is the only one whose `PASS` means anything: `auth-inbox`
+is green because of it. The other four are unit-tested logic and **not yet verified
+in a browser**. The four remaining `PERCEPTION_FAILURE` rows below are unchanged
+for exactly this reason, and will stay red until the extension is the thing under
+test.
+
+| Gap | Verdict | Status | Evidence |
+|---|---|---|---|
+| ~~No shadow DOM traversal~~ | **Retracted — never existed** | Closed | A control inside an *open* shadow root comes back from a plain top-frame `getFullAXTree` (`auth-shadow`, `OK`). Chrome traverses open roots itself. The 2026-09-28 evidence was a grep for `shadowRoot` returning nothing, which described *our source*, not Chrome |
+| No iframe traversal | `GAP_FRAMES` | Built, unverified in browser | `observation/surfaces.ts` reads one `getFullAXTree` per frame (the probe confirmed it takes a `frameId`, so no target-attach and no script in a foreign realm). Refs are composite `frame:node`, capped at 12 frames / depth 4 |
+| No canvas / screenshot fallback | `GAP_UNREACHABLE` | **Decided: report, don't add pixels** | A vision fallback is a measured *regression* on the pages Brotto already reads well (Gemini-3-Flash 69.3% vs vision-based Kimi-K2.5 45.9% on WebArena-Infinity). `prompt.py` now tells the model to check the text once and, if it is empty too, say the page is drawing itself and ask — which is the honest answer the fixture never gets |
+| No `aria-hidden` reconciliation | `GAP_ARIA` | Built, unverified in browser | `observation/supplement.ts` surfaces what the tree dropped, marked `[hidden]`, never auto-approved — `_first_time_key` returns `(domain, "click:hidden")` so a site-hidden control cannot inherit an existing click approval |
+| No dynamic-stability wait | `GAP_TIMING` | Built, unverified in browser | `observation/stability.ts` waits for a mutation-quiet window (3s quiet, 10s hard deadline) instead of polling `readyState`, which completes before a SPA renders. Target measured at **5000ms** to appear |
+| Observation hard-capped | `GAP_RENDER` | **Fixed and measured** | `ax_filter` now ranks by actionability before cutting at the budget, and `auth-inbox` is green because of it. Ranking under a budget is also the externally-validated direction: compressed AX trees beat linearized ones 20.7% to 15.6% on 358 OSWorld tasks |
+| Auth code present but unwired | Confirmed | **Open** | `session/auth.py` has `validate_token`, but `/ws/ext/{session_id}` never calls it and `AGENT_AUTH_DISABLED` defaults to `"true"`. `GET /v1/sessions` and `GET /v1/sessions/{id}/audit` are unauthenticated and return full run transcripts |
 
 ## The ceiling, measured externally
 
-Brotto has no reliability number of its own — the 2-of-7 fixture score is
-adversarial by construction, and the only real-site evidence is one failed
+Brotto has no reliability number of its own — the 4-of-8 fixture score is
+adversarial by construction, and half of it is measured on a path the
+extension never takes. The only real-site evidence is one failed
 19-step Gmail run. So the honest comparison is against the published numbers
 for this class of system, which bound what any version of Brotto can do:
 

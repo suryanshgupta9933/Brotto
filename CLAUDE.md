@@ -74,7 +74,7 @@ Providers: `anthropic`, `openai`, `minimax` (reuses AnthropicFactory with `https
 
 ## What the agent sees each step
 
-Four things per step — hierarchy (`parent_ref_id`, resolved to the nearest **kept** ancestor, or depth is 0 on most pages), hrefs (the model cannot see a page's URL space without them), page text, and `ax_filter.budget_for_window(context_window, step)` (window/20, floor 8K, cap 60K, **decaying to 30% by step 15**). `context_window` is resolved by `_resolve_model(deps)` *before* the loop so step 0 isn't budgeted against the wrong model. Full reasoning in `docs/architecture/agent-loop.md`.
+Four things per step — hierarchy (`parent_ref_id`, resolved to the nearest **kept** ancestor, or depth is 0 on most pages), hrefs (the model cannot see a page's URL space without them), page text, and `ax_filter.budget_for_window(context_window, step)` (window/20, floor 8K, cap 60K, **decaying to 30% by step 15**). The budget decides *how many* lines; `ax_filter` sorts by actionability before applying it and so decides *which* — truncation was a ranking problem, not a size one. `context_window` is resolved by `_resolve_model(deps)` *before* the loop so step 0 isn't budgeted against the wrong model. Full reasoning in `docs/architecture/agent-loop.md`.
 
 ### Frames, and why a ref is composite
 

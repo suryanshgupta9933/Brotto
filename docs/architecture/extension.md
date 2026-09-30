@@ -140,9 +140,66 @@ rendered three useless targets stops retrying, and a merely-dense page burns
 all four retries on itself. It now re-reads **twice at most**, stopping at the
 first read whose `role|name|value` fingerprint is unchanged.
 
-**The `/run` benchmark path does not use this code.** `run_benchmark.py` POSTs
-to `/run`, which drives `dev/playwright_browser.py` — a separate observation
+**The `/run` benchmark path does not use this code, and `auth-slowjs` still
+records `PERCEPTION_FAILURE` after this change.** `run_benchmark.py` POSTs to
+`/run`, which drives `dev/playwright_browser.py` — a separate observation
 implementation whose `goto` waits on `domcontentloaded` and whose `observe`
-takes no stability wait at all. `auth-slowjs` still records
-`PERCEPTION_FAILURE` there after this change. A matching gate belongs in
-`playwright_browser.py` before the baseline is re-recorded.
+takes no stability wait at all. The extension is never loaded.
+
+That is a property of the measurement, not a defect in the fix, and it holds for
+every extension-side change in this workstream: the stability gate, frame
+enumeration, bulk geometry and the `aria-hidden` supplement are all invisible to
+the suite. **The baseline was re-recorded with those four fixtures still red**,
+because the alternative — recording them green — would report success for fixes
+that were never exercised, which is worse than having no measurement. The honest
+consequence is that this work is unit-tested logic and **needs a hand-run in a real
+browser** before it is called verified. `auth-inbox` flipped to PASS because ranked
+selection is the one server-side fix, and that PASS is real.
+
+## Geometry is three calls, not one per node
+
+`targetsForFrame` used to call `DOM.getBoxModel` **once per kept node, serially,
+inside the loop**. The Gmail search page measured 608 targets, so observation
+latency was proportional to page size on every step of every task — a floor under
+the product that no amount of prompt work can lift.
+
+`observation/geometry.ts` replaces N calls with three: `DOM.getDocument(depth:-1,
+pierce:true)` for the whole union, `DOM.resolveNode` for one `objectId`, then one
+`Runtime.callFunctionOn` that walks the id list and returns a
+`Map<backendNodeId, [x, y]>` with a `getClientRects().length` zero-check for
+elements that have no box. `backendNodeId` is the join key, and it is the same id
+space on both sides for a given target — which is the only reason this works, and
+was the one open question the probe did not answer.
+
+**A miss in the bulk map falls through to the old per-node call rather than
+dropping coordinates.** Off-screen and unmeasured are different states, and
+collapsing them would make a target that exists look like a target that does not —
+which is precisely the failure the fixtures exist to catch. The result reports
+`source: bulk | empty | no-join | failed` and `requested/resolved/fallback`, capped
+at 2000 entries, so a join that silently stops matching is visible in the
+observation rather than inferred from a page that looks emptier than it is.
+
+## `aria-hidden` is surfaced, not recovered
+
+An `aria-hidden` element is `ignored: true` in the AX tree and the extractor skips
+it. That is the contract working — a screen reader user cannot reach it either,
+which is the point of the attribute. But it is still *visible and clickable*, and
+for "delete the draft" it is exactly the control the user means.
+
+`observation/supplement.ts` returns those elements marked `hidden: true`, rendered
+as `[hidden]`. It refuses cross-origin surfaces and any surface below depth 0, caps
+at 200 nodes and 512 KB of evaluated script, and mints **negative** node ids so a
+supplemented ref (`0:-1`) can never collide with a real one.
+
+**This is a disclosure change and the sharpest edge in the workstream.** Surfacing
+a control to a model is not a screen-reader regression — nothing changes for AT
+users — but it does put a deliberately-hidden button in front of an agent that will
+click it. Two rules follow, and both are load-bearing:
+
+- The line is marked `[hidden]` and the prompt tells the model the site hid it, so
+  its own instructions can weigh it. Being able to see one is not a reason to use
+  one; if it is the only match for what the user asked for, acting on it is correct.
+- **A `[hidden]` action is never auto-approved.** `harness._first_time_key` returns
+  `(domain, f"{action}:hidden")` for it, so a hidden destructive control cannot
+  inherit an existing `(domain, "click")` approval the user gave for visible
+  controls. Pinned by `test_a_hidden_destructive_control_is_not_pre_approved`.

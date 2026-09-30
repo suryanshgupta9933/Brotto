@@ -288,6 +288,14 @@ than usual is visible after the fact.
 > suite can actually observe. Nothing in the extension is claimed as verified
 > on the strength of a fixture run.
 >
+> **Outcome, 2026-10-01:** the baseline was re-recorded at 4/8. `auth-inbox`
+> flipped to PASS — it is the only server-side fix, so it is the only PASS this
+> workstream earned. `auth-shadow` is new and passes, which is the probe's
+> "shadow DOM was never a gap" verdict showing up in the score. The four
+> extension-side fixtures stayed `PERCEPTION_FAILURE` and were left that way on
+> purpose. **Tasks 2, 4, 5 and 6 are unit-tested logic and have not been run in a
+> browser**; that hand-run is still outstanding.
+>
 > The probe's *verdicts* are unaffected — `GAP_FRAMES`, `GAP_TIMING`,
 > `GAP_ARIA` and `GAP_UNREACHABLE` are statements about what Chrome returns
 > through CDP, which is the same on both paths, and the probe drove a real

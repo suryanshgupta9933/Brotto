@@ -16,6 +16,29 @@ Four things arrive per step. All four were captured and thrown away at some poin
 
 Verified: the "find my most starred repo" task that took 8 steps went to 2 — one navigate to the star-sorted view (discovered from a visible href), then the answer.
 
+### Which lines survive the cut
+
+`ax_filter` sorts by `(role not in ACTIONABLE_ROLES, offscreen, not t.name, depth)`
+before applying the budget, and the sort is stable so tree order still breaks ties.
+The old order was viewport-first, then tree order — which meant a long page's
+*first* N controls survived and a named control in the middle of it did not.
+
+**Truncation was a ranking problem, not a size problem.** `auth-inbox` failed
+because the target was present in the tree and past the cut; no budget increase
+fixes that, because the next page up the list has the same problem. `budget_for_window`
+is untouched by this — it decides *how many* lines, the sort decides *which*.
+
+External evidence that less tree is the right direction, and that compressing beats
+passing through: on 358 OSWorld tasks, screenshot 7.0%, linearized AX tree 15.6%,
+**compressed** AX tree 20.7%. Two results. The no-vision position is measured rather
+than assumed, and ranking under a budget is the same move as that compression —
+same source, less tree, better tree.
+
+This is the only one of the five perception fixes the fixture suite can attest to,
+because it is the only server-side one. `auth-inbox` is green because of it. See
+"Wave 0 blockers — perception" in `docs/product/brotto-current-state.md` for why the
+other four still read red.
+
 ### What the AX tree does not contain — measured, not inferred
 
 Everything above describes what we do with the tree we get. Whether the tree
@@ -187,9 +210,11 @@ The fingerprint was not moving, and the reason is that **both of its inputs are
 prefixes**:
 
 - `page_text` is `innerText.slice(0, PAGE_TEXT_MAX)`.
-- `filtered_ax` keeps the first lines in tree order and drops the tail when over
-  budget (`ax_filter.py`). On the extension path `viewport_coords` is `None`, so
-  the drop is by tree position, not by what is on screen.
+- `filtered_ax` dropped the tail when over budget (`ax_filter.py`). *At the time it
+  was tree order* — the drop was by position, not by what was on screen. Ranked
+  selection changed that in 2026-10-01 (see the ceiling section below), which is
+  part of why the detector could not have been rescued by tuning: the two inputs it
+  hashed were both prefixes, and one of them no longer is.
 
 On an infinite feed, new articles land *later* in the tree. The retained prefix
 is byte-identical, so the hash is identical. This is not a threshold problem and
