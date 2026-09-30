@@ -8,6 +8,7 @@
  */
 
 import * as dbg from "../debugger";
+import { waitForStable } from "./stability";
 
 const KEEP_ROLES = new Set([
   "button","link","textbox","searchbox","combobox","checkbox","radio",
@@ -105,26 +106,10 @@ export async function extractAx(tabId: number): Promise<object[]> {
   return targets;
 }
 
-export async function waitForPageReady(tabId: number, maxWaitMs = 10_000): Promise<void> {
-  const deadline = Date.now() + maxWaitMs;
-  while (Date.now() < deadline) {
-    try {
-      const r = await dbg.sendCommand(tabId, {
-        method: "Runtime.evaluate",
-        params: { expression: "document.readyState", returnByValue: true },
-      }) as { result?: { value?: string } };
-      if (r.result?.value === "complete") {
-        await sleep(400); // let JS frameworks render
-        return;
-      }
-    } catch { /* tab mid-navigation — keep polling */ }
-    await sleep(300);
-  }
-  // timed out — proceed with whatever is there
-}
-
 export async function captureObservation(tabId: number) {
-  await waitForPageReady(tabId);
+  // readyState reaches "complete" with the load event, which on a SPA is
+  // before the app has rendered anything. Wait for the page to go still.
+  await waitForStable(tabId);
 
   // Page text rides along with url/title in the evaluate that already runs
   // every step — no extra round trip. innerText is the only place numbers
@@ -142,10 +127,20 @@ export async function captureObservation(tabId: number) {
 
   let axTargets = await extractAx(tabId);
 
-  // SPA pages render interactives after readyState — retry with backoff
-  for (let i = 0; i < 4 && axTargets.length < 3; i++) {
-    await sleep(800 * (i + 1));
-    axTargets = await extractAx(tabId);
+  // Retry only while the tree is still moving. The old test was
+  // `axTargets.length < 3`, which is wrong in both directions: a page that
+  // rendered three useless targets stops retrying, and a merely-dense page
+  // burns all four retries on itself. Two extra reads, stopping at the first
+  // one that changes nothing.
+  const fingerprint = (ts: any[]) =>
+    ts.map((t: any) => t.role + "|" + (t.name ?? "") + "|" + (t.value ?? "")).join("~");
+  for (let i = 0, fp = fingerprint(axTargets); i < 2; i++) {
+    await sleep(800);
+    const next = await extractAx(tabId);
+    const nextFp = fingerprint(next);
+    axTargets = next;
+    if (nextFp === fp) break;
+    fp = nextFp;
   }
 
   return { url, title, pageText, axTargets };

@@ -104,3 +104,45 @@ never reach `timings` or `result.usage`, because both are recorded only when
 `planned is not None` — so a 3-attempt failure's ~19s is charged to nothing.
 
 **Not verified in a browser.** Both halves are read-and-reasoned, not run.
+
+## The observation gate waits for quiet, not for the load event
+
+`captureObservation` used to poll `document.readyState` until `"complete"` and
+then sleep 400ms. **`readyState` reaches `complete` with the load event, which
+on a SPA is *before* the app has rendered anything.** The `auth-slowjs` fixture
+`setTimeout(…, 5000)`s its control into existence and measured a
+`PERCEPTION_FAILURE`: the page was captured at ~400ms with the control absent
+from the tree, and the model was shown a login form with nothing to do.
+
+`observation/stability.ts` replaces it with a mutation-quiet window — one
+`Runtime.evaluate` with `awaitPromise: true` that installs a
+`MutationObserver` on `document` and resolves once the page has been still for
+3s, with a 10s hard deadline.
+
+- **The deadline is the contract, not a fallback.** A live dashboard never
+  mutates out. A gate that waits for quiet is a *barrier*; a gate that waits
+  for quiet *up to a deadline* is a wait. A hung step costs 30s of orchestrator
+  timeout and then an empty page, which is indistinguishable from a perception
+  failure in the audit.
+- **A rejected evaluate (tab mid-navigation) returns immediately** with
+  `waited: false`. Same reasoning: capture whatever is there.
+- **3s is paid on every step**, including a static page — the window is
+  silence, and a page that loaded a moment ago is silent from `t0`. That is
+  the price of not handing the model a half-rendered page. Revisit the number
+  if step latency, not correctness, becomes the complaint.
+- `scripts/test-observation-stability.test.js` runs the real page-side
+  expression against a fake DOM, so "the gate never fires" and "the observer
+  leaks" are both caught. Both are absences and read clean in a diff.
+
+The SPA retry underneath it changed condition at the same time. It retried
+while `axTargets.length < 3`, which is wrong in both directions: a page that
+rendered three useless targets stops retrying, and a merely-dense page burns
+all four retries on itself. It now re-reads **twice at most**, stopping at the
+first read whose `role|name|value` fingerprint is unchanged.
+
+**The `/run` benchmark path does not use this code.** `run_benchmark.py` POSTs
+to `/run`, which drives `dev/playwright_browser.py` — a separate observation
+implementation whose `goto` waits on `domcontentloaded` and whose `observe`
+takes no stability wait at all. `auth-slowjs` still records
+`PERCEPTION_FAILURE` there after this change. A matching gate belongs in
+`playwright_browser.py` before the baseline is re-recorded.
