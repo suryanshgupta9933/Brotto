@@ -504,7 +504,14 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                 "[%s] task_start exceeds %d chars (%d) — prompt-injection risk",
                 session_id, MAX_TASK_CHARS, len(task),
             )
-        log.info("[%s] task_start  task=%r", session_id, task[:100])
+        # A follow-up task and a crash resume arrive on the same frame and do
+        # opposite things with the same document. The extension sets this, and
+        # a frame without it is a follow-up: an extension that predates the
+        # flag never reconnects with resume intent, so defaulting the other
+        # way would let a new task silently restart an approved run.
+        resume = bool(msg.get("resume", False))
+        log.info("[%s] task_start  task=%r  resume=%s", session_id, task[:100],
+                 resume)
     except asyncio.TimeoutError:
         log.warning("[%s] timed out waiting for task_start", session_id)
         await websocket.close(code=4000)
@@ -632,7 +639,7 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         client_ip=client_host,
     )
 
-    agent_task = asyncio.create_task(harness.run(deps))
+    agent_task = asyncio.create_task(harness.run(deps, resume=resume))
     # Publish it on the session state so _prune_sessions() can tell a
     # running session from an idle one and never evict the former.
     registry.get_or_create(session_id).current_task = agent_task

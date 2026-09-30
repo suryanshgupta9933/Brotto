@@ -1312,10 +1312,10 @@ class AgentHarness:
         elif state["action"] == "new_task":
             task_index = 0
         else:
-            # Spelled out rather than a conditional expression because
-            # `_resume_state`'s dict has no "task_index" key at all: the
-            # resume action must not read it, and a `dict.get` would hide that.
-            task_index = 0
+            # A resume continues whatever task the document was last running.
+            # Hardcoding 0 would put a crash in the second task's turns and
+            # messages into the first task's segment of the transcript.
+            task_index = audit.resume_task()
         deps.task_index = task_index
         if state["action"] == "new_task":
             audit.add_message(role="user", content=deps.task, task=task_index,

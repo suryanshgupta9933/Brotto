@@ -255,6 +255,12 @@ class AuditTrail:
         self._lock = threading.Lock()
         self._dropped = 0
         self._seq = 0
+        # Which `tasks[]` entry the turns being written belong to. Stamped
+        # onto every turn rather than passed in, because there is one writer
+        # per run and a dozen `begin_turn` call sites that would each have to
+        # remember to pass it. 0 is right for a first task and for a resume
+        # of one, and `resume_task` corrects it for a resume of a later one.
+        self._task_index = 0
         self._prompt_index: dict[str, tuple[int, dict]] = {}
         self._doc: dict = {
             "schema_version": SCHEMA_VERSION,
@@ -441,11 +447,24 @@ class AuditTrail:
         entry["status"] = "running"
         entry["steps"] = 0
         tasks.append(entry)
+        self._task_index = entry["index"]
         # Named after how the conversation started, not how it ended: the
         # history list needs one stable label for the whole session.
         if not self._doc.get("title"):
             _text(self._doc, "title", goal)
         return entry["index"]
+
+    def resume_task(self) -> int:
+        """Point at the task a crash-resume continues, without starting one.
+
+        Defaults to 0, which is correct for a v1 document and for a resume of
+        a first task. For a resume of a later task it is the last index —
+        anything else writes the resumed run's turns and messages into the
+        wrong segment of the transcript.
+        """
+        tasks = self._doc.get("tasks") or []
+        self._task_index = int(tasks[-1].get("index", 0)) if tasks else 0
+        return self._task_index
 
     def add_message(self, *, role: str, content: str, task: int,
                     turn: int | None) -> str:
@@ -494,6 +513,10 @@ class AuditTrail:
         turn = {
             "seq": self._next_seq(),
             "step": step,
+            # Which `tasks[]` entry this turn belongs to. The transcript join
+            # is messages[].turn -> turns[] and turns[].task -> tasks[], so
+            # without this the panel cannot group a conversation.
+            "task": self._task_index,
             "started_at": _now(),
             "ended_at": None,
             "observation": obs,

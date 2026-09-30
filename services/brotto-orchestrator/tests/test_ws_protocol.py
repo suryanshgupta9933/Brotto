@@ -59,7 +59,7 @@ def agent_disabled(monkeypatch):
     """
     import asyncio
 
-    async def stub_run(self, deps):
+    async def stub_run(self, deps, **kw):
         # Sleep forever, until the WS receive loop cancels us.
         await asyncio.sleep(3600)
 
@@ -242,7 +242,7 @@ def test_steer_message_does_not_touch_human_input_queue(agent_disabled, monkeypa
         def __init__(self, deps):
             self.deps = deps
 
-        async def run(self, deps):
+        async def run(self, deps, **kw):
             seen.append(deps)
             await asyncio.sleep(3600)
 

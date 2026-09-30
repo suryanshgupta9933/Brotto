@@ -102,3 +102,30 @@ def test_list_sessions_reports_the_conversation_title_and_task_count(tmp_path):
     row = [r for r in list_sessions(dir=d) if r["session_id"] == "conv-2"][0]
     assert row["title"] == "first goal"
     assert row["task_count"] == 2
+
+
+def test_every_turn_carries_the_task_it_belongs_to(trail):
+    """The transcript join is messages[].turn -> turns[] and
+    turns[].task -> tasks[]. Without the second hop the panel cannot group
+    a two-task conversation, and the gap is invisible in a one-task run."""
+    first = trail.begin_task("research")
+    t1 = trail.begin_turn(step=0, url="https://a.test", page_title="A",
+                          ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+    trail.end_turn(t1, timings={})
+    second = trail.begin_task("write the post")
+    t2 = trail.begin_turn(step=0, url="https://b.test", page_title="B",
+                          ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+    trail.end_turn(t2, timings={})
+    assert [t["task"] for t in _doc(trail)["turns"]] == [first, second] == [0, 1]
+
+
+def test_a_resume_points_at_the_task_it_continues(trail):
+    """A crash in the second task must not write into the first task's
+    segment. `resume_task` reads the document rather than guessing 0."""
+    trail.begin_task("research")
+    trail.begin_task("write the post")
+    assert trail.resume_task() == 1
+
+
+def test_resume_task_is_zero_on_a_first_conversation(trail):
+    assert trail.resume_task() == 0

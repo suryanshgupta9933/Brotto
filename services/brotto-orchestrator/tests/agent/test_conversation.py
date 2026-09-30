@@ -194,3 +194,32 @@ def test_the_conversation_block_excludes_the_current_task():
          {"role": "user", "content": "this one", "task": 1, "turn": None}],
         current_task=1)
     assert "earlier" in block and "this one" not in block
+
+
+def test_a_resume_of_a_later_task_keeps_its_turns_in_the_right_segment(sessions):
+    """A crash in task 1 resumes into task 1, not into task 0.
+
+    Goes through the harness's own adopt step, because that is the only way
+    an AuditTrail ever learns what is already on disk — a fresh instance
+    starts with an empty document and would answer 0 for anything.
+    """
+    t = AuditTrail("c8", dir=sessions)
+    t.begin_task("research")
+    t.begin_task("write the post")
+    t.begin_turn(step=0, url="https://x.test", page_title="X",
+                 ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+    t.close()
+
+    assert harness_mod._conversation_state("c8", resume=True)["action"] == "resume"
+
+    reopened = AuditTrail("c8", dir=sessions)
+    harness_mod._adopt_document(reopened, read("c8", dir=sessions))
+    assert reopened.resume_task() == 1
+    nxt = reopened.begin_turn(step=1, url="https://x.test", page_title="X",
+                              ax_targets=1, ax_chars=1, ax_diff="",
+                              page_text_chars=0)
+    reopened.add_message(role="assistant", content="posted", task=1, turn=nxt)
+    reopened.close()
+    doc = _doc(sessions, "c8")
+    assert doc["turns"][-1]["task"] == 1
+    assert doc["messages"][-1]["task"] == 1
