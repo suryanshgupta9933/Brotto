@@ -773,6 +773,14 @@ async function startRelay(
         await sendObservation(tid);
         break;
 
+      case "canonical_step":
+        // ponytail: the "still working" line. Forwarded verbatim — kind is a
+        // machine key and the panel owns the wording, so a line edit never
+        // needs a server deploy. Unhandled until now, which is why the live
+        // working bubble existed in the panel and never once appeared.
+        notifyUi({ type: "canonical_step", kind: msg.kind ?? "", step: msg.step });
+        break;
+
       case "step_progress":
         notifyUi({
           type:        "step_card",

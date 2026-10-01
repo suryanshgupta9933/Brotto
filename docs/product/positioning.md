@@ -24,7 +24,7 @@
 
 1. **"Agent runs in your logged-in Chrome — your cookies, your MFA, your SSO."** *(CDP-via-extension is the proof.)*
 2. **"No screenshots. Reads the accessibility tree directly — cheaper and faster than vision."** *(AX tree, by code.)*
-3. **"Bring your own API key. We never see it past the session."** *(chrome.storage.session.)*
+3. **"Bring your own API key. It's never written to disk — not by the extension, not by the server."** *(verified: `chrome.storage.session`, and `save_user_config` persists only the ModelConfig. Corrected 2026-10-01 — the previous wording here was "we never see it past the session", which is **false in hosted mode**: `background.ts:721` puts the key on the wire and `main.py:572` reads it, because the orchestrator is what calls the model provider. Self-hosted it is true; hosted it is not. See `PRIVACY.md`.*)
 4. **"You stay in control. Approval cards for sensitive actions, critical patterns, first-time-seen domains."** *(secure mode is real.)*
 5. **"Model-agnostic. Use Claude, OpenAI, or MiniMax. Swap per task."** *(registry + resolver.)*
 

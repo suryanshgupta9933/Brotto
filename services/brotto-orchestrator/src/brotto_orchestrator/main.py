@@ -684,9 +684,29 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
 
                 if t == "observation":
                     n = len(incoming.get("axTargets", []))
-                    log.debug(
-                        "[%s] ← observation  url=%s  ax_targets=%d",
+                    # What the observation cost, measured by the extension as it
+                    # built it. `scans` is 1 on a page that went still and 1-3 on
+                    # one that did not, and `fallback` is the per-node
+                    # `DOM.getBoxModel` tail the bulk path could not reach. This
+                    # was at debug while the numbers it reports were the whole
+                    # point of measuring them, so a run could not tell whether
+                    # the work landed.
+                    m = incoming.get("metrics") or {}
+                    st = m.get("stability") or {}
+                    geo = m.get("geometry") or {}
+                    log.info(
+                        "[%s] ← observation  url=%s  ax_targets=%d"
+                        "  scans=%s  bytes=%s"
+                        "  geometry=%s/%s resolved (fallback=%s truncated=%s %s)"
+                        "  stability=%s in %sms (%s mutations)",
                         session_id, incoming.get("url", "")[:80], n,
+                        m.get("scans", "?"), m.get("bytes", "?"),
+                        geo.get("resolved", "?"), geo.get("requested", "?"),
+                        geo.get("fallback", "?"), geo.get("truncated", "?"),
+                        geo.get("source", "?"),
+                        "quiet" if st.get("waited") else
+                            ("unsettled" if st.get("timedOut") else "unknown"),
+                        st.get("elapsedMs", "?"), st.get("mutations", "?"),
                     )
                     await obs_queue.put(incoming)
                     # A capped or partly-failed frame walk is a partial
@@ -696,11 +716,29 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     fr = incoming.get("frames") or {}
                     caps = [k for k in ("frameCapped", "depthCapped", "nodeCapped") if fr.get(k)]
                     if caps or fr.get("failed"):
+                        # Which frame capped is the only thing that says whether
+                        # the model lost something it needed: the main document
+                        # going dark is a blind agent, an analytics embed going
+                        # dark is nothing. A bare "capped=nodeCapped" every step
+                        # reads as an error and answers nothing.
+                        capped = fr.get("cappedFrames") or []
+                        # `kept` is the number of controls that survived the
+                        # cap, against `nodes` = the raw AX nodes in the tree.
+                        # The cap is on raw nodes and most of them never become
+                        # targets, so `nodes` alone cannot say whether the
+                        # model lost anything.
+                        where = ",".join(
+                            f"{c.get('frameIndex')}:{c.get('nodes')}"
+                            f"/{c.get('kept', '?')}kept"
+                            f"{'x' if c.get('crossOrigin') else ''}"
+                            f" {(c.get('url') or '')[:60]}"
+                            for c in capped
+                        ) or "-"
                         log.warning(
                             "[%s] observation truncated: %s/%s frames (%s cross-origin), "
-                            "capped=%s unreadable=%s",
+                            "capped=%s at [%s] unreadable=%s",
                             session_id, fr.get("traversed", 0), fr.get("total", 0),
-                            fr.get("crossOrigin", 0), ",".join(caps) or "none",
+                            fr.get("crossOrigin", 0), ",".join(caps) or "none", where,
                             fr.get("failed") or "none",
                         )
                 elif t == "observation_error":

@@ -78,9 +78,11 @@ a new session. A corrupt or already-finished document is reported as
 This retired `agent/run_logger.py`, which wrote a `type_text` action's full
 args — including passwords — to `steps.jsonl` in the clear.
 
-## Action vocabulary (16 actions, `agent/context.py:100-106`)
+## Action vocabulary (14 actions, `agent/context.py`)
 
-`navigate`, `click`, `type_text`, `press_key`, `scroll`, `find_element`, `read_page_text`, `write_scratchpad`, `append_scratchpad`, `read_scratchpad`, `recall_memory`, `recall_conversation`, `recall_steps`, `task_complete`, `cannot_complete`, `ask_human`. No `fill_form`, no `select_option`, no `hover`, no `drag`. `type_text` is char-by-char via `Input.dispatchKeyEvent`.
+`navigate`, `click`, `type_text`, `press_key`, `scroll`, `find_element`, `read_page_text`, `read_scratchpad`, `recall_memory`, `recall_conversation`, `recall_steps`, `task_complete`, `cannot_complete`, `ask_human`. No `fill_form`, no `select_option`, no `hover`, no `drag`. `type_text` is char-by-char via `Input.dispatchKeyEvent`.
+
+Memory is read-only. `append_scratchpad` and `write_scratchpad` are gone from the schema: pages are captured in code every step and persisted to disk, so the only thing the write actions bought was the model transcribing a page it was already looking at — 25 recorded calls, ~17,000 chars, and the six highest-`tokens_out` runs were exactly the six transcript-shaped ones. Prompting the model not to do this did not work (two `SYSTEM_PROMPT` rules pointed opposite ways), so the action left the schema rather than the prompt.
 
 `press_key` exists because `type_text` only inserts. A combobox — Gmail's search box is the canonical one — commits on Enter, and an agent with no way to press it reads the same results forever. Both it and `clear_ref` send CDP's modifier bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8); the extension forwards it, and an earlier version dropped it, so `clear_ref` typed a literal `a` instead of selecting the field.
 

@@ -39,6 +39,390 @@ because it is the only server-side one. `auth-inbox` is green because of it. See
 "Wave 0 blockers — perception" in `docs/product/brotto-current-state.md` for why the
 other four still read red.
 
+### What a step costs
+
+Measured off a 6-step Gmail run (session `d141a18f`, 178.10s wall, 6 model turns):
+
+| phase | seconds | share |
+|---|---|---|
+| observe | 70.53 | 39.6% |
+| model_plan | 82.97 | 46.6% |
+| execute | 24.59 | 13.8% |
+
+`tokens_in:out` = 39:1 — 161,764 in, 4,167 out, ~27K input tokens per turn.
+
+**The model is not thinking — and that turned out not to be the explanation.**
+`MiniMax-M3` is not in `_THINKING_REQUIRED` (`registry.py`), so
+`anthropic_thinking={"type": "disabled"}` is sent. This section originally
+concluded from there that `model_plan` was *prefill on a 27K-token prompt* and
+that the per-turn spread (4.5s → 39.3s) tracked prompt size. **That was
+inferred, not measured, and it is wrong.** It is corrected below.
+
+#### Latency is generation-bound. Cut output, not input.
+
+Over 73 recorded steps: `corr(output_tokens, latency) = +0.876`,
+`corr(input_tokens, latency) = +0.660`. The mechanism is visible in three steps
+from one Gmail session, all on the same page (`83844c3d`, `d0197c38`):
+
+| in | out | latency | note |
+|---|---|---|---|
+| 25,087 | 191 | 4.3s | |
+| 50,977 | 600 | 12.0s | **2× the input** |
+| 25,085 | 3,612 | 41.3s | **19× the output, identical input** |
+| 77,615 | 3,328 | 76.0s | 3 attempts |
+
+Doubling input cost 4.3 → 12.0s. Multiplying output by 19 at the *same* prompt
+cost 4.3 → 41.3s. The stable prefix (`SYSTEM_PROMPT + secure_prefix +
+<conversation> + ## Task`) is served from cache, so 25K input tokens is close to
+free; generation runs at ~60 tok/s and every token costs ~17ms.
+
+**So the leverage is inverted from the obvious.** Shrinking the prompt buys cost
+and little latency. The 41.3s step was 3.6k tokens of *writing*.
+
+**`tokens_in` is summed over retries, so it is not a prompt size.** It reads
+`result.usage.input_tokens` off pydantic-ai's `RunResult`, which is cumulative
+across every request in the run — that is why it is an exact integer multiple of
+the base prompt (25,086 / 50,789 / 77,615) and why `latency_ms` alone cannot
+interpret it. A retry that succeeds leaves no trace in the audit, so a
+retry-driven step is indistinguishable from a slow one in the document. Retries
+are themselves cheap (the prefix is cached); the 76s step's 3,328 generated
+tokens are ~55s of it.
+
+**The 27K is the ranked-selection change, and it is the intended cost.** Before
+it, the tree was truncated in tree order at 6K chars — small prompt, fast, and
+blind to a control in the middle of a long page, which is what `auth-inbox`
+caught. Ranking fills the same 50K-char budget with the *most actionable*
+elements instead, so a realistic page now costs ~27K tokens to say the same
+thing. The old latency was partly the old blindness; it is not a regression to
+recover.
+
+**Observation is the half that is still reducible.** Observe + execute is 95.12s
+= 53.4% of wall, and 12s of `execute` is one click: `_send_action` blocks until
+the extension pushes the post-action observation back.
+
+**What it costs, measured per CDP call.** `scripts/probe_observation_perf.py`
+replays the exact call sequence `captureObservation` runs, timing every call,
+with `BOX_WALK` and `HIDDEN_PROBE` extracted from the TypeScript rather than
+copied — a copy is a second thing to keep correct. Same-origin synthetic
+embeds, 400 nodes each, best of 3:
+
+| frames | AX nodes | geometry fallback | stability | CDP serial | @pool 6 |
+|---|---|---|---|---|---|
+| 1 | 5 | 0 | 3005ms | 6ms | 5ms |
+| 3 | 1,613 | 0 | 3003ms | 89ms | 43ms |
+| 6 | 4,025 | 2,025 | 3006ms | 1,453ms | 284ms |
+| 9 | 6,437 | 4,437 | 3004ms | 3,256ms | 612ms |
+| 12 | 8,849 | 6,849 | 3004ms | 4,728ms | 863ms |
+
+Two findings that changed the design. **The stability gate is a constant 3004ms** —
+3005ms on a 5-node page and 3004ms on an 8,849-node one, so it is `QUIET_MS`
+and nothing about the page moves it. And **the geometry fallback is the real
+cost, growing super-linearly past the cap**: `MAX_GEOMETRY_ENTRIES = 2000` bounds
+the bulk batch, not the per-node `DOM.getBoxModel` loop behind it, so at the
+Gmail-shaped 6-frame case it is 2,025 serial round trips for 1,453ms of one
+scan. Pooling at 6 is worth 5.1–5.5× on the CDP portion at realistic frame
+counts, and 1.2× on a one-frame page, which is the correct answer — there is
+nothing to pool.
+
+Composed with the unconditional retry, that is `3004 + 1453` per scan × 2
+scans ≈ 9s per observation, against a measured 11.75s.
+
+### The 41.3s step: the model was transcribing the page into its notes
+
+One step, one page, one call — 25,085 in, 3,612 out, 41.3s. The audit's
+per-field accounting (`6f66a0ae`) put **39% of that output in
+`append_scratchpad.line`: 5,093 chars**, a full transcription of the inbox —
+an URGENT block of 12 items plus ~45 emails by date — written on the very step
+that then also wrote a 4,262-char summary and finished the task.
+
+**Why it transcribed at all.** `Scratchpad` has two halves, and only one was in
+use. `entries` is a manifest of auto-captured reads: a 200-char digest in the
+prompt, the body fetched on demand by `recall_memory(id)`. That is the correct
+shape and it is the textbook Write/Select split. **It had captured nothing —
+`entries=0` on all three Gmail runs.** Only `read_page_text` created entries,
+and `page_text` already ships in every prompt, so the model had no reason to
+ever call `read_page_text`. With an empty manifest, notes were the only memory
+that existed, and with nothing to retrieve, writing the page down was the only
+way to keep it. The cost was ~1,300 output tokens — and output tokens are the
+latency.
+
+**It also never worked.** "Refer back to a page you've navigated away from
+instead of going back" was not achievable before this: `page_text` was live-only
+and the AX tree is ref-scoped, so navigating away destroyed both. The feature was
+described, prompted for, and unreachable.
+
+**The prompt fix did not work, and could not have.** The first attempt was two
+changes: capture every page in code (`Scratchpad.capture_page(url, step, text)`,
+called in the loop right after `get_page_text()` and before the turn is built, so
+the step's *own* page is in the manifest it reads), and one paragraph telling the
+model the page is already captured. **A later Gmail run (`94fd2166`) put 3,913
+chars of the inbox into a note on step 0 — 22 of the 33 seconds to first step —
+and then wrote the same content again as a 4,262-char summary, 59.1s.** The
+paragraph was necessary and not sufficient, for two reasons.
+
+**Two rules pointed opposite ways.** `SYSTEM_PROMPT` carried the 3-step note rule
+(*write a note if you will need this again in 3+ steps*) directly above the newer
+prohibition on writing a page's contents. What the model produced was a
+*synthesis*, which the older rule tells it to write and the newer paragraph does
+not clearly forbid — it forbids transcription. When rules conflict, the more
+operational one wins. **Prompting is not a guarantee**; the third Gmail run in a
+row had produced the same shape.
+
+**So the write action left the schema.** `append_scratchpad` and `write_scratchpad`
+are gone from `ActionCall`; the tokens cannot be spent on something with no action
+to call. The census across every recorded run: **25 `append_scratchpad` calls, 0
+`write_scratchpad`**, ~17,000 chars of them a copy of the page text already in the
+prompt, ~2,000 chars of breadcrumbs that duplicate `step_summaries`, ~1,250 chars
+irreducible. **The six runs with the largest `tokens_out` are exactly the six
+whose final note was transcript-shaped.** Capping was considered and rejected:
+`NOTES_CAP` truncated at 4K *after* the model had already spent the 1,300 output
+tokens writing 5,093 chars, which is strictly worse than never offering the write.
+
+`notes` survives as a read-only legacy field. Sidecars written before memory became
+code-written carry a `# NOTES` section and the loader still parses it, so files on
+disk keep working; nothing writes it and no notes block is rendered into the
+prompt. `set_scratchpad` no longer waits for an action to touch memory — with
+`capture_page` running above it every step, the write is unconditional, because
+gating it on an action is what left `entries=0` for so long.
+
+**…and the fix immediately moved the cost to the read path.** The prompt said
+the final summary "must be grounded in memory" and to "recall the relevant
+entries to verify the wording". On a live Gmail run — task *"Summarise today's
+inbox"*, step 0 — the manifest held exactly one entry, the inbox the model was
+already looking at, so it recalled it. The recall returned ~11K chars the prompt
+was **already carrying in full**: thousands of input tokens for zero new
+information, on the step that then wrote the summary. Removing the write path
+and leaving a mandatory verification read is the same waste on the other side of
+the token bill.
+
+So: **recall is for pages you have navigated away from, never the page in
+front of you.** `SYSTEM_PROMPT` states it, and the manifest entry whose `url`
+equals `current_url` is marked `← THIS PAGE, already in your prompt — do not
+recall` so the model does not have to infer it by comparing two URLs. An entry
+for an *earlier* page must stay unmarked — marking every entry would make
+"go back to that page" unreachable, which is what memory exists for. The stale
+note-keeping example (`GOAL PROGRESS: …`) and "read your memory at the start of
+every step" went with the write path.
+
+**The AX tree is deliberately not cached.** A ref is valid only for the
+observation that produced it. A cached tree hands the model refs that resolve to
+nothing or, worse, to the wrong element after a re-render — the grounding bug
+`_locate` was just hardened against. Page text is safe to keep precisely because
+it carries no refs; that is the whole boundary between the two.
+
+**`entries` carries `url`.** Three pages captured in one run are otherwise
+indistinguishable in the manifest, and "go back to *that* page" is the recall
+use case. Both entry kinds number from `Scratchpad.next_id()`; they previously
+numbered independently at their two call sites, so a capture landing between two
+reads could reuse an id and silently overwrite an entry. Empty and
+whitespace-only pages are skipped, or a run that never loads anything fills the
+manifest with empties and ships them every step.
+
+#### The capture nearly doubled the audit document
+
+`set_scratchpad` runs on every action-bearing step and `_record` rewrites the
+whole document, so anything serialised there is re-serialised every step.
+`_scratchpad_dict` used `e.model_dump()`, which includes `body`. That was
+invisible *precisely because nothing was ever captured* — `entries=0` on every
+run. Capturing every step's page turned a latent write-amplification into a
+per-step one: 20 Gmail-shaped pages measured **200KB of document growth**. The
+record now carries id/step/selector/around/digest/was_truncated/url and not the
+body; the bodies go to the sidecar below, so nothing is lost, only moved.
+
+`_as_scratchpad` rebuilds the model from that dict to write the sidecar, so it
+defaults `body` to the digest — without it a resumed run loses its entire
+manifest rather than keeping the digests. The sidecar header gains a trailing
+optional `url=`, and the loader's regex makes that group optional so files
+written before `url` existed keep parsing byte-identically.
+
+**A resumed entry recalls as its digest, and says so.** Handed 200 unmarked chars
+of an 11,000-char page, the model reads the fragment as the whole page and
+answers from it. `recall_memory` appends a marker naming the URL. The test is the
+trailing `…`: a page whose digest was never cut is complete, and `digest == body`
+is simply what a short page looks like — labelling that as a resume casualty
+would send the model navigating back for nothing.
+
+**…which is no longer the resume path.** With every page captured every step,
+a resume that recalled only digests was handing the model a degraded tool and
+asking it to cope. Bodies now go to a **separate JSON sidecar,
+`<session_id>.pages.json`**, written by the same `set_scratchpad` call as the
+manifest — they have to be in step, and that is the only thing that persists
+memory. **JSON, not the manifest format:** page text is arbitrary content from an
+arbitrary site and can contain a line shaped like `[r9 step=9 sel=page …]` or a
+`# NOTES` heading; a line-based format would have needed an escaping scheme
+invented for it. The manifest format predates bodies and files on disk keep
+parsing byte-identically. A missing or corrupt bodies file degrades to digests
+rather than raising — losing the whole manifest to gain the bodies is the wrong
+trade, and `recall_memory` already says out loud when that is what the model got.
+
+**Left alone deliberately:** `page_text` (~3.4K tokens) sits *after* the AX tree,
+which changes every step, so it is re-prefilled uncached every step. Moving it
+above the tree would extend the cached prefix — worth perhaps 1s/step, against a
+documented "don't reorder" and a lost-in-middle demotion of the values a
+read-only question is answered from. Not worth it.
+
+### The three serial loops are pooled, and the order is the contract
+
+`pooled(items, limit, fn)` in `surfaces.ts` runs a loop at `CDP_CONCURRENCY = 6`
+and writes results **by index, never by append**. It rewrites three loops: the
+per-frame `getFullAXTree` reads, the supplement's `DOM.getNodeForLocation`
+hit-tests, and the geometry fallback's `DOM.getBoxModel` calls. Every call is
+issued with identical arguments, so the observations are bit-identical.
+
+The frame reads were sequential deliberately — *"a page that legitimately has a
+dozen frames should not have twelve `getFullAXTree` calls in flight against one
+debugger session."* A bound of 6 answers that concern rather than overturning
+it: `chrome.debugger.sendCommand` is a native per-call callback API with no
+lock, so concurrency is supported by construction, and the number that matters
+is how many are in flight, not whether they are.
+
+**Why index-ordering is not a detail here.** A supplement ref is minted from the
+item's index — `-(i + 1)` — and that numbering is the only thing keeping a
+supplemented control from colliding with an AX `nodeId`. A pool that appended on
+completion would renumber every `aria-hidden` control on the page, and a
+renumbered AX tree is a tree that still parses and still looks plausible.
+Likewise the frame bookkeeping (`cappedFrames`, `failed`) is *not* pooled even
+though the reads are: both are read in order to decide whether the model lost
+something, so they are filled in one sequential pass after the reads land.
+
+**The re-attach needed deduplicating.** `sendCommand` re-attaches once when a
+command reports "not attached". With six calls in flight, a detach made every
+one of them independently call `chrome.debugger.attach` on the same tab. One
+in-flight attach promise per tab now, cleared on settle either way so a failed
+attach is not cached forever.
+
+**Not measured, stated rather than assumed:** the probe's synthetic pages carry
+no `aria-hidden` elements, so `hits` is 0 on every row and the supplement's
+≤200-call `DOM.getNodeForLocation` loop is still unpriced. It is bounded at 200
+calls so it cannot be the largest term, but it has no number.
+
+**An OOPIF is invisible to all of this.** Building *cross-origin* synthetic
+embeds measured zero frames: headed Chromium puts them in their own renderer
+process under site isolation, which makes them a separate CDP *target*, and
+they do not appear in the main frame's `Page.getFrameTree` at all. So the
+frame scan cannot see them, and the 6-frame row above is a floor on the real
+Gmail case rather than a representative number. This is the same gap already
+recorded as unfixed for OOPIF *clicks* — one cause, two symptoms.
+
+### The rescan is gated on the page having gone still, and `waited` is the predicate
+
+`captureObservation`'s retry loop read a settled page twice. Its first iteration
+was unconditional, so a page the stability gate had *already* watched go still
+for the full 3s window still paid a second full frame scan — a flat ~3.0s on
+every settled observation, and the 3.0s is the quiet window, not the scan.
+
+`pageMayStillBeMoving(stability)` skips the loop when the page provably sat still
+for the whole quiet window. `auth-slowjs` is the regression gate for this: its
+control appears at 5000ms, so the page mutates past the window, never settles,
+hits the deadline, and **rescans exactly as before**. `scripts/test-observation-stability.test.js`
+builds all three Stability shapes through the real `waitForStable` rather than
+writing them as literals, so the gate cannot ship alongside a change to what
+those shapes are.
+
+**The predicate is `waited`, not `!timedOut`.** `waitForStable`'s catch path
+returns `{waited: false, timedOut: false}` for a tab that navigated mid-observe
+— there was no promise left to resolve. Gating on `!timedOut` would skip the
+rescan on a page nobody watched, which is how a half-rendered tree reaches the
+model. The three cases are therefore: quiet for the full window → skip; ran to
+the deadline still mutating → rescan; no answer at all → rescan.
+
+What this does not buy: the *unsettled* path still runs up to three full frame
+scans, so a page with a dozen frames pays 36 `getFullAXTree` calls. Worth
+caching the frame list across the retries if a trace ever shows it — the cap
+bounds it, it is not unbounded.
+
+### The quiet window was unreachable on exactly the pages that need it
+
+The above gate was correct and nearly free — and the deadline it protects was
+the single largest cost in the whole loop. From the live Gmail run: wall 41.94s,
+of which observe was 22.38s (53.4%). One observation was 11.19s, and 10.002s of
+that was `waitForStable` sitting on its own deadline. Over a two-step run that
+is **47.7% of wall clock, every step, forever.**
+
+The reason is arithmetic, not tuning. `QUIET_MS` is 3000 and the gate resolves
+only after 3s with **zero** mutations. Gmail measured 41 mutations in 10,002ms —
+one every ~244ms. Three seconds of silence on that page is not rare, it is
+impossible. So the common page and the animated page are the same page, and the
+gate was never a wait on them; it was a sleep with a 10s timeout.
+
+**Mutation rate separates the two shapes a mutation count cannot.** A slow
+renderer is *silent* and then changes — `auth-slowjs` produces almost nothing at
+1000ms and renders its control at 5000ms. A live app is already churning at 1s,
+because it is past its initial render and into its steady state, where a spinner
+or a live feed keeps the document dirty forever. Same observation, opposite
+conclusion, and nothing in the old design could tell them apart.
+
+So the gate now **samples**: if ≥3 mutations landed in the first 1000ms, resolve
+at once with `early: true` and let the caller decide. Expected Gmail observation
+is 10.8s → ~1.4s. The decision is not trusted — it is a *guess about the page*,
+and the guess is checked below.
+
+**Misclassifying toward "busy" is the safe direction and cannot corrupt
+anything.** The sample only ever resolves `waited: false`; it has no path to
+`waited: true`, so it can never assert a page is still when it is not. The
+caller rescans and compares fingerprints, and if the page turns out to have been
+moving it falls back to the full gate. Misclassifying toward "quiet" is the
+dangerous direction and the sample structurally cannot do it.
+
+`waitForStable(tabId, {noEarly: true})` sets the sample window to 0, which is
+the caller's fallback and the mode that keeps a slow renderer's full window
+intact. `Stability.early` marks a page the sample claimed, so `metrics` says
+which path a given observation took.
+
+### The short-circuit is a guess, so the rescans are the arbiter
+
+`captureObservation`'s retry loop already compared `role|name|value`
+fingerprints across scans and broke on the first match — the check that decides
+whether an unsettled page is worth reading again. What it discarded was its exit
+reason, which is the only thing that distinguishes "the sample was right, the
+page had settled" from "we read it too early and owe it another look."
+
+```ts
+if (stability.early && !settledByFingerprint) {
+  await waitForStable(tabId, { noEarly: true });
+  const settled = await extractAx(tabId);
+  ...
+}
+```
+
+On the fast path the rescans match and this block never runs, so the whole
+saving stands. On the slow-renderer shape every rescan differs, the full quiet
+window is paid, and one more scan follows — which is the pre-existing
+behaviour, unchanged.
+
+`scripts/test-observation-rescan-guard.test.js` extracts `captureObservation`
+and pins all four shapes, because a guard that silently stops firing hands the
+model a half-rendered tree while every metric still reads healthy. An absence
+reads clean in a diff; that is the whole reason it has a test.
+
+**The thresholds are calibrated from one sample and are deliberately
+conservative.** Gmail ran 4.1 mutations/s against a threshold of 3 per 1000ms,
+so it clears the bar with ~30% headroom — a page half as busy would not, and
+would pay the old 10s. One live run recalibrates it, and the metrics already
+flow back to the server log. A *miss* costs time and never accuracy, which is
+the asymmetry that makes shipping an uncalibrated guess the right trade.
+
+### The observation reported its cost nowhere
+
+`waitForStable` returns `{waited, timedOut, elapsedMs, mutations}` and `boxMap`
+returns `{requested, resolved, fallback, truncated, source}`. `captureObservation`
+discarded both — it called `waitForStable(tabId)` for the await and threw the
+value away, and read `geometry.boxes` but not the rest. So the double rescan,
+the quiet-window floor and the geometry overflow were all inferable from the
+source and from nothing else, and the probe above existed to substitute for
+counters that were already being computed.
+
+`observationMetrics` now reports them, and `main.py` logs the block with every
+observation. This is what makes the other two changes falsifiable: a
+performance fix whose effect cannot be read off a real run is a fix argued
+from a synthetic probe.
+
+One trap in it. `geometry.boxes` is a `Map`, and a `Map` on the wire serialises
+to `{}` — which in the log is indistinguishable from `source: "no-join"`, a
+real and different fault. The metrics copy the geometry fields individually
+rather than spreading, and `scripts/test-observation-metrics.test.js` pins it.
+
+
 ### What the AX tree does not contain — measured, not inferred
 
 Everything above describes what we do with the tree we get. Whether the tree
@@ -114,11 +498,26 @@ surface — the main frame's tree is readable without a `frameId` — so the
 observation degrades to the pre-frames behaviour rather than to nothing.
 
 The scan (`frames` on the observation frame) records `traversed`, `total`,
-`crossOrigin`, the three cap flags and `failed`. `main.py` logs a warning when
-any of them trips, so a truncated or partly-unreadable observation is visible
-rather than silently partial. **The model is not told yet** — that wants one
-more line beside the "N more element(s) not shown" note at the end of
-`render_ax_tree`.
+`crossOrigin`, the three cap flags, `cappedFrames` and `failed`. `main.py` logs
+a warning when any of them trips, so a truncated or partly-unreadable
+observation is visible rather than silently partial. **The model is not told
+yet** — that wants one more line beside the "N more element(s) not shown" note
+at the end of `render_ax_tree`.
+
+**A boolean cap flag cannot answer the question it exists for.** The first
+version of that warning read
+
+```
+observation truncated: 6/6 frames (4 cross-origin), capped=nodeCapped unreadable=none
+```
+
+on every step of a Gmail run — six of six frames traversed, nothing unreadable,
+and the one thing that decides whether the agent is blind is *which* frame hit
+`MAX_NODES_PER_FRAME`. The main document capping is a model looking at half a
+page; an analytics embed capping is nothing at all, and there is no way to tell
+those two apart from the flag. The scan now carries `cappedFrames`
+(`{frameIndex, url, crossOrigin, nodes}`) and the warning names them. A log line
+that fires every step has to be worth reading when it fires.
 
 **Not fixed, deliberately:** a click still dispatches by coordinate on the
 top session. For a same-process cross-origin frame that works. For an
@@ -211,6 +610,57 @@ Fixed at the shared point both relays route through:
   failure, instead of typing into a field the model never named.
 
 Pinned by `tests/test_grounding_outcome.py` (5 tests, both relays).
+
+**…and then the fix was itself wrong, for the same reason.** A live Gmail run
+recorded it in the audit document:
+
+```
+'click' ok=True  ->  'Clicked [13829]: Error executing: ref 13829 is not in the current AX tree'
+```
+
+The prefix was there, just not at the front: `harness.py` decorates the relay's
+outcome on the way through (`f"Clicked [{ref}]: {result}"`), so a
+`startswith` test misses every failure whose action had a name to print. Making
+the relays well-behaved was necessary and not sufficient — the derivation point
+had to change too, and it is now **membership**, `_EXEC_FAILURE not in outcome`,
+with the string named as a module constant rather than repeated. A prefix test
+is the kind of contract that only holds until something upstream formats the
+message. Pinned by `test_a_wrapped_failure_is_still_recorded_as_not_ok`.
+
+**The model wrote `ref: 13829` because the prompt taught it to.** Two
+anti-examples in `SYSTEM_PROMPT` demonstrated the target as a *bare number*:
+
+```
+Bad: "…extracting the order ID."          (cited click on ref 42)
+- Bad: "I can see [28863] in the AX tree…"
+```
+
+while the tree correctly renders `[0:13829]`. The prompt was the source of the
+format it then emitted — the same class of bug as the `stagnat` needle, where
+the discriminator in the code is a substring of a model-authored string. Both
+lines now use composite refs, and a test scans `SYSTEM_PROMPT` for
+`\bref \d` so a future edit cannot reintroduce the shape.
+
+**…and the model kept writing it, so the relay tolerates it.** The prompt fix
+was necessary and not sufficient. A later Gmail run (2026-10-01) emitted
+`ref: "149099"` against a tree rendering `[0:149099]` on **4 of 4 steps** — the
+same ref, the same unchanged page, `ok: false` four times, 98s of wall for a task
+the model had already located. The prompt test still passes: the model simply
+emits the digits, on every element, every time. The lesson is the same one the
+`ok` derivation taught — *a model-authored string cannot be relied on to keep a
+format*, so the constraint has to live where the string is consumed, not where it
+is produced.
+
+So `_locate` (the single function all four ref-taking methods route through)
+falls back to a suffix match and resolves the bare nodeId. The interesting part
+is the refusal: a `nodeId` is unique only within its frame, so `42` can name a
+real element in two frames at once, and picking one would click the wrong
+control and record `ok: true` — the exact conflation the `(coords, reason)`
+split exists to prevent. It refuses and names both refs so the model can recover
+on the next step. A number the page has never seen still fails identically; the
+fallback is not a hole. Pinned by five cases in
+`tests/test_grounding_outcome.py`, one per ref-taking method plus the
+hallucination and exact-match shapes.
 
 **The measurement is the audit, not a probe script.** Rung two of the ladder:
 the record already exists and every run already writes it. A future

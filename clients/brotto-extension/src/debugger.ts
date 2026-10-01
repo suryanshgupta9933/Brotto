@@ -92,6 +92,32 @@ export async function detachAll(): Promise<void> {
 }
 
 /**
+ * One attach in flight per tab, shared by every command that hit the detach.
+ *
+ * The observation pipeline reads frames concurrently, so a detach used to make
+ * every in-flight call independently re-attach: N `chrome.debugger.attach` calls
+ * racing on one tab, each of which fails or resets the last one. Deduplicated
+ * because the alternative is a pile-up exactly when the debugger is already in
+ * a bad state.
+ */
+const REATTACHING = new Map<number, Promise<void>>();
+
+function reattach(tabId: number): Promise<void> {
+  const existing = REATTACHING.get(tabId);
+  if (existing) return existing;
+  const pending = (async () => {
+    await attachToTab(tabId);
+    await rawSendCommand(tabId, { method: "Page.enable" });
+  })();
+  // Cleared on settle either way, so a failed attach is not cached forever —
+  // the next command gets to try again, which is the pre-pool behaviour.
+  REATTACHING.set(tabId, pending);
+  const clear = () => { if (REATTACHING.get(tabId) === pending) REATTACHING.delete(tabId); };
+  pending.then(clear, clear);
+  return pending;
+}
+
+/**
  * Send a CDP command to an attached tab
  */
 export async function sendCommand(
@@ -110,8 +136,7 @@ export async function sendCommand(
     // and failed to decide anything from it. Re-attach once and retry; a
     // second failure is real and propagates.
     if (!/not attached/i.test(String(err))) throw err;
-    await attachToTab(tabId);
-    await rawSendCommand(tabId, { method: "Page.enable" });
+    await reattach(tabId);
     return rawSendCommand(tabId, command);
   }
 }

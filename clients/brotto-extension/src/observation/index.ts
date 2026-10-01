@@ -8,7 +8,7 @@
  */
 
 import * as dbg from "../debugger";
-import { waitForStable } from "./stability";
+import { waitForStable, pageMayStillBeMoving, Stability } from "./stability";
 import { anyCommand, enumerateSurfaces, makeRef, FrameScan, Surface } from "./surfaces";
 import { boxMap, GeometryResult } from "./geometry";
 import { findHiddenTargets } from "./supplement";
@@ -136,7 +136,7 @@ export async function targetsForFrame(
 
 export async function extractAx(
   tabId: number,
-): Promise<{ targets: object[]; frames: FrameScan }> {
+): Promise<{ targets: object[]; frames: FrameScan; geometry: GeometryResult }> {
   await dbg.sendCommand(tabId, { method: "Accessibility.enable" });
   const { surfaces, scan } = await enumerateSurfaces(tabId);
 
@@ -152,25 +152,82 @@ export async function extractAx(
   const geometry = await boxMap(tabId, ids);
 
   const targets: object[] = [];
+  const perFrame: number[] = [];
   // Sequential, not Promise.all: a frame bomb is capped, but a page that
   // legitimately has a dozen frames should not have twelve `getFullAXTree`
   // calls in flight against one debugger session.
   for (const surface of surfaces) {
-    targets.push(...await targetsForFrame(tabId, surface, geometry.boxes));
+    const fromTree = await targetsForFrame(tabId, surface, geometry.boxes);
+    perFrame.push(fromTree.length);
+    targets.push(...fromTree);
     // aria-hidden controls the AX tree dropped on purpose. They carry
     // `hidden: true`, which is what stops the harness pre-approving one.
     targets.push(...await findHiddenTargets(
       tabId, surface, new Set(targets.map((t: any) => t.backendNodeId)),
     ));
   }
+  // What the node cap is actually costing. `MAX_NODES_PER_FRAME` caps *raw*
+  // AX nodes, but only kept-role nodes ever become targets — so `nodes` alone
+  // cannot say whether a cap cost the model anything. `kept` is how many
+  // controls survived out of the 2000 this frame was allowed; compare it with
+  // `nodes` to see whether the slice is trimming containers or controls.
+  //
+  // The number of controls lost in the discarded tail is deliberately not
+  // reported: it is not knowable from what is left in hand, and a plausible
+  // wrong number here would be read as a measurement.
+  for (const capped of scan.cappedFrames ?? []) {
+    const kept = perFrame[capped.frameIndex];
+    if (kept !== undefined) capped.kept = kept;
+  }
   await dbg.sendCommand(tabId, { method: "Accessibility.disable" });
-  return { targets, frames: scan };
+  return { targets, frames: scan, geometry };
+}
+
+/**
+ * What the observation cost, in numbers the server can log.
+ *
+ * `waitForStable` returns a `Stability` and `boxMap` returns a `GeometryResult`,
+ * and `captureObservation` threw both away — so the double rescan, the
+ * `QUIET_MS` floor and the geometry overflow were all inferable from the source
+ * and from nothing else. This reports values that already exist; it computes
+ * nothing new.
+ *
+ * `geometry` is copied field by field rather than spread, because `boxes` is a
+ * `Map` and a `Map` on the wire serialises to `{}` — which in the log is
+ * indistinguishable from "the bulk path joined nothing", a real and different
+ * fault. `scripts/test-observation-metrics.test.js` pins that.
+ *
+ * `bytes` is the size of the observation the model is about to be handed, and
+ * the server retains it verbatim in `_cached_obs`, so it is the memory answer
+ * too. Measured on the finished object rather than summed from its parts,
+ * because the parts are not what is retained.
+ */
+function observationMetrics(
+  stability: Stability,
+  geometry: GeometryResult,
+  scans: number,
+  targetCount: number,
+  bytes: number,
+): object {
+  return {
+    scans,
+    targets: targetCount,
+    bytes,
+    stability,
+    geometry: {
+      requested: geometry?.requested ?? 0,
+      resolved: geometry?.resolved ?? 0,
+      fallback: geometry?.fallback ?? 0,
+      truncated: geometry?.truncated ?? false,
+      source: geometry?.source ?? "empty",
+    },
+  };
 }
 
 export async function captureObservation(tabId: number) {
   // readyState reaches "complete" with the load event, which on a SPA is
   // before the app has rendered anything. Wait for the page to go still.
-  await waitForStable(tabId);
+  const stability = await waitForStable(tabId);
 
   // Page text rides along with url/title in the evaluate that already runs
   // every step — no extra round trip. innerText is the only place numbers
@@ -186,7 +243,8 @@ export async function captureObservation(tabId: number) {
   }) as { result?: { value?: { url: string; title: string; text: string } } };
   const { url = "", title = "", text: pageText = "" } = ps.result?.value ?? {};
 
-  let { targets: axTargets, frames } = await extractAx(tabId);
+  let { targets: axTargets, frames, geometry } = await extractAx(tabId);
+  let scans = 1;
 
   // Retry only while the tree is still moving. The old test was
   // `axTargets.length < 3`, which is wrong in both directions: a page that
@@ -194,24 +252,64 @@ export async function captureObservation(tabId: number) {
   // burns all four retries on itself. Two extra reads, stopping at the first
   // one that changes nothing.
   //
-  // ponytail: this is now up to three full frame scans a step, so a page
-  // with a dozen frames pays 36 `getFullAXTree` calls. Worth caching the
+  // The loop's first iteration is unconditional, so a page that had already
+  // gone still paid a second full scan and a changed page paid three. The
+  // stability gate already ran and already knows: `pageMayStillBeMoving` is
+  // false only when the page provably sat still for the whole quiet window.
+  // That is a flat 3004ms off every settled observation, and an unsettled one
+  // is unchanged — `auth-slowjs` renders its control at 5000ms, so it mutates
+  // past the window, hits the deadline, and rescans exactly as before.
+  //
+  // ponytail: an unsettled page is still up to three full frame scans, so a
+  // page with a dozen frames pays 36 `getFullAXTree` calls. Worth caching the
   // frame list across the retries if it ever shows up in a trace — the cap
   // bounds it, it is not unbounded.
-  const fingerprint = (ts: any[]) =>
-    ts.map((t: any) => t.role + "|" + (t.name ?? "") + "|" + (t.value ?? "")).join("~");
-  for (let i = 0, fp = fingerprint(axTargets); i < 2; i++) {
-    await sleep(800);
-    const next = await extractAx(tabId);
-    const nextFp = fingerprint(next.targets);
-    axTargets = next.targets;
-    frames = next.frames;
-    if (nextFp === fp) break;
-    fp = nextFp;
+  // The busy short-circuit in `stability.ts` is a guess: it assumes a page
+  // already mutating hard is past its initial render. The rescans below are
+  // what actually decide that, and they say so by breaking early — an exit
+  // reason the loop was discarding.
+  //
+  // If every rescan saw a different tree, the page really was still moving
+  // and the short path read it early. Pay the full quiet window then, and
+  // scan once more. That is the slow-renderer shape (`auth-slowjs` renders at
+  // 5000ms), and on it this is the pre-existing behaviour — wait the gate,
+  // then rescan. On the fast path it costs nothing: the rescans matched and we
+  // never arrive here.
+  let settledByFingerprint = !pageMayStillBeMoving(stability);
+  if (pageMayStillBeMoving(stability)) {
+    const fingerprint = (ts: any[]) =>
+      ts.map((t: any) => t.role + "|" + (t.name ?? "") + "|" + (t.value ?? "")).join("~");
+    for (let i = 0, fp = fingerprint(axTargets); i < 2; i++) {
+      await sleep(800);
+      const next = await extractAx(tabId);
+      const nextFp = fingerprint(next.targets);
+      axTargets = next.targets;
+      frames = next.frames;
+      geometry = next.geometry;
+      scans++;
+      if (nextFp === fp) { settledByFingerprint = true; break; }
+      fp = nextFp;
+    }
+  }
+  if (stability.early && !settledByFingerprint) {
+    await waitForStable(tabId, { noEarly: true });
+    const settled = await extractAx(tabId);
+    axTargets = settled.targets;
+    frames = settled.frames;
+    geometry = settled.geometry;
+    scans++;
   }
 
-  // `frames` rides the wire for free — `sendObservation` spreads the whole
-  // observation — so a truncated or cross-origin-reading step is visible in
-  // the server log and the audit without a second channel.
-  return { url, title, pageText, axTargets, frames };
+  const observation = { url, title, pageText, axTargets, frames };
+  // `frames` and `metrics` ride the wire for free — `sendObservation` spreads
+  // the whole observation — so a truncated or cross-origin-reading step, and
+  // what the observation cost to produce, are visible in the server log and
+  // the audit without a second channel.
+  return {
+    ...observation,
+    metrics: observationMetrics(
+      stability, geometry, scans, axTargets.length,
+      JSON.stringify(observation).length,
+    ),
+  };
 }

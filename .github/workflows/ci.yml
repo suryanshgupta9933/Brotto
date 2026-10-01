@@ -94,23 +94,3 @@ jobs:
           path: clients/brotto-extension/dist
           if-no-files-found: error
           retention-days: 7
-
-  # ─── Aggregator ─────────────────────────────────────────────────────
-  # ponytail: a single check name that branch protection requires. Both
-  # jobs must succeed; if either fails, this fails.
-  ci-success:
-    name: CI
-    runs-on: ubuntu-latest
-    needs: [test-orchestrator, build-extension]
-    if: always()
-    steps:
-      - name: All checks passed
-        run: |
-          if [ "${{ needs.test-orchestrator.result }}" != "success" ] || \
-             [ "${{ needs.build-extension.result }}" != "success" ]; then
-            echo "One or more jobs failed:"
-            echo "  test-orchestrator: ${{ needs.test-orchestrator.result }}"
-            echo "  build-extension:   ${{ needs.build-extension.result }}"
-            exit 1
-          fi
-          echo "All checks passed."

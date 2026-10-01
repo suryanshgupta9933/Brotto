@@ -133,8 +133,14 @@ def _as_scratchpad(value: Scratchpad | dict) -> Scratchpad | None:
     if isinstance(value, Scratchpad):
         return value
     try:
+        # `body` defaults to the digest: `_scratchpad_dict` no longer writes
+        # it, and a reloaded entry genuinely holds nothing more than the
+        # digest — the same thing `load_scratchpad` has always produced from
+        # the sidecar. Without this default the model would lose its entire
+        # manifest on resume rather than keep the digests.
         return Scratchpad(
-            entries=[MemoryEntry(**e) for e in value.get("entries", [])],
+            entries=[MemoryEntry(**{**e, "body": e.get("body", e.get("digest", ""))})
+                     for e in value.get("entries", [])],
             notes=value.get("notes", ""),
         )
     except Exception as exc:  # a dict that is not entry-shaped
@@ -143,10 +149,50 @@ def _as_scratchpad(value: Scratchpad | dict) -> Scratchpad | None:
 
 
 def _scratchpad_dict(value: Scratchpad | dict) -> dict:
+    # `body` is deliberately excluded. This runs on every step and the whole
+    # document is rewritten each time, so a body here is a body re-serialised
+    # every step. That was free while nothing was captured — entries=0 on
+    # three Gmail runs, because `page_text` ships in the prompt so the model
+    # never called `read_page_text` — and is not free now that every step's
+    # page is captured: a 20-page run measured 200KB of growth for pages that
+    # were 10x smaller. Nothing reads the body off disk; the digest is what a
+    # resumed run's manifest renders.
+    _FIELDS = ("id", "step", "selector", "around", "digest", "was_truncated", "url")
     if isinstance(value, Scratchpad):
-        return {"entries": [e.model_dump() for e in value.entries],
+        return {"entries": [{k: getattr(e, k) for k in _FIELDS} for e in value.entries],
                 "notes": value.notes}
     return _cap_deep(value)
+
+
+def save_page_bodies(path: Path, scratchpad: Scratchpad) -> None:
+    """Write every entry's full body to its own JSON sidecar.
+
+    The manifest file keeps storing digests — its format predates bodies and
+    files on disk have to keep parsing unchanged. Bodies go here instead of
+    there because page text is arbitrary content: it can contain a line that
+    looks like a manifest header, a `# NOTES` marker, or anything else a
+    line-oriented format would have to escape. JSON needs no delimiter and
+    no escaping scheme invented for it.
+
+    Written by the harness, so it costs zero output tokens — which is the
+    whole point. The model used to keep a page by copying it into a note,
+    and that copy was ~1,300 output tokens and ~22s of a step.
+    """
+    payload = {e.id: e.body for e in scratchpad.entries if e.body}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+def load_page_bodies(path: Path) -> dict[str, str]:
+    """Read the bodies sidecar. Returns {} for a missing or unreadable file —
+    a session captured before this existed, or a half-written one. Entries
+    then recall as their digest, which is what `recall_memory` says out loud.
+    """
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str)} if isinstance(data, dict) else {}
 
 
 def load_scratchpad(path: Path) -> Scratchpad:
@@ -175,7 +221,7 @@ def load_scratchpad(path: Path) -> Scratchpad:
             continue
         if line.startswith("# MANIFEST") or line == "# MEMORY v2" or line == "":
             continue
-        m = re.match(r"^\[(r\d+)\s+step=(\d+)\s+sel=([^\s]+)\s+around=(\S+)\s+truncated=(True|False)\]\s*$", line)
+        m = re.match(r"^\[(r\d+)\s+step=(\d+)\s+sel=([^\s]+)\s+around=(\S+)\s+truncated=(True|False)(?:\s+url=(\S*))?\]\s*$", line)
         if m:
             # Flush previous entry
             if current_header is not None:
@@ -187,6 +233,7 @@ def load_scratchpad(path: Path) -> Scratchpad:
                     digest="\n".join(current_entry_lines).strip(),
                     body="\n".join(current_entry_lines),  # body == digest on reload
                     was_truncated=(current_header["trunc"] == "True"),
+                    url=current_header["url"],
                 ))
             current_header = {
                 "id": m.group(1),
@@ -194,6 +241,9 @@ def load_scratchpad(path: Path) -> Scratchpad:
                 "sel": m.group(3),
                 "around": m.group(4),
                 "trunc": m.group(5),
+                # Optional: files written before entries carried a url have
+                # no such field, and they must keep parsing unchanged.
+                "url": m.group(6) or "",
             }
             current_entry_lines = []
         else:
@@ -210,6 +260,7 @@ def load_scratchpad(path: Path) -> Scratchpad:
             digest="\n".join(current_entry_lines).strip(),
             body="\n".join(current_entry_lines),
             was_truncated=(current_header["trunc"] == "True"),
+            url=current_header["url"],
         ))
 
     return Scratchpad(entries=entries, notes="\n".join(notes_lines).strip())
@@ -227,8 +278,12 @@ def save_scratchpad(path: Path, scratchpad: Scratchpad) -> None:
     for e in scratchpad.entries:
         around = e.around if e.around is not None else "None"
         trunc = "True" if e.was_truncated else "False"
+        # url is the trailing optional field the loader's regex made
+        # optional; written only when present so a pre-url file is
+        # byte-identical to what it always was.
+        url = f" url={e.url}" if e.url else ""
         lines.append(
-            f"[{e.id} step={e.step} sel={e.selector} around={around} truncated={trunc}]"
+            f"[{e.id} step={e.step} sel={e.selector} around={around} truncated={trunc}{url}]"
         )
         lines.append(e.digest)
         lines.append("")
@@ -385,6 +440,10 @@ class AuditTrail:
         # read another's. The old layout was logs/runs/<task_id>/scratchpad.txt,
         # which was per-task; this keeps that property while moving the parent.
         return self.dir / f"{self.session_id}.scratchpad.txt"
+
+    @property
+    def page_bodies_path(self) -> Path:
+        return self.dir / f"{self.session_id}.pages.json"
 
     @property
     def dropped_writes(self) -> int:
@@ -720,6 +779,12 @@ class AuditTrail:
         model = _as_scratchpad(scratchpad)
         if model is not None:
             save_scratchpad(self.scratchpad_path, model)
+            # Bodies too, so a resume recalls the whole page rather than its
+            # 200-char digest. A dict — which is what `_as_scratchpad` turns
+            # into when the caller has one — carries no bodies, and there is
+            # nothing to save then.
+            if isinstance(scratchpad, Scratchpad):
+                save_page_bodies(self.page_bodies_path, scratchpad)
 
     def finish(self, result: dict) -> None:
         self._record(self._finish, result)

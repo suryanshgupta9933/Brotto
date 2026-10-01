@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 
 import pytest
 
@@ -111,3 +112,161 @@ async def test_the_harness_stops_type_text_when_focus_failed():
     assert out.startswith(FAIL_PREFIX)
     cdp.clear_ref.assert_not_awaited()
     cdp.type_text_to_ref.assert_not_awaited()
+
+
+def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
+    """The harness decorates the relay's outcome as `Clicked [ref]: <result>`,
+    which puts a success-shaped prefix in front of the failure marker. A
+    derivation that only looks at the *start* of the string then writes
+    ok=True for a click that never happened — which is exactly what a live
+    Gmail run recorded."""
+    import json
+
+    from brotto_orchestrator.agent.context import ActionCall, AgentDeps
+    from brotto_orchestrator.agent.harness import AgentHarness
+    from brotto_orchestrator.testing.scripted_planner import ScriptedPlanner, ScriptedStep
+
+    planner = ScriptedPlanner(
+        [ScriptedStep(thought="open it", actions=[ActionCall(
+            action="click", action_args={"ref": "0:13829"})])],
+        on_exhausted="task_complete",
+    )
+    cdp = AsyncMock()
+    cdp.ping = AsyncMock(return_value=True)
+    cdp.get_targets = AsyncMock(return_value=[])
+    cdp.get_current_url = AsyncMock(return_value="https://app.example.com/")
+    cdp.get_page_title = AsyncMock(return_value="Home")
+    cdp.get_page_text = AsyncMock(return_value="")
+    cdp.refresh_target_map = AsyncMock()
+    # What extension_relay.click_ref really returned on the live run.
+    cdp.click_ref = AsyncMock(
+        return_value="Error executing: ref 13829 is not in the current AX tree")
+
+    q: asyncio.Queue = asyncio.Queue()
+    q.put_nowait("yes")
+    deps = AgentDeps(
+        user_id="t", task="read my mail", cdp=cdp,
+        ws_send=AsyncMock(), human_input_queue=q, scripted_planner=planner,
+    )
+
+    async def _go():
+        return await AgentHarness().run(deps)
+    asyncio.new_event_loop().run_until_complete(_go())
+
+    docs = [p for p in (tmp_path / "sessions").glob("*.json")
+            if not p.name.endswith(".pages.json")]
+    assert len(docs) == 1, f"expected one audit document, got {docs}"
+    doc = json.loads(docs[0].read_text())
+    clicks = [a for t in doc["turns"] for a in t["actions"] if a["action"] == "click"]
+    assert clicks, "no click was recorded"
+    assert clicks[0]["ok"] is False, (
+        f"grounding failure recorded as ok=True: {clicks[0]['outcome']!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_bare_node_id_resolves_to_its_composite_ref():
+    """The model drops the frame prefix, and did so 4/4 times on a live Gmail
+    run: the tree renders `[0:149099]` and the action carried `ref: 149099`.
+    Every click failed, so every step was spent re-deciding an unchanged page.
+
+    This could not be fixed in the prompt. The bare-number anti-examples were
+    removed and the prompt test above still passes — the model emits the
+    digits anyway, on every element, every time. So the relay tolerates it.
+    """
+    relay = _relay([
+        {"ref": "0:149099", "role": "link", "x": 30, "y": 40},
+        {"ref": "0:149317", "role": "link", "x": 50, "y": 60},
+    ])
+    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+
+    out = await relay.click_ref("149099")
+
+    assert not out.startswith(FAIL_PREFIX), f"recorded as ok=False: {out!r}"
+    relay._ws_send.assert_called_once_with(
+        {"type": "action", "action": {"type": "click", "x": 30, "y": 40}}
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
+    """`_locate` is the one place all four route through, so one case per
+    method: `type_text` into a bare ref must not silently retype into whatever
+    holds focus, which is the HDFC failure class."""
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+
+    for method, args in (
+        (relay.focus_ref, ("7",)),
+        (relay.clear_ref, ("7",)),
+        (relay.type_text_to_ref, ("7", "hello")),
+    ):
+        out = await method(*args)
+        assert not out.startswith(FAIL_PREFIX), f"{method.__name__}: {out!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_node_id_present_in_two_frames_is_refused_not_guessed():
+    """nodeId is unique only within a frame, so `42` can name a real element in
+    two of them. Guessing would click the wrong one and record ok=True — the
+    exact failure the two-state split above exists to keep separable."""
+    relay = _relay([
+        {"ref": "0:42", "role": "button", "x": 1, "y": 1},
+        {"ref": "1:42", "role": "button", "x": 2, "y": 2},
+    ])
+
+    out = await relay.click_ref("42")
+
+    assert out.startswith(FAIL_PREFIX)
+    assert "ambiguous" in out, f"refusal does not say why: {out!r}"
+    assert "0:42" in out, f"refusal does not name the real refs: {out!r}"
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_hallucinated_bare_node_id_is_still_a_grounding_failure():
+    """The fallback must not become a hole: a number the page has never seen
+    resolves to nothing, exactly as before."""
+    relay = _relay([{"ref": "0:7", "role": "button", "x": 10, "y": 20}])
+
+    out = await relay.click_ref("999999")
+
+    assert out.startswith(FAIL_PREFIX)
+    assert "not in the current AX tree" in out
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_exact_composite_ref_wins_over_the_bare_fallback():
+    """A page can hold `0:5` and `1:05`; the model naming `1:05` exactly must
+    get `1:05`, not whichever suffix match the scan saw first."""
+    relay = _relay([
+        {"ref": "0:5", "role": "button", "x": 1, "y": 1},
+        {"ref": "1:05", "role": "button", "x": 2, "y": 2},
+    ])
+    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+
+    out = await relay.click_ref("1:05")
+
+    assert not out.startswith(FAIL_PREFIX), f"recorded as ok=False: {out!r}"
+    relay._ws_send.assert_called_once_with(
+        {"type": "action", "action": {"type": "click", "x": 2, "y": 2}}
+    )
+
+
+def test_the_prompt_does_not_demonstrate_a_bare_number_as_a_ref():
+    """Live Gmail run: the model emitted `ref: 13829` instead of `0:13829`,
+    twice. The prompt's own anti-examples were the source — two "Bad:" lines
+    reading `clicking ref 42` / `ref 28863`, which is the format it then
+    copied. A bare number is not a ref; nothing can resolve it."""
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+
+    offenders = [
+        line.strip() for line in SYSTEM_PROMPT.splitlines()
+        if re.search(r"\bref \d", line)
+    ]
+    assert not offenders, (
+        "prompt shows a bare-number ref, which teaches the model to emit one:\n  "
+        + "\n  ".join(offenders)
+    )
+

@@ -76,6 +76,28 @@ const CONSTS = {
 };
 const BOX_WALK = extractTemplate("BOX_WALK");
 
+// The page-side walk lives in geometry.ts, but `pooled` and `CDP_CONCURRENCY`
+// are the shared CDP helpers in surfaces.ts. Extracted from there too, so the
+// fallback this file measures is the fallback that ships.
+const SURFACES_SRC = path.join(path.dirname(SRC), "surfaces.ts");
+const surfacesSrc = fs.readFileSync(SURFACES_SRC, "utf8");
+
+function extractFrom(source, name) {
+  const start = source.search(new RegExp(`^(export )?(async )?function ${name}\\s*(<[^>(]*>)?\\s*\\(`, "m"));
+  if (start < 0) throw new Error(`no function ${name} — renamed?`);
+  const open = source.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) return source.slice(open + 1, i);
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+const POOLED_BODY = extractFrom(surfacesSrc, "pooled");
+const CDP_CONCURRENCY = vm.runInNewContext(
+  surfacesSrc.match(/^export const CDP_CONCURRENCY = (.*);$/m)[1],
+);
+
 // The wrapper every case runs in: the extracted bodies, bound to a fake dbg.
 function moduleFor(dbgImpl) {
   // Evaluated, not spread as text: `"2000" > 600` happens to be true in
@@ -84,13 +106,15 @@ function moduleFor(dbgImpl) {
   for (const k of Object.keys(CONSTS)) consts[k] = vm.runInNewContext(CONSTS[k]);
   const sandbox = {
     ...consts,
+    CDP_CONCURRENCY,
     BOX_WALK,
     dbg: { sendCommand: dbgImpl },
-    JSON, Math, Set, Map, String, Array, console,
+    JSON, Math, Set, Map, String, Array, console, Promise,
   };
   return vm.runInNewContext(
     `(function () {
        const anyCommand = (async function (tabId, command) { return await dbg.sendCommand(tabId, command); });
+       const pooled = (async function (items, limit, fn) { ${POOLED_BODY} });
        const reachablePaths = (function (root, wanted) { ${BODIES.reachablePaths} });
        const boxMap = (async function (tabId, backendNodeIds) { ${BODIES.boxMap} });
        return { reachablePaths, boxMap };

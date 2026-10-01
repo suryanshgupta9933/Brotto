@@ -709,22 +709,31 @@
        steps read as one column. */
     .message.step      { align-self: stretch; }
 
-    /* Live caret — the agent's "still writing". Square, like everything else
-       in the system, and blink stepped rather than eased so it holds its
-       edges instead of smearing. Added when a message starts being written
-       and wiped with the rest of the bubble when it's finalised. */
-    .caret {
-      display: inline-block;
-      width: 5px;
-      height: 11px;
-      margin-left: 3px;
-      background: var(--ink);
-      vertical-align: -1px;
-      animation: blink 1.05s step-end infinite;
+    /* Live working line — the agent's "still going", covering the ~25s a
+       step spends observing and planning before it has anything to report.
+       Transient: removed the moment the step's own bubble lands, so it is
+       deliberately quieter than one — it should not compete with a real
+       result for the eye. Flex, not margin, so the glyph sits on the text's
+       own centre line whatever the line height does. */
+    .message.working .bubble {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--ink-3);
     }
-    @keyframes blink {
-      0%, 49%   { opacity: 1; }
-      50%, 100% { opacity: 0; }
+    /* A glyph, not the status-bar .spinner: variety across SPINNER_FRAMES
+       means the element's text is rewritten on a ticker, and a border spinner
+       cannot be one of several without becoming a special case. Mono because
+       the braille and quadrant frames only read as rotating in mono.
+       The fixed width is load-bearing — these glyphs are different widths, so
+       without it the line reflows on every frame. */
+    .working-spinner {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1;
+      width: 1em;
+      flex-shrink: 0;
+      text-align: center;
     }
 
     .bubble {
@@ -1410,7 +1419,6 @@
     @media (prefers-reduced-motion: reduce) {
       .marquee .model-pill-track,   /* the model name is clipped, not scrolled */
       .spinner,                      /* still present, just not turning */
-      .caret,                        /* still present, just not blinking */
       #statusBar .cell.flash,
       .overlay-panel,                /* appears instead of sliding in */
       .message,                      /* entrance texture */

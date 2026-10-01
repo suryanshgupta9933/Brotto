@@ -33,6 +33,11 @@ clients/brotto-extension/   — Chrome extension (TS, manifest v3)
 docs/architecture/             — per-subsystem design reasoning (read on demand)
 docs/superpowers/{specs,plans}/ — formal feature specs
 docs/product/                  — product strategy docs
+
+# OSS / launch surface (untracked or pending as of 2026-10-01 — see release-plan.md)
+README.md  PRIVACY.md  SECURITY.md     — required for the Chrome Web Store
+clients/brotto-extension/src/welcome.html — first-run screen; must carry the purpose statement
+.github/ISSUE_TEMPLATE/                — bug report template
 ```
 
 ## Product docs (`docs/product/`) — strategic context
@@ -51,6 +56,8 @@ docs/product/                  — product strategy docs
 | `gap-analysis.md` | When planning work | A gap fills or a new one emerges |
 | `roadmap.md` | When planning work | Phase hits, misses, or re-prioritizes |
 | `risks.md` | When making risk decisions | New risk emerges, old one dies |
+| `release-plan.md` | **Before any launch or packaging work** | A blocker clears or a date moves |
+| `cws-submission.md` | **Before touching the Chrome Web Store listing** | A store field is filled in or a placeholder resolves |
 | `dev-environment.md` | Starting a non-trivial Claude session | New skill/hook/pattern becomes standard |
 | `decisions/` | Before re-debating | **Append** a new file when answering an open question |
 
@@ -81,7 +88,7 @@ Four things per step — hierarchy (`parent_ref_id`, resolved to the nearest **k
 The observation is the union of every frame's AX tree, not just the top frame's — the probe measured `GAP_FRAMES` on `auth-iframe`, and `getFullAXTree` takes a `frameId` and reads cross-origin frames in-process, so it is one call per frame and **no script in a foreign realm, ever**.
 
 - **A `nodeId` is unique only within one frame.** Two frames both return `42`. The ref is `<frameIndex>:<nodeId>` — the ordinal, not the 32-char CDP id, because a ref is printed on every rendered line; `frameId` rides on the target for dispatch. `parent` is composite too and `_depths` treats it as opaque, so the server is unchanged. Parent resolution is **per frame** — the `parentId` table is that frame's own.
-- **Caps are enforced in the walk: 12 frames, depth 4, 2000 nodes per tree.** Depth 4 because `MAX_DEPTH` for indentation is already 4 — anything deeper flattens out of the rendered tree anyway. A failing frame is recorded in `scan.failed` and skipped; a failed `Page.getFrameTree` falls back to the frameless main-frame read.
+- **Caps are enforced in the walk: 12 frames, depth 4, 2000 nodes per tree.** Depth 4 because `MAX_DEPTH` for indentation is already 4 — anything deeper flattens out of the rendered tree anyway. A failing frame is recorded in `scan.failed` and skipped; a failed `Page.getFrameTree` falls back to the frameless main-frame read. **A capped frame is recorded as a frame, not a boolean** (`scan.cappedFrames`), because only *which* frame hit the 2000-node cut decides whether the model lost something: the main document going dark is a blind agent, an analytics embed going dark is nothing. A bare `capped=nodeCapped` fires every step and answers nothing.
 - `frames` rides the observation frame and `main.py` warns when any cap trips. **The model isn't told about truncation yet** — that wants one line beside `render_ax_tree`'s "N more element(s) not shown".
 - **Not fixed:** a click still dispatches by coordinate on the top session. Fine for a same-process cross-origin frame; an **OOPIF** would need `Target.attachToTarget`, a privilege expansion the probe did not show we need. Not verified in a browser.
 
@@ -100,28 +107,198 @@ What the model sees is half of it; the other half is `prompt.py`'s `<convergence
 
 ### A ref that resolves to nothing is now a recorded failure
 
-`ok` is derived from a string prefix: `not outcome.startswith("Error executing")`.
 The relays used to return a *friendly sentence* for an unresolvable ref
 (`"No coordinates for ref '0:99' — element may be off-screen"`), which does not
-match, so the audit wrote **`ok: true` for an action that never happened** —
-and the grounding failure rate was not merely unmeasured, it was recorded as
-clean. `focus_ref`/`clear_ref` returned `None` and no-opped silently, so a
-`type_text` into a hallucinated ref typed into whatever was focused before.
+match the `Error executing:` marker, so the audit wrote **`ok: true` for an
+action that never happened** — and the grounding failure rate was not merely
+unmeasured, it was recorded as clean. `focus_ref`/`clear_ref` returned `None`
+and no-opped silently, so a `type_text` into a hallucinated ref typed into
+whatever was focused before.
 
 Every ref-taking method on **both** relays now returns the `Error executing:`
 prefix when the ref does not resolve, and `_coords` is `_locate`, returning
 `(coords, reason)` so "not in the AX tree" (a grounding error) is separable
 from "no box model" (a correct guess at something off-screen). `type_text`
-bails if focus or clear reports failure. Pinned by
-`tests/test_grounding_outcome.py`.
+bails if focus or clear reports failure.
+
+**`ok` is membership, not a prefix.** The relays were necessary and not
+sufficient: `harness.py` decorates the outcome as `f"Clicked [{ref}]: {result}"`,
+so the marker arrives *mid-string* and a live Gmail run recorded
+`'click' ok=True -> 'Clicked [13829]: Error executing: ref … is not in the
+current AX tree'`. The derivation is now `_EXEC_FAILURE not in outcome`, with
+the string a module constant. **The model wrote `ref: 13829` because the prompt
+taught it to** — two anti-examples in `SYSTEM_PROMPT` demonstrated a bare number
+while the tree renders `[0:13829]`; both are composite now, and a test greps the
+prompt for `\bref \d`.
+
+**…and the model kept doing it anyway, so `_locate` tolerates it.** Removing the
+anti-examples did not stop the bare number: a later Gmail run emitted
+`ref: "149099"` for a tree rendering `[0:149099]` on **4 of 4 steps**, so every
+click failed, the page never changed, and each step was spent re-deciding it.
+The prompt fix was necessary and not sufficient — this is a format the model
+cannot be relied on to reproduce, not a prompt defect to re-fix. `_locate` now
+falls back to a suffix match and resolves the bare nodeId, **refusing when two
+frames hold the same nodeId** and naming them: a `nodeId` is unique only within
+its frame, and guessing would click the wrong element and record `ok: true`.
+A number the page has never seen still fails exactly as before — the fallback is
+not a hole. Pinned by `tests/test_grounding_outcome.py` (12 tests).
 
 **Counted over all 41 audit documents / 168 executable actions: 0 grounding
 failures.** Read that narrowly — it is the Playwright path only (the extension
 has never written a document), and it counts *resolution*, not *validity*: a
 ref that hallucinates into a real but wrong element resolves and records
 `ok: true`. The measurement is the audit, not a probe script — count `ok: false`
-actions in `logs/sessions/`. Full reasoning, including why "1A′: we are at
-34.0% Action Object" was wrong, in `docs/architecture/agent-loop.md`.
+actions in `logs/sessions/`. **That count is now stale: the first
+extension-written document recorded 7 of 42 refs failing to resolve, every one a
+bare nodeId.** Full reasoning, including why "1A′: we are at 34.0% Action Object"
+was wrong, in `docs/architecture/agent-loop.md`.
+
+### A step costs ~30s, and it is *generation*, not the prompt
+
+**Cut output tokens for latency; cut input tokens for cost.** Measured over 73
+recorded steps (`corr(out,lat)=+0.876`, `corr(in,lat)=+0.660`), and the mechanism
+is plain in two steps from the same inbox, same page, same prompt:
+
+| in | out | latency |
+|---|---|---|
+| 25,087 | 191 | **4.3s** |
+| 50,977 | 600 | 12.0s |
+| 25,085 | **3,612** | **41.3s** |
+
+Doubling *input* cost 4.3→12.0s; tripling *output* at **identical input** cost
+4.3→41.3s. The stable prefix is cached, so a 25K-token prompt is nearly free and
+generation runs at ~60 tok/s. The instinct to shrink the prompt buys cost and
+misses the wall.
+
+`tokens_in` is pydantic-ai's cumulative `RunResult.usage`, so it is **summed over
+retries** — it is an integer multiple of the base prompt, not a step size. A 76s
+step was three attempts. Retries are cheap (the prefix is cached); the 3,328
+*generated* tokens were 55s of that 76s. Retries that succeed leave no trace in
+the audit, so a retry-driven step looks identical to a slow one.
+
+**What produced the 3,612 output tokens, and the fix.** Three Gmail runs recorded
+`entries=0` — the scratchpad's retrieval half had *never been used*. `page_text`
+already ships in every prompt, so the model never called `read_page_text`, so
+nothing was ever auto-captured, so notes were the only memory that existed — and
+with nothing to retrieve, the model **transcribed the page into a note**. 5,093
+chars, ~1,300 output tokens, ~28 of that step's 41.3 seconds, written on the step
+that then also wrote a 4,262-char summary. Details in
+[the section below](#the-page-is-captured-in-code-every-step-and-the-model-cannot-write-memory)
+and `docs/architecture/agent-loop.md`.
+
+The 27K input is `ax_filter`'s ranked selection filling the 50K budget with the
+*most actionable* elements rather than truncating in tree order; the old flat 6K
+was smaller and blind to a control mid-page, which is the `auth-inbox` failure.
+`MiniMax-M3` is not in `_THINKING_REQUIRED`, so none of this is reasoning time.
+Observe+execute is 53.4% of wall, and 12s of that is one click —
+`_send_action` blocks on the post-action observation.
+
+### The page is captured in code, every step, and the model cannot write memory
+
+`Scratchpad` has one half. **`entries`** is the correct shape — a 200-char digest
+in the prompt, the body fetched on demand by `recall_memory(id)` — and
+`capture_page` fills it with **every step's page**, in code, before the turn is
+built, so the step's own page is in the manifest it reads. **The model has no
+write action at all.** `append_scratchpad`/`write_scratchpad` are gone from
+`ActionCall`, the prompt and the dispatch; `Scratchpad.notes` survives only as a
+read-only legacy field so sidecars already on disk keep parsing.
+
+- **Prompting alone did not work, and it was not a prompt defect.** The memory
+  section carried two rules pointing opposite ways — *"the 3-step rule for
+  notes: if you will need this again in 3 or more steps, write a synthesized
+  note"* sat directly above *"never write a page's contents into a note"*. The
+  model wrote a **synthesis**, which the older rule tells it to write and the
+  newer one does not clearly forbid. Capturing pages made this worse, not
+  better: it proved the transcription was pure duplicate. The action had to go —
+  a capability the model spends 1,000 output tokens on is not a capability.
+- **The measurement that decided it.** 25 `append_scratchpad` calls and 0
+  `write_scratchpad` across every recorded run. ~17,000 chars were a copy of the
+  page text already in the prompt, ~2,000 were step breadcrumbs duplicating
+  `step_summaries`, and ~1,250 were the only irreducible use (a goal statement).
+  **The six runs with the largest `tokens_out` are exactly the six whose final
+  note was transcript-shaped** — 3,612 / 5,232 / 4,167 / 3,768 / 3,293 /
+  2,587. One of them, `94fd2166`, spent 3,913 chars and 22 of its 33 seconds to
+  first step on a note, then spent 59 more writing the same content again as the
+  summary.
+- **This is what makes memory work at all.** Before it, `page_text` was live-only
+  and the AX tree is ref-scoped, so navigating away destroyed both — "refer back
+  to that page instead of going back" was not achievable, and writing the page
+  down was the model's only option. `entries` carries `url` because three pages
+  in one run are otherwise indistinguishable.
+- **The AX tree is deliberately *not* cached.** A ref is valid only for the
+  observation that produced it; a cached tree hands the model refs that resolve to
+  nothing or, worse, to the wrong element. Page text is safe precisely because it
+  carries no refs.
+- **Recall is for pages you have navigated away from, never the page in front
+  of you.** Removing the write action moved the cost rather than removing it:
+  the prompt's *"the summary must be grounded in memory… recall the relevant
+  entries to verify the wording"* made a live Gmail run call `recall_memory` on
+  step 0 of *"Summarise today's inbox"*, re-reading ~11K chars the prompt was
+  already carrying in full. The manifest entry whose `url` equals `current_url`
+  is now marked `← THIS PAGE … do not recall`; earlier pages stay unmarked, or
+  "go back to that page" becomes unreachable.
+- **`body` goes to a second sidecar, not into the audit document.** `set_scratchpad`
+  runs every step and rewrites the whole file; `model_dump()` carried `body`,
+  which was free while nothing was captured and is 200KB per 20 pages now that
+  every step captures one. The document keeps id/step/selector/url/digest;
+  `<session>.pages.json` holds the bodies. **JSON, not the manifest's
+  line format** — page text is arbitrary content and can contain a line that
+  looks like a manifest header, and that format predates bodies so files on disk
+  must keep parsing byte-identically. A resumed run now recalls **whole pages**;
+  the "only the digest survived" marker is the legacy path (no bodies file), and
+  a missing or corrupt one degrades to digests rather than raising.
+
+**The observation now reports its own cost.** `waitForStable` and `boxMap`
+returned a `Stability` and a `GeometryResult` and `captureObservation` threw
+both away; `metrics` ships `scans`, `bytes`, the stability verdict and
+`geometry.{requested,resolved,fallback,truncated,source}` on the observation
+frame, and `main.py` logs it. **`scans` is the one to watch** — it is 1 on a
+page that went still and 1–4 on one that did not. The per-CDP-call probe numbers
+(geometry fallback is super-linear past `MAX_GEOMETRY_ENTRIES`; the 3s quiet
+floor is constant; pooling at 6 is worth 5.1–5.5× at realistic frame counts; a
+cross-origin embed is an OOPIF and invisible to `Page.getFrameTree`) are in
+`docs/architecture/agent-loop.md`.
+
+**The three serial CDP loops are pooled** (`pooled` in `surfaces.ts`,
+`CDP_CONCURRENCY = 6`): per-frame `getFullAXTree`, the supplement's
+`DOM.getNodeForLocation`, and the geometry fallback's `DOM.getBoxModel`.
+**Results are written by index, never appended** — a supplement ref is
+`-(i + 1)`, so completion order would renumber every `aria-hidden` control and
+the tree would still parse. Frame bookkeeping (`cappedFrames`, `failed`) is
+deliberately *not* pooled; it is filled in one sequential pass after the reads
+land. `sendCommand` re-attaches **once per tab**, shared by everything in
+flight, or six concurrent calls would each race their own `attach`.
+
+**The rescan is gated on the page having gone still**
+(`pageMayStillBeMoving` in `stability.ts`): a page that sat still for the full
+quiet window skips the retry loop, which took ~3.0s off every settled
+observation. The predicate is `stability.waited`, **not `!timedOut`** — the
+catch path returns `{waited:false, timedOut:false}` for a tab that navigated
+mid-observe, and skipping there is how a half-rendered tree reaches the model.
+`auth-slowjs` (control at 5000ms → never settles → deadline) rescans exactly as
+before, which is the regression gate.
+
+**The 3s quiet window is unreachable on an animating page, and that page is the
+common one.** Gmail measured 41 mutations in 10,002ms — one every ~244ms — so
+3s of silence is arithmetically impossible and every observation paid the full
+10s deadline: 10.002s of an 11.19s observation, **47.7% of the wall clock of a
+two-step run, every step, forever.** The gate now **samples at 1000ms and gives
+up early if ≥3 mutations landed**: a page already churning hard at a second in
+is past its initial render, not about to make one. Expected Gmail observation
+10.8s → ~1.4s. `Stability.early` marks it and `waitForStable({noEarly:true})`
+disables the sample for the fallback.
+
+**The short-circuit is a guess, so `captureObservation` checks it.** If every
+rescan saw a different `role|name|value` fingerprint the page really *was*
+still moving and the short path read it early — so the guard pays the full
+quiet window (`noEarly`) and scans once more. That is the pre-existing
+behaviour on the slow-renderer shape; on the fast path the rescans match and the
+guard costs nothing. **Misclassifying toward "busy" is safe and cannot corrupt
+anything**; the sample can only ever report `waited:false`, never `waited:true`.
+Pinned by `scripts/test-observation-rescan-guard.test.js`. The thresholds (3 per
+1000ms, calibrated from one Gmail sample at 4.1/s) are a starting point — a
+miss costs time, never accuracy, and the metrics already flow back.
+
 
 ### The model could not press a key
 
@@ -212,6 +389,17 @@ Other load-bearing bits, all in `docs/architecture/conversation.md`: writes neve
 
 Cards (clarify/approval/login) answer **in place** — `resolveCard` drops the controls, puts the answer where they were and clears `.blocking`; the reply goes *inside* the card, not beside it, so the exchange reads as one exchange. Replayed cards are marked `.resolved` so `clearLoginPrompt` doesn't sweep live history. `renderMarkdown` is hand-rolled and escape-first: blocks parsed from raw lines, then inline per block, with code spans pulled out first via a NUL-delimited placeholder (a printable one would eat a real " 12 " in a price), and link hrefs must match `https?://` explicitly so `javascript:` stays visible text. **Not one string reaches `innerHTML` unescaped** — the model's own words are steerable by page content, so `appendPlanCard` builds its badge, sites line and step numbers with `textContent`/`createTextNode`. Clicking a history row **replays into live chat bubbles**, rebuilt from `tasks[]`/`turns[]`/`prompts[]` rather than `messages[]` alone; a turn draws a step bubble only if it had an external action. **Not verified in a browser** — `scripts/test-replay.test.js` is the only check, and it extracts the real functions by brace matching so it can't drift. Full text in `docs/architecture/panel-ui.md`.
 
+### The panel shows a working line, and streaming would not have fixed it
+
+**Don't move this to the streaming API.** Three independent reasons, any one sufficient. `AgentDecision` is structured JSON (`thought` + `actions[]`) — there is no prose token stream, and `thought` is ~10 tokens. The latency is in **silence, not text**: observe (~11.8s) and model_plan (~13.8s) both complete *before* `step_progress` fires, so ~25s of a ~30s step produces no frame at all. And panel-closed forbids it structurally — no socket means no stream, and reopening replays a finished record.
+
+- **The frame is a phase key, not a sentence.** `harness.py` sends `{"type":"canonical_step","kind":"observe"|"plan"}` at the two boundaries; `WORKING_LINES` in `sidepanel.js` maps each key to panel-owned English. A wording change is then a panel edit, not a server deploy — presentation lives where rendering lives. The frame is not audited (it is a live UI frame; the timings it summarises are already in the document).
+- **The bug was a wired feature nobody sent.** `canonical_step` had a panel handler, a bubble builder and a closer, and **had never once run** — `finishAssistantMessage` had no call site, so the caret blinked for the life of the panel. That is the "looks stuck" complaint, named. It was never a missing feature but a missing producer.
+- **A line is held 700ms** (`setWorkingText`). A cached page answers in under a second and the two phase lines would otherwise flash past unread, which reads as *more* broken than the silence this replaced. A burst inside one hold collapses to the last line rather than showing one and immediately overwriting it.
+- **The bubble and its ticker are torn down together.** `dropWorkingMessage` calls `stopSpinner` *before* the null check — otherwise the interval outlives the node it animates and writes frames into a detached element every 90ms. It fires from `setPhase` (any phase but `executing`), `step_card`, and `context_update` (which the server sends *instead of* `step_progress` when a step had no visible action).
+- **`SPINNER_FRAMES` is data, not mechanism** — `{frames, ms, back}`, five sets, randomly picked, each with its **own cadence** because same-shape-at-same-speed reads as one spinner. `back: true` ping-pongs instead of wrapping; `bar` needs it or it snaps `█` straight back to empty. Three rules keep a sixth set honest, and all three are asserted in the test: no two sets share a cadence; every frame is Block/Braille/Arrow (`0x2580–0x259f`, `0x2800–0x28ff`, `0x2190–0x21ff`) — **no curves**, since the sheet sets `border-radius: 0 !important` globally, so a circle is the one shape this panel has no vocabulary for; every frame is one character. `.working-spinner` has a fixed `width: 1em` and is load-bearing — the glyphs are different widths, so without it the line reflows on every frame. `prefers-reduced-motion` is honoured in **JS** (`matchMedia`), because the stylesheet's reduced-motion block cannot reach a ticker; it still shows a frame, it just stops ticking.
+- **Pinned by `scripts/test-working-line.test.js`** (49 checks), which stubs `Math.random` to walk all five sets deterministically — the picker is a coin toss, so testing only the drawn set leaves four of five unexercised most runs. **Not verified in a browser**: `▛▜▙▟` and `▖▘▝▗` at 11px are the two most likely to render as tofu.
+
 ## Commands
 
 ```bash
@@ -221,8 +409,11 @@ cd clients/brotto-extension && npm run build
 # Run server (dev mode picks up .env)
 cd services/brotto-orchestrator && python start_server.py
 
-# Tests — run from services/brotto-orchestrator/
+# Python tests — run from services/brotto-orchestrator/
 ../../.venv/bin/python -m pytest tests/ -q
+
+# Extension JS tests — run from the REPO ROOT, not clients/brotto-extension
+node scripts/test-replay.test.js           # or any other scripts/*.test.js
 
 # Smoke test (real API call, exercises full model adapter; reads .env)
 .venv/bin/python scripts/smoke_minimax_endtoend.py
@@ -230,9 +421,12 @@ cd services/brotto-orchestrator && python start_server.py
 
 The pytest install lives in the **repo-root** venv, not `services/brotto-orchestrator/.venv` (which has pydantic-ai but no pytest).
 
+**`npm test` runs nothing.** It is `node --test tests/*.test.js`, and `clients/brotto-extension/tests/` does not exist — the 10 suites live in repo-root `scripts/`. Repointing the glob would newly *enable* ten never-executed suites, which is a bigger change than the one-word fix looks; until someone does it deliberately, run them directly. Every `scripts/*.test.js` is extraction-based: it pulls the real functions out of `sidepanel.js` / `background.ts` by brace matching and evals them against a fake DOM, so it cannot drift from what ships. A dropped field is an *absence* and reads clean in review, which is the whole reason they exist.
+
 ## Gotchas
 
-- `/docs/` is gitignored wholesale (`docs/architecture/`, `docs/product/`, `docs/superpowers/`); force-add with `git add -f` or the reasoning notes are local-only and a fresh clone starts blind.
+- **`/ws/ext` is unauthenticated.** `main.py:454` is a bare `await websocket.accept()` with no token, and it is the *only* path a Chrome Web Store install uses. Anyone who can reach a self-hosted server's URL can drive the agent against that user's logged-in browser. Hard launch gate — do not ship the store listing until it is closed. Listed as Wave 3 auth in `release-plan.md`, but it is not in that doc's blocker table either.
+- **`.gitignore` lists `/docs/` and `/CLAUDE.md`, but 27 files under `docs/` and this file are tracked** (force-added with `git add -f`). New docs are ignored by default and silently local-only — that is the failure, not the absence of tracking. `vision.md`, `users.md`, `market.md`, `risks.md`, `gap-analysis.md`, `competitors.md`, `dev-environment.md`, `release-plan.md` and `cws-submission.md` are **not** yet tracked.
 - `.env` is gitignored and there is no `.env.example`; the `.env` itself carries the comments.
 - Don't include `Co-Authored-By: Claude ...` in commit messages (per global `~/.claude/CLAUDE.md`).
 - **`decisions.md` is locked architectural decisions (D1–D10).** Don't change without explicit re-discussion. Product/strategy decisions live in `docs/product/decisions/`.

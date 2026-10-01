@@ -92,11 +92,33 @@ class ExtensionCDPRelay:
         """
         if not self._cached_obs:
             return None, "cannot resolve: no observation captured yet"
-        for t in self._cached_obs.get("axTargets", []):
+        targets = self._cached_obs.get("axTargets", [])
+
+        def at(t: dict) -> tuple[dict | None, str]:
+            if "x" in t and "y" in t:
+                return {"x": t["x"], "y": t["y"]}, ""
+            return None, "is off-screen (no box model in the last observation)"
+
+        for t in targets:
             if str(t.get("ref")) == str(ref):
-                if "x" in t and "y" in t:
-                    return {"x": t["x"], "y": t["y"]}, ""
-                return None, "is off-screen (no box model in the last observation)"
+                return at(t)
+
+        # The model drops the frame prefix: the tree renders `[0:149099]` and
+        # the action carries `ref: 149099`. On a live Gmail run that happened on
+        # 4 of 4 steps, so every click failed and every step was spent
+        # re-deciding an unchanged page. The prompt was already fixed — the
+        # bare-number anti-examples that taught this are gone and the test
+        # pinning that still passes — so this is a format the model cannot be
+        # relied on to reproduce, not a prompt defect to re-fix.
+        hits = [t for t in targets if str(t.get("ref", "")).endswith(":" + str(ref))]
+        if len(hits) == 1:
+            return at(hits[0])
+        if len(hits) > 1:
+            # A nodeId is unique only within its frame, so the bare form can
+            # name a real element twice. Guessing would click the wrong one and
+            # record ok=True — the failure the split above exists to keep out.
+            real = ", ".join(sorted(str(t.get("ref")) for t in hits))
+            return None, f"is ambiguous — node {ref} appears in several frames ({real}); use the full ref"
         return None, "is not in the current AX tree"
 
     # ---------- CDPRelay interface ----------

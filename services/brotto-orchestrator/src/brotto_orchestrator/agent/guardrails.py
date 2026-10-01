@@ -117,8 +117,8 @@ def check_sensitive_action(action: str, action_args: dict, policy) -> bool:
 
     Terminal / internal / question actions are skipped — those are
     metadata, not things the user should approve. (E.g. a click with
-    description matching `payment` should fire; but a scratchpad write
-    whose notes happen to mention "payment" should not.)
+    description matching `payment` should fire; but a memory recall whose
+    page happens to mention "payment" should not.)
     """
     if getattr(policy, "mode", None) != "secure":
         return False
@@ -126,8 +126,7 @@ def check_sensitive_action(action: str, action_args: dict, policy) -> bool:
     if not patterns:
         return False
     if action in {"task_complete", "cannot_complete", "ask_human",
-                  "write_scratchpad", "append_scratchpad", "read_scratchpad",
-                  "recall_memory", "read_page_text"}:
+                  "read_scratchpad", "recall_memory", "read_page_text"}:
         return False
     # Match against action name + arg values joined into one string.
     # Cheap substring scan; no regex needed for the curated list.

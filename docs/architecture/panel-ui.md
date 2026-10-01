@@ -136,3 +136,90 @@ is `scripts/test-replay.test.js`, which extracts the real functions out of
 asserts the shape: both task boundaries, two done bubbles, URLs on the step
 bubbles, a scratchpad turn drawing no step, no duplicated thought, and all
 three prompt kinds replayed resolved.
+
+## The working line (and why it is not a stream)
+
+A step is ~30s, and observe (~11.8s) plus `model_plan` (~13.8s) both complete
+**before** `step_progress` fires. That gap is the whole problem: ~25s of a step
+produces no frame at all, and the panel reads as hung even though the server is
+busy.
+
+**Streaming would not have fixed it**, on three independent grounds:
+
+1. `AgentDecision` is structured JSON — `thought` plus `actions[]`. There is no
+   prose token stream, and `thought` is ~10 tokens. There is nothing to render
+   incrementally.
+2. The latency is in **silence, not text**. The slow part happens before any
+   model output exists, so a token stream would have nothing to carry.
+3. Panel-closed forbids it structurally. No socket means no stream, and
+   reopening replays a finished record. The feature has to work identically
+   with the panel shut, which streaming by definition cannot.
+
+**What ships instead: a frame at each phase boundary.** `harness.py` emits
+`{"type": "canonical_step", "kind": "observe" | "plan"}` at the two boundaries;
+`background.ts` forwards it verbatim; `sidepanel.js` maps the key to a line from
+`WORKING_LINES`. A machine key rather than a sentence — the wording is
+presentation, it lives where rendering lives, and a line edit never needs a
+server deploy. An unrecognised `kind` falls back to the server's own text, so
+the bubble still shows something.
+
+**The real bug was a wired feature nobody sent.** `canonical_step` had a panel
+handler, a bubble builder and a closer function, and had never once run —
+`finishAssistantMessage` had no call site, so its caret blinked for the life of
+the panel. The "it looks stuck" complaint was not a missing feature, it was a
+missing producer.
+
+### The parts that fail silently
+
+- **The 700ms hold.** `setWorkingText` defers a line arriving inside the window
+  rather than dropping it, and a burst inside one hold collapses to the last
+  line. A cached page answers in under a second and both phase lines would
+  otherwise flash past unread — which reads as *more* broken than the silence
+  this replaced.
+- **Teardown order.** `dropWorkingMessage` calls `stopSpinner` **before** the
+  null check on the bubble. After it, the interval outlives the node it animates
+  and writes frames into a detached element every 90ms. It fires from `setPhase`
+  (any phase but `executing`), `step_card`, and `context_update` — the last
+  because the server sends it *instead of* `step_progress` when a step had no
+  visible action, so leaving the bubble up would claim the agent is busy through
+  the whole next observe window.
+- **Two identical lines in a row.** `workingLine` never repeats. Plain random
+  repeats about one time in ten, and two identical lines running is precisely
+  what reads as a stuck animation — the exact problem the varied wording exists
+  to fix. The two phases draw independently, so an observe line and a plan line
+  may legitimately collide.
+
+### The spinner set is data
+
+`SPINNER_FRAMES` is `{frames, ms, back}` per set, five of them, randomly picked,
+so a new look is a new entry rather than new code. Three rules keep a sixth
+honest, and all three are asserted rather than commented:
+
+- **No two sets share a cadence.** Same shape at the same speed reads as one
+  spinner seen five times, which defeats the variety.
+- **Every frame is Block, Braille or Arrow** (`0x2580–0x259f`,
+  `0x2800–0x28ff`, `0x2190–0x21ff`) — **no curves**. The sheet sets
+  `border-radius: 0 !important` globally, so a circle is the one shape this
+  panel has no vocabulary for, and a decorative star is not square either.
+  Two sets were cut (`half`, `spokes`) for exactly this.
+- **Every frame is a single character**, and `.working-spinner` carries a fixed
+  `width: 1em`. That width is load-bearing, not tidiness: the glyphs are
+  different widths, so without it the line reflows on every frame.
+
+`back: true` ping-pongs at the ends instead of wrapping, so the motion reverses
+rather than snapping from last back to first. `bar` needs it — wrapping would
+snap a full block straight back to an empty one, which reads as a glitch.
+
+`prefers-reduced-motion` is honoured in **JS** via `matchMedia`, not only in
+the stylesheet, because the sheet's reduced-motion block cannot reach a ticker.
+Reduced motion still gets a frame; it just stops ticking.
+
+### Test
+
+`scripts/test-working-line.test.js`, 49 checks. It stubs `Math.random` to walk
+all five sets deterministically: the picker is a coin toss, so testing only the
+drawn set leaves four of five unexercised most runs, and both motion branches
+need covering every time.
+
+**Not verified in a browser.** `▛▜▙▟` and `▖▘▝▗` at 11px in Geist Mono are the
+two most likely to render as tofu boxes rather than read as motion.

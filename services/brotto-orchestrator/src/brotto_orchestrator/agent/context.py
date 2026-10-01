@@ -16,7 +16,7 @@ class StepSummary(BaseModel):
 
 
 class MemoryEntry(BaseModel):
-    """One read_page_text result, captured automatically.
+    """One captured chunk of page text, recorded automatically.
 
     Lives in Scratchpad.entries. The agent sees the manifest in every step
     (a small digest per entry) and recalls the full body via the
@@ -31,6 +31,10 @@ class MemoryEntry(BaseModel):
     digest: str
     body: str
     was_truncated: bool
+    # Which page it came from. Three pages captured in one run are
+    # otherwise indistinguishable in the manifest, and "go back to *that*
+    # page" is the whole point of keeping them.
+    url: str = ""
 
 
 DIGEST_LEN = 200
@@ -39,18 +43,63 @@ DIGEST_LEN = 200
 class Scratchpad(BaseModel):
     """Long-term memory. Two parts:
 
-    - entries: every read_page_text result, captured automatically by code.
-      The agent sees the digest (small) in every step's prompt; the full body
-      is loaded on demand via recall_memory.
+    - entries: page text, captured automatically by code — every step's
+      page, plus every read_page_text result. The agent sees the digest
+      (small) in every step's prompt; the full body is loaded on demand
+      via recall_memory.
     - notes: agent-synthesized free-form text. The agent writes high-level
       findings, decisions, sub-question answers. This is the "narrative" the
       agent curates on top of the raw reads.
 
-    No hard cap on either — sized for complex multi-step tasks. The
-    manifest is small; the bodies are loaded on demand.
+    `entries` is uncapped by design — the manifest is small and the bodies
+    are loaded on demand, so growth costs almost nothing. `notes` is NOT:
+    it is echoed in full in every step's prompt, so it is the one part that
+    compounds, and it is capped.
     """
     entries: list[MemoryEntry] = field(default_factory=list)
+    # Read-only legacy. Sidecars written before memory became a code-written
+    # page cache carry a `# NOTES` section, and the loader still parses it, but
+    # nothing writes notes any more — see the class docstring.
     notes: str = ""
+
+    def next_id(self) -> str:
+        """One numbering scheme for both entry kinds. They were numbered
+        independently at their two call sites, so a page capture landing
+        between two reads could reuse an id and silently overwrite one."""
+        return f"r{len(self.entries) + 1}"
+
+    def capture_page(self, url: str, step: int, text: str) -> "Scratchpad":
+        """Record the page the agent is currently looking at.
+
+        Done in code on every step, not asked for. `page_text` already
+        ships in the prompt, so the model had no reason to ever call
+        `read_page_text`, and so nothing was captured: three Gmail runs
+        recorded entries=0 and the model transcribed the page into
+        `notes` instead. That transcription is ~1,300 output tokens, and
+        output tokens are the latency (25,087 in / 191 out = 4.3s;
+        25,085 in / 3,612 out = 41.3s, same prompt).
+
+        It is also what makes memory work at all. Before this, the page
+        text was live-only and the AX tree is ref-scoped, so navigating
+        away destroyed both and the only way to keep a finding was to
+        write it down.
+
+        This is now the *only* way memory is written. The model has no
+        write action, because it used every one it had to transcribe the
+        page it was already looking at: 25 `append_scratchpad` calls
+        across every recorded run, ~17,000 chars of them a copy of the
+        page text in the prompt, and the six runs with the largest
+        `tokens_out` are exactly the six whose final note was
+        transcript-shaped.
+        """
+        body = (text or "").strip()
+        if not body:
+            return self
+        digest = body[:DIGEST_LEN] + ("…" if len(body) > DIGEST_LEN else "")
+        return self.with_entry(MemoryEntry(
+            id=self.next_id(), step=step, selector="page", around=None,
+            digest=digest, body=body, was_truncated=False, url=url,
+        ))
 
     def with_entry(self, entry: MemoryEntry) -> "Scratchpad":
         return Scratchpad(
@@ -64,21 +113,10 @@ class Scratchpad(BaseModel):
                 return e
         return None
 
-    def append_note(self, line: str) -> "Scratchpad":
-        if not line:
-            return self
-        if self.notes:
-            return Scratchpad(entries=self.entries, notes=(self.notes + "\n" + line).strip())
-        return Scratchpad(entries=self.entries, notes=line.strip())
-
-    def write_notes(self, content: str) -> "Scratchpad":
-        return Scratchpad(entries=self.entries, notes=content)
-
 
 class AgentTurn(BaseModel):
     task: str
     step_number: int
-    scratchpad_notes: str
     scratchpad_entries: list[MemoryEntry]
     current_url: str
     current_page_title: str
@@ -96,11 +134,11 @@ class AgentTurn(BaseModel):
 
 class ActionCall(BaseModel):
     """One action in a multi-action decision. The agent may emit several of
-    these per step (e.g. click + append_scratchpad)."""
+    these per step (e.g. click + press_key)."""
     action: Literal[
         "navigate", "click", "type_text", "press_key", "scroll",
         "find_element", "read_page_text",
-        "write_scratchpad", "append_scratchpad", "read_scratchpad", "recall_memory",
+        "read_scratchpad", "recall_memory",
         "recall_conversation", "recall_steps",
         "task_complete", "cannot_complete", "ask_human",
     ]
