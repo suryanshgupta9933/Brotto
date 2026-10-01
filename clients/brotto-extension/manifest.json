@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Brotto",
   "version": "1.0.0",
-  "description": "Drive your real browser with any AI model. Model-agnostic, open-source.",
+  "description": "Let you ask an AI to perform tasks in your own logged-in browser. Bring your own model key.",
   "background": {
     "service_worker": "background.js"
   },
