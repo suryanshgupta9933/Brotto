@@ -58,6 +58,13 @@ class ModelInfo:
     context_window: int
     pricing: Pricing | None = None
     label: str = ""
+    # Whether the model accepts image input. Anthropic and OpenAI both state
+    # that *every* current model does, so this is only ever false where a
+    # vendor says so (DeepSeek's pro) or has said nothing at all (the MiniMax
+    # M2 pair, Groq's open weights). False therefore means "not documented",
+    # not "confirmed text-only" — the vision fallback should treat a false as
+    # a reason to check, not a proof.
+    vision: bool = False
 
     def to_dict(self) -> dict[str, object]:
         p = self.pricing
@@ -65,6 +72,7 @@ class ModelInfo:
             "id": self.id,
             "label": self.label or self.id,
             "context_window": self.context_window,
+            "vision": self.vision,
             "pricing": None if p is None else {
                 "input_per_mtok": p.input_per_mtok,
                 "output_per_mtok": p.output_per_mtok,
@@ -135,6 +143,9 @@ _OPUS = Pricing(4.00, 20.00, 0.20, 5.00)
 _SONNET = Pricing(2.00, 10.00, 0.20, 2.50)
 # Haiku is the one 200K model left; the other three are 1M.
 _HAIKU = Pricing(1.00, 5.00, 0.10, 1.25)
+# Sonnet 4.5 is the previous generation, kept because a 200K window is still
+# the honest budget for a task that should not spend 1M.
+_SONNET_45 = Pricing(3.00, 15.00, 0.30, 3.75)
 _ASTRA = Pricing(
     10.00, 50.00, 1.00, 12.50,
     long_context_threshold=272_000,
@@ -152,6 +163,28 @@ _LUNA = Pricing(
     long_context_threshold=272_000,
     input_per_mtok_long=0.20, output_per_mtok_long=0.75,
     cache_read_per_mtok_long=0.02, cache_write_per_mtok_long=0.25,
+)
+# The GPT-5.6 generation, one tier below GPT-6 and kept alongside it because
+# they are the same architecture at a different price point. NOTE these are
+# *promotional* rates — OpenAI says gpt-5.6-sol's are available "at least
+# through November 21, 2026" — so re-read them before showing a cost.
+_GPT56_SOL = Pricing(
+    4.00, 20.00, 0.40, 5.00,
+    long_context_threshold=272_000,
+    input_per_mtok_long=8.00, output_per_mtok_long=30.00,
+    cache_read_per_mtok_long=0.80, cache_write_per_mtok_long=10.00,
+)
+_GPT56_TERRA = Pricing(
+    2.00, 12.00, 0.20, 2.50,
+    long_context_threshold=272_000,
+    input_per_mtok_long=4.00, output_per_mtok_long=18.00,
+    cache_read_per_mtok_long=0.40, cache_write_per_mtok_long=5.00,
+)
+_GPT56_LUNA = Pricing(
+    0.20, 1.20, 0.02, 0.25,
+    long_context_threshold=272_000,
+    input_per_mtok_long=0.40, output_per_mtok_long=1.80,
+    cache_read_per_mtok_long=0.04, cache_write_per_mtok_long=0.50,
 )
 _FLASH_38 = Pricing(0.75, 3.75, 0.075, 0.0)
 _FLASH_35 = Pricing(1.50, 9.00, 0.15, 0.0)
@@ -189,20 +222,29 @@ PROVIDER_CATALOG: dict[str, ProviderInfo] = {
         id="anthropic",
         label="Anthropic",
         api_shape="anthropic",
+        # Anthropic: "All current models support text and image input".
         models=(
-            ModelInfo("claude-sonnet-5-5", 1_000_000, _SONNET),
-            ModelInfo("claude-opus-5-5", 1_000_000, _OPUS),
-            ModelInfo("claude-fable-5-1", 1_000_000, _FABLE),
-            ModelInfo("claude-haiku-4-5", 200_000, _HAIKU),
+            ModelInfo("claude-sonnet-5-5", 1_000_000, _SONNET, vision=True),
+            ModelInfo("claude-opus-5-5", 1_000_000, _OPUS, vision=True),
+            ModelInfo("claude-fable-5-1", 1_000_000, _FABLE, vision=True),
+            ModelInfo("claude-haiku-4-5", 200_000, _HAIKU, vision=True),
+            # 200K, not the 1M its successors get — that is the point of keeping
+            # it: the window drives the AX-tree budget, so a smaller honest
+            # number is what a long task should be paced against.
+            ModelInfo("claude-sonnet-4-5", 200_000, _SONNET_45, vision=True),
         ),
     ),
     "openai": ProviderInfo(
         id="openai",
         label="OpenAI",
+        # OpenAI: "All latest OpenAI models support text and image input".
         models=(
-            ModelInfo("gpt-6.1-sol", 1_050_000, _SOL),
-            ModelInfo("gpt-6-luna", 1_050_000, _LUNA),
-            ModelInfo("gpt-6-astra", 1_050_000, _ASTRA),
+            ModelInfo("gpt-6.1-sol", 1_050_000, _SOL, vision=True),
+            ModelInfo("gpt-6-luna", 1_050_000, _LUNA, vision=True),
+            ModelInfo("gpt-6-astra", 1_050_000, _ASTRA, vision=True),
+            ModelInfo("gpt-5.6-sol", 1_050_000, _GPT56_SOL, vision=True),
+            ModelInfo("gpt-5.6-terra", 1_050_000, _GPT56_TERRA, vision=True),
+            ModelInfo("gpt-5.6-luna", 1_050_000, _GPT56_LUNA, vision=True),
         ),
     ),
     "minimax": ProviderInfo(
@@ -213,9 +255,12 @@ PROVIDER_CATALOG: dict[str, ProviderInfo] = {
         # compatible vendors below. The field still exists because it is what
         # the Anthropic factory falls back to.
         default_base_url="https://api.minimax.io/anthropic",
+        # MiniMax documents the M3 pair as "Multimodal" and says nothing about
+        # image input on the M2.7 pair — hence vision unset there rather than
+        # a guess in either direction.
         models=(
-            ModelInfo("MiniMax-M3.1-Flash-Preview", 1_000_000),
-            ModelInfo("MiniMax-M3", 1_000_000, _M3),
+            ModelInfo("MiniMax-M3.1-Flash-Preview", 1_000_000, vision=True),
+            ModelInfo("MiniMax-M3", 1_000_000, _M3, vision=True),
             ModelInfo("MiniMax-M2.7", 204_800, _M27),
             ModelInfo("MiniMax-M2.7-highspeed", 204_800, _M27_HS),
         ),
@@ -228,10 +273,10 @@ PROVIDER_CATALOG: dict[str, ProviderInfo] = {
         # long-context tiers could not be read off the pricing page, so
         # long_context_threshold stays None rather than invented.
         models=(
-            ModelInfo("gemini-3.8-flash", 1_048_576, _FLASH_38),
-            ModelInfo("gemini-3.5-flash", 1_048_576, _FLASH_35),
-            ModelInfo("gemini-3.5-flash-lite", 1_048_576, _FLASH_LITE),
-            ModelInfo("gemini-3.1-flash-lite", 1_048_576, _FLASH_LITE_31),
+            ModelInfo("gemini-3.8-flash", 1_048_576, _FLASH_38, vision=True),
+            ModelInfo("gemini-3.5-flash", 1_048_576, _FLASH_35, vision=True),
+            ModelInfo("gemini-3.5-flash-lite", 1_048_576, _FLASH_LITE, vision=True),
+            ModelInfo("gemini-3.1-flash-lite", 1_048_576, _FLASH_LITE_31, vision=True),
         ),
     ),
     # The generic adapter. Everything below speaks the OpenAI chat-completions
@@ -251,8 +296,10 @@ PROVIDER_CATALOG: dict[str, ProviderInfo] = {
         accepts_base_url=True,
         default_base_url="https://api.deepseek.com/v1",
         models=(
+            # DeepSeek's own table is the only one that says "not supported"
+            # outright: vision on flash, not on pro.
             ModelInfo("deepseek-v4-pro", 1_000_000, _DS_PRO),
-            ModelInfo("deepseek-flash", 1_000_000, _DS_FLASH),
+            ModelInfo("deepseek-flash", 1_000_000, _DS_FLASH, vision=True),
         ),
     ),
     "groq": ProviderInfo(

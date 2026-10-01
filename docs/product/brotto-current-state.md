@@ -123,8 +123,8 @@ Nine providers, one catalogue — `model/catalog.py`'s `PROVIDER_CATALOG` genera
 factories, `GET /v1/models`, and both extension screens, so adding a model is one edit. It
 replaced three hand-kept copies that had already drifted:
 
-- `anthropic` — `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` (all 1M), `claude-haiku-4-5` (200K)
-- `openai` — `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra` (all 1.05M)
+- `anthropic` — `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` (all 1M), `claude-haiku-4-5` and `claude-sonnet-4-5` (both 200K — the previous generation, kept deliberately)
+- `openai` — `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra` and the `gpt-5.6-{sol,terra,luna}` tier (all 1.05M)
 - `minimax` — Anthropic request shape, `base_url=https://api.minimax.io/anthropic`; `MiniMax-M3.1-Flash-Preview` (1M, Token Plan), `MiniMax-M3` (1M, pay-as-you-go — 402 without credits), `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`
 - `gemini` — `gemini-3.8-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` (all 1.05M)
 - `deepseek` — `deepseek-v4-pro`, `deepseek-flash` (1M); `groq` — `openai/gpt-oss-120b`, `openai/gpt-oss-20b` (131K)

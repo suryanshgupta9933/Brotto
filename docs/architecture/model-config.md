@@ -12,8 +12,8 @@ edit. It replaced three hand-kept copies that had already drifted.
 
 | id | shape | notes |
 |---|---|---|
-| `anthropic` | anthropic | claude-sonnet-5-5, claude-opus-5-5, claude-fable-5-1 (1M), claude-haiku-4-5 (200K) |
-| `openai` | openai | gpt-6.1-sol, gpt-6-luna, gpt-6-astra; all 1.05M |
+| `anthropic` | anthropic | claude-sonnet-5-5, claude-opus-5-5, claude-fable-5-1 (1M), claude-haiku-4-5 (200K), claude-sonnet-4-5 (200K, previous gen) |
+| `openai` | openai | gpt-6.1-sol, gpt-6-luna, gpt-6-astra and the gpt-5.6 tier (sol/terra/luna); all 1.05M |
 | `minimax` | anthropic | 4 models; fixed endpoint, no base-URL field |
 | `gemini` | gemini | gemini-3.8-flash, 3.5-flash, 3.5-flash-lite, 3.1-flash-lite; all 1.05M |
 | `openrouter` | openai | any model id; endpoint editable |
@@ -30,6 +30,34 @@ reasoning lives here because the failure is silent in review — a stale id look
 exactly like a correct one, and only a 404 or a rejected `thinking` param at
 runtime tells you. **When refreshing, read the source URL recorded above the
 rate constants in `catalog.py`; do not transcribe from memory.**
+
+**One previous generation is kept per vendor, not just the newest.** Claude
+Sonnet 4.5 (200K) and the gpt-5.6 tier sit below their successors. This is
+deliberate and not sentimentality: `context_window` becomes `window/20` of AX
+tree, so a genuinely smaller window is the honest budget for a task that should
+*not* spend a million tokens, and a user who has a Claude Code subscription
+landed on a 4.5-era model. `gpt-5.6`'s rates are promotional — OpenAI says
+Sol's hold "at least through November 21, 2026".
+
+### Vision
+
+`ModelInfo.vision` is a plain bool and it is set only where a vendor says so.
+Anthropic ("all current models support text and image input") and OpenAI ("all
+latest OpenAI models support text and image input") mean *every* one of their
+entries is True, and MiniMax labels the M3 pair "Multimodal". DeepSeek's table
+is the only one that says "not supported" outright — vision on `deepseek-flash`,
+not on `deepseek-v4-pro`.
+
+**A `False` means "not documented", not "confirmed text-only."** The MiniMax
+M2.7 pair, Groq's open weights and every `accepts_any_model` provider fall in
+that bucket, because a vendor not listing a capability is not a vendor denying
+it. So a `False` is a reason for the vision fallback to check before it sends a
+frame, not a proof it should skip the model. Set it when the vendor documents
+it; do not set it on a hunch.
+
+The field is on the wire (`GET /v1/models`) and nothing consumes it yet — the
+fallback that selects on it is §1.1, which is not written. Pinned by
+`test_models_ship_whether_they_take_an_image`.
 
 
 **Dispatch is on the vendor's request shape (`api_shape`), never on its id.**

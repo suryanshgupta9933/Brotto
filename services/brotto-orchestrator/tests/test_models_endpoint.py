@@ -56,6 +56,27 @@ def test_models_ship_their_context_window_and_pricing(client):
     assert providers["minimax"]["models"][0]["pricing"] is None
 
 
+def test_models_ship_whether_they_take_an_image(client):
+    """The vision fallback selects on this. A flag that silently defaulted to
+    False everywhere would look correct in review and leave §1.1 with no
+    candidates; one that defaulted True would send frames to a text-only
+    endpoint and fail at the API."""
+    providers = {p["id"]: p for p in client.get("/v1/models").json()["providers"]}
+    by_id = {
+        m["id"]: m
+        for p in providers.values()
+        for m in p["models"]
+    }
+    # Anthropic and OpenAI both state that *every* current model takes image
+    # input, so all of theirs are true by documentation, not by guess.
+    for pid in ("anthropic", "openai", "gemini"):
+        for m in providers[pid]["models"]:
+            assert m["vision"] is True, (pid, m["id"])
+    # DeepSeek's table is the one that says "not supported" outright.
+    assert by_id["deepseek-flash"]["vision"] is True
+    assert by_id["deepseek-v4-pro"]["vision"] is False
+
+
 def test_a_provider_with_no_models_still_ships(client):
     """`custom` is a base URL and a free-text field. Rendering nothing for it
     would leave a user with a self-hosted endpoint unable to describe it."""
