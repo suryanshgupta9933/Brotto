@@ -48,7 +48,7 @@ def test_the_response_carries_the_flags_the_panel_renders_by(client):
 def test_models_ship_their_context_window_and_pricing(client):
     providers = {p["id"]: p for p in client.get("/v1/models").json()["providers"]}
     sonnet = providers["anthropic"]["models"][0]
-    assert sonnet["id"] == "claude-3-5-sonnet-latest"
+    assert sonnet["id"] == "claude-sonnet-5-5"
     assert sonnet["context_window"] > 0
     assert sonnet["pricing"]["input_per_mtok"] > 0
     # MiniMax is deliberately unpriced; `null` must survive serialization as

@@ -103,7 +103,7 @@ const SERVER = {
   providers: [
     { id: "anthropic", label: "Anthropic", accepts_base_url: false, default_base_url: null,
       accepts_any_model: false, keyless_ok: false,
-      models: [{ id: "claude-3-5-sonnet-latest", context_window: 200000 }] },
+      models: [{ id: "claude-sonnet-5-5", context_window: 1000000 }] },
     { id: "ollama", label: "Ollama (local)", accepts_base_url: true,
       default_base_url: "http://localhost:11434/v1",
       accepts_any_model: true, keyless_ok: true,
@@ -180,7 +180,7 @@ async function main() {
     const { api } = await makeCatalog(async () => { throw new Error("x"); });
     const list = { providers: SERVER.providers };
     check("a catalogued model reports its own window",
-      api.contextWindow(list, "anthropic", "claude-3-5-sonnet-latest") === 200000);
+      api.contextWindow(list, "anthropic", "claude-sonnet-5-5") === 1000000);
     check("a free-text model id does not claim zero",
       api.contextWindow(list, "ollama", "qwen2.5-coder:7b") === 128000,
       String(api.contextWindow(list, "ollama", "qwen2.5-coder:7b")));
@@ -259,7 +259,7 @@ async function main() {
     check("provider options are labelled, not raw ids",
       els["model-provider"].children[1].textContent === "Ollama (local)");
     check("model suggestions come from the catalogue",
-      els["model-name-options"].children.map((c) => c.value).join() === "claude-3-5-sonnet-latest");
+      els["model-name-options"].children.map((c) => c.value).join() === "claude-sonnet-5-5");
   }
 
   {
@@ -311,7 +311,7 @@ async function main() {
     await ctx.initModelSettings("http://box:8000");
     els["model-provider"].value = "anthropic";
     vm.runInContext("populateModelOptions()", ctx);
-    els["model-name"].value = "claude-3-5-sonnet-latest";
+    els["model-name"].value = "claude-sonnet-5-5";
     els["model-api-key"].value = "sk-secret";
     await els["model-save"].handlers.click();
     check("a provider with no base-URL field stores null, not the leftover box value",
@@ -337,11 +337,11 @@ async function main() {
 
   {
     const { els, ctx } = await panelWithCatalog(async () => { throw new Error("down"); }, {
-      provider: "anthropic", model: "claude-3-5-sonnet-latest", context_window: 200000,
+      provider: "anthropic", model: "claude-sonnet-5-5", context_window: 1000000,
     });
     await ctx.initModelSettings("");
     check("a config saved before base_url existed still loads",
-      els["model-name"].value === "claude-3-5-sonnet-latest");
+      els["model-name"].value === "claude-sonnet-5-5");
     check("…and does not resurrect a stale base URL", els["model-base-url"].value === "");
   }
 

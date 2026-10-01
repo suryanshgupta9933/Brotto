@@ -24,7 +24,7 @@ def test_anthropic_factory_default_models_nonempty():
 
 def test_anthropic_factory_validates_known_model():
     f = AnthropicFactory()
-    assert f.validate_model_id("claude-3-5-sonnet-latest") is True
+    assert f.validate_model_id("claude-sonnet-5-5") is True
     assert f.validate_model_id("definitely-not-a-real-model-xyz") is False
 
 
@@ -72,13 +72,13 @@ def test_openai_factory_default_models_nonempty():
 def test_openai_factory_build_returns_openai_model():
     from pydantic_ai.models.openai import OpenAIChatModel
     f = OpenAIFactory()
-    model = f.build("gpt-4o", UserCredentials(api_key="sk-test", base_url=None))
+    model = f.build("gpt-6.1-sol", UserCredentials(api_key="sk-test", base_url=None))
     assert isinstance(model, OpenAIChatModel)
 
 
 def test_openai_factory_rejects_unknown_model():
     f = OpenAIFactory()
-    assert f.validate_model_id("gpt-4o") is True
+    assert f.validate_model_id("gpt-6.1-sol") is True
     assert f.validate_model_id("definitely-not-a-real-model-xyz") is False
 
 
@@ -101,10 +101,10 @@ def test_the_registry_builds_on_the_request_shape_not_the_provider_id():
 def test_gemini_factory_builds_a_google_model():
     from pydantic_ai.models.google import GoogleModel
     f = GeminiFactory()
-    model = f.build("gemini-2.0-flash", UserCredentials(api_key="k", base_url=None))
+    model = f.build("gemini-3.8-flash", UserCredentials(api_key="k", base_url=None))
     assert isinstance(model, GoogleModel)
-    assert f.validate_model_id("gemini-2.0-flash") is True
-    assert f.validate_model_id("gpt-4o") is False
+    assert f.validate_model_id("gemini-3.8-flash") is True
+    assert f.validate_model_id("gpt-6.1-sol") is False
 
 
 def test_an_openai_compatible_vendor_is_one_class_with_a_different_endpoint():

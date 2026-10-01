@@ -10,8 +10,9 @@ from brotto_orchestrator.model.registry import (
 # other vendors, so the base default must not look at the id or raise on one
 # it has never heard of.
 _ALL = [
-    "MiniMax-M3.1-Flash-Preview", "MiniMax-M3", "claude-3-5-sonnet-latest",
-    "gpt-4o", "gemini-2.0-flash", "llama3.1", "openrouter/auto",
+    "MiniMax-M3.1-Flash-Preview", "MiniMax-M3", "claude-sonnet-5-5",
+    "claude-opus-5-5", "gpt-6.1-sol", "gemini-3.8-flash", "llama3.1",
+    "openrouter/auto", "deepseek-v4-pro", "openai/gpt-oss-120b",
 ]
 
 
@@ -26,10 +27,33 @@ def test_every_provider_sets_a_token_cap():
             assert settings["max_tokens"] == _OUTPUT_TOKEN_CAP, (provider, model_id)
 
 
-def test_thinking_is_disabled_where_the_provider_allows_it():
+def test_minimax_m3_is_told_not_to_think():
+    """It accepts `thinking.type="disabled"` and does not think by default
+    anyway — the param is here so a provider-side default change cannot
+    silently turn reasoning back on for a UI that pays ~0.8s per extra
+    second of it."""
     assert PROVIDER_REGISTRY["minimax"].model_settings("MiniMax-M3")[
         "anthropic_thinking"
     ] == {"type": "disabled"}
+
+
+def test_no_claude_model_is_ever_told_to_stop_thinking():
+    """Anthropic moved to adaptive thinking: Fable 5.1, Opus 5.5 and Sonnet
+    5.5 are always-on and answer `disabled` with HTTP 400. Every Claude id
+    in the catalog is one of them, so this is the shape that would 400 on
+    every single call."""
+    for model_id in ("claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1",
+                     "claude-haiku-4-5"):
+        settings = PROVIDER_REGISTRY["anthropic"].model_settings(model_id)
+        assert "anthropic_thinking" not in settings, model_id
+
+
+def test_an_anthropic_id_sent_to_the_minimax_factory_gets_no_thinking_param():
+    """The two providers share a factory and differ only in `provider_id`, so
+    an allowlist keyed on the model id alone would send `disabled` to Claude
+    and 400 on every call."""
+    settings = PROVIDER_REGISTRY["minimax"].model_settings("claude-sonnet-5-5")
+    assert "anthropic_thinking" not in settings
 
 
 def test_thinking_required_model_is_not_sent_a_disabled_param():
@@ -55,6 +79,16 @@ def test_no_non_anthropic_vendor_ever_gets_the_thinking_param():
             continue
         for model_id in _ALL:
             assert "anthropic_thinking" not in factory.model_settings(model_id), (pid, model_id)
+
+
+def test_effort_is_never_sent_explicitly():
+    """Anthropic invalidates prompt-cache breakpoints when the effort value
+    changes between requests, and setting effort to the model's default is
+    equivalent to omitting it. Brotto's stable prefix is the cheap part of a
+    run, so the only cache-safe choice is to omit it."""
+    for pid, factory in PROVIDER_REGISTRY.items():
+        for model_id in _ALL:
+            assert "effort" not in str(factory.model_settings(model_id)), (pid, model_id)
 
 
 def test_an_unknown_model_id_does_not_raise():

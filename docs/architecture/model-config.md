@@ -12,15 +12,25 @@ edit. It replaced three hand-kept copies that had already drifted.
 
 | id | shape | notes |
 |---|---|---|
-| `anthropic` | anthropic | claude-3-5-sonnet-latest, claude-3-5-haiku-latest |
-| `openai` | openai | gpt-4o, gpt-4o-mini, o1 |
+| `anthropic` | anthropic | claude-sonnet-5-5, claude-opus-5-5, claude-fable-5-1 (1M), claude-haiku-4-5 (200K) |
+| `openai` | openai | gpt-6.1-sol, gpt-6-luna, gpt-6-astra; all 1.05M |
 | `minimax` | anthropic | 4 models; fixed endpoint, no base-URL field |
-| `gemini` | gemini | gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash |
+| `gemini` | gemini | gemini-3.8-flash, 3.5-flash, 3.5-flash-lite, 3.1-flash-lite; all 1.05M |
 | `openrouter` | openai | any model id; endpoint editable |
-| `deepseek` | openai | any model id; endpoint editable |
-| `groq` | openai | any model id; endpoint editable |
+| `deepseek` | openai | deepseek-v4-pro, deepseek-flash; 1M |
+| `groq` | openai | openai/gpt-oss-120b, openai/gpt-oss-20b; 131K |
 | `ollama` | openai | **keyless**, any model id, defaults to `http://localhost:11434/v1` |
 | `custom` | openai | any model id, no models, no default endpoint |
+
+**The lineup is re-read from each vendor's own page, not remembered.** It was
+refreshed on 2026-10-01 and every id here was verified against the provider's
+model list that day; the old set (claude-3-5-\*, gpt-4o, o1, gemini-1.5/2.0,
+deepseek-chat/reasoner) is gone, several of those shut down entirely. The
+reasoning lives here because the failure is silent in review — a stale id looks
+exactly like a correct one, and only a 404 or a rejected `thinking` param at
+runtime tells you. **When refreshing, read the source URL recorded above the
+rate constants in `catalog.py`; do not transcribe from memory.**
+
 
 **Dispatch is on the vendor's request shape (`api_shape`), never on its id.**
 MiniMax speaks the Anthropic shape from its own id; a registry that dispatched
@@ -117,11 +127,29 @@ separately and they do not overlap. `harness.py` accumulates all four into
 and is still resumable.
 
 `Pricing | None` is a supported value and `price_usage` returns `None` for it.
-MiniMax, Groq, DeepSeek and OpenRouter are deliberately unpriced. **A visibly
-absent cost beats a confidently wrong one**, because the consumer of this number
-is a budget cap. Prices were transcribed on 2026-10-01 and must be re-checked
-against each provider's pricing page before any of them is shown to a user.
-Local inference is the one zero that is certain rather than unknown.
+OpenRouter is deliberately unpriced — its rate is per-model, not per-provider.
+**A visibly absent cost beats a confidently wrong one**, because the consumer of
+this number is a budget cap. Rates were read off each vendor's pricing page on
+2026-10-01 and must be re-checked before any of them is shown to a user. Local
+inference is the one zero that is certain rather than unknown.
+
+**A `0.0` cache-write rate is "not published", not "free".** Google charges per
+hour of cache storage rather than per write, Groq publishes no write rate at all,
+and MiniMax publishes none for M3. The write field is a required float, so
+`price_usage` has nowhere to record the distinction — which is why
+`test_every_priced_model_has_a_plausible_rate_card` asserts only that a read is
+cheaper than an uncached input token, and says so.
+
+**Two vendors re-rate the whole request past a size threshold**, which is why
+`Pricing` grew `long_context_threshold` and four `_long` fields. OpenAI doubles
+input and cache and multiplies output by 1.5 past 272K input tokens; MiniMax
+doubles everything past 512K. The rule applies to the **entire request**, not to
+the tokens over the line — a per-token split prices a long run at the base rate
+and undercounts it by up to half. Gemini has tiers too, but they could not be
+read off its pricing page, so its threshold is left `None` rather than invented.
+DeepSeek doubles during weekday peak hours (01:00–04:00, 06:00–10:00 UTC) and
+`Pricing` has no clock in it; that is the one known underestimate, marked with a
+`ponytail:` comment at the constants.
 
 `testing/runner.py` prices the offline benchmark off `tokens_in`/`tokens_out`
 with its own flat 3.00/15.00 rates and is **deliberately not wired to the
@@ -153,7 +181,8 @@ fill in.
 
 **`max_tokens` and thinking are set in `registry.py`, not the harness.** Each factory exposes `model_settings(model_id)`, wired at the `agent.run` call in `harness.py`:
 - `_OUTPUT_TOKEN_CAP = 32_000` on every provider. pydantic-ai's own default is 4096, below what a reasoning turn produces, and the failure names a *prompt-length* problem that does not exist ("simplify the prompt to result in a shorter response"). A cap is a ceiling, not a reservation, so a generous one costs nothing.
-- `anthropic_thinking={"type":"disabled"}` on every model except `_THINKING_REQUIRED` (`MiniMax-M3.1-Flash-Preview`). Never send it to OpenAI or Gemini — it is an Anthropic request field, they reject an unknown body key, and every OpenAI-compatible gateway passes the body through.
+- `anthropic_thinking={"type":"disabled"}` only where it is *known* to be accepted, and it is an allowlist now, not a denylist. **Anthropic moved to adaptive thinking**: Fable 5.1, Opus 5.5 and Sonnet 5.5 are "adaptive (always on)" and answer `disabled` with HTTP 400, so every Claude id in the catalog rejects it. `_THINKING_DISABLE_OK` is keyed by `provider_id` and holds only the three MiniMax models that take it. **The failure mode is asymmetric**: sending the param to a model that requires adaptive thinking is an HTTP 400 on every call, whereas omitting it from one that would have accepted it only costs latency — so an unknown id must fall on the "send nothing" side. It is also why the allowlist is keyed on `provider_id` and not on the model id: `anthropic` and `minimax` share one factory, and an id-keyed list would hand `disabled` to Claude. Never send it to OpenAI or Gemini either — it is an Anthropic request field, they reject an unknown body key, and every OpenAI-compatible gateway passes the body through.
+- **Effort is deliberately never sent.** Anthropic's control is now `thinking: {"type": "adaptive"}` + `output_config: {"effort": …}`, and the docs are explicit that *changing* the effort value invalidates prompt-cache breakpoints while *setting it to the model's default is equivalent to omitting it*. Brotto's stable prefix is the cheap part of a run (see the latency section in CLAUDE.md), so omitting is the only choice that is both cache-safe and correct.
 
 Both are pinned by `tests/model/test_registry_settings.py`, which sweeps **every** provider in the registry against model ids belonging to *other* providers. That is why the base `model_settings` must not look at `model_id`: it is called with ids it has never heard of, and a gate that raises on an unrecognised one breaks the sweep and the feature.
 

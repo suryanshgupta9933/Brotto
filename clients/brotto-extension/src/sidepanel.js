@@ -137,7 +137,7 @@ function setModelPill(model) {
 }
 
 // A name that fits sits dead still; only an overflowing one travels. Measuring
-// beats guessing — a marquee that always runs makes "gpt-4o" drift pointlessly.
+// beats guessing — a marquee that always runs makes "gpt-6-luna" drift pointlessly.
 // Compare one copy (plus the gap it needs to hand off) against the window, so
 // the decision never depends on the two-copy track's own width.
 function fitModelPill() {

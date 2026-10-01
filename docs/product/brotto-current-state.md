@@ -123,11 +123,16 @@ Nine providers, one catalogue — `model/catalog.py`'s `PROVIDER_CATALOG` genera
 factories, `GET /v1/models`, and both extension screens, so adding a model is one edit. It
 replaced three hand-kept copies that had already drifted:
 
-- `anthropic` — `claude-3-5-sonnet-latest`, `claude-3-5-haiku-latest`
-- `openai` — `gpt-4o`, `gpt-4o-mini`, `o1`
+- `anthropic` — `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` (all 1M), `claude-haiku-4-5` (200K)
+- `openai` — `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra` (all 1.05M)
 - `minimax` — Anthropic request shape, `base_url=https://api.minimax.io/anthropic`; `MiniMax-M3.1-Flash-Preview` (1M, Token Plan), `MiniMax-M3` (1M, pay-as-you-go — 402 without credits), `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`
-- `gemini` — `gemini-2.0-flash`, `gemini-1.5-pro`, `gemini-1.5-flash`
-- `openrouter`, `deepseek`, `groq`, `ollama`, `custom` — any model id, editable endpoint
+- `gemini` — `gemini-3.8-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` (all 1.05M)
+- `deepseek` — `deepseek-v4-pro`, `deepseek-flash` (1M); `groq` — `openai/gpt-oss-120b`, `openai/gpt-oss-20b` (131K)
+- `openrouter`, `ollama`, `custom` — any model id, editable endpoint
+
+Every id and rate was re-read from the vendor's own documentation on 2026-10-01; the
+superseded set (claude-3-5-\*, gpt-4o, o1, gemini-1.5/2.0, deepseek-chat/reasoner,
+Groq's Llama ids) was deleted, and several of those had shut down entirely.
 
 Dispatch is on the vendor's **request shape** (`api_shape`), not its id: three factories
 (`AnthropicFactory`, `GeminiFactory`, `OpenAICompatibleFactory`), not nine. The
@@ -144,14 +149,15 @@ Pricing is our own table (`Pricing | None` per model), not pydantic-ai's — `An
 has no cost calculation at all in 2.31, so `RunUsage.cost` stays 0 on Claude and MiniMax.
 Cache read/write tokens are accumulated separately because `input_tokens` is the *uncached*
 portion, and an input/output-only estimate overprices the real workload several fold.
-`testing/runner.py` prices the offline benchmark off its own flat rates and is deliberately
-not wired to the catalog.
+OpenAI and MiniMax re-rate the *whole* request past a token threshold, so `Pricing` carries
+`long_context_threshold` and long-context rates. `testing/runner.py` prices the offline
+benchmark off its own flat rates and is deliberately not wired to the catalog.
 
 ## BYOK flow
 
 `model_config` → `chrome.storage.local` (persists); `api_key` → `chrome.storage.session` (in-memory, dies on browser restart — intentional, "disk leak avoided"). On `task_start`, both sent over WS inline. Server validates provider is in registry; builds pydantic-ai `Model`. Per-user config (`remember_key=true`) persisted to `logs/user_configs/<ip_hash>.json` keyed by IP. Env fallback: `AGENT_MODEL=provider:model`, `ANTHROPIC_API_KEY` / `AUTH_TOKEN`.
 
-Dev default: `minimax:MiniMax-M3`, 1M context. `BROTTO_ENV=prod` opts out. `AUTH_TOKEN → API_KEY` propagation for Token Plan users. M3, not M3.1-Flash-Preview: Flash *requires* adaptive thinking and rejects `thinking.type="disabled"` with a 400.
+Dev default: `minimax:MiniMax-M3`, 1M context. `BROTTO_ENV=prod` opts out. `AUTH_TOKEN → API_KEY` propagation for Token Plan users. M3, not M3.1-Flash-Preview: Flash *requires* adaptive thinking and rejects `thinking.type="disabled"` with a 400 — and so does every current Claude model, which is why `anthropic_thinking` is now an allowlist of the three MiniMax ids that accept it rather than a denylist of the one that does not.
 
 ## What's well-built (the moat ingredients)
 

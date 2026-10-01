@@ -25,13 +25,27 @@ class ProviderFactory(Protocol):
 # cap costs nothing on the steps that do not use it.
 _OUTPUT_TOKEN_CAP = 32_000
 
-# MiniMax-M3.1-Flash-Preview refuses any attempt to turn thinking off:
-# sending thinking.type="disabled" returns HTTP 400 ("requires adaptive
-# thinking"). Measured, not documented. Every other MiniMax model accepts
-# it, and M3 does not think by default anyway — the param is here so a
-# provider-side default change cannot silently turn reasoning back on for
-# a UI that pays 0.8s per extra second of it.
-_THINKING_REQUIRED = frozenset({"MiniMax-M3.1-Flash-Preview"})
+# Anthropic moved to adaptive thinking, so `anthropic_thinking` is now the
+# exception rather than the rule. Fable 5.1, Opus 5.5 and Sonnet 5.5 are
+# "adaptive (always on)" and answer `thinking.type="disabled"` with HTTP 400,
+# and every Claude id in the catalog is one of them. The param goes only to the
+# MiniMax models that accept it, and never to an id we have not verified —
+# guessing sends `disabled` to the next model that requires adaptive thinking,
+# and the failure is one HTTP 400 on every call rather than a slow step.
+#
+# Of these, only M3 is measured (it accepts `disabled` and does not think by
+# default anyway — the param is here so a provider-side default change cannot
+# silently turn reasoning back on for a UI that pays ~0.8s per extra second of
+# it). The M2.7 pair has always received it and never 400'd. M3.1-Flash-Preview
+# is absent because it *requires* adaptive thinking.
+#
+# Effort is deliberately not sent. Anthropic invalidates prompt-cache
+# breakpoints when the effort value changes, and "setting effort explicitly to
+# the model's default is equivalent to omitting it" — so omitting is the only
+# choice that is both cache-safe and correct.
+_THINKING_DISABLE_OK: dict[str, frozenset[str]] = {
+    "minimax": frozenset({"MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"}),
+}
 
 
 class BaseFactory:
@@ -75,7 +89,7 @@ class AnthropicFactory(BaseFactory):
 
     def model_settings(self, model_id: str) -> dict[str, Any]:
         settings = super().model_settings(model_id)
-        if model_id not in _THINKING_REQUIRED:
+        if model_id in _THINKING_DISABLE_OK.get(self.provider_id, frozenset()):
             settings["anthropic_thinking"] = {"type": "disabled"}
         return settings
 

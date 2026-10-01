@@ -46,9 +46,15 @@ def price_usage(
     if info is None or info.pricing is None:
         return None
     p = info.pricing
+    # Past the threshold the vendor re-rates the *whole* request, not just the
+    # tokens over the line, so the choice is made once on total input.
+    long_context = (
+        p.long_context_threshold is not None and input_tokens > p.long_context_threshold
+    )
+    i_rate, o_rate, read_rate, write_rate = p.rates(long_context=long_context)
     return (
-        input_tokens * p.input_per_mtok
-        + output_tokens * p.output_per_mtok
-        + cache_read * p.cache_read_per_mtok
-        + cache_write * p.cache_write_per_mtok
+        input_tokens * i_rate
+        + output_tokens * o_rate
+        + cache_read * read_rate
+        + cache_write * write_rate
     ) / _MTOK
