@@ -331,6 +331,77 @@ scans, so a page with a dozen frames pays 36 `getFullAXTree` calls. Worth
 caching the frame list across the retries if a trace ever shows it — the cap
 bounds it, it is not unbounded.
 
+### The quiet window was unreachable on exactly the pages that need it
+
+The above gate was correct and nearly free — and the deadline it protects was
+the single largest cost in the whole loop. From the live Gmail run: wall 41.94s,
+of which observe was 22.38s (53.4%). One observation was 11.19s, and 10.002s of
+that was `waitForStable` sitting on its own deadline. Over a two-step run that
+is **47.7% of wall clock, every step, forever.**
+
+The reason is arithmetic, not tuning. `QUIET_MS` is 3000 and the gate resolves
+only after 3s with **zero** mutations. Gmail measured 41 mutations in 10,002ms —
+one every ~244ms. Three seconds of silence on that page is not rare, it is
+impossible. So the common page and the animated page are the same page, and the
+gate was never a wait on them; it was a sleep with a 10s timeout.
+
+**Mutation rate separates the two shapes a mutation count cannot.** A slow
+renderer is *silent* and then changes — `auth-slowjs` produces almost nothing at
+1000ms and renders its control at 5000ms. A live app is already churning at 1s,
+because it is past its initial render and into its steady state, where a spinner
+or a live feed keeps the document dirty forever. Same observation, opposite
+conclusion, and nothing in the old design could tell them apart.
+
+So the gate now **samples**: if ≥3 mutations landed in the first 1000ms, resolve
+at once with `early: true` and let the caller decide. Expected Gmail observation
+is 10.8s → ~1.4s. The decision is not trusted — it is a *guess about the page*,
+and the guess is checked below.
+
+**Misclassifying toward "busy" is the safe direction and cannot corrupt
+anything.** The sample only ever resolves `waited: false`; it has no path to
+`waited: true`, so it can never assert a page is still when it is not. The
+caller rescans and compares fingerprints, and if the page turns out to have been
+moving it falls back to the full gate. Misclassifying toward "quiet" is the
+dangerous direction and the sample structurally cannot do it.
+
+`waitForStable(tabId, {noEarly: true})` sets the sample window to 0, which is
+the caller's fallback and the mode that keeps a slow renderer's full window
+intact. `Stability.early` marks a page the sample claimed, so `metrics` says
+which path a given observation took.
+
+### The short-circuit is a guess, so the rescans are the arbiter
+
+`captureObservation`'s retry loop already compared `role|name|value`
+fingerprints across scans and broke on the first match — the check that decides
+whether an unsettled page is worth reading again. What it discarded was its exit
+reason, which is the only thing that distinguishes "the sample was right, the
+page had settled" from "we read it too early and owe it another look."
+
+```ts
+if (stability.early && !settledByFingerprint) {
+  await waitForStable(tabId, { noEarly: true });
+  const settled = await extractAx(tabId);
+  ...
+}
+```
+
+On the fast path the rescans match and this block never runs, so the whole
+saving stands. On the slow-renderer shape every rescan differs, the full quiet
+window is paid, and one more scan follows — which is the pre-existing
+behaviour, unchanged.
+
+`scripts/test-observation-rescan-guard.test.js` extracts `captureObservation`
+and pins all four shapes, because a guard that silently stops firing hands the
+model a half-rendered tree while every metric still reads healthy. An absence
+reads clean in a diff; that is the whole reason it has a test.
+
+**The thresholds are calibrated from one sample and are deliberately
+conservative.** Gmail ran 4.1 mutations/s against a threshold of 3 per 1000ms,
+so it clears the bar with ~30% headroom — a page half as busy would not, and
+would pay the old 10s. One live run recalibrates it, and the metrics already
+flow back to the server log. A *miss* costs time and never accuracy, which is
+the asymmetry that makes shipping an uncalibrated guess the right trade.
+
 ### The observation reported its cost nowhere
 
 `waitForStable` returns `{waited, timedOut, elapsedMs, mutations}` and `boxMap`

@@ -33,6 +33,11 @@ clients/brotto-extension/   — Chrome extension (TS, manifest v3)
 docs/architecture/             — per-subsystem design reasoning (read on demand)
 docs/superpowers/{specs,plans}/ — formal feature specs
 docs/product/                  — product strategy docs
+
+# OSS / launch surface (untracked or pending as of 2026-10-01 — see release-plan.md)
+README.md  PRIVACY.md  SECURITY.md     — required for the Chrome Web Store
+clients/brotto-extension/src/welcome.html — first-run screen; must carry the purpose statement
+.github/ISSUE_TEMPLATE/                — bug report template
 ```
 
 ## Product docs (`docs/product/`) — strategic context
@@ -51,6 +56,8 @@ docs/product/                  — product strategy docs
 | `gap-analysis.md` | When planning work | A gap fills or a new one emerges |
 | `roadmap.md` | When planning work | Phase hits, misses, or re-prioritizes |
 | `risks.md` | When making risk decisions | New risk emerges, old one dies |
+| `release-plan.md` | **Before any launch or packaging work** | A blocker clears or a date moves |
+| `cws-submission.md` | **Before touching the Chrome Web Store listing** | A store field is filled in or a placeholder resolves |
 | `dev-environment.md` | Starting a non-trivial Claude session | New skill/hook/pattern becomes standard |
 | `decisions/` | Before re-debating | **Append** a new file when answering an open question |
 
@@ -246,7 +253,7 @@ returned a `Stability` and a `GeometryResult` and `captureObservation` threw
 both away; `metrics` ships `scans`, `bytes`, the stability verdict and
 `geometry.{requested,resolved,fallback,truncated,source}` on the observation
 frame, and `main.py` logs it. **`scans` is the one to watch** — it is 1 on a
-page that went still and 1–3 on one that did not. The per-CDP-call probe numbers
+page that went still and 1–4 on one that did not. The per-CDP-call probe numbers
 (geometry fallback is super-linear past `MAX_GEOMETRY_ENTRIES`; the 3s quiet
 floor is constant; pooling at 6 is worth 5.1–5.5× at realistic frame counts; a
 cross-origin embed is an OOPIF and invisible to `Page.getFrameTree`) are in
@@ -270,6 +277,27 @@ catch path returns `{waited:false, timedOut:false}` for a tab that navigated
 mid-observe, and skipping there is how a half-rendered tree reaches the model.
 `auth-slowjs` (control at 5000ms → never settles → deadline) rescans exactly as
 before, which is the regression gate.
+
+**The 3s quiet window is unreachable on an animating page, and that page is the
+common one.** Gmail measured 41 mutations in 10,002ms — one every ~244ms — so
+3s of silence is arithmetically impossible and every observation paid the full
+10s deadline: 10.002s of an 11.19s observation, **47.7% of the wall clock of a
+two-step run, every step, forever.** The gate now **samples at 1000ms and gives
+up early if ≥3 mutations landed**: a page already churning hard at a second in
+is past its initial render, not about to make one. Expected Gmail observation
+10.8s → ~1.4s. `Stability.early` marks it and `waitForStable({noEarly:true})`
+disables the sample for the fallback.
+
+**The short-circuit is a guess, so `captureObservation` checks it.** If every
+rescan saw a different `role|name|value` fingerprint the page really *was*
+still moving and the short path read it early — so the guard pays the full
+quiet window (`noEarly`) and scans once more. That is the pre-existing
+behaviour on the slow-renderer shape; on the fast path the rescans match and the
+guard costs nothing. **Misclassifying toward "busy" is safe and cannot corrupt
+anything**; the sample can only ever report `waited:false`, never `waited:true`.
+Pinned by `scripts/test-observation-rescan-guard.test.js`. The thresholds (3 per
+1000ms, calibrated from one Gmail sample at 4.1/s) are a starting point — a
+miss costs time, never accuracy, and the metrics already flow back.
 
 
 ### The model could not press a key
@@ -361,6 +389,17 @@ Other load-bearing bits, all in `docs/architecture/conversation.md`: writes neve
 
 Cards (clarify/approval/login) answer **in place** — `resolveCard` drops the controls, puts the answer where they were and clears `.blocking`; the reply goes *inside* the card, not beside it, so the exchange reads as one exchange. Replayed cards are marked `.resolved` so `clearLoginPrompt` doesn't sweep live history. `renderMarkdown` is hand-rolled and escape-first: blocks parsed from raw lines, then inline per block, with code spans pulled out first via a NUL-delimited placeholder (a printable one would eat a real " 12 " in a price), and link hrefs must match `https?://` explicitly so `javascript:` stays visible text. **Not one string reaches `innerHTML` unescaped** — the model's own words are steerable by page content, so `appendPlanCard` builds its badge, sites line and step numbers with `textContent`/`createTextNode`. Clicking a history row **replays into live chat bubbles**, rebuilt from `tasks[]`/`turns[]`/`prompts[]` rather than `messages[]` alone; a turn draws a step bubble only if it had an external action. **Not verified in a browser** — `scripts/test-replay.test.js` is the only check, and it extracts the real functions by brace matching so it can't drift. Full text in `docs/architecture/panel-ui.md`.
 
+### The panel shows a working line, and streaming would not have fixed it
+
+**Don't move this to the streaming API.** Three independent reasons, any one sufficient. `AgentDecision` is structured JSON (`thought` + `actions[]`) — there is no prose token stream, and `thought` is ~10 tokens. The latency is in **silence, not text**: observe (~11.8s) and model_plan (~13.8s) both complete *before* `step_progress` fires, so ~25s of a ~30s step produces no frame at all. And panel-closed forbids it structurally — no socket means no stream, and reopening replays a finished record.
+
+- **The frame is a phase key, not a sentence.** `harness.py` sends `{"type":"canonical_step","kind":"observe"|"plan"}` at the two boundaries; `WORKING_LINES` in `sidepanel.js` maps each key to panel-owned English. A wording change is then a panel edit, not a server deploy — presentation lives where rendering lives. The frame is not audited (it is a live UI frame; the timings it summarises are already in the document).
+- **The bug was a wired feature nobody sent.** `canonical_step` had a panel handler, a bubble builder and a closer, and **had never once run** — `finishAssistantMessage` had no call site, so the caret blinked for the life of the panel. That is the "looks stuck" complaint, named. It was never a missing feature but a missing producer.
+- **A line is held 700ms** (`setWorkingText`). A cached page answers in under a second and the two phase lines would otherwise flash past unread, which reads as *more* broken than the silence this replaced. A burst inside one hold collapses to the last line rather than showing one and immediately overwriting it.
+- **The bubble and its ticker are torn down together.** `dropWorkingMessage` calls `stopSpinner` *before* the null check — otherwise the interval outlives the node it animates and writes frames into a detached element every 90ms. It fires from `setPhase` (any phase but `executing`), `step_card`, and `context_update` (which the server sends *instead of* `step_progress` when a step had no visible action).
+- **`SPINNER_FRAMES` is data, not mechanism** — `{frames, ms, back}`, five sets, randomly picked, each with its **own cadence** because same-shape-at-same-speed reads as one spinner. `back: true` ping-pongs instead of wrapping; `bar` needs it or it snaps `█` straight back to empty. Three rules keep a sixth set honest, and all three are asserted in the test: no two sets share a cadence; every frame is Block/Braille/Arrow (`0x2580–0x259f`, `0x2800–0x28ff`, `0x2190–0x21ff`) — **no curves**, since the sheet sets `border-radius: 0 !important` globally, so a circle is the one shape this panel has no vocabulary for; every frame is one character. `.working-spinner` has a fixed `width: 1em` and is load-bearing — the glyphs are different widths, so without it the line reflows on every frame. `prefers-reduced-motion` is honoured in **JS** (`matchMedia`), because the stylesheet's reduced-motion block cannot reach a ticker; it still shows a frame, it just stops ticking.
+- **Pinned by `scripts/test-working-line.test.js`** (49 checks), which stubs `Math.random` to walk all five sets deterministically — the picker is a coin toss, so testing only the drawn set leaves four of five unexercised most runs. **Not verified in a browser**: `▛▜▙▟` and `▖▘▝▗` at 11px are the two most likely to render as tofu.
+
 ## Commands
 
 ```bash
@@ -370,8 +409,11 @@ cd clients/brotto-extension && npm run build
 # Run server (dev mode picks up .env)
 cd services/brotto-orchestrator && python start_server.py
 
-# Tests — run from services/brotto-orchestrator/
+# Python tests — run from services/brotto-orchestrator/
 ../../.venv/bin/python -m pytest tests/ -q
+
+# Extension JS tests — run from the REPO ROOT, not clients/brotto-extension
+node scripts/test-replay.test.js           # or any other scripts/*.test.js
 
 # Smoke test (real API call, exercises full model adapter; reads .env)
 .venv/bin/python scripts/smoke_minimax_endtoend.py
@@ -379,9 +421,12 @@ cd services/brotto-orchestrator && python start_server.py
 
 The pytest install lives in the **repo-root** venv, not `services/brotto-orchestrator/.venv` (which has pydantic-ai but no pytest).
 
+**`npm test` runs nothing.** It is `node --test tests/*.test.js`, and `clients/brotto-extension/tests/` does not exist — the 10 suites live in repo-root `scripts/`. Repointing the glob would newly *enable* ten never-executed suites, which is a bigger change than the one-word fix looks; until someone does it deliberately, run them directly. Every `scripts/*.test.js` is extraction-based: it pulls the real functions out of `sidepanel.js` / `background.ts` by brace matching and evals them against a fake DOM, so it cannot drift from what ships. A dropped field is an *absence* and reads clean in review, which is the whole reason they exist.
+
 ## Gotchas
 
-- `/docs/` is gitignored wholesale (`docs/architecture/`, `docs/product/`, `docs/superpowers/`); force-add with `git add -f` or the reasoning notes are local-only and a fresh clone starts blind.
+- **`/ws/ext` is unauthenticated.** `main.py:454` is a bare `await websocket.accept()` with no token, and it is the *only* path a Chrome Web Store install uses. Anyone who can reach a self-hosted server's URL can drive the agent against that user's logged-in browser. Hard launch gate — do not ship the store listing until it is closed. Listed as Wave 3 auth in `release-plan.md`, but it is not in that doc's blocker table either.
+- **`.gitignore` lists `/docs/` and `/CLAUDE.md`, but 27 files under `docs/` and this file are tracked** (force-added with `git add -f`). New docs are ignored by default and silently local-only — that is the failure, not the absence of tracking. `vision.md`, `users.md`, `market.md`, `risks.md`, `gap-analysis.md`, `competitors.md`, `dev-environment.md`, `release-plan.md` and `cws-submission.md` are **not** yet tracked.
 - `.env` is gitignored and there is no `.env.example`; the `.env` itself carries the comments.
 - Don't include `Co-Authored-By: Claude ...` in commit messages (per global `~/.claude/CLAUDE.md`).
 - **`decisions.md` is locked architectural decisions (D1–D10).** Don't change without explicit re-discussion. Product/strategy decisions live in `docs/product/decisions/`.

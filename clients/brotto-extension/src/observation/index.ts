@@ -264,6 +264,18 @@ export async function captureObservation(tabId: number) {
   // page with a dozen frames pays 36 `getFullAXTree` calls. Worth caching the
   // frame list across the retries if it ever shows up in a trace — the cap
   // bounds it, it is not unbounded.
+  // The busy short-circuit in `stability.ts` is a guess: it assumes a page
+  // already mutating hard is past its initial render. The rescans below are
+  // what actually decide that, and they say so by breaking early — an exit
+  // reason the loop was discarding.
+  //
+  // If every rescan saw a different tree, the page really was still moving
+  // and the short path read it early. Pay the full quiet window then, and
+  // scan once more. That is the slow-renderer shape (`auth-slowjs` renders at
+  // 5000ms), and on it this is the pre-existing behaviour — wait the gate,
+  // then rescan. On the fast path it costs nothing: the rescans matched and we
+  // never arrive here.
+  let settledByFingerprint = !pageMayStillBeMoving(stability);
   if (pageMayStillBeMoving(stability)) {
     const fingerprint = (ts: any[]) =>
       ts.map((t: any) => t.role + "|" + (t.name ?? "") + "|" + (t.value ?? "")).join("~");
@@ -275,9 +287,17 @@ export async function captureObservation(tabId: number) {
       frames = next.frames;
       geometry = next.geometry;
       scans++;
-      if (nextFp === fp) break;
+      if (nextFp === fp) { settledByFingerprint = true; break; }
       fp = nextFp;
     }
+  }
+  if (stability.early && !settledByFingerprint) {
+    await waitForStable(tabId, { noEarly: true });
+    const settled = await extractAx(tabId);
+    axTargets = settled.targets;
+    frames = settled.frames;
+    geometry = settled.geometry;
+    scans++;
   }
 
   const observation = { url, title, pageText, axTargets, frames };
