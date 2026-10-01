@@ -18,14 +18,92 @@ the card, not beside it, so the exchange reads as one exchange.
 Consequences worth knowing:
 
 - The clarify card is no longer removed on submit, so a *second* question would
-  stack. `appendClarifyCard` removes the prior `.clarify-card.blocking` — only
-  the pending one — and a resolved one stays as history.
+  stack. `appendClarifyCard` settles the prior `.clarify-card.blocking` with
+  "Brotto moved on without an answer." — it was still asked, and the replay
+  draws from the audit, which never knew about the deletion. Replayed ones are
+  marked `.resolved` so they survive.
 - The approval card's "Action approved." floating bubble is gone; the decision
   is the card's last line. That also means `approval_resolved` can no longer
   silently do nothing when the card is missing.
-- The login bubble still fades on the next step, because there is no orphaned
-  reply to strand it and the fade avoids a layout jump. Replayed ones are
-  marked `.resolved` so they survive.
+- The login card settles the same way. The fade-out and the `.removing`
+  keyframe it used went with it; `clearLoginPrompt(outcome)` writes the outcome
+  into `.login-required-outcome` and nothing is removed. `@keyframes msg-leave`
+  stays — `.toast.leaving` still uses it.
+
+## A card outlives the run that asked it
+
+`clearBlockingCards` deleted every unanswered prompt on a terminal event. That
+was right about approvals — the controls were dead — and wrong about
+everything else: **a question Brotto asked is part of what happened.** Deleting
+it left a hole in the transcript, and a worse one on a reopened session, where
+the replay rebuilt from the audit and therefore redrew the question the panel
+had just erased. An unanswered prompt is itself the record.
+
+`settleBlockingCards(outcome)` resolves each outstanding card in place, and
+every terminal path passes its own sentence — `setPhase` on done/error,
+`stopTask`, `task_completed`, `task_failed` — so the card records *which* ending
+arrived rather than a generic "resolved". It is one function with five callers,
+not five deletions.
+
+## The composer is the answer box
+
+The clarify card used to carry its own text field. There is already one text
+box in the panel, and two is worse than one: the card's copy was seeded at an
+arbitrary focus, and a reply typed there looked like it had been sent when the
+composer next read as empty. The question goes in the transcript; the answer
+goes in the box the user is already looking at.
+
+- **`sendUserMessage` branches first.** A pending `state.pendingClarifyId` means
+  the send is an answer, not a task. Starting a task there would abandon the run
+  that is blocked waiting for it. A `{"success": false}` from the resolver — the
+  run moved on while the user was typing — puts the words back rather than
+  dropping them.
+- **One writer, two entry points.** `answerPendingClarify(answer)` is the only
+  thing that resolves a card and posts the reply; the composer's send and the
+  card's Skip both call it. They used to each do it themselves, which is how
+  they drifted: Skip said "Skipped" in the transcript while the audit recorded
+  an empty response.
+- **The composer re-enables only for a clarify pause.** `setPhase` unlocks
+  `sendBtn` when `state.pendingClarifyId` is set, and `clarify_request`
+  therefore appends the card *before* setting the phase — reversed, `pendingClarifyId`
+  is still null and nothing re-runs `setPhase`, leaving the run blocked on a
+  question the panel would not accept an answer to. An approval pause stays
+  locked; that one is answered by its own buttons.
+
+## The sign-in card names the site and the task
+
+`login_required` used to carry one string — "please log in: <title>" — and the
+panel's fallback label ("this site") was therefore the common case, so the wall
+named no site and no task. `harness.py` now sends `url`, `domain`, `page_title`
+and `task` on the frame, and records the same four into `turns[].prompts[].args`.
+Both, deliberately: the live card is built from the frame and the replayed one
+from the audit, so a field present in only one is a card that changes shape the
+moment you reopen the session.
+
+The card draws the task as a subject line (`.login-required-task`), the page
+title as the body, and the URL as `.login-required-url`. All three are
+`textContent` — the task string is the model's and the title is the site's, both
+steerable by page content — and the `<a href>` is set **only** for `http(s)`,
+the same guard `renderMarkdown` applies, because the current URL is whatever
+the page last set.
+
+`.login-required-outcome` is a fourth class, not a reuse of
+`.login-required-body`: the title line owns that one, and `resolveCard` takes
+the first match, so reusing it would have overwritten the title.
+
+## New chat is hidden while a run is live
+
+The `+ New chat` button shows when there is a conversation to leave *and*
+nothing is running. A session id alone was enough, which left the one button
+that ends a run sitting next to a live one — clicking it mid-task reset the
+session out from under the agent.
+
+`connecting` counts as running: it is the window between accepting a send and
+`task_started`, and a task is already committed by then. A paused run still
+holds the button, because the only ways out of a pause are the card or Stop.
+The one exception is a stop in flight (`stopping` + `paused`), where the
+outcome cell already reads STOPPED BY YOU — a stop mid-pause may never draw a
+terminal event, so holding on there would strand the user in a run they killed.
 
 ## Markdown in the panel
 
