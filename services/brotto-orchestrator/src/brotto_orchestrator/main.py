@@ -722,8 +722,14 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                         # dark is nothing. A bare "capped=nodeCapped" every step
                         # reads as an error and answers nothing.
                         capped = fr.get("cappedFrames") or []
+                        # `kept` is the number of controls that survived the
+                        # cap, against `nodes` = the raw AX nodes in the tree.
+                        # The cap is on raw nodes and most of them never become
+                        # targets, so `nodes` alone cannot say whether the
+                        # model lost anything.
                         where = ",".join(
                             f"{c.get('frameIndex')}:{c.get('nodes')}"
+                            f"/{c.get('kept', '?')}kept"
                             f"{'x' if c.get('crossOrigin') else ''}"
                             f" {(c.get('url') or '')[:60]}"
                             for c in capped

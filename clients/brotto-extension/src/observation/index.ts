@@ -152,16 +152,32 @@ export async function extractAx(
   const geometry = await boxMap(tabId, ids);
 
   const targets: object[] = [];
+  const perFrame: number[] = [];
   // Sequential, not Promise.all: a frame bomb is capped, but a page that
   // legitimately has a dozen frames should not have twelve `getFullAXTree`
   // calls in flight against one debugger session.
   for (const surface of surfaces) {
-    targets.push(...await targetsForFrame(tabId, surface, geometry.boxes));
+    const fromTree = await targetsForFrame(tabId, surface, geometry.boxes);
+    perFrame.push(fromTree.length);
+    targets.push(...fromTree);
     // aria-hidden controls the AX tree dropped on purpose. They carry
     // `hidden: true`, which is what stops the harness pre-approving one.
     targets.push(...await findHiddenTargets(
       tabId, surface, new Set(targets.map((t: any) => t.backendNodeId)),
     ));
+  }
+  // What the node cap is actually costing. `MAX_NODES_PER_FRAME` caps *raw*
+  // AX nodes, but only kept-role nodes ever become targets — so `nodes` alone
+  // cannot say whether a cap cost the model anything. `kept` is how many
+  // controls survived out of the 2000 this frame was allowed; compare it with
+  // `nodes` to see whether the slice is trimming containers or controls.
+  //
+  // The number of controls lost in the discarded tail is deliberately not
+  // reported: it is not knowable from what is left in hand, and a plausible
+  // wrong number here would be read as a measurement.
+  for (const capped of scan.cappedFrames ?? []) {
+    const kept = perFrame[capped.frameIndex];
+    if (kept !== undefined) capped.kept = kept;
   }
   await dbg.sendCommand(tabId, { method: "Accessibility.disable" });
   return { targets, frames: scan, geometry };

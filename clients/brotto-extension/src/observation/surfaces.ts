@@ -116,8 +116,15 @@ export interface FrameScan {
   depthCapped: boolean;
   nodeCapped: boolean;
   /** The frames whose tree hit MAX_NODES_PER_FRAME, so the server can say
-   *  whether the truncated one was the page or an embed. */
-  cappedFrames: { frameIndex: number; url: string; crossOrigin: boolean; nodes: number }[];
+   *  whether the truncated one was the page or an embed.
+   *
+   *  `kept` is filled in by the caller once `targetsForFrame` has run, because
+   *  kept-role is not knowable here: the cap applies to *raw* AX nodes and most
+   *  of them never become targets. Gmail's main frame measured 2650 raw nodes
+   *  against a 2000 cap, so 650 went unseen every step — whether that was 650
+   *  controls or 650 generic containers is the whole accuracy question, and
+   *  `kept` is what answers it. */
+  cappedFrames: { frameIndex: number; url: string; crossOrigin: boolean; nodes: number; kept?: number }[];
   /** Frame ids whose `getFullAXTree` failed. */
   failed: string[];
 }
