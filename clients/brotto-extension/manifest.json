@@ -27,17 +27,11 @@
   "permissions": [
     "debugger",
     "notifications",
-    "tabs",
     "storage",
     "sidePanel",
     "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
-  ],
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "brotto-browser-extension@inventic.ch"
-    }
-  }
+  ]
 }
