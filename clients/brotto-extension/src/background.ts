@@ -107,24 +107,21 @@ let lastObservedUrl = "";
 // `user_policy` on each task_start. It is the whole policy — the server has
 // no operator-set floor to merge into it.
 // ponytail: write-on-save only — no debounce, no reactivity layer.
-// ponytail: whitelist was removed in the enterprise redesign — secure
-// mode now means "hard-block blacklisted + first-time-seen prompts on
-// new (domain, action) pairs". Keeping the type narrow to what we ship.
-let userPolicy: { mode: "normal" | "secure"; blacklist: string[] } = {
-  mode: "normal",
-  blacklist: [],
-};
+// ponytail: `whitelist` and `mode` were both removed. The list is the
+// whole policy and every gate on the server runs unconditionally, so there
+// is nothing for a flag to switch. Keeping the type narrow to what we ship.
+let userPolicy: { blacklist: string[] } = { blacklist: [] };
 
 // ponytail: Bug 1 — SW hydration on startup. Without this, every
 // extension reload resets userPolicy to defaults even though the user
-// saved a secure-mode policy. The sidepanel writes to chrome.storage
+// saved a blacklist. The sidepanel writes to chrome.storage
 // .local on Save; we mirror it into the SW's in-memory `userPolicy`
 // here so the next task_start ships the correct view.
 async function hydrateUserPolicy(): Promise<void> {
   try {
     const stored = await chrome.storage.local.get("settings");
     const s = stored.settings as
-      | { mode?: string; blacklist?: unknown; notifyBlocking?: boolean; notifyResults?: boolean }
+      | { blacklist?: unknown; notifyBlocking?: boolean; notifyResults?: boolean }
       | undefined;
     if (!s) return;
     // Both notify unless explicitly turned off. Brotto's premise is that you
@@ -133,7 +130,6 @@ async function hydrateUserPolicy(): Promise<void> {
     notifyBlocking = s.notifyBlocking !== false;
     notifyResults = s.notifyResults !== false;
     userPolicy = {
-      mode: s.mode === "secure" ? "secure" : "normal",
       blacklist: Array.isArray(s.blacklist)
         ? s.blacklist.filter((d): d is string => typeof d === "string")
         : [],
@@ -1232,11 +1228,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           // full settings object to chrome.storage.local; here we just
           // update the in-memory mirror used on the next task_start.
           const s = message.settings as
-            | { mode?: string; blacklist?: string[]; notifyBlocking?: boolean; notifyResults?: boolean }
+            | { blacklist?: string[]; notifyBlocking?: boolean; notifyResults?: boolean }
             | undefined;
           if (s) {
             userPolicy = {
-              mode: s.mode === "secure" ? "secure" : "normal",
               blacklist: Array.isArray(s.blacklist) ? s.blacklist : [],
             };
             // Notification prefs ride along on Save rather than growing their
