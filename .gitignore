@@ -59,8 +59,16 @@ clients/brotto-extension/crx-signing.pem
 # the extension's own src/assets/ (brand mark, etc.) is unaffected.
 # The extension's brand assets are public and committed.
 /assets/
-/docs/
-/CLAUDE.md
+
+# /docs/ and /CLAUDE.md were ignored here while 27 files under docs/ were
+# already tracked (force-added). That made the lines inert for existing
+# files and actively harmful for new ones: every new doc was local-only
+# unless you remembered `git add -f`, including release-plan.md and
+# cws-submission.md, which gate the Chrome Web Store submission. Both are
+# now tracked and the ignore rules are gone.
+
+# Local agent config — absolute paths and per-machine permissions.
+.claude/settings.local.json
 
 # Local scratch previews
 .preview/
