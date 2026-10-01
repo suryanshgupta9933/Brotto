@@ -60,7 +60,28 @@ clients/brotto-extension/crx-signing.pem
 # The extension's brand assets are public and committed.
 /assets/
 
-# /docs/ and /CLAUDE.md were ignored here while 27 files under docs/ were
+# ── Internal, not published ───────────────────────────────────────────────
+# docs/architecture/ is public — it is the technical documentation, and it is
+# the reason a stranger can tell this was built by people who understand it.
+# The rest is the business of running the project, not of using the code:
+# strategy, pricing, market sizing, competitor analysis, launch gates, and our
+# own agent working agreements. Publishing those hands a stranger the pricing
+# model and the roadmap. They stay on disk and stay versioned locally; they are
+# simply not in this repository.
+/docs/product/
+/docs/superpowers/
+/docs/CONTRIBUTING.md
+/CLAUDE.md
+/phase1.md
+
+# Tracking is not the same as publishing, and the two used to be conflated —
+# the failure was silent in both directions. A new doc under docs/product/ used
+# to be a no-op to `git add`, so a launch-gating document could go unwritten
+# from the team's point of view. The fix is scoping, not blanket ignoring: one
+# tree ships, the other does not.
+
+# The old note this replaced, kept because the history matters: /docs/ and
+# /CLAUDE.md were ignored here while 27 files under docs/ were
 # already tracked (force-added). That made the lines inert for existing
 # files and actively harmful for new ones: every new doc was local-only
 # unless you remembered `git add -f`, including release-plan.md and
