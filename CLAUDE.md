@@ -122,15 +122,29 @@ current AX tree'`. The derivation is now `_EXEC_FAILURE not in outcome`, with
 the string a module constant. **The model wrote `ref: 13829` because the prompt
 taught it to** — two anti-examples in `SYSTEM_PROMPT` demonstrated a bare number
 while the tree renders `[0:13829]`; both are composite now, and a test greps the
-prompt for `\bref \d`. Pinned by `tests/test_grounding_outcome.py` (7 tests).
+prompt for `\bref \d`.
+
+**…and the model kept doing it anyway, so `_locate` tolerates it.** Removing the
+anti-examples did not stop the bare number: a later Gmail run emitted
+`ref: "149099"` for a tree rendering `[0:149099]` on **4 of 4 steps**, so every
+click failed, the page never changed, and each step was spent re-deciding it.
+The prompt fix was necessary and not sufficient — this is a format the model
+cannot be relied on to reproduce, not a prompt defect to re-fix. `_locate` now
+falls back to a suffix match and resolves the bare nodeId, **refusing when two
+frames hold the same nodeId** and naming them: a `nodeId` is unique only within
+its frame, and guessing would click the wrong element and record `ok: true`.
+A number the page has never seen still fails exactly as before — the fallback is
+not a hole. Pinned by `tests/test_grounding_outcome.py` (12 tests).
 
 **Counted over all 41 audit documents / 168 executable actions: 0 grounding
 failures.** Read that narrowly — it is the Playwright path only (the extension
 has never written a document), and it counts *resolution*, not *validity*: a
 ref that hallucinates into a real but wrong element resolves and records
 `ok: true`. The measurement is the audit, not a probe script — count `ok: false`
-actions in `logs/sessions/`. Full reasoning, including why "1A′: we are at
-34.0% Action Object" was wrong, in `docs/architecture/agent-loop.md`.
+actions in `logs/sessions/`. **That count is now stale: the first
+extension-written document recorded 7 of 42 refs failing to resolve, every one a
+bare nodeId.** Full reasoning, including why "1A′: we are at 34.0% Action Object"
+was wrong, in `docs/architecture/agent-loop.md`.
 
 ### A step costs ~30s, and most of it is the prompt
 

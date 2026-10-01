@@ -404,6 +404,27 @@ the discriminator in the code is a substring of a model-authored string. Both
 lines now use composite refs, and a test scans `SYSTEM_PROMPT` for
 `\bref \d` so a future edit cannot reintroduce the shape.
 
+**…and the model kept writing it, so the relay tolerates it.** The prompt fix
+was necessary and not sufficient. A later Gmail run (2026-10-01) emitted
+`ref: "149099"` against a tree rendering `[0:149099]` on **4 of 4 steps** — the
+same ref, the same unchanged page, `ok: false` four times, 98s of wall for a task
+the model had already located. The prompt test still passes: the model simply
+emits the digits, on every element, every time. The lesson is the same one the
+`ok` derivation taught — *a model-authored string cannot be relied on to keep a
+format*, so the constraint has to live where the string is consumed, not where it
+is produced.
+
+So `_locate` (the single function all four ref-taking methods route through)
+falls back to a suffix match and resolves the bare nodeId. The interesting part
+is the refusal: a `nodeId` is unique only within its frame, so `42` can name a
+real element in two frames at once, and picking one would click the wrong
+control and record `ok: true` — the exact conflation the `(coords, reason)`
+split exists to prevent. It refuses and names both refs so the model can recover
+on the next step. A number the page has never seen still fails identically; the
+fallback is not a hole. Pinned by five cases in
+`tests/test_grounding_outcome.py`, one per ref-taking method plus the
+hallucination and exact-match shapes.
+
 **The measurement is the audit, not a probe script.** Rung two of the ladder:
 the record already exists and every run already writes it. A future
 grounding failure is now countable in `logs/sessions/*.json` by counting

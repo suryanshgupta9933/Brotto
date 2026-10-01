@@ -685,15 +685,16 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                 if t == "observation":
                     n = len(incoming.get("axTargets", []))
                     # What the observation cost, measured by the extension as it
-                    # built it. `scans` is the number that was never visible: a
-                    # settled page paid two full frame scans because the retry
-                    # loop's first iteration is unconditional, and `fallback` is
-                    # the per-node `DOM.getBoxModel` tail the bulk path could not
-                    # reach. Both were computed and thrown away on the way here.
+                    # built it. `scans` is 1 on a page that went still and 1-3 on
+                    # one that did not, and `fallback` is the per-node
+                    # `DOM.getBoxModel` tail the bulk path could not reach. This
+                    # was at debug while the numbers it reports were the whole
+                    # point of measuring them, so a run could not tell whether
+                    # the work landed.
                     m = incoming.get("metrics") or {}
                     st = m.get("stability") or {}
                     geo = m.get("geometry") or {}
-                    log.debug(
+                    log.info(
                         "[%s] ← observation  url=%s  ax_targets=%d"
                         "  scans=%s  bytes=%s"
                         "  geometry=%s/%s resolved (fallback=%s truncated=%s %s)"
