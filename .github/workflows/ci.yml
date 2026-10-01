@@ -28,12 +28,11 @@ jobs:
           cache: "pip"
           cache-dependency-path: requirements-dev.txt
 
-      # ponytail: pip + requirements*.txt instead of uv because the root
-      # pyproject.toml + uv.lock aren't tracked yet — only the
-      # requirements files are. uv searches for pyproject.toml at the
-      # workspace root and fails the job before pytest ever runs.
-      # Switch back to `uv sync --group dev` once the root pyproject is
-      # committed to main.
+      # ponytail: pip + requirements*.txt, not `uv sync`. uv is what
+      # CONTRIBUTING tells contributors to use locally, but this job pins
+      # the requirements files so a lockfile reformat can't break CI on its
+      # own. Both describe the same dependency set; if they ever disagree,
+      # requirements*.txt wins here and pyproject.toml wins locally.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
