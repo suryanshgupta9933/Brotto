@@ -143,7 +143,7 @@ export async function waitForStable(
 ): Promise<Stability> {
   const quietMs = opts?.quietMs ?? QUIET_MS;
   const deadlineMs = opts?.deadlineMs ?? DEADLINE_MS;
-  const earlyMs = opts?.noEarly ? 0 : (opts?.earlyMs ?? BUSY_SAMPLE_MS);
+  const earlyMs = opts?.noEarly ? 0 : BUSY_SAMPLE_MS;
   try {
     const r = await evalInPage(
       tabId, observerExpression(quietMs, deadlineMs, earlyMs, BUSY_MUTATIONS),
