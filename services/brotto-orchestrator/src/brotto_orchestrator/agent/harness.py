@@ -21,6 +21,7 @@ from pydantic_ai.exceptions import (
     UserError, ModelHTTPError, ModelRetry, UnexpectedModelBehavior,
 )
 
+from brotto_orchestrator.model.catalog import is_keyless_ok
 from brotto_orchestrator.model.config import UserCredentials
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
 from brotto_orchestrator.model.resolver import resolve_model_config
@@ -1173,12 +1174,25 @@ def _resolve_model(deps: AgentDeps) -> tuple:
     """
     cached = getattr(deps, "_model_config", None)
     if cached is None:
+        inline = getattr(deps, "model_config", None)
+        # Ollama needs no key, so a provider the catalog marks keyless gets
+        # credentials even with an empty api_key. Every other provider keeps
+        # the "no key means no inline config" rule the resolver documents.
+        has_creds = bool(getattr(deps, "api_key", None)) or (
+            inline is not None and is_keyless_ok(getattr(inline, "provider", ""))
+        )
         cached = resolve_model_config(
             client_ip=getattr(deps, "client_ip", "127.0.0.1"),
-            inline_config=getattr(deps, "model_config", None),
+            inline_config=inline,
             inline_creds=(
-                UserCredentials(api_key=deps.api_key, base_url=None)
-                if getattr(deps, "api_key", None)
+                UserCredentials(
+                    api_key=deps.api_key,
+                    # The config carries the endpoint because it must persist;
+                    # the factory reads it off the credentials because that is
+                    # the one shape both factories already agree on.
+                    base_url=getattr(inline, "base_url", None),
+                )
+                if has_creds
                 else None
             ),
         )
@@ -1561,7 +1575,7 @@ class AgentHarness:
         # the timing dict so the benchmark runner can price the run. The
         # scripted-planner path never calls `agent.run`, so these stay 0
         # there — a real fact (no model ran), not missing data.
-        tokens: dict[str, int] = {"in": 0, "out": 0}
+        tokens: dict[str, int] = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0}
         steps_run = 0
         task_start = time.perf_counter()
 
@@ -1857,15 +1871,28 @@ class AgentHarness:
                 page_title, filtered_ax, current_url
             ):
                 t_lp = time.perf_counter()
+                # The task travels with the prompt because "please log in" on
+                # its own does not say what for. The panel draws it as the
+                # card's subject line, and the audit keeps it so a session
+                # reopened from history explains the wall it stopped at
+                # instead of just recording that one happened.
                 pid = audit.record_prompt(
                     a_turn, kind="login_required", action="login",
-                    args={"url": current_url, "page_title": page_title},
+                    args={
+                        "url": current_url,
+                        "page_title": page_title,
+                        "task": deps.task,
+                    },
                     domain=etld1(current_url),
                     reason=f"Please log in: {page_title}",
                 )
                 await deps.ws_send({
                     "type": "login_required",
                     "message": f"Please log in: {page_title}. Agent will continue when ready.",
+                    "url": current_url,
+                    "domain": etld1(current_url) or "",
+                    "page_title": page_title,
+                    "task": deps.task,
                 })
                 try:
                     reply = await asyncio.wait_for(
