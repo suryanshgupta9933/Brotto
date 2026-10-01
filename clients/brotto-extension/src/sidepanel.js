@@ -7,10 +7,154 @@ const $modelName = document.getElementById('model-name');
 const $modelNameOptions = document.getElementById('model-name-options');
 const $modelBaseUrlSetting = document.getElementById('modelBaseUrlSetting');
 const $modelBaseUrl = document.getElementById('model-base-url');
-const $modelKeySetting = document.getElementById('modelKeySetting');
 const $modelKey = document.getElementById('model-api-key');
 const $modelSave = document.getElementById('model-save');
 const $modelStatus = document.getElementById('model-save-status');
+const $modelVisionBadge = document.getElementById('modelVisionBadge');
+const $modelContextWindow = document.getElementById('modelContextWindow');
+
+// ── Ink & Rule dropdown ──────────────────────────────────────────────────
+// One control, three instances: provider, security mode, and the model
+// field's suggestion list. The value host is always the element the rest of
+// this file already reads — a real <select> for the first two, the free-text
+// <input> for the third — so choosing an option writes `host.value` and fires
+// that element's own `change`, and every existing listener keeps working.
+// The component owns only the listbox.
+//
+// Selection is carried by a check glyph and by aria-selected, never by colour:
+// the system is monochrome, so a tint is not a channel.
+
+const DROPDOWNS = [];
+// Set while choose() pushes a value into its host. The model host is an
+// <input>, so writing it emits an `input` event, and the model list's own
+// "user is typing, offer suggestions" handler would immediately reopen what
+// was just closed.
+let dropdownWriting = false;
+
+function attachDropdown({ root, trigger, list, getOptions, getValue, setValue, editable }) {
+  let active = -1;
+
+  function paint() {
+    const value = getValue();
+    list.textContent = '';
+    const options = getOptions();
+    sync();
+    options.forEach((opt, i) => {
+      const selected = opt.value === value;
+      const row = document.createElement('li');
+      row.className = 'dd-option';
+      row.id = `${list.id}-opt-${i}`;
+      row.dataset.value = opt.value;
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const check = document.createElement('span');
+      check.className = 'dd-check';
+      check.setAttribute('aria-hidden', 'true');
+      check.textContent = selected ? '✓' : '';
+      const label = document.createElement('span');
+      label.className = 'dd-option-label';
+      label.textContent = opt.label;
+      row.appendChild(check);
+      row.appendChild(label);
+      row.addEventListener('click', () => choose(i));
+      list.appendChild(row);
+    });
+    active = -1;
+  }
+
+  // The box shows the host's current value. Nothing else writes that text, so
+  // a value set straight on the host — hydrateSettingsPanel, the save handler,
+  // a restored config — has to be pushed into the label by hand.
+  function sync() {
+    const slot = trigger.querySelector('.dd-value');
+    if (!slot) return;
+    const row = getOptions().find((o) => o.value === getValue());
+    slot.textContent = row ? row.label : (getValue() || '—');
+  }
+
+  function setActive(i) {
+    const rows = list.children;
+    if (active >= 0 && rows[active]) rows[active].classList.remove('active');
+    active = i;
+    if (!rows[active]) return;
+    rows[active].classList.add('active');
+    // The DOM focus stays on the trigger so Tab keeps working and Escape has
+    // somewhere to go; aria-activedescendant is what a screen reader reads.
+    trigger.setAttribute('aria-activedescendant', rows[active].id);
+    if (rows[active].scrollIntoView) rows[active].scrollIntoView({ block: 'nearest' });
+  }
+
+  function move(delta) {
+    const n = list.children.length;
+    if (!n) return;
+    const from = active < 0 ? (delta > 0 ? -1 : 0) : active;
+    setActive((from + delta + n) % n);
+  }
+
+  function open() {
+    for (const other of DROPDOWNS) if (other !== api) other.close();
+    paint();
+    list.hidden = false;
+    root.classList.add('open');
+    trigger.setAttribute('aria-expanded', 'true');
+    const current = getOptions().findIndex((o) => o.value === getValue());
+    if (current >= 0) setActive(current);
+  }
+
+  function close() {
+    list.hidden = true;
+    root.classList.remove('open');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.removeAttribute('aria-activedescendant');
+    active = -1;
+  }
+
+  function choose(i) {
+    const row = list.children[i];
+    if (!row) return;
+    const value = row.dataset.value;
+    close();
+    dropdownWriting = true;
+    try {
+      setValue(value);
+    } finally {
+      dropdownWriting = false;
+    }
+  }
+
+  trigger.addEventListener('click', () => (list.hidden ? open() : close()));
+  trigger.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !list.hidden) {
+      // Close without selecting. The value host is untouched, so a select
+      // stays where it was and a typed model id survives.
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      return;
+    }
+    if (e.key === 'Tab') { close(); return; }
+    // Space only means "select" on a closed-over-a-value control. On the model
+    // box it is a character, and swallowing it would make half of every model
+    // id untypeable the moment the list is open.
+    if (editable && e.key === ' ') return;
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (list.hidden) { open(); return; }
+      if (e.key === 'Enter' || e.key === ' ') { choose(active); return; }
+      move(e.key === 'ArrowDown' ? 1 : -1);
+    }
+  });
+  // Keep the pointer from moving focus off the trigger on press, which would
+  // blur it and let a second dropdown open.
+  list.addEventListener('mousedown', (e) => e.preventDefault());
+  document.addEventListener('click', (e) => {
+    if (!root.contains(e.target)) close();
+  });
+
+  const api = { open, close, paint, sync, isOpen: () => !list.hidden };
+  DROPDOWNS.push(api);
+  return api;
+}
 
 // The catalogue comes from GET /v1/models (see model_catalog.js). It is null
 // until the first load resolves, which is why the provider <select> ships
@@ -30,19 +174,17 @@ function populateModelOptions() {
     opt.value = entry.id;
     $modelNameOptions.appendChild(opt);
   }
-  // The base-URL box and the API-key box are per-provider facts, not
-  // preferences: Ollama has no key, Anthropic has no editable endpoint. A
-  // field left visible for a provider that ignores it is a lie about what the
-  // user has to fill in.
+  // The base-URL box is a per-provider fact, not a preference: Anthropic and
+  // OpenAI have a fixed endpoint, everything else takes one. A field left
+  // visible for a provider that ignores it is a lie about what the user has to
+  // fill in. The API-key box is never per-provider — every provider in the
+  // catalogue needs a key.
   if ($modelBaseUrlSetting) {
     const accepts = !!provider?.accepts_base_url;
     $modelBaseUrlSetting.classList.toggle('hidden', !accepts);
     if (accepts && $modelBaseUrl && !$modelBaseUrl.value) {
       $modelBaseUrl.value = provider.default_base_url || '';
     }
-  }
-  if ($modelKeySetting) {
-    $modelKeySetting.classList.toggle('hidden', !!provider?.keyless_ok);
   }
 }
 
@@ -61,8 +203,55 @@ function populateProviders() {
   }
 }
 
+// ── What the model can do: a vision badge and a context window, read from
+// the same catalogue entry the save handler prices its budget against.
+function renderModelFacts() {
+  const modelId = ($modelName?.value || '').trim();
+  const entry = (currentProvider()?.models || []).find((m) => m.id === modelId) || null;
+
+  if ($modelContextWindow) {
+    // contextWindow() is the one that answers for an id the catalogue has
+    // never seen: the provider's smallest known window, which can only
+    // under-fill. An invented 1M would overrun the real window and 400.
+    $modelContextWindow.textContent = modelId
+      ? `${brottoModelCatalog.contextWindow(modelCatalog, $modelProvider?.value, modelId).toLocaleString()} ctx`
+      : '';
+    $modelContextWindow.title = modelId && !entry
+      ? `${modelId} is not in the catalogue — showing the smallest window this provider is known to have`
+      : '';
+  }
+
+  if (!$modelVisionBadge) return;
+  // Vision is asserted only where the vendor documents image input. It is
+  // deliberately NOT asserted in the other direction: in this catalogue
+  // `false` means "not documented", so a badge claiming the model is
+  // text-only would be the panel inventing a fact the server declined to
+  // make. The neutral badge is the honest reading — it says we checked and
+  // the vendor said nothing — where rendering nothing would be
+  // indistinguishable from a model that has no vision at all.
+  $modelVisionBadge.hidden = !modelId;
+  $modelVisionBadge.dataset.vision = entry?.vision ? 'yes' : 'no';
+  $modelVisionBadge.textContent = entry?.vision ? 'VISION' : 'vision unverified';
+}
+
 if ($modelProvider) {
-  $modelProvider.addEventListener('change', populateModelOptions);
+  $modelProvider.addEventListener('change', () => {
+    populateModelOptions();
+    renderModelFacts();
+  });
+}
+
+if ($modelName) {
+  $modelName.addEventListener('input', () => {
+    renderModelFacts();
+    // Typing into the model box IS the request for suggestions. Escape or a
+    // click away dismisses them; nothing here forces the list open on focus,
+    // because a dropdown that appears the moment you look at a field is a
+    // dropdown you learn to ignore.
+    if (dropdownWriting) return;
+    if (modelDd?.isOpen()) modelDd.paint();
+    else if ($modelName.value.trim()) modelDd?.open();
+  });
 }
 
 async function initModelSettings(base) {
@@ -85,7 +274,7 @@ if ($modelSave) {
     if (!provider || !model) return;
     const providerInfo = currentProvider();
     const ctx = brottoModelCatalog.contextWindow(modelCatalog, provider, model);
-    // base_url rides on modelConfig, not on the key, so an Ollama or
+    // base_url rides on modelConfig, not on the key, so a self-hosted or
     // OpenRouter user does not re-paste it every browser restart the way
     // they re-paste the key.
     const baseUrl = providerInfo?.accepts_base_url
@@ -174,11 +363,58 @@ async function hydrateModelSettings() {
   // Don't re-hydrate the API key field — it's in chrome.storage.session
   // and we deliberately don't surface it in the UI (no plaintext display).
 }
+// ── Wire the three dropdowns to the value hosts the rest of this file uses.
+const providerDd = $modelProvider && attachDropdown({
+  root: document.getElementById('providerDd'),
+  trigger: document.getElementById('model-provider-trigger'),
+  list: document.getElementById('model-provider-list'),
+  getOptions: () => Array.from($modelProvider.children).map((o) => ({ value: o.value, label: o.textContent || o.value })),
+  getValue: () => $modelProvider.value,
+  // Dispatching `change` is what makes the provider switch behave exactly as
+  // it did when this was a native select: repopulate the model list, show or
+  // hide the base-URL and key boxes, refresh the facts.
+  setValue: (v) => { $modelProvider.value = v; $modelProvider.dispatchEvent(new Event('change')); },
+});
+
+const securityModeDd = attachDropdown({
+  root: document.getElementById('securityModeDd'),
+  trigger: document.getElementById('security-mode-trigger'),
+  list: document.getElementById('security-mode-list'),
+  getOptions: () => Array.from(securityModeSetting.children).map((o) => ({ value: o.value, label: o.textContent || o.value })),
+  getValue: () => securityModeSetting.value,
+  setValue: (v) => { securityModeSetting.value = v; securityModeSetting.dispatchEvent(new Event('change')); },
+});
+
+// The trigger shows the host's current value, so both selects need a sync
+// after anything writes them: the catalogue landing, hydrateSettingsPanel,
+// and the save handler's own round trip.
+
+const modelDd = $modelName && attachDropdown({
+  root: document.getElementById('modelDd'),
+  trigger: $modelName,
+  list: document.getElementById('model-name-list'),
+  // Free text stays free: the list is filtered to what has been typed, but an
+  // id that matches nothing is still typed, still saved, and still gets a
+  // context window. That is the whole reason this control is an input.
+  getOptions: () => {
+    const typed = ($modelName.value || '').trim().toLowerCase();
+    return (currentProvider()?.models || [])
+      .filter((m) => !typed || m.id.toLowerCase().includes(typed))
+      .map((m) => ({ value: m.id, label: m.label || m.id }));
+  },
+  getValue: () => $modelName.value.trim(),
+  setValue: (v) => { $modelName.value = v; $modelName.dispatchEvent(new Event('input')); },
+  editable: true,
+});
+
 // Called twice on purpose: once now so the header pill names the model
 // immediately, and again from initModelSettings once the catalogue has landed
-// and the provider select can actually hold the id this config names.
-hydrateModelSettings();
-initModelSettings(document.getElementById('plannerUrl')?.value || '');
+// and the provider select can actually hold the id this config names. Both
+// repaint the triggers and the facts on the way out, because a value written
+// straight to a host never tells anyone it changed.
+hydrateModelSettings().then(() => { providerDd?.sync(); renderModelFacts(); });
+initModelSettings(document.getElementById('plannerUrl')?.value || '')
+  .then(() => { providerDd?.sync(); renderModelFacts(); });
 
 const messagesEl  = document.getElementById('messages');
 const emptyState   = document.getElementById('emptyState');
@@ -268,8 +504,29 @@ settingsClose.addEventListener('click', () => settingsOverlay.classList.remove('
 settingsOverlay.addEventListener('click', (e) => {
   if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');
 });
+
+// The hosted Brotto server's address. There isn't one yet — self-host is the
+// only deployment — so this is empty and the field below stays editable,
+// which is exactly how it behaves today. When a launch domain is chosen, set
+// it here and nothing else changes: the read-only state is derived by
+// comparing the field against this constant, not stored and not toggled.
+const HOSTED_SERVER_URL = '';
+
+const SELF_HOST_HINT = 'Where Brotto sends your tasks. Leave this alone unless you run your own Brotto server.';
+const HOSTED_HINT = 'Brotto is hosted. Run your own server to point it somewhere else.';
+
+function applyServerAddressState() {
+  if (!plannerUrlSetting) return;
+  const hosted = !!HOSTED_SERVER_URL && plannerUrlSetting.value.trim() === HOSTED_SERVER_URL;
+  plannerUrlSetting.readOnly = hosted;
+  plannerUrlSetting.classList.toggle('input--readonly', hosted);
+  const hint = document.getElementById('serverAddressHint');
+  if (hint) hint.textContent = hosted ? HOSTED_HINT : SELF_HOST_HINT;
+}
+
 plannerUrlSetting.addEventListener('input', () => {
   plannerUrlEl.value = plannerUrlSetting.value;
+  applyServerAddressState();
 });
 
 // ── Session history ────────────────────────────────────────────────────────
@@ -714,8 +971,10 @@ if (replaySetupBtn) {
 // are sitting in a local cache against a dead one.
 settingsBtn.addEventListener('click', async () => {
   plannerUrlSetting.value = plannerUrlEl.value || 'http://localhost:8000';
+  applyServerAddressState();
   await hydrateSettingsPanel();
   settingsOverlay.classList.add('open');
+  securityModeDd?.sync();
   renderVerifyStatus();
 });
 
