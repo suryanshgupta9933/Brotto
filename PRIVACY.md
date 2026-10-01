@@ -34,7 +34,7 @@ model provider.
 |---|---|---|
 | Model configuration (provider, model name, context window) | `chrome.storage.local` | Until you clear it |
 | **Your model API key** | `chrome.storage.session` | **Memory only.** Cleared when the browser closes. Never written to disk by the extension. |
-| Secure-mode policy (blocked domains, sensitive-action list) | `chrome.storage.local` | Until you clear it |
+| Your policy (blocked domains, sensitive-action list) | `chrome.storage.local` | Until you clear it |
 | Session ID for the conversation | `chrome.storage.session` | Until the browser closes |
 
 Because the key lives in `chrome.storage.session`, it is not written to disk by Chrome and is gone when
@@ -50,6 +50,13 @@ When you start a task, the extension sends to the orchestrator:
    accessibility tree of interactive elements (role, accessible name, value, and a stable reference for
    each), and visible page text when the task calls for it.
 
+**Page text is redacted before it is sent.** Before any page text reaches the model, the orchestrator
+removes credentials, API keys, bearer tokens, payment card numbers and government identifiers, replacing
+each with `[redacted]`. This happens in code, on your machine, on every task, with no setting to turn it
+off. It is pattern matching, not a guarantee: it will miss an unfamiliar identifier format, and it will
+occasionally redact an innocuous number that happens to pass a checksum. The agent is told the redaction
+already happened and is instructed not to try to reconstruct a redacted value.
+
 The orchestrator then sends **the page observations to the model provider you selected** — Anthropic,
 OpenAI, or MiniMax. This is the core of what a browser agent does: the model has to see the page in
 order to act on it. Which provider receives it is entirely your choice, and that choice determines which
@@ -64,7 +71,12 @@ through our server in order to reach your model provider.
 |---|---|
 | `logs/sessions/<session_id>.json` | The audit record of your conversation: your messages, each step's observation, the prompts, the actions taken, approvals, timing, and errors. |
 | `logs/user_models/<client>.json` | Your model configuration (provider and model name). **Not your key.** |
-| `logs/policies/` | Your secure-mode policy. |
+| `logs/user_policies/` | Your blocked-domains list. |
+
+**Page text is never written to disk.** Each step's page is recorded as a 200-character digest, so a run
+over an authenticated session leaves a record of *what* was visited and not copies of *what was on it*.
+A run resumed later recalls those digests rather than whole pages — that is the trade for keeping your
+pages off the filesystem, and it is not configurable.
 
 Values typed into a field the orchestrator identifies as a secret — anything with
 `type="password"`, or an accessible name that reads like a credential — are **redacted before the
@@ -79,9 +91,14 @@ If you leave the side panel open on a page with no task running, Brotto can read
 text**, URL, and title and send them to your model provider to suggest something you might want to do.
 No action is taken on the page, and nothing is stored beyond the suggestion itself.
 
-This reads a page you are looking at without a task in flight. **It is off unless you turn it on, and it
-has no indicator in the panel**, so we are calling it out here rather than relying on you noticing a
-change. If you would rather it did not exist, turn it off in settings and do not enable it.
+This reads a page you are looking at without a task in flight. **It is off unless you turn it on**, and
+we are calling it out here rather than relying on you noticing a change. If you would rather it did not
+exist, do not enable it.
+
+Two things narrow what it will read. Pages whose address looks like a login, checkout, payment or account
+settings screen are skipped before the read, and a page carrying a password, card or one-time-code field
+is skipped even when its address looks ordinary. The panel shows a **"Reading page"** badge for exactly
+as long as a read is in progress, so the read is visible while it happens.
 
 ## Third parties
 
@@ -106,9 +123,11 @@ and how long they keep it. Those terms are between you and them.
 - The extension requests `chrome.debugger` to read the accessibility tree and dispatch input, and
   `<all_urls>` host access so it can work on the site you name. Both are exercised only during a task
   you started.
-- Brotto prompts for approval before sensitive actions (sending email, payments, deletes, publishing,
-  changing passwords, and similar) when secure mode is on, and can be configured to ask before acting
-  on a site for the first time.
+- Brotto always asks for approval before sensitive actions (sending email, payments, deletes,
+  publishing, changing passwords, and similar), and always asks before acting on a site for the first
+  time. There is no setting that turns either off.
+- The blocked-domains list is yours alone. There is no server-side floor, so nothing Brotto's operators
+  configure can add a site you did not block yourself.
 
 No system is perfect. A browser agent operating with your session has the same access you do, and a
 compromise of the extension or the server would have the same effect. Do not use it on accounts where
