@@ -164,37 +164,6 @@ def _scratchpad_dict(value: Scratchpad | dict) -> dict:
     return _cap_deep(value)
 
 
-def save_page_bodies(path: Path, scratchpad: Scratchpad) -> None:
-    """Write every entry's full body to its own JSON sidecar.
-
-    The manifest file keeps storing digests — its format predates bodies and
-    files on disk have to keep parsing unchanged. Bodies go here instead of
-    there because page text is arbitrary content: it can contain a line that
-    looks like a manifest header, a `# NOTES` marker, or anything else a
-    line-oriented format would have to escape. JSON needs no delimiter and
-    no escaping scheme invented for it.
-
-    Written by the harness, so it costs zero output tokens — which is the
-    whole point. The model used to keep a page by copying it into a note,
-    and that copy was ~1,300 output tokens and ~22s of a step.
-    """
-    payload = {e.id: e.body for e in scratchpad.entries if e.body}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload))
-
-
-def load_page_bodies(path: Path) -> dict[str, str]:
-    """Read the bodies sidecar. Returns {} for a missing or unreadable file —
-    a session captured before this existed, or a half-written one. Entries
-    then recall as their digest, which is what `recall_memory` says out loud.
-    """
-    try:
-        data = json.loads(path.read_text())
-    except Exception:
-        return {}
-    return {k: v for k, v in data.items() if isinstance(v, str)} if isinstance(data, dict) else {}
-
-
 def load_scratchpad(path: Path) -> Scratchpad:
     """Parse the structured file. Returns an empty Scratchpad on legacy
     plain-text files (no header) — the run continues without entries.
@@ -440,10 +409,6 @@ class AuditTrail:
         # read another's. The old layout was logs/runs/<task_id>/scratchpad.txt,
         # which was per-task; this keeps that property while moving the parent.
         return self.dir / f"{self.session_id}.scratchpad.txt"
-
-    @property
-    def page_bodies_path(self) -> Path:
-        return self.dir / f"{self.session_id}.pages.json"
 
     @property
     def dropped_writes(self) -> int:
@@ -779,12 +744,6 @@ class AuditTrail:
         model = _as_scratchpad(scratchpad)
         if model is not None:
             save_scratchpad(self.scratchpad_path, model)
-            # Bodies too, so a resume recalls the whole page rather than its
-            # 200-char digest. A dict — which is what `_as_scratchpad` turns
-            # into when the caller has one — carries no bodies, and there is
-            # nothing to save then.
-            if isinstance(scratchpad, Scratchpad):
-                save_page_bodies(self.page_bodies_path, scratchpad)
 
     def finish(self, result: dict) -> None:
         self._record(self._finish, result)

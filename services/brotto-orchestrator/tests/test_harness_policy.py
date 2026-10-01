@@ -2,7 +2,7 @@
 
 Pure-function tests, no I/O, no event loops, no LLM mocks. Each test
 runs in <50ms. Integration coverage is in
-`scripts/smoke_secure_mode.py` (run separately, slower).
+`scripts/smoke_policy.py` (run separately, slower).
 
 Covers:
 - `_HUMAN_PAUSE_BUCKETS` set membership
@@ -32,19 +32,16 @@ def test_policy_schema_no_block_blacklisted_field():
     assert "block_blacklisted" not in Policy.model_fields
 
 
-def test_policy_schema_retains_blacklist_and_first_time_seen():
+def test_policy_schema_is_just_the_two_content_fields():
     from brotto_orchestrator.policy.schema import Policy
-    assert "blacklist" in Policy.model_fields
-    assert "first_time_seen_prompt" in Policy.model_fields
-    assert "mode" in Policy.model_fields
+    assert set(Policy.model_fields) == {"blacklist", "sensitive_actions"}
 
 
 def test_policy_defaults():
     from brotto_orchestrator.policy.schema import Policy
     p = Policy()
-    assert p.mode == "normal"
     assert p.blacklist == []
-    assert p.first_time_seen_prompt is True
+    assert p.sensitive_actions
 
 
 def test_policy_user_policy_inherits():
@@ -58,7 +55,7 @@ def test_policy_user_policy_inherits():
 
 
 def test_gate_decision_has_no_approve():
-    """APPROVE was removed — blacklist matches always block in secure mode,
+    """APPROVE was removed — blacklist matches always block,
     and the old whitelist-approve path is gone. Regression guard against
     accidentally re-adding it."""
     from brotto_orchestrator.policy.gate import GateDecision
@@ -234,7 +231,7 @@ def test_first_time_seen_guard_blocks_on_blacklisted_url():
 
     deps = AgentDeps(
         user_id="u", task="x", cdp=None, ws_send=None,
-        policy=Policy(mode="secure", blacklist=["evil.com"]),
+        policy=Policy(blacklist=["evil.com"]),
     )
     log = _FakeRunLog()
 
@@ -263,7 +260,7 @@ def test_first_time_seen_guard_passes_on_clean_url():
 
     deps = AgentDeps(
         user_id="u", task="x", cdp=None, ws_send=None,
-        policy=Policy(mode="secure", blacklist=["evil.com"]),
+        policy=Policy(blacklist=["evil.com"]),
     )
     log = _FakeRunLog()
 
@@ -277,18 +274,14 @@ def test_first_time_seen_guard_passes_on_clean_url():
     assert log.calls == []
 
 
-def test_first_time_seen_guard_skips_in_normal_mode():
-    """If somehow called when mode is not secure (defensive), the guard
-    must not set a result — it should pass through. The actual block
-    is the gate's job, not this helper."""
+def test_first_time_seen_guard_passes_through_without_a_policy():
+    """AgentDeps.policy is None in ~20 test files, so a task with no policy
+    configured is a real state, not a defensive one. The guard must fall
+    through rather than raise on the unguarded `policy.blacklist`."""
     from brotto_orchestrator.agent.context import AgentDeps
     from brotto_orchestrator.agent.harness import _guard_first_time_seen_blacklist
-    from brotto_orchestrator.policy import Policy
 
-    deps = AgentDeps(
-        user_id="u", task="x", cdp=None, ws_send=None,
-        policy=Policy(mode="normal", blacklist=["evil.com"]),
-    )
+    deps = AgentDeps(user_id="u", task="x", cdp=None, ws_send=None, policy=None)
     log = _FakeRunLog()
 
     blocked = _guard_first_time_seen_blacklist(
@@ -296,7 +289,6 @@ def test_first_time_seen_guard_skips_in_normal_mode():
         step=0, action="click",
     )
 
-    # check_domain_policy returns N_A in normal mode → guard passes.
     assert blocked is False
     assert deps.result is None
 
@@ -304,48 +296,48 @@ def test_first_time_seen_guard_skips_in_normal_mode():
 # ── 2.1 stricter prompt ────────────────────────────────────────────────────
 
 
-def test_secure_mode_preamble_present_when_secure():
-    """When secure mode is on, the prompt must include the stricter
-    preamble so the LLM knows it's operating under org policy."""
+def test_the_policy_preamble_is_present_always():
+    """There is no mode to switch off, so a configured policy must put the
+    preamble in every prompt — the model has to know what is forbidden
+    before it proposes an action, not after the gate blocks it."""
     from brotto_orchestrator.agent.context import AgentDeps
-    from brotto_orchestrator.agent.harness import _turn_to_prompt
-    from brotto_orchestrator.agent.prompt import SECURE_MODE_PREAMBLE_LEGACY
-    from brotto_orchestrator.agent.prompt import secure_mode_preamble
+    from brotto_orchestrator.agent.prompt import policy_preamble
     from brotto_orchestrator.policy import Policy
 
     deps = AgentDeps(
         user_id="u", task="x", cdp=None, ws_send=None,
-        policy=Policy(mode="secure", blacklist=["evil.com", "banned.io"]),
+        policy=Policy(blacklist=["evil.com", "banned.io"]),
     )
     turn = _prompt_with_deps(deps)
-    # Substring: the "SECURE MODE ACTIVE" banner is always present.
-    assert "## SECURE MODE ACTIVE" in turn
+    assert "## BROTTO POLICY" in turn
     # The preamble interpolates the policy's actual blacklist so the LLM
     # knows what's forbidden without having to discover it.
-    assert secure_mode_preamble(deps.policy) in turn
+    assert policy_preamble(deps.policy) in turn
     assert "evil.com" in turn
     assert "banned.io" in turn
     # And the standard SYSTEM_PROMPT bits still appear (we prepend, not replace).
     assert "## What is your next action(s)?" in turn
 
 
-def test_secure_mode_preamble_absent_when_normal():
+def test_the_data_boundary_reaches_the_model():
+    """Redaction is a code boundary (agent/redact.py), so the prompt cannot
+    enforce it. What the prompt can do is stop the model from trying to
+    reconstruct a `[redacted]` value or asking the user for one."""
     from brotto_orchestrator.agent.context import AgentDeps
-    from brotto_orchestrator.agent.prompt import SECURE_MODE_PREAMBLE_LEGACY
     from brotto_orchestrator.policy import Policy
 
-    deps = AgentDeps(
-        user_id="u", task="x", cdp=None, ws_send=None,
-        policy=Policy(mode="normal"),
-    )
-    turn = _prompt_with_deps(deps)
-    assert "## SECURE MODE ACTIVE" not in turn
+    turn = _prompt_with_deps(AgentDeps(
+        user_id="u", task="x", cdp=None, ws_send=None, policy=Policy(),
+    ))
+    assert "### Data you will not see" in turn
+    assert "[redacted]" in turn
+
 
 
 def _prompt_with_deps(deps):
     """Build the prompt with the same shape the harness uses, so we can
     assert on the result. Mirrors `_turn_to_prompt` but accepts a deps
-    so we can flip secure mode per test."""
+    so each test can supply its own policy."""
     from brotto_orchestrator.agent.context import AgentTurn, AgentDeps
     from brotto_orchestrator.agent.harness import _turn_to_prompt
 
@@ -355,7 +347,7 @@ def _prompt_with_deps(deps):
         current_url="https://example.com", current_page_title="t",
         ax_tree="", ax_diff="", step_summaries=[],
     )
-    # `_turn_to_prompt(turn)` doesn't take deps today — the secure preamble
+    # `_turn_to_prompt(turn)` doesn't take deps today — the policy preamble
     # wiring needs to read from somewhere. The harness will pass deps
     # through; for the unit test we monkey-patch the helper to consult
     # the deps global below.
@@ -372,7 +364,7 @@ def _prompt_with_deps(deps):
 
 def test_policy_schema_has_sensitive_actions_field():
     """New field: curated list of irreversible action patterns that
-    always require approval in secure mode."""
+    always require approval."""
     from brotto_orchestrator.policy.schema import Policy
     assert "sensitive_actions" in Policy.model_fields
 
@@ -384,19 +376,10 @@ def test_policy_sensitive_actions_default_nonempty():
     assert len(p.sensitive_actions) >= 3  # at least a sane default
 
 
-def test_check_sensitive_action_matches_name_in_normal_mode_false():
-    """Guardrail is a no-op in normal mode — even if the action name
-    is in the sensitive list, secure mode is off so no approval fires."""
+def test_check_sensitive_action_matches_the_name():
     from brotto_orchestrator.agent.guardrails import check_sensitive_action
     from brotto_orchestrator.policy import Policy
-    p = Policy(mode="normal", sensitive_actions=["payment", "delete_record"])
-    assert check_sensitive_action("payment", {"ref": "x"}, p) is False
-
-
-def test_check_sensitive_action_matches_name_in_secure_mode():
-    from brotto_orchestrator.agent.guardrails import check_sensitive_action
-    from brotto_orchestrator.policy import Policy
-    p = Policy(mode="secure", sensitive_actions=["payment", "delete_record"])
+    p = Policy(sensitive_actions=["payment", "delete_record"])
     assert check_sensitive_action("payment", {"ref": "x"}, p) is True
     assert check_sensitive_action("delete_record", {"ref": "y"}, p) is True
 
@@ -404,7 +387,7 @@ def test_check_sensitive_action_matches_name_in_secure_mode():
 def test_check_sensitive_action_non_matching_action():
     from brotto_orchestrator.agent.guardrails import check_sensitive_action
     from brotto_orchestrator.policy import Policy
-    p = Policy(mode="secure", sensitive_actions=["payment"])
+    p = Policy(sensitive_actions=["payment"])
     assert check_sensitive_action("click", {"ref": "x"}, p) is False
 
 
@@ -413,7 +396,7 @@ def test_check_sensitive_action_matches_args_keyword():
     (e.g. a click with `description="delete_record"`)."""
     from brotto_orchestrator.agent.guardrails import check_sensitive_action
     from brotto_orchestrator.policy import Policy
-    p = Policy(mode="secure", sensitive_actions=["payment", "delete_record"])
+    p = Policy(sensitive_actions=["payment", "delete_record"])
     # Substring match — admin's `delete_record` pattern hits the
     # `description="delete_record ..."` arg.
     assert check_sensitive_action(
@@ -432,7 +415,7 @@ def test_check_sensitive_action_matches_args_keyword():
 def test_check_sensitive_action_empty_list_returns_false():
     from brotto_orchestrator.agent.guardrails import check_sensitive_action
     from brotto_orchestrator.policy import Policy
-    p = Policy(mode="secure", sensitive_actions=[])
+    p = Policy(sensitive_actions=[])
     assert check_sensitive_action("payment", {}, p) is False
 
 
@@ -449,7 +432,7 @@ def test_agent_deps_has_visited_domains():
 
 def test_first_time_seen_skips_terminal_actions():
     """Regression for the bug where the agent emitting cannot_complete
-    in secure mode prompted the user to approve the failure."""
+    prompted the user to approve the failure."""
     from brotto_orchestrator.agent.harness import (
         _NEVER_APPROVE, _TERMINAL_ACTIONS, _INTERNAL_ACTIONS, _QUESTION_ACTIONS,
     )
@@ -467,7 +450,7 @@ def test_check_sensitive_action_skips_internal_actions():
     model-written id happens to mention 'payment'."""
     from brotto_orchestrator.agent.guardrails import check_sensitive_action
     from brotto_orchestrator.policy import Policy
-    p = Policy(mode="secure", sensitive_actions=["payment"])
+    p = Policy(sensitive_actions=["payment"])
     assert check_sensitive_action(
         "recall_memory",
         {"entry_id": "the page showing a payment flow"},
@@ -510,7 +493,7 @@ def test_a_hidden_destructive_control_is_not_pre_approved():
     from brotto_orchestrator.policy import Policy
     from brotto_orchestrator.policy.gate import check_first_time_seen
 
-    policy = Policy(mode="secure")
+    policy = Policy()
     domain = "shop.example"
     targets = [_hidden_target()]
     call = _click("0:-1")
@@ -541,7 +524,7 @@ def test_an_ordinary_control_still_reuses_its_domain_approval():
     )
     key = _first_time_key("shop.example", _click("0:7"), [visible])
     assert key == ("shop.example", "click")
-    assert check_first_time_seen(key, {("shop.example", "click")}, Policy(mode="secure")) is False
+    assert check_first_time_seen(key, {("shop.example", "click")}, Policy()) is False
 
 
 def test_a_hidden_control_prompts_only_once():
@@ -552,7 +535,7 @@ def test_a_hidden_control_prompts_only_once():
     from brotto_orchestrator.policy.gate import check_first_time_seen
     from brotto_orchestrator.policy import Policy
 
-    policy = Policy(mode="secure")
+    policy = Policy()
     seen = set()
     call = _click("0:-1")
     targets = [_hidden_target()]
@@ -572,41 +555,21 @@ def test_an_unresolvable_ref_is_treated_as_ordinary():
     assert key == ("shop.example", "click")
 
 
-def test_normal_mode_never_prompts_for_a_hidden_control():
-    """The gate is inert outside secure mode, hidden or not — the whole
-    secure-mode contract is that it changes nothing in normal mode."""
-    from brotto_orchestrator.agent.harness import _first_time_key
-    from brotto_orchestrator.policy.gate import check_first_time_seen
-    from brotto_orchestrator.policy import Policy
-    key = _first_time_key("shop.example", _click("0:-1"), [_hidden_target()])
-    assert check_first_time_seen(key, set(), Policy(mode="normal")) is False
-
 
 # ── click cross-domain approval (Change 3) ──────────────────────────────────
 
 
-def _mk_deps(mode="secure"):
+def _mk_deps():
     """Minimal AgentDeps for testing the pure cross-domain helper. The
-    helper only reads `policy.mode` and `visited_domains`, so we leave
+    helper only reads `policy` and `visited_domains`, so we leave
     everything else default."""
     from brotto_orchestrator.agent.context import AgentDeps
     from brotto_orchestrator.policy import Policy
     return AgentDeps(
         user_id="u", task="x", cdp=None, ws_send=None,
-        policy=Policy(mode=mode),
+        policy=Policy(),
     )
 
-
-def test_should_prompt_cross_domain_click_normal_mode_no_prompt():
-    """Cross-domain clicks in normal mode never prompt — that's the
-    whole point of the change (secure-only gating)."""
-    from brotto_orchestrator.agent.harness import _should_prompt_cross_domain_click
-    deps = _mk_deps(mode="normal")
-    needs, target = _should_prompt_cross_domain_click(
-        "https://google.com/", "https://mail.google.com/", deps,
-    )
-    assert needs is False
-    assert target is None
 
 
 def test_should_prompt_cross_domain_click_same_etld_no_prompt():
@@ -681,8 +644,8 @@ def test_should_prompt_cross_domain_click_unparseable_urls_no_prompt():
 
 
 def test_looks_like_blacklist_hit_helper():
-    """Light heuristic used to decide whether cannot_complete in secure
-    mode is a policy preflight."""
+    """Light heuristic used to decide whether a `cannot_complete` is a
+    policy preflight."""
     from brotto_orchestrator.agent.harness import _looks_like_blacklist_hit
     # Substring match in either direction.
     assert _looks_like_blacklist_hit("mail.google.com", "Gmail (mail.google.com) is blocked")
@@ -708,17 +671,15 @@ def test_persist_save_and_load(tmp_path, monkeypatch):
     import importlib
     from brotto_orchestrator.policy import persist
     importlib.reload(persist)
-    persist.save("user-A", {"mode": "secure", "blacklist": ["evil.com"]})
-    persist.save("user-B", {"mode": "normal", "blacklist": []})
+    persist.save("user-A", {"blacklist": ["evil.com"]})
+    persist.save("user-B", {"blacklist": []})
     # load by key
     a = persist.load("user-A")
     assert a is not None
-    assert a["mode"] == "secure"
     assert a["blacklist"] == ["evil.com"]
     # Bookkeeping fields are added by save_if_changed.
     assert "_saved_at" in a
     assert "_content_sha256" in a
-    assert persist.load("user-B")["mode"] == "normal"
     assert persist.load("user-NONEXISTENT") is None
     # load_all returns both.
     all_loaded = persist.load_all()
@@ -732,7 +693,7 @@ def test_persist_atomic_no_partial_on_corruption(tmp_path, monkeypatch):
     import importlib
     from brotto_orchestrator.policy import persist
     importlib.reload(persist)
-    persist.save("user-X", {"mode": "secure"})
+    persist.save("user-X", {})
     files = list(tmp_path.glob("*.json"))
     assert len(files) == 1
     files[0].write_text("{not json")
@@ -750,7 +711,7 @@ def test_persist_save_if_changed_skips_no_op(tmp_path, monkeypatch):
     from brotto_orchestrator.policy import persist
     importlib.reload(persist)
 
-    payload = {"mode": "secure", "blacklist": ["foo.com"]}
+    payload = {"blacklist": ["foo.com"]}
     # First save writes.
     assert persist.save_if_changed("user-Y", payload) is True
     mtime_before = (tmp_path / persist._key_to_filename("user-Y")).stat().st_mtime_ns
@@ -761,15 +722,15 @@ def test_persist_save_if_changed_skips_no_op(tmp_path, monkeypatch):
     assert mtime_before == mtime_after, "no-op save touched the file"
     # A real change writes.
     assert persist.save_if_changed(
-        "user-Y", {"mode": "secure", "blacklist": ["foo.com", "bar.com"]},
+        "user-Y", {"blacklist": ["foo.com", "bar.com"]},
     ) is True
     # Re-save the same content again — no write.
     assert persist.save_if_changed(
-        "user-Y", {"mode": "secure", "blacklist": ["foo.com", "bar.com"]},
+        "user-Y", {"blacklist": ["foo.com", "bar.com"]},
     ) is False
     # Different key with same payload — IS a write (separate file).
     assert persist.save_if_changed(
-        "user-Z", {"mode": "secure", "blacklist": ["foo.com"]},
+        "user-Z", {"blacklist": ["foo.com"]},
     ) is True
 
 
@@ -781,7 +742,7 @@ def test_persist_load_strips_bookkeeping(tmp_path, monkeypatch):
     import importlib
     from brotto_orchestrator.policy import persist
     importlib.reload(persist)
-    payload = {"mode": "secure", "blacklist": ["a.com"]}
+    payload = {"blacklist": ["a.com"]}
     persist.save_if_changed("user-K", payload)
     # Hash with bookkeeping fields stripped.
     hash_first = persist._payload_hash(

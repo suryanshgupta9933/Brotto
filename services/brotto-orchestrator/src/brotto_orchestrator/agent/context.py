@@ -180,10 +180,6 @@ class TaskResult(BaseModel):
     failure_reason: str | None = None
     tried: list[str] = field(default_factory=list)
     timing: dict | None = None  # per-component seconds + wall clock, set by harness
-    # ponytail: set by the harness so the sidepanel can show a "SECURE"
-    # badge for the duration of the task_result bubble. Optional so
-    # existing callers/tests don't have to populate it.
-    policy_mode: str | None = None
     # ponytail: set by the harness to the URL observed at the start of the
     # final step, so a benchmark record can tell "navigated then failed"
     # apart from "never left the start page". Approximation: pre-step, not
