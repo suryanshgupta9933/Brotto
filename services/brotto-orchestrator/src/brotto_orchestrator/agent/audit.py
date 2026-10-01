@@ -818,11 +818,28 @@ class AuditTrail:
                 pass
 
 
+def _is_document_stem(name: str) -> bool:
+    """Whether `name` is a session id rather than a path or a sidecar.
+
+    Session ids are UUIDs, so the only legal shape is a single
+    dot-free, path-free token. Rejecting everything else is what keeps
+    `<id>.pages` and `../../secrets` off the filesystem.
+    """
+    return bool(name) and name == Path(name).name and "." not in name
+
+
 def read(session_id: str, *, dir: Path | None = None) -> dict:
-    """Read one document. Never raises: a damaged file is reported."""
+    """Read one document. Never raises: a damaged file is reported.
+
+    `session_id` comes off an unauthenticated HTTP path, so it is treated as
+    untrusted. A sidecar lives beside the document as `<id>.pages.json` (full
+    page text) and `<id>.scratchpad.txt`; without this guard
+    `GET /v1/sessions/<id>.pages/audit` reads the first one straight off disk
+    and `../../..` walks out of the directory entirely.
+    """
     d = dir or default_dir()
-    p = d / f"{session_id}.json"
-    if not p.exists():
+    p = d / f"{session_id}.json" if _is_document_stem(session_id) else None
+    if p is None or not p.exists():
         return {"found": False, "session_id": session_id}
     try:
         doc = json.loads(p.read_text())
@@ -846,6 +863,10 @@ def list_sessions(*, dir: Path | None = None) -> list[dict]:
     except OSError:
         return []
     for p in files:
+        # `<id>.pages.json` matches the glob and would otherwise be listed —
+        # and readable — as if it were a session.
+        if not _is_document_stem(p.stem):
+            continue
         doc = read(p.stem, dir=d)
         out.append({
             "session_id": doc.get("session_id", p.stem),

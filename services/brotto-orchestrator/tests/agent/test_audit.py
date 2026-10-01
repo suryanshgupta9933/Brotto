@@ -205,6 +205,30 @@ def test_read_of_missing_session_returns_404_shaped_stub(tmp_path):
     assert doc["found"] is False
 
 
+def test_a_sidecar_is_not_reachable_as_a_session(tmp_path):
+    """`<id>.pages.json` is the full page text of every step, and `read()`
+    builds its path by concatenation — so `GET /v1/sessions/<id>.pages/audit`
+    used to hand it over verbatim. The endpoint is unauthenticated, which is
+    what makes the one-line guard below load-bearing rather than tidy.
+    """
+    (tmp_path / "s1.json").write_text('{"schema_version": 2, "session_id": "s1"}')
+    (tmp_path / "s1.pages.json").write_text('{"e1": "the user banked at 09:14"}')
+
+    assert read("s1.pages", dir=tmp_path)["found"] is False
+    # And it must not be listed as a session of its own.
+    assert [e["session_id"] for e in list_sessions(dir=tmp_path)] == ["s1"]
+
+
+def test_a_traversing_session_id_reads_nothing(tmp_path):
+    """`session_id` is an untrusted path segment. Anything that is not a bare
+    dot-free token is refused before it reaches the filesystem."""
+    outside = tmp_path.parent / "secret.json"
+    outside.write_text('{"session_id": "not-yours"}')
+    assert read("../secret", dir=tmp_path)["found"] is False
+    assert read("..", dir=tmp_path)["found"] is False
+    assert read("", dir=tmp_path)["found"] is False
+
+
 def test_list_sessions_returns_newest_first(tmp_path):
     for sid, goal in (("a", "first"), ("b", "second")):
         t = AuditTrail(sid, dir=tmp_path)
