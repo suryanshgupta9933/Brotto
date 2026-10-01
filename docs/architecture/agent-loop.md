@@ -39,6 +39,38 @@ because it is the only server-side one. `auth-inbox` is green because of it. See
 "Wave 0 blockers — perception" in `docs/product/brotto-current-state.md` for why the
 other four still read red.
 
+### What a step costs
+
+Measured off a 6-step Gmail run (session `d141a18f`, 178.10s wall, 6 model turns):
+
+| phase | seconds | share |
+|---|---|---|
+| observe | 70.53 | 39.6% |
+| model_plan | 82.97 | 46.6% |
+| execute | 24.59 | 13.8% |
+
+`tokens_in:out` = 39:1 — 161,764 in, 4,167 out, ~27K input tokens per turn.
+
+**The model is not thinking.** `MiniMax-M3` is not in `_THINKING_REQUIRED`
+(`registry.py`), so `anthropic_thinking={"type": "disabled"}` is sent and the
+`model_plan` seconds are *prefill on a 27K-token prompt*. The per-turn spread
+(4.5s → 39.3s, 8.7×) tracks prompt size, not reasoning depth.
+
+**The 27K is the ranked-selection change, and it is the intended cost.** Before
+it, the tree was truncated in tree order at 6K chars — small prompt, fast, and
+blind to a control in the middle of a long page, which is what `auth-inbox`
+caught. Ranking fills the same 50K-char budget with the *most actionable*
+elements instead, so a realistic page now costs ~27K tokens to say the same
+thing. The old latency was partly the old blindness; it is not a regression to
+recover.
+
+**Observation is the half that is still reducible.** Observe + execute is 95.12s
+= 53.4% of wall, and 12s of `execute` is one click: `_send_action` blocks until
+the extension pushes the post-action observation back. The 6 `getFullAXTree`
+calls (one per frame, up to 12 by `MAX_FRAMES`) are the other cost. Not yet
+optimized — the lever is fewer frames, not a bigger budget, and the honest next
+measurement is per-frame time on a page with 4 cross-origin embeds.
+
 ### What the AX tree does not contain — measured, not inferred
 
 Everything above describes what we do with the tree we get. Whether the tree
@@ -114,11 +146,26 @@ surface — the main frame's tree is readable without a `frameId` — so the
 observation degrades to the pre-frames behaviour rather than to nothing.
 
 The scan (`frames` on the observation frame) records `traversed`, `total`,
-`crossOrigin`, the three cap flags and `failed`. `main.py` logs a warning when
-any of them trips, so a truncated or partly-unreadable observation is visible
-rather than silently partial. **The model is not told yet** — that wants one
-more line beside the "N more element(s) not shown" note at the end of
-`render_ax_tree`.
+`crossOrigin`, the three cap flags, `cappedFrames` and `failed`. `main.py` logs
+a warning when any of them trips, so a truncated or partly-unreadable
+observation is visible rather than silently partial. **The model is not told
+yet** — that wants one more line beside the "N more element(s) not shown" note
+at the end of `render_ax_tree`.
+
+**A boolean cap flag cannot answer the question it exists for.** The first
+version of that warning read
+
+```
+observation truncated: 6/6 frames (4 cross-origin), capped=nodeCapped unreadable=none
+```
+
+on every step of a Gmail run — six of six frames traversed, nothing unreadable,
+and the one thing that decides whether the agent is blind is *which* frame hit
+`MAX_NODES_PER_FRAME`. The main document capping is a model looking at half a
+page; an analytics embed capping is nothing at all, and there is no way to tell
+those two apart from the flag. The scan now carries `cappedFrames`
+(`{frameIndex, url, crossOrigin, nodes}`) and the warning names them. A log line
+that fires every step has to be worth reading when it fires.
 
 **Not fixed, deliberately:** a click still dispatches by coordinate on the
 top session. For a same-process cross-origin frame that works. For an
@@ -211,6 +258,36 @@ Fixed at the shared point both relays route through:
   failure, instead of typing into a field the model never named.
 
 Pinned by `tests/test_grounding_outcome.py` (5 tests, both relays).
+
+**…and then the fix was itself wrong, for the same reason.** A live Gmail run
+recorded it in the audit document:
+
+```
+'click' ok=True  ->  'Clicked [13829]: Error executing: ref 13829 is not in the current AX tree'
+```
+
+The prefix was there, just not at the front: `harness.py` decorates the relay's
+outcome on the way through (`f"Clicked [{ref}]: {result}"`), so a
+`startswith` test misses every failure whose action had a name to print. Making
+the relays well-behaved was necessary and not sufficient — the derivation point
+had to change too, and it is now **membership**, `_EXEC_FAILURE not in outcome`,
+with the string named as a module constant rather than repeated. A prefix test
+is the kind of contract that only holds until something upstream formats the
+message. Pinned by `test_a_wrapped_failure_is_still_recorded_as_not_ok`.
+
+**The model wrote `ref: 13829` because the prompt taught it to.** Two
+anti-examples in `SYSTEM_PROMPT` demonstrated the target as a *bare number*:
+
+```
+Bad: "…extracting the order ID."          (cited click on ref 42)
+- Bad: "I can see [28863] in the AX tree…"
+```
+
+while the tree correctly renders `[0:13829]`. The prompt was the source of the
+format it then emitted — the same class of bug as the `stagnat` needle, where
+the discriminator in the code is a substring of a model-authored string. Both
+lines now use composite refs, and a test scans `SYSTEM_PROMPT` for
+`\bref \d` so a future edit cannot reintroduce the shape.
 
 **The measurement is the audit, not a probe script.** Rung two of the ladder:
 the record already exists and every run already writes it. A future

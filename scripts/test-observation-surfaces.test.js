@@ -428,6 +428,12 @@ function check(name, cond, detail) {
       `kept ${surfaces[0].axNodes.length} nodes`);
     check("…and the truncation is reported", scan.nodeCapped === true,
       `scan.nodeCapped was ${scan.nodeCapped}`);
+    // Which frame capped is the only thing that says whether the model lost
+    // something it needed. A boolean fires every step on a harmless embed and
+    // tells a reader nothing.
+    check("…naming the frame that capped", scan.cappedFrames.length === 1
+      && scan.cappedFrames[0].frameIndex === 0 && scan.cappedFrames[0].nodes === 2500,
+      `cappedFrames was ${JSON.stringify(scan.cappedFrames)}`);
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

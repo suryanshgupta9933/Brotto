@@ -66,6 +66,9 @@ export interface FrameScan {
   frameCapped: boolean;
   depthCapped: boolean;
   nodeCapped: boolean;
+  /** The frames whose tree hit MAX_NODES_PER_FRAME, so the server can say
+   *  whether the truncated one was the page or an embed. */
+  cappedFrames: { frameIndex: number; url: string; crossOrigin: boolean; nodes: number }[];
   /** Frame ids whose `getFullAXTree` failed. */
   failed: string[];
 }
@@ -117,7 +120,7 @@ export function selectFrames(
   const maxDepth = limits?.maxDepth ?? MAX_FRAME_DEPTH;
   const scan = {
     traversed: 0, total: 0, crossOrigin: 0,
-    frameCapped: false, depthCapped: false, nodeCapped: false, failed: [],
+    frameCapped: false, depthCapped: false, nodeCapped: false, cappedFrames: [], failed: [],
   };
   const surfaces = [];
   if (!frameTree || typeof frameTree !== "object") return { surfaces, scan };
@@ -194,7 +197,7 @@ export async function enumerateSurfaces(
     surfaces = [{ frameIndex: 0, frameId: "", depth: 0, url: "", crossOrigin: false, axNodes: [] }];
     scan = {
       traversed: 0, total: 0, crossOrigin: 0,
-      frameCapped: false, depthCapped: false, nodeCapped: false, failed: [],
+      frameCapped: false, depthCapped: false, nodeCapped: false, cappedFrames: [], failed: [],
     };
   }
 
@@ -207,6 +210,15 @@ export async function enumerateSurfaces(
       const nodes = raw?.nodes ?? [];
       if (nodes.length > maxNodes) {
         scan.nodeCapped = true;
+        // Which frame capped is the only thing that decides whether the model
+        // lost something it needed: the main document going dark is a blind
+        // agent, an analytics iframe going dark is nothing.
+        scan.cappedFrames.push({
+          frameIndex: surface.frameIndex,
+          url: surface.url,
+          crossOrigin: surface.crossOrigin,
+          nodes: nodes.length,
+        });
         surface.axNodes = nodes.slice(0, maxNodes);
       } else {
         surface.axNodes = nodes;

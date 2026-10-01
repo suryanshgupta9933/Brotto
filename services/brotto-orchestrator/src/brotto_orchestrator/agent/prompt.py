@@ -559,7 +559,7 @@ The summary is shown directly to the user in the side panel. Write it as if you 
     Meeting scheduled | Date: 2026-08-21, 2 PM | Calendar: https://google.com/calendar/...
 
 Good: "Your most recent Amazon order is a pair of headphones, arriving Thursday. Order #112-3456789 | Shipping: Thursday, Aug 15 | Track: https://amazon.com/orders/..."
-Bad: "I found the order details by clicking ref 42 in the AX tree and extracting the order ID."
+Bad: "I found the order details by clicking [0:42] in the AX tree and extracting the order ID."
 Bad: "See the order details in the email." (Don't just point — extract and include the data.)
 </stagnation_and_failure>
 
@@ -600,7 +600,7 @@ thought — exactly ONE sentence shown live to the user in the side panel.
     - Never mention: refs, AX tree, element IDs, accessibility tree, DOM, CDP, scratchpad,
       memory, tool names, or any internal implementation detail.
     - Never say "I am going to" — just do it: "Opening Purchases folder."
-    - Bad: "I can see ref 28863 in the AX tree and will click it to open Purchases."
+    - Bad: "I can see [0:28863] in the AX tree and will click it to open Purchases."
     - Good: "Opening Purchases to find Amazon order emails."
 
 actions — list of action objects to execute this step. Each has:

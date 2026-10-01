@@ -81,7 +81,7 @@ Four things per step — hierarchy (`parent_ref_id`, resolved to the nearest **k
 The observation is the union of every frame's AX tree, not just the top frame's — the probe measured `GAP_FRAMES` on `auth-iframe`, and `getFullAXTree` takes a `frameId` and reads cross-origin frames in-process, so it is one call per frame and **no script in a foreign realm, ever**.
 
 - **A `nodeId` is unique only within one frame.** Two frames both return `42`. The ref is `<frameIndex>:<nodeId>` — the ordinal, not the 32-char CDP id, because a ref is printed on every rendered line; `frameId` rides on the target for dispatch. `parent` is composite too and `_depths` treats it as opaque, so the server is unchanged. Parent resolution is **per frame** — the `parentId` table is that frame's own.
-- **Caps are enforced in the walk: 12 frames, depth 4, 2000 nodes per tree.** Depth 4 because `MAX_DEPTH` for indentation is already 4 — anything deeper flattens out of the rendered tree anyway. A failing frame is recorded in `scan.failed` and skipped; a failed `Page.getFrameTree` falls back to the frameless main-frame read.
+- **Caps are enforced in the walk: 12 frames, depth 4, 2000 nodes per tree.** Depth 4 because `MAX_DEPTH` for indentation is already 4 — anything deeper flattens out of the rendered tree anyway. A failing frame is recorded in `scan.failed` and skipped; a failed `Page.getFrameTree` falls back to the frameless main-frame read. **A capped frame is recorded as a frame, not a boolean** (`scan.cappedFrames`), because only *which* frame hit the 2000-node cut decides whether the model lost something: the main document going dark is a blind agent, an analytics embed going dark is nothing. A bare `capped=nodeCapped` fires every step and answers nothing.
 - `frames` rides the observation frame and `main.py` warns when any cap trips. **The model isn't told about truncation yet** — that wants one line beside `render_ax_tree`'s "N more element(s) not shown".
 - **Not fixed:** a click still dispatches by coordinate on the top session. Fine for a same-process cross-origin frame; an **OOPIF** would need `Target.attachToTarget`, a privilege expansion the probe did not show we need. Not verified in a browser.
 
@@ -100,20 +100,29 @@ What the model sees is half of it; the other half is `prompt.py`'s `<convergence
 
 ### A ref that resolves to nothing is now a recorded failure
 
-`ok` is derived from a string prefix: `not outcome.startswith("Error executing")`.
 The relays used to return a *friendly sentence* for an unresolvable ref
 (`"No coordinates for ref '0:99' — element may be off-screen"`), which does not
-match, so the audit wrote **`ok: true` for an action that never happened** —
-and the grounding failure rate was not merely unmeasured, it was recorded as
-clean. `focus_ref`/`clear_ref` returned `None` and no-opped silently, so a
-`type_text` into a hallucinated ref typed into whatever was focused before.
+match the `Error executing:` marker, so the audit wrote **`ok: true` for an
+action that never happened** — and the grounding failure rate was not merely
+unmeasured, it was recorded as clean. `focus_ref`/`clear_ref` returned `None`
+and no-opped silently, so a `type_text` into a hallucinated ref typed into
+whatever was focused before.
 
 Every ref-taking method on **both** relays now returns the `Error executing:`
 prefix when the ref does not resolve, and `_coords` is `_locate`, returning
 `(coords, reason)` so "not in the AX tree" (a grounding error) is separable
 from "no box model" (a correct guess at something off-screen). `type_text`
-bails if focus or clear reports failure. Pinned by
-`tests/test_grounding_outcome.py`.
+bails if focus or clear reports failure.
+
+**`ok` is membership, not a prefix.** The relays were necessary and not
+sufficient: `harness.py` decorates the outcome as `f"Clicked [{ref}]: {result}"`,
+so the marker arrives *mid-string* and a live Gmail run recorded
+`'click' ok=True -> 'Clicked [13829]: Error executing: ref … is not in the
+current AX tree'`. The derivation is now `_EXEC_FAILURE not in outcome`, with
+the string a module constant. **The model wrote `ref: 13829` because the prompt
+taught it to** — two anti-examples in `SYSTEM_PROMPT` demonstrated a bare number
+while the tree renders `[0:13829]`; both are composite now, and a test greps the
+prompt for `\bref \d`. Pinned by `tests/test_grounding_outcome.py` (7 tests).
 
 **Counted over all 41 audit documents / 168 executable actions: 0 grounding
 failures.** Read that narrowly — it is the Playwright path only (the extension
@@ -122,6 +131,19 @@ ref that hallucinates into a real but wrong element resolves and records
 `ok: true`. The measurement is the audit, not a probe script — count `ok: false`
 actions in `logs/sessions/`. Full reasoning, including why "1A′: we are at
 34.0% Action Object" was wrong, in `docs/architecture/agent-loop.md`.
+
+### A step costs ~30s, and most of it is the prompt
+
+A 6-step Gmail run: observe 70.53s (39.6%), model_plan 82.97s (46.6%),
+execute 24.59s (13.8%); `tokens_in:out` = 39:1, ~27K input tokens per turn.
+**The model is not thinking** — `MiniMax-M3` is not in `_THINKING_REQUIRED`, so
+`model_plan` is prefill on a 27K prompt and the 4.5s→39.3s spread tracks prompt
+size. The 27K is `ax_filter`'s ranked selection filling the 50K budget with the
+*most actionable* elements rather than truncating in tree order; the old flat 6K
+was smaller and blind to a control mid-page, which is the `auth-inbox` failure.
+Observe+execute is 53.4% of wall, and 12s of that is one click —
+`_send_action` blocks on the post-action observation. Full table and the next
+lever in `docs/architecture/agent-loop.md`.
 
 ### The model could not press a key
 

@@ -696,11 +696,23 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     fr = incoming.get("frames") or {}
                     caps = [k for k in ("frameCapped", "depthCapped", "nodeCapped") if fr.get(k)]
                     if caps or fr.get("failed"):
+                        # Which frame capped is the only thing that says whether
+                        # the model lost something it needed: the main document
+                        # going dark is a blind agent, an analytics embed going
+                        # dark is nothing. A bare "capped=nodeCapped" every step
+                        # reads as an error and answers nothing.
+                        capped = fr.get("cappedFrames") or []
+                        where = ",".join(
+                            f"{c.get('frameIndex')}:{c.get('nodes')}"
+                            f"{'x' if c.get('crossOrigin') else ''}"
+                            f" {(c.get('url') or '')[:60]}"
+                            for c in capped
+                        ) or "-"
                         log.warning(
                             "[%s] observation truncated: %s/%s frames (%s cross-origin), "
-                            "capped=%s unreadable=%s",
+                            "capped=%s at [%s] unreadable=%s",
                             session_id, fr.get("traversed", 0), fr.get("total", 0),
-                            fr.get("crossOrigin", 0), ",".join(caps) or "none",
+                            fr.get("crossOrigin", 0), ",".join(caps) or "none", where,
                             fr.get("failed") or "none",
                         )
                 elif t == "observation_error":

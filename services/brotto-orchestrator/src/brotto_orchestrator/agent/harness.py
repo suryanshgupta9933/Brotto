@@ -68,6 +68,12 @@ _INTERNAL_ACTIONS = {
 # Actions that short-circuit the rest of the multi-action list.
 _TERMINAL_ACTIONS = {"task_complete", "cannot_complete"}
 
+# ponytail: a failed action marks its outcome with this string, and the audit
+# derives `ok` from its *absence*. Membership, not a prefix test: the outcome
+# is decorated as it travels (`Clicked [0:7]: <result>`), so a relay failure
+# arrives mid-string and a prefix test recorded it as a success.
+_EXEC_FAILURE = "Error executing"
+
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r"}
 
 
@@ -911,10 +917,10 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             # the model saw "Typed into [0:99]" and moved on. Bail on the first
             # failure so the audit records it.
             focused = await cdp.focus_ref(args["ref"])
-            if focused.startswith("Error executing"):
+            if _EXEC_FAILURE in focused:
                 return focused
             cleared = await cdp.clear_ref(args["ref"])
-            if cleared.startswith("Error executing"):
+            if _EXEC_FAILURE in cleared:
                 return cleared
             result = await cdp.type_text_to_ref(args["ref"], args["text"])
             return f"Typed into [{args['ref']}]: {result}"
@@ -1134,7 +1140,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             return f"Unknown action: {action}"
 
     except Exception as e:
-        return f"Error executing {action}: {e}"
+        return f"{_EXEC_FAILURE} {action}: {e}"
 
 
 def _scripted_decision(deps: AgentDeps, turn: AgentTurn) -> AgentDecision | None:
@@ -2142,7 +2148,7 @@ class AgentHarness:
                 outcome = await _execute_action(call, deps, audit=audit, turn=a_turn)
                 audit.record_action(
                     a_turn, action=call.action, args=rec_args, outcome=outcome,
-                    ok=not outcome.startswith("Error executing"),
+                    ok=_EXEC_FAILURE not in outcome,
                     redacted=redact,
                     duration_ms=int((time.perf_counter() - t_a) * 1000),
                 )
