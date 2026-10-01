@@ -256,10 +256,9 @@ def _persist_user_policy(user_key: str, payload: dict | None) -> None:
         wrote = _user_policy_persist.save_if_changed(user_key, payload)
         if wrote:
             log.info(
-                "user-policy saved  user_key=%s  blacklist=%s  mode=%s",
+                "user-policy saved  user_key=%s  blacklist=%s",
                 user_key,
                 payload.get("blacklist"),
-                payload.get("mode"),
             )
         # else: silent no-op save; this is the common case when the
         # user clicks Save without changing anything.
@@ -301,7 +300,6 @@ async def get_effective_policy(request: Request):
             user_pol = None
     effective = user_pol or Policy()
     return JSONResponse(content={
-        "mode": effective.mode,
         "blacklist": effective.blacklist,
         "sensitive_actions": effective.sensitive_actions,
         "caller": caller,
@@ -363,17 +361,23 @@ async def policy_ack(request: Request):
     body = await _json_body(request)
     settings = body.get("settings") or {}
     user_id = body.get("user_id") or request.client.host if request.client else "unknown"
-    mode = settings.get("mode")
     blacklist = settings.get("blacklist") or []
     # Mirror on the session registry so a later GET /v1/policy returns
     # this user's view (handles the "Save with no WS open" case from
     # the audit work earlier). Persist to disk too.
-    snapshot = {"mode": mode, "blacklist": blacklist}
+    #
+    # The snapshot is the whole document — building it as
+    # `{"mode": settings.get("mode"), ...}` while the field no longer
+    # exists wrote a literal `None`, which then failed UserPolicy
+    # validation on the next GET, was swallowed by the bare except
+    # above, and silently served an empty blacklist. Add a key here
+    # only if Policy actually declares it.
+    snapshot = {"blacklist": blacklist}
     registry.set_user_policy(user_id, snapshot)
     _persist_user_policy(user_id, snapshot)
     log.warning(
-        "[%s] POLICY: user saved settings  mode=%s  blacklist=%s",
-        user_id, mode, blacklist,
+        "[%s] POLICY: user saved settings  blacklist=%s",
+        user_id, blacklist,
     )
     try:
         from .agent.audit import append_policy_event
@@ -622,9 +626,8 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         registry.set_user_policy(client_host, user_policy_payload)
         _persist_user_policy(client_host, user_policy_payload)
     effective_policy = user_policy or Policy()
-    log.info("[%s] effective_policy  mode=%s  blacklist=%d",
-             session_id, effective_policy.mode,
-             len(effective_policy.blacklist))
+    log.info("[%s] effective_policy  blacklist=%d",
+             session_id, len(effective_policy.blacklist))
 
     deps = AgentDeps(
         user_id=session_id,
@@ -652,7 +655,6 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     try:
         await ws_send({
             "type": "policy_effective",
-            "mode": effective_policy.mode,
             "blacklist": effective_policy.blacklist,
             "sensitive_actions": effective_policy.sensitive_actions,
         })
@@ -807,15 +809,13 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     # survives a session restart — see the ponytail note
                     # at the task_start handler above.
                     snapshot = {
-                        "mode": settings.get("mode"),
                         "blacklist": settings.get("blacklist") or [],
                     }
                     registry.set_user_policy(client_host, snapshot)
                     _persist_user_policy(client_host, snapshot)
                     log.warning(
-                        "[%s] POLICY: user saved settings  mode=%s  blacklist=%s",
+                        "[%s] POLICY: user saved settings  blacklist=%s",
                         session_id,
-                        settings.get("mode"),
                         settings.get("blacklist"),
                     )
                     try:
@@ -825,7 +825,6 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                             step=None, kind="policy_acknowledged",
                             domain=None, action=None,
                             decision=(
-                                f"mode={settings.get('mode')}  "
                                 f"blacklist={settings.get('blacklist')}"
                             ),
                         )
@@ -909,11 +908,10 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
                     except Exception as exc:
                         log.warning("[%s] invalid user_policy, ignoring: %s", user_id, exc)
                 effective_policy = user_policy or Policy()
-                log.info("[%s] submit_task  task=%r  start_url=%s  effective_mode=%s",
-                         user_id, task_text[:80], start_url, effective_policy.mode)
-                log.info("[%s] effective_policy  mode=%s  blacklist=%d",
-                         user_id, effective_policy.mode,
-                         len(effective_policy.blacklist))
+                log.info("[%s] submit_task  task=%r  start_url=%s",
+                         user_id, task_text[:80], start_url)
+                log.info("[%s] effective_policy  blacklist=%d",
+                         user_id, len(effective_policy.blacklist))
 
                 async def _run_task(task: str, start_url: str) -> None:
                     from .dev.playwright_browser import PlaywrightBrowser
@@ -996,8 +994,7 @@ async def run_task(request: Request):
         except Exception as exc:
             log.warning("/run: invalid user_policy, ignoring: %s", exc)
     effective_policy = user_policy or Policy()
-    log.info("/run  task=%r  start_url=%s  effective_mode=%s",
-             task[:80], start_url, effective_policy.mode)
+    log.info("/run  task=%r  start_url=%s", task[:80], start_url)
 
     if not task:
         return _error(400, "task required")
