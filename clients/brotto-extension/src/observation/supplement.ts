@@ -21,7 +21,7 @@
  * workstream. Hence the two caps and the main-frame-only rule below.
  */
 
-import { anyCommand, makeRef, Surface } from "./surfaces";
+import { anyCommand, makeRef, pooled, CDP_CONCURRENCY, Surface } from "./surfaces";
 
 // Untrusted page content flowing into a model prompt, bounded twice.
 //
@@ -151,17 +151,28 @@ export async function findHiddenTargets(
   // a model prompt, and an unreported overflow is how it gets there.
   if (JSON.stringify(value.items).length > MAX_EVAL_BYTES) return [];
 
-  const targets = [];
-  for (let i = 0; i < value.items.length; i++) {
-    const it = value.items[i];
-    let backendNodeId;
+  // Hit-tests pooled; the refs are not. A supplemented ref is minted from the
+  // item's *index* (`-(i + 1)`), so letting completion order decide the index
+  // would renumber every hidden control on the page — and the numbering is the
+  // only thing keeping a supplemented ref from colliding with an AX ref. The
+  // reads are concurrent, the assignment is still one pass in order.
+  const hits = await pooled(value.items, CDP_CONCURRENCY, async (it) => {
     try {
       const hit = await anyCommand(tabId, {
         method: "DOM.getNodeForLocation",
         params: { x: it.x, y: it.y },
       });
-      backendNodeId = hit?.backendNodeId;
-    } catch { /* fall through: unverified nodes are not surfaced */ }
+      return hit?.backendNodeId;
+    } catch {
+      // fall through: unverified nodes are not surfaced
+      return undefined;
+    }
+  });
+
+  const targets = [];
+  for (let i = 0; i < value.items.length; i++) {
+    const it = value.items[i];
+    const backendNodeId = hits[i];
     // Unverifiable is not surfaced. A control we cannot hit-test is one we
     // cannot promise the model is clickable, and the whole premise of the
     // supplement is that the model may act on it.

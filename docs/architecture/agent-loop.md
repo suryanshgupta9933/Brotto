@@ -95,6 +95,36 @@ nothing to pool.
 Composed with the unconditional retry, that is `3004 + 1453` per scan × 2
 scans ≈ 9s per observation, against a measured 11.75s.
 
+### The three serial loops are pooled, and the order is the contract
+
+`pooled(items, limit, fn)` in `surfaces.ts` runs a loop at `CDP_CONCURRENCY = 6`
+and writes results **by index, never by append**. It rewrites three loops: the
+per-frame `getFullAXTree` reads, the supplement's `DOM.getNodeForLocation`
+hit-tests, and the geometry fallback's `DOM.getBoxModel` calls. Every call is
+issued with identical arguments, so the observations are bit-identical.
+
+The frame reads were sequential deliberately — *"a page that legitimately has a
+dozen frames should not have twelve `getFullAXTree` calls in flight against one
+debugger session."* A bound of 6 answers that concern rather than overturning
+it: `chrome.debugger.sendCommand` is a native per-call callback API with no
+lock, so concurrency is supported by construction, and the number that matters
+is how many are in flight, not whether they are.
+
+**Why index-ordering is not a detail here.** A supplement ref is minted from the
+item's index — `-(i + 1)` — and that numbering is the only thing keeping a
+supplemented control from colliding with an AX `nodeId`. A pool that appended on
+completion would renumber every `aria-hidden` control on the page, and a
+renumbered AX tree is a tree that still parses and still looks plausible.
+Likewise the frame bookkeeping (`cappedFrames`, `failed`) is *not* pooled even
+though the reads are: both are read in order to decide whether the model lost
+something, so they are filled in one sequential pass after the reads land.
+
+**The re-attach needed deduplicating.** `sendCommand` re-attaches once when a
+command reports "not attached". With six calls in flight, a detach made every
+one of them independently call `chrome.debugger.attach` on the same tab. One
+in-flight attach promise per tab now, cleared on settle either way so a failed
+attach is not cached forever.
+
 **Not measured, stated rather than assumed:** the probe's synthetic pages carry
 no `aria-hidden` elements, so `hits` is 0 on every row and the supplement's
 ≤200-call `DOM.getNodeForLocation` loop is still unpriced. It is bounded at 200

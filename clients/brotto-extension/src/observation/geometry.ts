@@ -42,7 +42,7 @@
  * `scripts/test-observation-geometry.test.js` exists to keep it honest.
  */
 
-import { anyCommand } from "./surfaces";
+import { anyCommand, pooled, CDP_CONCURRENCY } from "./surfaces";
 
 /** Matches MAX_NODES_PER_FRAME in `surfaces.ts`: 2000 nodes per tree. A cap
  *  written down and not enforced is not a cap, so the ids past it are dropped
@@ -231,10 +231,19 @@ export async function boxMap(
     }
   }
 
-  let fallback = 0;
-  for (const id of ids) {
-    if (boxes.has(id)) continue;
-    fallback++;
+  // The fallback, pooled. This is the loop the probe found dominating: at the
+  // Gmail-shaped 6-frame case it is ~2,025 serial round trips, because
+  // `MAX_GEOMETRY_ENTRIES` bounds the *bulk* batch and not the ids past it.
+  // That count is unchanged here — it is still one call per uncovered id, it
+  // just costs a sixth as much wall time.
+  //
+  // `fallback` is the length of the uncovered set, which is what the sequential
+  // loop counted: it incremented before the call and left the increment in
+  // place when the call threw. A node that has no box costs a call and counts,
+  // so a pool that counted only the successes would report a healthier number
+  // than the loop it replaced.
+  const uncovered = ids.filter((id) => !boxes.has(id));
+  const found = await pooled(uncovered, CDP_CONCURRENCY, async (id) => {
     try {
       const box = await anyCommand(tabId, {
         method: "DOM.getBoxModel",
@@ -242,16 +251,23 @@ export async function boxMap(
       });
       const content = box?.model?.content;
       if (content && content.length >= 4) {
-        boxes.set(id, {
+        return {
           x: Math.round((content[0] + content[2]) / 2),
           y: Math.round((content[1] + content[3]) / 2),
-        });
+        };
       }
     } catch {
       // No box — off-screen, display:none, or a stale id. Today's behaviour:
       // the target is emitted without x/y. Never 0,0.
     }
+    return null;
+  });
+  for (let i = 0; i < uncovered.length; i++) {
+    if (found[i]) boxes.set(uncovered[i], found[i]);
   }
 
-  return { boxes, requested: ids.length, resolved: boxes.size, fallback, truncated, source };
+  return {
+    boxes, requested: ids.length, resolved: boxes.size,
+    fallback: uncovered.length, truncated, source,
+  };
 }

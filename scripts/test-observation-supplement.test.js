@@ -27,9 +27,13 @@ const vm = require("vm");
 
 const OBS_DIR = path.join(__dirname, "..", "clients", "brotto-extension", "src", "observation");
 const supplementSrc = fs.readFileSync(path.join(OBS_DIR, "supplement.ts"), "utf8");
+const surfacesSrc = fs.readFileSync(path.join(OBS_DIR, "surfaces.ts"), "utf8");
 
 function extract(src, name) {
-  const start = src.search(new RegExp(`^(export )?(async )?function ${name}\\(`, "m"));
+  // `<T, R>` between the name and the paren is legal TypeScript and `pooled`
+  // is the first thing here that uses it. Generic parameters carry no braces,
+  // so the brace matching below is unaffected.
+  const start = src.search(new RegExp(`^(export )?(async )?function ${name}\\s*(<[^>(]*>)?\\s*\\(`, "m"));
   if (start < 0) throw new Error(`no function ${name} — renamed?`);
   const open = src.indexOf("{", start);
   if (src.slice(start, open).includes("}")) {
@@ -66,10 +70,17 @@ function extractProbe(src) {
   throw new Error("unterminated HIDDEN_PROBE");
 }
 
-const BODIES = { findHiddenTargets: extract(supplementSrc, "findHiddenTargets") };
+const BODIES = {
+  findHiddenTargets: extract(supplementSrc, "findHiddenTargets"),
+  // The hit-test loop is pooled, and the ref is minted from the item's index
+  // — so the pool's ordering is exactly what decides the refs. Extracted from
+  // surfaces.ts rather than restated, for the same reason BOX_WALK is.
+  pooled: extract(surfacesSrc, "pooled"),
+};
 const CONSTS = {
   MAX_HIDDEN_NODES: extractConst(supplementSrc, "MAX_HIDDEN_NODES"),
   MAX_EVAL_BYTES: extractConst(supplementSrc, "MAX_EVAL_BYTES"),
+  CDP_CONCURRENCY: surfacesSrc.match(/^export const CDP_CONCURRENCY = (.*);$/m)[1],
 };
 const PROBE = extractProbe(supplementSrc);
 
@@ -82,11 +93,12 @@ function moduleFor(dbgImpl) {
     HIDDEN_PROBE: PROBE,
     dbg: { sendCommand: dbgImpl },
     makeRef: (frameIndex, nodeId) => frameIndex + ":" + nodeId,
-    JSON, Math, Set, Map, String, Array, console,
+    JSON, Math, Set, Map, String, Array, console, Promise,
   };
   return vm.runInNewContext(
     `(function () {
        const anyCommand = (async function (tabId, command) { return await dbg.sendCommand(tabId, command); });
+       const pooled = (async function (items, limit, fn) { ${BODIES.pooled} });
        const findHiddenTargets = (async function (tabId, surface, seenBackendIds) { ${BODIES.findHiddenTargets} });
        return { findHiddenTargets };
      })()`,
@@ -129,7 +141,12 @@ function dbgFor(opts = {}) {
         return opts.result !== undefined ? opts.result : probeResult(opts.n ?? 1);
       }
       if (cmd.method === "DOM.getNodeForLocation") {
-        const id = 100 + hit++;
+        const seq = hit++;
+        // `stagger` makes the renderer answer in reverse order, which is what
+        // a pool that appends on completion cannot survive. Real renderers do
+        // not answer in issue order — that is the entire reason for pooling.
+        if (opts.stagger) await new Promise((r) => setTimeout(r, (opts.n - seq) * 2));
+        const id = 100 + seq;
         if (opts.hitBackendId) return { backendNodeId: opts.hitBackendId };
         return { backendNodeId: id };
       }
@@ -182,6 +199,27 @@ function check(name, cond, detail) {
       targets[0].backendNodeId === 100, `got ${JSON.stringify(targets[0])}`);
     check("…on a ref that cannot collide with an AX node id",
       targets[0].ref === "0:-1", `ref was ${targets[0].ref}`);
+  }
+
+  // 1b. THE HIT-TESTS ARE POOLED, SO THE ORDER IS NOT THE RENDERER'S. A ref is
+  //     minted from the item's index and it is the only thing keeping a
+  //     supplemented control from colliding with an AX ref — so completion
+  //     order leaking into the result renumbers every hidden control on the
+  //     page, and a renumbered tree is a tree that still parses.
+  {
+    const d = dbgFor({ n: 6, stagger: true });
+    const mod = moduleFor(d.send);
+    const targets = await mod.findHiddenTargets(7, MAIN);
+    check("a renderer answering out of order still yields refs in page order",
+      targets.map((t) => t.ref).join(",") === "0:-1,0:-2,0:-3,0:-4,0:-5,0:-6",
+      `refs were ${JSON.stringify(targets.map((t) => t.ref))}`);
+    check("…and each control still carries its own name, not its neighbour's",
+      targets.map((t) => t.name).join(",") ===
+        "Hidden 0,Hidden 1,Hidden 2,Hidden 3,Hidden 4,Hidden 5",
+      `names were ${JSON.stringify(targets.map((t) => t.name))}`);
+    check("…and its own backend id, so nothing is double-counted",
+      targets.map((t) => t.backendNodeId).join(",") === "100,101,102,103,104,105",
+      `ids were ${JSON.stringify(targets.map((t) => t.backendNodeId))}`);
   }
 
   // 2. THE 512 KB CAP. A page that produces an oversized result is a page we do

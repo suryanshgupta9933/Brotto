@@ -156,6 +156,17 @@ pooling at 6 is worth 5.1–5.5× at realistic frame counts; a cross-origin embe
 is an OOPIF and invisible to `Page.getFrameTree`) are in
 `docs/architecture/agent-loop.md`.
 
+**The three serial CDP loops are pooled** (`pooled` in `surfaces.ts`,
+`CDP_CONCURRENCY = 6`): per-frame `getFullAXTree`, the supplement's
+`DOM.getNodeForLocation`, and the geometry fallback's `DOM.getBoxModel`.
+**Results are written by index, never appended** — a supplement ref is
+`-(i + 1)`, so completion order would renumber every `aria-hidden` control and
+the tree would still parse. Frame bookkeeping (`cappedFrames`, `failed`) is
+deliberately *not* pooled; it is filled in one sequential pass after the reads
+land. `sendCommand` re-attaches **once per tab**, shared by everything in
+flight, or six concurrent calls would each race their own `attach`.
+
+
 ### The model could not press a key
 
 A 19-step HDFC UPI run burned 158s and ~19 model calls without executing a

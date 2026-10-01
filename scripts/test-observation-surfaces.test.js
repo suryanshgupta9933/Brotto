@@ -33,7 +33,10 @@ const indexSrc = fs.readFileSync(path.join(OBS_DIR, "index.ts"), "utf8");
 // Returns the function *body* only, so the extracted text is plain JS. The
 // signatures are deliberately brace-free for this reason.
 function extract(src, name) {
-  const start = src.search(new RegExp(`^(export )?(async )?function ${name}\\(`, "m"));
+  // `<T, R>` between the name and the paren is legal TypeScript and `pooled`
+  // is the first thing here that uses it. Generic parameters carry no braces,
+  // so the brace matching below is unaffected.
+  const start = src.search(new RegExp(`^(export )?(async )?function ${name}\\s*(<[^>(]*>)?\\s*\\(`, "m"));
   if (start < 0) throw new Error(`no function ${name} — renamed?`);
   const open = src.indexOf("{", start);
   if (src.slice(start, open).includes("}")) {
@@ -48,7 +51,8 @@ function extract(src, name) {
 }
 
 function extractConst(src, name) {
-  const start = src.search(new RegExp(`^const ${name} = `, "m"));
+  // `CDP_CONCURRENCY` is exported so the observation modules can share it.
+  const start = src.search(new RegExp(`^(export )?const ${name} = `, "m"));
   if (start < 0) throw new Error(`no const ${name} — renamed?`);
   const line = src.slice(start, src.indexOf("\n", start));
   return line.slice(line.indexOf("=") + 1).replace(/;\s*$/, "").trim();
@@ -59,6 +63,7 @@ const BODIES = {
   enumerateSurfaces: extract(surfacesSrc, "enumerateSurfaces"),
   makeRef: extract(surfacesSrc, "makeRef"),
   originOf: extract(surfacesSrc, "originOf"),
+  pooled: extract(surfacesSrc, "pooled"),
   targetsForFrame: extract(indexSrc, "targetsForFrame"),
   propUrl: extract(indexSrc, "propUrl"),
 };
@@ -66,6 +71,7 @@ const CONSTS = {
   MAX_FRAMES: extractConst(surfacesSrc, "MAX_FRAMES"),
   MAX_FRAME_DEPTH: extractConst(surfacesSrc, "MAX_FRAME_DEPTH"),
   MAX_NODES_PER_FRAME: extractConst(surfacesSrc, "MAX_NODES_PER_FRAME"),
+  CDP_CONCURRENCY: extractConst(surfacesSrc, "CDP_CONCURRENCY"),
 };
 
 // KEEP_ROLES is a multi-line Set, so the single-line const reader won't take
@@ -85,6 +91,7 @@ function moduleFor(dbgImpl) {
   return vm.runInNewContext(
     `(function () {
        const anyCommand = (async function (tabId, command) { return await dbg.sendCommand(tabId, command); });
+       const pooled = (async function (items, limit, fn) { ${BODIES.pooled} });
        const makeRef = (function (frameIndex, nodeId) { ${BODIES.makeRef} });
        const originOf = (function (url) { ${BODIES.originOf} });
        const selectFrames = (function (frameTree, limits) { ${BODIES.selectFrames} });

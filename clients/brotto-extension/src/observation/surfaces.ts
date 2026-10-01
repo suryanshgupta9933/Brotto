@@ -33,6 +33,55 @@ export async function anyCommand(tabId: number, command: any): Promise<any> {
   return await dbg.sendCommand(tabId, command);
 }
 
+/**
+ * How many CDP calls may be in flight at once against one debugger session.
+ *
+ * The frame reads were sequential on purpose — "a page that legitimately has a
+ * dozen frames should not have twelve `getFullAXTree` calls in flight against
+ * one debugger session" — so this is a bound on an intent, not a free-for-all.
+ * `chrome.debugger.sendCommand` is a native per-call callback API carrying no
+ * lock, so concurrency is supported by construction; 6 is where the measured
+ * serial cost collapses (5.1–5.5× on the CDP portion at 6–12 frames) without
+ * putting a dozen full AX trees on the renderer at once.
+ */
+export const CDP_CONCURRENCY = 6;
+
+/**
+ * `items` through `fn`, at most `CDP_CONCURRENCY` at a time, results in the
+ * original order.
+ *
+ * Order is the whole contract. Every caller here is rewriting a sequential
+ * `for` loop that pushes into a list, and the refs the model sees are minted
+ * from the *index* — a supplement target's ref is `-(i + 1)` — so completion
+ * order leaking into the result would renumber every ref on the page. Results
+ * are written by index, never appended, so the array is a permutation of the
+ * input no matter what order the renderer answers in.
+ *
+ * A rejection propagates, and the other workers keep draining: the callers all
+ * catch per item, so a `pooled` that swallowed a failure would turn one dead
+ * node into a silently missing coordinate.
+ *
+ * Untyped, like `anyCommand` above and for the same reason: the callers are
+ * all CDP traffic that is `any` at the boundary anyway, and the Node tests
+ * evaluate this body as plain JavaScript.
+ */
+export async function pooled(items: any, limit: number, fn: any): Promise<any[]> {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  const width = Math.max(1, Math.min(limit, items.length));
+  const workers = [];
+  for (let i = 0; i < width; i++) workers.push(worker());
+  await Promise.all(workers);
+  return out;
+}
+
 const MAX_FRAMES = 12;
 const MAX_FRAME_DEPTH = 4;
 const MAX_NODES_PER_FRAME = 2000;
@@ -201,32 +250,47 @@ export async function enumerateSurfaces(
     };
   }
 
-  for (const surface of surfaces) {
+  // The reads are pooled, the bookkeeping is not. A frame that fails is
+  // recorded and skipped, and `cappedFrames` and `failed` are read in order
+  // by anyone deciding whether the model lost something — so both are filled
+  // in frame order after the reads land, exactly as the sequential loop had
+  // them. Only the round trips are concurrent.
+  const reads = await pooled(surfaces, CDP_CONCURRENCY, async (surface) => {
     try {
       const raw = await anyCommand(tabId, {
         method: "Accessibility.getFullAXTree",
         ...(surface.frameId ? { params: { frameId: surface.frameId } } : {}),
       });
-      const nodes = raw?.nodes ?? [];
-      if (nodes.length > maxNodes) {
-        scan.nodeCapped = true;
-        // Which frame capped is the only thing that decides whether the model
-        // lost something it needed: the main document going dark is a blind
-        // agent, an analytics iframe going dark is nothing.
-        scan.cappedFrames.push({
-          frameIndex: surface.frameIndex,
-          url: surface.url,
-          crossOrigin: surface.crossOrigin,
-          nodes: nodes.length,
-        });
-        surface.axNodes = nodes.slice(0, maxNodes);
-      } else {
-        surface.axNodes = nodes;
-      }
+      return { nodes: raw?.nodes ?? [] };
     } catch (err) {
+      return { nodes: [], error: String(err) };
+    }
+  });
+
+  for (let i = 0; i < surfaces.length; i++) {
+    const surface = surfaces[i];
+    const read = reads[i];
+    if (read.error) {
       surface.axNodes = [];
-      surface.error = String(err);
+      surface.error = read.error;
       scan.failed.push(surface.frameId || "main");
+      continue;
+    }
+    const nodes = read.nodes;
+    if (nodes.length > maxNodes) {
+      scan.nodeCapped = true;
+      // Which frame capped is the only thing that decides whether the model
+      // lost something it needed: the main document going dark is a blind
+      // agent, an analytics iframe going dark is nothing.
+      scan.cappedFrames.push({
+        frameIndex: surface.frameIndex,
+        url: surface.url,
+        crossOrigin: surface.crossOrigin,
+        nodes: nodes.length,
+      });
+      surface.axNodes = nodes.slice(0, maxNodes);
+    } else {
+      surface.axNodes = nodes;
     }
   }
   return { surfaces, scan };
