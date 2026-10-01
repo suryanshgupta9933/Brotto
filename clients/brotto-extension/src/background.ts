@@ -502,7 +502,13 @@ function sendObservationError(reason: string): void {
 // lost the same server doesn't retry in lockstep and knock it over again on
 // the way up. Ceiling: the attempts are not rescheduled past
 // RECONNECT_MAX_ATTEMPTS; past that the run ends as connection-lost.
-const RECONNECT_MAX_ATTEMPTS = 6;
+//
+// Three, not six. A socket that is not coming back is the common case when
+// the server is restarting or refused the task, and six attempts is ~30s of
+// "retrying" before the panel admits the run is over. Ceiling: if a real
+// network blip needs more than three, raise this — the backoff is not what
+// would need changing.
+const RECONNECT_MAX_ATTEMPTS = 3;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 
@@ -847,6 +853,38 @@ async function startRelay(
         // ponytail: failure_reason + summary field names — see the
         // matching note on the task_result handler.
         notifyUi({ type: "task_failed", failure_reason: "TASK_ERROR", summary: msg.error ?? "Unknown error" });
+        notifyUi({ type: "canonical_status", status: "failed" });
+        break;
+
+      // The server sends this one directly, before it has a result to wrap
+      // — a task_start it refuses to run (unknown provider, bad config). It
+      // had no case here, so the frame was dropped, `taskTerminalEmitted`
+      // stayed false, and the close that followed looked like a lost socket:
+      // the panel showed "Server unreachable, retrying 1 of 6" against a
+      // server that was alive and had already said no. Same absence, same
+      // symptom, one layer in. See test-no-orphan-frames.test.js.
+      case "task_failed":
+        if (taskTerminalEmitted) break;
+        taskTerminalEmitted = true;
+        taskInFlight = false;
+        setBadgeForResult();
+        notifyUi({
+          type: "task_failed",
+          failure_reason: msg.failure_reason ?? "TASK_FAILED",
+          summary: msg.summary ?? "The server could not run this task.",
+        });
+        notifyUi({ type: "canonical_status", status: "failed" });
+        break;
+
+      // The other terminal frame with no case: the server confirmed a cancel.
+      // Same shape as the two above — drop it and the panel keeps a live clock
+      // and a reconnect against a socket that closed on purpose.
+      case "task_cancelled":
+        if (taskTerminalEmitted) break;
+        taskTerminalEmitted = true;
+        taskInFlight = false;
+        setBadgeForResult();
+        notifyUi({ type: "task_failed", failure_reason: "CANCELLED", summary: msg.summary ?? "Task cancelled." });
         notifyUi({ type: "canonical_status", status: "failed" });
         break;
 

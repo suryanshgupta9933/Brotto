@@ -21,8 +21,14 @@ const fs = require("fs");
 const path = require("path");
 
 const SRC = path.join(__dirname, "..", "clients", "brotto-extension", "src");
+const PY = path.join(__dirname, "..", "services", "brotto-orchestrator", "src", "brotto_orchestrator");
 const panel = fs.readFileSync(path.join(SRC, "sidepanel.js"), "utf8");
 const worker = fs.readFileSync(path.join(SRC, "background.ts"), "utf8");
+
+/** The two server files that emit WS frames. */
+const serverSrc = ["main.py", path.join("agent", "harness.py")]
+  .map((f) => fs.readFileSync(path.join(PY, f), "utf8"))
+  .join("\n");
 
 /** Every `case '<frame>':` label in the panel. */
 function panelCases() {
@@ -124,6 +130,48 @@ if (unreachableCase) {
     '"Server unreachable… (retry 1 of 6)" truncated mid-word in the header',
   );
 }
+
+// ── The other direction: server → worker ───────────────────────────────────
+//
+// The same absence, one layer in, and it cost a real debugging session. The
+// server refuses a task_start with an unknown provider and sends
+// `{"type": "task_failed"}` *directly* — no result to wrap. background.ts had
+// no case for it, so the frame was dropped, `taskTerminalEmitted` stayed
+// false, and the close that followed read as a lost socket. The panel showed
+// "Server unreachable, retrying 1 of 6" against a server that was alive and
+// had already said no.
+//
+// Scoped to TERMINAL frames on purpose. A dropped terminal frame leaves a run
+// with a live clock and a reconnect that can never succeed; a dropped
+// non-terminal frame loses an update. The first is the one that looks like a
+// hang, so it is the one this file holds shut.
+const TERMINAL = ["task_result", "task_error", "task_failed", "task_cancelled"];
+
+console.log("\nevery terminal frame the server sends is handled by the worker");
+for (const frame of TERMINAL) {
+  const emitted = new RegExp(`"type":\\s*"${frame}"`).test(serverSrc);
+  check(
+    emitted && new RegExp(`case "${frame}":`).test(worker),
+    `${frame} has a case in background.ts`,
+    emitted
+      ? "the server sends it directly; without a case the run never ends"
+      : `the server does not emit ${frame} — the list needs updating`,
+  );
+}
+
+console.log("\na refused task does not become a reconnect loop");
+check(
+  /if provider_name and provider_name not in PROVIDER_REGISTRY:/.test(
+    fs.readFileSync(path.join(PY, "main.py"), "utf8"),
+  ),
+  "an empty provider is not rejected as unknown",
+  "the panel sends provider:'' until Settings is opened; refusing it closed the socket before the resolver ran, so BROTTO_FORCE_ENV_MODEL never got a say",
+);
+check(
+  /const RECONNECT_MAX_ATTEMPTS = 3;/.test(worker),
+  "the worker retries three times",
+  "six attempts is ~30s of 'retrying' before the panel admits the run is over",
+);
 
 console.log(
   failed === 0

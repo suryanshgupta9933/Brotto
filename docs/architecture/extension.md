@@ -258,3 +258,46 @@ click it. Two rules follow, and both are load-bearing:
   `(domain, f"{action}:hidden")` for it, so a hidden destructive control cannot
   inherit an existing `(domain, "click")` approval the user gave for visible
   controls. Pinned by `test_a_hidden_destructive_control_is_not_pre_approved`.
+
+## A dropped terminal frame presents as "server unreachable"
+
+The panel said `Server unreachable… (retry 1 of 6)` against a server that was
+alive, healthy, and had already refused the task. Two independent defects
+stacked to produce that one wrong sentence.
+
+**The server refused a model choice it did not have.** `main.py` rejected any
+`model_config` whose provider was not in the registry. The panel sends
+`{provider: ""}` on **every** task until someone opens Settings, so an unset
+model — a completely normal state — was refused and the socket closed before
+`resolver.py` ever ran. `BROTTO_FORCE_ENV_MODEL` and a plain `AGENT_MODEL`
+both became unreachable, because the check that gated them sat upstream of the
+thing that reads them. An empty provider now falls through: only a *named*
+provider that is not in the registry is refused, and the resolver — the only
+component that knows about env and per-user configs — decides the rest.
+
+**The worker had no `case` for the frame the refusal sent.** On a refusal the
+server sends `{"type": "task_failed"}` **directly**, with no result to wrap.
+`background.ts` handled `task_result` and `task_error` but not `task_failed`,
+so the frame was dropped and `taskTerminalEmitted` stayed false. The close
+that followed was then read as a lost socket: `onclose` schedules a reconnect
+whenever `taskInFlight && !taskTerminalEmitted`, and it was about to satisfy
+both — against a server that had just said no, on a run that could never
+start. Six attempts, ~30 seconds of "retrying", and no way to tell it apart
+from a genuine outage.
+
+**The rule this generalises to:** a refused run and a lost socket are the same
+two events — a terminal frame then a close — and only the first frame tells
+them apart. Anything that drops a terminal frame converts one into the other.
+`task_cancelled` had the same hole and now has a case.
+
+`RECONNECT_MAX_ATTEMPTS` is **3**, down from 6. Six is ~30s of a spinner over a
+server that is not coming back; three is enough for a blip and short enough
+that the panel admits the run is over. Raise it if a real network needs more —
+the backoff, not the count, is what would not survive a bigger number.
+
+Pinned by `scripts/test-no-orphan-frames.test.js`, which now enumerates **both**
+boundaries — service-worker → panel, and server → worker. The second one is the
+gap that let this through: the panel-side suite was already here and green.
+It is scoped to terminal frames deliberately. A dropped terminal frame leaves
+a run with a live clock and a doomed reconnect; a dropped non-terminal frame
+loses an update. Only the first reads as a hang, so only the first is pinned.

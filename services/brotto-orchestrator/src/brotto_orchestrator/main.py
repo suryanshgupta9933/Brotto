@@ -602,8 +602,16 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     parsed_model_cfg = None
     if isinstance(model_cfg_payload, dict):
         provider_name = model_cfg_payload.get("provider", "")
-        if provider_name not in PROVIDER_REGISTRY:
-            log.warning("[%s] unknown provider %r — closing", session_id, provider_name)
+        # An empty provider is the extension saying it has nothing chosen, not
+        # naming a provider we don't know — the panel sends `{provider: ""}`
+        # on every task until the user opens Settings. Refusing it closed the
+        # socket before the resolver ever ran, so BROTTO_FORCE_ENV_MODEL and a
+        # plain AGENT_MODEL both became unreachable: the run could not start
+        # and the failure reached the user as "server unreachable" rather than
+        # as the model choice it was. Fall through and let the resolver decide,
+        # which is the only thing that knows about env and per-user configs.
+        if provider_name and provider_name not in PROVIDER_REGISTRY:
+            log.warning("[%s] unknown provider %r — refusing the task", session_id, provider_name)
             await ws_send({
                 "type": "task_failed",
                 "failure_reason": "model_not_found",
@@ -611,16 +619,17 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
             })
             await websocket.close(code=4000)
             return
-        try:
-            parsed_model_cfg = ModelConfig(
-                provider=provider_name,
-                model=str(model_cfg_payload.get("model", "")),
-                context_window=int(model_cfg_payload.get("context_window") or 400_000),
-                base_url=model_cfg_payload.get("base_url") or None,
-            )
-        except (ValueError, TypeError) as e:
-            log.warning("[%s] invalid model_config in task_start: %s", session_id, e)
-            parsed_model_cfg = None
+        if provider_name:
+            try:
+                parsed_model_cfg = ModelConfig(
+                    provider=provider_name,
+                    model=str(model_cfg_payload.get("model", "")),
+                    context_window=int(model_cfg_payload.get("context_window") or 400_000),
+                    base_url=model_cfg_payload.get("base_url") or None,
+                )
+            except (ValueError, TypeError) as e:
+                log.warning("[%s] invalid model_config in task_start: %s", session_id, e)
+                parsed_model_cfg = None
 
         if remember_key and parsed_model_cfg is not None:
             try:
