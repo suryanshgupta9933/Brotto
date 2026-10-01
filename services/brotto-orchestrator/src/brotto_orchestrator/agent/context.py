@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import ClassVar, Literal
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -57,13 +57,10 @@ class Scratchpad(BaseModel):
     compounds, and it is capped.
     """
     entries: list[MemoryEntry] = field(default_factory=list)
+    # Read-only legacy. Sidecars written before memory became a code-written
+    # page cache carry a `# NOTES` section, and the loader still parses it, but
+    # nothing writes notes any more — see the class docstring.
     notes: str = ""
-
-    # ponytail: 4K chars ≈ 1,300 tokens/step, and head+tail keeps the
-    # method (which a note opens with) and the findings (which it closes
-    # with). Raise if a real task ever needs more; the manifest, not the
-    # notes, is where volume belongs.
-    NOTES_CAP: ClassVar[int] = 4_000
 
     def next_id(self) -> str:
         """One numbering scheme for both entry kinds. They were numbered
@@ -86,6 +83,14 @@ class Scratchpad(BaseModel):
         text was live-only and the AX tree is ref-scoped, so navigating
         away destroyed both and the only way to keep a finding was to
         write it down.
+
+        This is now the *only* way memory is written. The model has no
+        write action, because it used every one it had to transcribe the
+        page it was already looking at: 25 `append_scratchpad` calls
+        across every recorded run, ~17,000 chars of them a copy of the
+        page text in the prompt, and the six runs with the largest
+        `tokens_out` are exactly the six whose final note was
+        transcript-shaped.
         """
         body = (text or "").strip()
         if not body:
@@ -108,32 +113,10 @@ class Scratchpad(BaseModel):
                 return e
         return None
 
-    def _capped(self, notes: str) -> str:
-        if len(notes) <= self.NOTES_CAP:
-            return notes
-        head = self.NOTES_CAP // 2
-        dropped = len(notes) - self.NOTES_CAP
-        return (notes[:head] + f"\n…[{dropped} chars dropped — the raw reads "
-                f"are in the manifest above, recall_memory(id) to fetch one]…\n"
-                + notes[-(head - 1):])
-
-    def append_note(self, line: str) -> "Scratchpad":
-        if not line:
-            return self
-        joined = (self.notes + "\n" + line).strip() if self.notes else line.strip()
-        return Scratchpad(entries=self.entries, notes=self._capped(joined))
-
-    def write_notes(self, content: str) -> "Scratchpad":
-        # Not capped: this replaces rather than accumulates, so it cannot
-        # grow without bound. Capping it would discard what the model just
-        # decided to keep.
-        return Scratchpad(entries=self.entries, notes=content)
-
 
 class AgentTurn(BaseModel):
     task: str
     step_number: int
-    scratchpad_notes: str
     scratchpad_entries: list[MemoryEntry]
     current_url: str
     current_page_title: str
@@ -151,11 +134,11 @@ class AgentTurn(BaseModel):
 
 class ActionCall(BaseModel):
     """One action in a multi-action decision. The agent may emit several of
-    these per step (e.g. click + append_scratchpad)."""
+    these per step (e.g. click + press_key)."""
     action: Literal[
         "navigate", "click", "type_text", "press_key", "scroll",
         "find_element", "read_page_text",
-        "write_scratchpad", "append_scratchpad", "read_scratchpad", "recall_memory",
+        "read_scratchpad", "recall_memory",
         "recall_conversation", "recall_steps",
         "task_complete", "cannot_complete", "ask_human",
     ]

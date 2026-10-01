@@ -37,7 +37,8 @@ from ..policy.gate import GateDecision, check_domain_policy, check_first_time_se
 from ..policy.domains import etld1
 from .prompt import SYSTEM_PROMPT, secure_mode_preamble
 from .audit import (
-    SCHEMA_VERSION, AuditTrail, REDACTED, is_secret_field, load_scratchpad, read,
+    SCHEMA_VERSION, AuditTrail, REDACTED, is_secret_field, load_page_bodies,
+    load_scratchpad, read,
 )
 
 _HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
@@ -59,11 +60,10 @@ _REASON_CRITICAL = "{thought} This can't be undone from here — continue?"
 # every prompt site carries its own bookkeeping for setting deps.result +
 # audit + return — easy to forget one and ship a partial fix.
 
-# Actions that don't fire a UI bubble. Scratchpad mutations and recall are
-# metadata — the user sees the thought, not the write/recall itself.
+# Actions that don't fire a UI bubble. Recall is metadata — the user sees the
+# thought, not the recall itself.
 _INTERNAL_ACTIONS = {
-    "write_scratchpad", "append_scratchpad", "read_scratchpad",
-    "recall_memory",
+    "read_scratchpad", "recall_memory",
 }
 # Actions that short-circuit the rest of the multi-action list.
 _TERMINAL_ACTIONS = {"task_complete", "cannot_complete"}
@@ -82,15 +82,14 @@ def _unescape(text: str) -> str:
 
     MiniMax-M3 double-escapes: it writes `\\n` inside a JSON string argument,
     so the value decodes to a backslash followed by 'n' rather than a newline.
-    Measured on a completed job-alerts run — the task_complete summary and an
-    append_scratchpad line both arrived holding literal escapes, and the panel
-    rendered them verbatim as one wall of text. The thoughts on those same turns
-    were clean, so this is the model writing JSON-shaped prose inside a string
-    it was already inside.
+    Measured on a completed job-alerts run — the task_complete summary arrived
+    holding literal escapes and the panel rendered them verbatim as one wall of
+    text. The thoughts on those same turns were clean, so this is the model
+    writing JSON-shaped prose inside a string it was already inside.
 
     Fixed here rather than in the panel because the damage is not only visual:
-    append_scratchpad feeds the agent's own memory, so a later step reading its
-    notes back sees the escapes too.
+    the summary is the run's answer, and a follow-up task is handed the same
+    string back.
     """
     if "\\" not in text:
         return text
@@ -415,10 +414,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     return f"""{secure_prefix}{conv_section}## Task
 {turn.task}
 
-## Your memory (notes)
-{turn.scratchpad_notes or "(empty — append_scratchpad(line) to add your own findings here)"}
-
-## Memory manifest (auto-captured reads)
+## Memory manifest (every page you have seen)
 {manifest_section}
 
 ## Steps completed
@@ -996,27 +992,15 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 return f"Found: [{t.ref_id}] {t.role} '{t.name}' value='{t.value}'"
             return f"Element matching '{desc}' not found in {len(targets)} targets"
 
-        elif action == "append_scratchpad":
-            deps.scratchpad = deps.scratchpad.append_note(_unescape(args.get("line", "")))
-            return "Memory note appended"
-
-        elif action == "write_scratchpad":
-            deps.scratchpad = deps.scratchpad.write_notes(_unescape(args.get("content", "")))
-            return "Memory notes rewritten"
-
         elif action == "read_scratchpad":
-            # Returns the manifest + notes as a single blob so the agent
-            # can see everything in one call. (recall_memory is the
-            # token-efficient path — call this only when you need a
-            # full dump.)
+            # Returns the manifest as a single blob so the agent can see
+            # everything in one call. (recall_memory is the token-efficient
+            # path — call this only when you need a full dump.)
             lines = []
             if deps.scratchpad.entries:
                 lines.append("### Memory manifest")
                 for e in deps.scratchpad.entries:
                     lines.append(f"- `{e.id}` step={e.step}: {e.digest}")
-            if deps.scratchpad.notes:
-                lines.append("### Notes")
-                lines.append(deps.scratchpad.notes)
             return "\n".join(lines) or "(empty)"
 
         elif action == "recall_memory":
@@ -1025,16 +1009,17 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             if entry is None:
                 available = [e.id for e in deps.scratchpad.entries]
                 return f"Memory entry {entry_id!r} not found. Available: {available}"
-            # The sidecar stores digests, not bodies, so a resumed run holds
-            # less than the live one did. Say so: handed 200 chars of an
-            # 11,000-char page with no marker, the model reads the fragment
-            # as the whole page and answers from it. A page shorter than the
-            # digest length is not degraded — digest == body is the whole
-            # truth there, so the marker would be a lie.
+            # Bodies are persisted now, so this is the legacy path: a session
+            # whose sidecar predates the pages file, or one whose bodies file
+            # went missing. Say so when it happens — handed 200 chars of an
+            # 11,000-char page with no marker, the model reads the fragment as
+            # the whole page and answers from it. A page shorter than the
+            # digest length is not degraded — digest == body is the whole truth
+            # there, so the marker would be a lie.
             if entry.digest.endswith("…") and entry.body == entry.digest:
                 where = entry.url or "an earlier page"
                 return (f"{entry.digest}\n\n[only the digest of {where} survived "
-                        f"— the full body is not kept across a resume. "
+                        f"— its full text was not kept. "
                         f"Navigate back to {entry.url or 'that page'} to read it "
                         "again if you need more.]")
             return entry.body
@@ -1697,9 +1682,18 @@ class AgentHarness:
             )
 
         # Restore scratchpad if this task was previously interrupted.
-        # load_scratchpad returns a structured Scratchpad (entries + notes).
+        # load_scratchpad returns a structured Scratchpad (entries); the
+        # bodies live beside it in a JSON sidecar, so a resumed run recalls
+        # whole pages rather than the 200-char digests the manifest renders.
         # Legacy plain-text files (no # MEMORY v2 header) parse as notes-only.
         loaded = load_scratchpad(audit.scratchpad_path)
+        bodies = load_page_bodies(audit.page_bodies_path)
+        if bodies:
+            loaded = Scratchpad(
+                entries=[e.model_copy(update={"body": bodies[e.id]})
+                         if e.id in bodies else e for e in loaded.entries],
+                notes=loaded.notes,
+            )
         if loaded.entries or loaded.notes:
             deps.scratchpad = loaded
 
@@ -1914,7 +1908,6 @@ class AgentHarness:
             turn = AgentTurn(
                 task=deps.task,
                 step_number=step,
-                scratchpad_notes=deps.scratchpad.notes,
                 scratchpad_entries=list(deps.scratchpad.entries),  # manifest snapshot
                 current_url=current_url,
                 current_page_title=page_title,
@@ -2015,15 +2008,16 @@ class AgentHarness:
 
             # Guardrail: critical action approval (check ALL actions in the
             # batch — checking only the first was a bypass: `click(delete) +
-            # append_scratchpad` would only see the first critical action,
+            # recall_memory` would only see the first critical action,
             # and if the model put a non-critical action first, critical
             # actions later in the batch ran unchecked). Deny on ANY
             # critical action aborts the entire task — the user's plan was
             # wrong, the agent shouldn't try a different angle.
             #
-            # _NEVER_APPROVE first: the internal four carry model-written
+            # _NEVER_APPROVE first: the internal actions carry model-written
             # prose in their args and check_critical_action regexes those,
-            # so a scratchpad note could raise a card on its own.
+            # so a recall of a page that happens to say "confirm" could raise
+            # a card on its own.
             critical_actions = [
                 c for c in decision.actions
                 if c.action not in _NEVER_APPROVE
@@ -2198,18 +2192,13 @@ class AgentHarness:
             timings["execute"] += time.perf_counter() - t_ex
             combined_outcome = "; ".join(outcomes) if outcomes else "no action"
 
-            # Persist the full structured memory whenever any step touched
-            # it: read_page_text (auto-capture), append_scratchpad /
-            # write_scratchpad (synthesized notes). The file is the
-            # source of truth — operators can inspect
-            # <sessions>/scratchpad.txt to see what memory was
-            # built. Auto-append writes the digest; the full body lives
-            # only in-memory and is lost on restart.
-            memory_actions = {
-                "read_page_text", "write_scratchpad", "append_scratchpad",
-            }
-            if any(c.action in memory_actions for c in decision.actions):
-                audit.set_scratchpad(deps.scratchpad)
+            # Memory is written in code on every step (`capture_page` runs
+            # above, before the turn is built), so it is persisted every step
+            # rather than when an action touched it. The files are the source
+            # of truth — operators can inspect <sessions>/*.scratchpad.txt and
+            # *.pages.json to see what memory was built, and a resume reads
+            # both back.
+            audit.set_scratchpad(deps.scratchpad)
 
             # Record
             deps.step_summaries.append(StepSummary(

@@ -138,12 +138,12 @@ async def test_approval_card_never_leaks_internals():
     """A card must name the action, not the tool, and must not carry the
     model's private narration.
 
-    Regression from a real run: an `append_scratchpad` note reading "…to
-    confirm star counts." raised a card on the word "confirm", and the
-    card body showed the tool name plus a line of reasoning that opened
-    with "the stars count isn't shown directly in the AX tree" — the
-    system prompt marks `reasoning` as never-shown, and an approval card
-    is a place the user reads verbatim.
+    Regression from a real run: a recall of a page reading "…to confirm
+    star counts." raised a card on the word "confirm", and the card body
+    showed the tool name plus a line of reasoning that opened with "the
+    stars count isn't shown directly in the AX tree" — the system prompt
+    marks `reasoning` as never-shown, and an approval card is a place the
+    user reads verbatim.
     """
     from pydantic_ai.models.test import TestModel
     from brotto_orchestrator.agent.harness import AgentHarness, _NEVER_APPROVE
@@ -174,15 +174,15 @@ async def test_approval_card_never_leaks_internals():
         human_input_queue=asyncio.Queue(),
     )
 
-    # Only the note trips CRITICAL_PATTERNS — no real action in the batch.
+    # Only the recall trips CRITICAL_PATTERNS — no real action in the batch.
     test_agent = harness_mod.agent.__class__(
         TestModel(
             custom_output_args={
                 "reasoning": "The stars count isn't shown directly in the AX tree.",
                 "thought": "Reading around the stars figure.",
                 "actions": [
-                    {"action": "append_scratchpad", "action_args": {
-                        "line": "Reading the repository list to confirm star counts."}},
+                    {"action": "recall_memory", "action_args": {
+                        "entry_id": "the page listing repos to confirm star counts"}},
                 ],
             },
         ),
@@ -209,11 +209,11 @@ async def test_approval_card_never_leaks_internals():
     finally:
         harness_mod.agent = original
 
-    # The note alone must not raise a card.
+    # The recall alone must not raise a card.
     assert not [m for m in messages if m.get("type") == "approval_required"], (
-        "a scratchpad note containing 'confirm' must not raise an approval card"
+        "a memory recall whose id contains 'confirm' must not raise an approval card"
     )
-    assert "append_scratchpad" in _NEVER_APPROVE
+    assert "recall_memory" in _NEVER_APPROVE
 
 
 @pytest.mark.asyncio

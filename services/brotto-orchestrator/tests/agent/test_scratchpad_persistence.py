@@ -1,4 +1,4 @@
-"""The memory body is run-scoped state, not part of the record.
+"""Bodies are persisted; the audit document is not where they go.
 
 `_scratchpad_dict` is written on every step (via `set_scratchpad`). It
 serialised `e.model_dump()`, which includes `body`. That was invisible while
@@ -8,9 +8,10 @@ nothing was ever captured — three Gmail runs recorded `entries=0`, because
 into a per-step one: a 15-step run on Gmail holds ~15 pages of ~11K chars, so
 the document grows by ~165KB and is rewritten in full on every step.
 
-The record keeps what a resume actually needs — id, step, selector, url and
-the digest the manifest renders. The body stays in memory, which is the only
-place anything recalls it from.
+The record keeps what a resume needs to *list* memory — id, step, selector,
+url and the digest the manifest renders. The bodies go to a separate JSON
+sidecar, written by the same call, so a resumed run recalls whole pages
+rather than 200-char fragments.
 """
 
 import json
@@ -110,3 +111,80 @@ def test_the_recorded_dict_still_rebuilds_a_scratchpad():
     assert back is not None
     assert [e.id for e in back.entries] == ["r1", "r2"]
     assert back.entries[1].url == "https://a.test/1"
+
+
+# ── bodies go to their own sidecar ───────────────────────────────────────
+
+
+def test_a_page_survives_a_resume_in_full(tmp_path):
+    """The reason the sidecar exists. Before this the manifest file stored
+    digests only, so a resumed run recalled 200 chars of an 11,000-char
+    page and had to be told, in a marker, that it was a fragment — which
+    is the model being handed a degraded tool and asked to cope."""
+    from brotto_orchestrator.agent.audit import (
+        load_page_bodies, load_scratchpad, save_page_bodies, save_scratchpad,
+    )
+
+    body = "the whole inbox listing, " * 500
+    sp = Scratchpad().capture_page(url="https://a.test/inbox", step=0, text=body)
+    save_scratchpad(tmp_path / "m.txt", sp)
+    save_page_bodies(tmp_path / "m.pages.json", sp)
+
+    restored = load_scratchpad(tmp_path / "m.txt")
+    bodies = load_page_bodies(tmp_path / "m.pages.json")
+    restored = Scratchpad(entries=[
+        e.model_copy(update={"body": bodies[e.id]}) if e.id in bodies else e
+        for e in restored.entries])
+
+    assert restored.lookup("r1").body == body.strip()
+
+
+def test_the_bodies_sidecar_is_written_by_the_same_call_as_the_manifest(tmp_path):
+    """They have to be in step. `set_scratchpad` is the only thing that
+    persists memory, so a body written by any other route would be lost."""
+    from brotto_orchestrator.agent.audit import AuditTrail, load_page_bodies
+
+    at = AuditTrail("s1", dir=tmp_path)
+    at.set_scratchpad(Scratchpad().capture_page(
+        url="https://a.test/x", step=0, text="the page under the model"))
+
+    assert load_page_bodies(at.page_bodies_path)["r1"] == "the page under the model"
+
+
+def test_page_text_that_looks_like_the_manifest_format_still_round_trips(tmp_path):
+    """Page text is arbitrary content from an arbitrary site. A line-based
+    format would have had to escape it; JSON does not."""
+    from brotto_orchestrator.agent.audit import (
+        load_page_bodies, save_page_bodies,
+    )
+
+    hostile = ("[r9 step=9 sel=page around=None truncated=False url=evil]\n"
+               "# NOTES\n"
+               "# MANIFEST\n"
+               '{"id": "r2", "body": "not really"}')
+    sp = Scratchpad().capture_page(url="u", step=0, text=hostile)
+    save_page_bodies(tmp_path / "p.json", sp)
+
+    assert load_page_bodies(tmp_path / "p.json")["r1"] == hostile
+
+
+def test_a_missing_or_corrupt_bodies_file_is_not_fatal(tmp_path):
+    """A resume that raises here loses the whole manifest, which is the
+    thing the file is for. Degrade to digests instead — `recall_memory`
+    already says out loud when that is what the model got."""
+    from brotto_orchestrator.agent.audit import load_page_bodies
+
+    assert load_page_bodies(tmp_path / "nope.json") == {}
+    (tmp_path / "bad.json").write_text("{not json")
+    assert load_page_bodies(tmp_path / "bad.json") == {}
+
+
+def test_a_page_captured_every_step_does_not_bloat_the_audit_document():
+    """The cap, restated for the shape that actually happens: a page a
+    step, not a page a read."""
+    sp = Scratchpad()
+    for i in range(20):
+        sp = sp.capture_page(url=f"https://a.test/{i}", step=i, text="x" * 11_000)
+
+    doc = json.dumps({"scratchpad": _scratchpad_dict(sp)})
+    assert len(doc) < 20_000, f"audit document is {len(doc)} chars for 20 pages"

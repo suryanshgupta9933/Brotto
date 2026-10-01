@@ -14,6 +14,8 @@ These tests pin that the current page is captured in code, every step,
 without the model asking — and that navigating away does not lose it.
 """
 
+import pytest
+
 from brotto_orchestrator.agent.context import (
     DIGEST_LEN, MemoryEntry, Scratchpad, StepSummary,
 )
@@ -96,39 +98,36 @@ def test_ids_stay_unique_when_reads_and_page_captures_interleave():
     assert sp.lookup("r2").body == "an explicit read"
 
 
-# ── the notes are bounded ────────────────────────────────────────────────
+# ── the model cannot write memory at all ──────────────────────────────────
 
 
-def test_a_runaway_note_stops_growing():
-    """`append_note` concatenated without limit and the prompt block echoed
-    the result in full, so one transcription became a permanent ~1,300-token
-    tax on every later step for the life of the session."""
-    sp = Scratchpad()
-    for _ in range(20):
-        sp = sp.append_note("z" * 2_000)
-    assert len(sp.notes) <= Scratchpad.NOTES_CAP + 200
+def test_there_is_no_scratchpad_write_action():
+    """The enforcement half. Telling the model not to transcribe did not
+    work — it did anyway, 3,913 chars of the inbox on the step it could
+    already see — and prompting is not a guarantee. The action simply is
+    not in the schema, so the tokens cannot be spent."""
+    from brotto_orchestrator.agent.context import ActionCall
+    import pydantic
+
+    names = set(ActionCall.model_fields["action"].annotation.__args__)
+    assert "append_scratchpad" not in names
+    assert "write_scratchpad" not in names
+    with pytest.raises(pydantic.ValidationError):
+        ActionCall(action="append_scratchpad", action_args={"line": "x"})
 
 
-def test_the_cap_keeps_the_oldest_and_the_newest():
-    """Same head+tail shape as `_conversation_block`: a synthesized note
-    states its method first and its findings last, so either end alone
-    loses the half the next step asks about."""
-    sp = Scratchpad(notes="FIRST-MARKER\n" + "a" * 9_000 + "\nLAST-MARKER")
-    assert "FIRST-MARKER" in sp.notes
-    assert "LAST-MARKER" in sp.notes
+def test_the_prompt_never_offers_a_way_to_write_memory():
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+    assert "append_scratchpad" not in SYSTEM_PROMPT
+    assert "write_scratchpad" not in SYSTEM_PROMPT
 
 
-def test_a_note_under_the_cap_is_untouched():
-    sp = Scratchpad().append_note("a short finding")
-    assert sp.notes == "a short finding"
-
-
-def test_rewrite_may_exceed_the_cap_but_only_once():
-    """`write_scratchpad` replaces rather than accumulates. Capping the
-    replacement too would silently discard what the model just decided to
-    keep — the cap exists to stop unbounded *growth*, not to editorialize."""
-    big = "q" * (Scratchpad.NOTES_CAP * 2)
-    assert Scratchpad().write_notes(big).notes == big
+def test_no_notes_block_is_rendered_into_the_prompt():
+    """A note block that is always empty still costs tokens and tells the
+    model a capability it does not have exists."""
+    sp = Scratchpad(notes="a legacy note from an older sidecar")
+    p = _prompt(scratchpad_entries=list(sp.entries))
+    assert "a legacy note from an older sidecar" not in p
 
 
 # ── the model is told, so it stops transcribing ──────────────────────────
@@ -138,7 +137,7 @@ def _prompt(**kw):
     from brotto_orchestrator.agent.context import AgentTurn
     from brotto_orchestrator.agent.harness import _turn_to_prompt
     turn = dict(
-        task="t", step_number=1, scratchpad_notes="", scratchpad_entries=[],
+        task="t", step_number=1, scratchpad_entries=[],
         current_url="https://a.test", current_page_title="X", ax_tree="",
         ax_diff="", step_summaries=[StepSummary(step=0, url="u", action_taken="click",
                                                 outcome="ok")],
@@ -155,12 +154,12 @@ def test_the_manifest_names_the_url_of_each_captured_page():
 
 
 def test_the_system_prompt_says_the_current_page_is_already_captured():
-    """Without this the model cannot know capture happened, so it keeps
-    writing the page down — and the write is the expensive part."""
+    """Without this the model cannot know capture happened, so it has no
+    reason to trust the manifest over its own notes."""
     from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
     low = SYSTEM_PROMPT.lower()
     assert "page you are looking at" in low
-    assert "never write a page's contents into a note" in low
+    assert "do not restate a page" in low
 
 
 # ── a recalled page must not look complete when it isn't ────────────────
@@ -187,18 +186,19 @@ def test_recall_returns_the_whole_page_while_the_run_lives():
     assert "digest" not in out.lower()
 
 
-def test_recall_of_a_resumed_entry_says_it_is_only_the_digest():
-    """The sidecar stores digests, not bodies — that is pre-existing and
-    unchanged. What must not happen is a resume handing the model 200 chars
-    of an 11,000-char page with no marker, which it will happily read as
-    the whole page."""
+def test_recall_of_a_legacy_entry_says_it_is_only_the_digest():
+    """Bodies are persisted now, so this is the legacy path: a session
+    captured before the pages file existed, or one whose file went missing.
+    What must not happen is a resume handing the model 200 chars of an
+    11,000-char page with no marker, which it will happily read as the
+    whole page."""
     import asyncio
     from types import SimpleNamespace
 
     from brotto_orchestrator.agent.context import ActionCall, MemoryEntry
     from brotto_orchestrator.agent.harness import _execute_action
 
-    # What save_scratchpad actually wrote: the digest, ellipsis included.
+    # What load_scratchpad builds with no bodies file beside it.
     digest = ("subject line\n\nthe body of " * 20)[:DIGEST_LEN] + "…"
     sp = Scratchpad(entries=[MemoryEntry(
         id="r1", step=0, selector="page", around=None, digest=digest,

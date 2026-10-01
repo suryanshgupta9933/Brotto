@@ -153,7 +153,8 @@ def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
         return await AgentHarness().run(deps)
     asyncio.new_event_loop().run_until_complete(_go())
 
-    docs = list((tmp_path / "sessions").glob("*.json"))
+    docs = [p for p in (tmp_path / "sessions").glob("*.json")
+            if not p.name.endswith(".pages.json")]
     assert len(docs) == 1, f"expected one audit document, got {docs}"
     doc = json.loads(docs[0].read_text())
     clicks = [a for t in doc["turns"] for a in t["actions"] if a["action"] == "click"]

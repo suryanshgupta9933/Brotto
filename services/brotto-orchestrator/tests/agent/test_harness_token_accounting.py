@@ -94,8 +94,8 @@ async def test_usage_accumulates_across_steps(monkeypatch):
     # returning a non-terminal decision first.
     seq = iter([
         AgentDecision(reasoning="look", thought="look",
-                      actions=[ActionCall(action="append_scratchpad",
-                                          action_args={"text": "note"})]),
+                      actions=[ActionCall(action="recall_memory",
+                                          action_args={"entry_id": "r1"})]),
         _COMPLETE,
     ])
     usages = iter([_Usage(1_000, 100), _Usage(2_000, 200)])

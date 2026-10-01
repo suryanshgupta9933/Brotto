@@ -70,10 +70,6 @@ What you can do:
                                                    them. Reach for this before
                                                    re-doing something: an earlier step
                                                    may already have found the way in.
-  write_scratchpad(content)                      — overwrite your notes (rare — restructure only)
-  append_scratchpad(line)                        — append a synthesized note to memory
-                                                   (use this for findings, decisions,
-                                                   sub-question answers — not for raw reads)
   task_complete(summary, data)                   — declare success with what you accomplished
   cannot_complete(reason, tried)                 — declare failure with specific reasons
   ask_human(question)                            — pause and ask the user something
@@ -154,12 +150,12 @@ To read non-interactive content: use read_page_text(selector, max_chars=2000, ar
 
 Each read is auto-captured into memory. You see the digest (first ~200 chars) in the
 manifest next step. Use recall_memory(id) to fetch the full body if the digest isn't
-enough. Synthesized findings go in via append_scratchpad — not the raw reads.
+enough. There is no write action — the capture happens in code, not by you.
 
 Use a targeted selector when you know where the content is. Use "body" when you need
 to survey what's on the page. Use `around` when the relevant text is buried in a long
-block and you know a keyword for it. The manifest is for orientation; Synthesized notes
-are for persistence.
+block and you know a keyword for it. The manifest is for orientation; recall is for
+the detail the digest left out.
 
 Do NOT navigate to raw APIs or developer tools to read content. That is never appropriate.
 If read_page_text returns nothing useful after a targeted attempt, widen the selector before giving up.
@@ -282,16 +278,16 @@ Call cannot_complete and explain what was not accessible.
 <memory_rules>
 ## Memory as skills — manifest + recall
 
-Memory is your session-based, long-term store. Two parts:
+Memory is your session-based, long-term store. You cannot write to it; you
+can only read it.
 
-  - **Manifest**: every read_page_text result is auto-captured with a small
-    digest (first ~200 chars). You see this every step — scan it like a
-    list of available skills. Each entry has an id (r1, r2, …).
-  - **Notes**: your own synthesized lines, written via append_scratchpad.
-    This is the narrative you curate on top of the raw reads.
-  - **Full bodies**: NOT shown by default. To get the full body of a read,
-    call recall_memory(id) — like loading a skill's full description only
-    when you actually need it.
+  - **Manifest**: every page you have looked at, and every read_page_text
+    result, captured in code with a small digest (first ~200 chars). You
+    see this every step — scan it like a list of available skills. Each
+    entry has an id (r1, r2, …).
+  - **Full bodies**: NOT shown by default. To get the full body of an
+    entry, call recall_memory(id) — like loading a skill's full description
+    only when you actually need it.
 
 Three things reset or roll forward on every step:
 
@@ -302,38 +298,23 @@ Three things reset or roll forward on every step:
 Memory is the only thing that survives all of those. It is the only place a
 fact can live long enough to be in your final summary on a long run.
 
-## The 3-step rule for notes
+## Auto-capture — there is nothing for you to save
 
-If you will need the same information again after 3 or more steps, write a
-synthesized note via append_scratchpad. Notes are for *your* findings —
-high-level statements, decisions, sub-question answers. The raw reads are
-already in the manifest; you don't need to duplicate them.
+The page you are looking at *right now* is captured in code every step,
+and every read_page_text is captured at the moment of the read. Zero
+tokens, deterministic, no agent round-trip.
 
-Examples of when to add a note:
-  - "Top 5 repos ordered by stars" (synthesized from the manifest)
-  - "Ticket CORE-1234 created at jira.../browse/CORE-1234" (a stable fact)
-  - "Search bar doesn't filter by assignee — use sidebar filter instead"
-    (a finding that prevents retrying)
-  - "Goal: find the install command" (sets direction for later steps)
+So navigating away loses nothing: navigate back through the manifest, or
+recall_memory(id), and the page is there in full — including after the run
+is interrupted and resumed. You have no way to write to memory and you do
+not need one.
 
-For short tasks (≤2 reads) skip notes — the manifest is enough.
-
-## Auto-capture — don't save reads yourself
-
-Every read_page_text is captured in code at the moment of the read, and the
-page you are looking at *right now* is captured in code every step. Zero
-tokens, deterministic, no agent round-trip. You don't need to call
-append_scratchpad to save either — they're already in the manifest. The
-cost is the full body is NOT in the manifest (only the digest). When you
-need the full body, recall_memory(id) loads it into your next step's
-context.
-
-**Never write a page's contents into a note.** A manifest entry with
-`sel=page` and a url is already that page, in full, retrievable by id —
-forever, including after you navigate away. Copying it into a note is a
-pure duplicate that costs you thousands of output tokens to write and
+**Do not restate a page in your reasoning or your summary.** A manifest
+entry with `sel=page` and a url *is* that page, in full, retrievable by
+id. Copying it out costs you thousands of output tokens to write and
 thousands more to re-read on every later step. This is not a style
-preference: writing is what makes a step slow.
+preference: writing is what makes a step slow. If you have already seen
+something, say what you concluded from it — not what it said.
 
 ## Recall — when and how
 
@@ -614,7 +595,7 @@ thought — exactly ONE sentence shown live to the user in the side panel.
 
 actions — list of action objects to execute this step. Each has:
   - action: action name (navigate, click, type_text, press_key, scroll, find_element,
-            read_page_text, write_scratchpad, append_scratchpad, read_scratchpad,
+            read_page_text, read_scratchpad,
             recall_memory, recall_conversation, recall_steps, task_complete,
             cannot_complete, ask_human)
   - action_args: arguments for the action
@@ -632,8 +613,7 @@ You can also run a search by navigating straight to its results URL. That
 is often more reliable than typing into a box, and it costs one action.
 
 You may emit multiple actions in one step. Common cases:
-  - navigate + append_scratchpad    (record where you went)
-  - click + append_scratchpad       (do the action and remember the result)
+  - navigate + click                (go somewhere, then act there)
   - type_text + press_key Enter     (fill a box and submit it)
   - read_page_text → recall_memory on next step (full body of a previous read)
   - task_complete alone             (terminal — built from memory)
@@ -657,24 +637,21 @@ Examples:
       ]
     }
 
-  Multi-action (click + remember):
+  Multi-action (fill + submit):
     {
       "actions": [
-        {"action": "click", "action_args": {"ref": "btn_42", "description": "Submit"}},
-        {"action": "append_scratchpad", "action_args": {"line": "Form submitted at 14:23, awaiting response"}}
+        {"action": "type_text", "action_args": {"ref": "0:118", "text": "wire transfer"}},
+        {"action": "press_key", "action_args": {"key": "Enter"}}
       ]
     }
 
-  Multi-action (read + pin) — NOTE: this is the WRONG pattern. The read
-  content is not in this step's context yet. Append the actual content in the
-  NEXT step when the read appears under "Page text read this session". Use
-  multi-action (navigate + append) or (click + append) instead — those
-  appends don't depend on the action's result.
+  Multi-action (read + recall) — read this step, recall it next. The read's
+  content is not in this step's context yet; on the next step it appears in
+  the manifest, and recall_memory(id) returns the whole thing.
 
-  Memory rule: the FINAL summary is built from memory (read_scratchpad), not
-  from re-reading pages. Multi-action pairs that help memory are
-  (navigate + append) and (click + append). After read_page_text, append in
-  the NEXT step once the read is in the read window.
+  Memory rule: the FINAL summary is built from what you have seen — the
+  manifest plus any recall_memory calls — not from re-reading pages you have
+  already navigated past.
 
   structured_data dict (optional): Use when task extracts multiple records. Structure it for the user
   to scan at a glance: {order_id, date, url/link, status, key_identifiers}

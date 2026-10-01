@@ -463,14 +463,14 @@ def test_first_time_seen_skips_terminal_actions():
 
 
 def test_check_sensitive_action_skips_internal_actions():
-    """The sensitive-action regex shouldn't match on a scratchpad write
-    whose notes happen to mention 'payment'."""
+    """The sensitive-action regex shouldn't match on a memory recall whose
+    model-written id happens to mention 'payment'."""
     from brotto_orchestrator.agent.guardrails import check_sensitive_action
     from brotto_orchestrator.policy import Policy
     p = Policy(mode="secure", sensitive_actions=["payment"])
     assert check_sensitive_action(
-        "append_scratchpad",
-        {"line": "Note: looks like a payment flow"},
+        "recall_memory",
+        {"entry_id": "the page showing a payment flow"},
         p,
     ) is False
     # And the action name itself is matched (the bug case: action called

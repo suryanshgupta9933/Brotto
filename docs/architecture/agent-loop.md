@@ -151,27 +151,39 @@ instead of going back" was not achievable before this: `page_text` was live-only
 and the AX tree is ref-scoped, so navigating away destroyed both. The feature was
 described, prompted for, and unreachable.
 
-**Three changes, in the order they mattered.**
+**The prompt fix did not work, and could not have.** The first attempt was two
+changes: capture every page in code (`Scratchpad.capture_page(url, step, text)`,
+called in the loop right after `get_page_text()` and before the turn is built, so
+the step's *own* page is in the manifest it reads), and one paragraph telling the
+model the page is already captured. **A later Gmail run (`94fd2166`) put 3,913
+chars of the inbox into a note on step 0 — 22 of the 33 seconds to first step —
+and then wrote the same content again as a 4,262-char summary, 59.1s.** The
+paragraph was necessary and not sufficient, for two reasons.
 
-1. **`Scratchpad.capture_page(url, step, text)`**, called in the loop right after
-   `get_page_text()` and before the turn is built — so the step's *own* page is
-   in the manifest the model reads. Empty and whitespace-only pages are skipped,
-   or a run that never loads anything fills the manifest with empties. Both
-   entry kinds now number from `Scratchpad.next_id()`; they previously numbered
-   independently at their two call sites, so a capture landing between two reads
-   could reuse an id and silently overwrite an entry.
-2. **One prompt paragraph** — the page is already captured, never write a page's
-   contents into a note. Without it the model cannot know capture happened, and
-   it keeps writing. This is the lever; 1 and 2 together are what remove the
-   1,300 tokens.
-3. **`NOTES_CAP` = 4K on `append_note`, head+tail.** `append_note` concatenated
-   without limit and the `## Your memory (notes)` block echoes the result in full
-   every step, so one transcription is a permanent ~1,300-token tax on every
-   later step for the life of the session. Head+tail because a synthesized note
-   states its method first and its findings last — either end alone loses the
-   half the next step asks about. `write_scratchpad` is *not* capped: it replaces
-   rather than accumulates, so it cannot grow without bound, and capping it would
-   discard what the model just decided to keep.
+**Two rules pointed opposite ways.** `SYSTEM_PROMPT` carried the 3-step note rule
+(*write a note if you will need this again in 3+ steps*) directly above the newer
+prohibition on writing a page's contents. What the model produced was a
+*synthesis*, which the older rule tells it to write and the newer paragraph does
+not clearly forbid — it forbids transcription. When rules conflict, the more
+operational one wins. **Prompting is not a guarantee**; the third Gmail run in a
+row had produced the same shape.
+
+**So the write action left the schema.** `append_scratchpad` and `write_scratchpad`
+are gone from `ActionCall`; the tokens cannot be spent on something with no action
+to call. The census across every recorded run: **25 `append_scratchpad` calls, 0
+`write_scratchpad`**, ~17,000 chars of them a copy of the page text already in the
+prompt, ~2,000 chars of breadcrumbs that duplicate `step_summaries`, ~1,250 chars
+irreducible. **The six runs with the largest `tokens_out` are exactly the six
+whose final note was transcript-shaped.** Capping was considered and rejected:
+`NOTES_CAP` truncated at 4K *after* the model had already spent the 1,300 output
+tokens writing 5,093 chars, which is strictly worse than never offering the write.
+
+`notes` survives as a read-only legacy field. Sidecars written before memory became
+code-written carry a `# NOTES` section and the loader still parses it, so files on
+disk keep working; nothing writes it and no notes block is rendered into the
+prompt. `set_scratchpad` no longer waits for an action to touch memory — with
+`capture_page` running above it every step, the write is unconditional, because
+gating it on an action is what left `entries=0` for so long.
 
 **The AX tree is deliberately not cached.** A ref is valid only for the
 observation that produced it. A cached tree hands the model refs that resolve to
@@ -181,7 +193,11 @@ it carries no refs; that is the whole boundary between the two.
 
 **`entries` carries `url`.** Three pages captured in one run are otherwise
 indistinguishable in the manifest, and "go back to *that* page" is the recall
-use case.
+use case. Both entry kinds number from `Scratchpad.next_id()`; they previously
+numbered independently at their two call sites, so a capture landing between two
+reads could reuse an id and silently overwrite an entry. Empty and
+whitespace-only pages are skipped, or a run that never loads anything fills the
+manifest with empties and ships them every step.
 
 #### The capture nearly doubled the audit document
 
@@ -192,7 +208,7 @@ invisible *precisely because nothing was ever captured* — `entries=0` on every
 run. Capturing every step's page turned a latent write-amplification into a
 per-step one: 20 Gmail-shaped pages measured **200KB of document growth**. The
 record now carries id/step/selector/around/digest/was_truncated/url and not the
-body; the sidecar already stored digests only, so nothing regresses.
+body; the bodies go to the sidecar below, so nothing is lost, only moved.
 
 `_as_scratchpad` rebuilds the model from that dict to write the sidecar, so it
 defaults `body` to the digest — without it a resumed run loses its entire
@@ -206,6 +222,19 @@ answers from it. `recall_memory` appends a marker naming the URL. The test is th
 trailing `…`: a page whose digest was never cut is complete, and `digest == body`
 is simply what a short page looks like — labelling that as a resume casualty
 would send the model navigating back for nothing.
+
+**…which is no longer the resume path.** With every page captured every step,
+a resume that recalled only digests was handing the model a degraded tool and
+asking it to cope. Bodies now go to a **separate JSON sidecar,
+`<session_id>.pages.json`**, written by the same `set_scratchpad` call as the
+manifest — they have to be in step, and that is the only thing that persists
+memory. **JSON, not the manifest format:** page text is arbitrary content from an
+arbitrary site and can contain a line shaped like `[r9 step=9 sel=page …]` or a
+`# NOTES` heading; a line-based format would have needed an escaping scheme
+invented for it. The manifest format predates bodies and files on disk keep
+parsing byte-identically. A missing or corrupt bodies file degrades to digests
+rather than raising — losing the whole manifest to gain the bodies is the wrong
+trade, and `recall_memory` already says out loud when that is what the model got.
 
 **Left alone deliberately:** `page_text` (~3.4K tokens) sits *after* the AX tree,
 which changes every step, so it is re-prefilled uncached every step. Moving it

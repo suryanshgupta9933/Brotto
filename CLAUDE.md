@@ -176,8 +176,8 @@ nothing was ever auto-captured, so notes were the only memory that existed — a
 with nothing to retrieve, the model **transcribed the page into a note**. 5,093
 chars, ~1,300 output tokens, ~28 of that step's 41.3 seconds, written on the step
 that then also wrote a 4,262-char summary. Details in
-[the section below](#the-page-is-captured-in-code-every-step) and
-`docs/architecture/agent-loop.md`.
+[the section below](#the-page-is-captured-in-code-every-step-and-the-model-cannot-write-memory)
+and `docs/architecture/agent-loop.md`.
 
 The 27K input is `ax_filter`'s ranked selection filling the 50K budget with the
 *most actionable* elements rather than truncating in tree order; the old flat 6K
@@ -186,16 +186,33 @@ was smaller and blind to a control mid-page, which is the `auth-inbox` failure.
 Observe+execute is 53.4% of wall, and 12s of that is one click —
 `_send_action` blocks on the post-action observation.
 
-### The page is captured in code, every step
+### The page is captured in code, every step, and the model cannot write memory
 
-`Scratchpad` is two halves and only one of them was being used. **`entries`** is
-the correct shape — a 200-char digest in the prompt, the body fetched on demand
-by `recall_memory(id)` — and `capture_page` now fills it with **every step's
-page**, in code, before the turn is built, so the step's own page is in the
-manifest it reads. **`notes`** is the model's own synthesis, and it is now capped
-at `Scratchpad.NOTES_CAP` (4K, head+tail) because it is echoed in full every step
-and `append_note` concatenated without limit.
+`Scratchpad` has one half. **`entries`** is the correct shape — a 200-char digest
+in the prompt, the body fetched on demand by `recall_memory(id)` — and
+`capture_page` fills it with **every step's page**, in code, before the turn is
+built, so the step's own page is in the manifest it reads. **The model has no
+write action at all.** `append_scratchpad`/`write_scratchpad` are gone from
+`ActionCall`, the prompt and the dispatch; `Scratchpad.notes` survives only as a
+read-only legacy field so sidecars already on disk keep parsing.
 
+- **Prompting alone did not work, and it was not a prompt defect.** The memory
+  section carried two rules pointing opposite ways — *"the 3-step rule for
+  notes: if you will need this again in 3 or more steps, write a synthesized
+  note"* sat directly above *"never write a page's contents into a note"*. The
+  model wrote a **synthesis**, which the older rule tells it to write and the
+  newer one does not clearly forbid. Capturing pages made this worse, not
+  better: it proved the transcription was pure duplicate. The action had to go —
+  a capability the model spends 1,000 output tokens on is not a capability.
+- **The measurement that decided it.** 25 `append_scratchpad` calls and 0
+  `write_scratchpad` across every recorded run. ~17,000 chars were a copy of the
+  page text already in the prompt, ~2,000 were step breadcrumbs duplicating
+  `step_summaries`, and ~1,250 were the only irreducible use (a goal statement).
+  **The six runs with the largest `tokens_out` are exactly the six whose final
+  note was transcript-shaped** — 3,612 / 5,232 / 4,167 / 3,768 / 3,293 /
+  2,587. One of them, `94fd2166`, spent 3,913 chars and 22 of its 33 seconds to
+  first step on a note, then spent 59 more writing the same content again as the
+  summary.
 - **This is what makes memory work at all.** Before it, `page_text` was live-only
   and the AX tree is ref-scoped, so navigating away destroyed both — "refer back
   to that page instead of going back" was not achievable, and writing the page
@@ -205,14 +222,16 @@ and `append_note` concatenated without limit.
   observation that produced it; a cached tree hands the model refs that resolve to
   nothing or, worse, to the wrong element. Page text is safe precisely because it
   carries no refs.
-- **`body` is not written to the audit document.** `set_scratchpad` runs every
-  step and rewrites the whole file; `model_dump()` carried `body`, which was
-  free while nothing was captured and is 200KB per 20 pages now that every step
-  captures one. The record keeps id/step/selector/url/digest. The sidecar has
-  always stored digests only, so a **resumed** entry recalls as its digest —
-  `recall_memory` says so and names the URL, because 200 unmarked chars of an
-  11,000-char page reads as the whole page. A page shorter than `DIGEST_LEN` is
-  not degraded, and is not labelled.
+- **`body` goes to a second sidecar, not into the audit document.** `set_scratchpad`
+  runs every step and rewrites the whole file; `model_dump()` carried `body`,
+  which was free while nothing was captured and is 200KB per 20 pages now that
+  every step captures one. The document keeps id/step/selector/url/digest;
+  `<session>.pages.json` holds the bodies. **JSON, not the manifest's
+  line format** — page text is arbitrary content and can contain a line that
+  looks like a manifest header, and that format predates bodies so files on disk
+  must keep parsing byte-identically. A resumed run now recalls **whole pages**;
+  the "only the digest survived" marker is the legacy path (no bodies file), and
+  a missing or corrupt one degrades to digests rather than raising.
 
 **The observation now reports its own cost.** `waitForStable` and `boxMap`
 returned a `Stability` and a `GeometryResult` and `captureObservation` threw
