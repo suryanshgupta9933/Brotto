@@ -292,6 +292,22 @@ check("an idle panel does not offer New chat", (() => {
   return newTask.visible === false;
 })());
 
+// New chat ends a run, so it must not sit next to one. Clicking it mid-task
+// reset the session out from under the agent — the connection kept, the
+// conversation did not.
+const offersNewChat = (phase, sessionId, stopped) => {
+  vm.runInContext(`stopping = ${!!stopped}`, sandbox);
+  gate(phase, false, sessionId);
+  return newTask.visible;
+};
+check("a live run does not offer New chat", offersNewChat("executing", "s-1", false) === false);
+check("a run waiting on you does not offer New chat", offersNewChat("paused", "s-1", false) === false);
+check("a send in flight does not offer New chat", offersNewChat("connecting", "s-1", false) === false);
+check("a finished run offers New chat again", offersNewChat("done", "s-1", false) === true);
+check("a failed run offers New chat again", offersNewChat("error", "s-1", false) === true);
+check("a run you stopped offers New chat", offersNewChat("paused", "s-1", true) === true);
+vm.runInContext("stopping = false", sandbox);
+
 // Stop is a pause: stopTask sets the phase to 'paused' so the composer and
 // buttons behave, which used to stamp WAITING FOR YOU over the STOPPED BY YOU
 // it had just written — a run the user had killed, announcing it was waiting.

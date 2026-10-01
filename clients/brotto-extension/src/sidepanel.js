@@ -1575,11 +1575,18 @@ function setPhase(phase, message) {
   // is running: a replayed run shows the numbers it ended on, frozen.
   const showBar = phase !== 'idle' && phase !== 'connected' && phase !== 'disconnected' && phase !== 'connecting';
   if (statusBarEl) statusBarEl.classList.toggle('active', showBar || state.replaying);
-  // ponytail: New chat shows whenever there is a conversation to leave. Keying
-  // it to a phase made it structurally impossible to reach from a replay,
-  // which ends on `connected` — a session id is the honest condition, and both
-  // a finished run and a reopened one already set it.
-  const showNewTask = state.sessionId !== null;
+  // ponytail: New chat shows whenever there is a conversation to leave *and*
+  // nothing is running. A session id alone was enough, which left the one
+  // button that ends a run sitting next to a live one — clicking it mid-task
+  // reset the session out from under the agent. `connecting` counts: it is the
+  // window between accepting a send and `task_started`, and a task is already
+  // committed by then. A paused run still holds the button, because the only
+  // way out of a pause is the card in the transcript or Stop. The one pause
+  // that releases it is a stop in flight, where the outcome cell already reads
+  // STOPPED BY YOU — and a stop mid-pause may never draw a terminal event, so
+  // holding on to `paused` there would strand the user in a run they killed.
+  const runInFlight = phase === 'connecting' || phase === 'executing' || (phase === 'paused' && !stopping);
+  const showNewTask = state.sessionId !== null && !runInFlight;
   if (newTaskBtn) newTaskBtn.classList.toggle('visible', showNewTask);
   // The outcome cell tracks the run the same way every other part of the bar
   // does, so it reads phase here rather than at the six places that produce
