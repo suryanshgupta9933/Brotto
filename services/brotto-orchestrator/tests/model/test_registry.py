@@ -2,23 +2,38 @@ from __future__ import annotations
 
 import pytest
 
+from brotto_orchestrator.model.catalog import PROVIDER_CATALOG
 from brotto_orchestrator.model.config import UserCredentials
-from brotto_orchestrator.model.registry import AnthropicFactory, OpenAIFactory, PROVIDER_REGISTRY
+from brotto_orchestrator.model.registry import (
+    AnthropicFactory,
+    GeminiFactory,
+    OpenAICompatibleFactory,
+    OpenAIFactory,
+    PROVIDER_REGISTRY,
+)
 
 
 def test_anthropic_factory_default_models_nonempty():
     f = AnthropicFactory()
     models = f.default_models()
     assert len(models) >= 1
-    for mid, ctx in models:
-        assert isinstance(mid, str) and mid
-        assert ctx > 0
+    for info in models:
+        assert isinstance(info.id, str) and info.id
+        assert info.context_window > 0
 
 
 def test_anthropic_factory_validates_known_model():
     f = AnthropicFactory()
-    assert f.validate_model_id("MiniMax-M3") is True
+    assert f.validate_model_id("claude-sonnet-5-5") is True
     assert f.validate_model_id("definitely-not-a-real-model-xyz") is False
+
+
+def test_a_minimax_model_is_not_accepted_under_the_anthropic_provider():
+    """MiniMax models used to be listed under `anthropic`, which sent them to
+    api.anthropic.com and failed there. The catalog splits them, and a user who
+    genuinely wants the Anthropic-shaped MiniMax endpoint picks `minimax`."""
+    assert AnthropicFactory().validate_model_id("MiniMax-M3") is False
+    assert PROVIDER_REGISTRY["minimax"].validate_model_id("MiniMax-M3") is True
 
 
 def test_anthropic_factory_build_returns_anthropic_model():
@@ -49,26 +64,57 @@ def test_openai_factory_default_models_nonempty():
     f = OpenAIFactory()
     models = f.default_models()
     assert len(models) >= 1
-    for mid, ctx in models:
-        assert isinstance(mid, str) and mid
-        assert ctx > 0
+    for info in models:
+        assert isinstance(info.id, str) and info.id
+        assert info.context_window > 0
 
 
 def test_openai_factory_build_returns_openai_model():
     from pydantic_ai.models.openai import OpenAIChatModel
     f = OpenAIFactory()
-    model = f.build("gpt-4o", UserCredentials(api_key="sk-test", base_url=None))
+    model = f.build("gpt-6.1-sol", UserCredentials(api_key="sk-test", base_url=None))
     assert isinstance(model, OpenAIChatModel)
 
 
 def test_openai_factory_rejects_unknown_model():
     f = OpenAIFactory()
-    assert f.validate_model_id("gpt-4o") is True
+    assert f.validate_model_id("gpt-6.1-sol") is True
     assert f.validate_model_id("definitely-not-a-real-model-xyz") is False
 
 
-def test_provider_registry_has_three_entries():
-    assert set(PROVIDER_REGISTRY) == {"anthropic", "openai", "minimax"}
+def test_provider_registry_covers_every_catalog_entry():
+    """Dispatch is generated from the catalog, so these two cannot disagree."""
+    assert set(PROVIDER_REGISTRY) == set(PROVIDER_CATALOG)
+
+
+def test_the_registry_builds_on_the_request_shape_not_the_provider_id():
+    """The trap: minimax speaks the Anthropic shape from its own id, and
+    dispatching on id sent it OpenAI requests at an endpoint that only accepts
+    Anthropic ones."""
+    assert isinstance(PROVIDER_REGISTRY["minimax"], AnthropicFactory)
+    assert isinstance(PROVIDER_REGISTRY["anthropic"], AnthropicFactory)
+    assert isinstance(PROVIDER_REGISTRY["gemini"], GeminiFactory)
+    for pid in ("openai", "openrouter", "deepseek", "groq", "custom"):
+        assert isinstance(PROVIDER_REGISTRY[pid], OpenAICompatibleFactory), pid
+
+
+def test_gemini_factory_builds_a_google_model():
+    from pydantic_ai.models.google import GoogleModel
+    f = GeminiFactory()
+    model = f.build("gemini-3.8-flash", UserCredentials(api_key="k", base_url=None))
+    assert isinstance(model, GoogleModel)
+    assert f.validate_model_id("gemini-3.8-flash") is True
+    assert f.validate_model_id("gpt-6.1-sol") is False
+
+
+def test_an_openai_compatible_vendor_is_one_class_with_a_different_endpoint():
+    """The point of the adapter: OpenRouter and OpenAI are the same factory
+    pointed at a different URL, not a wrapper per vendor."""
+    openrouter = PROVIDER_REGISTRY["openrouter"]
+    openai = PROVIDER_REGISTRY["openai"]
+    assert type(openrouter) is type(openai)
+    assert openrouter.default_base_url != openai.default_base_url
+    assert openrouter.default_models() != openai.default_models()
 
 
 def test_minimax_uses_anthropic_factory_with_minimax_base_url():

@@ -2,11 +2,32 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
 
 from brotto_orchestrator.model.config import ModelConfig, UserCredentials
 from brotto_orchestrator.model.store import load_user_config
 
 log = logging.getLogger(__name__)
+
+
+def _authenticates(config: ModelConfig | None, creds: UserCredentials | None) -> bool:
+    """Whether this pair can actually reach a provider. Every provider in the
+    catalogue needs a key, which is the rule the "keyless inline config" note
+    in `resolve_model_config` describes."""
+    if config is None or creds is None:
+        return False
+    return bool(creds.api_key)
+
+
+def _with_base_url(config: ModelConfig, creds: UserCredentials) -> UserCredentials:
+    """The factories read `creds.base_url`; the base URL is stored on the
+    config, because that is the half that persists. Copying it across here
+    rather than at each call site is what makes every OpenAI-compatible
+    vendor reachable — a caller that forgets is a vendor that silently talks
+    to the wrong endpoint."""
+    if not config.base_url or creds.base_url:
+        return creds
+    return replace(creds, base_url=config.base_url)
 
 
 def _from_env() -> tuple[ModelConfig, UserCredentials] | None:
@@ -34,8 +55,13 @@ def _from_env() -> tuple[ModelConfig, UserCredentials] | None:
             "with. Put ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in .env, or send "
             "a key from the extension."
         )
-    creds = UserCredentials(api_key=api_key, base_url=os.getenv("ANTHROPIC_BASE_URL"))
-    return ModelConfig(provider=provider, model=model_id, context_window=context_window), creds
+    # AGENT_BASE_URL is the provider-neutral name; ANTHROPIC_BASE_URL is read
+    # first for the configs that predate it.
+    base_url = os.getenv("AGENT_BASE_URL") or os.getenv("ANTHROPIC_BASE_URL")
+    creds = UserCredentials(api_key=api_key, base_url=base_url)
+    return ModelConfig(
+        provider=provider, model=model_id, context_window=context_window, base_url=base_url
+    ), creds
 
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -64,7 +90,7 @@ def resolve_model_config(
     it produced a keyless AnthropicProvider and the recurring "Set
     ANTHROPIC_API_KEY or pass it via AnthropicProvider(api_key=...)"
     error, shadowing the working .env config the user never asked to
-    override. All three registered providers need a key, so there is no
+    override. Every provider in the catalogue needs a key, so there is no
     keyless case worth preserving.
     """
     if os.getenv("BROTTO_FORCE_ENV_MODEL", "").lower() in _TRUTHY:
@@ -80,9 +106,10 @@ def resolve_model_config(
         )
         return env
 
-    if inline_config is not None and inline_creds is not None and inline_creds.api_key:
+    if _authenticates(inline_config, inline_creds):
+        assert inline_config is not None and inline_creds is not None
         log.debug("model resolved inline: %s/%s", inline_config.provider, inline_config.model)
-        return inline_config, inline_creds
+        return inline_config, _with_base_url(inline_config, inline_creds)
 
     if inline_config is not None:
         log.info(
@@ -92,11 +119,11 @@ def resolve_model_config(
         )
 
     per_user = load_user_config(client_ip)
-    if per_user is not None and (inline_creds and inline_creds.api_key):
+    if per_user is not None and _authenticates(per_user, inline_creds):
         log.debug(
             "model resolved per-user for %s: %s/%s", client_ip, per_user.provider, per_user.model
         )
-        return per_user, inline_creds
+        return per_user, _with_base_url(per_user, inline_creds)
 
     env = _from_env()
     if env is not None:

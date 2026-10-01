@@ -24,9 +24,12 @@ import brotto_orchestrator.agent.harness as harness_mod
 
 
 class _Usage:
-    def __init__(self, input_tokens: int, output_tokens: int) -> None:
+    def __init__(self, input_tokens: int, output_tokens: int,
+                 cache_read: int = 0, cache_write: int = 0) -> None:
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
+        self.cache_read_tokens = cache_read
+        self.cache_write_tokens = cache_write
 
 
 class _PlanResult:
@@ -107,6 +110,19 @@ async def test_usage_accumulates_across_steps(monkeypatch):
     result = await AgentHarness().run(_deps())
     assert result.timing["tokens_in"] == 3_000
     assert result.timing["tokens_out"] == 300
+
+
+@pytest.mark.asyncio
+async def test_cache_tokens_are_counted_separately(monkeypatch):
+    """Cache read/write are reported by the API as their own counts, not a
+    subset of `input_tokens`. They dominate a multi-step run and are priced an
+    order of magnitude below input, so folding them into tokens_in or dropping
+    them both misprice the normal workload."""
+    _stub_plan(monkeypatch, [_Usage(1_500, 320, cache_read=48_000, cache_write=9_000)])
+    result = await AgentHarness().run(_deps())
+    assert result.timing["tokens_in"] == 1_500
+    assert result.timing["cache_read_tokens"] == 48_000
+    assert result.timing["cache_write_tokens"] == 9_000
 
 
 @pytest.mark.asyncio

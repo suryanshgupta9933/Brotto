@@ -4,24 +4,9 @@
 // over. Every field is optional — "Skip" is a real answer, and the panel
 // works with server defaults. This is not a gate.
 
-// Mirrors MODEL_CATALOG in sidepanel.js and PROVIDER_REGISTRY in
-// services/brotto-orchestrator/src/brotto_orchestrator/model/registry.py.
-// Kept in sync by hand on purpose: pulling a shared module out of the
-// 2,500-line panel for four lines of data is not worth the reformat.
-const MODEL_CATALOG = {
-  anthropic: [
-    { model: "claude-3-5-sonnet-latest", context_window: 200000 },
-  ],
-  openai: [
-    { model: "gpt-4o", context_window: 128000 },
-    { model: "o1", context_window: 200000 },
-  ],
-  minimax: [
-    { model: "MiniMax-M3.1-Flash-Preview", context_window: 1000000 },
-    { model: "MiniMax-M3", context_window: 1000000 },
-    { model: "MiniMax-M2.7", context_window: 204800 },
-  ],
-};
+// The provider/model list comes from the server (see model_catalog.js). It
+// used to be a third hand-kept copy here, and the copies had already drifted:
+// this file listed three MiniMax models where the registry listed four.
 
 const DEFAULT_SERVER = "http://localhost:8000";
 const TOTAL_STEPS = 3;
@@ -52,16 +37,40 @@ function show(n) {
   $next.focus();
 }
 
-function populateModels() {
-  $model.textContent = "";
-  for (const entry of MODEL_CATALOG[$provider.value] || []) {
+let catalog = null;
+
+function populateProviders() {
+  $provider.textContent = "";
+  for (const p of catalog?.providers || []) {
     const opt = document.createElement("option");
-    opt.value = entry.model;
-    opt.textContent = entry.model;
-    $model.appendChild(opt);
+    opt.value = p.id;
+    opt.textContent = p.label || p.id;
+    $provider.appendChild(opt);
   }
+  populateModels();
+}
+
+function populateModels() {
+  const list = document.getElementById("model-options");
+  if (!list) return;
+  const p = brottoModelCatalog.provider(catalog, $provider.value);
+  list.textContent = "";
+  for (const entry of p?.models || []) {
+    const opt = document.createElement("option");
+    opt.value = entry.id;
+    list.appendChild(opt);
+  }
+  // No default model: a first-run screen should not pre-select a model the
+  // user has no key for. The datalist suggests; the field decides.
+  if (!document.activeElement || document.activeElement !== $model) $model.value = "";
 }
 $provider.addEventListener("change", populateModels);
+
+// Runs on load, not on a step change: the server may not be up yet, and the
+// loader falls back to the cached catalogue then the built-in one, so this
+// never blocks the wizard.
+catalog = brottoModelCatalog.load($serverUrl.value.trim() || DEFAULT_SERVER);
+catalog.then(populateProviders);
 
 // A dead server address is the one mistake here that costs the user a
 // confused first task, so say so now rather than on their first send.
@@ -84,15 +93,18 @@ $serverUrl.addEventListener("blur", checkServer);
 async function finish() {
   const server = $serverUrl.value.trim() || DEFAULT_SERVER;
   const provider = $provider.value;
-  const ctx = (MODEL_CATALOG[provider] || []).find((e) => e.model === $model.value)?.context_window;
+  const model = $model.value.trim();
+  const ctx = brottoModelCatalog.contextWindow(catalog, provider, model);
   const key = $apiKey.value.trim();
 
   // Same storage shapes sidepanel.js reads: config persists, key does not.
+  // The first-run screen has no base-URL field — a self-hosted endpoint is set
+  // in Settings, where there is room to explain it.
   const saved = await chrome.storage.local.get("settings");
   await Promise.all([
     chrome.storage.local.set({
       settings: { ...(saved.settings || {}), serverUrl: server, onboarded: true },
-      modelConfig: { provider, model: $model.value, context_window: ctx },
+      modelConfig: { provider, model, context_window: ctx },
     }),
     key ? chrome.storage.session.set({ modelApiKey: key }) : Promise.resolve(),
   ]);

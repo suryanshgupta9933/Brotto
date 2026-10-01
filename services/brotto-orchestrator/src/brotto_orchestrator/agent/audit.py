@@ -304,8 +304,9 @@ class AuditTrail:
             "model": {},
             "policy": {},
             "totals": {"turns": 0, "steps": 0, "prompts": 0, "actions": 0,
-                       "tokens_in": 0, "tokens_out": 0, "wall_s": 0.0,
-                       "errors": 0},
+                       "tokens_in": 0, "tokens_out": 0,
+                       "cache_read_tokens": 0, "cache_write_tokens": 0,
+                       "wall_s": 0.0, "errors": 0},
             "turns": [],
             "errors": [],
             # Policy decisions that belong to no single turn (preflight
@@ -578,15 +579,18 @@ class AuditTrail:
 
     def record_model(self, turn: int, *, thought: str, reasoning: str,
                      tokens_in: int, tokens_out: int, context_pct: float,
-                     latency_ms: int) -> None:
+                     latency_ms: int, cache_read: int = 0,
+                     cache_write: int = 0) -> None:
         self._record(self._record_model, turn, thought=thought,
                      reasoning=reasoning, tokens_in=tokens_in,
                      tokens_out=tokens_out, context_pct=context_pct,
-                     latency_ms=latency_ms)
+                     latency_ms=latency_ms, cache_read=cache_read,
+                     cache_write=cache_write)
 
     def _record_model(self, turn: int, *, thought: str, reasoning: str,
                       tokens_in: int, tokens_out: int, context_pct: float,
-                      latency_ms: int) -> None:
+                      latency_ms: int, cache_read: int = 0,
+                      cache_write: int = 0) -> None:
         t = self._turn(turn)
         if t is None:
             return
@@ -595,12 +599,20 @@ class AuditTrail:
         _text(block, "reasoning", reasoning)
         block["tokens_in"] = tokens_in
         block["tokens_out"] = tokens_out
+        # Absent from every document written before this field existed, so a
+        # reader must default them rather than require them.
+        block["cache_read_tokens"] = cache_read
+        block["cache_write_tokens"] = cache_write
         block["context_pct"] = context_pct
         block["latency_ms"] = latency_ms
         t["model"] = block
         totals = self._doc["totals"]
         totals["tokens_in"] += tokens_in
         totals["tokens_out"] += tokens_out
+        # A document written before these keys existed is still resumable, so
+        # they are accumulated off a default rather than read directly.
+        totals["cache_read_tokens"] = totals.get("cache_read_tokens", 0) + cache_read
+        totals["cache_write_tokens"] = totals.get("cache_write_tokens", 0) + cache_write
 
     def record_prompt(self, turn: int, *, kind: str, action: str, args: dict,
                       domain: str | None, reason: str) -> str:
@@ -765,11 +777,28 @@ class AuditTrail:
                 pass
 
 
+def _is_document_stem(name: str) -> bool:
+    """Whether `name` is a session id rather than a path or a sidecar.
+
+    Session ids are UUIDs, so the only legal shape is a single
+    dot-free, path-free token. Rejecting everything else is what keeps
+    `<id>.pages` and `../../secrets` off the filesystem.
+    """
+    return bool(name) and name == Path(name).name and "." not in name
+
+
 def read(session_id: str, *, dir: Path | None = None) -> dict:
-    """Read one document. Never raises: a damaged file is reported."""
+    """Read one document. Never raises: a damaged file is reported.
+
+    `session_id` comes off an unauthenticated HTTP path, so it is treated as
+    untrusted. A sidecar lives beside the document as `<id>.pages.json` (full
+    page text) and `<id>.scratchpad.txt`; without this guard
+    `GET /v1/sessions/<id>.pages/audit` reads the first one straight off disk
+    and `../../..` walks out of the directory entirely.
+    """
     d = dir or default_dir()
-    p = d / f"{session_id}.json"
-    if not p.exists():
+    p = d / f"{session_id}.json" if _is_document_stem(session_id) else None
+    if p is None or not p.exists():
         return {"found": False, "session_id": session_id}
     try:
         doc = json.loads(p.read_text())
@@ -793,6 +822,10 @@ def list_sessions(*, dir: Path | None = None) -> list[dict]:
     except OSError:
         return []
     for p in files:
+        # `<id>.pages.json` matches the glob and would otherwise be listed —
+        # and readable — as if it were a session.
+        if not _is_document_stem(p.stem):
+            continue
         doc = read(p.stem, dir=d)
         out.append({
             "session_id": doc.get("session_id", p.stem),

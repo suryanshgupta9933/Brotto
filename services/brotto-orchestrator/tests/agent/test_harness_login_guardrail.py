@@ -23,6 +23,7 @@ import pytest
 from brotto_orchestrator.agent.context import ActionCall, AgentDecision, AgentDeps
 from brotto_orchestrator.agent.harness import AgentHarness
 import brotto_orchestrator.agent.harness as harness_mod
+import brotto_orchestrator.agent.audit as audit_mod
 
 
 _COMPLETE = AgentDecision(
@@ -108,3 +109,51 @@ async def test_guardrail_still_fires_without_a_scripted_planner(monkeypatch):
 
     assert result.status == "failed"
     assert result.failure_reason == "user_skipped_login"
+
+
+@pytest.mark.asyncio
+async def test_the_sign_in_wall_says_where_and_what_for(monkeypatch, tmp_path):
+    """The card cannot draw a subject it was never sent.
+
+    `login_required` used to carry one string — "please log in: <title>" —
+    and the panel's own fallback label ("this site") was therefore the
+    common case, so the wall named no site and no task. Both are on the
+    frame now, and both are on the audit prompt, because the transcript a
+    session replays is rebuilt from the audit and the live card from the
+    frame: a field in only one of them is a card that changes shape the
+    moment you reopen the session.
+    """
+    _stub_plan(monkeypatch)
+    sent: list[dict] = []
+
+    deps = _login_deps()
+    deps.task = "book the cheapest flight to Lisbon"
+    deps.task_id = "login-wall-session"
+    deps.human_input_queue.put_nowait("skip")
+
+    async def ws_send(msg: dict) -> None:
+        sent.append(msg)
+
+    deps.ws_send = ws_send
+
+    # AuditTrail writes a real file; keep it out of logs/sessions.
+    monkeypatch.setattr(audit_mod, "default_dir", lambda: tmp_path)
+
+    await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+
+    wall = next(m for m in sent if m.get("type") == "login_required")
+    assert wall["url"] == "http://example.com/login"
+    assert wall["domain"] == "example.com"
+    assert wall["page_title"] == "Sign in"
+    assert wall["task"] == "book the cheapest flight to Lisbon"
+
+    import json
+
+    doc = json.loads((tmp_path / "login-wall-session.json").read_text())
+    prompt = doc["turns"][0]["prompts"][0]
+    assert prompt["kind"] == "login_required"
+    assert prompt["domain"] == "example.com"
+    assert prompt["args"]["url"] == "http://example.com/login"
+    assert prompt["args"]["page_title"] == "Sign in"
+    assert prompt["args"]["task"] == "book the cheapest flight to Lisbon"
+    assert prompt["decision"] == "skipped"

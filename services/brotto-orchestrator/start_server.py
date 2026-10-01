@@ -4,9 +4,9 @@
 import sys
 from pathlib import Path
 
-# ponytail: two clones of this repo sit on one machine sharing one venv, and
-# that venv has an editable install pointing at whichever one it was made from.
-# Without this, "start the server from brotto-v2" silently runs the sibling's
+# ponytail: this repo has two worktrees on one machine sharing one venv, and
+# that venv's editable install points at whichever worktree it was made from.
+# Without this, "start the server from here" silently runs the other tree's
 # code — which is how a deleted control kept showing up in the panel. sys.path
 # entries from PYTHONPATH are added before site-packages .pth paths, so
 # inserting here beats both.

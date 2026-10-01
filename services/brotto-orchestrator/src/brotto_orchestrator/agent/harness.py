@@ -1158,12 +1158,20 @@ def _resolve_model(deps: AgentDeps) -> tuple:
     """
     cached = getattr(deps, "_model_config", None)
     if cached is None:
+        inline = getattr(deps, "model_config", None)
+        has_creds = bool(getattr(deps, "api_key", None))
         cached = resolve_model_config(
             client_ip=getattr(deps, "client_ip", "127.0.0.1"),
-            inline_config=getattr(deps, "model_config", None),
+            inline_config=inline,
             inline_creds=(
-                UserCredentials(api_key=deps.api_key, base_url=None)
-                if getattr(deps, "api_key", None)
+                UserCredentials(
+                    api_key=deps.api_key,
+                    # The config carries the endpoint because it must persist;
+                    # the factory reads it off the credentials because that is
+                    # the one shape both factories already agree on.
+                    base_url=getattr(inline, "base_url", None),
+                )
+                if has_creds
                 else None
             ),
         )
@@ -1544,7 +1552,7 @@ class AgentHarness:
         # the timing dict so the benchmark runner can price the run. The
         # scripted-planner path never calls `agent.run`, so these stay 0
         # there — a real fact (no model ran), not missing data.
-        tokens: dict[str, int] = {"in": 0, "out": 0}
+        tokens: dict[str, int] = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0}
         steps_run = 0
         task_start = time.perf_counter()
 
@@ -1837,15 +1845,28 @@ class AgentHarness:
                 page_title, filtered_ax, current_url
             ):
                 t_lp = time.perf_counter()
+                # The task travels with the prompt because "please log in" on
+                # its own does not say what for. The panel draws it as the
+                # card's subject line, and the audit keeps it so a session
+                # reopened from history explains the wall it stopped at
+                # instead of just recording that one happened.
                 pid = audit.record_prompt(
                     a_turn, kind="login_required", action="login",
-                    args={"url": current_url, "page_title": page_title},
+                    args={
+                        "url": current_url,
+                        "page_title": page_title,
+                        "task": deps.task,
+                    },
                     domain=etld1(current_url),
                     reason=f"Please log in: {page_title}",
                 )
                 await deps.ws_send({
                     "type": "login_required",
                     "message": f"Please log in: {page_title}. Agent will continue when ready.",
+                    "url": current_url,
+                    "domain": etld1(current_url) or "",
+                    "page_title": page_title,
+                    "task": deps.task,
                 })
                 try:
                     reply = await asyncio.wait_for(
@@ -1925,16 +1946,25 @@ class AgentHarness:
                 usage = result.usage if result is not None else None
                 tokens_in = usage.input_tokens if usage else 0
                 tokens_out = usage.output_tokens if usage else 0
+                # Reported separately by the API and not a subset of
+                # tokens_in. Free to skip: only a priced model turns them into
+                # a cost, and the cost is not on the wire yet.
+                cache_read = usage.cache_read_tokens if usage else 0
+                cache_write = usage.cache_write_tokens if usage else 0
                 if usage is not None:
                     tokens["in"] += tokens_in
                     tokens["out"] += tokens_out
+                    tokens["cache_read"] += cache_read
+                    tokens["cache_write"] += cache_write
             except Exception:
-                usage, tokens_in, tokens_out = None, 0, 0
+                usage = None
+                tokens_in = tokens_out = cache_read = cache_write = 0
             tokens_used = tokens_in if usage is not None else None
             context = _build_context(tokens_used, window=context_window)
             audit.record_model(
                 a_turn, thought=decision.thought, reasoning=decision.reasoning,
                 tokens_in=tokens_in, tokens_out=tokens_out,
+                cache_read=cache_read, cache_write=cache_write,
                 context_pct=context["pct"] or 0.0,
                 latency_ms=int((time.perf_counter() - t_plan) * 1000),
             )
@@ -2323,6 +2353,11 @@ class AgentHarness:
             "components": {k: round(timings[k], 3) for k in TIMING_BUCKETS},
             "per_step": per_step,
             # Consumed by testing/runner.py, which pops these to price the run.
+            # It prices off tokens_in/out with its own flat rates and is
+            # deliberately not wired to the catalog: it is the offline
+            # benchmark's assumption, not the live pricing path.
             "tokens_in": tok.get("in", 0),
             "tokens_out": tok.get("out", 0),
+            "cache_read_tokens": tok.get("cache_read", 0),
+            "cache_write_tokens": tok.get("cache_write", 0),
         }

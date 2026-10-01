@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
-
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic_ai.models import Model
 
+from brotto_orchestrator.model.catalog import PROVIDER_CATALOG, ModelInfo
 from brotto_orchestrator.model.config import UserCredentials
 
 
 @runtime_checkable
 class ProviderFactory(Protocol):
     def build(self, model_id: str, creds: UserCredentials) -> Model: ...
-    def default_models(self) -> list[tuple[str, int]]: ...
+    def default_models(self) -> list[ModelInfo]: ...
     def validate_model_id(self, model_id: str) -> bool: ...
     def model_settings(self, model_id: str) -> dict[str, Any]: ...
 
@@ -26,83 +25,102 @@ class ProviderFactory(Protocol):
 # cap costs nothing on the steps that do not use it.
 _OUTPUT_TOKEN_CAP = 32_000
 
-# MiniMax-M3.1-Flash-Preview refuses any attempt to turn thinking off:
-# sending thinking.type="disabled" returns HTTP 400 ("requires adaptive
-# thinking"). Measured, not documented. Every other MiniMax model accepts
-# it, and M3 does not think by default anyway — the param is here so a
-# provider-side default change cannot silently turn reasoning back on for
-# a UI that pays 0.8s per extra second of it.
-_THINKING_REQUIRED = frozenset({"MiniMax-M3.1-Flash-Preview"})
+# Anthropic moved to adaptive thinking, so `anthropic_thinking` is now the
+# exception rather than the rule. Fable 5.1, Opus 5.5 and Sonnet 5.5 are
+# "adaptive (always on)" and answer `thinking.type="disabled"` with HTTP 400,
+# and every Claude id in the catalog is one of them. The param goes only to the
+# MiniMax models that accept it, and never to an id we have not verified —
+# guessing sends `disabled` to the next model that requires adaptive thinking,
+# and the failure is one HTTP 400 on every call rather than a slow step.
+#
+# Of these, only M3 is measured (it accepts `disabled` and does not think by
+# default anyway — the param is here so a provider-side default change cannot
+# silently turn reasoning back on for a UI that pays ~0.8s per extra second of
+# it). The M2.7 pair has always received it and never 400'd. M3.1-Flash-Preview
+# is absent because it *requires* adaptive thinking.
+#
+# Effort is deliberately not sent. Anthropic invalidates prompt-cache
+# breakpoints when the effort value changes, and "setting effort explicitly to
+# the model's default is equivalent to omitting it" — so omitting is the only
+# choice that is both cache-safe and correct.
+_THINKING_DISABLE_OK: dict[str, frozenset[str]] = {
+    "minimax": frozenset({"MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"}),
+}
 
 
-def _anthropic_settings(model_id: str) -> dict[str, Any]:
-    settings: dict[str, Any] = {"max_tokens": _OUTPUT_TOKEN_CAP}
-    if model_id not in _THINKING_REQUIRED:
-        settings["anthropic_thinking"] = {"type": "disabled"}
-    return settings
+class BaseFactory:
+    """Shared behaviour. Subclasses override `build`; only Anthropic needs to
+    override `model_settings`.
 
+    The default deliberately does not look at `model_id`. It is called with ids
+    belonging to other providers (test_registry_settings sweeps every provider
+    against the MiniMax ids), so anything that inspects the id or raises on an
+    unrecognised one breaks that sweep.
+    """
 
-def _openai_settings(model_id: str) -> dict[str, Any]:
-    return {"max_tokens": _OUTPUT_TOKEN_CAP}
+    default_base_url: str | None = None
+    # Which catalog entry this instance answers for. Set by _build_registry, so
+    # one class serves several vendors; the subclasses read their own entry
+    # rather than a hardcoded one, which is what made the minimax factory
+    # validate model ids against Anthropic's list.
+    provider_id = "openai"
 
-
-# Catalog order = preference. MiniMax-M3.1-Flash-Preview is the Token Plan
-# model (covered by Claude Code Token Plan subscriptions); MiniMax-M3 is
-# pay-as-you-go with separate credits — using M3 without a paid balance
-# returns 402 insufficient_balance.
-_DEFAULT_ANTHROPIC_MODELS: list[tuple[str, int]] = [
-    ("MiniMax-M3.1-Flash-Preview", 1_000_000),  # Token Plan (default)
-    ("MiniMax-M3", 1_000_000),                   # pay-as-you-go
-    ("MiniMax-M2.7", 204_800),                  # pay-as-you-go, legacy
-    ("MiniMax-M2.7-highspeed", 204_800),        # pay-as-you-go, legacy
-    ("claude-3-5-sonnet-latest", 200_000),       # direct Anthropic API
-]
-
-
-_DEFAULT_OPENAI_MODELS: list[tuple[str, int]] = [
-    ("gpt-4o", 128_000),
-    ("gpt-4o-mini", 128_000),
-    ("o1", 200_000),
-]
-
-
-class AnthropicFactory:
     def __init__(self, default_base_url: str | None = None) -> None:
         self.default_base_url = default_base_url
 
-    def default_models(self) -> list[tuple[str, int]]:
-        return list(_DEFAULT_ANTHROPIC_MODELS)
+    def default_models(self) -> list[ModelInfo]:
+        raise NotImplementedError
 
     def validate_model_id(self, model_id: str) -> bool:
-        return any(mid == model_id for mid, _ in _DEFAULT_ANTHROPIC_MODELS)
+        raise NotImplementedError
 
     def model_settings(self, model_id: str) -> dict[str, Any]:
-        return _anthropic_settings(model_id)
+        return {"max_tokens": _OUTPUT_TOKEN_CAP}
+
+
+class AnthropicFactory(BaseFactory):
+    provider_id = "anthropic"
+
+    def default_models(self) -> list[ModelInfo]:
+        return list(PROVIDER_CATALOG[self.provider_id].models)
+
+    def validate_model_id(self, model_id: str) -> bool:
+        return PROVIDER_CATALOG[self.provider_id].validate_model_id(model_id)
+
+    def model_settings(self, model_id: str) -> dict[str, Any]:
+        settings = super().model_settings(model_id)
+        if model_id in _THINKING_DISABLE_OK.get(self.provider_id, frozenset()):
+            settings["anthropic_thinking"] = {"type": "disabled"}
+        return settings
 
     def build(self, model_id: str, creds: UserCredentials) -> Model:
         from pydantic_ai.models.anthropic import AnthropicModel
         from pydantic_ai.providers.anthropic import AnthropicProvider
 
-        base_url = creds.base_url or self.default_base_url
         kwargs: dict[str, object] = {"api_key": creds.api_key}
+        base_url = creds.base_url or self.default_base_url
         if base_url is not None:
             kwargs["base_url"] = base_url
         provider = AnthropicProvider(**kwargs)  # type: ignore[arg-type]
         return AnthropicModel(model_id, provider=provider)
 
 
-class OpenAIFactory:
-    def __init__(self, default_base_url: str | None = None) -> None:
-        self.default_base_url = default_base_url
+class OpenAICompatibleFactory(BaseFactory):
+    """OpenAI, and everything that converged on the OpenAI chat-completions
+    shape: OpenRouter, Groq, DeepSeek, vLLM. One class and a
+    different default endpoint, rather than a wrapper per vendor.
 
-    def default_models(self) -> list[tuple[str, int]]:
-        return list(_DEFAULT_OPENAI_MODELS)
+    Deliberately OpenAIChatModel and not OpenAIResponsesModel: the Responses
+    API is OpenAI's own, and most gateways implement chat completions only.
+    """
+
+    provider_id = "openai"
+
+    def default_models(self) -> list[ModelInfo]:
+        return list(PROVIDER_CATALOG[self.provider_id].models)
 
     def validate_model_id(self, model_id: str) -> bool:
-        return any(mid == model_id for mid, _ in _DEFAULT_OPENAI_MODELS)
-
-    def model_settings(self, model_id: str) -> dict[str, Any]:
-        return _openai_settings(model_id)
+        return PROVIDER_CATALOG[self.provider_id].validate_model_id(model_id)
 
     def build(self, model_id: str, creds: UserCredentials) -> Model:
         from pydantic_ai.models.openai import OpenAIChatModel
@@ -116,8 +134,48 @@ class OpenAIFactory:
         return OpenAIChatModel(model_id, provider=provider)
 
 
-PROVIDER_REGISTRY: dict[str, ProviderFactory] = {
-    "anthropic": AnthropicFactory(),
-    "openai": OpenAIFactory(),
-    "minimax": AnthropicFactory(default_base_url="https://api.minimax.io/anthropic"),
+class GeminiFactory(BaseFactory):
+    provider_id = "gemini"
+
+    def default_models(self) -> list[ModelInfo]:
+        return list(PROVIDER_CATALOG[self.provider_id].models)
+
+    def validate_model_id(self, model_id: str) -> bool:
+        return PROVIDER_CATALOG[self.provider_id].validate_model_id(model_id)
+
+    def build(self, model_id: str, creds: UserCredentials) -> Model:
+        from pydantic_ai.models.google import GoogleModel
+        from pydantic_ai.providers.google import GoogleProvider
+
+        kwargs: dict[str, object] = {"api_key": creds.api_key}
+        base_url = creds.base_url or self.default_base_url
+        if base_url is not None:
+            kwargs["base_url"] = base_url
+        provider = GoogleProvider(**kwargs)  # type: ignore[arg-type]
+        return GoogleModel(model_id, provider=provider)
+
+
+_FACTORY_BY_SHAPE: dict[str, type[BaseFactory]] = {
+    "anthropic": AnthropicFactory,
+    "gemini": GeminiFactory,
+    "openai": OpenAICompatibleFactory,
 }
+
+
+def _build_registry() -> dict[str, ProviderFactory]:
+    """One factory instance per catalog entry, so PROVIDER_REGISTRY and the
+    catalog cannot disagree about which providers exist. Dispatch is on the
+    vendor's request shape, never on its id."""
+    registry: dict[str, ProviderFactory] = {}
+    for provider_id, info in PROVIDER_CATALOG.items():
+        factory = _FACTORY_BY_SHAPE[info.api_shape](info.default_base_url)
+        factory.provider_id = provider_id
+        registry[provider_id] = factory
+    return registry
+
+
+PROVIDER_REGISTRY: dict[str, ProviderFactory] = _build_registry()
+
+# Kept so the existing import in tests and any external caller still resolves.
+# "openai" is the OpenAI-compatible factory pointed at the real OpenAI.
+OpenAIFactory = OpenAICompatibleFactory

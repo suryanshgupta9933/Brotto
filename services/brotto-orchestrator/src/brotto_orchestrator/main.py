@@ -283,6 +283,18 @@ async def context_limit():
 # Unauthenticated (same as /health) — payload only contains domain lists,
 # not secrets; this is fine for the demo. Add auth before any production
 # deployment.
+# Unauthenticated like /health and /v1/policy — the payload is a model
+# catalogue, no secrets and no per-caller state. This is what deletes two of the
+# three hand-kept copies of the list (sidepanel.js, welcome.js); the extension
+# caches it and keeps a small offline fallback.
+@app.get("/v1/models")
+async def get_models():
+    from .model.catalog import PROVIDER_CATALOG
+    return JSONResponse(content={
+        "providers": [info.to_dict() for info in PROVIDER_CATALOG.values()],
+    })
+
+
 @app.get("/v1/policy")
 async def get_effective_policy(request: Request):
     from .policy import UserPolicy
@@ -424,11 +436,15 @@ async def suggestions(request: Request):
                 provider=str(cfg_payload["provider"]),
                 model=str(cfg_payload.get("model", "")),
                 context_window=int(cfg_payload.get("context_window") or 400_000),
+                base_url=cfg_payload.get("base_url") or None,
             )
         except (ValueError, TypeError) as exc:
             log.warning("invalid model_config in /v1/suggestions: %s", exc)
     api_key = body.get("api_key")
-    inline_creds = UserCredentials(api_key=api_key, base_url=None) if api_key else None
+    inline_creds = (
+        UserCredentials(api_key=api_key, base_url=getattr(inline_config, "base_url", None))
+        if api_key else None
+    )
 
     try:
         cfg, creds = resolve_model_config(client_host, inline_config, inline_creds)
@@ -600,6 +616,7 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                 provider=provider_name,
                 model=str(model_cfg_payload.get("model", "")),
                 context_window=int(model_cfg_payload.get("context_window") or 400_000),
+                base_url=model_cfg_payload.get("base_url") or None,
             )
         except (ValueError, TypeError) as e:
             log.warning("[%s] invalid model_config in task_start: %s", session_id, e)

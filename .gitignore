@@ -93,3 +93,6 @@ clients/brotto-extension/crx-signing.pem
 
 # Local scratch previews
 .preview/
+
+# Visual brainstorming companion
+.superpowers/

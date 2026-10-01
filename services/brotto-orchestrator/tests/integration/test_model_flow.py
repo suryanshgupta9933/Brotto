@@ -30,6 +30,45 @@ def test_task_start_with_inline_model_config_round_trips():
     assert msg.api_key == "sk-test"
 
 
+def test_base_url_survives_the_wire():
+    """The extension ships `model_config` whole, so adding the field to the
+    wire type is the whole client-side change — but a wire type that drops it
+    on validation would send a self-hosted user back to the default
+    endpoint with no error anywhere."""
+    msg = TaskStart(
+        goal="run it",
+        model_cfg=ModelConfigWire(provider="ollama", model="llama3.1",
+                                  context_window=128_000,
+                                  base_url="http://localhost:11434/v1"),
+        api_key="",
+    )
+    assert msg.model_cfg.base_url == "http://localhost:11434/v1"
+
+
+def test_a_task_start_without_a_base_url_still_parses():
+    """Additive field: a pre-existing extension sends none, and the model
+    must be optional rather than required."""
+    msg = TaskStart(
+        goal="search",
+        model_cfg=ModelConfigWire(provider="anthropic",
+                                  model="claude-3-5-sonnet-latest", context_window=200_000),
+        api_key="sk-test",
+    )
+    assert msg.model_cfg.base_url is None
+
+
+def test_a_non_http_base_url_is_refused_at_construction():
+    """/ws/ext is unauthenticated, so a client-supplied URL is a
+    request-forgery primitive: point the server at file:// or an internal
+    host and it will POST there with the caller's key."""
+    with pytest.raises(ValueError, match="http"):
+        ModelConfig(provider="custom", model="whatever", context_window=8_000,
+                    base_url="file:///etc/passwd")
+    with pytest.raises(ValueError, match="http"):
+        ModelConfig(provider="custom", model="whatever", context_window=8_000,
+                    base_url="gopher://internal:70/")
+
+
 def test_remember_key_saves_per_user_config(tmp_model_dir: Path):
     msg = TaskStart(
         goal="search",

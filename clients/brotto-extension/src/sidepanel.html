@@ -65,7 +65,7 @@
        Every stat caption, section head, badge, and secondary button. */
     .label, .settings-title, .msg-name, .plan-approach-title,
     .facts-label, .plan-badge, .approval-badge, .clarify-badge,
-    .login-required-badge, .settings-section h3,
+    .login-required-badge, .settings-section h3, .lbl,
     .policy-block-card .footer {
       font-family: var(--font-mono);
       font-size: 9.5px;
@@ -155,7 +155,7 @@
     /* Two copies side by side; shifting the track by exactly one copy's
        width (the gap is on the span, so it swaps seamlessly) walks the
        name across. JS adds .marquee only after measuring an overflow, so a
-       name that fits (gpt-4o, o1) sits dead still. */
+       name that fits (gpt-6-luna) sits dead still. */
     .model-pill-track { display: flex; width: max-content; }
     .model-pill-track > span { white-space: nowrap; padding-right: 20px; }
     .marquee .model-pill-track { animation: travel 17s linear infinite; }
@@ -248,10 +248,15 @@
     #outcomeCell[data-state="error"]   { --state: var(--bad);   --fill: transparent; }
     #outcomeCell[data-state="gave-up"] { --state: var(--bad);   --fill: transparent; }
     #outcomeCell[data-state="blocked"] { --state: var(--wait);  --fill: transparent; }
-    #outcomeCell[data-state="stopped"] { --state: var(--ink-3); --fill: transparent; }
+    #outcomeCell[data-state="stopped"] { --state: var(--bad);   --fill: transparent; }
     #outcomeCell[data-state="ended"]   { --state: var(--bad);   --fill: transparent; }
     #outcomeCell[data-state="waiting"] { --state: var(--wait);  --fill: transparent; }
     #outcomeCell[data-state="working"] { --state: var(--ink-2); --fill: transparent; }
+    /* A run you stopped ends without an answer, which is exactly what red
+       already means here (error / gave-up / ended are all hollow red). Yellow
+       would be wrong twice over: --wait is "needs you", and a run you stopped
+       needs nothing. --ink-3 was the placeholder tone, so it read as a cell
+       nothing had rendered into. */
     /* Motion means exactly one thing here: a run is live right now. */
     #outcomeCell[data-state="working"] .outcome-mark { animation: pulse 1.4s ease-in-out infinite; }
 
@@ -358,6 +363,23 @@
 
     .settings-section { display: flex; flex-direction: column; gap: 6px; }
     .settings-section h3 { color: var(--ink); margin-top: 4px; }
+    /* The four sections are separated by a hairline, not by a box. Everything
+       in this panel is open — there is nothing to collapse — so the heading
+       *is* the separator and the rule does the dividing. */
+    .settings-section + .settings-section { border-top: 1px solid var(--rule); padding-top: 15px; }
+
+    /* `.hidden` was toggled by populateModelOptions() but never defined
+       anywhere, so the base-URL and API-key boxes were shown for every
+       provider regardless of the class. A class that hides nothing is an
+       absence that reads clean in review; it needs one rule to be true. */
+    .hidden { display: none !important; }
+
+    /* A field is a label, a control, and optionally a hint — stacked. This
+       replaces the `label:has(> input)` / `label:has(> select)` rule it used
+       to be: the markup now nests controls inside .dd wrappers, so the shape
+       that rule matched no longer exists, and an explicit class says what it
+       means without the :has() special case .settings-toggle needed. */
+    .field { display: flex; flex-direction: column; gap: 5px; }
     /* Toggle rows: the box is the control, the label is the sentence, and the
        subordinate line says what the setting actually does. */
     .settings-toggle {
@@ -507,12 +529,118 @@
        `[hidden] { display: none }` loses to both of them. */
     [hidden] { display: none !important; }
 
-    /* Labels that wrap their own control stack instead of running inline. */
-    /* A toggle is excluded: its text sits BESIDE the box, not under it.
-       Specificity alone is not enough to save it — this selector is
-       `.settings-section label:has(...)`, which outranks `.settings-toggle`. */
-    .settings-section label:not(.settings-toggle):has(> select),
-    .settings-section label:not(.settings-toggle):has(> input) { display: flex; flex-direction: column; gap: 5px; }
+    /* ─── Dropdown (Ink & Rule) ───────────────────────────────────────────
+       One control, two instances: provider and the model
+       field's suggestion list. The value host is always the element the rest
+       of sidepanel.js already reads — a real <select> for the first two, the
+       free-text <input> for the third — so choosing an option writes `.value`
+       and every existing listener keeps working untouched.
+
+       The native <select> is display:none: the widget below carries the
+       combobox semantics, and leaving the UA widget focusable would put two
+       tab stops and two keyboard models on one field. */
+    .dd { position: relative; }
+    .dd-native { display: none; }
+
+    /* `.input` sets the box; this only re-voices the value in mono. It is
+       `.input.dd-trigger` rather than `.dd-trigger` because `.input` is
+       declared later in this sheet at equal specificity and would win. */
+    .input.dd-trigger {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      text-align: left;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      color: var(--ink);
+    }
+    .dd-value {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* A drawn triangle, not a glyph — the same rule the checkbox and the
+       markdown task box follow. It points down when closed and flips when the
+       list is open, so the state is legible without colour. */
+    .dd-caret {
+      flex: 0 0 auto;
+      width: 0;
+      height: 0;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-top: 5px solid var(--ink-2);
+      transition: transform var(--t);
+    }
+    .dd.open .dd-caret { transform: rotate(180deg); }
+
+    /* The list hangs off the control's own bottom edge with its top border
+       dropped, so it reads as the control opening rather than as a card
+       floating above the page. No shadow — there isn't one in this system. */
+    .dd-list {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 100%;
+      z-index: 5;
+      max-height: 210px;
+      overflow-y: auto;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      background: var(--paper);
+      border: 1px solid var(--rule-2);
+      border-top: 0;
+    }
+    .dd-option {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 10px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--ink-2);
+      cursor: pointer;
+    }
+    .dd-option + .dd-option { border-top: 1px solid var(--rule); }
+    .dd-option:hover, .dd-option.active { background: var(--paper-2); color: var(--ink); }
+    .dd-option-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Selection is a check, not a tint. The panel is monochrome, so a colour
+       difference is not an available channel; and a 9px slot of whitespace is
+       what keeps every row's label on the same x. */
+    .dd-check { flex: 0 0 9px; width: 9px; color: var(--ink); }
+
+    /* ─── Model facts: the vision badge and the context window ─────────── */
+    .model-facts {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 18px;
+      margin-top: 2px;
+    }
+    .vision-badge {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      border: 1px solid var(--rule-2);
+      color: var(--ink-3);
+      padding: 3px 5px;
+    }
+    .vision-badge[data-vision="yes"] { border-color: var(--ok); color: var(--ok); }
+    .model-ctx {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--ink-3);
+      font-variant-numeric: tabular-nums;
+    }
 
     /* Hint copy. Was referenced in markup but never defined — it was
        inheriting 16px body text and breaking the settings rhythm. */
@@ -529,16 +657,45 @@
     }
 
     .settings-actions-row { display: flex; gap: 8px; align-items: stretch; }
-    /* `flex: 1` alone leaves the children's min-width at the size of their
-       nowrap text, so the two secondary labels together push Save past the
-       panel edge instead of sharing the row. */
-    .settings-actions-row .settings-btn-secondary { flex: 1; min-width: 0; white-space: normal; }
     /* The global reset at the top of this file zeroes padding on every
        element, UA button padding included, and `.btn` never puts it back — so
        these rendered 14px tall with the label flush against the border. Only
-       the settings row is fixed; the rest of the panel sizes its own buttons
-       with `.btn-sm` and looks right. */
+       the settings rows are fixed; the rest of the panel sizes its own
+       buttons with `.btn-sm` and looks right. */
     .settings-actions-row .btn { padding: 9px 14px; }
+
+    /* Save is the panel's only commit, so it gets the heavy rule; Replay setup
+       is a link beside it, not a second button competing for the same weight. */
+    .settings-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-top: 2px solid var(--ink);
+      padding-top: 13px;
+    }
+    .settings-footer .btn { padding: 9px 18px; }
+    .settings-link {
+      background: none;
+      border: 0;
+      border-bottom: 1px solid var(--rule-2);
+      padding: 0 0 2px;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-2);
+      cursor: pointer;
+      transition: color var(--t), border-color var(--t);
+    }
+    .settings-link:hover { color: var(--ink); border-bottom-color: var(--ink); }
+    .settings-link:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
+
+    /* A hosted install has one correct server address; showing it as editable
+       invites a user to break their own install with no way back. */
+    .input--readonly { background: var(--paper-3); color: var(--ink-2); cursor: not-allowed; }
+
     .settings-verify { display: flex; align-items: center; gap: 6px; min-height: 16px; }
     .settings-verify .dot { width: 7px; height: 7px; background: var(--ink-3); flex-shrink: 0; }
     .settings-verify.ok    { color: var(--ok); }
@@ -579,11 +736,6 @@
       transition: border-color var(--t);
     }
     .input:focus { border-color: var(--ink); border-width: 2px; }
-    select.input {
-      font-family: var(--font-mono);
-      font-size: 11px;
-      letter-spacing: 0.04em;
-    }
 
     #settingsClose { margin-bottom: -4px; }
 
@@ -685,8 +837,6 @@
       from { opacity: 1; transform: translateY(0);    max-height: 200px; margin-bottom: 8px; }
       to   { opacity: 0; transform: translateY(-4px); max-height: 0;    margin-bottom: 0; padding-top: 0; padding-bottom: 0; }
     }
-    .message.removing,
-    .login-continue-btn.removing { animation: msg-leave 0.18s ease forwards; }
 
     .message.user      { align-self: flex-end; }
     .message.assistant { align-self: flex-start; }
@@ -764,6 +914,40 @@
       50%      { opacity: 0.3;  transform: scale(0.7); }
     }
     .login-required-body { font-size: 13px; line-height: 1.5; }
+    /* The wall is settled, not standing: a resolved sign-in is part of the
+       record and must not keep pulsing as if it were still blocking. */
+    .login-required-msg.resolved .login-required-badge { color: var(--ink-2); }
+    .login-required-msg.resolved .login-required-badge::before {
+      background: var(--ink-3);
+      animation: none;
+    }
+    /* What Brotto was trying to do, and where it was. Both are the user's
+       own words back to them — the task they typed and the page they are
+       looking at — so the card reads as an account of the wall, not a
+       system notice about one. */
+    .login-required-task {
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--ink);
+      border-left: 2px solid var(--wait);
+      padding-left: 8px;
+    }
+    .login-required-url {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: var(--ink-2);
+      word-break: break-all;
+      text-decoration: none;
+    }
+    .login-required-url[href] { text-decoration: underline; }
+    /* The outcome, in the same place the other two cards put theirs. */
+    .login-required-outcome {
+      border-top: 1px solid var(--rule);
+      padding-top: 9px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--ink-2);
+    }
 
     /* ─── Step bubble ─────────────────────────────────────────────────── */
     .step-bubble { display: flex; flex-direction: column; gap: 5px; }
@@ -949,39 +1133,6 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-
-    .clarify-input-row { display: flex; gap: 8px; align-items: stretch; }
-    .clarify-input {
-      flex: 1;
-      font-family: var(--font-ui);
-      font-size: 13px;
-      color: var(--ink);
-      background: var(--paper-2);
-      border: 1px solid var(--rule-2);
-      padding: 8px 10px;
-      resize: none;
-      min-height: 36px;
-      max-height: 96px;
-      outline: none;
-      transition: border-color var(--t);
-    }
-    .clarify-input:focus { border-color: var(--ink); border-width: 2px; }
-    .clarify-input::placeholder { color: var(--ink-3); }
-    .clarify-send-btn {
-      background: var(--ink);
-      color: var(--paper);
-      border: 1px solid var(--ink);
-      padding: 0 16px;
-      font-family: var(--font-mono);
-      font-size: 9.5px;
-      font-weight: 500;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      cursor: pointer;
-      transition: background var(--t), color var(--t);
-    }
-    .clarify-send-btn:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
-    .clarify-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
     .inline-log {
       font-family: var(--font-mono);
@@ -1429,8 +1580,6 @@
       #statusBar .cell.flash,
       .overlay-panel,                /* appears instead of sliding in */
       .message,                      /* entrance texture */
-      .message.removing,
-      .login-continue-btn.removing,
       .plan-card, .approval-card, .clarify-card,
       /* the `.blocking` forms are (0,2,0) and would outrank the bare
          selectors above, so they have to be named here too */
@@ -1582,43 +1731,81 @@
         </svg>
       </button>
     </div>
-    <div class="settings-section">
-      <label for="plannerUrlSetting">Server address</label>
-      <input id="plannerUrlSetting" class="input" type="url" placeholder="http://localhost:8000">
-      <p class="settings-hint">Where Brotto sends your tasks. Leave this alone unless you run your own Brotto server.</p>
-    </div>
-    <div class="settings-section">
-      <label for="blacklistSetting">Domains Brotto refuses</label>
-      <textarea id="blacklistSetting" class="input" rows="3"
-        placeholder="competitor.com&#10;mail.personal.com"></textarea>
-      <p class="settings-hint">One domain per line. Wildcard <code>*.example.com</code> allowed. Brotto refuses these sites outright — always, with no override.</p>
-    </div>
-    <div class="settings-section">
+    <!-- ── Model ─────────────────────────────────────────────────────── -->
+    <section class="settings-section">
       <h3>Model</h3>
-      <label>
-        Provider
-        <select id="model-provider" class="input">
-          <option value="anthropic">Anthropic</option>
-          <option value="openai">OpenAI</option>
-          <option value="minimax">MiniMax (Anthropic-compat)</option>
-        </select>
-      </label>
-      <label>
-        Model
-        <select id="model-name" class="input">
-          <!-- populated from JS based on provider selection -->
-        </select>
-      </label>
-      <label>
-        API key
+
+      <div class="field">
+        <span class="lbl" id="providerLabel">Provider</span>
+        <div class="dd" id="providerDd">
+          <!-- Value host only. display:none, so it is out of the a11y tree and
+               out of the tab order; the trigger below carries the combobox
+               semantics. It stays a real <select> because populateProviders()
+               and the $modelSave handler already read and write `.value`. -->
+          <select id="model-provider" class="dd-native" tabindex="-1" aria-hidden="true">
+            <!-- populated from GET /v1/models -->
+          </select>
+          <button type="button" id="model-provider-trigger" class="dd-trigger input"
+                  role="combobox" aria-expanded="false" aria-haspopup="listbox"
+                  aria-controls="model-provider-list" aria-labelledby="providerLabel">
+            <span class="dd-value">—</span>
+            <span class="dd-caret" aria-hidden="true"></span>
+          </button>
+          <ul id="model-provider-list" class="dd-list" role="listbox" hidden></ul>
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="lbl" for="model-name">Model</label>
+        <div class="dd dd--editable" id="modelDd">
+          <!-- The model control is editable on purpose: OpenRouter's catalogue
+               is not enumerable and `qwen2.5-coder:7b` is reachable only by
+               typing, so a select cannot say "one of these, or your own". The
+               datalist is the option store populateModelOptions() has always
+               filled; the `list=` attribute is deliberately absent so Chromium
+               never draws its own popup underneath the Ink & Rule list. -->
+          <input id="model-name" class="input" placeholder="Model id" autocomplete="off"
+                 role="combobox" aria-expanded="false" aria-haspopup="listbox"
+                 aria-controls="model-name-list" aria-autocomplete="list" />
+          <datalist id="model-name-options"></datalist>
+          <ul id="model-name-list" class="dd-list" role="listbox" hidden></ul>
+        </div>
+        <div class="model-facts">
+          <span id="modelVisionBadge" class="vision-badge" hidden></span>
+          <span id="modelContextWindow" class="model-ctx"></span>
+        </div>
+      </div>
+
+      <div class="field hidden" id="modelBaseUrlSetting">
+        <label class="lbl" for="model-base-url">API base URL</label>
+        <input id="model-base-url" class="input" type="url" placeholder="https://api.example.com/v1" autocomplete="off" />
+      </div>
+
+      <div class="field" id="modelKeySetting">
+        <label class="lbl" for="model-api-key">API key</label>
         <input id="model-api-key" class="input" type="password" placeholder="Leave blank to use server default" autocomplete="off" />
-      </label>
+      </div>
+
       <div class="settings-actions-row">
         <button id="model-save" class="btn" type="button">Save model</button>
         <span id="model-save-status" class="settings-hint"></span>
       </div>
-    </div>
-    <div class="settings-section">
+    </section>
+
+    <!-- ── Security ──────────────────────────────────────────────────── -->
+    <section class="settings-section">
+      <h3>Security</h3>
+
+      <div class="field">
+        <label class="lbl" for="blacklistSetting">Domains Brotto refuses</label>
+        <textarea id="blacklistSetting" class="input" rows="3"
+          placeholder="competitor.com&#10;mail.personal.com"></textarea>
+        <p class="settings-hint">One domain per line. Wildcard <code>*.example.com</code> allowed. Brotto refuses these sites outright — always, with no override.</p>
+      </div>
+    </section>
+
+    <!-- ── Notifications ─────────────────────────────────────────────── -->
+    <section class="settings-section">
       <h3>Notifications</h3>
       <label class="settings-toggle">
         <input id="notifyBlockingSetting" type="checkbox" checked />
@@ -1634,8 +1821,10 @@
           <em>Skipped when the panel is open and you're looking at it.</em>
         </span>
       </label>
-    </div>
-    <div class="settings-section">
+    </section>
+
+    <!-- ── Privacy ──────────────────────────────────────────────────── -->
+    <section class="settings-section">
       <h3>Privacy</h3>
       <label class="settings-toggle">
         <input id="contextSuggestionsSetting" type="checkbox" />
@@ -1646,20 +1835,39 @@
           does. Never reads banking, password manager or payment pages.</em>
         </span>
       </label>
-    </div>
-    <div class="settings-section">
+    </section>
+
+    <!-- ── Connection ────────────────────────────────────────────────── -->
+    <section class="settings-section">
+      <h3>Connection</h3>
+
+      <div class="field">
+        <label class="lbl" for="plannerUrlSetting">Server address</label>
+        <input id="plannerUrlSetting" class="input" type="url" placeholder="http://localhost:8000">
+        <p class="settings-hint" id="serverAddressHint">Where Brotto sends your tasks. Leave this alone unless you run your own Brotto server.</p>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Status</span>
+        <p id="settingsVerifyStatus" class="settings-hint settings-verify">Verifying server…</p>
+      </div>
+
       <div class="settings-actions-row">
-        <button id="refreshPolicyBtn" class="btn settings-btn-secondary"
+        <button id="refreshPolicyBtn" class="btn"
                 type="button" title="Re-fetch the effective policy from the server">
           Refresh from server
         </button>
-        <button id="replaySetupBtn" class="btn settings-btn-secondary"
-                type="button" title="Show the first-run wizard again">
-          Replay setup
-        </button>
-        <button id="saveSettingsBtn" class="btn btn-primary" type="button">Save</button>
       </div>
-      <p id="settingsVerifyStatus" class="settings-hint settings-verify">Verifying server…</p>
+    </section>
+
+    <!-- ── Actions ─────────────────────────────────────────────────────
+         Save is the panel's only commit. Replay setup is a link, not a
+         button: it is a "start over" affordance that re-points the panel at
+         the wizard, not a preference you set and keep. -->
+    <div class="settings-footer">
+      <button id="saveSettingsBtn" class="btn btn-primary" type="button">Save</button>
+      <button id="replaySetupBtn" class="settings-link"
+              type="button" title="Show the first-run wizard again">Replay setup</button>
     </div>
   </div>
 </div>
@@ -1682,6 +1890,7 @@
   </div>
 </div>
 
+<script src="model_catalog.js"></script>
 <script src="sidepanel.js"></script>
 </body>
 </html>

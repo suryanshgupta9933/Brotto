@@ -14,8 +14,11 @@ from brotto_orchestrator.model.store import (
 
 @pytest.fixture
 def no_env(monkeypatch):
+    # The base-URL vars matter as much as the key: a shell that exports
+    # ANTHROPIC_BASE_URL pins every resolved config to it, which silently
+    # rewrites what a test thinks it asserted.
     for k in ("AGENT_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-              "BROTTO_FORCE_ENV_MODEL"):
+              "AGENT_BASE_URL", "ANTHROPIC_BASE_URL", "BROTTO_FORCE_ENV_MODEL"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -124,3 +127,56 @@ def test_keyless_per_user_names_the_problem(tmp_model_dir: Path, no_env):
     save_user_config("127.0.0.1", ModelConfig(provider="openai", model="gpt-4o", context_window=128_000))
     with pytest.raises(ValueError, match="has no api_key"):
         resolve_model_config("127.0.0.1", None, None)
+
+def test_an_inline_config_without_a_key_is_ignored_for_every_provider(tmp_model_dir: Path, no_env):
+    """There is no keyless provider left in the catalogue, so the rule is
+    unconditional: an inline config with no key falls through to the next
+    tier rather than resolving into a provider that cannot authenticate."""
+    cfg = ModelConfig(provider="openrouter", model="openrouter/auto", context_window=128_000)
+    save_user_config("127.0.0.1", ModelConfig(provider="openai", model="gpt-6.1-sol", context_window=1_050_000))
+    with pytest.raises(ValueError):
+        resolve_model_config("127.0.0.1", cfg, UserCredentials(api_key="", base_url=None))
+
+
+def test_base_url_travels_with_the_inline_config(tmp_model_dir: Path, no_env):
+    cfg = ModelConfig(provider="openrouter", model="openrouter/auto", context_window=128_000,
+                      base_url="https://openrouter.ai/api/v1")
+    out_cfg, out_creds = resolve_model_config(
+        "127.0.0.1", cfg, UserCredentials(api_key="sk-x", base_url=None))
+    assert out_cfg.base_url == "https://openrouter.ai/api/v1"
+    # The creds are what the factory reads; a base_url that stops crossing
+    # over is the two-line gap that made every OpenAI-compatible vendor
+    # unreachable.
+    assert out_creds.base_url == "https://openrouter.ai/api/v1"
+
+
+def test_env_base_url_is_read_and_preferred_over_the_legacy_name(tmp_model_dir: Path, no_env, monkeypatch):
+    monkeypatch.setenv("AGENT_MODEL", "openai:gpt-4o")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    monkeypatch.setenv("AGENT_BASE_URL", "https://new.example/v1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://legacy.example/v1")
+    cfg, creds = resolve_model_config("127.0.0.1", None, None)
+    assert cfg.base_url == "https://new.example/v1"
+    assert creds.base_url == "https://new.example/v1"
+
+
+def test_a_shell_exported_base_url_is_not_silently_ignored(tmp_model_dir: Path, no_env, monkeypatch):
+    """Documented, not endorsed: ANTHROPIC_BASE_URL in the shell overrides
+    the Anthropic default, so a developer's environment quietly redirects
+    every anthropic request. Same class as CLAUDE.md's "the key must be in
+    .env, not the shell"."""
+    monkeypatch.setenv("AGENT_MODEL", "anthropic:claude-3-5-sonnet-latest")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.minimax.io/anthropic")
+    cfg, creds = resolve_model_config("127.0.0.1", None, None)
+    assert cfg.base_url == "https://api.minimax.io/anthropic"
+    assert creds.base_url == "https://api.minimax.io/anthropic"
+
+
+def test_a_per_user_config_keeps_its_base_url_across_reloads(tmp_model_dir: Path, no_env):
+    cfg = ModelConfig(provider="custom", model="qwen2.5-coder:7b", context_window=128_000,
+                      base_url="http://gpu-box.lan:8000/v1")
+    save_user_config("127.0.0.1", cfg)
+    out_cfg, out_creds = resolve_model_config("127.0.0.1", None, UserCredentials(api_key="sk-persisted", base_url=None))
+    assert out_cfg.base_url == "http://gpu-box.lan:8000/v1"
+    assert out_creds.base_url == "http://gpu-box.lan:8000/v1"

@@ -20,13 +20,22 @@ const source = fs.readFileSync(SRC, "utf8");
 function extract(name) {
   const start = source.search(new RegExp(`^function ${name}\\(`, "m"));
   if (start < 0) throw new Error(`no function ${name} in sidepanel.js — renamed?`);
+  // Brace counting has to begin after the parameter list, not at the first
+  // `{` — a destructured argument like `({ domain, url })` closes its own
+  // brace, which ends the match at the signature and yields a "function" that
+  // is only a parameter list.
+  let parens = 0;
+  let bodyStart = -1;
+  for (let i = source.indexOf("(", start); i < source.length; i++) {
+    if (source[i] === "(") parens++;
+    else if (source[i] === ")" && --parens === 0) { bodyStart = source.indexOf("{", i); break; }
+  }
+  if (bodyStart < 0) throw new Error(`no body for ${name}`);
   let depth = 0;
-  let seen = false;
-  for (let i = source.indexOf("{", start); i < source.length; i++) {
-    if (source[i] === "{") { depth++; seen = true; }
+  for (let i = bodyStart; i < source.length; i++) {
+    if (source[i] === "{") depth++;
     else if (source[i] === "}" && --depth === 0) return source.slice(start, i + 1);
   }
-  if (!seen) throw new Error(`unterminated function ${name}`);
   throw new Error(`unterminated function ${name}`);
 }
 
@@ -413,5 +422,101 @@ vm.runInContext(`renderReplayMetrics({ status: 'completed', turns: [{ model: { c
 check("a v1 document still fills the cells it has", timerEl.textContent === "0.0s" && contextEl.textContent === "12.5%",
   `${timerEl.textContent} / ${contextEl.textContent}`);
 
-console.log(failures ? `\n${failures} failed` : "\nall passed");
-process.exit(failures ? 1 : 0);
+// ── A question Brotto never got an answer to ──────────────────────────────
+// The panel used to delete pending cards when a run ended, and the audit
+// keeps them either way — so a reopened session drew a question the live
+// panel had erased, and the transcript read as if Brotto had asked into the
+// void. This is that document: a run that hit a sign-in wall, then failed.
+rendered.length = 0;
+sandbox.renderTranscript({
+  status: "failed",
+  goal: "star brotto-ui",
+  tasks: [{ status: "failed" }],
+  messages: [
+    { role: "user", content: "star brotto-ui", task: 0 },
+    { role: "assistant", content: "Stop.", task: 0 },
+  ],
+  turns: [{
+    task: 0,
+    model: { thought: "Opening the repo." },
+    actions: [{ action: "navigate", args: { url: "https://github.com/acme/brotto-ui" } }],
+    prompts: [
+      { id: "p1", kind: "login_required", action: "login", domain: "github.com",
+        args: { url: "https://github.com/login?return_to=%2Facme", page_title: "Sign in to GitHub", task: "star brotto-ui" },
+        status: "answered", decision: "continue", response: "" },
+      { id: "p2", kind: "ask_human", action: "ask_human", args: { question: "Star it as public or private?" },
+        status: "pending" },
+    ],
+  }],
+});
+
+const unanswered = rendered.find((r) => r.el === "clarify");
+const wall = rendered.find((r) => r.el === "login");
+check("a question the user never answered is still in the transcript",
+  !!unanswered && unanswered.question === "Star it as public or private?",
+  JSON.stringify(unanswered));
+check("an unanswered question is not dressed up as answered",
+  !!unanswered && unanswered.resolved === "skipped",
+  JSON.stringify(unanswered));
+check("the sign-in wall replays with the site it was on",
+  !!wall && wall.url === "https://github.com/login?return_to=%2Facme"
+    && wall.title === "Sign in to GitHub"
+    && wall.task === "star brotto-ui",
+  JSON.stringify(wall));
+
+// The wall's url goes into an href. It is whatever the page last navigated
+// to, and `javascript:` there is a live payload — so the link is only
+// created for http(s) and anything else stays text. Sliced out of the
+// shipping source, because a missing guard is an absence and reads clean.
+const loginCardSrc = extract("appendLoginCard");
+const guardStart = loginCardSrc.indexOf("if (/^https?");
+// The `if` and the `else` both close at four spaces, so the end marker has to
+// be sought past the `} else {` or the slice stops at the happy path and the
+// guard under test is the one that always says yes.
+const guardEnd = loginCardSrc.indexOf("\n    }", loginCardSrc.indexOf("} else {", guardStart));
+if (guardStart < 0 || guardEnd < 0) throw new Error("no url guard in appendLoginCard — renamed or rewritten?");
+vm.runInNewContext(
+  `function guard(url) { const link = {}; ${loginCardSrc.slice(guardStart, guardEnd + 6)}; return link; }`,
+  sandbox,
+);
+const linkFor = (u) => vm.runInContext(`guard(${JSON.stringify(u)})`, sandbox);
+check("a normal url becomes a link", linkFor("https://github.com/login").href === "https://github.com/login");
+check("a javascript: url stays text",
+  linkFor("javascript:alert(1)").href === undefined && linkFor("javascript:alert(1)").textContent === "javascript:alert(1)");
+check("a chrome:// url stays text", linkFor("chrome://extensions").href === undefined);
+
+// ── One way to answer a question ──────────────────────────────────────────
+// The card's own text field is gone; the composer is the answer box, and the
+// Skip button is the other way in. Both go through answerPendingClarify, so
+// there is a single place that settles the card and posts the reply — which
+// is how the two used to drift, Skip reading "Skipped" in the transcript
+// while the audit recorded an empty response.
+const cardS2 = sandbox;
+cardS2.messagesEl = { querySelector: () => ({ id: "the-card" }) };
+const asked = [];
+const settled = [];
+cardS2.sendMessage = (m) => { asked.push(m); return Promise.resolve({ success: true }); };
+cardS2.resolveCard = (card, cls, text) => { settled.push(`${card.id} ${cls}=${text}`); };
+cardS2.setClarifyComposerMode = () => {};
+
+vm.runInNewContext(extract("answerLabel"), sandbox);
+vm.runInNewContext(extract("answerPendingClarify"), sandbox);
+vm.runInContext("state.pendingClarifyId = 'clarify-7';", sandbox);
+vm.runInContext("answerPendingClarify('public')", sandbox)
+  .then(() => {
+    check("the composer's reply settles the card it belongs to",
+      settled.length === 1 && settled[0] === "the-card clarify-answer=You: public",
+      JSON.stringify(settled));
+    check("the reply is posted as the answer to that question",
+      asked.length === 1 && asked[0].type === "submit_clarification"
+        && asked[0].id === "clarify-7" && asked[0].answer === "public",
+      JSON.stringify(asked[0]));
+    vm.runInContext("answerPendingClarify('again')", sandbox);
+    check("a second answer has nothing left to answer", asked.length === 1,
+      JSON.stringify(asked));
+  })
+  .then(() => {
+    console.log(failures ? `\n${failures} failed` : "\nall passed");
+    process.exit(failures ? 1 : 0);
+  });
+

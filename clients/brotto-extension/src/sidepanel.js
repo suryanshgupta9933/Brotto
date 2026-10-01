@@ -2,59 +2,289 @@
 // Preserves all event handlers, state machine, and message listeners.
 // Only rendering functions are updated to produce the Claude-in-Chrome chat interface.
 
-// Static catalog mirrors the Python PROVIDER_REGISTRY. Keep in sync with
-// services/brotto-orchestrator/src/brotto_orchestrator/model/registry.py.
-// MiniMax-M3.1-Flash-Preview = Token Plan (covered). MiniMax-M3 =
-// pay-as-you-go with separate credits.
-const MODEL_CATALOG = {
-  anthropic: [
-    { model: "claude-3-5-sonnet-latest", context_window: 200000 },
-  ],
-  openai: [
-    { model: "gpt-4o", context_window: 128000 },
-    { model: "o1", context_window: 200000 },
-  ],
-  minimax: [
-    { model: "MiniMax-M3.1-Flash-Preview", context_window: 1000000 },
-    { model: "MiniMax-M3", context_window: 1000000 },
-    { model: "MiniMax-M2.7", context_window: 204800 },
-  ],
-};
-
 const $modelProvider = document.getElementById('model-provider');
 const $modelName = document.getElementById('model-name');
+const $modelNameOptions = document.getElementById('model-name-options');
+const $modelBaseUrlSetting = document.getElementById('modelBaseUrlSetting');
+const $modelBaseUrl = document.getElementById('model-base-url');
 const $modelKey = document.getElementById('model-api-key');
 const $modelSave = document.getElementById('model-save');
 const $modelStatus = document.getElementById('model-save-status');
+const $modelVisionBadge = document.getElementById('modelVisionBadge');
+const $modelContextWindow = document.getElementById('modelContextWindow');
+
+// ── Ink & Rule dropdown ──────────────────────────────────────────────────
+// One control, two instances: provider and the model
+// field's suggestion list. The value host is always the element the rest of
+// this file already reads — a real <select> for the first two, the free-text
+// <input> for the third — so choosing an option writes `host.value` and fires
+// that element's own `change`, and every existing listener keeps working.
+// The component owns only the listbox.
+//
+// Selection is carried by a check glyph and by aria-selected, never by colour:
+// the system is monochrome, so a tint is not a channel.
+
+const DROPDOWNS = [];
+// Set while choose() pushes a value into its host. The model host is an
+// <input>, so writing it emits an `input` event, and the model list's own
+// "user is typing, offer suggestions" handler would immediately reopen what
+// was just closed.
+let dropdownWriting = false;
+
+function attachDropdown({ root, trigger, list, getOptions, getValue, setValue, editable }) {
+  let active = -1;
+
+  function paint() {
+    const value = getValue();
+    list.textContent = '';
+    const options = getOptions();
+    sync();
+    options.forEach((opt, i) => {
+      const selected = opt.value === value;
+      const row = document.createElement('li');
+      row.className = 'dd-option';
+      row.id = `${list.id}-opt-${i}`;
+      row.dataset.value = opt.value;
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', selected ? 'true' : 'false');
+      const check = document.createElement('span');
+      check.className = 'dd-check';
+      check.setAttribute('aria-hidden', 'true');
+      check.textContent = selected ? '✓' : '';
+      const label = document.createElement('span');
+      label.className = 'dd-option-label';
+      label.textContent = opt.label;
+      row.appendChild(check);
+      row.appendChild(label);
+      row.addEventListener('click', () => choose(i));
+      list.appendChild(row);
+    });
+    active = -1;
+  }
+
+  // The box shows the host's current value. Nothing else writes that text, so
+  // a value set straight on the host — hydrateSettingsPanel, the save handler,
+  // a restored config — has to be pushed into the label by hand.
+  function sync() {
+    const slot = trigger.querySelector('.dd-value');
+    if (!slot) return;
+    const row = getOptions().find((o) => o.value === getValue());
+    slot.textContent = row ? row.label : (getValue() || '—');
+  }
+
+  function setActive(i) {
+    const rows = list.children;
+    if (active >= 0 && rows[active]) rows[active].classList.remove('active');
+    active = i;
+    if (!rows[active]) return;
+    rows[active].classList.add('active');
+    // The DOM focus stays on the trigger so Tab keeps working and Escape has
+    // somewhere to go; aria-activedescendant is what a screen reader reads.
+    trigger.setAttribute('aria-activedescendant', rows[active].id);
+    if (rows[active].scrollIntoView) rows[active].scrollIntoView({ block: 'nearest' });
+  }
+
+  function move(delta) {
+    const n = list.children.length;
+    if (!n) return;
+    const from = active < 0 ? (delta > 0 ? -1 : 0) : active;
+    setActive((from + delta + n) % n);
+  }
+
+  function open() {
+    for (const other of DROPDOWNS) if (other !== api) other.close();
+    paint();
+    list.hidden = false;
+    root.classList.add('open');
+    trigger.setAttribute('aria-expanded', 'true');
+    const current = getOptions().findIndex((o) => o.value === getValue());
+    if (current >= 0) setActive(current);
+  }
+
+  function close() {
+    list.hidden = true;
+    root.classList.remove('open');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.removeAttribute('aria-activedescendant');
+    active = -1;
+  }
+
+  function choose(i) {
+    const row = list.children[i];
+    if (!row) return;
+    const value = row.dataset.value;
+    close();
+    dropdownWriting = true;
+    try {
+      setValue(value);
+    } finally {
+      dropdownWriting = false;
+    }
+  }
+
+  trigger.addEventListener('click', () => (list.hidden ? open() : close()));
+  trigger.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !list.hidden) {
+      // Close without selecting. The value host is untouched, so a select
+      // stays where it was and a typed model id survives.
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      return;
+    }
+    if (e.key === 'Tab') { close(); return; }
+    // Space only means "select" on a closed-over-a-value control. On the model
+    // box it is a character, and swallowing it would make half of every model
+    // id untypeable the moment the list is open.
+    if (editable && e.key === ' ') return;
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (list.hidden) { open(); return; }
+      if (e.key === 'Enter' || e.key === ' ') { choose(active); return; }
+      move(e.key === 'ArrowDown' ? 1 : -1);
+    }
+  });
+  // Keep the pointer from moving focus off the trigger on press, which would
+  // blur it and let a second dropdown open.
+  list.addEventListener('mousedown', (e) => e.preventDefault());
+  document.addEventListener('click', (e) => {
+    if (!root.contains(e.target)) close();
+  });
+
+  const api = { open, close, paint, sync, isOpen: () => !list.hidden };
+  DROPDOWNS.push(api);
+  return api;
+}
+
+// The catalogue comes from GET /v1/models (see model_catalog.js). It is null
+// until the first load resolves, which is why the provider <select> ships
+// empty rather than with hardcoded options.
+let modelCatalog = null;
+
+function currentProvider() {
+  return modelCatalog ? brottoModelCatalog.provider(modelCatalog, $modelProvider.value) : null;
+}
 
 function populateModelOptions() {
-  const provider = $modelProvider.value;
-  const catalog = MODEL_CATALOG[provider] || [];
-  $modelName.textContent = '';
-  for (const entry of catalog) {
+  if (!$modelNameOptions) return;
+  const provider = currentProvider();
+  $modelNameOptions.textContent = '';
+  for (const entry of provider?.models || []) {
     const opt = document.createElement('option');
-    opt.value = entry.model;
-    opt.textContent = entry.model;
-    $modelName.appendChild(opt);
+    opt.value = entry.id;
+    $modelNameOptions.appendChild(opt);
+  }
+  // The base-URL box is a per-provider fact, not a preference: Anthropic and
+  // OpenAI have a fixed endpoint, everything else takes one. A field left
+  // visible for a provider that ignores it is a lie about what the user has to
+  // fill in. The API-key box is never per-provider — every provider in the
+  // catalogue needs a key.
+  if ($modelBaseUrlSetting) {
+    const accepts = !!provider?.accepts_base_url;
+    $modelBaseUrlSetting.classList.toggle('hidden', !accepts);
+    if (accepts && $modelBaseUrl && !$modelBaseUrl.value) {
+      $modelBaseUrl.value = provider.default_base_url || '';
+    }
   }
 }
 
+function populateProviders() {
+  if (!$modelProvider) return;
+  const previous = $modelProvider.value;
+  $modelProvider.textContent = '';
+  for (const p of modelCatalog?.providers || []) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.label || p.id;
+    $modelProvider.appendChild(opt);
+  }
+  if (previous && brottoModelCatalog.provider(modelCatalog, previous)) {
+    $modelProvider.value = previous;
+  }
+}
+
+// ── What the model can do: a vision badge and a context window, read from
+// the same catalogue entry the save handler prices its budget against.
+function renderModelFacts() {
+  const modelId = ($modelName?.value || '').trim();
+  const entry = (currentProvider()?.models || []).find((m) => m.id === modelId) || null;
+
+  if ($modelContextWindow) {
+    // contextWindow() is the one that answers for an id the catalogue has
+    // never seen: the provider's smallest known window, which can only
+    // under-fill. An invented 1M would overrun the real window and 400.
+    $modelContextWindow.textContent = modelId
+      ? `${brottoModelCatalog.contextWindow(modelCatalog, $modelProvider?.value, modelId).toLocaleString()} ctx`
+      : '';
+    $modelContextWindow.title = modelId && !entry
+      ? `${modelId} is not in the catalogue — showing the smallest window this provider is known to have`
+      : '';
+  }
+
+  if (!$modelVisionBadge) return;
+  // Vision is asserted only where the vendor documents image input. It is
+  // deliberately NOT asserted in the other direction: in this catalogue
+  // `false` means "not documented", so a badge claiming the model is
+  // text-only would be the panel inventing a fact the server declined to
+  // make. The neutral badge is the honest reading — it says we checked and
+  // the vendor said nothing — where rendering nothing would be
+  // indistinguishable from a model that has no vision at all.
+  $modelVisionBadge.hidden = !modelId;
+  $modelVisionBadge.dataset.vision = entry?.vision ? 'yes' : 'no';
+  $modelVisionBadge.textContent = entry?.vision ? 'VISION' : 'vision unverified';
+}
+
 if ($modelProvider) {
-  $modelProvider.addEventListener('change', populateModelOptions);
+  $modelProvider.addEventListener('change', () => {
+    populateModelOptions();
+    renderModelFacts();
+  });
+}
+
+if ($modelName) {
+  $modelName.addEventListener('input', () => {
+    renderModelFacts();
+    // Typing into the model box IS the request for suggestions. Escape or a
+    // click away dismisses them; nothing here forces the list open on focus,
+    // because a dropdown that appears the moment you look at a field is a
+    // dropdown you learn to ignore.
+    if (dropdownWriting) return;
+    if (modelDd?.isOpen()) modelDd.paint();
+    else if ($modelName.value.trim()) modelDd?.open();
+  });
+}
+
+async function initModelSettings(base) {
+  modelCatalog = await brottoModelCatalog.load(base);
+  populateProviders();
   populateModelOptions();
+  // A stale provider id from a config saved against an older catalog leaves
+  // the select on its first option while the stored model belongs to another.
+  if (!$modelProvider.value) {
+    $modelProvider.value = modelCatalog?.providers?.[0]?.id || '';
+    populateModelOptions();
+  }
+  await hydrateModelSettings();
 }
 
 if ($modelSave) {
   $modelSave.addEventListener('click', async () => {
     const provider = $modelProvider.value;
-    const model = $modelName.value;
-    const catalog = MODEL_CATALOG[provider] || [];
-    const ctx = catalog.find((e) => e.model === model)?.context_window;
+    const model = $modelName.value.trim();
+    if (!provider || !model) return;
+    const providerInfo = currentProvider();
+    const ctx = brottoModelCatalog.contextWindow(modelCatalog, provider, model);
+    // base_url rides on modelConfig, not on the key, so a self-hosted or
+    // OpenRouter user does not re-paste it every browser restart the way
+    // they re-paste the key.
+    const baseUrl = providerInfo?.accepts_base_url
+      ? ($modelBaseUrl?.value.trim() || providerInfo.default_base_url || null)
+      : null;
     // model_config → chrome.storage.local (persists).
     // api_key → chrome.storage.session (in-memory; cleared on browser restart).
     await Promise.all([
       chrome.storage.local.set({
-        modelConfig: { provider, model, context_window: ctx },
+        modelConfig: { provider, model, context_window: ctx, base_url: baseUrl },
       }),
       $modelKey.value.trim()
         ? chrome.storage.session.set({ modelApiKey: $modelKey.value.trim() })
@@ -108,7 +338,7 @@ function setModelPill(model) {
 }
 
 // A name that fits sits dead still; only an overflowing one travels. Measuring
-// beats guessing — a marquee that always runs makes "gpt-4o" drift pointlessly.
+// beats guessing — a marquee that always runs makes "gpt-6-luna" drift pointlessly.
 // Compare one copy (plus the gap it needs to hand off) against the window, so
 // the decision never depends on the two-copy track's own width.
 function fitModelPill() {
@@ -129,7 +359,15 @@ async function hydrateModelSettings() {
   if (cfg) {
     if ($modelProvider) $modelProvider.value = cfg.provider;
     populateModelOptions();
-    if ($modelName) $modelName.value = cfg.model;
+    // Never overwrite a field the user is mid-edit in. initModelSettings runs
+    // twice (once on load, once after /health names the real server) and
+    // someone typing a custom model id in that window would otherwise watch
+    // it get reverted from storage under them.
+    if ($modelName && document.activeElement !== $modelName) $modelName.value = cfg.model;
+    // Only refill when the stored config has one: a config saved before the
+    // field existed should land on the provider's default, not on a stale
+    // value the user typed for a different provider.
+    if ($modelBaseUrl && cfg.base_url) $modelBaseUrl.value = cfg.base_url;
     setModelPill(cfg.model);
   } else {
     setModelPill(null);
@@ -137,7 +375,49 @@ async function hydrateModelSettings() {
   // Don't re-hydrate the API key field — it's in chrome.storage.session
   // and we deliberately don't surface it in the UI (no plaintext display).
 }
-hydrateModelSettings();
+// ── Wire the dropdowns to the value hosts the rest of this file uses.
+const providerDd = $modelProvider && attachDropdown({
+  root: document.getElementById('providerDd'),
+  trigger: document.getElementById('model-provider-trigger'),
+  list: document.getElementById('model-provider-list'),
+  getOptions: () => Array.from($modelProvider.children).map((o) => ({ value: o.value, label: o.textContent || o.value })),
+  getValue: () => $modelProvider.value,
+  // Dispatching `change` is what makes the provider switch behave exactly as
+  // it did when this was a native select: repopulate the model list, show or
+  // hide the base-URL and key boxes, refresh the facts.
+  setValue: (v) => { $modelProvider.value = v; $modelProvider.dispatchEvent(new Event('change')); },
+});
+
+// The trigger shows the host's current value, so both selects need a sync
+// after anything writes them: the catalogue landing, hydrateSettingsPanel,
+// and the save handler's own round trip.
+
+const modelDd = $modelName && attachDropdown({
+  root: document.getElementById('modelDd'),
+  trigger: $modelName,
+  list: document.getElementById('model-name-list'),
+  // Free text stays free: the list is filtered to what has been typed, but an
+  // id that matches nothing is still typed, still saved, and still gets a
+  // context window. That is the whole reason this control is an input.
+  getOptions: () => {
+    const typed = ($modelName.value || '').trim().toLowerCase();
+    return (currentProvider()?.models || [])
+      .filter((m) => !typed || m.id.toLowerCase().includes(typed))
+      .map((m) => ({ value: m.id, label: m.label || m.id }));
+  },
+  getValue: () => $modelName.value.trim(),
+  setValue: (v) => { $modelName.value = v; $modelName.dispatchEvent(new Event('input')); },
+  editable: true,
+});
+
+// Called twice on purpose: once now so the header pill names the model
+// immediately, and again from initModelSettings once the catalogue has landed
+// and the provider select can actually hold the id this config names. Both
+// repaint the triggers and the facts on the way out, because a value written
+// straight to a host never tells anyone it changed.
+hydrateModelSettings().then(() => { providerDd?.sync(); renderModelFacts(); });
+initModelSettings(document.getElementById('plannerUrl')?.value || '')
+  .then(() => { providerDd?.sync(); renderModelFacts(); });
 
 const messagesEl  = document.getElementById('messages');
 const emptyState   = document.getElementById('emptyState');
@@ -227,8 +507,29 @@ settingsClose.addEventListener('click', () => settingsOverlay.classList.remove('
 settingsOverlay.addEventListener('click', (e) => {
   if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');
 });
+
+// The hosted Brotto server's address. There isn't one yet — self-host is the
+// only deployment — so this is empty and the field below stays editable,
+// which is exactly how it behaves today. When a launch domain is chosen, set
+// it here and nothing else changes: the read-only state is derived by
+// comparing the field against this constant, not stored and not toggled.
+const HOSTED_SERVER_URL = '';
+
+const SELF_HOST_HINT = 'Where Brotto sends your tasks. Leave this alone unless you run your own Brotto server.';
+const HOSTED_HINT = 'Brotto is hosted. Run your own server to point it somewhere else.';
+
+function applyServerAddressState() {
+  if (!plannerUrlSetting) return;
+  const hosted = !!HOSTED_SERVER_URL && plannerUrlSetting.value.trim() === HOSTED_SERVER_URL;
+  plannerUrlSetting.readOnly = hosted;
+  plannerUrlSetting.classList.toggle('input--readonly', hosted);
+  const hint = document.getElementById('serverAddressHint');
+  if (hint) hint.textContent = hosted ? HOSTED_HINT : SELF_HOST_HINT;
+}
+
 plannerUrlSetting.addEventListener('input', () => {
   plannerUrlEl.value = plannerUrlSetting.value;
+  applyServerAddressState();
 });
 
 // ── Session history ────────────────────────────────────────────────────────
@@ -626,6 +927,9 @@ function appendPromptCard(p) {
   if (p.kind === 'login_required') {
     appendLoginCard({
       domain: p.domain || 'this site',
+      url: args.url || '',
+      title: args.page_title || '',
+      task: args.task || '',
       outcome: loginOutcome(p),
     });
     return;
@@ -671,6 +975,7 @@ if (replaySetupBtn) {
 // are sitting in a local cache against a dead one.
 settingsBtn.addEventListener('click', async () => {
   plannerUrlSetting.value = plannerUrlEl.value || 'http://localhost:8000';
+  applyServerAddressState();
   await hydrateSettingsPanel();
   settingsOverlay.classList.add('open');
   renderVerifyStatus();
@@ -1320,14 +1625,33 @@ void fetchContextWindow();
 async function sendUserMessage() {
   const text = goalEl.value.trim();
   if (!text) return;
+  // A question is outstanding. Everything below this line means "start a
+  // task", and starting one here would abandon the run that is blocked
+  // waiting for the answer — so the box answers the question instead, and
+  // the card it belongs to is what records the reply.
+  if (state.pendingClarifyId !== null && state.pendingClarifyId !== undefined) {
+    goalEl.value = '';
+    goalEl.style.height = 'auto';
+    setPhase('connected', 'Resuming…');
+    const res = await answerPendingClarify(text);
+    if (res && res.success === false) {
+      // The run moved on while the user was typing. Put the words back
+      // rather than dropping them, and let them send it as a task.
+      goalEl.value = text;
+      goalEl.style.height = 'auto';
+      goalEl.focus();
+      appendMessage({ role: 'error', text: res.error || 'That question is no longer waiting.' });
+    }
+    return;
+  }
   // Mid-task steering. This has to come before everything below: the rest of
   // this function is "start a task" — it clears the transcript, resets the
   // tab tally and calls setPhase('connecting'), all of which would destroy
   // the running task the user is trying to redirect. A paused task is
-  // excluded on purpose: a prompt is outstanding then, and the composer
-  // answer would be read by the server as the answer to that prompt. The
-  // disabled button is not the protection — Enter still reaches this
-  // function with the button off.
+  // excluded on purpose: an approval is outstanding then, and steering text
+  // typed into the box while the agent waits for a yes or no would be
+  // silently dropped. The disabled button is not the protection — Enter still
+  // reaches this function with the button off.
   if (state.phase === 'executing') {
     const res = await chrome.runtime.sendMessage({
       type: 'send_to_server',
@@ -1538,17 +1862,26 @@ function setPhase(phase, message) {
   // setPhase rather than toggling sendBtn.disabled directly.
   // ponytail: 'executing' deliberately stays enabled — that is the whole
   // point of steering, and a composer that locks the moment the task starts
-  // forces Stop, which throws the transcript away. 'paused' stays disabled
-  // because a prompt is outstanding and the same box answers it.
-  sendBtn.disabled = phase === 'connecting' || (running && phase !== 'executing');
+  // forces Stop, which throws the transcript away.
+  //
+  // 'paused' is the one phase that re-enables, and only while a question is
+  // outstanding: the composer is the answer box (see answerPendingClarify),
+  // so locking it there would leave the run blocked on something the panel
+  // would not let the user give it. An approval pause stays locked — that one
+  // is answered by its own buttons.
+  const answering = state.pendingClarifyId !== null && state.pendingClarifyId !== undefined;
+  sendBtn.disabled = phase === 'connecting' || (running && phase !== 'executing' && !answering);
+  setClarifyComposerMode(answering);
   // ponytail: surface a brief feedback message for the prose-only failure
   // so the user knows the loop stopped on purpose, not from a network
   // error. The actual message is rendered by the task_failed handler.
   if (phase === 'done' || phase === 'error') {
-    // ponytail: clear every prompt the task was blocked on so no card
-    // survives into the terminal state. clearLoginPrompt alone left an
-    // approval or clarify card live and clickable on a finished task.
-    clearBlockingCards();
+    // ponytail: every prompt the task was blocked on has to stop being
+    // answerable, but it does not stop being part of the conversation —
+    // settleBlockingCards takes the controls off and writes the outcome
+    // in, so a card left on a finished task is a record rather than a
+    // button that goes nowhere.
+    settleBlockingCards('The task ended before you answered.');
   }
   // ponytail: the clock belongs to a run. Every terminal phase stops it,
   // not just done/error — a bar that kept counting after a failed or
@@ -1906,7 +2239,7 @@ async function stopTask() {
   // ponytail: Stop only moved the phase; an approval / clarify card stayed on
   // screen and clickable, so the user could still approve a purchase on a task
   // they had just cancelled. Same cleanup setPhase does on a terminal phase.
-  clearBlockingCards();
+  settleBlockingCards('You stopped the task before answering.');
   setPhase('paused', 'Stopping…');
   // setPhase recomputes the button from the phase, so re-disable after it —
   // otherwise Stop stays clickable-looking while the guard silently no-ops.
@@ -1992,29 +2325,38 @@ function appendEmptyState() {
   void currentTab().then(refreshEmptyState);
 }
 
-// ponytail: helper to fade out + remove the login_required bubble and
-// its Continue button in one render frame. Called on resolve paths: the
-// Continue button click, the next step_card after auto-resume, any
-// agent input request (clarify / approval), and terminal events (done /
-// error / fail). The fade matches the CSS .removing keyframe (180ms);
-// DOM removal happens 20ms later so the fade isn't cut short.
-function clearLoginPrompt() {
-  const els = document.querySelectorAll('.login-required-msg:not(.resolved), .login-continue-btn');
-  if (els.length === 0) return;
-  els.forEach((el) => el.classList.add('removing'));
-  setTimeout(() => {
-    els.forEach((el) => { if (el.isConnected) el.remove(); });
-  }, 200);
+// ponytail: the sign-in wall's outcome, written into the card rather than
+// the card being deleted. Every caller means the same thing — the agent got
+// past the wall — so the default is the sentence; the terminal paths pass
+// their own because the run ended instead of carrying on.
+//
+// It used to fade the bubble out over 180ms and remove it. There is no
+// removal left to soften, so the fade and the .removing keyframe went with it.
+function clearLoginPrompt(outcome = 'Signed in, and the task carried on.') {
+  const card = messagesEl.querySelector('.login-required-msg:not(.resolved)');
+  if (!card) return;
+  resolveCard(card, 'login-required-outcome', outcome);
 }
 
-// ponytail: every prompt a task can be blocked on. Terminal events and Stop
-// must clear all of them, not just the login bubble — an approval card that
-// outlives its task means the user can still approve a purchase on something
-// that is no longer running. Not folded into clearLoginPrompt: the auto-resume
-// paths call that on every step, where a live approval card must survive.
-function clearBlockingCards() {
-  clearLoginPrompt();
-  messagesEl.querySelectorAll('.approval-card, .clarify-card').forEach((el) => el.remove());
+// ponytail: every prompt a task can be blocked on, when the run ends before
+// the user answered any of them. Terminal events and Stop both land here.
+//
+// These cards used to be deleted, which was right about approvals and wrong
+// about everything else: an approval that outlives its task can still be
+// clicked, but a question Brotto asked is part of what happened, and
+// removing it left a hole in the transcript. Worse on a reopened session —
+// the replay draws from the audit, so the question came back with the
+// panel's deletion not in it, and the conversation read as if Brotto had
+// asked into the void. An unanswered prompt is itself the record.
+function settleBlockingCards(outcome) {
+  for (const card of messagesEl.querySelectorAll('.clarify-card.blocking')) {
+    resolveCard(card, 'clarify-answer', outcome);
+  }
+  for (const card of messagesEl.querySelectorAll('.approval-card.blocking')) {
+    resolveCard(card, 'approval-decision', outcome);
+  }
+  clearLoginPrompt(outcome);
+  state.pendingClarifyId = null;
 }
 
 // ponytail: the copy below is duplicated verbatim in sidepanel.html for first
@@ -2999,7 +3341,10 @@ function appendClarifyCard({ id, question, reason, resolved }) {
   // already answered, and it is what their answer in the transcript reads
   // against.
   const prior = messagesEl.querySelector('.clarify-card.blocking');
-  if (prior) prior.remove();
+  // Settle rather than remove: a second question supersedes the first, but
+  // the first was still asked. Deleting it left the replayed transcript
+  // showing a question with nothing after it.
+  if (prior) resolveCard(prior, 'clarify-answer', 'Brotto moved on without an answer.');
 
   const card = document.createElement('div');
   card.className = resolved ? 'clarify-card resolved' : 'clarify-card blocking';
@@ -3026,39 +3371,15 @@ function appendClarifyCard({ id, question, reason, resolved }) {
     return;
   }
 
-  // Real text input INSIDE the card — previous version told the user to use
-  // the bottom goalEl but that input was hard-coded to send a new task.
-  const inputRow = document.createElement('div');
-  inputRow.className = 'clarify-input-row';
-
-  const input = document.createElement('textarea');
-  input.className = 'clarify-input';
-  input.rows = 1;
-  input.placeholder = 'Type your answer…';
-  input.addEventListener('input', () => {
-    input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 96) + 'px';
-  });
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      void submit(input.value, input, card);
-    }
-  });
-
-  const sendBtn = document.createElement('button');
-  sendBtn.className = 'clarify-send-btn';
-  sendBtn.textContent = 'Send';
-  sendBtn.addEventListener('click', () => void submit(input.value, input, card));
-
-  inputRow.appendChild(input);
-  inputRow.appendChild(sendBtn);
-  card.appendChild(inputRow);
-
-  const hint = document.createElement('div');
-  hint.className = 'input-hint clarify-hint';
-  hint.textContent = 'Press Enter to send · Shift+Enter for newline';
-  card.appendChild(hint);
+  // No input inside the card. There is already one text box in the panel and
+  // two is a worse answer than one: the card's copy was seeded at an arbitrary
+  // focus, and a reply typed there looked like it had been sent when the
+  // composer next read as empty. The question goes in the transcript, the
+  // answer goes in the box the user is already looking at.
+  const pointer = document.createElement('div');
+  pointer.className = 'input-hint clarify-hint';
+  pointer.textContent = 'Answer in the box below.';
+  card.appendChild(pointer);
 
   const actions = document.createElement('div');
   actions.className = 'clarify-actions';
@@ -3067,9 +3388,7 @@ function appendClarifyCard({ id, question, reason, resolved }) {
   skipBtn.className = 'btn btn-sm';
   skipBtn.textContent = 'Skip';
   skipBtn.addEventListener('click', () => {
-    void sendMessage({ type: 'submit_clarification', id, answer: '' });
-    resolveCard(card, 'clarify-answer', 'Skipped');
-    state.pendingClarifyId = null;
+    void answerPendingClarify('');
     setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Resuming…' : 'Idle');
   });
   actions.appendChild(skipBtn);
@@ -3077,21 +3396,36 @@ function appendClarifyCard({ id, question, reason, resolved }) {
   card.appendChild(actions);
   messagesEl.appendChild(card);
   messagesEl.scrollTop = messagesEl.scrollHeight;
-  input.focus();
 
   state.pendingClarifyId = id;
+}
 
-  async function submit(value, inputEl, cardEl) {
-    const answer = value.trim();
-    if (!answer) {
-      inputEl.focus();
-      return;
-    }
-    resolveCard(cardEl, 'clarify-answer', answer);
-    state.pendingClarifyId = null;
-    setPhase('connected', 'Resuming…');
-    await sendMessage({ type: 'submit_clarification', id, answer });
+// The one way an outstanding question gets answered, whether it came from the
+// composer's send button or the card's Skip. Both callers used to resolve the
+// card and post the reply themselves, which is how they drifted: Skip said
+// "Skipped" in the transcript while the audit recorded an empty response.
+function answerPendingClarify(answer) {
+  const id = state.pendingClarifyId;
+  if (id === null || id === undefined) return Promise.resolve(false);
+  const card = messagesEl.querySelector('.clarify-card.blocking');
+  if (card) {
+    resolveCard(card, 'clarify-answer', answer ? answerLabel(answer) : 'Skipped');
   }
+  state.pendingClarifyId = null;
+  setClarifyComposerMode(false);
+  return sendMessage({ type: 'submit_clarification', id, answer });
+}
+
+// The composer doubles as the answer box while a question is outstanding.
+// The placeholder and the send label are the only things that change — the
+// textarea, the Enter binding and the send button are the same controls the
+// user has been typing a task into all along.
+function setClarifyComposerMode(on) {
+  if (!goalEl) return;
+  goalEl.placeholder = on
+    ? 'Answer Brotto…'
+    : 'What would you like Brotto to do?';
+  sendBtn.title = on ? 'Send answer' : 'Send';
 }
 
 // The answer is the user's own words, so it goes in as text — the same
@@ -3104,7 +3438,7 @@ function answerLabel(answer) {
 // ── Login required ────────────────────────────────────────────────────────
 // A function rather than inline markup because the history replay draws the
 // same card, resolved, out of the audit's `login_required` prompt.
-function appendLoginCard({ domain, outcome }) {
+function appendLoginCard({ domain, url, title, task, outcome }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
@@ -3122,14 +3456,43 @@ function appendLoginCard({ domain, outcome }) {
   badge.className = 'login-required-badge';
   badge.textContent = outcome ? `Sign-in needed · ${domain}` : `Waiting for sign-in · ${domain}`;
 
-  const body = document.createElement('div');
-  body.className = 'login-required-body';
-  if (outcome) {
-    body.textContent = outcome;
-  } else {
-    body.textContent = 'Sign in manually in the browser tab. The task resumes automatically once the post-login page loads. Use Continue only if auto-resume does not fire.';
+  // What Brotto was trying to do, and where. A bare "please log in" is a
+  // wall with no subject: the user cannot tell a sign-in for the task they
+  // asked for from one the agent wandered into, and the audit kept neither.
+  // Both are textContent — the task string and the page title are the model's
+  // and the site's words respectively, steerable by page content.
+  if (task) {
+    const subject = document.createElement('div');
+    subject.className = 'login-required-task';
+    subject.textContent = task;
+    bubble.appendChild(subject);
   }
-  bubble.append(badge, body);
+  if (title) {
+    const where = document.createElement('div');
+    where.className = 'login-required-body';
+    where.textContent = title;
+    bubble.appendChild(where);
+  }
+  if (url) {
+    const link = document.createElement('a');
+    link.className = 'login-required-url';
+    // Same guard renderMarkdown applies: a link whose href is anything other
+    // than http(s) is text, not a navigation. The current URL is whatever the
+    // page last set, and `javascript:` there is a live payload.
+    if (/^https?:\/\//i.test(url)) {
+      link.href = url;
+      link.textContent = url;
+    } else {
+      link.textContent = url;
+    }
+    bubble.appendChild(link);
+  }
+
+  const body = document.createElement('div');
+  body.className = outcome ? 'login-required-outcome' : 'login-required-body';
+  body.textContent = outcome
+    || 'Sign in manually in the browser tab. The task resumes automatically once the post-login page loads. Use Continue only if auto-resume does not fire.';
+  bubble.appendChild(body);
   msg.appendChild(bubble);
   messagesEl.appendChild(msg);
 
@@ -3598,9 +3961,16 @@ function handleEvent(message) {
       setPhase('paused', `Login required at ${message.domain || 'site'}`);
       // ponytail: dedupe via clearLoginPrompt so the old bubble + button
       // fade out instead of being yanked from the layout (which causes a
-      // visible jump when the next bubble appears).
-      clearLoginPrompt();
-      appendLoginCard({ domain: message.domain || 'this site' });
+      // visible jump when the next bubble appears). The outgoing wall is
+      // settled rather than deleted — the audit keeps it, so the replay
+      // would draw it back with the deletion not in it.
+      clearLoginPrompt('Signed in, and the task carried on.');
+      appendLoginCard({
+        domain: message.domain || 'this site',
+        url: message.url || '',
+        title: message.page_title || '',
+        task: message.task || '',
+      });
       break;
 
     case 'context_update': {
@@ -3621,9 +3991,10 @@ function handleEvent(message) {
 
     case 'task_completed':
       if (alreadyTerminal('task_completed')) break;
-      // ponytail: clear any lingering login prompt — task is ending, no
-      // point leaving the user looking at a "Waiting for sign-in" bubble.
-      clearBlockingCards();
+      // ponytail: the sign-in wall and any question are part of how this run
+      // went — they settle, not vanish, so the transcript still says Brotto
+      // asked before it finished.
+      settleBlockingCards('The task finished before you answered.');
       // Captured before stopTimer, which resets the counter.
       void saveSession({ status: 'done', steps: message.steps, elapsed: timerActiveEl && timerActiveEl.textContent });
       setOutcome('completed', message.summary);
@@ -3682,10 +4053,10 @@ function handleEvent(message) {
 
     case 'task_failed':
       if (alreadyTerminal('task_failed')) break;
-      // ponytail: same as task_completed — clean up login prompt on any
-      // terminal event so the user never sees a stale "Waiting" bubble
+      // ponytail: same as task_completed — every prompt settles on any
+      // terminal event, so the user never sees a stale "Waiting" bubble
       // after the task has failed / been cancelled.
-      clearBlockingCards();
+      settleBlockingCards('The task stopped before you answered.');
       void saveSession({ status: 'failed', elapsed: timerActiveEl && timerActiveEl.textContent });
       setOutcome('failed', message.summary, message.failure_reason);
       stopTimer();
@@ -3728,12 +4099,16 @@ function handleEvent(message) {
       // before the new clarify card appears so the transition reads as
       // a single flow, not two stacked bubbles.
       clearLoginPrompt();
-      setPhase('paused', 'Brotto has a question');
+      // Card first: it sets state.pendingClarifyId, and setPhase is what
+      // re-enables the composer for the answer. The other order leaves the
+      // run blocked on a question the panel refuses to accept an answer to.
       appendClarifyCard({
         id: message.id,
         question: message.question || 'Brotto needs your guidance.',
         reason: message.reason || '',
       });
+      setPhase('paused', 'Brotto has a question');
+      goalEl.focus();
       break;
     }
 
@@ -3799,9 +4174,8 @@ function handleEvent(message) {
 
     case 'canonical_terminal': {
       if (alreadyTerminal('canonical_terminal')) break;
-      // ponytail: terminal event from the canonical stream — clean up
-      // any login prompt so it doesn't survive past the task ending.
-      clearBlockingCards();
+      // No card cleanup here: every branch below lands on a terminal phase,
+      // and setPhase settles whatever the task was blocked on.
       stopTimer();
       const m = message.message || {};
       if (m.type === 'task.completed') {
@@ -3904,6 +4278,10 @@ goalEl.focus();
     const res = await fetch(url + '/health', { method: 'GET' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.plannerUrl = url;
+    // The catalogue was loaded above against whatever URL the field held
+    // then — the default, on a first open. Now that the saved server is
+    // known, re-read it from there.
+    await initModelSettings(url);
   } catch {
     // ponytail: Bug 9 — server unreachable on open. A toast, not a chat
     // message: this is a transient condition, not part of the transcript,
