@@ -1,4 +1,4 @@
-"""Policy: user domain blacklist + secure mode gate.
+"""Policy: user domain blacklist + sensitive-action approval.
 
 The blacklist is whatever the user set in the panel, full stop. There is no
 operator-set floor: a server-side list could only ever *add* sites the user

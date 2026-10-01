@@ -18,7 +18,6 @@ Format on disk:
     {
       "_saved_at": "2026-08-29T22:01:00Z",
       "_content_sha256": "abc123...",
-      "mode": "secure",
       "blacklist": ["foo.com", "bar.com"]
     }
 
