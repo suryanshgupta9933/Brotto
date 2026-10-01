@@ -102,12 +102,12 @@ function check(name, cond, detail) {
 const SERVER = {
   providers: [
     { id: "anthropic", label: "Anthropic", accepts_base_url: false, default_base_url: null,
-      accepts_any_model: false, keyless_ok: false,
+      accepts_any_model: false,
       models: [{ id: "claude-sonnet-5-5", context_window: 1000000 }] },
-    { id: "ollama", label: "Ollama (local)", accepts_base_url: true,
-      default_base_url: "http://localhost:11434/v1",
-      accepts_any_model: true, keyless_ok: true,
-      models: [{ id: "llama3.1", context_window: 128000 }] },
+    { id: "custom", label: "Custom (OpenAI-compatible)", accepts_base_url: true,
+      default_base_url: "http://gpu-box.lan:8000/v1",
+      accepts_any_model: true,
+      models: [{ id: "qwen2.5-coder:7b", context_window: 128000 }] },
   ],
 };
 
@@ -172,7 +172,7 @@ async function main() {
     const { api, store } = await makeCatalog(async () => { throw new Error("down"); });
     store.local.modelCatalog = { providers: SERVER.providers, at: 0 };
     const out = await api.load("http://box:8000");
-    check("a stale cache is preferred over the built-in fallback", out.providers[1].id === "ollama");
+    check("a stale cache is preferred over the built-in fallback", out.providers[1].id === "custom");
   }
 
   // ── context_window, which drives the AX-tree budget ──────────────────────
@@ -182,12 +182,12 @@ async function main() {
     check("a catalogued model reports its own window",
       api.contextWindow(list, "anthropic", "claude-sonnet-5-5") === 1000000);
     check("a free-text model id does not claim zero",
-      api.contextWindow(list, "ollama", "qwen2.5-coder:7b") === 128000,
-      String(api.contextWindow(list, "ollama", "qwen2.5-coder:7b")));
+      api.contextWindow(list, "custom", "qwen2.5-coder:7b") === 128000,
+      String(api.contextWindow(list, "custom", "qwen2.5-coder:7b")));
     // window/20 becomes the AX budget, so an invented 1M would overrun the real
     // window and 400 on the next step. The fallback can only under-fill.
     check("an unknown id never resolves to more than the provider's smallest known window",
-      api.contextWindow(list, "ollama", "made-up") <= 128000);
+      api.contextWindow(list, "custom", "made-up") <= 128000);
   }
 
   // ── The side panel's rendering ───────────────────────────────────────────
@@ -257,7 +257,7 @@ async function main() {
     const ids = els["model-provider"].children.map((c) => c.value);
     check("the provider select is populated from the server", ids.length === 2, JSON.stringify(ids));
     check("provider options are labelled, not raw ids",
-      els["model-provider"].children[1].textContent === "Ollama (local)");
+      els["model-provider"].children[1].textContent === "Custom (OpenAI-compatible)");
     check("model suggestions come from the catalogue",
       els["model-name-options"].children.map((c) => c.value).join() === "claude-sonnet-5-5");
   }
@@ -270,40 +270,34 @@ async function main() {
     check("a fixed-endpoint provider hides the base-URL box",
       els.modelBaseUrlSetting.classList.contains("hidden") === true);
     check("…and does not prefill one", els["model-base-url"].value === "");
-    check("a keyed provider keeps the API-key box",
-      els.modelKeySetting.classList.contains("hidden") === false);
   }
 
   {
     const { els, ctx } = await panelWithCatalog(ok);
     await ctx.initModelSettings("http://box:8000");
-    els["model-provider"].value = "ollama";
+    els["model-provider"].value = "custom";
     vm.runInContext("populateModelOptions()", ctx);
     check("a self-hosted provider shows the base-URL box",
       els.modelBaseUrlSetting.classList.contains("hidden") === false);
     check("…prefilled with the provider's default endpoint",
-      els["model-base-url"].value === "http://localhost:11434/v1");
-    check("a keyless provider hides the API-key box",
-      els.modelKeySetting.classList.contains("hidden") === true);
+      els["model-base-url"].value === "http://gpu-box.lan:8000/v1");
   }
 
   {
-    // The whole point of base_url on ModelConfig: an Ollama user should not
+    // The whole point of base_url on ModelConfig: a self-hosted user should not
     // re-paste it every browser restart, the way they re-paste their key.
     const { els, store, ctx } = await panelWithCatalog(ok);
     await ctx.initModelSettings("http://box:8000");
-    els["model-provider"].value = "ollama";
+    els["model-provider"].value = "custom";
     vm.runInContext("populateModelOptions()", ctx);
     els["model-name"].value = "qwen2.5-coder:7b";
-    els["model-api-key"].value = "";
+    els["model-api-key"].value = "sk-box";
     await els["model-save"].handlers.click();
     check("base_url is persisted with the model config",
-      store.local.modelConfig.base_url === "http://localhost:11434/v1",
+      store.local.modelConfig.base_url === "http://gpu-box.lan:8000/v1",
       JSON.stringify(store.local.modelConfig));
     check("a free-text model id still gets a context window",
       store.local.modelConfig.context_window > 0);
-    check("a keyless provider's blank key does not write a key",
-      !("modelApiKey" in store.session));
   }
 
   {
@@ -324,12 +318,12 @@ async function main() {
     // The round trip this feature exists for, and the one that did not work
     // before base_url was on the config.
     const { els, ctx } = await panelWithCatalog(ok, {
-      provider: "ollama", model: "llama3.1", context_window: 128000,
+      provider: "custom", model: "qwen2.5-coder:7b", context_window: 128000,
       base_url: "http://gpu-box.lan:11434/v1",
     });
     await ctx.initModelSettings("http://box:8000");
-    check("a saved provider comes back selected", els["model-provider"].value === "ollama");
-    check("a saved model comes back in the field", els["model-name"].value === "llama3.1");
+    check("a saved provider comes back selected", els["model-provider"].value === "custom");
+    check("a saved model comes back in the field", els["model-name"].value === "qwen2.5-coder:7b");
     check("a saved base URL comes back — not the provider default",
       els["model-base-url"].value === "http://gpu-box.lan:11434/v1",
       els["model-base-url"].value);

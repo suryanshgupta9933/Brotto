@@ -4,7 +4,6 @@ import logging
 import os
 from dataclasses import replace
 
-from brotto_orchestrator.model.catalog import is_keyless_ok
 from brotto_orchestrator.model.config import ModelConfig, UserCredentials
 from brotto_orchestrator.model.store import load_user_config
 
@@ -12,13 +11,12 @@ log = logging.getLogger(__name__)
 
 
 def _authenticates(config: ModelConfig | None, creds: UserCredentials | None) -> bool:
-    """Whether this pair can actually reach a provider. A keyless provider
-    counts, so `ollama:llama3.1` resolves without one; everything else still
-    requires a key, which is the rule the "keyless inline config" note below
-    describes."""
+    """Whether this pair can actually reach a provider. Every provider in the
+    catalogue needs a key, which is the rule the "keyless inline config" note
+    in `resolve_model_config` describes."""
     if config is None or creds is None:
         return False
-    return bool(creds.api_key) or is_keyless_ok(config.provider)
+    return bool(creds.api_key)
 
 
 def _with_base_url(config: ModelConfig, creds: UserCredentials) -> UserCredentials:
@@ -47,7 +45,7 @@ def _from_env() -> tuple[ModelConfig, UserCredentials] | None:
     provider, model_id = raw_model.split(":", 1)
     context_window = int(os.getenv("CONTEXT_WINDOW_TOKENS", "400000"))
     api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")
-    if not api_key and not is_keyless_ok(provider):
+    if not api_key:
         # Every registered provider needs a key, so returning one without it
         # only defers the failure into the provider constructor, where
         # pydantic-ai reports it as a generic AnthropicProvider error that
@@ -92,7 +90,7 @@ def resolve_model_config(
     it produced a keyless AnthropicProvider and the recurring "Set
     ANTHROPIC_API_KEY or pass it via AnthropicProvider(api_key=...)"
     error, shadowing the working .env config the user never asked to
-    override. All three registered providers need a key, so there is no
+    override. Every provider in the catalogue needs a key, so there is no
     keyless case worth preserving.
     """
     if os.getenv("BROTTO_FORCE_ENV_MODEL", "").lower() in _TRUTHY:

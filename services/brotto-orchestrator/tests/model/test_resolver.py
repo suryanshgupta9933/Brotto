@@ -128,16 +128,14 @@ def test_keyless_per_user_names_the_problem(tmp_model_dir: Path, no_env):
     with pytest.raises(ValueError, match="has no api_key"):
         resolve_model_config("127.0.0.1", None, None)
 
-def test_a_keyless_local_runtime_resolves_with_no_key_at_all(tmp_model_dir: Path, no_env):
-    """Ollama has no API key, and CLAUDE.md documents at length that an
-    inline config without one is ignored. Rather than weaken that rule for
-    everyone, the catalog marks one provider keyless and the resolver honours
-    an inline config for exactly that provider."""
-    cfg = ModelConfig(provider="ollama", model="llama3.1", context_window=128_000,
-                      base_url="http://localhost:11434/v1")
-    out_cfg, out_creds = resolve_model_config("127.0.0.1", cfg, UserCredentials(api_key="", base_url=None))
-    assert out_cfg == cfg
-    assert out_creds.base_url == "http://localhost:11434/v1"
+def test_an_inline_config_without_a_key_is_ignored_for_every_provider(tmp_model_dir: Path, no_env):
+    """There is no keyless provider left in the catalogue, so the rule is
+    unconditional: an inline config with no key falls through to the next
+    tier rather than resolving into a provider that cannot authenticate."""
+    cfg = ModelConfig(provider="openrouter", model="openrouter/auto", context_window=128_000)
+    save_user_config("127.0.0.1", ModelConfig(provider="openai", model="gpt-6.1-sol", context_window=1_050_000))
+    with pytest.raises(ValueError):
+        resolve_model_config("127.0.0.1", cfg, UserCredentials(api_key="", base_url=None))
 
 
 def test_base_url_travels_with_the_inline_config(tmp_model_dir: Path, no_env):
@@ -176,9 +174,9 @@ def test_a_shell_exported_base_url_is_not_silently_ignored(tmp_model_dir: Path, 
 
 
 def test_a_per_user_config_keeps_its_base_url_across_reloads(tmp_model_dir: Path, no_env):
-    cfg = ModelConfig(provider="ollama", model="llama3.1", context_window=128_000,
-                      base_url="http://gpu-box.lan:11434/v1")
+    cfg = ModelConfig(provider="custom", model="qwen2.5-coder:7b", context_window=128_000,
+                      base_url="http://gpu-box.lan:8000/v1")
     save_user_config("127.0.0.1", cfg)
-    out_cfg, out_creds = resolve_model_config("127.0.0.1", None, UserCredentials(api_key="", base_url=None))
-    assert out_cfg.base_url == "http://gpu-box.lan:11434/v1"
-    assert out_creds.base_url == "http://gpu-box.lan:11434/v1"
+    out_cfg, out_creds = resolve_model_config("127.0.0.1", None, UserCredentials(api_key="sk-persisted", base_url=None))
+    assert out_cfg.base_url == "http://gpu-box.lan:8000/v1"
+    assert out_creds.base_url == "http://gpu-box.lan:8000/v1"

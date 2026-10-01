@@ -107,12 +107,11 @@ class AnthropicFactory(BaseFactory):
 
 class OpenAICompatibleFactory(BaseFactory):
     """OpenAI, and everything that converged on the OpenAI chat-completions
-    shape: OpenRouter, Groq, DeepSeek, Ollama, vLLM. One class and a
+    shape: OpenRouter, Groq, DeepSeek, vLLM. One class and a
     different default endpoint, rather than a wrapper per vendor.
 
     Deliberately OpenAIChatModel and not OpenAIResponsesModel: the Responses
-    API is OpenAI's own, and the local runtimes this exists to reach
-    implement chat completions only.
+    API is OpenAI's own, and most gateways implement chat completions only.
     """
 
     provider_id = "openai"
@@ -128,11 +127,7 @@ class OpenAICompatibleFactory(BaseFactory):
         from pydantic_ai.providers.openai import OpenAIProvider
 
         base_url = creds.base_url or self.default_base_url
-        # Ollama ignores the key but OpenAIProvider still wants one; the
-        # catalog flags the provider as keyless_ok and the resolver is what
-        # lets a keyless inline config through, so this is the only place the
-        # placeholder appears.
-        kwargs: dict[str, object] = {"api_key": creds.api_key or "not-needed"}
+        kwargs: dict[str, object] = {"api_key": creds.api_key}
         if base_url is not None:
             kwargs["base_url"] = base_url
         provider = OpenAIProvider(**kwargs)  # type: ignore[arg-type]

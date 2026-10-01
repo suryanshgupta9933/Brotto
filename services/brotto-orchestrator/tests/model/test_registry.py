@@ -94,7 +94,7 @@ def test_the_registry_builds_on_the_request_shape_not_the_provider_id():
     assert isinstance(PROVIDER_REGISTRY["minimax"], AnthropicFactory)
     assert isinstance(PROVIDER_REGISTRY["anthropic"], AnthropicFactory)
     assert isinstance(PROVIDER_REGISTRY["gemini"], GeminiFactory)
-    for pid in ("openai", "openrouter", "deepseek", "groq", "ollama", "custom"):
+    for pid in ("openai", "openrouter", "deepseek", "groq", "custom"):
         assert isinstance(PROVIDER_REGISTRY[pid], OpenAICompatibleFactory), pid
 
 
@@ -108,22 +108,13 @@ def test_gemini_factory_builds_a_google_model():
 
 
 def test_an_openai_compatible_vendor_is_one_class_with_a_different_endpoint():
-    """The point of the adapter: Ollama and OpenRouter are the same factory
+    """The point of the adapter: OpenRouter and OpenAI are the same factory
     pointed at a different URL, not a wrapper per vendor."""
-    ollama = PROVIDER_REGISTRY["ollama"]
+    openrouter = PROVIDER_REGISTRY["openrouter"]
     openai = PROVIDER_REGISTRY["openai"]
-    assert type(ollama) is type(openai)
-    assert ollama.default_base_url != openai.default_base_url
-    assert ollama.default_models() != openai.default_models()
-
-
-def test_a_keyless_local_runtime_still_gets_a_placeholder_key():
-    """OpenAIProvider demands a key even for Ollama, which ignores it."""
-    from pydantic_ai.models.openai import OpenAIChatModel
-    model = PROVIDER_REGISTRY["ollama"].build(
-        "llama3.1", UserCredentials(api_key="", base_url=None)
-    )
-    assert isinstance(model, OpenAIChatModel)
+    assert type(openrouter) is type(openai)
+    assert openrouter.default_base_url != openai.default_base_url
+    assert openrouter.default_models() != openai.default_models()
 
 
 def test_minimax_uses_anthropic_factory_with_minimax_base_url():

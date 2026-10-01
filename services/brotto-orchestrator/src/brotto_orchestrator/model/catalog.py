@@ -106,8 +106,6 @@ class ProviderInfo:
     # OpenRouter's catalogue are reachable. When False a typo fails at the gate
     # instead of costing a step.
     accepts_any_model: bool = False
-    # A local runtime may have no key at all. Only Ollama is this today.
-    keyless_ok: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -116,7 +114,6 @@ class ProviderInfo:
             "accepts_base_url": self.accepts_base_url,
             "default_base_url": self.default_base_url,
             "accepts_any_model": self.accepts_any_model,
-            "keyless_ok": self.keyless_ok,
             "models": [m.to_dict() for m in self.models],
         }
 
@@ -206,8 +203,6 @@ _M3 = Pricing(
 )
 _M27 = Pricing(0.30, 1.20, 0.06, 0.375)
 _M27_HS = Pricing(0.60, 2.40, 0.06, 0.375)
-# Local inference is free, and unlike a missing price this one is certain.
-_LOCAL = Pricing(0.0, 0.0, 0.0, 0.0)
 
 # Order is preference. MiniMax-M3.1-Flash-Preview is the Token Plan model
 # (covered by Claude Code Token Plan subscriptions) and has no pay-as-you-go
@@ -315,15 +310,6 @@ PROVIDER_CATALOG: dict[str, ProviderInfo] = {
             ModelInfo("openai/gpt-oss-20b", 131_072, _GROQ_20B),
         ),
     ),
-    "ollama": ProviderInfo(
-        id="ollama",
-        label="Ollama (local)",
-        accepts_base_url=True,
-        default_base_url="http://localhost:11434/v1",
-        accepts_any_model=True,
-        keyless_ok=True,
-        models=(ModelInfo("llama3.1", 128_000, _LOCAL),),
-    ),
     "custom": ProviderInfo(
         id="custom",
         label="Custom (OpenAI-compatible)",
@@ -332,11 +318,6 @@ PROVIDER_CATALOG: dict[str, ProviderInfo] = {
         models=(),
     ),
 }
-
-
-def is_keyless_ok(provider: str) -> bool:
-    info = PROVIDER_CATALOG.get(provider)
-    return info is not None and info.keyless_ok
 
 
 def get(provider: str) -> ProviderInfo | None:

@@ -13,30 +13,38 @@
 const FALLBACK = {
   providers: [
     { id: 'anthropic', label: 'Anthropic', accepts_base_url: false, default_base_url: null,
-      accepts_any_model: false, keyless_ok: false,
+      accepts_any_model: false,
       models: [
-        { id: 'claude-sonnet-5-5', context_window: 1000000 },
-        { id: 'claude-haiku-4-5', context_window: 200000 },
+        // `label` mirrors the wire shape (ModelInfo.to_dict sends
+        // `label or id`), and `vision` is only ever true where a vendor has
+        // actually said so — Anthropic says every current model takes image
+        // input. A fallback is not a copy to keep in sync: anything missing
+        // here arrives on the next successful fetch.
+        { id: 'claude-sonnet-5-5', label: 'claude-sonnet-5-5', context_window: 1000000, vision: true },
+        { id: 'claude-haiku-4-5', label: 'claude-haiku-4-5', context_window: 200000, vision: true },
       ] },
     { id: 'openai', label: 'OpenAI', accepts_base_url: false, default_base_url: null,
-      accepts_any_model: false, keyless_ok: false,
+      accepts_any_model: false,
       models: [
-        { id: 'gpt-6.1-sol', context_window: 1050000 },
-        { id: 'gpt-6-luna', context_window: 1050000 },
+        { id: 'gpt-6.1-sol', label: 'gpt-6.1-sol', context_window: 1050000, vision: true },
+        { id: 'gpt-6-luna', label: 'gpt-6-luna', context_window: 1050000, vision: true },
       ] },
     { id: 'minimax', label: 'MiniMax', accepts_base_url: false,
       default_base_url: 'https://api.minimax.io/anthropic',
-      accepts_any_model: false, keyless_ok: false,
+      accepts_any_model: false,
       models: [
-        { id: 'MiniMax-M3.1-Flash-Preview', context_window: 1000000 },
-        { id: 'MiniMax-M3', context_window: 1000000 },
-        { id: 'MiniMax-M2.7', context_window: 204800 },
-        { id: 'MiniMax-M2.7-highspeed', context_window: 204800 },
+        { id: 'MiniMax-M3.1-Flash-Preview', label: 'MiniMax-M3.1-Flash-Preview', context_window: 1000000, vision: true },
+        { id: 'MiniMax-M3', label: 'MiniMax-M3', context_window: 1000000, vision: true },
+        // MiniMax calls the M3 pair "Multimodal" and says nothing about image
+        // input on the M2.7 pair, so vision is left unset rather than guessed.
+        { id: 'MiniMax-M2.7', label: 'MiniMax-M2.7', context_window: 204800, vision: false },
+        { id: 'MiniMax-M2.7-highspeed', label: 'MiniMax-M2.7-highspeed', context_window: 204800, vision: false },
       ] },
-    { id: 'ollama', label: 'Ollama (local)', accepts_base_url: true,
-      default_base_url: 'http://localhost:11434/v1',
-      accepts_any_model: true, keyless_ok: true,
-      models: [{ id: 'llama3.1', context_window: 128000 }] },
+    // `custom` is a base URL plus a free-text model id, and it is the only
+    // provider here that takes an endpoint. Drop it and the offline panel has
+    // no way to reach the base-URL field at all.
+    { id: 'custom', label: 'Custom (OpenAI-compatible)', accepts_base_url: true,
+      default_base_url: null, accepts_any_model: true, models: [] },
   ],
 };
 

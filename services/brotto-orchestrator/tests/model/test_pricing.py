@@ -71,14 +71,8 @@ def test_the_four_counts_add_up():
 
 
 def test_no_usage_costs_nothing_rather_than_none():
-    """A turn on a free local runtime is 0.00, not unknown."""
-    assert price_usage(lookup("ollama", "llama3.1"), input_tokens=0) == 0.0
-
-
-def test_a_local_runtime_is_free():
-    local = lookup("ollama", "llama3.1")
-    assert local.pricing == Pricing(0.0, 0.0, 0.0, 0.0)
-    assert price_usage(local, input_tokens=10**9, output_tokens=10**9) == 0.0
+    """A turn that spent no tokens is 0.00, not unknown."""
+    assert price_usage(lookup("anthropic", "claude-sonnet-5-5"), input_tokens=0) == 0.0
 
 
 def test_just_under_the_threshold_is_priced_at_the_base_rate():

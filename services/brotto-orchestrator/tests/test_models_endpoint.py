@@ -33,16 +33,15 @@ def test_every_catalog_provider_is_served(client):
 def test_the_response_carries_the_flags_the_panel_renders_by(client):
     providers = {p["id"]: p for p in client.get("/v1/models").json()["providers"]}
     # A base-URL box, prefilled.
-    assert providers["ollama"]["accepts_base_url"] is True
-    assert providers["ollama"]["default_base_url"] == "http://localhost:11434/v1"
+    assert providers["deepseek"]["accepts_base_url"] is True
+    assert providers["deepseek"]["default_base_url"] == "https://api.deepseek.com/v1"
     # A fixed endpoint — no box, so the panel must not offer one.
     assert providers["minimax"]["accepts_base_url"] is False
     # Free text rather than a select, so OpenRouter's catalogue and
     # `qwen2.5-coder:7b` are reachable at all.
     assert providers["openrouter"]["accepts_any_model"] is True
-    # Ollama has no key; every other provider does.
-    assert providers["ollama"]["keyless_ok"] is True
-    assert providers["anthropic"]["keyless_ok"] is False
+    # Every provider needs a key, so the panel always shows the key box.
+    assert all("keyless_ok" not in p for p in providers.values())
 
 
 def test_models_ship_their_context_window_and_pricing(client):

@@ -128,7 +128,7 @@ replaced three hand-kept copies that had already drifted:
 - `minimax` — Anthropic request shape, `base_url=https://api.minimax.io/anthropic`; `MiniMax-M3.1-Flash-Preview` (1M, Token Plan), `MiniMax-M3` (1M, pay-as-you-go — 402 without credits), `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`
 - `gemini` — `gemini-3.8-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` (all 1.05M)
 - `deepseek` — `deepseek-v4-pro`, `deepseek-flash` (1M); `groq` — `openai/gpt-oss-120b`, `openai/gpt-oss-20b` (131K)
-- `openrouter`, `ollama`, `custom` — any model id, editable endpoint
+- `openrouter`, `custom` — any model id, editable endpoint
 
 Every id and rate was re-read from the vendor's own documentation on 2026-10-01; the
 superseded set (claude-3-5-\*, gpt-4o, o1, gemini-1.5/2.0, deepseek-chat/reasoner,
@@ -136,9 +136,9 @@ Groq's Llama ids) was deleted, and several of those had shut down entirely.
 
 Dispatch is on the vendor's **request shape** (`api_shape`), not its id: three factories
 (`AnthropicFactory`, `GeminiFactory`, `OpenAICompatibleFactory`), not nine. The
-OpenAI-compatible one is the convergence bet — OpenRouter, Groq, DeepSeek, Ollama and vLLM
+OpenAI-compatible one is the convergence bet — OpenRouter, Groq, DeepSeek and vLLM
 are the same class with a different default URL, using `OpenAIChatModel` because those
-runtimes implement chat completions and not the Responses API. Ollama is `keyless_ok`.
+gateways implement chat completions and not the Responses API. Every provider needs a key; there is no keyless local runtime.
 
 `base_url` lives on `ModelConfig` (the half that persists), not on the credentials (the half
 that is a secret), so a self-hosted user stops re-pasting the URL every browser restart.

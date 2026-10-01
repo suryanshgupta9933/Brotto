@@ -19,7 +19,6 @@ edit. It replaced three hand-kept copies that had already drifted.
 | `openrouter` | openai | any model id; endpoint editable |
 | `deepseek` | openai | deepseek-v4-pro, deepseek-flash; 1M |
 | `groq` | openai | openai/gpt-oss-120b, openai/gpt-oss-20b; 131K |
-| `ollama` | openai | **keyless**, any model id, defaults to `http://localhost:11434/v1` |
 | `custom` | openai | any model id, no models, no default endpoint |
 
 **The lineup is re-read from each vendor's own page, not remembered.** It was
@@ -71,16 +70,16 @@ a fact about the vendor, which is why it lives in the catalog and not in
 **Three factories, not nine.** `AnthropicFactory`, `GeminiFactory` and
 `OpenAICompatibleFactory`, each carrying a `provider_id` that `_build_registry`
 sets from the catalog key. `OpenAICompatibleFactory` is the whole OpenAI-
-convergence bet: OpenRouter, Groq, DeepSeek, Ollama, vLLM and any self-hosted
-endpoint are the same class with a different default URL. A previous
+convergence bet: OpenRouter, Groq, DeepSeek and any self-hosted endpoint are
+the same class with a different default URL. A previous
 `_VendoredOpenAI` subclass existed to carry the id and was removed once
 `provider_id` moved onto the base — it was also the reason `AnthropicFactory`
 validated model ids against *Anthropic's* list, so the minimax factory rejected
 `MiniMax-M3` for a minimax user.
 
 **`OpenAIChatModel`, not `OpenAIResponsesModel`.** The Responses API is
-OpenAI's own. Ollama, vLLM, DeepSeek and most gateways implement chat
-completions only, and reaching them is the entire point of the adapter.
+OpenAI's own. vLLM, DeepSeek and most gateways implement chat completions
+only, and reaching them is the entire point of the adapter.
 
 **Per-task resolution** (`resolver.resolve_model_config`):
 1. inline_config / inline_creds (from extension's task_start)
@@ -91,8 +90,8 @@ completions only, and reaching them is the entire point of the adapter.
 
 `UserCredentials.base_url` is what the factories read; `ModelConfig.base_url` is
 where it is stored. The split is deliberate: the config is what `store.py`
-persists, so an Ollama user does not re-paste the URL every browser restart the
-way they re-paste their key, while the URL still travels next to the key on the
+persists, so a self-hosted user does not re-paste the URL every browser restart
+the way they re-paste their key, while the URL still travels next to the key on the
 one path that builds a provider.
 
 `resolver._with_base_url` is what joins the halves, and it is the reason the
@@ -127,15 +126,19 @@ env -u ANTHROPIC_BASE_URL -u AGENT_BASE_URL \
 `AGENT_BASE_URL` is the provider-neutral name and is read first;
 `ANTHROPIC_BASE_URL` is kept for the configs that predate it.
 
-### Ollama has no key
+### There is no keyless provider
 
-`resolver` deliberately ignores an inline config that arrives without one — a
-rule this file documents at length. Rather than weaken it, `ProviderInfo.
-keyless_ok` marks the one provider it applies to (Ollama, today) and
-`_authenticates` honours exactly that. Every other provider keeps the old
-behaviour, so `test_keyless_inline_config_is_ignored` still passes. The panel
-hides the API-key box for a keyless provider, so the user is not told to fill in
-something that is ignored.
+`resolver` deliberately ignores an inline config that arrives without a key — a
+rule this file documents at length. It used to carry an exception, marked by
+`ProviderInfo.keyless_ok`, for `ollama`; the local-runtime case is gone and so
+is the flag. `_authenticates` is now unconditional (`return bool(creds.api_key)`),
+`is_keyless_ok()` and the registry's `"not-needed"` placeholder key are deleted,
+and the panel's API-key box is never hidden. Every provider in the catalogue
+needs a key, so there is no keyless case worth preserving — and a provider that
+existed only to justify a concept is the wrong thing to keep. Ollama was removed
+from the catalogue for product reasons (BYOB/BYOK, ship fast, no local-AI
+hassle); this was the cleanup it made possible. `custom` still reaches a local
+runtime for a self-hoster, because it takes a base URL.
 
 ### Pricing
 
@@ -245,9 +248,8 @@ auth env at startup: ANTHROPIC_API_KEY=set (len=125)  ANTHROPIC_AUTH_TOKEN=set (
 
 Tiers: inline (extension) → per-user file → env. Two rules that aren't obvious:
 
-- An inline config **without** a key is ignored and falls through — unless the
-  catalog marks its provider `keyless_ok`, which today only Ollama is. The
-  extension stores `model_config` in `chrome.storage.local` (survives restart)
+- An inline config **without** a key is ignored and falls through, for every
+  provider without exception. The extension stores `model_config` in `chrome.storage.local` (survives restart)
   but the key in `chrome.storage.session` (does not), so every browser restart
   it sends a config and no key. Honoring that gave a keyless provider and "Set
   `ANTHROPIC_API_KEY`" while shadowing a working `.env`.

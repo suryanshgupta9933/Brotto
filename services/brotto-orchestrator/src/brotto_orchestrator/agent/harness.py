@@ -21,7 +21,6 @@ from pydantic_ai.exceptions import (
     UserError, ModelHTTPError, ModelRetry, UnexpectedModelBehavior,
 )
 
-from brotto_orchestrator.model.catalog import is_keyless_ok
 from brotto_orchestrator.model.config import UserCredentials
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
 from brotto_orchestrator.model.resolver import resolve_model_config
@@ -1175,12 +1174,7 @@ def _resolve_model(deps: AgentDeps) -> tuple:
     cached = getattr(deps, "_model_config", None)
     if cached is None:
         inline = getattr(deps, "model_config", None)
-        # Ollama needs no key, so a provider the catalog marks keyless gets
-        # credentials even with an empty api_key. Every other provider keeps
-        # the "no key means no inline config" rule the resolver documents.
-        has_creds = bool(getattr(deps, "api_key", None)) or (
-            inline is not None and is_keyless_ok(getattr(inline, "provider", ""))
-        )
+        has_creds = bool(getattr(deps, "api_key", None))
         cached = resolve_model_config(
             client_ip=getattr(deps, "client_ip", "127.0.0.1"),
             inline_config=inline,
