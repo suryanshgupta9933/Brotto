@@ -469,6 +469,9 @@ function renderReplayMetrics(doc) {
 // bubble when it ran — and must produce none when it is replayed, or the
 // transcript gains steps the user never saw.
 const INTERNAL_ACTIONS = new Set([
+  // The two write actions are gone from the schema but stay here: audit
+  // documents already on disk contain turns that used them, and replaying
+  // one must not gain a bubble the user never saw live.
   'write_scratchpad', 'append_scratchpad', 'read_scratchpad', 'recall_memory',
 ]);
 
@@ -1528,15 +1531,11 @@ function setPhase(phase, message) {
   // interval that the line above had just restarted, so ACTIVE stayed frozen
   // at the answer for the rest of the run.
   if (TERMINAL_PHASES.has(phase)) { stopTimer(); state.taskInFlight = false; }
-  // ponytail: the live "still working" bubble must stop blinking the moment
-  // the agent stops producing — which includes 'paused', because a pause is
-  // the agent asking for approval, a login, or an answer, not the agent
-  // working. finishAssistantMessage was the intended closer but had no call
-  // site, so the caret blinked for the life of the panel and every later
-  // step merged into that one bubble.
-  if (phase !== 'executing' && currentAssistantMsg) {
-    finishAssistantMessage({ title: currentAssistantMsg.textNode.nodeValue });
-  }
+  // ponytail: the live "working" line must go the moment the agent stops
+  // producing — which includes 'paused', because a pause is the agent asking
+  // for approval, a login, or an answer, not the agent working. Without this
+  // the spinner turns for the life of the panel, which reads as a hang.
+  if (phase !== 'executing') dropWorkingMessage();
   // ponytail: a pause is the agent blocked on the *user* (approval, login,
   // clarify) or on a site that never answers. There are five setPhase('paused')
   // call sites and no timeout on any of them, so a reply that never arrives
@@ -2983,85 +2982,206 @@ function iconFor(kind) {
   }
 }
 
-// ── Live assistant message (current "working" message being updated) ───────
+// ── Live working message ──────────────────────────────────────────────────
+// One transient bubble, swapped in place, removed the moment the real step
+// lands. It is never part of the transcript: a permanent "Reading the page"
+// line above the step that says the same thing better is clutter.
 let currentAssistantMsg = null;
-let currentAssistantLogs = [];
 
-function startAssistantMessage({ icon, title, meta }) {
-  currentAssistantMsg = null;
-  currentAssistantLogs = [];
+// ponytail: the panel owns this wording, not the server. The server sends a
+// phase key; English is presentation and this is the only thing that renders
+// it, so a line edit never needs a server deploy.
+//
+// Random, with one rule: never the same line twice running. Plain random
+// repeats a line about one time in ten, and two identical lines in a row is
+// the one thing that reads as a stuck animation — which is the exact problem
+// the varied wording exists to fix. Everything else is free rein, so the set
+// is wide and the phrasing is allowed to be a bit chatty.
+//
+// The lines still have to describe the phase that is actually running. A
+// narration the user cannot check against reality is worse than a bare
+// spinner, however good it reads.
+const WORKING_LINES = {
+  observe: [
+    'Reading the page',
+    'Looking at what is on screen',
+    'Checking the page',
+    'Taking in what is there',
+    'Reading what is on the page',
+    'Getting the lay of the land',
+    'Sizing up the screen',
+    'Scanning what is here',
+    'Looking around',
+    'Reading the room',
+  ],
+  plan: [
+    'Deciding what to do next',
+    'Working out the next step',
+    'Thinking it through',
+    'Figuring out the next move',
+    'Working out what comes next',
+    'Considering the options',
+    'Picking a direction',
+    'Thinking about what to do',
+    'Weighing it up',
+    'Deciding on an approach',
+  ],
+};
+const workingLast = { observe: null, plan: null };
+let workingSwapAt = 0;
+let workingSwapTimer = null;
+
+function workingLine(kind) {
+  const list = WORKING_LINES[kind];
+  if (!list) return null;
+  let line = list[Math.floor(Math.random() * list.length)];
+  if (list.length > 1 && line === workingLast[kind]) {
+    line = list[(list.indexOf(line) + 1) % list.length];
+  }
+  workingLast[kind] = line;
+  return line;
+}
+
+// ponytail: variety as data, not mechanism. A spinner is a frame list and a
+// ticker, so a new look is a new entry rather than new code.
+//
+// The shared rule, so a sixth one is easy to add in the right style: a
+// monochrome block-drawing glyph, mono, no curves anywhere (the sheet sets
+// border-radius: 0 globally, so a circle is the one shape this panel has no
+// vocabulary for), 4–10 frames, and its own cadence so two spinners never
+// tick in lockstep. Same shape and same speed across the set would be five
+// spinners that read as one.
+//
+//   frames — the glyphs, in order
+//   ms     — its own interval
+//   back   — true ping-pongs at the ends instead of wrapping, so the motion
+//            reverses rather than snapping from last back to first
+const SPINNER_FRAMES = {
+  dots: {
+    frames: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
+    ms: 90,
+  },
+  quadrant: {
+    frames: ['▖', '▘', '▝', '▗'],
+    ms: 200,
+  },
+  cells: {
+    frames: ['▛', '▜', '▙', '▟'],
+    ms: 150,
+    back: true,
+  },
+  bar: {
+    frames: ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'],
+    ms: 110,
+    back: true,
+  },
+  arrow: {
+    frames: ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'],
+    ms: 130,
+  },
+};
+const SPINNER_KEYS = Object.keys(SPINNER_FRAMES);
+let spinTimer = null;
+let spinSet = null;
+let spinIndex = 0;
+let spinDir = 1;
+
+// Honours prefers-reduced-motion in JS, which the stylesheet's reduced-motion
+// block cannot: this is a ticker, not a CSS animation. A still glyph in the
+// same place carries the same information with none of the movement.
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+function startSpinner(el) {
+  stopSpinner();
+  spinSet = SPINNER_FRAMES[SPINNER_KEYS[Math.floor(Math.random() * SPINNER_KEYS.length)]];
+  spinIndex = 0;
+  spinDir = 1;
+  el.textContent = spinSet.frames[0];
+  if (reduceMotion.matches) return;
+  spinTimer = setInterval(() => {
+    if (spinSet.back) {
+      if (spinIndex + spinDir >= spinSet.frames.length || spinIndex + spinDir < 0) {
+        spinDir = -spinDir;
+      }
+      spinIndex += spinDir;
+    } else {
+      spinIndex = (spinIndex + 1) % spinSet.frames.length;
+    }
+    el.textContent = spinSet.frames[spinIndex];
+  }, spinSet.ms);
+}
+
+function stopSpinner() {
+  clearInterval(spinTimer);
+  spinTimer = null;
+}
+
+function startAssistantMessage(title) {
+  dropWorkingMessage();
 
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
   const msg = document.createElement('div');
-  msg.className = 'message assistant';
+  msg.className = 'message assistant working';
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
 
-  const iconEl = document.createElement('span');
-  iconEl.style.marginRight = '5px';
-  iconEl.style.opacity = '0.6';
-  iconEl.innerHTML = icon || '&#8594;';
-
   const textNode = document.createTextNode(title || 'Working…');
-  // The caret is the only "still typing" signal the chat has. finishAssistant-
-  // Message rewrites the bubble's innerHTML, so it clears itself.
-  const caret = document.createElement('span');
-  caret.className = 'caret';
-  bubble.appendChild(iconEl);
+
+  // One mark, not two. A leading dot alongside a spinner said the same thing
+  // twice, and with the spinner now carrying the motion the dot only competed
+  // with the line it was labelling.
+  const spinner = document.createElement('span');
+  spinner.className = 'working-spinner';
+
   bubble.appendChild(textNode);
-  bubble.appendChild(caret);
+  bubble.appendChild(spinner);
 
   msg.appendChild(bubble);
   messagesEl.appendChild(msg);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 
-  currentAssistantMsg = { el: msg, bubble, textNode };
+  currentAssistantMsg = { el: msg, textNode };
+  workingSwapAt = Date.now();
+  startSpinner(spinner);
   return currentAssistantMsg;
 }
 
-function appendLogToAssistant(logText) {
+function setWorkingText(text) {
   if (!currentAssistantMsg) return;
-  const existing = currentAssistantMsg.bubble.querySelector('.inline-log');
-  if (existing) {
-    existing.textContent += ' · ' + logText;
-  } else {
-    const logsDiv = document.createElement('div');
-    logsDiv.className = 'inline-log';
-    logsDiv.textContent = logText;
-    currentAssistantMsg.bubble.appendChild(logsDiv);
-  }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
-function finishAssistantMessage({ icon, title, meta }) {
-  if (!currentAssistantMsg) {
-    // Fallback: just append as a regular message
-    appendMessage({ role: 'assistant', text: `${icon} ${title}${meta ? ' · ' + meta : ''}` });
+  // Hold a line long enough to read. A cached page answers in under a second
+  // and the two phase lines would otherwise flash past unread, which looks
+  // more broken than the silence this replaced.
+  const wait = 700 - (Date.now() - workingSwapAt);
+  clearTimeout(workingSwapTimer);
+  if (wait <= 0) {
+    currentAssistantMsg.textNode.nodeValue = text;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    workingSwapAt = Date.now();
     return;
   }
-  // Finalize the bubble
-  currentAssistantMsg.bubble.innerHTML = '';
-  const iconEl = document.createElement('span');
-  iconEl.style.marginRight = '6px';
-  iconEl.style.opacity = '0.5';
-  iconEl.innerHTML = icon || '&#8594;';
-  const titleText = document.createTextNode(title || '');
-  currentAssistantMsg.bubble.appendChild(iconEl);
-  currentAssistantMsg.bubble.appendChild(titleText);
+  const msg = currentAssistantMsg;
+  workingSwapTimer = setTimeout(() => {
+    // The bubble can be dropped by a step card while this is pending.
+    if (currentAssistantMsg !== msg) return;
+    msg.textNode.nodeValue = text;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    workingSwapAt = Date.now();
+  }, wait);
+}
 
-  if (meta) {
-    const metaEl = document.createElement('div');
-    metaEl.className = 'inline-log';
-    metaEl.textContent = meta;
-    currentAssistantMsg.bubble.appendChild(metaEl);
-  }
-
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+function dropWorkingMessage() {
+  clearTimeout(workingSwapTimer);
+  workingSwapTimer = null;
+  // Before the null check, not after: the ticker outlives the bubble it was
+  // animating otherwise, and writing frames into a detached node every 90ms
+  // is the kind of leak that only shows up after a long session.
+  stopSpinner();
+  if (!currentAssistantMsg) return;
+  currentAssistantMsg.el.remove();
   currentAssistantMsg = null;
-  currentAssistantLogs = [];
 }
 
 // ── Message listener (all event types from background.ts) ──────────────────
@@ -3230,6 +3350,9 @@ function handleEvent(message) {
       // the bubble + button out before rendering the new step so the
       // user sees a continuous flow, not two bubbles stacked.
       clearLoginPrompt();
+      // The step bubble below says this better than the working line, so the
+      // working line goes rather than being left spinning one row above it.
+      dropWorkingMessage();
       state.stepCount = Math.max(state.stepCount, message.index !== undefined ? message.index + 1 : state.stepCount + 1);
       updateStepCount();
       const icon = iconFor(message.iconKind || '');
@@ -3272,6 +3395,11 @@ function handleEvent(message) {
       break;
 
     case 'context_update': {
+      // ponytail: the server sends this INSTEAD of step_progress when a step
+      // produced no visible action, so it means the step ended with nothing
+      // to show. Leaving the spinner up would claim the agent is still busy
+      // through the whole next observe window.
+      dropWorkingMessage();
       // ponytail: scratchpad-only step (no external action visible to
       // bubble). Backend still emits context so the CONTEXT cell updates
       // on every step.
@@ -3412,19 +3540,15 @@ function handleEvent(message) {
     case 'canonical_step': {
       // ponytail: any canonical step past a login wall clears the prompt.
       clearLoginPrompt();
-      const icon = message.kind === 'action' ? '&#9654;' : message.kind === 'observation' ? '&#128065;' : '&#10003;';
-      const titleText = (message.reasoning && message.reasoning.trim())
+      // A known phase key gets panel-owned wording; anything else falls back
+      // to the server's own text so an unrecognised kind still shows something.
+      const line = workingLine(message.kind);
+      const titleText = line
+        || (message.reasoning && message.reasoning.trim())
         || deriveReasoningFromAction(message.summary || '', message.kind)
         || 'Working on it…';
-      if (!currentAssistantMsg) {
-        startAssistantMessage({ icon, title: titleText });
-      } else {
-        // Each heartbeat supersedes the last: the bubble is one live "still
-        // working" line, not one message per step. Previously this branch
-        // did nothing, so every step's text was dropped.
-        currentAssistantMsg.textNode.nodeValue = titleText;
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      }
+      if (currentAssistantMsg) setWorkingText(titleText);
+      else startAssistantMessage(titleText);
       break;
     }
 
