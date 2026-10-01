@@ -142,6 +142,9 @@
     }
     /* Buttons invert on hover; the pill is a button now, so it must too. */
     .model-pill:hover, .model-pill:focus-visible { background: var(--ink); color: var(--paper); }
+    /* Unset model. Dashed, because nothing was chosen here — a solid border
+       reads as a settled value the way the old "Default" label did. */
+    .model-pill.no-model { border-style: dashed; color: var(--ink-3); }
     .model-pill-name {
       position: relative;
       flex: 1 1 auto;

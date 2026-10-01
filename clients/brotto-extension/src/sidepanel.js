@@ -72,9 +72,16 @@ if ($modelSave) {
 // Storage is the only source the panel has — the server's resolved config
 // (env var, per-IP file) isn't visible from here, so the pill shows what
 // this browser last saved and nothing more.
+//
+// "Default" was the wrong word for the unset case: it reads as a neutral
+// choice, and in the header it was mistaken for a leftover security-mode
+// selector. "Server default" names what it actually means — this browser
+// chose nothing, and the server decides.
+const MODEL_UNSET_LABEL = 'Server default';
+
 function setModelPill(model) {
   if (!modelPillName) return;
-  const label = model || 'Default';
+  const label = model || MODEL_UNSET_LABEL;
   // Two copies of the name: the track travels exactly one copy's width, so
   // the tail hands off to the head without a visible seam.
   const track = document.createElement('div');
@@ -88,7 +95,12 @@ function setModelPill(model) {
     track.appendChild(copy);
   }
   modelPillName.replaceChildren(track);
-  if (modelPill) modelPill.title = `${model ? 'Model: ' + model : 'Model: server default'} — open settings to change it`;
+  if (modelPill) {
+    modelPill.classList.toggle('no-model', !model);
+    modelPill.title = model
+      ? `Model: ${model} — open settings to change it`
+      : 'No model chosen in this browser — the server picks. Open settings to choose one.';
+  }
   fitModelPill();
   // Geist may still be loading when this first runs, which would measure the
   // fallback face and under-report the overflow.
@@ -1371,6 +1383,22 @@ async function sendUserMessage() {
   state.taskCount = continuing ? (state.taskCount || 1) + 1 : 1;
   clearMessages({ keepTranscript: continuing });
   appendMessage({ role: 'user', text });
+  // ponytail: an unset model is a warning, not a block. The server usually
+  // does have one — BROTTO_FORCE_ENV_MODEL, AGENT_MODEL, or a per-user file —
+  // and none of those are visible from here, so refusing to start would break
+  // the ordinary case where the server is configured and the browser isn't.
+  // What it must not do is let an unconfigured run look configured, which is
+  // what the header's neutral "Default" label did.
+  const stored = await chrome.storage.local.get('modelConfig');
+  const rawCfg = stored.modelConfig;
+  const chosen = rawCfg && typeof rawCfg.provider === 'string' ? rawCfg : rawCfg?.model_config;
+  if (!chosen) {
+    appendFailureBubble({
+      title: 'No model chosen in this browser',
+      body: "Brotto will run on your server's default model. To use a different one, or to bring your own key, open **Settings → Model**.",
+      footer: 'The pill in the header shows which model is in use.',
+    });
+  }
   state.lastGoal = text;
   goalEl.value = '';
   goalEl.style.height = 'auto';
@@ -1777,6 +1805,9 @@ const FAILURE_NOTE = {
 
   // ── Brotto's own server ──
   internal: "Brotto's server hit an error. The details are in its log.",
+  // `task_error` carries the raw exception, which this run shows in the
+  // bubble footer — so it can't claim the details are only in the log.
+  server_error: "Brotto's server hit an error and stopped the run. The details are below.",
   cdp_preflight_failed: 'Brotto could not attach to the browser tab. Close DevTools on that page and try again.',
   policy_preflight: 'Brotto refused the task: the site is on your blocked list.',
   policy_blocked: 'Brotto stopped: the task was blocked by your security policy.',
@@ -3474,8 +3505,20 @@ function handleEvent(message) {
     // ponytail: the session-create retry in startRelay. A server that is
     // down used to fail as one silent throw; the user saw the panel sit on
     // "Starting…" with nothing to explain it.
+    //
+    // The sentence goes in the toast, not the pill. The header has no room
+    // for it — "Server unreachable… (retry 1 of 6)" truncated mid-word and
+    // pushed the rest of the header off screen. The pill keeps the same
+    // one-word shape as its siblings (Connected / Connecting… / Disconnected
+    // / Idle), and the retry count is live information: one toast replacing
+    // the next restates it in place rather than stacking six identical lines.
     case 'server_unreachable':
-      setConnPill('reconnecting', `Server unreachable… (retry ${message.attempt ?? '?'} of ${message.of ?? '?'})`);
+      setConnPill('reconnecting', 'Reconnecting');
+      toast(
+        `Server unreachable — retrying (${message.attempt ?? '?'}/${message.of ?? '?'})`,
+        'bad',
+        4000,
+      );
       break;
 
     case 'canonical_status': {
@@ -3611,6 +3654,29 @@ function handleEvent(message) {
         role: 'done',
         text: messageText,
         finalAnswer: message.finalAnswer,
+      });
+      break;
+
+    case 'task_error':
+      // ponytail: main.py sends this from its `finally` for anything the
+      // harness raised and nobody handled — an unresolvable model config, a
+      // resolver raise, a bug. It used to have no case here at all, so the
+      // frame was dropped: no stopTimer, no setOutcome, no card cleanup. The
+      // clock ran forever and OUTCOME sat on WORKING while the server was
+      // already dead — indistinguishable from a slow step, and the socket
+      // close on top of it started a reconnect that could never succeed.
+      //
+      // A server frame with no case here is an infinite run. Adding one to
+      // the set below is the whole fix; see test-no-orphan-frames.test.js.
+      if (alreadyTerminal('task_error')) break;
+      clearBlockingCards();
+      void saveSession({ status: 'failed', elapsed: timerActiveEl && timerActiveEl.textContent });
+      setOutcome('failed', message.error, 'server_error');
+      stopTimer();
+      setPhase('error', FAILURE_NOTE.server_error);
+      appendFailureBubble({
+        title: FAILURE_NOTE.server_error,
+        footer: String(message.error ?? '').trim(),
       });
       break;
 
@@ -3846,7 +3912,7 @@ goalEl.focus();
     // — but appendMessage writes class "message error" (a space), so the
     // selector never matched and the notice sat in the chat forever.
     state.serverReachable = false;
-    setConnPill(null, 'Server unreachable');
+    setConnPill('error', 'Disconnected');
     toast('Server unreachable — settings still work locally', 'bad', 5000);
   }
   // Last, so it runs whether or not the health probe succeeded: the panel
