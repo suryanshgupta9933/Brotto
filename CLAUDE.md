@@ -222,6 +222,14 @@ read-only legacy field so sidecars already on disk keep parsing.
   observation that produced it; a cached tree hands the model refs that resolve to
   nothing or, worse, to the wrong element. Page text is safe precisely because it
   carries no refs.
+- **Recall is for pages you have navigated away from, never the page in front
+  of you.** Removing the write action moved the cost rather than removing it:
+  the prompt's *"the summary must be grounded in memory… recall the relevant
+  entries to verify the wording"* made a live Gmail run call `recall_memory` on
+  step 0 of *"Summarise today's inbox"*, re-reading ~11K chars the prompt was
+  already carrying in full. The manifest entry whose `url` equals `current_url`
+  is now marked `← THIS PAGE … do not recall`; earlier pages stay unmarked, or
+  "go back to that page" becomes unreachable.
 - **`body` goes to a second sidecar, not into the audit document.** `set_scratchpad`
   runs every step and rewrites the whole file; `model_dump()` carried `body`,
   which was free while nothing was captured and is 200KB per 20 pages now that

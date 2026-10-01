@@ -185,6 +185,25 @@ prompt. `set_scratchpad` no longer waits for an action to touch memory — with
 `capture_page` running above it every step, the write is unconditional, because
 gating it on an action is what left `entries=0` for so long.
 
+**…and the fix immediately moved the cost to the read path.** The prompt said
+the final summary "must be grounded in memory" and to "recall the relevant
+entries to verify the wording". On a live Gmail run — task *"Summarise today's
+inbox"*, step 0 — the manifest held exactly one entry, the inbox the model was
+already looking at, so it recalled it. The recall returned ~11K chars the prompt
+was **already carrying in full**: thousands of input tokens for zero new
+information, on the step that then wrote the summary. Removing the write path
+and leaving a mandatory verification read is the same waste on the other side of
+the token bill.
+
+So: **recall is for pages you have navigated away from, never the page in
+front of you.** `SYSTEM_PROMPT` states it, and the manifest entry whose `url`
+equals `current_url` is marked `← THIS PAGE, already in your prompt — do not
+recall` so the model does not have to infer it by comparing two URLs. An entry
+for an *earlier* page must stay unmarked — marking every entry would make
+"go back to that page" unreachable, which is what memory exists for. The stale
+note-keeping example (`GOAL PROGRESS: …`) and "read your memory at the start of
+every step" went with the write path.
+
 **The AX tree is deliberately not cached.** A ref is valid only for the
 observation that produced it. A cached tree hands the model refs that resolve to
 nothing or, worse, to the wrong element after a re-render — the grounding bug

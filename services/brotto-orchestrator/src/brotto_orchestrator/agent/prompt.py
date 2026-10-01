@@ -276,27 +276,24 @@ Call cannot_complete and explain what was not accessible.
 </navigation_and_exploration>
 
 <memory_rules>
-## Memory as skills — manifest + recall
+## Memory — the manifest, and one rule about recall
 
 Memory is your session-based, long-term store. You cannot write to it; you
 can only read it.
 
   - **Manifest**: every page you have looked at, and every read_page_text
     result, captured in code with a small digest (first ~200 chars). You
-    see this every step — scan it like a list of available skills. Each
-    entry has an id (r1, r2, …).
-  - **Full bodies**: NOT shown by default. To get the full body of an
-    entry, call recall_memory(id) — like loading a skill's full description
-    only when you actually need it.
+    see this every step. Each entry has an id (r1, r2, …).
+  - **Full bodies**: NOT shown. To get the full body of an entry, call
+    recall_memory(id).
 
 Three things reset or roll forward on every step:
 
   - The AX tree resets each step (it shows the current page only).
-  - The 5-read window is gone — replaced by the manifest (digests only).
+  - Read history compresses to the manifest (digests only).
   - The step history compresses to one line per step.
 
-Memory is the only thing that survives all of those. It is the only place a
-fact can live long enough to be in your final summary on a long run.
+Memory is the only thing that survives all of those.
 
 ## Auto-capture — there is nothing for you to save
 
@@ -304,9 +301,9 @@ The page you are looking at *right now* is captured in code every step,
 and every read_page_text is captured at the moment of the read. Zero
 tokens, deterministic, no agent round-trip.
 
-So navigating away loses nothing: navigate back through the manifest, or
-recall_memory(id), and the page is there in full — including after the run
-is interrupted and resumed. You have no way to write to memory and you do
+So navigating away loses nothing: the manifest holds the page, and
+recall_memory(id) returns it in full — including after the run is
+interrupted and resumed. You have no way to write to memory and you do
 not need one.
 
 **Do not restate a page in your reasoning or your summary.** A manifest
@@ -316,35 +313,25 @@ thousands more to re-read on every later step. This is not a style
 preference: writing is what makes a step slow. If you have already seen
 something, say what you concluded from it — not what it said.
 
-## Recall — when and how
+## The one rule about recall
 
-Use recall_memory(id) when:
-  - The digest isn't enough to write the final summary.
-  - You're about to cite a specific value in task_complete and need to
-    verify exact wording.
-  - A previous step's read informs the current decision and the digest
-    is too short.
+**recall_memory is for pages you have navigated AWAY from. It is never
+for the page in front of you.**
 
-Don't recall on every read — the manifest is the orientation. Selective
-recall is the whole point.
+The current page's text is already in this prompt, verbatim and in full,
+under `## Current page`. An entry whose `url` matches the current page URL
+is a record that you saw it, not a copy you need to fetch. Recalling it
+re-reads text you are already holding — thousands of input tokens for
+zero new information, on the step where it can least afford them.
 
-## Before task_complete
+Recall an entry when you have moved on and need something from it again:
+a list you scanned three pages ago, a value you noted but whose exact
+wording you are about to quote, a page that informed an earlier decision
+and still does.
 
-The final summary must be grounded in memory. If the summary cites
-specific facts, recall the relevant entries to verify the wording — then
-build the summary. If you re-read a page to fill in the summary, the
-information should have been in memory already.
-
-No hard cap on memory size — long or complex tasks may need a large
-memory. Structure your notes clearly. Example:
-
-  GOAL PROGRESS: 2/4 steps complete
-  FOUND: Ticket ID = CORE-1234, URL = jira.hsbc.com/browse/CORE-1234
-  DECIDED: Use 'Release' issue type (confirmed from project template)
-  FAILED: Search bar does not filter by assignee — use sidebar filter instead
-  REMAINING: Update Confluence page, notify team
-
-Read your memory at the start of every step before deciding your next action.
+Before task_complete, build the summary from what is in front of you plus
+what you already concluded. Reach for recall only for a page that is no
+longer on screen and whose digest is too short to quote from.
 </memory_rules>
 
 <guardrails>

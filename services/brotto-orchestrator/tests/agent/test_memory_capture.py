@@ -153,6 +153,74 @@ def test_the_manifest_names_the_url_of_each_captured_page():
     assert "r1" in p
 
 
+# ── the current page is not a recall target ──────────────────────────────
+#
+# Live Gmail run, step 0 of "Summarise today's inbox": the model called
+# recall_memory. It was obeying — the prompt said the final summary "must
+# be grounded in memory" and to recall the relevant entries to verify
+# wording, and the manifest held exactly one entry, the inbox it was
+# already looking at. The recall returned ~11K chars the prompt was
+# already carrying: thousands of input tokens for zero new information.
+
+
+def test_the_entry_for_the_page_in_front_of_you_says_do_not_recall():
+    sp = Scratchpad().capture_page(url="https://a.test/inbox", step=0, text="the inbox")
+    p = _prompt(scratchpad_entries=list(sp.entries), current_url="https://a.test/inbox")
+    assert "do not recall" in p.lower()
+    assert "https://a.test/inbox" in p
+
+
+def test_an_earlier_page_is_still_recallable():
+    """The mark has to distinguish the two cases, not disable recall. Every
+    entry would be marked otherwise and the model would never go back to a
+    page it has navigated away from — the thing memory exists for."""
+    sp = Scratchpad().capture_page(url="https://a.test/inbox", step=0, text="a")
+    sp = sp.capture_page(url="https://a.test/thread/9", step=1, text="b")
+    p = _prompt(scratchpad_entries=list(sp.entries), current_url="https://a.test/thread/9")
+    lines = [ln for ln in p.splitlines() if ln.startswith("- `r")]
+    assert "do not recall" in lines[1].lower(), "the current page is unmarked"
+    assert "do not recall" not in lines[0].lower(), "an earlier page was marked"
+
+
+def _flat(text: str) -> str:
+    """Line wrapping splits these rules mid-sentence, so a substring check
+    against the raw prompt is a check against the wrapping, not the rule."""
+    return " ".join(text.lower().split())
+
+
+def test_the_prompt_does_not_instruct_a_recall_before_task_complete():
+    """The instruction that produced the step-0 recall. Requiring a
+    verification read turns every summarising task into a guaranteed
+    wasted round trip on the step that then writes the summary."""
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+
+    low = _flat(SYSTEM_PROMPT)
+    assert "grounded in memory" not in low, (
+        "mandates a recall before task_complete; that is the step-0 recall")
+    assert "recall the relevant entries" not in low, (
+        "tells the model to re-read entries to verify wording")
+
+
+def test_the_prompt_carries_no_note_keeping_instructions():
+    """Residue of the removed write path. It teaches a behaviour the model
+    no longer has an action for, and spends prompt tokens describing it."""
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+
+    low = _flat(SYSTEM_PROMPT)
+    assert "goal progress" not in low
+    assert "read your memory at the start of every step" not in low
+
+
+def test_the_prompt_states_recall_is_for_pages_you_left():
+    """The positive form of the rule, so the mark in the manifest has
+    something to point at."""
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+
+    low = _flat(SYSTEM_PROMPT)
+    assert "navigated away from" in low
+    assert "never for the page in front of you" in low
+
+
 def test_the_system_prompt_says_the_current_page_is_already_captured():
     """Without this the model cannot know capture happened, so it has no
     reason to trust the manifest over its own notes."""

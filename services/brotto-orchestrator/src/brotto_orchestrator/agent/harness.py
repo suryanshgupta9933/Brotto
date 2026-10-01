@@ -399,16 +399,21 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         )
 
     # Memory manifest: small per-entry digest. Full bodies are loaded on
-    # demand via recall_memory(id). This is the "skills" pattern — the
-    # agent sees the description (digest) for free, fetches full content
-    # only when it actually needs it.
+    # demand via recall_memory(id).
+    #
+    # The entry whose url is the current page is marked as such. Left
+    # unmarked it reads as a skill to load and the model loads it — a live
+    # Gmail run did exactly that on step 0 of a "summarise the inbox" task,
+    # re-reading ~11K chars the prompt was already carrying in full.
     manifest_lines = ["### Memory manifest (recall_memory(id) fetches full body)"]
     for e in turn.scratchpad_entries:
         around = f" around={e.around!r}" if e.around else ""
         trunc = " [truncated]" if e.was_truncated else ""
         where = f" url={e.url}" if e.url else ""
+        here = "  ← THIS PAGE, already in your prompt — do not recall" if (
+            e.url and e.url == turn.current_url) else ""
         manifest_lines.append(
-            f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}{trunc}: {e.digest}")
+            f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}{trunc}{here}: {e.digest}")
     manifest_section = "\n".join(manifest_lines) + "\n"
 
     return f"""{secure_prefix}{conv_section}## Task
