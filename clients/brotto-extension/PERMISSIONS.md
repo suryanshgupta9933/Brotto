@@ -1,264 +1,234 @@
-# Permission Justification Documentation
+# Permission Justifications
 
-This document provides detailed justification for each permission requested by the Brotto Browser Extension.
+Brotto's single purpose: **let you ask an AI to perform tasks in your own
+logged-in browser.** Every permission below exists to serve that one purpose
+and nothing else.
 
-## Permission Overview
+This document is written against `manifest.json` as shipped. If the two
+disagree, the manifest is correct and this file is a bug.
 
-| Permission | Justification | Risk Level |
-|------------|---------------|------------|
-| `debugger` | Core automation capability | High |
-| `tabs` | Tab listing for selection | Low |
-| `storage` | Persist local settings (server URL) | Low |
-| `sidePanel` | Render the side panel UI | Low |
-| `<all_urls>` | Access any user-selected website | High |
+## Permission overview
 
----
-
-## debugger
-
-### Purpose
-The `chrome.debugger` API is the core mechanism for browser automation in this extension.
-
-### Why It's Required
-Without this permission, the extension cannot:
-- Take screenshots of web pages
-- Execute mouse clicks, movements, and scrolls at specific coordinates
-- Type text into form fields
-- Navigate to URLs
-- Read page titles and URLs
-
-### How It's Used
-1. User selects a tab for automation
-2. Extension calls `chrome.debugger.attach({ tabId })`
-3. Extension sends CDP commands through `chrome.debugger.sendCommand`
-4. Commands are limited to:
-   - `Page.captureScreenshot` - Screenshot capture
-   - `Input.dispatchMouseEvent` - Mouse actions (click, move, drag, scroll)
-   - `Input.dispatchKeyEvent` - Keyboard actions
-   - `Page.navigate` - Navigation
-   - `Runtime.evaluate` - Focused text insertion only (no arbitrary JS)
-   - `Page.reload` - Page reload
-   - `Page.bringToFront` - Focus tab
-
-### Security Controls
-- Only attaches to **explicitly user-selected** tabs
-- No automatic browser-wide attachment
-- Immediate detachment when socket closes
-- No support for arbitrary JavaScript execution
-- CDP commands are allowlisted, not dynamic
-
-### What It Does NOT Enable
-- Access to browser settings
-- Access to extensions
-- Access to passwords or saved credentials
-- Installation of plugins or content
-- Modification of browser state beyond the selected tab
+| Permission | Grants | Risk |
+|---|---|---|
+| `debugger` | Chrome DevTools Protocol on the one tab you picked | **High** |
+| `<all_urls>` | Host access for that same tab | **High** |
+| `scripting` | Read visible text from the tab you are looking at | Medium |
+| `storage` | Your server URL and model choice, on this device | Low |
+| `notifications` | A desktop alert when a run needs you | Low |
+| `sidePanel` | The panel where you talk to it | Low |
 
 ---
 
-## tabs
+## `debugger` — driving the tab you picked
 
-### Purpose
-Allows the extension to list available tabs for selection.
+### Why it is required
 
-### Why It's Required
-The tab selection dialog needs to display:
-- Open tabs with their titles
-- Tab URLs (for security warnings)
-- Tab icons (favicons)
-- Incognito status
+Brotto does not run its own browser. It drives *yours*, through the Chrome
+DevTools Protocol, on the single tab you selected — which is what lets it act
+inside a session you are already signed in to. `chrome.debugger` is the only
+Chrome API that exposes CDP to an extension.
 
-Without this permission, users cannot see which tabs are available to automate.
+### How it is used
 
-### How It's Used
-- `chrome.tabs.query({ active: true, currentWindow: true })` to find the active tab
-- `chrome.tabs.create({ url })` to open a starting tab if the user did not pick one
-- `chrome.tabs.get(tabId)` to look up the tab we have attached to
-- `chrome.tabs.onCreated` / `chrome.tabs.onRemoved` to keep the side panel's tab bar in sync
+`debugger.attach` is called for one tab id, and only after you select it. The
+complete set of CDP methods the extension issues:
 
-### Data Accessed
-- `tab.title` - Display name
-- `tab.url` - URL for security filtering
-- `tab.favIconUrl` - Icon
-- `tab.incognito` - Privacy indicator
-- `tab.id` - For attachment
+| Domain | Method | Used for |
+|---|---|---|
+| Accessibility | `Accessibility.enable` / `disable` / `getFullAXTree` | Reading the page as a labelled tree of controls |
+| Input | `Input.dispatchMouseEvent` | Click, move, scroll |
+| Input | `Input.dispatchKeyEvent` | Typing, Enter, Control+A |
+| Page | `Page.enable` / `Page.navigate` / `Page.getFrameTree` | Navigation, and enumerating frames |
+| DOM | `DOM.getDocument` / `getAttributes` / `resolveNode` | Resolving a tree ref to a node |
+| DOM | `DOM.getBoxModel` / `getNodeForLocation` | Turning a node into clickable coordinates |
+| Runtime | `Runtime.evaluate` | Reading page text — see below |
 
-### Security Controls
-- Only metadata, not page content
-- System tabs automatically excluded
-- `chrome.tabs.update` / `chrome.tabs.remove` are not called
+**There is no `Page.captureScreenshot` anywhere in this extension.** The agent
+perceives the page through the Accessibility tree, not through images. It
+never screenshots, so it never has access to a picture of your screen.
 
----
+### `Runtime.evaluate` — the one honest caveat
 
-## storage
+The extension will evaluate JavaScript in the page. In the shipped code the
+server uses this in exactly one place, `read_page_text`, to run a bounded
+`innerText` read:
 
-### Purpose
-Persists a small bag of local settings (today: the server URL and any future
-user toggles) in `chrome.storage.local`.
-
-### Why It's Required
-The extension needs to remember the orchestrator URL between browser
-restarts so the user does not have to re-enter it on every reload.
-
-### How It's Used
-- `chrome.storage.local.get('settings')` to read the saved server URL
-- `chrome.storage.local.set({ settings })` to persist it
-
-### Data Accessed
-- One key: `settings`. Stores `{ serverUrl: string }` and a small allow-list
-  of feature flags.
-
-### Security Controls
-- `chrome.storage.local` only — never `chrome.storage.sync`. Nothing leaves
-  the user's machine through this API.
-- No PII, no credentials, no automation history.
-
----
-
-## sidePanel
-
-### Purpose
-Lets the extension open its own side panel when the user clicks the toolbar
-icon, and route messages between the service worker and the side panel.
-
-### Why It's Required
-The side panel is the orchestrator's UI surface — chat, plan, approval,
-clarify, status. Without this permission the user would have to open a
-separate tab to see what the agent is doing.
-
-### How It's Used
-- `chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })` once
-  at startup so clicking the toolbar icon opens the panel
-- `chrome.runtime.sendMessage` from the service worker to push events
-  (`step_card`, `task_completed`, `approval_request`, etc.) to the side panel
-
-### Security Controls
-- Side panel content is loaded from the extension's own bundle, not from any
-  web origin. No third-party scripts.
-- No `chrome.sidePanel.setOptions` calls — the panel is a fixed surface.
-
----
-
-## \<all_urls\>
-
-### Purpose
-Allows the extension to attach debugger to any user-selected website.
-
-### Why It's Required
-Users may need to automate any website, including:
-- Web applications
-- E-commerce sites
-- Productivity tools
-- Any HTTPS website
-
-Since we cannot predict which sites users will want to automate, we need access to all URLs.
-
-### How It's Used
-- User selects a tab from any website
-- Extension attaches `chrome.debugger` to that tab
-- No automatic access - explicit user selection required
-
-### Security Controls
-- **MOST IMPORTANT**: Does NOT automatically access all sites
-- User must explicitly select each tab for automation
-- Security warnings shown for sensitive sites (banking, email, login)
-- Confirmation required before attaching
-- Only one tab at a time (or one tab group)
-- No silent or background attachment
-
-### Warnings Displayed
-The extension warns users before attaching to:
-- Banking/financial sites
-- Email providers (Gmail, Outlook, etc.)
-- Login/authentication pages
-- Payment processors (PayPal, Stripe, etc.)
-- Sites with "<all_urls>" pattern matches
-
----
-
-## Data Flow
-
-```
-User Action                    Extension Behavior
----------                       ----------------
-1. Click icon                  -> Opens side panel (sidePanel)
-2. Click "Start Automation"     -> Lists tabs (tabs)
-3. Select tab                  -> Checks security (tabs, debugger)
-4. Confirm                     -> Attaches debugger (debugger)
-5. Automation active           -> Badge turns green (action)
-6. Click "Stop"                -> Detaches debugger (debugger)
+```js
+(document.querySelector(<selector>) || document.body).innerText.substring(0, <max>)
 ```
 
----
+The server composes that string and sends it over the relay; the extension
+runs what it is given. So the *current use* is a page-text read, but the
+*mechanism* is not restricted to one — the extension trusts the relay.
 
-## Comparison with Similar Extensions
+This matters because the relay is unauthenticated. See "Known limitations".
 
-| Extension | debugger | tabs | all_urls | Notes |
-|-----------|-----------|------|----------|-------|
-| Vimium | No | Yes | Yes | Keyboard navigation |
-| Momentum | No | Yes | Yes | New tab page |
-| LastPass | No | Yes | Yes | Password manager |
-| This Extension | Yes | Yes | Yes | Browser automation |
+### Security controls
 
----
+- Attaches to one tab, only the one you selected. There is no
+  browser-wide attach and no tab enumeration.
+- Detaches when the socket closes.
+- The CDP command set is a fixed dispatch table in source, not a
+  server-selected method name.
 
-## Privacy Considerations
+### What this does not give it
 
-### What We DON'T Access
-- Browser history
-- Bookmarks
-- Passwords or credentials
-- Cookies directly (only through CDP which is logged)
-- Extension data from other extensions
-- System files
-
-### What We DO Access
-- Tab titles and URLs (for display and security)
-- Screenshots (sent to server only during automation)
-- Mouse/keyboard events (during automation only)
-
-### Data Transmission
-- All data sent only to configured Brotto server
-- Screenshots transmitted via encrypted WSS relay
-- No third-party analytics or tracking
+Browser settings, other extensions, saved passwords, cookies as a store, the
+ability to install content, or any state outside the attached tab.
 
 ---
 
-## User Consent
+## `<all_urls>` — host access, for the same one tab
 
-The extension implements multiple layers of user consent:
+### Why it is required
 
-1. **Installation Consent**: Chrome Web Store displays all permissions before installation
-2. **Pairing Consent**: User must enter pairing code to connect to server
-3. **Tab Selection Consent**: User explicitly selects which tab to automate
-4. **Security Warning Consent**: Users see warnings for sensitive sites and must confirm
-5. **Session Start Consent**: Users must actively start automation
-6. **Session End Control**: Users can stop automation at any time via popup or badge
+There is no way to know in advance which sites you will want to automate. A
+narrow host list would make the extension useless for the authenticated tools
+it exists to drive.
+
+### How it is used
+
+Only to attach the debugger to the tab you selected. It is not used to fetch
+anything in the background, and there is no content script that runs on every
+page.
+
+### Security controls
+
+- No automatic access. You pick the tab; nothing is touched until you do.
+- `checkTabSecurity` runs before attaching and warns when the URL matches a
+  sensitive pattern — mail, bank, payment processors, coinbase, auth, login,
+  signin, account — or when the page is plain HTTP.
+- A run is one tab at a time. There is no background or scheduled attachment.
 
 ---
 
-## Chrome Web Store Compliance
+## `scripting` — reading the page you are looking at
 
-This extension follows Chrome Web Store policies:
+### Why it is required
 
-1. **Limited Use Policy**: Only requests permissions necessary for functionality
-2. **Prominent Disclosure**: All permissions and their purposes are clearly documented
-3. **No Surprising Features**: Extension does not do anything unexpected
-4. **User Control**: All actions require explicit user consent
-5. **Data Handling**: No personal data is collected or transmitted except as part of automation
+When the side panel is open and no task is running, Brotto can suggest tasks
+based on the page in front of you. That needs the visible text of the current
+page, obtained on demand.
+
+### How it is used
+
+`chrome.scripting.executeScript` reads `document.body.innerText`, capped at
+2000 characters, from the active tab — the one whose URL is shown in the
+panel. Nothing else is injected. No script is ever executed in the page.
+
+### Security controls
+
+- Read-only, on the active tab, text only.
+- Capped at 2000 characters.
+- No background polling; it runs when the panel refreshes its idle state.
+
+> **This reads your page with no task in flight.** It is disclosed in
+> `PRIVACY.md`. It is on by default today and a settings toggle is on the
+> Phase 1 roadmap.
 
 ---
 
-## Conclusion
+## `storage` — remembering your settings
 
-The permissions requested by this extension are:
-- **Necessary**: Required for the stated functionality
-- **Minimal**: Only what's required for browser automation
-- **Controlled**: All access requires explicit user consent
-- **Transparent**: All permissions and their uses are documented
+### Why it is required
 
-The extension follows the principle of least privilege by:
-- Using debugger commands only from an allowlist
-- Attaching only to explicitly selected tabs
-- Immediately detaching when sessions end
-- Not storing or transmitting data beyond the automation session
+So you type your server URL once. The panel also remembers your model choice.
+
+### How it is used
+
+- `chrome.storage.local` — server URL, model configuration, feature flags.
+- `chrome.storage.session` — your model API key, which is **cleared when the
+  browser quits** and never written to disk.
+
+### Security controls
+
+- `chrome.storage.local` only. Never `chrome.storage.sync`, so nothing is
+  synced to a Google account.
+- No credentials in `local`, no browsing history, no task transcripts. The API
+  key is session-only by design, so a stolen profile does not yield it.
+
+---
+
+## `sidePanel` — the UI you talk to it through
+
+### Why it is required
+
+The side panel is where the conversation, the plan, the approval prompts and
+the results live. Without it you would have to watch a full browser tab.
+
+### How it is used
+
+`chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })` at
+startup, and `chrome.runtime.sendMessage` from the service worker to push
+events to the panel.
+
+### Security controls
+
+The panel is loaded from the extension's own bundle. No remote code, no
+third-party scripts, no web origin.
+
+---
+
+## `notifications` — telling you it needs you
+
+### Why it is required
+
+A run can sit waiting on an approval, a sign-in, or a clarification. If the
+panel is closed you would not know.
+
+### How it is used
+
+`chrome.notifications.create` / `update` / `clear`. Blocking events always
+notify. Results notify only when the panel is not focused — the whole point is
+that you can start a task and come back.
+
+### Security controls
+
+Notification text is the domain and event type. No page content is included.
+
+---
+
+## Known limitations
+
+Stated here rather than omitted, because a reviewer or a user should be able
+to find them.
+
+1. **The relay is unauthenticated.** `/ws/ext/{session_id}` accepts any
+   connection. Anyone who can reach your Brotto server URL can drive the agent
+   against your logged-in browser. Auth is scheduled and not yet shipped. For
+   now, run the server on loopback or a trusted network.
+2. **Combined with `Runtime.evaluate`**, that means a hostile relay could run
+   JavaScript in your browser, not merely click things.
+3. **Brotto is not a sandbox.** It runs with your permissions, in your
+   session. Secure mode and the domain blocklist are the user's, and there is
+   no server-side floor.
+4. **Brotto is not protected against prompt injection** from page content.
+   Treat a hostile page as able to mislead the model.
+
+## Privacy
+
+See [`PRIVACY.md`](../../PRIVACY.md) for the full statement.
+
+**Not accessed:** browsing history, bookmarks, saved passwords or cookies as a
+credential store, other extensions' data, system files. No screenshots are
+taken at any point. No third-party analytics.
+
+**Accessed, and why:** the accessible tree and visible text of the tab you
+selected, while a task runs. Mouse and keyboard input on that tab, while a
+task runs. Your server URL and model choice, stored locally. The visible text
+of the active page, when the panel is idle and suggesting.
+
+**Transmission:** to the Brotto server you configured, over the relay. No
+third parties. The audit trail (`logs/sessions/`) stays on your own disk.
+
+## User control
+
+1. Chrome shows every permission at install time.
+2. You pick the tab. Nothing attaches before that.
+3. Sensitive-site and plain-HTTP warnings are shown before attaching.
+4. Approval, clarification and sign-in prompts stop the run and wait for you.
+5. A destructive action on an unseen domain is never pre-approved.
+6. You can stop a run at any time from the panel. There is no popup and no
+   browser-wide toggle — the panel is the whole control surface.
+7. Your domain blocklist is yours alone; the server adds no floor.
