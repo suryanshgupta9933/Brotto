@@ -320,11 +320,20 @@ For short tasks (≤2 reads) skip notes — the manifest is enough.
 
 ## Auto-capture — don't save reads yourself
 
-Every read_page_text is captured in code at the moment of the read. Zero
+Every read_page_text is captured in code at the moment of the read, and the
+page you are looking at *right now* is captured in code every step. Zero
 tokens, deterministic, no agent round-trip. You don't need to call
-append_scratchpad to save a read — it's already there. The cost is the
-full body is NOT in the manifest (only the digest). When you need the
-full body, recall_memory(id) loads it into your next step's context.
+append_scratchpad to save either — they're already in the manifest. The
+cost is the full body is NOT in the manifest (only the digest). When you
+need the full body, recall_memory(id) loads it into your next step's
+context.
+
+**Never write a page's contents into a note.** A manifest entry with
+`sel=page` and a url is already that page, in full, retrievable by id —
+forever, including after you navigate away. Copying it into a note is a
+pure duplicate that costs you thousands of output tokens to write and
+thousands more to re-read on every later step. This is not a style
+preference: writing is what makes a step slow.
 
 ## Recall — when and how
 

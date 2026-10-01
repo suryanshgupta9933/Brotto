@@ -407,7 +407,9 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     for e in turn.scratchpad_entries:
         around = f" around={e.around!r}" if e.around else ""
         trunc = " [truncated]" if e.was_truncated else ""
-        manifest_lines.append(f"- `{e.id}` step={e.step} sel={e.selector}{around}{trunc}: {e.digest}")
+        where = f" url={e.url}" if e.url else ""
+        manifest_lines.append(
+            f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}{trunc}: {e.digest}")
     manifest_section = "\n".join(manifest_lines) + "\n"
 
     return f"""{secure_prefix}{conv_section}## Task
@@ -952,7 +954,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             # Auto-capture: every read lands in memory. Zero tokens. The
             # agent sees the manifest in the next step's prompt and can
             # recall this entry's full body via recall_memory(id).
-            entry_id = f"r{len(deps.scratchpad.entries) + 1}"
+            entry_id = deps.scratchpad.next_id()
             digest_body = text[:DIGEST_LEN]
             digest = digest_body + ("…" if len(text) > DIGEST_LEN else "")
             deps.scratchpad = deps.scratchpad.with_entry(MemoryEntry(
@@ -1023,6 +1025,18 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             if entry is None:
                 available = [e.id for e in deps.scratchpad.entries]
                 return f"Memory entry {entry_id!r} not found. Available: {available}"
+            # The sidecar stores digests, not bodies, so a resumed run holds
+            # less than the live one did. Say so: handed 200 chars of an
+            # 11,000-char page with no marker, the model reads the fragment
+            # as the whole page and answers from it. A page shorter than the
+            # digest length is not degraded — digest == body is the whole
+            # truth there, so the marker would be a lie.
+            if entry.digest.endswith("…") and entry.body == entry.digest:
+                where = entry.url or "an earlier page"
+                return (f"{entry.digest}\n\n[only the digest of {where} survived "
+                        f"— the full body is not kept across a resume. "
+                        f"Navigate back to {entry.url or 'that page'} to read it "
+                        "again if you need more.]")
             return entry.body
 
         elif action == "recall_conversation":
@@ -1738,6 +1752,15 @@ class AgentHarness:
             steps_run += 1
             cumulative_snapshots.append(dict(timings))
 
+            # ponytail: announce the phase, not prose. Observe+plan is ~25s of
+            # a ~30s step and step_progress only fires after both, so without
+            # this the panel shows nothing at all between step bubbles and reads
+            # as hung. A machine key rather than a sentence: the wording is
+            # presentation and belongs to the panel, which is the only thing
+            # that renders it. Not audited — it is a live UI frame, and the
+            # document already carries the timings.
+            await deps.ws_send({"type": "canonical_step", "kind": "observe", "step": step})
+
             # Observe
             t0 = time.perf_counter()
             targets = await deps.cdp.get_targets()
@@ -1747,6 +1770,13 @@ class AgentHarness:
             # one evaluate on the dev path. Shipped every step because the
             # accessibility tree often omits the value a question is about.
             page_text = await deps.cdp.get_page_text()
+            # Captured in code, every step, before the turn is built — so
+            # this step's own page is in the manifest the model reads. Done
+            # here rather than as a `read_page_text` side effect because the
+            # page text already ships in the prompt, so the model never calls
+            # `read_page_text` and nothing was ever captured.
+            deps.scratchpad = deps.scratchpad.capture_page(
+                url=current_url, step=step, text=page_text)
             # ponytail: stash for the click cross-domain gate (Change 3).
             # The click handler runs inside this same step and needs to
             # compare pre-click URL to post-click URL.
@@ -1899,6 +1929,7 @@ class AgentHarness:
                      deps.user_id, step, current_url[:80], len(targets), len(turn.scratchpad_entries))
 
             # Plan
+            await deps.ws_send({"type": "canonical_step", "kind": "plan", "step": step})
             t_plan = time.perf_counter()
             log.debug("[%s] calling model...", deps.user_id)
             planned = await _plan_step(deps, turn, agent, audit)

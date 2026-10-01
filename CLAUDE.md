@@ -146,17 +146,73 @@ extension-written document recorded 7 of 42 refs failing to resolve, every one a
 bare nodeId.** Full reasoning, including why "1A′: we are at 34.0% Action Object"
 was wrong, in `docs/architecture/agent-loop.md`.
 
-### A step costs ~30s, and most of it is the prompt
+### A step costs ~30s, and it is *generation*, not the prompt
 
-A 6-step Gmail run: observe 70.53s (39.6%), model_plan 82.97s (46.6%),
-execute 24.59s (13.8%); `tokens_in:out` = 39:1, ~27K input tokens per turn.
-**The model is not thinking** — `MiniMax-M3` is not in `_THINKING_REQUIRED`, so
-`model_plan` is prefill on a 27K prompt and the 4.5s→39.3s spread tracks prompt
-size. The 27K is `ax_filter`'s ranked selection filling the 50K budget with the
+**Cut output tokens for latency; cut input tokens for cost.** Measured over 73
+recorded steps (`corr(out,lat)=+0.876`, `corr(in,lat)=+0.660`), and the mechanism
+is plain in two steps from the same inbox, same page, same prompt:
+
+| in | out | latency |
+|---|---|---|
+| 25,087 | 191 | **4.3s** |
+| 50,977 | 600 | 12.0s |
+| 25,085 | **3,612** | **41.3s** |
+
+Doubling *input* cost 4.3→12.0s; tripling *output* at **identical input** cost
+4.3→41.3s. The stable prefix is cached, so a 25K-token prompt is nearly free and
+generation runs at ~60 tok/s. The instinct to shrink the prompt buys cost and
+misses the wall.
+
+`tokens_in` is pydantic-ai's cumulative `RunResult.usage`, so it is **summed over
+retries** — it is an integer multiple of the base prompt, not a step size. A 76s
+step was three attempts. Retries are cheap (the prefix is cached); the 3,328
+*generated* tokens were 55s of that 76s. Retries that succeed leave no trace in
+the audit, so a retry-driven step looks identical to a slow one.
+
+**What produced the 3,612 output tokens, and the fix.** Three Gmail runs recorded
+`entries=0` — the scratchpad's retrieval half had *never been used*. `page_text`
+already ships in every prompt, so the model never called `read_page_text`, so
+nothing was ever auto-captured, so notes were the only memory that existed — and
+with nothing to retrieve, the model **transcribed the page into a note**. 5,093
+chars, ~1,300 output tokens, ~28 of that step's 41.3 seconds, written on the step
+that then also wrote a 4,262-char summary. Details in
+[the section below](#the-page-is-captured-in-code-every-step) and
+`docs/architecture/agent-loop.md`.
+
+The 27K input is `ax_filter`'s ranked selection filling the 50K budget with the
 *most actionable* elements rather than truncating in tree order; the old flat 6K
 was smaller and blind to a control mid-page, which is the `auth-inbox` failure.
+`MiniMax-M3` is not in `_THINKING_REQUIRED`, so none of this is reasoning time.
 Observe+execute is 53.4% of wall, and 12s of that is one click —
 `_send_action` blocks on the post-action observation.
+
+### The page is captured in code, every step
+
+`Scratchpad` is two halves and only one of them was being used. **`entries`** is
+the correct shape — a 200-char digest in the prompt, the body fetched on demand
+by `recall_memory(id)` — and `capture_page` now fills it with **every step's
+page**, in code, before the turn is built, so the step's own page is in the
+manifest it reads. **`notes`** is the model's own synthesis, and it is now capped
+at `Scratchpad.NOTES_CAP` (4K, head+tail) because it is echoed in full every step
+and `append_note` concatenated without limit.
+
+- **This is what makes memory work at all.** Before it, `page_text` was live-only
+  and the AX tree is ref-scoped, so navigating away destroyed both — "refer back
+  to that page instead of going back" was not achievable, and writing the page
+  down was the model's only option. `entries` carries `url` because three pages
+  in one run are otherwise indistinguishable.
+- **The AX tree is deliberately *not* cached.** A ref is valid only for the
+  observation that produced it; a cached tree hands the model refs that resolve to
+  nothing or, worse, to the wrong element. Page text is safe precisely because it
+  carries no refs.
+- **`body` is not written to the audit document.** `set_scratchpad` runs every
+  step and rewrites the whole file; `model_dump()` carried `body`, which was
+  free while nothing was captured and is 200KB per 20 pages now that every step
+  captures one. The record keeps id/step/selector/url/digest. The sidecar has
+  always stored digests only, so a **resumed** entry recalls as its digest —
+  `recall_memory` says so and names the URL, because 200 unmarked chars of an
+  11,000-char page reads as the whole page. A page shorter than `DIGEST_LEN` is
+  not degraded, and is not labelled.
 
 **The observation now reports its own cost.** `waitForStable` and `boxMap`
 returned a `Stability` and a `GeometryResult` and `captureObservation` threw

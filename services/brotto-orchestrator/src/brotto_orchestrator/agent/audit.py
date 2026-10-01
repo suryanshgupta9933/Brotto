@@ -133,8 +133,14 @@ def _as_scratchpad(value: Scratchpad | dict) -> Scratchpad | None:
     if isinstance(value, Scratchpad):
         return value
     try:
+        # `body` defaults to the digest: `_scratchpad_dict` no longer writes
+        # it, and a reloaded entry genuinely holds nothing more than the
+        # digest — the same thing `load_scratchpad` has always produced from
+        # the sidecar. Without this default the model would lose its entire
+        # manifest on resume rather than keep the digests.
         return Scratchpad(
-            entries=[MemoryEntry(**e) for e in value.get("entries", [])],
+            entries=[MemoryEntry(**{**e, "body": e.get("body", e.get("digest", ""))})
+                     for e in value.get("entries", [])],
             notes=value.get("notes", ""),
         )
     except Exception as exc:  # a dict that is not entry-shaped
@@ -143,8 +149,17 @@ def _as_scratchpad(value: Scratchpad | dict) -> Scratchpad | None:
 
 
 def _scratchpad_dict(value: Scratchpad | dict) -> dict:
+    # `body` is deliberately excluded. This runs on every step and the whole
+    # document is rewritten each time, so a body here is a body re-serialised
+    # every step. That was free while nothing was captured — entries=0 on
+    # three Gmail runs, because `page_text` ships in the prompt so the model
+    # never called `read_page_text` — and is not free now that every step's
+    # page is captured: a 20-page run measured 200KB of growth for pages that
+    # were 10x smaller. Nothing reads the body off disk; the digest is what a
+    # resumed run's manifest renders.
+    _FIELDS = ("id", "step", "selector", "around", "digest", "was_truncated", "url")
     if isinstance(value, Scratchpad):
-        return {"entries": [e.model_dump() for e in value.entries],
+        return {"entries": [{k: getattr(e, k) for k in _FIELDS} for e in value.entries],
                 "notes": value.notes}
     return _cap_deep(value)
 
@@ -175,7 +190,7 @@ def load_scratchpad(path: Path) -> Scratchpad:
             continue
         if line.startswith("# MANIFEST") or line == "# MEMORY v2" or line == "":
             continue
-        m = re.match(r"^\[(r\d+)\s+step=(\d+)\s+sel=([^\s]+)\s+around=(\S+)\s+truncated=(True|False)\]\s*$", line)
+        m = re.match(r"^\[(r\d+)\s+step=(\d+)\s+sel=([^\s]+)\s+around=(\S+)\s+truncated=(True|False)(?:\s+url=(\S*))?\]\s*$", line)
         if m:
             # Flush previous entry
             if current_header is not None:
@@ -187,6 +202,7 @@ def load_scratchpad(path: Path) -> Scratchpad:
                     digest="\n".join(current_entry_lines).strip(),
                     body="\n".join(current_entry_lines),  # body == digest on reload
                     was_truncated=(current_header["trunc"] == "True"),
+                    url=current_header["url"],
                 ))
             current_header = {
                 "id": m.group(1),
@@ -194,6 +210,9 @@ def load_scratchpad(path: Path) -> Scratchpad:
                 "sel": m.group(3),
                 "around": m.group(4),
                 "trunc": m.group(5),
+                # Optional: files written before entries carried a url have
+                # no such field, and they must keep parsing unchanged.
+                "url": m.group(6) or "",
             }
             current_entry_lines = []
         else:
@@ -210,6 +229,7 @@ def load_scratchpad(path: Path) -> Scratchpad:
             digest="\n".join(current_entry_lines).strip(),
             body="\n".join(current_entry_lines),
             was_truncated=(current_header["trunc"] == "True"),
+            url=current_header["url"],
         ))
 
     return Scratchpad(entries=entries, notes="\n".join(notes_lines).strip())
@@ -227,8 +247,12 @@ def save_scratchpad(path: Path, scratchpad: Scratchpad) -> None:
     for e in scratchpad.entries:
         around = e.around if e.around is not None else "None"
         trunc = "True" if e.was_truncated else "False"
+        # url is the trailing optional field the loader's regex made
+        # optional; written only when present so a pre-url file is
+        # byte-identical to what it always was.
+        url = f" url={e.url}" if e.url else ""
         lines.append(
-            f"[{e.id} step={e.step} sel={e.selector} around={around} truncated={trunc}]"
+            f"[{e.id} step={e.step} sel={e.selector} around={around} truncated={trunc}{url}]"
         )
         lines.append(e.digest)
         lines.append("")

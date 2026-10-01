@@ -51,10 +51,42 @@ Measured off a 6-step Gmail run (session `d141a18f`, 178.10s wall, 6 model turns
 
 `tokens_in:out` = 39:1 — 161,764 in, 4,167 out, ~27K input tokens per turn.
 
-**The model is not thinking.** `MiniMax-M3` is not in `_THINKING_REQUIRED`
-(`registry.py`), so `anthropic_thinking={"type": "disabled"}` is sent and the
-`model_plan` seconds are *prefill on a 27K-token prompt*. The per-turn spread
-(4.5s → 39.3s, 8.7×) tracks prompt size, not reasoning depth.
+**The model is not thinking — and that turned out not to be the explanation.**
+`MiniMax-M3` is not in `_THINKING_REQUIRED` (`registry.py`), so
+`anthropic_thinking={"type": "disabled"}` is sent. This section originally
+concluded from there that `model_plan` was *prefill on a 27K-token prompt* and
+that the per-turn spread (4.5s → 39.3s) tracked prompt size. **That was
+inferred, not measured, and it is wrong.** It is corrected below.
+
+#### Latency is generation-bound. Cut output, not input.
+
+Over 73 recorded steps: `corr(output_tokens, latency) = +0.876`,
+`corr(input_tokens, latency) = +0.660`. The mechanism is visible in three steps
+from one Gmail session, all on the same page (`83844c3d`, `d0197c38`):
+
+| in | out | latency | note |
+|---|---|---|---|
+| 25,087 | 191 | 4.3s | |
+| 50,977 | 600 | 12.0s | **2× the input** |
+| 25,085 | 3,612 | 41.3s | **19× the output, identical input** |
+| 77,615 | 3,328 | 76.0s | 3 attempts |
+
+Doubling input cost 4.3 → 12.0s. Multiplying output by 19 at the *same* prompt
+cost 4.3 → 41.3s. The stable prefix (`SYSTEM_PROMPT + secure_prefix +
+<conversation> + ## Task`) is served from cache, so 25K input tokens is close to
+free; generation runs at ~60 tok/s and every token costs ~17ms.
+
+**So the leverage is inverted from the obvious.** Shrinking the prompt buys cost
+and little latency. The 41.3s step was 3.6k tokens of *writing*.
+
+**`tokens_in` is summed over retries, so it is not a prompt size.** It reads
+`result.usage.input_tokens` off pydantic-ai's `RunResult`, which is cumulative
+across every request in the run — that is why it is an exact integer multiple of
+the base prompt (25,086 / 50,789 / 77,615) and why `latency_ms` alone cannot
+interpret it. A retry that succeeds leaves no trace in the audit, so a
+retry-driven step is indistinguishable from a slow one in the document. Retries
+are themselves cheap (the prefix is cached); the 76s step's 3,328 generated
+tokens are ~55s of it.
 
 **The 27K is the ranked-selection change, and it is the intended cost.** Before
 it, the tree was truncated in tree order at 6K chars — small prompt, fast, and
@@ -94,6 +126,92 @@ nothing to pool.
 
 Composed with the unconditional retry, that is `3004 + 1453` per scan × 2
 scans ≈ 9s per observation, against a measured 11.75s.
+
+### The 41.3s step: the model was transcribing the page into its notes
+
+One step, one page, one call — 25,085 in, 3,612 out, 41.3s. The audit's
+per-field accounting (`6f66a0ae`) put **39% of that output in
+`append_scratchpad.line`: 5,093 chars**, a full transcription of the inbox —
+an URGENT block of 12 items plus ~45 emails by date — written on the very step
+that then also wrote a 4,262-char summary and finished the task.
+
+**Why it transcribed at all.** `Scratchpad` has two halves, and only one was in
+use. `entries` is a manifest of auto-captured reads: a 200-char digest in the
+prompt, the body fetched on demand by `recall_memory(id)`. That is the correct
+shape and it is the textbook Write/Select split. **It had captured nothing —
+`entries=0` on all three Gmail runs.** Only `read_page_text` created entries,
+and `page_text` already ships in every prompt, so the model had no reason to
+ever call `read_page_text`. With an empty manifest, notes were the only memory
+that existed, and with nothing to retrieve, writing the page down was the only
+way to keep it. The cost was ~1,300 output tokens — and output tokens are the
+latency.
+
+**It also never worked.** "Refer back to a page you've navigated away from
+instead of going back" was not achievable before this: `page_text` was live-only
+and the AX tree is ref-scoped, so navigating away destroyed both. The feature was
+described, prompted for, and unreachable.
+
+**Three changes, in the order they mattered.**
+
+1. **`Scratchpad.capture_page(url, step, text)`**, called in the loop right after
+   `get_page_text()` and before the turn is built — so the step's *own* page is
+   in the manifest the model reads. Empty and whitespace-only pages are skipped,
+   or a run that never loads anything fills the manifest with empties. Both
+   entry kinds now number from `Scratchpad.next_id()`; they previously numbered
+   independently at their two call sites, so a capture landing between two reads
+   could reuse an id and silently overwrite an entry.
+2. **One prompt paragraph** — the page is already captured, never write a page's
+   contents into a note. Without it the model cannot know capture happened, and
+   it keeps writing. This is the lever; 1 and 2 together are what remove the
+   1,300 tokens.
+3. **`NOTES_CAP` = 4K on `append_note`, head+tail.** `append_note` concatenated
+   without limit and the `## Your memory (notes)` block echoes the result in full
+   every step, so one transcription is a permanent ~1,300-token tax on every
+   later step for the life of the session. Head+tail because a synthesized note
+   states its method first and its findings last — either end alone loses the
+   half the next step asks about. `write_scratchpad` is *not* capped: it replaces
+   rather than accumulates, so it cannot grow without bound, and capping it would
+   discard what the model just decided to keep.
+
+**The AX tree is deliberately not cached.** A ref is valid only for the
+observation that produced it. A cached tree hands the model refs that resolve to
+nothing or, worse, to the wrong element after a re-render — the grounding bug
+`_locate` was just hardened against. Page text is safe to keep precisely because
+it carries no refs; that is the whole boundary between the two.
+
+**`entries` carries `url`.** Three pages captured in one run are otherwise
+indistinguishable in the manifest, and "go back to *that* page" is the recall
+use case.
+
+#### The capture nearly doubled the audit document
+
+`set_scratchpad` runs on every action-bearing step and `_record` rewrites the
+whole document, so anything serialised there is re-serialised every step.
+`_scratchpad_dict` used `e.model_dump()`, which includes `body`. That was
+invisible *precisely because nothing was ever captured* — `entries=0` on every
+run. Capturing every step's page turned a latent write-amplification into a
+per-step one: 20 Gmail-shaped pages measured **200KB of document growth**. The
+record now carries id/step/selector/around/digest/was_truncated/url and not the
+body; the sidecar already stored digests only, so nothing regresses.
+
+`_as_scratchpad` rebuilds the model from that dict to write the sidecar, so it
+defaults `body` to the digest — without it a resumed run loses its entire
+manifest rather than keeping the digests. The sidecar header gains a trailing
+optional `url=`, and the loader's regex makes that group optional so files
+written before `url` existed keep parsing byte-identically.
+
+**A resumed entry recalls as its digest, and says so.** Handed 200 unmarked chars
+of an 11,000-char page, the model reads the fragment as the whole page and
+answers from it. `recall_memory` appends a marker naming the URL. The test is the
+trailing `…`: a page whose digest was never cut is complete, and `digest == body`
+is simply what a short page looks like — labelling that as a resume casualty
+would send the model navigating back for nothing.
+
+**Left alone deliberately:** `page_text` (~3.4K tokens) sits *after* the AX tree,
+which changes every step, so it is re-prefilled uncached every step. Moving it
+above the tree would extend the cached prefix — worth perhaps 1s/step, against a
+documented "don't reorder" and a lost-in-middle demotion of the values a
+read-only question is answered from. Not worth it.
 
 ### The three serial loops are pooled, and the order is the contract
 
