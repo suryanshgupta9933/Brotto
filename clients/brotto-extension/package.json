@@ -18,8 +18,8 @@
     "browser-automation",
     "model-agnostic"
   ],
-  "author": "Brotto",
-  "license": "BUSL-1.1",
+  "author": "Inventic",
+  "license": "Apache-2.0",
   "devDependencies": {
     "@types/chrome": "^0.0.268",
     "@types/node": "^20.11.0",

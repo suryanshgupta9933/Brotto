@@ -60,7 +60,7 @@ If you prefer scripting the rule (or want to keep it in source-of-truth):
 gh api \
   --method PUT \
   -H "Accept: application/vnd.github+json" \
-  /repos/suryanshgupta9933/brotto/branches/main/protection \
+  /repos/inventicai/browser-automation/branches/main/protection \
   --input - <<'JSON'
 {
   "required_status_checks": {
@@ -88,7 +88,7 @@ CODEOWNERS approval, and no one — admins included — can push directly.
 
 ## Adjusting CODEOWNERS
 
-`.github/CODEOWNERS` ships pointing at `@suryanshgupta9933`. If
+`.github/CODEOWNERS` ships pointing at `@inventicai/maintainers`. If
 that team does not exist yet, replace it with a real GitHub team
 (Settings → Teams) or individual `@handle`s before the first PR — a
 missing owner silently turns auto-assignment off.
