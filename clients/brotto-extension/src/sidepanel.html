@@ -245,10 +245,15 @@
     #outcomeCell[data-state="error"]   { --state: var(--bad);   --fill: transparent; }
     #outcomeCell[data-state="gave-up"] { --state: var(--bad);   --fill: transparent; }
     #outcomeCell[data-state="blocked"] { --state: var(--wait);  --fill: transparent; }
-    #outcomeCell[data-state="stopped"] { --state: var(--ink-3); --fill: transparent; }
+    #outcomeCell[data-state="stopped"] { --state: var(--bad);   --fill: transparent; }
     #outcomeCell[data-state="ended"]   { --state: var(--bad);   --fill: transparent; }
     #outcomeCell[data-state="waiting"] { --state: var(--wait);  --fill: transparent; }
     #outcomeCell[data-state="working"] { --state: var(--ink-2); --fill: transparent; }
+    /* A run you stopped ends without an answer, which is exactly what red
+       already means here (error / gave-up / ended are all hollow red). Yellow
+       would be wrong twice over: --wait is "needs you", and a run you stopped
+       needs nothing. --ink-3 was the placeholder tone, so it read as a cell
+       nothing had rendered into. */
     /* Motion means exactly one thing here: a run is live right now. */
     #outcomeCell[data-state="working"] .outcome-mark { animation: pulse 1.4s ease-in-out infinite; }
 
@@ -699,8 +704,6 @@
       from { opacity: 1; transform: translateY(0);    max-height: 200px; margin-bottom: 8px; }
       to   { opacity: 0; transform: translateY(-4px); max-height: 0;    margin-bottom: 0; padding-top: 0; padding-bottom: 0; }
     }
-    .message.removing,
-    .login-continue-btn.removing { animation: msg-leave 0.18s ease forwards; }
 
     .message.user      { align-self: flex-end; }
     .message.assistant { align-self: flex-start; }
@@ -778,6 +781,40 @@
       50%      { opacity: 0.3;  transform: scale(0.7); }
     }
     .login-required-body { font-size: 13px; line-height: 1.5; }
+    /* The wall is settled, not standing: a resolved sign-in is part of the
+       record and must not keep pulsing as if it were still blocking. */
+    .login-required-msg.resolved .login-required-badge { color: var(--ink-2); }
+    .login-required-msg.resolved .login-required-badge::before {
+      background: var(--ink-3);
+      animation: none;
+    }
+    /* What Brotto was trying to do, and where it was. Both are the user's
+       own words back to them — the task they typed and the page they are
+       looking at — so the card reads as an account of the wall, not a
+       system notice about one. */
+    .login-required-task {
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--ink);
+      border-left: 2px solid var(--wait);
+      padding-left: 8px;
+    }
+    .login-required-url {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: var(--ink-2);
+      word-break: break-all;
+      text-decoration: none;
+    }
+    .login-required-url[href] { text-decoration: underline; }
+    /* The outcome, in the same place the other two cards put theirs. */
+    .login-required-outcome {
+      border-top: 1px solid var(--rule);
+      padding-top: 9px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--ink-2);
+    }
 
     /* ─── Step bubble ─────────────────────────────────────────────────── */
     .step-bubble { display: flex; flex-direction: column; gap: 5px; }
@@ -963,39 +1000,6 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-
-    .clarify-input-row { display: flex; gap: 8px; align-items: stretch; }
-    .clarify-input {
-      flex: 1;
-      font-family: var(--font-ui);
-      font-size: 13px;
-      color: var(--ink);
-      background: var(--paper-2);
-      border: 1px solid var(--rule-2);
-      padding: 8px 10px;
-      resize: none;
-      min-height: 36px;
-      max-height: 96px;
-      outline: none;
-      transition: border-color var(--t);
-    }
-    .clarify-input:focus { border-color: var(--ink); border-width: 2px; }
-    .clarify-input::placeholder { color: var(--ink-3); }
-    .clarify-send-btn {
-      background: var(--ink);
-      color: var(--paper);
-      border: 1px solid var(--ink);
-      padding: 0 16px;
-      font-family: var(--font-mono);
-      font-size: 9.5px;
-      font-weight: 500;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      cursor: pointer;
-      transition: background var(--t), color var(--t);
-    }
-    .clarify-send-btn:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
-    .clarify-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
     .inline-log {
       font-family: var(--font-mono);
@@ -1422,8 +1426,6 @@
       #statusBar .cell.flash,
       .overlay-panel,                /* appears instead of sliding in */
       .message,                      /* entrance texture */
-      .message.removing,
-      .login-continue-btn.removing,
       .plan-card, .approval-card, .clarify-card,
       /* the `.blocking` forms are (0,2,0) and would outrank the bare
          selectors above, so they have to be named here too */
@@ -1589,18 +1591,23 @@
       <label>
         Provider
         <select id="model-provider" class="input">
-          <option value="anthropic">Anthropic</option>
-          <option value="openai">OpenAI</option>
-          <option value="minimax">MiniMax (Anthropic-compat)</option>
+          <!-- populated from GET /v1/models -->
         </select>
       </label>
       <label>
         Model
-        <select id="model-name" class="input">
-          <!-- populated from JS based on provider selection -->
-        </select>
+        <!-- A text input with suggestions, not a <select>: OpenRouter's
+             catalogue and `qwen2.5-coder:7b` are not enumerable, and a select
+             cannot say "one of these, or your own". This also removes the
+             accepts_any_model branch the select needed. -->
+        <input id="model-name" class="input" list="model-name-options" placeholder="Model id" autocomplete="off" />
+        <datalist id="model-name-options"></datalist>
       </label>
-      <label>
+      <label id="modelBaseUrlSetting" class="hidden">
+        API base URL
+        <input id="model-base-url" class="input" type="url" placeholder="https://api.example.com/v1" autocomplete="off" />
+      </label>
+      <label id="modelKeySetting">
         API key
         <input id="model-api-key" class="input" type="password" placeholder="Leave blank to use server default" autocomplete="off" />
       </label>
@@ -1661,6 +1668,7 @@
   </div>
 </div>
 
+<script src="model_catalog.js"></script>
 <script src="sidepanel.js"></script>
 </body>
 </html>

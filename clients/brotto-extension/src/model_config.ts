@@ -12,6 +12,12 @@ export interface ModelConfig {
   provider: string;
   model: string;
   context_window?: number;
+  // Where the provider's API lives, for the OpenAI-compatible and self-hosted
+  // vendors. On the config rather than beside the key because it is not a
+  // secret and must survive a browser restart — otherwise an Ollama or
+  // OpenRouter user re-pastes the URL every restart, the way they re-paste
+  // their key.
+  base_url?: string;
 }
 
 export interface StoredModelConfig {

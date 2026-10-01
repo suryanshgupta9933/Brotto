@@ -36,6 +36,7 @@ class ModelConfigWire(BaseModel):
     provider: str
     model: str
     context_window: int | None = None
+    base_url: str | None = None
 
 
 class TaskStart(BaseModel):

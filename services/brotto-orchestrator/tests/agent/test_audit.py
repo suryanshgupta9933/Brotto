@@ -76,6 +76,7 @@ def test_totals_track_turns_prompts_actions_and_tokens(trail):
     totals = trail.document()["totals"]
     assert totals == {"turns": 1, "steps": 1, "prompts": 1, "actions": 1,
                       "tokens_in": 10, "tokens_out": 2,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0,
                       "wall_s": 0.0, "errors": 0}
 
 

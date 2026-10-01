@@ -1,19 +1,151 @@
 # Model adapter, dev mode, and key resolution
 
-Read before touching `model/{config,registry,store,resolver}.py`, `main.py`'s
-dev-mode env defaults, or anything about which model runs a task.
+Read before touching `model/{config,catalog,registry,store,resolver,pricing}.py`,
+`main.py`'s dev-mode env defaults, or anything about which model runs a task.
 
 ## Model adapter
 
-**Always-available providers** (`brotto_orchestrator.model.registry`):
-- `anthropic` (claude-3-5-sonnet-latest)
-- `openai` (gpt-4o, gpt-4o-mini, o1)
-- `minimax` (MiniMax-M3.1-Flash-Preview, MiniMax-M3, MiniMax-M2.7) — reuses AnthropicFactory with `https://api.minimax.io/anthropic` as base URL
+**One catalogue, nine providers** (`brotto_orchestrator.model.catalog.PROVIDER_CATALOG`).
+This is the single source of truth: the factories, the `GET /v1/models` endpoint,
+and both extension screens are all generated from it, so adding a model is one
+edit. It replaced three hand-kept copies that had already drifted.
+
+| id | shape | notes |
+|---|---|---|
+| `anthropic` | anthropic | claude-3-5-sonnet-latest, claude-3-5-haiku-latest |
+| `openai` | openai | gpt-4o, gpt-4o-mini, o1 |
+| `minimax` | anthropic | 4 models; fixed endpoint, no base-URL field |
+| `gemini` | gemini | gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash |
+| `openrouter` | openai | any model id; endpoint editable |
+| `deepseek` | openai | any model id; endpoint editable |
+| `groq` | openai | any model id; endpoint editable |
+| `ollama` | openai | **keyless**, any model id, defaults to `http://localhost:11434/v1` |
+| `custom` | openai | any model id, no models, no default endpoint |
+
+**Dispatch is on the vendor's request shape (`api_shape`), never on its id.**
+MiniMax speaks the Anthropic shape from its own id; a registry that dispatched
+on `id == "anthropic"` sent it OpenAI requests at an endpoint that only accepts
+Anthropic ones, and — because both factories are the same class — Anthropic
+requests went to `api.minimax.io` at the same time. `ProviderInfo.api_shape` is
+a fact about the vendor, which is why it lives in the catalog and not in
+`registry.py`.
+
+**Three factories, not nine.** `AnthropicFactory`, `GeminiFactory` and
+`OpenAICompatibleFactory`, each carrying a `provider_id` that `_build_registry`
+sets from the catalog key. `OpenAICompatibleFactory` is the whole OpenAI-
+convergence bet: OpenRouter, Groq, DeepSeek, Ollama, vLLM and any self-hosted
+endpoint are the same class with a different default URL. A previous
+`_VendoredOpenAI` subclass existed to carry the id and was removed once
+`provider_id` moved onto the base — it was also the reason `AnthropicFactory`
+validated model ids against *Anthropic's* list, so the minimax factory rejected
+`MiniMax-M3` for a minimax user.
+
+**`OpenAIChatModel`, not `OpenAIResponsesModel`.** The Responses API is
+OpenAI's own. Ollama, vLLM, DeepSeek and most gateways implement chat
+completions only, and reaching them is the entire point of the adapter.
 
 **Per-task resolution** (`resolver.resolve_model_config`):
 1. inline_config / inline_creds (from extension's task_start)
 2. per-user JSON file keyed by client IP
 3. env vars (`AGENT_MODEL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`)
+
+### `base_url` lives on the config, not the credentials
+
+`UserCredentials.base_url` is what the factories read; `ModelConfig.base_url` is
+where it is stored. The split is deliberate: the config is what `store.py`
+persists, so an Ollama user does not re-paste the URL every browser restart the
+way they re-paste their key, while the URL still travels next to the key on the
+one path that builds a provider.
+
+`resolver._with_base_url` is what joins the halves, and it is the reason the
+resolver is the only place that needs to know about it — a caller that built
+`UserCredentials` itself and passed the config separately would send the
+request to the wrong endpoint with no error anywhere.
+
+Adding the field was backward compatible with no migration: `from_dict`'s `known`
+set only rejects *extra* keys, so every already-persisted `logs/user_models/*.json`
+loads unchanged, and `background.ts` already ships `model_config` whole so the
+wire needed no new field.
+
+**This is an SSRF primitive and the line is drawn at the scheme.** `/ws/ext` is
+unauthenticated, so anyone who can reach the server can point it at an arbitrary
+URL and have it make authenticated POSTs there. `ModelConfig.__post_init__`
+requires `http://` or `https://`. Private IP ranges are deliberately *not*
+refused — that would break `http://localhost:11434/v1`, the case the feature
+exists for, and the server's operator is the one choosing to expose it. It is
+not recorded in the audit document's `model` block, so an internal hostname
+stays out of the session record.
+
+**A shell-exported `ANTHROPIC_BASE_URL` overrides the Anthropic default**, and
+the base-URL half of this feature makes that stickier than it was: `_from_env`
+now persists it into a per-user config. Same class as "the key must be in `.env`,
+not the shell" above. Verify with the environment scrubbed:
+
+```bash
+env -u ANTHROPIC_BASE_URL -u AGENT_BASE_URL \
+  ../../.venv/bin/python -m pytest tests/ -q
+```
+
+`AGENT_BASE_URL` is the provider-neutral name and is read first;
+`ANTHROPIC_BASE_URL` is kept for the configs that predate it.
+
+### Ollama has no key
+
+`resolver` deliberately ignores an inline config that arrives without one — a
+rule this file documents at length. Rather than weaken it, `ProviderInfo.
+keyless_ok` marks the one provider it applies to (Ollama, today) and
+`_authenticates` honours exactly that. Every other provider keeps the old
+behaviour, so `test_keyless_inline_config_is_ignored` still passes. The panel
+hides the API-key box for a keyless provider, so the user is not told to fill in
+something that is ignored.
+
+### Pricing
+
+`model/pricing.py`. `RunUsage` carries `cache_read_tokens` / `cache_write_tokens`
+and pydantic-ai 2.31 has `RunUsage.cost`, but `AnthropicModel` has **no cost
+calculation at all**, so on Claude and MiniMax it stays 0 — the catalog is the
+only source of a number.
+
+Cache tokens are the reason this is not `tokens * rate`. CLAUDE.md records that
+the stable prompt prefix is cached, so on a normal multi-step run the cached
+read dominates input volume while costing a tenth of the rate; an input/output
+-only estimate overprices the actual workload several fold. `RunUsage.
+input_tokens` is the *uncached* portion — the API reports the three counts
+separately and they do not overlap. `harness.py` accumulates all four into
+`TaskResult.timing` and the audit document records them per turn and in
+`totals`; the keys are additive, so a document written before them still parses
+and is still resumable.
+
+`Pricing | None` is a supported value and `price_usage` returns `None` for it.
+MiniMax, Groq, DeepSeek and OpenRouter are deliberately unpriced. **A visibly
+absent cost beats a confidently wrong one**, because the consumer of this number
+is a budget cap. Prices were transcribed on 2026-10-01 and must be re-checked
+against each provider's pricing page before any of them is shown to a user.
+Local inference is the one zero that is certain rather than unknown.
+
+`testing/runner.py` prices the offline benchmark off `tokens_in`/`tokens_out`
+with its own flat 3.00/15.00 rates and is **deliberately not wired to the
+catalog** — it is the benchmark's assumption, not the live pricing path.
+`tests/testing/test_runner.py` pins its result.
+
+### The extension
+
+`GET /v1/models` serves the catalog; `model_catalog.js` fetches it, caches it in
+`chrome.storage.local` for a day, and falls back to a small built-in list so
+Settings still opens with the server down. That fallback is the last copy and is
+deliberately *not* a thing to keep in sync — it is stale-tolerant by design.
+
+The model control is `<input list=…>` with a `<datalist>`, not a `<select>`.
+OpenRouter's catalogue and `qwen2.5-coder:7b` are not enumerable, and a select
+cannot express "one of these, or your own" — which also deleted the
+`accepts_any_model` branch the select would have needed. `context_window` for a
+free-text id falls back to the provider's *smallest* known window, because it
+becomes `window/20` of AX-tree budget and an invented 1M would overrun the real
+window and 400 on the next step. Pinned by `scripts/test-model-config.test.js`.
+
+The base-URL box and the API-key box are shown per provider, not always. A field
+left visible for a provider that ignores it is a lie about what the user has to
+fill in.
 
 **MiniMax model choice** — latency, not billing, is the deciding factor:
 - `MiniMax-M3` — accepts `thinking.type="disabled"`. Measured 2–5s/step end-to-end. Dev default.
@@ -21,9 +153,9 @@ dev-mode env defaults, or anything about which model runs a task.
 
 **`max_tokens` and thinking are set in `registry.py`, not the harness.** Each factory exposes `model_settings(model_id)`, wired at the `agent.run` call in `harness.py`:
 - `_OUTPUT_TOKEN_CAP = 32_000` on every provider. pydantic-ai's own default is 4096, below what a reasoning turn produces, and the failure names a *prompt-length* problem that does not exist ("simplify the prompt to result in a shorter response"). A cap is a ceiling, not a reservation, so a generous one costs nothing.
-- `anthropic_thinking={"type":"disabled"}` on every model except `_THINKING_REQUIRED` (`MiniMax-M3.1-Flash-Preview`). Don't send it to OpenAI providers.
+- `anthropic_thinking={"type":"disabled"}` on every model except `_THINKING_REQUIRED` (`MiniMax-M3.1-Flash-Preview`). Never send it to OpenAI or Gemini — it is an Anthropic request field, they reject an unknown body key, and every OpenAI-compatible gateway passes the body through.
 
-Both are pinned by `tests/model/test_registry_settings.py`, which fails with the reason in the test name.
+Both are pinned by `tests/model/test_registry_settings.py`, which sweeps **every** provider in the registry against model ids belonging to *other* providers. That is why the base `model_settings` must not look at `model_id`: it is called with ids it has never heard of, and a gate that raises on an unrecognised one breaks the sweep and the feature.
 
 ## Dev mode
 
@@ -56,5 +188,12 @@ auth env at startup: ANTHROPIC_API_KEY=set (len=125)  ANTHROPIC_AUTH_TOKEN=set (
 
 Tiers: inline (extension) → per-user file → env. Two rules that aren't obvious:
 
-- An inline config **without** a key is ignored and falls through. The extension stores `model_config` in `chrome.storage.local` (survives restart) but the key in `chrome.storage.session` (does not), so every browser restart it sends a config and no key. Honoring that gave a keyless provider and "Set `ANTHROPIC_API_KEY`" while shadowing a working `.env`.
-- A per-user config persists the *model* only, never a key — so after a browser restart it is unusable on its own and the resolver says so explicitly.
+- An inline config **without** a key is ignored and falls through — unless the
+  catalog marks its provider `keyless_ok`, which today only Ollama is. The
+  extension stores `model_config` in `chrome.storage.local` (survives restart)
+  but the key in `chrome.storage.session` (does not), so every browser restart
+  it sends a config and no key. Honoring that gave a keyless provider and "Set
+  `ANTHROPIC_API_KEY`" while shadowing a working `.env`.
+- A per-user config persists the *model* only, never a key — so after a browser
+  restart it is unusable on its own and the resolver says so explicitly. It
+  does now persist the **base URL**, which is the half that is not a secret.

@@ -8,12 +8,13 @@ Code-grounded audit of what's actually built today. **Read when working on the c
   - `main.py` (~715 LOC) — FastAPI app + WebSocket handlers
   - `agent/harness.py` (1,280 LOC) — observe→plan→act loop
   - `agent/context.py` — action vocabulary (16 actions, see below)
-  - `model/{config,registry,store,resolver}.py` — provider-agnostic model adapter
+  - `model/{config,catalog,registry,store,resolver,pricing}.py` — provider-agnostic model adapter
   - `policy/` — secure-mode policy + persistence
 - **Chrome MV3 extension** — `clients/brotto-extension/`
   - `background.ts` (976 LOC) — CDP relay
   - `sidepanel.html` (~2,213 LOC compiled) — UI
   - `model_config.ts`, `content.js`, `debugger.ts`
+  - `model_catalog.js` — fetches `/v1/models`, caches a day, offline fallback
 
 ## Wire protocol
 
@@ -118,12 +119,33 @@ Service worker owns: tab lifecycle (`tab.openerTabId`), debugger attach/detach p
 
 ## Model adapter
 
-Three hardcoded providers in `model/registry.py`:
-- `anthropic` — `claude-3-5-sonnet-latest` (200k)
-- `openai` — `gpt-4o`, `gpt-4o-mini`, `o1`
-- `minimax` — alias for `AnthropicFactory` with `base_url=https://api.minimax.io/anthropic`; `MiniMax-M3.1-Flash-Preview` (1M, Token Plan), `MiniMax-M3` (1M, pay-as-you-go — 402 without credits), `MiniMax-M2.7` (204k), `MiniMax-M2.7-highspeed` (204k)
+Nine providers, one catalogue — `model/catalog.py`'s `PROVIDER_CATALOG` generates the
+factories, `GET /v1/models`, and both extension screens, so adding a model is one edit. It
+replaced three hand-kept copies that had already drifted:
 
-**No Gemini, Mistral, DeepSeek, Ollama/local.** Adding one = `ProviderFactory` subclass + registry entry.
+- `anthropic` — `claude-3-5-sonnet-latest`, `claude-3-5-haiku-latest`
+- `openai` — `gpt-4o`, `gpt-4o-mini`, `o1`
+- `minimax` — Anthropic request shape, `base_url=https://api.minimax.io/anthropic`; `MiniMax-M3.1-Flash-Preview` (1M, Token Plan), `MiniMax-M3` (1M, pay-as-you-go — 402 without credits), `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`
+- `gemini` — `gemini-2.0-flash`, `gemini-1.5-pro`, `gemini-1.5-flash`
+- `openrouter`, `deepseek`, `groq`, `ollama`, `custom` — any model id, editable endpoint
+
+Dispatch is on the vendor's **request shape** (`api_shape`), not its id: three factories
+(`AnthropicFactory`, `GeminiFactory`, `OpenAICompatibleFactory`), not nine. The
+OpenAI-compatible one is the convergence bet — OpenRouter, Groq, DeepSeek, Ollama and vLLM
+are the same class with a different default URL, using `OpenAIChatModel` because those
+runtimes implement chat completions and not the Responses API. Ollama is `keyless_ok`.
+
+`base_url` lives on `ModelConfig` (the half that persists), not on the credentials (the half
+that is a secret), so a self-hosted user stops re-pasting the URL every browser restart.
+Scheme is validated `http`/`https`; private ranges are deliberately allowed because refusing
+them breaks `http://localhost:11434/v1`.
+
+Pricing is our own table (`Pricing | None` per model), not pydantic-ai's — `AnthropicModel`
+has no cost calculation at all in 2.31, so `RunUsage.cost` stays 0 on Claude and MiniMax.
+Cache read/write tokens are accumulated separately because `input_tokens` is the *uncached*
+portion, and an input/output-only estimate overprices the real workload several fold.
+`testing/runner.py` prices the offline benchmark off its own flat rates and is deliberately
+not wired to the catalog.
 
 ## BYOK flow
 

@@ -221,14 +221,13 @@
       <div class="field">
         <label for="provider">Provider</label>
         <select id="provider" class="input">
-          <option value="anthropic">Anthropic</option>
-          <option value="openai">OpenAI</option>
-          <option value="minimax">MiniMax (Anthropic-compat)</option>
+          <!-- populated from GET /v1/models -->
         </select>
       </div>
       <div class="field">
         <label for="model">Model</label>
-        <select id="model" class="input"></select>
+        <input id="model" class="input" list="model-options" placeholder="Model id" autocomplete="off" />
+        <datalist id="model-options"></datalist>
       </div>
       <div class="field">
         <label for="apiKey">API key</label>
@@ -246,6 +245,7 @@
     <button id="nextBtn" class="btn btn-primary" type="button">Next</button>
   </div>
 
+  <script src="model_catalog.js"></script>
   <script src="welcome.js"></script>
 </body>
 </html>

@@ -1974,16 +1974,25 @@ class AgentHarness:
                 usage = result.usage if result is not None else None
                 tokens_in = usage.input_tokens if usage else 0
                 tokens_out = usage.output_tokens if usage else 0
+                # Reported separately by the API and not a subset of
+                # tokens_in. Free to skip: only a priced model turns them into
+                # a cost, and the cost is not on the wire yet.
+                cache_read = usage.cache_read_tokens if usage else 0
+                cache_write = usage.cache_write_tokens if usage else 0
                 if usage is not None:
                     tokens["in"] += tokens_in
                     tokens["out"] += tokens_out
+                    tokens["cache_read"] += cache_read
+                    tokens["cache_write"] += cache_write
             except Exception:
-                usage, tokens_in, tokens_out = None, 0, 0
+                usage = None
+                tokens_in = tokens_out = cache_read = cache_write = 0
             tokens_used = tokens_in if usage is not None else None
             context = _build_context(tokens_used, window=context_window)
             audit.record_model(
                 a_turn, thought=decision.thought, reasoning=decision.reasoning,
                 tokens_in=tokens_in, tokens_out=tokens_out,
+                cache_read=cache_read, cache_write=cache_write,
                 context_pct=context["pct"] or 0.0,
                 latency_ms=int((time.perf_counter() - t_plan) * 1000),
             )
@@ -2379,6 +2388,11 @@ class AgentHarness:
             "components": {k: round(timings[k], 3) for k in TIMING_BUCKETS},
             "per_step": per_step,
             # Consumed by testing/runner.py, which pops these to price the run.
+            # It prices off tokens_in/out with its own flat rates and is
+            # deliberately not wired to the catalog: it is the offline
+            # benchmark's assumption, not the live pricing path.
             "tokens_in": tok.get("in", 0),
             "tokens_out": tok.get("out", 0),
+            "cache_read_tokens": tok.get("cache_read", 0),
+            "cache_write_tokens": tok.get("cache_write", 0),
         }
