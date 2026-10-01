@@ -19,7 +19,7 @@ Phase 1 delivers a stable, secure, and self-hostable **Free/Open-Source (OSS) Ti
 |   • Real-Browser Extension Test Verification                                                     |
 +--------------------------------------------------------------------------------------------------+
 | Track 2: Product Finishing & Store Packaging                                                     |
-|   • Repository & Package Hygiene (`uvx`, Apache 2.0)                                             |
+|   • Repository & Package Hygiene (`uvx`, BSL 1.1 -> Apache 2.0 in 2029)                             |
 |   • Side Panel Polish (Token/Cost Dashboard, Replay State Isolation)                             |
 |   • Privacy Transparency (Opt-in Idle Suggestions)                                               |
 |   • Unlisted Chrome Web Store Submission                                                         |
@@ -178,7 +178,7 @@ Phase 1 delivers a stable, secure, and self-hostable **Free/Open-Source (OSS) Ti
 2. *Dependency Lockfile Consolidation:* Remove redundant `uv.lock` files between the repository root and `services/brotto-orchestrator/`, tracking a single root lockfile.
 
 
-3. *Licensing Finalization:* Apply the standard Apache 2.0 license text across root `LICENSE` and `NOTICE` files, replacing third-party copyright artifacts with clean project copyright headers.
+3. *Licensing Finalization:* Apply the **Business Source License 1.1** to the root `LICENSE`, with a `Change Date` of 2029-10-01 and the Apache 2.0 text preserved at `LICENSES/Apache-2.0.txt` as the conversion target. Clean the root `NOTICE` of third-party copyright artifacts. This follows the accepted decision in `docs/product/decisions/2026-09-28-distribution-oss-cloud.md` (Fork A, Q1) — not plain Apache 2.0, which would leave the hosted cloud tier unprotected.
 
 
 4. *Documentation Sync:* Remove gitignore exclusions on `/docs/architecture/` and `/docs/product/`. Rewrite `clients/brotto-extension/README.md` to purge non-existent source references (e.g., `crypto.ts`, `pairing.ts`, `popup.tsx`).
@@ -193,7 +193,7 @@ Phase 1 delivers a stable, secure, and self-hostable **Free/Open-Source (OSS) Ti
 * [ ] `git status` confirms root dependencies resolve from a single `uv.lock`.
 
 
-* [ ] `LICENSE` is valid Apache 2.0 and repo-wide searches return zero references to legacy third-party entities.
+* [ ] `LICENSE` is BSL 1.1 with a 2029-10-01 change date, `LICENSES/Apache-2.0.txt` holds the conversion text, and repo-wide searches return zero references to legacy third-party entities.
 
 
 
@@ -425,9 +425,9 @@ Phase 1 delivers a stable, secure, and self-hostable **Free/Open-Source (OSS) Ti
  | `pip install -e .` and `uvx brotto` run cleanly from a fresh shell.
 
  |
-| **PKG-02** | Legal & Licensing | Clean Apache 2.0 license & removed third-party references
+| **PKG-02** | Legal & Licensing | BSL 1.1 with 2029-10-01 Apache conversion, no third-party references
 
- | Root `LICENSE` is valid Apache 2.0; repo contains zero external company artifacts.
+ | Root `LICENSE` is BSL 1.1 with the Apache 2.0 conversion target committed; repo contains zero external company artifacts.
 
  |
 | **UI-01** | Panel Cost Tracker | Live token spend and task budget caps

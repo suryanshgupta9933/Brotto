@@ -41,8 +41,9 @@ The agent layer is model-agnostic (D6). The active model is configured at runtim
 
 ## License Compatibility
 
-This project is released under Apache-2.0. The combination of MIT, BSD, and
-Apache-2.0 dependencies above is compatible with that license.
+This project is released under the Business Source License 1.1, which converts to
+Apache-2.0 on 2029-10-01. The combination of MIT, BSD, and Apache-2.0
+dependencies above is compatible with both.
 
 ## Dependency Tracking
 

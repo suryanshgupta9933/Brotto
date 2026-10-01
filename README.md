@@ -124,4 +124,9 @@ CI runs both. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE) and [PRIVACY.md](PRIVACY.md).
+Business Source License 1.1 — free for personal, research, evaluation and
+non-commercial internal use. It converts to Apache 2.0 on **2029-10-01**, which
+is reproduced in [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt). Running a
+hosted service on top of this repo needs a commercial license.
+
+See [LICENSE](LICENSE) and [PRIVACY.md](PRIVACY.md).
