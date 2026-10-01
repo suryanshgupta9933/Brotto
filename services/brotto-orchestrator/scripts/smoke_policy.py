@@ -1,4 +1,4 @@
-"""E2E smoke for secure-mode + domain policy.
+"""E2E smoke for the domain policy and sensitive-action gates.
 
 Drives the harness with a fake CDP and a monkey-patched pydantic-ai
 agent (no real browser or model API key needed) to exercise each
@@ -7,17 +7,15 @@ checkpoint and print the resulting WS messages + final TaskResult.
 Run from repo root:
 
     PYTHONPATH=services/brotto-orchestrator/src \
-        .venv/bin/python services/brotto-orchestrator/scripts/smoke_secure_mode.py
+        .venv/bin/python services/brotto-orchestrator/scripts/smoke_policy.py
 
-Scenarios (enterprise redesign — whitelist removed, blacklist = hard block,
-deny → abort task):
+Scenarios (blacklist = hard block, deny → abort task):
 
-    1. Normal mode — no policy enforcement (regression check).
-    2. Secure mode + landing on blacklisted URL → task fails with policy_blocked.
-    3. Secure mode + agent navigates to blacklisted URL → task fails at execute.
-    4. Secure mode + critical-pattern action denied → task aborts with user_denied.
-    5. Secure mode + first-time-seen denied → task aborts with user_denied.
-    6. Secure mode + first-time-seen approved → continues normally.
+    1. Landing on a blacklisted URL → task fails with policy_blocked.
+    2. Agent navigates to a blacklisted URL → task fails at execute.
+    3. Critical-pattern action denied → task aborts with user_denied.
+    4. First-time-seen denied → task aborts with user_denied.
+    5. First-time-seen approved → continues normally.
 """
 
 from __future__ import annotations
@@ -70,6 +68,9 @@ class FakeCDP:
 
     async def get_page_title(self) -> str:
         return f"Page at {self.url}"
+
+    async def get_page_text(self) -> str:
+        return f"visible text on {self.url}"
 
     async def click_ref(self, ref: str) -> str:
         self.clicked.append(ref)
@@ -190,7 +191,7 @@ class WSRecorder:
 async def run_scenario(name: str, *, policy: Policy, url: str, decisions: list[AgentDecision],
                        human_replies: list[str], expect_timeout: bool = False):
     print(f"\n── {name} ──")
-    print(f"  policy.mode={policy.mode}  blacklist={policy.blacklist}")
+    print(f"  blacklist={policy.blacklist}")
     print(f"  starting url={url}")
     print(f"  human_replies (in order): {human_replies}")
 
@@ -248,35 +249,15 @@ async def main() -> None:
 
     # Sanity print of the gate logic for a few URLs.
     print("== Gate decision previews (no harness run) ==")
-    secure = Policy(mode="secure", blacklist=["evil.com"])
+    policy = Policy(blacklist=["evil.com"])
     for u in ["https://app.bank.com/x", "https://evil.com/x", "https://other.com/x", "mailto:user@bank.com", "not a url"]:
-        d = check_domain_policy(u, secure)
+        d = check_domain_policy(u, policy)
         print(f"  {u:<40}  eTLD+1={etld1(u)!r:<22}  → {d.value}")
 
-    # 1. Normal mode = today's behaviour.
+    # 1. Landing on blacklisted URL → observe-phase hard block.
     await run_scenario(
-        "1. Normal mode (regression check — no policy prompts expected)",
-        policy=Policy(mode="normal"),
-        url="https://example.com/home",
-        decisions=[
-            AgentDecision(
-                reasoning="click the first button",
-                thought="looks good",
-                actions=[ActionCall(action="click", action_args={"ref": "btn1"})],
-            ),
-            AgentDecision(
-                reasoning="all done",
-                thought="finishing",
-                actions=[ActionCall(action="task_complete", action_args={"summary": "clicked"})],
-            ),
-        ],
-        human_replies=[],
-    )
-
-    # 2. Secure + landing on blacklisted URL → observe-phase hard block.
-    await run_scenario(
-        "2. Secure + landing on blacklisted URL → task fails policy_blocked at observe",
-        policy=Policy(mode="secure", blacklist=["evil.com"]),
+        "1. Landing on blacklisted URL → task fails policy_blocked at observe",
+        policy=Policy(blacklist=["evil.com"]),
         url="https://evil.com/welcome",
         decisions=[
             AgentDecision(
@@ -288,10 +269,10 @@ async def main() -> None:
         human_replies=[],
     )
 
-    # 3. Secure + agent's navigate targets blacklisted URL → block at execute.
+    # 2. Agent's navigate targets blacklisted URL → block at execute.
     await run_scenario(
-        "3. Secure + agent navigates to blacklisted URL → task fails at execute",
-        policy=Policy(mode="secure", blacklist=["evil.com"]),
+        "2. Agent navigates to blacklisted URL → task fails at execute",
+        policy=Policy(blacklist=["evil.com"]),
         url="https://clean.com/start",
         decisions=[
             AgentDecision(
@@ -308,10 +289,10 @@ async def main() -> None:
         human_replies=[],
     )
 
-    # 4. Secure + critical-pattern action → user denies → task aborts.
+    # 3. Critical-pattern action → user denies → task aborts.
     await run_scenario(
-        "4. Secure + critical-pattern action denied → task aborts with user_denied",
-        policy=Policy(mode="secure"),
+        "3. Critical-pattern action denied → task aborts with user_denied",
+        policy=Policy(),
         url="https://example.com/admin",
         decisions=[
             AgentDecision(
@@ -329,10 +310,10 @@ async def main() -> None:
         human_replies=["no"],
     )
 
-    # 5. Secure + first-time-seen denied → task aborts.
+    # 4. First-time-seen denied → task aborts.
     await run_scenario(
-        "5. Secure + first-time-seen denied → task aborts with user_denied",
-        policy=Policy(mode="secure", first_time_seen_prompt=True),
+        "4. First-time-seen denied → task aborts with user_denied",
+        policy=Policy(),
         url="https://example.com/admin",
         decisions=[
             AgentDecision(
@@ -349,10 +330,10 @@ async def main() -> None:
         human_replies=["no"],  # deny the first-time-seen card
     )
 
-    # 6. Secure + first-time-seen approved → continues normally.
+    # 5. First-time-seen approved → continues normally.
     await run_scenario(
-        "6. Secure + first-time-seen approved → task completes",
-        policy=Policy(mode="secure", first_time_seen_prompt=True),
+        "5. First-time-seen approved → task completes",
+        policy=Policy(),
         url="https://example.com/admin",
         decisions=[
             AgentDecision(
