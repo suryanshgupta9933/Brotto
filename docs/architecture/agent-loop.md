@@ -66,10 +66,68 @@ recover.
 
 **Observation is the half that is still reducible.** Observe + execute is 95.12s
 = 53.4% of wall, and 12s of `execute` is one click: `_send_action` blocks until
-the extension pushes the post-action observation back. The 6 `getFullAXTree`
-calls (one per frame, up to 12 by `MAX_FRAMES`) are the other cost. Not yet
-optimized — the lever is fewer frames, not a bigger budget, and the honest next
-measurement is per-frame time on a page with 4 cross-origin embeds.
+the extension pushes the post-action observation back.
+
+**What it costs, measured per CDP call.** `scripts/probe_observation_perf.py`
+replays the exact call sequence `captureObservation` runs, timing every call,
+with `BOX_WALK` and `HIDDEN_PROBE` extracted from the TypeScript rather than
+copied — a copy is a second thing to keep correct. Same-origin synthetic
+embeds, 400 nodes each, best of 3:
+
+| frames | AX nodes | geometry fallback | stability | CDP serial | @pool 6 |
+|---|---|---|---|---|---|
+| 1 | 5 | 0 | 3005ms | 6ms | 5ms |
+| 3 | 1,613 | 0 | 3003ms | 89ms | 43ms |
+| 6 | 4,025 | 2,025 | 3006ms | 1,453ms | 284ms |
+| 9 | 6,437 | 4,437 | 3004ms | 3,256ms | 612ms |
+| 12 | 8,849 | 6,849 | 3004ms | 4,728ms | 863ms |
+
+Two findings that changed the design. **The stability gate is a constant 3004ms** —
+3005ms on a 5-node page and 3004ms on an 8,849-node one, so it is `QUIET_MS`
+and nothing about the page moves it. And **the geometry fallback is the real
+cost, growing super-linearly past the cap**: `MAX_GEOMETRY_ENTRIES = 2000` bounds
+the bulk batch, not the per-node `DOM.getBoxModel` loop behind it, so at the
+Gmail-shaped 6-frame case it is 2,025 serial round trips for 1,453ms of one
+scan. Pooling at 6 is worth 5.1–5.5× on the CDP portion at realistic frame
+counts, and 1.2× on a one-frame page, which is the correct answer — there is
+nothing to pool.
+
+Composed with the unconditional retry, that is `3004 + 1453` per scan × 2
+scans ≈ 9s per observation, against a measured 11.75s.
+
+**Not measured, stated rather than assumed:** the probe's synthetic pages carry
+no `aria-hidden` elements, so `hits` is 0 on every row and the supplement's
+≤200-call `DOM.getNodeForLocation` loop is still unpriced. It is bounded at 200
+calls so it cannot be the largest term, but it has no number.
+
+**An OOPIF is invisible to all of this.** Building *cross-origin* synthetic
+embeds measured zero frames: headed Chromium puts them in their own renderer
+process under site isolation, which makes them a separate CDP *target*, and
+they do not appear in the main frame's `Page.getFrameTree` at all. So the
+frame scan cannot see them, and the 6-frame row above is a floor on the real
+Gmail case rather than a representative number. This is the same gap already
+recorded as unfixed for OOPIF *clicks* — one cause, two symptoms.
+
+### The observation reported its cost nowhere
+
+`waitForStable` returns `{waited, timedOut, elapsedMs, mutations}` and `boxMap`
+returns `{requested, resolved, fallback, truncated, source}`. `captureObservation`
+discarded both — it called `waitForStable(tabId)` for the await and threw the
+value away, and read `geometry.boxes` but not the rest. So the double rescan,
+the quiet-window floor and the geometry overflow were all inferable from the
+source and from nothing else, and the probe above existed to substitute for
+counters that were already being computed.
+
+`observationMetrics` now reports them, and `main.py` logs the block with every
+observation. This is what makes the other two changes falsifiable: a
+performance fix whose effect cannot be read off a real run is a fix argued
+from a synthetic probe.
+
+One trap in it. `geometry.boxes` is a `Map`, and a `Map` on the wire serialises
+to `{}` — which in the log is indistinguishable from `source: "no-join"`, a
+real and different fault. The metrics copy the geometry fields individually
+rather than spreading, and `scripts/test-observation-metrics.test.js` pins it.
+
 
 ### What the AX tree does not contain — measured, not inferred
 

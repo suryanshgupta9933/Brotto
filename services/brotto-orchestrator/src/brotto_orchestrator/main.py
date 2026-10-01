@@ -684,9 +684,28 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
 
                 if t == "observation":
                     n = len(incoming.get("axTargets", []))
+                    # What the observation cost, measured by the extension as it
+                    # built it. `scans` is the number that was never visible: a
+                    # settled page paid two full frame scans because the retry
+                    # loop's first iteration is unconditional, and `fallback` is
+                    # the per-node `DOM.getBoxModel` tail the bulk path could not
+                    # reach. Both were computed and thrown away on the way here.
+                    m = incoming.get("metrics") or {}
+                    st = m.get("stability") or {}
+                    geo = m.get("geometry") or {}
                     log.debug(
-                        "[%s] ← observation  url=%s  ax_targets=%d",
+                        "[%s] ← observation  url=%s  ax_targets=%d"
+                        "  scans=%s  bytes=%s"
+                        "  geometry=%s/%s resolved (fallback=%s truncated=%s %s)"
+                        "  stability=%s in %sms (%s mutations)",
                         session_id, incoming.get("url", "")[:80], n,
+                        m.get("scans", "?"), m.get("bytes", "?"),
+                        geo.get("resolved", "?"), geo.get("requested", "?"),
+                        geo.get("fallback", "?"), geo.get("truncated", "?"),
+                        geo.get("source", "?"),
+                        "quiet" if st.get("waited") else
+                            ("unsettled" if st.get("timedOut") else "unknown"),
+                        st.get("elapsedMs", "?"), st.get("mutations", "?"),
                     )
                     await obs_queue.put(incoming)
                     # A capped or partly-failed frame walk is a partial

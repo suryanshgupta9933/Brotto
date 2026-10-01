@@ -8,7 +8,7 @@
  */
 
 import * as dbg from "../debugger";
-import { waitForStable } from "./stability";
+import { waitForStable, Stability } from "./stability";
 import { anyCommand, enumerateSurfaces, makeRef, FrameScan, Surface } from "./surfaces";
 import { boxMap, GeometryResult } from "./geometry";
 import { findHiddenTargets } from "./supplement";
@@ -136,7 +136,7 @@ export async function targetsForFrame(
 
 export async function extractAx(
   tabId: number,
-): Promise<{ targets: object[]; frames: FrameScan }> {
+): Promise<{ targets: object[]; frames: FrameScan; geometry: GeometryResult }> {
   await dbg.sendCommand(tabId, { method: "Accessibility.enable" });
   const { surfaces, scan } = await enumerateSurfaces(tabId);
 
@@ -164,13 +164,54 @@ export async function extractAx(
     ));
   }
   await dbg.sendCommand(tabId, { method: "Accessibility.disable" });
-  return { targets, frames: scan };
+  return { targets, frames: scan, geometry };
+}
+
+/**
+ * What the observation cost, in numbers the server can log.
+ *
+ * `waitForStable` returns a `Stability` and `boxMap` returns a `GeometryResult`,
+ * and `captureObservation` threw both away — so the double rescan, the
+ * `QUIET_MS` floor and the geometry overflow were all inferable from the source
+ * and from nothing else. This reports values that already exist; it computes
+ * nothing new.
+ *
+ * `geometry` is copied field by field rather than spread, because `boxes` is a
+ * `Map` and a `Map` on the wire serialises to `{}` — which in the log is
+ * indistinguishable from "the bulk path joined nothing", a real and different
+ * fault. `scripts/test-observation-metrics.test.js` pins that.
+ *
+ * `bytes` is the size of the observation the model is about to be handed, and
+ * the server retains it verbatim in `_cached_obs`, so it is the memory answer
+ * too. Measured on the finished object rather than summed from its parts,
+ * because the parts are not what is retained.
+ */
+function observationMetrics(
+  stability: Stability,
+  geometry: GeometryResult,
+  scans: number,
+  targetCount: number,
+  bytes: number,
+): object {
+  return {
+    scans,
+    targets: targetCount,
+    bytes,
+    stability,
+    geometry: {
+      requested: geometry?.requested ?? 0,
+      resolved: geometry?.resolved ?? 0,
+      fallback: geometry?.fallback ?? 0,
+      truncated: geometry?.truncated ?? false,
+      source: geometry?.source ?? "empty",
+    },
+  };
 }
 
 export async function captureObservation(tabId: number) {
   // readyState reaches "complete" with the load event, which on a SPA is
   // before the app has rendered anything. Wait for the page to go still.
-  await waitForStable(tabId);
+  const stability = await waitForStable(tabId);
 
   // Page text rides along with url/title in the evaluate that already runs
   // every step — no extra round trip. innerText is the only place numbers
@@ -186,7 +227,8 @@ export async function captureObservation(tabId: number) {
   }) as { result?: { value?: { url: string; title: string; text: string } } };
   const { url = "", title = "", text: pageText = "" } = ps.result?.value ?? {};
 
-  let { targets: axTargets, frames } = await extractAx(tabId);
+  let { targets: axTargets, frames, geometry } = await extractAx(tabId);
+  let scans = 1;
 
   // Retry only while the tree is still moving. The old test was
   // `axTargets.length < 3`, which is wrong in both directions: a page that
@@ -206,12 +248,22 @@ export async function captureObservation(tabId: number) {
     const nextFp = fingerprint(next.targets);
     axTargets = next.targets;
     frames = next.frames;
+    geometry = next.geometry;
+    scans++;
     if (nextFp === fp) break;
     fp = nextFp;
   }
 
-  // `frames` rides the wire for free — `sendObservation` spreads the whole
-  // observation — so a truncated or cross-origin-reading step is visible in
-  // the server log and the audit without a second channel.
-  return { url, title, pageText, axTargets, frames };
+  const observation = { url, title, pageText, axTargets, frames };
+  // `frames` and `metrics` ride the wire for free — `sendObservation` spreads
+  // the whole observation — so a truncated or cross-origin-reading step, and
+  // what the observation cost to produce, are visible in the server log and
+  // the audit without a second channel.
+  return {
+    ...observation,
+    metrics: observationMetrics(
+      stability, geometry, scans, axTargets.length,
+      JSON.stringify(observation).length,
+    ),
+  };
 }

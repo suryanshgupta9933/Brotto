@@ -142,8 +142,19 @@ size. The 27K is `ax_filter`'s ranked selection filling the 50K budget with the
 *most actionable* elements rather than truncating in tree order; the old flat 6K
 was smaller and blind to a control mid-page, which is the `auth-inbox` failure.
 Observe+execute is 53.4% of wall, and 12s of that is one click —
-`_send_action` blocks on the post-action observation. Full table and the next
-lever in `docs/architecture/agent-loop.md`.
+`_send_action` blocks on the post-action observation.
+
+**The observation now reports its own cost.** `waitForStable` and `boxMap`
+returned a `Stability` and a `GeometryResult` and `captureObservation` threw
+both away; `metrics` ships `scans`, `bytes`, the stability verdict and
+`geometry.{requested,resolved,fallback,truncated,source}` on the observation
+frame, and `main.py` logs it. **`scans` is the one to watch** — a settled page
+pays two full frame scans, because the retry loop's first iteration is
+unconditional. The per-CDP-call probe numbers (geometry fallback is
+super-linear past `MAX_GEOMETRY_ENTRIES`; the 3s quiet floor is constant;
+pooling at 6 is worth 5.1–5.5× at realistic frame counts; a cross-origin embed
+is an OOPIF and invisible to `Page.getFrameTree`) are in
+`docs/architecture/agent-loop.md`.
 
 ### The model could not press a key
 
