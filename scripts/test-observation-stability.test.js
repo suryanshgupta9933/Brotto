@@ -51,6 +51,7 @@ const BODIES = {
   waitForStable: extract("waitForStable"),
   evalInPage: extract("evalInPage"),
   observerExpression: extract("observerExpression"),
+  pageMayStillBeMoving: extract("pageMayStillBeMoving"),
 };
 const CONSTS = { QUIET_MS: extractConst("QUIET_MS"), DEADLINE_MS: extractConst("DEADLINE_MS") };
 
@@ -224,6 +225,54 @@ function bounded(p, ms) {
     check("…and reports neither a quiet wait nor a timeout",
       r.ok && r.v.waited === false && r.v.timedOut === false,
       r.ok ? JSON.stringify(r.v) : "no result");
+  }
+
+  // 6. THE RESCAN GATE. `captureObservation`'s retry loop ran its first
+  //    iteration unconditionally, so a page that had already gone still paid a
+  //    second full frame scan. The gate skips that when the page provably sat
+  //    still — a flat 3004ms off every settled observation.
+  //
+  //    The trap is that `timedOut` is not "it went still". Case 5 above
+  //    produces the shape that breaks a `!timedOut` gate: a tab that navigated
+  //    mid-observe returns timedOut:false, having watched nothing. Gating on
+  //    that skips the rescan on a page nobody observed, which is how a
+  //    half-rendered tree reaches the model.
+  //
+  //    Every Stability here is produced by the real `waitForStable` through
+  //    the same harness as the cases above, not written out as a literal — a
+  //    literal would still pass if the gate shipped alongside a change to what
+  //    these three shapes actually are.
+  {
+    const moving = vm.runInNewContext(
+      `(function (stability) { ${BODIES.pageMayStillBeMoving} })`, { Object },
+    );
+
+    // A page that sits still: case 1's shape.
+    const quiet = await harness({ quietMs: 150, deadlineMs: 4000 }).wait();
+    check("a page that went still for the full window is not read again",
+      quiet.waited === true && moving(quiet) === false,
+      `got ${JSON.stringify(quiet)}, gate said ${moving(quiet)}`);
+
+    // `auth-slowjs`: the control appears at 5000ms, so the page mutates past
+    // the quiet window, never settles, and hits the deadline. Case 2's shape.
+    // This is the regression gate — it must rescan exactly as it did before.
+    const busy = harness({ quietMs: 400, deadlineMs: 900 });
+    const ticker = setInterval(() => busy.dom.mutate(), 40);
+    const churned = (await bounded(busy.wait(), 3000)).v;
+    clearInterval(ticker);
+    check("a page that never settled is read again (auth-slowjs)",
+      churned && churned.waited === false && churned.mutations > 0 && moving(churned) === true,
+      `got ${JSON.stringify(churned)}, gate said ${churned && moving(churned)}`);
+
+    // A tab that navigated mid-evaluate: case 5's shape, and the one a
+    // `!timedOut` gate gets wrong.
+    const gone = await harness({ behaviour: "reject" }).wait();
+    check("a tab that navigated mid-observe is read again, despite timedOut:false",
+      gone.timedOut === false && moving(gone) === true,
+      `timedOut=${gone.timedOut}, gate said ${moving(gone)}`);
+
+    check("a missing Stability reads as moving, not as quiet",
+      moving(undefined) === true, "an absent answer skipped the rescan");
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

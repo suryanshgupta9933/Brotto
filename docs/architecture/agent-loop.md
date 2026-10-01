@@ -138,6 +138,33 @@ frame scan cannot see them, and the 6-frame row above is a floor on the real
 Gmail case rather than a representative number. This is the same gap already
 recorded as unfixed for OOPIF *clicks* — one cause, two symptoms.
 
+### The rescan is gated on the page having gone still, and `waited` is the predicate
+
+`captureObservation`'s retry loop read a settled page twice. Its first iteration
+was unconditional, so a page the stability gate had *already* watched go still
+for the full 3s window still paid a second full frame scan — a flat ~3.0s on
+every settled observation, and the 3.0s is the quiet window, not the scan.
+
+`pageMayStillBeMoving(stability)` skips the loop when the page provably sat still
+for the whole quiet window. `auth-slowjs` is the regression gate for this: its
+control appears at 5000ms, so the page mutates past the window, never settles,
+hits the deadline, and **rescans exactly as before**. `scripts/test-observation-stability.test.js`
+builds all three Stability shapes through the real `waitForStable` rather than
+writing them as literals, so the gate cannot ship alongside a change to what
+those shapes are.
+
+**The predicate is `waited`, not `!timedOut`.** `waitForStable`'s catch path
+returns `{waited: false, timedOut: false}` for a tab that navigated mid-observe
+— there was no promise left to resolve. Gating on `!timedOut` would skip the
+rescan on a page nobody watched, which is how a half-rendered tree reaches the
+model. The three cases are therefore: quiet for the full window → skip; ran to
+the deadline still mutating → rescan; no answer at all → rescan.
+
+What this does not buy: the *unsettled* path still runs up to three full frame
+scans, so a page with a dozen frames pays 36 `getFullAXTree` calls. Worth
+caching the frame list across the retries if a trace ever shows it — the cap
+bounds it, it is not unbounded.
+
 ### The observation reported its cost nowhere
 
 `waitForStable` returns `{waited, timedOut, elapsedMs, mutations}` and `boxMap`

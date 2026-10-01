@@ -8,7 +8,7 @@
  */
 
 import * as dbg from "../debugger";
-import { waitForStable, Stability } from "./stability";
+import { waitForStable, pageMayStillBeMoving, Stability } from "./stability";
 import { anyCommand, enumerateSurfaces, makeRef, FrameScan, Surface } from "./surfaces";
 import { boxMap, GeometryResult } from "./geometry";
 import { findHiddenTargets } from "./supplement";
@@ -236,22 +236,32 @@ export async function captureObservation(tabId: number) {
   // burns all four retries on itself. Two extra reads, stopping at the first
   // one that changes nothing.
   //
-  // ponytail: this is now up to three full frame scans a step, so a page
-  // with a dozen frames pays 36 `getFullAXTree` calls. Worth caching the
+  // The loop's first iteration is unconditional, so a page that had already
+  // gone still paid a second full scan and a changed page paid three. The
+  // stability gate already ran and already knows: `pageMayStillBeMoving` is
+  // false only when the page provably sat still for the whole quiet window.
+  // That is a flat 3004ms off every settled observation, and an unsettled one
+  // is unchanged — `auth-slowjs` renders its control at 5000ms, so it mutates
+  // past the window, hits the deadline, and rescans exactly as before.
+  //
+  // ponytail: an unsettled page is still up to three full frame scans, so a
+  // page with a dozen frames pays 36 `getFullAXTree` calls. Worth caching the
   // frame list across the retries if it ever shows up in a trace — the cap
   // bounds it, it is not unbounded.
-  const fingerprint = (ts: any[]) =>
-    ts.map((t: any) => t.role + "|" + (t.name ?? "") + "|" + (t.value ?? "")).join("~");
-  for (let i = 0, fp = fingerprint(axTargets); i < 2; i++) {
-    await sleep(800);
-    const next = await extractAx(tabId);
-    const nextFp = fingerprint(next.targets);
-    axTargets = next.targets;
-    frames = next.frames;
-    geometry = next.geometry;
-    scans++;
-    if (nextFp === fp) break;
-    fp = nextFp;
+  if (pageMayStillBeMoving(stability)) {
+    const fingerprint = (ts: any[]) =>
+      ts.map((t: any) => t.role + "|" + (t.name ?? "") + "|" + (t.value ?? "")).join("~");
+    for (let i = 0, fp = fingerprint(axTargets); i < 2; i++) {
+      await sleep(800);
+      const next = await extractAx(tabId);
+      const nextFp = fingerprint(next.targets);
+      axTargets = next.targets;
+      frames = next.frames;
+      geometry = next.geometry;
+      scans++;
+      if (nextFp === fp) break;
+      fp = nextFp;
+    }
   }
 
   const observation = { url, title, pageText, axTargets, frames };

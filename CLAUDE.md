@@ -148,12 +148,11 @@ Observe+execute is 53.4% of wall, and 12s of that is one click —
 returned a `Stability` and a `GeometryResult` and `captureObservation` threw
 both away; `metrics` ships `scans`, `bytes`, the stability verdict and
 `geometry.{requested,resolved,fallback,truncated,source}` on the observation
-frame, and `main.py` logs it. **`scans` is the one to watch** — a settled page
-pays two full frame scans, because the retry loop's first iteration is
-unconditional. The per-CDP-call probe numbers (geometry fallback is
-super-linear past `MAX_GEOMETRY_ENTRIES`; the 3s quiet floor is constant;
-pooling at 6 is worth 5.1–5.5× at realistic frame counts; a cross-origin embed
-is an OOPIF and invisible to `Page.getFrameTree`) are in
+frame, and `main.py` logs it. **`scans` is the one to watch** — it is 1 on a
+page that went still and 1–3 on one that did not. The per-CDP-call probe numbers
+(geometry fallback is super-linear past `MAX_GEOMETRY_ENTRIES`; the 3s quiet
+floor is constant; pooling at 6 is worth 5.1–5.5× at realistic frame counts; a
+cross-origin embed is an OOPIF and invisible to `Page.getFrameTree`) are in
 `docs/architecture/agent-loop.md`.
 
 **The three serial CDP loops are pooled** (`pooled` in `surfaces.ts`,
@@ -165,6 +164,15 @@ the tree would still parse. Frame bookkeeping (`cappedFrames`, `failed`) is
 deliberately *not* pooled; it is filled in one sequential pass after the reads
 land. `sendCommand` re-attaches **once per tab**, shared by everything in
 flight, or six concurrent calls would each race their own `attach`.
+
+**The rescan is gated on the page having gone still**
+(`pageMayStillBeMoving` in `stability.ts`): a page that sat still for the full
+quiet window skips the retry loop, which took ~3.0s off every settled
+observation. The predicate is `stability.waited`, **not `!timedOut`** — the
+catch path returns `{waited:false, timedOut:false}` for a tab that navigated
+mid-observe, and skipping there is how a half-rendered tree reaches the model.
+`auth-slowjs` (control at 5000ms → never settles → deadline) rescans exactly as
+before, which is the regression gate.
 
 
 ### The model could not press a key

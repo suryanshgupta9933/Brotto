@@ -72,6 +72,23 @@ async function evalInPage(tabId: number, expression: string): Promise<any> {
   });
 }
 
+/**
+ * Whether the accessibility tree is worth reading a second time.
+ *
+ * True whenever we cannot *prove* the page went still. The retry loop in
+ * `captureObservation` is the only thing allowed to skip a rescan on this, and
+ * it is deliberately not `!timedOut`: `waitForStable` returns `timedOut: false`
+ * on a tab that navigated mid-observe, because there was no promise left to
+ * resolve. That page has not gone still — nobody watched it — and skipping the
+ * rescan there is how a half-rendered tree reaches the model.
+ *
+ * So the three cases are: quiet for the full window → false; ran to the
+ * deadline still mutating → true; no answer at all → true.
+ */
+export function pageMayStillBeMoving(stability: Stability): boolean {
+  return !(stability && stability.waited === true);
+}
+
 export async function waitForStable(
   tabId: number,
   opts?: StableOpts,
