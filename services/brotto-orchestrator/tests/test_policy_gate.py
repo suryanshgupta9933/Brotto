@@ -93,23 +93,35 @@ def test_blacklist_no_approve_path_exists():
 def test_first_time_seen_returns_true_when_unseen():
     p = Policy(first_time_seen_prompt=True)
     seen: set = set()
-    assert check_first_time_seen(("bank.com", "click"), seen, p) is True
+    assert check_first_time_seen("bank.com", seen, p) is True
 
 
 def test_first_time_seen_returns_false_after_seen():
     p = Policy(first_time_seen_prompt=True)
-    seen = {("bank.com", "click")}
-    assert check_first_time_seen(("bank.com", "click"), seen, p) is False
+    seen = {"bank.com"}
+    assert check_first_time_seen("bank.com", seen, p) is False
 
 
-
-def test_first_time_seen_different_action_still_first_time():
+def test_first_time_seen_different_action_is_not_first_time():
+    """The key is the domain, so approving one verb on a site approves the
+    site. It used to be `(domain, action)` and this asserted the opposite —
+    which is exactly the "five approvals for one page" complaint. The narrow
+    rule that survived is the `aria-hidden` one, pinned in
+    `test_a_standing_grant_does_not_cover_a_hidden_control`."""
     p = Policy(first_time_seen_prompt=True)
-    seen = {("bank.com", "click")}
-    assert check_first_time_seen(("bank.com", "type_text"), seen, p) is True
+    seen = {"bank.com"}
+    assert check_first_time_seen("bank.com", seen, p) is False
 
 
 def test_first_time_seen_different_domain_still_first_time():
     p = Policy(first_time_seen_prompt=True)
-    seen = {("bank.com", "click")}
-    assert check_first_time_seen(("other.com", "click"), seen, p) is True
+    seen = {"bank.com"}
+    assert check_first_time_seen("other.com", seen, p) is True
+
+
+def test_first_time_seen_hidden_key_is_separate_from_the_domain():
+    """A hidden control never inherits the site's grant — the one narrowing
+    that remains on top of domain-scoped approval."""
+    p = Policy(first_time_seen_prompt=True)
+    seen = {"bank.com"}
+    assert check_first_time_seen("bank.com:hidden", seen, p) is True

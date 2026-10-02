@@ -541,7 +541,17 @@ async def policy_ack(request: Request):
     # validation on the next GET, was swallowed by the bare except
     # above, and silently served an empty blacklist. Add a key here
     # only if Policy actually declares it.
-    snapshot = {"blacklist": blacklist}
+    #
+    # `approved_domains` is carried across from disk rather than rebuilt:
+    # the harness writes those grants when the user clicks Approve on a
+    # site, and a Settings save is not a request to forget them. Writing
+    # this snapshot wholesale would drop the list, and the next task on
+    # that site would re-ask for an approval the user already gave.
+    from .policy import persist as _user_policy_persist
+    snapshot = {
+        "blacklist": blacklist,
+        "approved_domains": _user_policy_persist.load_granted_domains(user_id),
+    }
     registry.set_user_policy(user_id, snapshot)
     _persist_user_policy(user_id, snapshot)
     log.warning(
@@ -554,7 +564,7 @@ async def policy_ack(request: Request):
             f"client-{user_id}",
             step=None, kind="policy_acknowledged",
             domain=None, action=None,
-            decision=f"mode={mode}  blacklist={blacklist}",
+            decision=f"blacklist={blacklist}",
         )
     except Exception as exc:
         log.warning("failed to persist policy_acknowledged: %s", exc)

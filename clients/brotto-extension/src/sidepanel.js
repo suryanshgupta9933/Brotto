@@ -3295,12 +3295,18 @@ function appendApprovalCard({ id, reason, action, resolved }) {
     card.appendChild(body);
   }
 
-  const preview = document.createElement('div');
-  preview.className = 'approval-preview';
-  const previewText = action?.url ? `${action.type ?? 'action'} → ${action.url}` : (action?.type ?? 'action');
-  preview.textContent = previewText;
-  preview.title = previewText;
-  card.appendChild(preview);
+  // The destination, never the action's internal name. It read
+  // `_policy_navigation → https://github.com`, which is the harness's label for
+  // a step, not something the user asked about or can act on. The reason line
+  // above already says what the agent wants, so the name repeated it at best;
+  // with no url there is nothing left worth a line.
+  if (action?.url) {
+    const preview = document.createElement('div');
+    preview.className = 'approval-preview';
+    preview.textContent = action.url;
+    preview.title = action.url;
+    card.appendChild(preview);
+  }
 
   if (resolved) {
     resolveCard(card, 'approval-decision', decisionLabel(resolved));

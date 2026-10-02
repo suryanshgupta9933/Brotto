@@ -61,11 +61,15 @@ def _hostname_only(url: str) -> str:
 
 
 def check_first_time_seen(
-    key: tuple[str, str],
-    seen: set[tuple[str, str]],
+    key: str,
+    seen: set[str],
     policy: Policy,
 ) -> bool:
-    """True iff the (domain, action) pair has not been seen this session.
+    """True iff this key has not been seen this session.
+
+    The key is a domain (or `domain:hidden` — see `harness._first_time_key`),
+    not an action: approving a site approves the site. Keying it any finer made
+    a single run ask the same question once per action type on the same page.
 
     Caller adds the key to `seen` after acting on the result (whether
     approved or denied) — re-asking on deny would loop, and on approve

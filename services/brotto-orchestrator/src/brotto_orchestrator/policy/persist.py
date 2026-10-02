@@ -147,5 +147,37 @@ def directory_path() -> Path:
     return _DIR
 
 
+def grant_domain(user_key: str, domain: str) -> None:
+    """Record that the user approved `domain`, keeping every other key.
+
+    Read-modify-write rather than a fresh `save_if_changed`: the same file
+    holds the user's blacklist, and the harness must not clobber it by
+    writing a payload that only knows about the grant. `save_if_changed`
+    would also skip the write whenever the *whole* document hashed equal,
+    which is a different question than whether this grant is new.
+
+    Best-effort by design: a grant that fails to reach disk costs one extra
+    prompt next task, so this never raises into the approval path.
+    """
+    existing = load(user_key) or {}
+    if domain in (existing.get("approved_domains") or []):
+        return
+    payload = {k: v for k, v in existing.items()}
+    payload["approved_domains"] = sorted(
+        set(payload.get("approved_domains") or []) | {domain}
+    )
+    save_if_changed(user_key, payload)
+
+
+def load_granted_domains(user_key: str) -> list[str]:
+    """Domains the user has already approved, for seeding `visited_domains`.
+
+    A file this user has never written returns empty, and a malformed one
+    raises nothing — `load` already swallows both. The caller treats a
+    missing grant as "ask", which is the safe direction to fail in.
+    """
+    return list((load(user_key) or {}).get("approved_domains") or [])
+
+
 # ponytail: filename guard for sanity tests / future path-based callers.
 _SAFE_NAME = re.compile(r"^[a-f0-9]{32}\.json$")

@@ -47,7 +47,7 @@ Two reasons that is the wrong shape, and neither is "it's more code":
   The one setting the mode existed to gate was the one setting the mode made
   meaningless.
 
-`Policy` is now `blacklist` + `sensitive_actions`, and every gate runs
+`Policy` is now `blacklist` + `sensitive_actions` + `approved_domains`, and every gate runs
 unconditionally. `first_time_seen_prompt` was promoted to always-on and deleted.
 The `deps.policy is not None` guards in `harness.py` **stay** — `AgentDeps.policy`
 defaults to `None` and about twenty test files rely on it — and two of them were
@@ -63,6 +63,48 @@ it, a bare `except Exception` swallowed the error, and the server served an empt
 `Policy()` — **the user's saved blacklist vanished from the panel with nothing
 logged anywhere.** When a field is removed from a wire payload, it has to leave
 the dicts that build it, not merely stop arriving.
+
+## Approving a site approves the site, and it outlives the run
+
+The first-time-seen prompt used to be keyed on `(domain, action)`, so approving
+one verb on a page approved nothing else on it. A run on a real page then asked
+once per action type — read the text, click, type, scroll — and the user had to
+approve the same site four times to watch it do one job. A user reported it as
+"so many approvals as a user which is not right", and they were right: what the
+user consents to is *a site*, not *a verb on a site*. The key is the eTLD+1 now.
+
+Two things make that a real grant rather than a per-run cache:
+
+- **`approved_domains` on the user's own policy file.** The grant is written by
+  `persist.grant_domain` on approve and read back by `_seed_granted_domains` at
+  the top of every run, into the `visited_domains` set that every domain gate
+  already consults. The file is keyed by `deps.client_ip` — the same key
+  `/v1/policy_ack` uses — so the grant lands beside that user's blacklist
+  instead of in a second store nothing else reads. It is a **read-modify-write**:
+  the harness and the panel write two different fields of one file, and a grant
+  written as a whole-payload `save_if_changed` would have emptied the blocklist
+  in a file named after a hash of an IP, where the damage is invisible in review.
+- **The audit is the fallback, not the store.** A resume restores approved
+  domains from `policy_events` with `user_decision == "approved"`, and that
+  filter now accepts `first_time_seen` as well as `first_navigation`. Both now
+  mean "the user said yes to this site". The policy file is the durable copy; the
+  audit covers a grant whose file write failed.
+
+**The one narrowing that survived is `aria-hidden`.** A target the extension
+supplemented is one the site deliberately put out of the accessibility tree, and
+it gets the key `<domain>:hidden` so it never rides a standing grant. The loop's
+shortcut is therefore `key == domain and domain in deps.visited_domains` — the
+membership test is *after* the key is built, because testing membership first
+would let a page-injected "Delete account" through on a site the user approved
+last week. `test_a_standing_grant_does_not_cover_a_hidden_control` pins that
+condition, and `test_a_hidden_control_never_becomes_a_standing_grant` pins that
+the key shape is the only thing keeping it out of the file.
+
+**The prompt names the site and nothing else.** It used to interpolate
+`_card_label`, which is the model's own `description` string — so a click whose
+description was the page title rendered as *"the agent wants to District by
+Zomato — Best Go Karting in Gurgaon (2026)"*, which is a page, not an action. A
+domain-scoped approval does not need a per-action label.
 
 ## Two boundaries that are structure, not settings
 

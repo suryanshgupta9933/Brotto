@@ -25,6 +25,14 @@ class Policy(BaseModel):
     """A policy document. Used for both the floor and the effective policy."""
 
     blacklist: list[str] = Field(default_factory=list)
+    # eTLD+1 sites the user has said yes to, kept between tasks and across a
+    # server restart. Without it the first-time-seen gate re-asks about a site
+    # the user approved an hour ago, which is how one page turned into five
+    # identical prompts. Written by the harness on approval, never by the
+    # panel — the user grants it by clicking Approve, not by editing settings.
+    # An `aria-hidden` target never lands here: those keep a per-run key, so a
+    # hidden "Delete account" cannot inherit a grant made days earlier.
+    approved_domains: list[str] = Field(default_factory=list)
     # ponytail: curated list of irreversible action patterns (action name
     # OR substring of action_args) that always require approval.
     # Complements the regex-based CRITICAL_PATTERNS by giving the user a

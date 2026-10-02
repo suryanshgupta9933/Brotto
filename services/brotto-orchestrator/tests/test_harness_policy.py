@@ -32,15 +32,18 @@ def test_policy_schema_no_block_blacklisted_field():
     assert "block_blacklisted" not in Policy.model_fields
 
 
-def test_policy_schema_is_just_the_two_content_fields():
+def test_policy_schema_is_just_the_three_content_fields():
     from brotto_orchestrator.policy.schema import Policy
-    assert set(Policy.model_fields) == {"blacklist", "sensitive_actions"}
+    assert set(Policy.model_fields) == {
+        "blacklist", "sensitive_actions", "approved_domains",
+    }
 
 
 def test_policy_defaults():
     from brotto_orchestrator.policy.schema import Policy
     p = Policy()
     assert p.blacklist == []
+    assert p.approved_domains == []
     assert p.sensitive_actions
 
 
@@ -196,12 +199,19 @@ def test_agent_deps_has_policy_field():
 
 def test_first_time_seen_reason_format():
     """The reasoning string is what shows up in the sidepanel card.
-    Format it once here; any break is caught immediately."""
+    Format it once here; any break is caught immediately.
+
+    It names the site and nothing else. It used to interpolate the action,
+    which was the model's own `description` — so a click whose description
+    was the page title rendered as "the agent wants to District by Zomato —
+    Best Go Karting in Gurgaon (2026)", which is a page, not an action. A
+    domain-scoped approval does not need a per-action label at all."""
     from brotto_orchestrator.agent.harness import _REASON_FIRST_TIME
-    msg = _REASON_FIRST_TIME.format(domain="bank.com", action="click")
+    msg = _REASON_FIRST_TIME.format(domain="bank.com")
     assert "bank.com" in msg
-    assert "click" in msg
     assert "?" in msg  # asks the user
+    # Says the grant is standing, so "approve once" is legible up front.
+    assert "later ones" in msg
 
 
 # ── Bug A regression: first-time-seen guard ────────────────────────────────
@@ -483,11 +493,135 @@ def _click(ref, description="a button on the page"):
     )
 
 
+# ── Standing grants survive the process ────────────────────────────────────
+
+
+def test_a_granted_domain_is_written_to_the_user_policy_file(tmp_path, monkeypatch):
+    """The whole point of the grant is that it outlives the run. Without a
+    file, `_seed_granted_domains` finds nothing on the next task and the user
+    is asked about the same site again — so this asserts the write, not just
+    the in-memory set."""
+    from brotto_orchestrator.agent.harness import _persist_domain_grant
+    from brotto_orchestrator.agent.context import AgentDeps
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+    deps = AgentDeps(
+        user_id="u", task="x", cdp=None, ws_send=None, client_ip="10.0.0.9",
+    )
+    _persist_domain_grant(deps, "bank.com")
+
+    assert pol.load_granted_domains("10.0.0.9") == ["bank.com"]
+
+
+def test_a_grant_does_not_clobber_the_blacklist(tmp_path, monkeypatch):
+    """The grant and the blacklist are two fields of ONE file, written by two
+    different code paths — the harness on Approve, the panel on Save. A grant
+    written as a whole-payload save would silently empty the user's blocklist,
+    and the file it lands in is hashed from an IP, so the damage is invisible
+    in review."""
+    from brotto_orchestrator.agent.harness import _persist_domain_grant
+    from brotto_orchestrator.agent.context import AgentDeps
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+    pol.save_if_changed("10.0.0.9", {"blacklist": ["bad.example"]})
+
+    deps = AgentDeps(
+        user_id="u", task="x", cdp=None, ws_send=None, client_ip="10.0.0.9",
+    )
+    _persist_domain_grant(deps, "bank.com")
+
+    on_disk = pol.load("10.0.0.9")
+    assert on_disk["blacklist"] == ["bad.example"]
+    assert on_disk["approved_domains"] == ["bank.com"]
+
+
+def test_a_restarted_server_loads_the_grant_into_visited_domains(tmp_path, monkeypatch):
+    """A brand-new `AgentDeps` — a new task, or a new process — with an
+    empty `visited_domains`, must come up already holding the grant. This is
+    the case the user reported: approving a site and being asked about it
+    again on the next task."""
+    from brotto_orchestrator.agent.harness import _seed_granted_domains
+    from brotto_orchestrator.agent.context import AgentDeps
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+    pol.grant_domain("10.0.0.9", "google.com")
+
+    deps = AgentDeps(
+        user_id="u", task="x", cdp=None, ws_send=None, client_ip="10.0.0.9",
+    )
+    assert deps.visited_domains == set()
+    _seed_granted_domains(deps)
+    assert "google.com" in deps.visited_domains
+
+
+def test_seeding_grants_keeps_what_the_resume_path_already_found(tmp_path, monkeypatch):
+    """Union, never assignment. The resume path populates `visited_domains`
+    from the audit before this runs; a grant on disk has to add to that, or a
+    resumed run would lose the navigation approvals it just restored."""
+    from brotto_orchestrator.agent.harness import _seed_granted_domains
+    from brotto_orchestrator.agent.context import AgentDeps
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+    pol.grant_domain("10.0.0.9", "google.com")
+
+    deps = AgentDeps(
+        user_id="u", task="x", cdp=None, ws_send=None, client_ip="10.0.0.9",
+    )
+    deps.visited_domains.add("mail.example")
+    _seed_granted_domains(deps)
+    assert deps.visited_domains == {"mail.example", "google.com"}
+
+
+def test_a_user_with_no_policy_file_is_asked_as_normal(tmp_path, monkeypatch):
+    """The failure direction has to be "ask", not "assume". A brand-new user,
+    a never-written file, and a corrupt one all have to leave the gate armed."""
+    from brotto_orchestrator.agent.harness import _seed_granted_domains
+    from brotto_orchestrator.agent.context import AgentDeps
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+    deps = AgentDeps(
+        user_id="u", task="x", cdp=None, ws_send=None, client_ip="10.0.0.9",
+    )
+    _seed_granted_domains(deps)
+    assert deps.visited_domains == set()
+
+    (tmp_path / pol._key_to_filename("10.0.0.9")).write_text("{not json")
+    _seed_granted_domains(deps)
+    assert deps.visited_domains == set()
+
+
+def test_a_hidden_control_never_becomes_a_standing_grant(tmp_path, monkeypatch):
+    """Only the loop's bare-domain path calls `grant_domain`. A hidden target
+    is approved per-run, so a grant written from it would launder a
+    page-injected control into a permanent permission."""
+    from brotto_orchestrator.agent.harness import _first_time_key, _persist_domain_grant
+    from brotto_orchestrator.agent.context import AgentDeps
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+    deps = AgentDeps(
+        user_id="u", task="x", cdp=None, ws_send=None, client_ip="10.0.0.9",
+    )
+    hidden_key = _first_time_key("shop.example", _click("0:-1"), [_hidden_target()])
+    assert hidden_key != "shop.example"
+
+    # The loop's approve branch is guarded by nothing but the key shape, so
+    # pin that the key is what stops it: a domain-keyed call would persist.
+    if hidden_key == "shop.example":
+        _persist_domain_grant(deps, hidden_key)
+    assert pol.load_granted_domains("10.0.0.9") == []
+
+
 def test_a_hidden_destructive_control_is_not_pre_approved():
-    """Review Focus #3. The user approved clicking *something* on this domain
-    twenty steps ago. The site then put a "Delete account" button where
+    """Review Focus #3. The user approved this domain — twenty steps ago, or
+    on a run last week. The site then put a "Delete account" button where
     assistive technology cannot see it. That button must not inherit the
-    earlier approval — which is the whole reason the supplement is safe to
+    standing grant — which is the whole reason the supplement is safe to
     ship at all."""
     from brotto_orchestrator.agent.harness import _first_time_key
     from brotto_orchestrator.policy import Policy
@@ -498,11 +632,11 @@ def test_a_hidden_destructive_control_is_not_pre_approved():
     targets = [_hidden_target()]
     call = _click("0:-1")
 
-    # The session has already been approved to click on this domain.
-    seen = {(domain, "click")}
+    # The site is on a standing grant: approved for ordinary controls.
+    seen = {domain}
 
     key = _first_time_key(domain, call, targets)
-    assert key != (domain, "click"), "a hidden control reused a live approval"
+    assert key == f"{domain}:hidden", "a hidden control reused a live approval"
     # …and `check_first_time_seen` is what decides whether to prompt, so the
     # question is not "is the key different" but "does this still prompt".
     assert check_first_time_seen(key, seen, policy) is True, (
@@ -523,8 +657,26 @@ def test_an_ordinary_control_still_reuses_its_domain_approval():
         ref_id="0:7", tag="button", role="button", name="Save draft",
     )
     key = _first_time_key("shop.example", _click("0:7"), [visible])
-    assert key == ("shop.example", "click")
-    assert check_first_time_seen(key, {("shop.example", "click")}, Policy()) is False
+    assert key == "shop.example"
+    assert check_first_time_seen(key, {"shop.example"}, Policy()) is False
+
+
+def test_a_standing_grant_does_not_cover_a_hidden_control():
+    """The shortcut in the approval loop skips a domain the user has already
+    granted — but only for the ordinary key. This is that condition, pinned
+    separately from the key function: the two are read in different files, and
+    a grant that leaked onto `domain:hidden` would let a page-injected
+    "Delete account" through on a site approved weeks earlier."""
+    from brotto_orchestrator.agent.harness import _first_time_key
+
+    domain = "shop.example"
+    hidden_key = _first_time_key(domain, _click("0:-1"), [_hidden_target()])
+    granted = {domain}
+
+    # The loop's own condition: skip only when the key IS the bare domain.
+    assert (hidden_key == domain and domain in granted) is False, (
+        "a hidden control would ride the standing grant"
+    )
 
 
 def test_a_hidden_control_prompts_only_once():
@@ -552,7 +704,7 @@ def test_an_unresolvable_ref_is_treated_as_ordinary():
     describe to the user in the prompt."""
     from brotto_orchestrator.agent.harness import _first_time_key
     key = _first_time_key("shop.example", _click("9:9"), [])
-    assert key == ("shop.example", "click")
+    assert key == "shop.example"
 
 
 

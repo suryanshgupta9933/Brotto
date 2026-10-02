@@ -93,7 +93,7 @@ disk, and that file is still there after the task ends. The next section says ex
 | `logs/sessions/<session_id>.json` | The audit record of your conversation: your messages, the page URL and title at each step, the prompts, the actions taken, approvals, timing, and errors. For the page itself it keeps counts and a summary of what changed — not the whole tree. |
 | `logs/sessions/<session_id>.scratchpad.txt` | The agent's working memory: a short digest of each captured page and its URL. |
 | `logs/user_models/<client>.json` | Your model configuration: provider, model name, context window, and the address of your provider's API if you set a custom one. **Not your key.** If that address is on your own network, it is written to disk in the clear. |
-| `logs/user_policies/<hash>.json` | Your blocked-domains list, and when you last saved it. |
+| `logs/user_policies/<hash>.json` | Your blocked-domains list; the sites you have approved Brotto to work on; and when you last saved it. |
 
 **Page text is never written to disk.** Each step's page is recorded as a 200-character digest, so a run
 over an authenticated session leaves a record of *what* was visited and not copies of *what was on it*.
@@ -115,6 +115,14 @@ share settings. That name is derived from your client address. The model-configu
 with the address in plain text; the policy file is named with a scrambled version of it. In hosted mode,
 that means the server holds a record of which address used it. It is not used for advertising or
 analytics.
+
+**The approved-sites list is a record of where you have let Brotto work.** When you approve a site in
+an approval card, its domain is added to your policy file and stays there until you clear it, so you
+are not asked about that site again. That means a hosted server holds a list of the domains you have
+given an agent access to. Nothing else about those sites is kept — no URLs, no page content, no dates
+of use — and the list is yours to remove: delete the policy file, or the approved list inside it, and
+every site goes back to asking. Blocking a domain is separate from approving it, and blocking one
+always wins.
 
 One caveat worth knowing rather than guessing at: the server also accepts an identifier a client can
 supply in place of your address, and it will use that instead. The Brotto extension does not send one

@@ -48,7 +48,10 @@ _HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
 # `reasoning` and to policy.log for audit.
 #
 # {action} is the human label from _ACTION_LABEL, never the tool name.
-_REASON_FIRST_TIME = "First time on {domain}: the agent wants to {action}. Continue?"
+_REASON_FIRST_TIME = (
+    "Allow Brotto to work on {domain}? Approving the site covers it for the "
+    "rest of this task, and for later ones."
+)
 # {thought} is the model's `thought` field, which the system prompt already
 # contracts as one sentence of user-facing plain English. `reasoning` must
 # NOT be used here — the prompt marks it "NEVER shown to the user", and an
@@ -105,6 +108,7 @@ def _unescape(text: str) -> str:
         out.append(ch)
         i += 1
     return "".join(out)
+
 # ponytail: ask_human is metadata too — it pauses for user input but the
 # user is not "approving" an agent action, they're answering a question.
 # Card UI is different (no Approve/Deny buttons).
@@ -701,30 +705,77 @@ def _guard_first_time_seen_blacklist(
 
 def _first_time_key(
     domain: str, call: ActionCall, targets: list,
-) -> tuple[str, str]:
-    """The `(domain, action)` pair the first-time-seen prompt is keyed on.
+) -> str:
+    """The key the first-time-seen prompt is keyed on: the **domain**.
 
-    One case gets its own key. A target the extension supplemented is one the
+    It used to be `(domain, action)`, which meant approving one action on a
+    site approved nothing else on it. A run on a real page then asked once per
+    action type — read the text, click, type, scroll — and the user had to
+    approve the same site four times to watch it do one job. What the user
+    actually consents to is *this site*, not *this verb on this site*, so the
+    domain is the whole key.
+
+    One case still gets its own. A target the extension supplemented is one the
     site marked `aria-hidden` — deliberately out of the accessibility tree, so
     a screen-reader user cannot reach it either. It is very often still visible
     and clickable, and for "delete the draft" it is exactly the control the
     user means, which is why we surface it at all. But the site put it there
-    *on purpose*, and the approval the user already gave for ordinary clicks on
+    *on purpose*, and the approval the user just gave for ordinary actions on
     this domain was given without knowing that.
 
-    So a hidden target never rides an existing `(domain, action)` approval: it
-    gets a distinct key, which means one extra prompt the first time a run
-    touches a supplemented control on a domain, and none after that. The
-    alternative — treating it like any other click — is the failure mode this
-    whole task exists to prevent: a hidden "Delete account" button arriving at
-    the user pre-approved because the model had clicked something else on the
+    So a hidden target never rides an existing domain approval: it gets a
+    distinct key, which means at most one extra prompt per domain, per session.
+    The alternative — treating it like any other click — is the failure mode
+    this whole gate exists to prevent: a hidden "Delete account" button arriving
+    at the user pre-approved because the model had clicked something else on the
     same site twenty steps earlier.
     """
     ref = call.action_args.get("ref")
     target = next((t for t in targets if t.ref_id == ref), None)
     if getattr(target, "hidden", False):
-        return (domain, f"{call.action}:hidden")
-    return (domain, call.action)
+        return f"{domain}:hidden"
+    return domain
+
+
+def _grant_key(deps: AgentDeps) -> str:
+    """Which user's policy file a domain grant belongs in.
+
+    `client_ip` is the same key `POST /v1/policy_ack` uses when the panel
+    sends no `user_id`, which is the default — so a grant written here lands
+    in the same file as that user's blacklist instead of a second store
+    nobody else reads.
+    """
+    return deps.client_ip or "unknown"
+
+
+def _persist_domain_grant(deps: AgentDeps, domain: str) -> None:
+    """Write an approved domain to the user's policy file.
+
+    Swallows its own failure. This runs inside the approval path, and a
+    disk error must not turn a user's "Approve" into a crashed task — the
+    worst case is that they see this prompt one more time next session.
+    """
+    try:
+        from ..policy import persist as _persist
+        _persist.grant_domain(_grant_key(deps), domain)
+    except Exception as exc:  # noqa: BLE001 — never break a run over a grant
+        log.warning("could not persist domain grant %s: %s", domain, exc)
+
+
+def _seed_granted_domains(deps: AgentDeps) -> None:
+    """Pre-load the user's standing grants into `visited_domains`.
+
+    `visited_domains` is the set every domain gate already consults, so
+    seeding it is what makes a granted site silent in the *first* task after
+    a restart, not just the rest of the current run. Union, never
+    assignment: the resume path has already populated it from the audit and
+    a grant the audit missed should add to that, not replace it.
+    """
+    try:
+        from ..policy import persist as _persist
+        deps.visited_domains |= set(_persist.load_granted_domains(_grant_key(deps)))
+    except Exception as exc:  # noqa: BLE001 — a missing grant just re-asks
+        log.warning("could not load domain grants: %s", exc)
 
 
 async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
@@ -1428,9 +1479,16 @@ def _resume_state(session_id: str) -> dict:
     # Only domains the user APPROVED get into visited_domains on the live
     # path, so only those are restored — re-adding a domain they never
     # approved would skip the prompt that exists to ask them.
+    #
+    # `first_time_seen` counts as well as `first_navigation`: both now mean
+    # "the user said yes to this site", and the first-time-seen approval is
+    # the common one now that a navigate no longer precedes every page load.
+    # This is the fallback for a grant whose policy-file write failed — the
+    # audit is written on the same path, so if the file is gone so is this,
+    # and a domain nobody can recover just re-asks.
     visited = {
         e["domain"] for e in (doc.get("policy_events") or [])
-        if e.get("kind") == "first_navigation"
+        if e.get("kind") in ("first_navigation", "first_time_seen")
         and e.get("user_decision") == "approved" and e.get("domain")
     }
     return {"doc": doc, "summaries": summaries, "visited": visited,
@@ -1592,6 +1650,11 @@ class AgentHarness:
         # its turns when the refusal below is recorded on top of it.
         if state["doc"] and not state["doc"].get("corrupt"):
             _adopt_document(audit, state["doc"])
+        # Unconditional, and before the resume merge: the user's standing
+        # grants outlive this process, so a brand-new task on a site they
+        # approved last week must not re-ask. Union, so the two sources
+        # stack rather than one overwriting the other.
+        _seed_granted_domains(deps)
         if state["summaries"]:
             deps.step_summaries.extend(state["summaries"])
             deps.visited_domains |= state["visited"]
@@ -2067,12 +2130,12 @@ class AgentHarness:
                 timings["approval_pause"] += time.perf_counter() - t_ap
                 continue
 
-            # Secure-mode add-on: first-time-seen on this domain for ANY
-            # action (not just critical ones). Each (domain, action) pair
-            # prompts once per session. The pair is added to seen_first_time
-            # whether approved or denied — on deny the task aborts anyway,
-            # but the cache entry prevents a retry-loop on a persistent
-            # prompt-injection attempt.
+            # First-time-seen on a domain: ONE prompt per site, not one per
+            # action. Keying it finer asked the user to approve the same page
+            # once per verb and read as a bug rather than a safeguard. The key
+            # is added to seen_first_time whether approved or denied — on deny
+            # the task aborts anyway, but the cache entry prevents a retry-loop
+            # on a persistent prompt-injection attempt.
             if deps.policy is not None:
                 for c in decision.actions:
                     # Skip terminal / internal / question actions — they
@@ -2089,6 +2152,15 @@ class AgentHarness:
                     if domain is None:
                         continue
                     key = _first_time_key(domain, c, deps.prev_targets)
+                    # A standing grant covers ORDINARY controls only. The
+                    # `aria-hidden` key is deliberately not the bare domain,
+                    # so a site the user approved on Monday still asks once
+                    # when the run touches a control the site hid from
+                    # assistive technology. Checking membership before
+                    # building the key would let that control ride the grant,
+                    # which is the injection this whole gate exists to stop.
+                    if key == domain and domain in deps.visited_domains:
+                        continue
                     if not check_first_time_seen(key, deps.seen_first_time, deps.policy):
                         continue
                     log.warning(
@@ -2103,9 +2175,7 @@ class AgentHarness:
                         deps, audit, turn=a_turn, kind="first_time_seen",
                         action=_card_label(c.action, c.action_args),
                         args=c.action_args, domain=domain,
-                        reason=_REASON_FIRST_TIME.format(
-                            domain=domain, action=_card_label(c.action, c.action_args),
-                        ),
+                        reason=_REASON_FIRST_TIME.format(domain=domain),
                     )
                     deps.seen_first_time.add(key)
                     if not approved:
@@ -2128,6 +2198,18 @@ class AgentHarness:
                             deps=deps,
                         )
                         break
+                    # Approving the site approves the site, for this run and
+                    # every run after it. The audit event is what a resume
+                    # reads; the policy file is what a restart reads. Without
+                    # the second one the grant dies with the server, and the
+                    # user is asked about the same site again tomorrow.
+                    deps.visited_domains.add(domain)
+                    audit.record_policy(
+                        step=step, kind="first_time_seen", domain=domain,
+                        action=c.action, decision="require_approval",
+                        user_decision="approved",
+                    )
+                    _persist_domain_grant(deps, domain)
                     log.warning(
                         "[%s] POLICY: user APPROVED first-time-seen  step=%d  domain=%s  action=%s",
                         deps.user_id, step, domain, c.action,
