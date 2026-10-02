@@ -101,7 +101,13 @@ function el(extra = {}) {
       },
     },
     textContent: {
-      get() { return this._text; },
+      // The DOM's own concatenation: the code under test builds a row's meta
+      // line by appending spans, and the assertion reads the result.
+      get() {
+        return this.children.length
+          ? this.children.map((c) => c.textContent).join("")
+          : this._text;
+      },
       set(v) { this._text = v; },
     },
   });
@@ -109,10 +115,23 @@ function el(extra = {}) {
 }
 
 // ── Sandbox ────────────────────────────────────────────────────────────────
+// One fetch, restored in both directions. A second copy that drifts is how a
+// test stops testing what ships.
+function fakeFetch(url, opts = {}) {
+  calls.push({ url, ...opts });
+  if (serverDown) throw new Error("offline");
+  return Promise.resolve({ ok: true, status: 200, json: async () => ({ sessions: serverSessions }) });
+}
+
 const store = {};
 const calls = [];
 let stored = [];
 let nextAnswer = true;
+// undefined = the server answered but had no list to give (the default for
+// every delete test, which only cares about the DELETE call). Set it to make
+// the server the source of history; set serverDown to make it unreachable.
+let serverSessions;
+let serverDown = false;
 
 const historyList = el({ id: "historyList" });
 const historyDeleteAll = el({ id: "historyDeleteAll" });
@@ -150,10 +169,7 @@ const sandbox = {
       },
     },
   },
-  fetch: async (url, opts = {}) => {
-    calls.push({ url, ...opts });
-    return { ok: true, status: 200, json: async () => ({}) };
-  },
+  fetch: fakeFetch,
   toast: (text, kind) => calls.push({ toast: text, kind }),
   confirmSettle: null,
   replaySession: async () => {},
@@ -162,8 +178,8 @@ sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
 for (const fn of ["askConfirm", "closeConfirm", "deleteSession", "deleteAllSessions",
-                  "serverBase", "authHeaders", "listSessions", "renderHistory",
-                  "formatSessionTime"]) {
+                  "serverBase", "authHeaders", "listSessions", "historyEntries",
+                  "renderHistory", "formatSessionTime"]) {
   vm.runInContext(extract(fn), sandbox);
 }
 
@@ -189,6 +205,8 @@ function reset(sessions = SESSIONS) {
   calls.length = 0;
   focused.length = 0;
   nextAnswer = true;
+  serverSessions = undefined;
+  serverDown = false;
 }
 
 // ── The confirmation ───────────────────────────────────────────────────────
@@ -291,10 +309,7 @@ sandbox.askConfirm = (...args) => {
   check("a refused delete says the file may still be on disk",
     calls.some((c) => c.toast && c.toast.includes("still be on disk")),
     JSON.stringify(calls));
-  sandbox.fetch = async (url, opts = {}) => {
-    calls.push({ url, ...opts });
-    return { ok: true, status: 200, json: async () => ({}) };
-  };
+  sandbox.fetch = fakeFetch;
 
   // ── Delete-all ────────────────────────────────────────────────────────
   reset();
@@ -318,6 +333,77 @@ sandbox.askConfirm = (...args) => {
   check("and the empty state says what history is for",
     historyList.children.length === 1
       && historyList.children[0]._classes.has("history-empty"));
+
+  // ── The server is the record; this browser is the fallback ────────────
+  // The local array caps at 20 and only knows what this browser watched, so
+  // anything the server knows and it does not is a conversation the user
+  // cannot see — and cannot delete.
+  const ON_DISK = [
+    { session_id: "ccc", title: "cancel the hotel booking", status: "done",
+      steps: 9, task_count: 2, started_at: "2026-10-03T04:12:00.000+00:00" },
+    { session_id: "ddd", task: "apply for the card", status: "interrupted",
+      steps: 3, task_count: 1, started_at: "2026-10-02T18:40:00.000+00:00" },
+  ];
+
+  reset([]);
+  serverSessions = ON_DISK;
+  await sandbox.renderHistory();
+  check("history comes from the server, not this browser's 20 rows",
+    historyList.children.length === 2, `${historyList.children.length} rows`);
+  check("a conversation this browser never saw is still listed",
+    calls.some((c) => c.url === "http://localhost:8000/v1/sessions" && !c.method),
+    JSON.stringify(calls));
+  const firstRow = historyList.children[0].children[0];
+  check("its own wording survives the trip",
+    firstRow.querySelector(".history-task").textContent === "cancel the hotel booking",
+    firstRow.querySelector(".history-task").textContent);
+  check("a two-task conversation says so",
+    firstRow.querySelector(".history-meta").textContent.includes("2 tasks"),
+    firstRow.querySelector(".history-meta").textContent);
+  check("a run that never finished is marked as it ended",
+    historyList.children[0].children[0].dataset.status === "done"
+      && historyList.children[1].children[0].dataset.status === "interrupted",
+    historyList.children[1].children[0].dataset.status);
+
+  // Deleting a row the server supplied. This browser watched the same run, so
+  // it has a local row too — but a *different object*, rebuilt from the index
+  // on every open. Removing it by identity would leave the local row behind
+  // and the conversation would come back the moment the server is unreachable.
+  const DUPLICATE = [
+    ...SESSIONS,
+    { task: "cancel the hotel booking", status: "done", steps: 9, elapsed: "3m",
+      startedAt: 3, session_id: "ccc", task_count: 2 },
+  ];
+  reset(DUPLICATE);
+  serverSessions = ON_DISK;
+  await sandbox.renderHistory();
+  calls.length = 0;
+  nextAnswer = true;
+  await sandbox.deleteSession(ON_DISK[0]);
+  const serverDel = calls.filter((c) => c.method === "DELETE");
+  check("deleting a server row still reaches the server",
+    serverDel.length === 1
+      && serverDel[0].url === "http://localhost:8000/v1/sessions/ccc",
+    JSON.stringify(serverDel));
+  check("and clears the stale local row with it",
+    stored.length === 2 && !stored.some((s) => s.session_id === "ccc"),
+    JSON.stringify(stored));
+
+  // ── No server, no empty list ──────────────────────────────────────────
+  reset(SESSIONS);
+  serverDown = true;
+  await sandbox.renderHistory();
+  check("an unreachable server falls back to what this browser knows",
+    historyList.children.length === 2, `${historyList.children.length} rows`);
+  check("and says nothing about it", calls.every((c) => c.toast === undefined),
+    JSON.stringify(calls));
+
+  reset(SESSIONS);
+  sandbox.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
+  await sandbox.renderHistory();
+  check("a wrong secret is the same fallback, not an empty history",
+    historyList.children.length === 2, `${historyList.children.length} rows`);
+  sandbox.fetch = fakeFetch;
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");
   process.exit(failures ? 1 : 0);

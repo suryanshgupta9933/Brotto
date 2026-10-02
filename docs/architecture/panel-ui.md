@@ -138,6 +138,30 @@ is on the page it is reading, so `appendPlanCard` builds the badge, the sites
 line and the step numbers with `textContent` and a `createTextNode`, and only
 the step body goes through `renderMarkdown`.
 
+## The server's index is the history
+
+`renderHistory` reads `GET /v1/sessions` and renders what comes back. The
+`chrome.storage.local` array is still written by `saveSession`, but only as the
+**fallback** for a panel opened when the orchestrator cannot be reached — the
+server being down, or a secret that does not match.
+
+It is the source of truth because it is the only copy that is complete. The
+local array caps at 20 rows and records only what *this browser* watched
+finish, so a run on another machine, or one the cap pushed out, was on disk and
+invisible — and a conversation the user cannot see is a conversation they cannot
+delete. `historyEntries` returns `local` on any failure rather than an empty
+list, because a history that empties itself when the server hiccups reads as
+"your conversations are gone".
+
+Two consequences worth naming:
+
+- **A row is matched by `session_id`, never by object identity.** A server row
+  is rebuilt from the index on every open, so `filter(s => s !== row)` keeps
+  every local row including the one being deleted. `deleteSession` is the only
+  caller that learned this.
+- **The index has no elapsed time** — only the loop reported that — so a
+  server-supplied row shows `—` where a local one shows `2m 10s`.
+
 ## Reopening a conversation from history
 
 Clicking a history row replays it into the normal chat bubbles rather than

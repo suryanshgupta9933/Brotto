@@ -679,16 +679,39 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && confirmOverlay.classList.contains('open')) closeConfirm(false);
 });
 
-// ponytail: sessions are a flat chrome.storage.local list, newest first,
-// capped so the panel's boot read stays trivial. The list is read on every
-// history open rather than held in memory — the whole point is that it
-// survives the panel being closed.
+// The server's disk is the record. This array is only what *this browser*
+// watched happen: it caps at 20, so a run finished on another machine, or one
+// pushed out by the cap, is on disk and invisible here. So the server answers
+// and this is the fallback for when it cannot — a panel opened with the
+// orchestrator down still shows what it knows about.
 const SESSION_LIMIT = 20;
 const SESSIONS_KEY = 'sessions';
 
 async function listSessions() {
   const { sessions } = await chrome.storage.local.get(SESSIONS_KEY);
   return Array.isArray(sessions) ? sessions : [];
+}
+
+async function historyEntries() {
+  const local = await listSessions();
+  try {
+    const res = await fetch(`${serverBase()}/v1/sessions`, { headers: await authHeaders() });
+    if (!res.ok) return local;
+    const { sessions } = await res.json();
+    if (!Array.isArray(sessions)) return local;
+    return sessions.map((s) => ({
+      task: s.task || s.title || '(no task text)',
+      status: s.status,
+      steps: s.steps,
+      // Elapsed time is what the loop reported; the index has no record of it.
+      elapsed: '—',
+      startedAt: s.started_at,
+      session_id: s.session_id,
+      task_count: s.task_count,
+    }));
+  } catch {
+    return local;
+  }
 }
 
 // ponytail: one writer, one reader, one shape. Called from both terminal
@@ -751,7 +774,7 @@ function formatSessionTime(ts) {
 
 async function renderHistory() {
   historyList.hidden = false;
-  const sessions = await listSessions();
+  const sessions = await historyEntries();
   document.getElementById('historyDeleteAll').hidden = sessions.length === 0;
   if (sessions.length === 0) {
     const empty = document.createElement('div');
@@ -825,7 +848,11 @@ async function deleteSession(entry) {
   );
   if (!ok) return;
 
-  const remaining = (await listSessions()).filter((s) => s !== entry);
+  // By id, not identity: a row the server supplied is a fresh object and is
+  // not in local storage at all, so filtering on === would keep every row.
+  const remaining = (await listSessions()).filter((s) => (
+    entry.session_id ? s.session_id !== entry.session_id : s !== entry
+  ));
   await chrome.storage.local.set({ [SESSIONS_KEY]: remaining });
   // The row goes from the panel first. A server that is down, or a secret
   // that is wrong, must not leave the user staring at a button that does
@@ -847,7 +874,10 @@ async function deleteSession(entry) {
 }
 
 async function deleteAllSessions() {
-  const sessions = await listSessions();
+  // The same source the list rendered, so the count in the question is the
+  // count on screen. Reading the local array instead would understate a list
+  // the server is supplying rows for.
+  const sessions = await historyEntries();
   const ok = await askConfirm(
     'Delete every conversation?',
     [`This deletes all ${sessions.length} conversation`
