@@ -36,6 +36,18 @@ routes resolve one — `task_start` over the WebSocket, and `device_id` on
 agree: `/v1/policy` reads the in-memory registry, so a panel asking under one
 key while the socket wrote under another gets an empty blocklist with a 200.
 
+**The uuid is not a credential, and the routes carrying it are gated.** It
+arrives in a request body on routes that were unauthenticated when this landed,
+and it goes into a log field, an audit key and a filename — so the format is
+enforced, not merely documented: anything that is not a uuid is not an
+identity claim worth honouring and falls back to the address. That closes
+forged log lines, but *unguessable* is a weaker property than
+*authenticated*, so `/v1/policy`, `/v1/policy_ack`, `/v1/model/check` and
+`/v1/suggestions` now check `AGENT_SECRET` like `/v1/sessions` did. Without the
+gate an unauthenticated caller could write a policy file under any key they
+liked, one per request — a way to fill a disk, and a way to edit a blocklist
+they had guessed the id for.
+
 **Session history is not affected** — `logs/sessions/` is not keyed by caller
 at all, which is why it migrates to a container untouched.
 

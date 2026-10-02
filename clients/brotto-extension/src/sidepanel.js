@@ -433,7 +433,7 @@ async function checkModelReady() {
   try {
     const res = await fetch(`${base}/v1/model/check`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...await authHeaders() },
       body: JSON.stringify({ model_config: cfg || undefined, api_key: apiKey, device_id: await deviceId() }),
     });
     if (!res.ok) return { ok: true };  // could not check — not the model's fault
@@ -1270,7 +1270,10 @@ async function hydrateSettingsPanel() {
   // here.
   let effective = null;
   try {
-    const r = await fetch(`${base}/v1/policy?user_id=${encodeURIComponent(await deviceId())}`);
+    const r = await fetch(
+      `${base}/v1/policy?user_id=${encodeURIComponent(await deviceId())}`,
+      { headers: await authHeaders() },
+    );
     if (r.ok) effective = await r.json();
   } catch (e) {
     console.warn('[brotto] could not reach server for policy check:', e);
@@ -1410,7 +1413,7 @@ if (saveSettingsBtn) {
       const base = settings.serverUrl.replace(/\/$/, '');
       const r = await fetch(`${base}/v1/policy_ack`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...await authHeaders() },
         body: JSON.stringify({ settings: { blacklist: settings.blacklist }, user_id: await deviceId() }),
       });
       serverOk = r.ok;
@@ -2951,13 +2954,14 @@ async function fetchSuggestions(url, title, pageText = '') {
     ]);
     const response = await fetch(`${base}/v1/suggestions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...await authHeaders() },
       body: JSON.stringify({
         url,
         title,
         page_text: pageText || undefined,
         model_config: local.modelConfig || undefined,
         api_key: key_.modelApiKey || undefined,
+        device_id: await deviceId(),
       }),
     });
     if (!response.ok) return null;

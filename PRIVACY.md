@@ -191,7 +191,9 @@ so in its startup log, so if you expose the port to a network, set the secret fi
 `docker compose` binds to `127.0.0.1` for exactly this reason.
 
 One endpoint is deliberately left open, and it is not a session one: `POST /run` launches a headless
-browser with no authentication. Do not put it on a public interface.
+browser with no authentication. Do not put it on a public interface. `/health` is also unauthenticated
+because the container's own healthcheck needs it; it reports that the service is up and which model is
+resolved, and nothing else.
 
 No system is perfect. A browser agent operating with your session has the same access you do, and a
 compromise of the extension or the server would have the same effect. Do not use it on accounts where

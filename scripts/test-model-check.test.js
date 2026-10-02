@@ -57,14 +57,18 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
     chrome: {
       storage: {
         local: {
-          get: async (key_) => (key_ === "deviceId" ? {} : stored),
+          get: async (key_) => {
+            if (key_ === "deviceId") return {};
+            if (key_ === "settings") return { settings: { agentSecret: "s3cret-for-the-test" } };
+            return stored;
+          },
           set: async () => {},
         },
         session: { get: async () => ({ modelApiKey: key }) },
       },
     },
     fetch: async (url, init) => {
-      calls.push({ url, body: JSON.parse(init.body) });
+      calls.push({ url, body: JSON.parse(init.body), headers: init.headers || {} });
       return handler(calls.length);
     },
     MODEL_CHECK_TITLE: {},
@@ -75,6 +79,7 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
   vm.createContext(sandbox);
   vm.runInContext(extract("checkModelReady"), sandbox);
   vm.runInContext(extract("deviceId"), sandbox);
+  vm.runInContext(extract("authHeaders"), sandbox);
   return { calls, sandbox, run: () => vm.runInContext("checkModelReady()", sandbox) };
 }
 
@@ -144,6 +149,12 @@ async function main() {
     check("…and carries the install id so the server can key the user",
       calls[0].body.device_id === "d3adb33f-0000-4000-8000-000000000001",
       JSON.stringify(calls[0].body));
+    // The route is behind AGENT_SECRET. Without this the check 404s and
+    // `!res.ok` swallows it as "could not check", so a user on a prod server
+    // silently stops having a pre-flight and is told everything is fine.
+    check("…and the secret, or the server answers 404 and the gate is a no-op",
+      calls[0].headers.Authorization === "Bearer s3cret-for-the-test",
+      JSON.stringify(calls[0].headers));
   }
   {
     const { run } = panelWith(() => { throw new TypeError("failed to fetch"); });

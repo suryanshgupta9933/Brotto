@@ -10,6 +10,16 @@ seen and the panel shows an empty list.
 So the extension sends `device_id` and this pins that it wins, on every route
 that resolves one. The fallback is deliberately kept: an extension predating
 the id still works, and an unsent id must not resolve to a shared key.
+
+Two things this value is not allowed to be, because the routes carrying it
+were unauthenticated when it was introduced and a caller-controlled string in
+a log field, an audit key and a filename is one incident:
+
+- **Not arbitrary text.** See `test_a_string_that_is_not_a_uuid_is_not_an_identity`.
+- **Not a credential.** A uuid is 122 bits of entropy, so it cannot be
+  guessed — but "unguessable" is a weaker property than "authenticated", and
+  it is only true because these routes now check the secret anyway. The
+  routes are gated in `test_every_caller_route_needs_the_secret` below.
 """
 
 from __future__ import annotations
@@ -21,6 +31,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from brotto_orchestrator.main import _caller_key
+
+SECRET = "s3cret-for-the-test"
+OTHER = "00000000-0000-4000-8000-000000000002"
 
 
 def _transport(host: str | None):
@@ -63,10 +76,42 @@ def test_a_non_string_id_is_not_an_identity():
     assert _caller_key(_transport("192.168.1.5"), {"a": 1}) == "192.168.1.5"
 
 
-def test_the_key_is_bounded():
-    # Only ever hashed or filtered, but a megabyte of it in a POST body
-    # should not become a megabyte of work.
-    assert len(_caller_key(_transport("1.2.3.4"), "x" * 10_000)) == 128
+def test_a_string_that_is_not_a_uuid_is_not_an_identity():
+    """The reason the format is checked, in one place.
+
+    The value lands in a log field, in an interpolated key inside an audit
+    document, and in a filename. Before the format check, a body carrying
+    `"a\nWARNING: everything is fine"` wrote that second line into the
+    server's own log — an unauthenticated caller forging operator output in
+    the one place an operator looks when something goes wrong. The peer
+    address was never exposed to this: it comes off the socket.
+    """
+    for hostile in (
+        "a\nWARNING: everything is fine",
+        "x" * 10_000,
+        "../../etc/passwd",
+        "192.168.1.5",       # looks like an address, is not a uuid
+        "d3adb33f000040008000000000000 1",   # uuid-ish, wrong alphabet
+        "d3adb33f-0000-4000-8000-00000000000",  # one digit short
+        "d3adb33f-0000-4000-8000-000000000001extra",
+        "z3adb33f-0000-4000-8000-000000000001",
+    ):
+        assert _caller_key(_transport("192.168.1.5"), hostile) == "192.168.1.5", hostile
+
+
+def test_a_uuid_containing_a_newline_is_rejected():
+    # The one that matters most, spelled out: a newline is what makes a log
+    # line forgeable, and the check is a fullmatch on the whole string, not a
+    # search within it.
+    assert _caller_key(_transport("192.168.1.5"),
+                       "d3adb33f-0000-4000-8000-000000000001\nINFO: ok") == "192.168.1.5"
+
+
+def test_a_uuid_is_accepted_in_upper_and_lower_case():
+    # `crypto.randomUUID()` is lowercase, but the id is compared by
+    # filesystem name, so a hand-restored one should not silently miss.
+    up = "D3ADB33F-0000-4000-8000-000000000001"
+    assert _caller_key(_transport("192.168.1.5"), up) == up
 
 
 # ── the routes that resolve one ──────────────────────────────────────────────
@@ -76,6 +121,7 @@ INSTALL_ID = "d3adb33f-0000-4000-8000-000000000001"
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_SECRET", SECRET)
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path / "sessions"))
     from brotto_orchestrator import main
     from brotto_orchestrator.policy import persist as pol
@@ -88,6 +134,10 @@ def client(monkeypatch, tmp_path):
         yield c
 
 
+def _auth():
+    return {"Authorization": f"Bearer {SECRET}"}
+
+
 def _policy_file(directory, key: str):
     return directory / f"{hashlib.sha256(key.encode()).hexdigest()[:32]}.json"
 
@@ -97,7 +147,8 @@ def test_saving_the_blocklist_lands_under_the_install_id(client, tmp_path):
     # after the install rather than after whatever address the request came
     # from. Check the path, not the response — a 200 that wrote to the wrong
     # key is the bug this whole change exists to remove.
-    r = client.post("/v1/policy_ack", json={"user_id": INSTALL_ID, "settings": {"blacklist": ["bank.com"]}})
+    r = client.post("/v1/policy_ack", json={"user_id": INSTALL_ID, "settings": {"blacklist": ["bank.com"]}},
+                    headers=_auth())
     assert r.status_code == 200
     saved = _policy_file(tmp_path / "policies", INSTALL_ID)
     assert saved.exists()
@@ -108,8 +159,9 @@ def test_saving_the_blocklist_lands_under_the_install_id(client, tmp_path):
 
 
 def test_reading_the_policy_back_finds_the_same_file(client):
-    client.post("/v1/policy_ack", json={"user_id": INSTALL_ID, "settings": {"blacklist": ["bank.com"]}})
-    r = client.get("/v1/policy", params={"user_id": INSTALL_ID})
+    client.post("/v1/policy_ack", json={"user_id": INSTALL_ID, "settings": {"blacklist": ["bank.com"]}},
+                headers=_auth())
+    r = client.get("/v1/policy", params={"user_id": INSTALL_ID}, headers=_auth())
     assert r.status_code == 200
     assert "bank.com" in r.json()["blacklist"]
 
@@ -118,7 +170,53 @@ def test_two_installs_do_not_share_a_blocklist(client):
     # The failure mode a shared key would produce: user B saving their own
     # blocklist silently overwrites user A's, and A then discovers their
     # approvals are gone.
-    client.post("/v1/policy_ack", json={"user_id": INSTALL_ID, "settings": {"blacklist": ["bank.com"]}})
-    other = "00000000-0000-4000-8000-000000000002"
-    r = client.get("/v1/policy", params={"user_id": other})
+    client.post("/v1/policy_ack", json={"user_id": INSTALL_ID, "settings": {"blacklist": ["bank.com"]}},
+                headers=_auth())
+    r = client.get("/v1/policy", params={"user_id": OTHER}, headers=_auth())
     assert "bank.com" not in r.json().get("blacklist", [])
+
+
+# ── the routes carrying the key are gated ────────────────────────────────────
+
+# A uuid is unguessable, which is why the key works as an identity at all.
+# It is not a credential: it travels in a request body on a route anyone who
+# can reach the port may call, and the routes below write the user's policy
+# file and spend the user's model credits. `AGENT_SECRET` is the difference
+# between "unguessable" and "authenticated", and only the second one is a
+# privacy control.
+CALLER_ROUTES = [
+    ("POST", "/v1/policy_ack", {"user_id": INSTALL_ID, "settings": {"blacklist": []}}),
+    ("POST", "/v1/model/check", {"model_config": None}),
+    ("POST", "/v1/suggestions", {"url": "https://example.com"}),
+]
+
+
+@pytest.mark.parametrize("method,path,body", CALLER_ROUTES)
+def test_every_caller_route_needs_the_secret(client, method, path, body):
+    r = getattr(client, method.lower())(path, json=body)
+    # 404 rather than 403: a refused route should not confirm it exists.
+    assert r.status_code == 404, f"{path} answered {r.status_code} with no secret"
+
+
+@pytest.mark.parametrize("method,path,body", CALLER_ROUTES)
+def test_a_wrong_secret_is_refused(client, method, path, body):
+    r = getattr(client, method.lower())(path, json=body,
+                                         headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 404, f"{path} answered {r.status_code} with a wrong secret"
+
+
+def test_reading_the_policy_needs_the_secret_too(client):
+    r = client.get("/v1/policy", params={"user_id": INSTALL_ID})
+    assert r.status_code == 404
+
+
+def test_an_unauthenticated_write_leaves_no_file(client, tmp_path):
+    """The consequence, not the status code.
+
+    A 404 is a fine answer to a probe, but the thing worth pinning is that
+    the caller's chosen key does not become a file on the user's disk. An
+    endpoint that creates a file per request is a way to fill one.
+    """
+    client.post("/v1/policy_ack", json={"user_id": OTHER, "settings": {"blacklist": ["x"]}})
+    assert list((tmp_path / "policies").glob("*.json")) == []
+

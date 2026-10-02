@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 
@@ -247,6 +248,13 @@ def _authed(request: Request) -> bool:
     )
 
 
+# Exactly what `crypto.randomUUID()` produces. Not a version check — the
+# property that matters is that the value is 36 characters of one safe
+# alphabet, so nothing downstream has to escape it, and that it is 122 bits
+# of entropy, so it cannot be guessed.
+_UUID = re.compile(r"\A[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
+
+
 def _caller_key(transport, explicit: object = None) -> str:
     """The key the user's blocklist and remembered model are stored under.
 
@@ -259,13 +267,16 @@ def _caller_key(transport, explicit: object = None) -> str:
     it as `device_id`; an extension that predates it falls back to the
     address, which is where this behaviour has always been.
 
-    The value reaches disk through `policy/persist.py` (sha256 of the key)
-    and `model/store.py` (a filename filtered to alnum, `.` and `-`), so an
-    arbitrary string is safe to accept — the length cap is just a bound on
-    what gets hashed.
+    **The format is enforced, not merely documented.** This value arrives in
+    an unauthenticated request body and is used as a log field, as an
+    interpolated key in an audit document, and as a filename — so an
+    arbitrary string is a log-injection and audit-forging primitive on four
+    routes. The peer address never was: it comes off the socket. Anything
+    that is not a uuid is not an identity claim worth honouring, so it
+    falls back to the address.
     """
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()[:128]
+    if isinstance(explicit, str) and _UUID.match(explicit):
+        return explicit
     client = getattr(transport, "client", None)
     return client.host if client else "unknown"
 
@@ -525,6 +536,8 @@ async def check_model(request: Request):
     from pydantic_ai.messages import ModelRequest, UserPromptPart
     from pydantic_ai.models import ModelRequestParameters
 
+    if not _authed(request):
+        return _error(404, "not found")
     body = await _json_body(request)
     client_host = _caller_key(request, body.get("device_id"))
     inline_config = _inline_model(body.get("model_config"))
@@ -579,6 +592,8 @@ async def check_model(request: Request):
 @app.get("/v1/policy")
 async def get_effective_policy(request: Request):
     from .policy import UserPolicy
+    if not _authed(request):
+        return _error(404, "not found")
     # Caller identity: prefer the install id the extension sends, fall back
     # to the peer address (SessionRegistry tracks per-key for the lifetime of
     # the server).
@@ -686,6 +701,8 @@ async def delete_all_sessions(request: Request):
 # this one logs even when the user clicks Save with no task running.
 @app.post("/v1/policy_ack")
 async def policy_ack(request: Request):
+    if not _authed(request):
+        return _error(404, "not found")
     body = await _json_body(request)
     settings = body.get("settings") or {}
     user_id = _caller_key(request, body.get("user_id"))
@@ -746,6 +763,8 @@ async def suggestions(request: Request):
     """
     from .agent.suggest import generate
 
+    if not _authed(request):
+        return _error(404, "not found")
     body = await _json_body(request)
     url = str(body.get("url", "") or "").strip()
     if not url:

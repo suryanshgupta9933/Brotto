@@ -154,9 +154,11 @@ Nothing is open. Each of these was a launch gate and each is closed as of
 | Nothing on disk ever expired | `BROTTO_RETENTION_DAYS`, swept at startup |
 | `POST /run` launched a headless browser for anyone | refused outright when `BROTTO_ENV=prod` |
 | `ax_diff` wrote page text into the audit document | a character count, and nothing else |
+| `/v1/policy_ack` wrote a file under any key a caller chose | the same secret; the id is a uuid or it is not honoured |
 
 Tests: `tests/test_agent_auth.py`, `tests/test_session_delete.py`,
-`tests/test_retention.py`, `tests/test_run_refused_in_prod.py`.
+`tests/test_retention.py`, `tests/test_run_refused_in_prod.py`,
+`tests/test_caller_key.py`.
 
 **The one dependency to keep in mind:** prod is what the *image* sets, not
 what the code defaults to. `BROTTO_ENV` unset means dev — no secret required,
