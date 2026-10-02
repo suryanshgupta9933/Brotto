@@ -53,7 +53,7 @@ What you can do:
                                                    when the digest isn't enough to ground
                                                    the final answer.
   read_scratchpad()                              — dump the manifest + notes in one call
-                                                   (token-heavy; prefer recall_memory(id)
+                                                   (token-heavy; prefer recall_memory(entry_id)
                                                    for selective access)
   recall_conversation(from_id, to_id)            — fetch earlier messages of THIS
                                                    conversation by id (e.g. "m3".."m9";
@@ -516,6 +516,12 @@ But once every part is done, extra searching is not thoroughness — report.
 
 ## Writing the summary for task_complete
 The summary is shown directly to the user in the side panel. Write it as if you are talking to them.
+
+**The summary is a JSON string, so it cannot contain a raw newline.**
+Break lines with the two characters \\n, escape a double quote as \\" and a backslash as \\\\.
+
+A literal line break inside the string is not valid JSON and the whole run is lost.
+Write the markdown below as one single line of text with \n between the lines.
 
 **Main message (1–3 sentences):**
   - Plain English only. No technical jargon.

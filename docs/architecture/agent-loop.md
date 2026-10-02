@@ -823,8 +823,8 @@ than the runaway it catches. The backstop reports nothing until it fires.
 
 ### A model that cannot decide fails the run
 
-`agent.run(retries=2)` at `harness.py:173`. When the model fails output
-validation three times, pydantic-ai raises `UnexpectedModelBehavior` and
+`agent.run(retries=_OUTPUT_RETRIES)`, now 3. When the model fails output
+validation four times, pydantic-ai raises `UnexpectedModelBehavior` and
 `str(exc)` is literally the string **`Exceeded maximum output retries (2)`**.
 
 The `except` chain in `_plan_step` covered only `ScriptTargetUnresolved`,
@@ -881,7 +881,7 @@ could run, so the only retry prompt available was the one that does not
 work.
 
 The budget is unchanged, and that is the point: raising `ModelRetry` spends
-one of `retries=2`, so a model that ignores the instruction three times
+one of the retries, so a model that ignores the instruction every time
 still ends the run instead of spinning. What changed is what it is told.
 
 The second, rarer mode is a response with no text and no tool call at all,
@@ -891,6 +891,66 @@ appeared in 1 of 6 runs and the retry fixed it — and the same measurement
 run had the model recover from the `actions` omission on its second attempt
 too, which is why the instruction above has to be this explicit rather than
 merely different.
+
+#### The prompt asked for a shape that is illegal in a JSON string
+
+The third cause, and the one that actually killed a run, is a **syntax** error
+rather than a missing field — so nothing a validator can reach ever sees it.
+Session `7cb14a63` (2026-10-02) died at step 7 of 8 on the run's final
+`task_complete`:
+
+```
+UnexpectedModelBehavior: Exceeded maximum output retries (2)
+  <- Invalid JSON: expected `,` or `]` at line 1 column 3301
+     input_value='{"reasoning": "The JSON keeps failing validation, likely due to
+       special characters or formatting in the summary field. ..."
+```
+
+The cause is in our own prompt. The "Writing the summary for `task_complete`"
+section asks for a **multi-line markdown** answer — bullet lists, `**bold**`,
+three labelled fact lines. `AgentDecision` is a structured-output model, so that
+summary has to go out as a JSON **string value**, and a literal newline inside a
+JSON string is a syntax error. The model did exactly what it was told.
+
+The model's own retry reasoning named the cause correctly ("special characters
+or formatting in the summary field") and it tried to simplify, which is the one
+case where the raw pydantic retry prompt did reach it. It still failed, because
+shortening a summary does not make newlines legal.
+
+**The fix is the prompt, and it is a contract, not a hint.** The section now
+states that the summary is a JSON string, that a raw line break inside it is not
+valid JSON and loses the whole run, and names the escapes (`\\n`, `\\"`, `\\\\`).
+Pinned by two tests in `test_model_text_escapes.py` that grep `SYSTEM_PROMPT` —
+a dropped instruction is an absence and reads clean in review.
+
+Two details that cost the first attempt. `SYSTEM_PROMPT` is a plain
+triple-quoted string, so writing `\n` in the source put a **real newline** in
+the prompt — the instruction told the model to escape newlines using a
+newline. The source needs `\\n`. And the fix does not remove escaping, it moves
+it: the model now reliably emits `\\n` (double-escaped), which parses and is
+then undone by the existing `_unescape` at the `task_complete` handler. Probed
+against live MiniMax-M3, three consecutive runs parse into a valid
+`task_complete` with a full multi-line markdown summary that renders to 9–10
+real newlines after `_unescape`.
+
+**The budget went 2 → 3 retries** (`_OUTPUT_RETRIES`), and the two places that
+report the count now derive from it rather than hardcoding "3 attempts", which
+had already drifted from `retries=2`. 4 of 22 recorded sessions ended in
+`invalid_decision`, the failure loses the entire run, and a retry is cheap here
+because the stable prefix is cache-read.
+
+**Not fixed, and it is the bigger one:** `ActionCall.action_args` is a bare
+`dict`, so the output tool's JSON schema tells the model **nothing** about any
+action's argument names or types. Every one is guesswork from prose in the
+prompt. The same run guessed three ways: `recall_memory` as `{"id": "r2"}`
+(against a handler reading `entry_id`), and `read_page_text` as
+`max_chars: "3000"` (a string that reached the relay and raised `TypeError:
+unsupported operand type(s) for //` in `text[:max_chars // 2]`). Two of the
+three are patched at the symptom — `recall_memory` now accepts `id` the way
+`recall_conversation` already accepted two spellings, and `_as_int` coerces the
+numeric args. Typing `action_args` as a union discriminated on `action` is the
+root fix, and it is a real change: ~30 call sites construct `ActionCall` with a
+literal dict and two read `action_args["ref"]` by subscript.
 
 **Not done:** cross-task memory. `Scratchpad` is per-task — persisted to
 `logs/runs/<id>/` for resume within a task and gone otherwise, so

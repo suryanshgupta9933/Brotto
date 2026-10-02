@@ -109,6 +109,23 @@ def _unescape(text: str) -> str:
         i += 1
     return "".join(out)
 
+
+def _as_int(value: object, default: int) -> int:
+    """Coerce a model-written argument to int, falling back on anything else.
+
+    `action_args` is a bare dict, so the output tool's JSON schema tells the
+    model nothing about any argument's type and it guesses. It guesses by
+    quoting: a recorded run sent `max_chars: "3000"`, which reached the relay
+    as a str and died in `text[:max_chars // 2]` with "unsupported operand
+    type(s) for //". A wrong number is worth tolerating; an exception is not.
+    """
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 # ponytail: ask_human is metadata too — it pauses for user input but the
 # user is not "approving" an agent action, they're answering a question.
 # Card UI is different (no Approve/Deny buttons).
@@ -205,6 +222,15 @@ def _build_context(tokens: int | None, window: int | None = None) -> dict:
     return {"tokens": tokens, "window": window, "pct": pct}
 
 
+# How many times the agent re-asks after an unparseable decision. Each retry
+# is cheap — the stable prefix is cache-read, so a retry costs generation on a
+# small delta — against a failure that loses the whole run: 4 of 22 recorded
+# sessions ended in `invalid_decision`. The model does respond to the retry
+# (on the recorded run it diagnosed its own bad JSON and tried to simplify),
+# so the extra attempt has somewhere to go.
+_OUTPUT_RETRIES = 3
+
+
 def _build_agent() -> Agent[AgentDeps, AgentDecision]:
     # Placeholder model id; defer_model_check=True means it's not validated
     # at construction. The real per-task model is selected via
@@ -214,7 +240,7 @@ def _build_agent() -> Agent[AgentDeps, AgentDecision]:
         output_type=AgentDecision,
         deps_type=AgentDeps,
         system_prompt=SYSTEM_PROMPT,
-        retries=2,
+        retries=_OUTPUT_RETRIES,
         defer_model_check=True,
     )
 
@@ -410,7 +436,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     # unmarked it reads as a skill to load and the model loads it — a live
     # Gmail run did exactly that on step 0 of a "summarise the inbox" task,
     # re-reading ~11K chars the prompt was already carrying in full.
-    manifest_lines = ["### Memory manifest (recall_memory(id) fetches full body)"]
+    manifest_lines = ["### Memory manifest (recall_memory(entry_id) fetches full body)"]
     for e in turn.scratchpad_entries:
         around = f" around={e.around!r}" if e.around else ""
         trunc = " [truncated]" if e.was_truncated else ""
@@ -968,19 +994,20 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             # A search box commits on Enter; without this the model could
             # type a query and never run it.
             key = args["key"]
-            result = await cdp.press_key(key, args.get("modifiers", 0))
+            result = await cdp.press_key(key, _as_int(args.get("modifiers"), 0))
             return f"Pressed {key}: {result}"
 
         elif action == "scroll":
             direction = args.get("direction", "down")
-            amount = args.get("amount", args.get("amount_px", 300))
+            amount = _as_int(
+                args.get("amount", args.get("amount_px")), 300)
             await cdp.scroll(direction, amount)
             await cdp.refresh_target_map()
             return f"Scrolled {direction}"
 
         elif action == "read_page_text":
             selector = args.get("selector", "body")
-            max_chars = args.get("max_chars", 2000)
+            max_chars = _as_int(args.get("max_chars"), 2000)
             around = args.get("around")
             text = await cdp.read_page_text(selector, max_chars=max_chars, around=around)
             # Heuristic: if the returned text is near the cap, the page was
@@ -1006,7 +1033,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             return (
                 f"read_page_text({selector!r}{around_note}, max_chars={max_chars}) "
                 f"→ {len(text)} chars. Auto-captured as {entry_id} in memory. "
-                f"Use recall_memory('{entry_id}') for full body."
+                f"Use recall_memory(entry_id='{entry_id}') for full body."
             )
 
         elif action == "find_element":
@@ -1044,11 +1071,19 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             return "\n".join(lines) or "(empty)"
 
         elif action == "recall_memory":
-            entry_id = args.get("entry_id", "")
+            # `id` is an accepted spelling, not just `entry_id`. The manifest
+            # header reads "recall_memory(id) fetches full body" and the
+            # auto-capture note says "recall_memory('r2')" positionally, so a
+            # model working from the manifest in front of it sends `id` — and
+            # an exact-match lookup on "" reported a miss for an entry that
+            # exists. Same two-spelling tolerance recall_conversation already
+            # has for from_id/message_id.
+            entry_id = args.get("entry_id") or args.get("id") or ""
             entry = deps.scratchpad.lookup(entry_id)
             if entry is None:
                 available = [e.id for e in deps.scratchpad.entries]
-                return f"Memory entry {entry_id!r} not found. Available: {available}"
+                return (f"{_EXEC_FAILURE} recall_memory: memory entry "
+                        f"{entry_id!r} not found. Available: {available}")
             # Bodies are persisted now, so this is the legacy path: a session
             # whose sidecar predates the pages file, or one whose bodies file
             # went missing. Say so when it happens — handed 200 chars of an
@@ -1324,8 +1359,8 @@ async def _plan_step(
                 code="invalid_decision",
                 where="plan_step",
                 message=f"{cfg.provider}:{cfg.model} could not produce a valid "
-                        f"action after 3 attempts",
-                detail={"retries": 2, "step": deps.step_number,
+                        f"action after {_OUTPUT_RETRIES + 1} attempts",
+                detail={"retries": _OUTPUT_RETRIES, "step": deps.step_number,
                         "detail": _failure_detail(e)},
             )
         return None
