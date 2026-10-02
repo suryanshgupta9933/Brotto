@@ -12,3 +12,5 @@ wrong fix is not re-derived a second time.
 | `suggestions.md` | `agent/suggest.py`, `POST /v1/suggestions`, panel suggestion box |
 | `panel-ui.md` | `sidepanel.js` rendering, cards, `renderMarkdown`, history rows |
 | `extension.md` | `background.ts`, `debugger.ts`, policy, notifications, storage |
+| `privacy.md` | anything touching user content: audit documents, `.pages.json`, metrics, retention |
+| `deployment.md` | the self-host image, env vars, TLS, VM sizing, the launch gates |

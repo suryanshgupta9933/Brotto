@@ -1,6 +1,6 @@
 # Brotto — Claude Code project notes
 
-Server-hosted browser automation harness: Python orchestrator (FastAPI + pydantic-ai + Playwright) drives a Chrome extension. Model-agnostic, BYOK.
+Server-hosted browser automation harness: Python orchestrator (FastAPI + pydantic-ai) drives a Chrome extension. Model-agnostic, BYOK. Playwright is **test-only** — the product path is the extension, the server never launches a browser.
 
 **Heads up — this project is a long-term product effort.** Strategic context lives in `docs/product/`; AI-dev workflow rules in `docs/product/dev-environment.md`. Read those before non-trivial work. See "Working agreements" below.
 
@@ -16,11 +16,13 @@ This file is the **operative rules** — constants, file paths, the one conclusi
 | `docs/architecture/suggestions.md` | `agent/suggest.py`, `POST /v1/suggestions`, the suggestion box |
 | `docs/architecture/panel-ui.md` | `sidepanel.js` rendering, cards, `renderMarkdown`, history rows |
 | `docs/architecture/extension.md` | `background.ts`, `debugger.ts`, policy, notifications, storage |
+| `docs/architecture/privacy.md` | anything touching user content: audit documents, `.pages.json`, metrics, retention, `/v1/sessions` |
+| `docs/architecture/deployment.md` | the self-host image, env vars, TLS, VM sizing, the launch gates |
 
 ## Repo layout
 
 ```
-services/brotto-orchestrator/  — server: FastAPI + pydantic-ai + Playwright
+services/brotto-orchestrator/  — server: FastAPI + pydantic-ai (Playwright is dev-only)
   src/brotto_orchestrator/
     main.py                 — entry: WS handler, dev-mode env defaults
     agent/harness.py         — observe→plan→act loop
@@ -39,6 +41,44 @@ README.md  PRIVACY.md  SECURITY.md     — required for the Chrome Web Store
 clients/brotto-extension/src/welcome.html — first-run screen; must carry the purpose statement
 .github/ISSUE_TEMPLATE/                — bug report template
 ```
+
+## User data
+
+**The agent loop runs on our machine; the browser runs on the user's.** The
+extension streams the full visible text of every page to the orchestrator, so
+page content necessarily transits the server. BYOK does not change that — BYOK
+is about the *model key*, not the pages. The posture is therefore **transit,
+never persist**, and everything below follows from that. Full reasoning and the
+local-first target in `docs/architecture/privacy.md`.
+
+- **Count events, never pages.** `tasks_run`, `active_users`, `signup` are fine.
+  Anything derived from an AX tree, page text, a URL, typed input or a task
+  title is not — the moment a counter is derived from what the agent *read*,
+  "monitoring activity numbers" becomes surveillance and cannot honestly be
+  described in `PRIVACY.md` or a CWS disclosure.
+- **`logs/sessions/` is the user's data, not a log.** It is not telemetry and
+  no endpoint may enumerate it. `GET /v1/sessions` currently returns every
+  session's task title to any caller — closed by auth, not by a docstring.
+- **`.pages.json` is the boundary and the largest liability in the repo** —
+  unredacted page text, ~200KB per 20 pages, retained forever. `ax_diff` is a
+  second copy in a worse place (inside the audit document, never scrubbed).
+  Content into a document goes in the sidecar.
+- **Redaction is not a boundary.** `is_secret_field` catches *typed* secrets at
+  write time; it does not catch the page.
+- **Nothing prunes disk.** `_prune_sessions` is in-memory only, so files
+  accumulate forever and a hosted user cannot delete their own.
+- **Auth is a privacy control, not a feature.** `/ws/ext` is a bare
+  `await websocket.accept()` with no token (`main.py:454`), and it is the
+  *only* path a Chrome Web Store install uses — anyone who can reach a
+  self-hosted server's URL can drive the agent against that user's logged-in
+  browser and read their documents. Hard launch gate; do not ship the store
+  listing until it is closed. Listed as Wave 3 auth in `release-plan.md` but
+  not in that doc's blocker table either. Sequence: auth → retention →
+  local-first. `AGENT_SECRET` must have no default (it currently is the
+  literal `"dev-secret"` with `AGENT_AUTH_DISABLED` defaulting to `true`,
+  which is worse than no auth because it looks configured).
+
+
 
 ## Product docs (`docs/product/`) — strategic context
 
@@ -439,14 +479,12 @@ node scripts/test-replay.test.js           # or any other scripts/*.test.js
 
 The pytest install lives in the **repo-root** venv, not `services/brotto-orchestrator/.venv` (which has pydantic-ai but no pytest).
 
-**`npm test` runs nothing.** It is `node --test tests/*.test.js`, and `clients/brotto-extension/tests/` does not exist — the 10 suites live in repo-root `scripts/`. Repointing the glob would newly *enable* ten never-executed suites, which is a bigger change than the one-word fix looks; until someone does it deliberately, run them directly. Every `scripts/*.test.js` is extraction-based: it pulls the real functions out of `sidepanel.js` / `background.ts` by brace matching and evals them against a fake DOM, so it cannot drift from what ships. A dropped field is an *absence* and reads clean in review, which is the whole reason they exist.
+**`npm test` runs nothing.** It is `node --test tests/*.test.js`, and `clients/brotto-extension/tests/` does not exist — the 13 suites live in repo-root `scripts/`. Repointing the glob would newly *enable* thirteen never-executed suites, which is a bigger change than the one-word fix looks; until someone does it deliberately, run them directly. Every `scripts/*.test.js` is extraction-based: it pulls the real functions out of `sidepanel.js` / `background.ts` by brace matching and evals them against a fake DOM, so it cannot drift from what ships. A dropped field is an *absence* and reads clean in review, which is the whole reason they exist.
 
 ## Gotchas
 
-- **`/ws/ext` is unauthenticated.** `main.py:454` is a bare `await websocket.accept()` with no token, and it is the *only* path a Chrome Web Store install uses. Anyone who can reach a self-hosted server's URL can drive the agent against that user's logged-in browser. Hard launch gate — do not ship the store listing until it is closed. Listed as Wave 3 auth in `release-plan.md`, but it is not in that doc's blocker table either.
 - **`.gitignore` lists `/docs/` and `/CLAUDE.md`, but 27 files under `docs/` and this file are tracked** (force-added with `git add -f`). New docs are ignored by default and silently local-only — that is the failure, not the absence of tracking. `vision.md`, `users.md`, `market.md`, `risks.md`, `gap-analysis.md`, `competitors.md`, `dev-environment.md`, `release-plan.md` and `cws-submission.md` are **not** yet tracked.
-- `.env` is gitignored and there is no `.env.example`; the `.env` itself carries the comments.
-- Don't include `Co-Authored-By: Claude ...` in commit messages (per global `~/.claude/CLAUDE.md`).
+- **There are two `.env` files and they are not interchangeable.** The deployment one beside `docker-compose.yml` holds only `AGENT_SECRET`; `services/brotto-orchestrator/.env` is the dev one and carries a model key. Compose must never fall back to the dev file — it would defeat `BROTTO_ENV=prod` and the run would silently spend the operator's credits. `.dockerignore` keeps both out of the image.
 - **`decisions.md` is locked architectural decisions (D1–D10).** Don't change without explicit re-discussion. Product/strategy decisions live in `docs/product/decisions/`.
 
 ## Working agreements (AI-assisted dev)
@@ -464,3 +502,4 @@ Full list in `docs/product/dev-environment.md`. The non-negotiables:
 9. **Comments only when WHY is non-obvious.** Don't repeat the code.
 10. **Don't include `Co-Authored-By: Claude ...` in commit messages.** Per global `~/.claude/CLAUDE.md`.
 11. **The "we tried X and it failed" reasoning lives in `docs/architecture/`, not here.** When you land a non-obvious conclusion, add it to the matching file in the same commit — and if the operative rule in this file changes, change it here too.
+12. **User data is not ours.** Before adding any field, endpoint or metric, ask *is this user content and where does it land?* Page text and typed input go in the user's sidecar and stay there; counters count events, never pages. See "User data" above.
