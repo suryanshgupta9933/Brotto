@@ -266,9 +266,16 @@ async function executeAction(tabId: number, action: any): Promise<void> {
     await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x, y, button: "left", clickCount: 1 } });
     await sleep(200); // brief pause for click to register / navigation to start
   } else if (t === "type") {
-    for (const ch of (action.text ?? "") as string) {
-      await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "char", text: ch } });
-    }
+    // One call, not one per character. A README is 1325 characters with 23
+    // newlines: the loop made 1325 sequential CDP round trips, and each "\n" was
+    // a literal newline *character* rather than a line break — so a markdown
+    // document arrived as one run-on line with 23 dead characters in it.
+    // insertText is also what a canvas-rendered editor (Google Docs) expects;
+    // per-character key events reach a contenteditable and nothing else.
+    await dbg.sendCommand(tabId, {
+      method: "Input.insertText",
+      params: { text: (action.text ?? "") as string },
+    });
   } else if (t === "scroll") {
     await dbg.sendCommand(tabId, {
       method: "Input.dispatchMouseEvent",
@@ -280,11 +287,50 @@ async function executeAction(tabId: number, action: any): Promise<void> {
     // being sent by the relay and dropped here, so Control+A — the clear
     // that clear_ref issues — arrived as a bare "a" and typed a letter into
     // the field instead of selecting it.
-    const mods = action.modifiers;
-    const base = { key: action.key, ...(mods ? { modifiers: mods } : {}) };
-    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyDown", ...base } });
-    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp",   ...base } });
+    const mods = action.modifiers ?? 0;
+    const code = keyCodeFor(action.key);
+    const base = {
+      key: action.key,
+      windowsVirtualKeyCode: code,
+      nativeVirtualKeyCode: code,
+      ...(mods ? { modifiers: mods } : {}),
+    };
+    // A character key carries its text on the keyDown, or Chrome registers a
+    // bare keypress and inserts nothing. A modified key wants rawKeyDown: the
+    // shortcut is resolved by the page, not by the browser's own key handling.
+    const printable = code >= 32 && code < 127;
+    await dbg.sendCommand(tabId, {
+      method: "Input.dispatchKeyEvent",
+      params: {
+        type: mods || !printable ? "rawKeyDown" : "keyDown",
+        ...base,
+        ...(mods || !printable ? {} : { text: action.key }),
+      },
+    });
+    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...base } });
   }
+}
+
+/**
+ * CDP will not interpret a key without a key code. `key: "Enter"` on its own is
+ * an event Chrome can decline to act on — a key press that reports success and
+ * types nothing, which is the same shape of lie as a key name it cannot parse.
+ * A named key comes from the table; a single character is its own code.
+ *
+ * No type annotations: `scripts/test-key-dispatch.test.js` evals this span
+ * directly so the key code cannot go missing unnoticed, and it is not a
+ * TypeScript compiler.
+ */
+const KEY_CODES = {
+  Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18,
+  Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36,
+  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Delete: 46,
+};
+
+function keyCodeFor(key) {
+  const named = KEY_CODES[key];
+  if (named !== undefined) return named;
+  return [...key].length === 1 ? key.toUpperCase().charCodeAt(0) : 0;
 }
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -942,11 +988,14 @@ async function startRelay(
 
       case "login_required": {
         let domain = "";
-        try { domain = new URL(msg.message ?? "").hostname; } catch { domain = "this site"; }
+        // msg.url, not msg.message: the message is the prose sentence the
+        // panel shows, so new URL() on it always threw and every login wall
+        // was labelled "this site".
+        try { domain = new URL(msg.url ?? "").hostname; } catch { domain = "this site"; }
         waitingForLogin = true;
         currentPrompt = "login";
         void persistSession();
-        notifyUi({ type: "login_required", url: msg.message ?? "", domain });
+        notifyUi({ type: "login_required", url: msg.url ?? "", domain });
         break;
       }
 

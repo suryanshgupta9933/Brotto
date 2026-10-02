@@ -37,6 +37,24 @@ function extractKeyBranch() {
   throw new Error("unterminated `key` branch");
 }
 
+// `keyCodeFor` and its table sit beside the branch rather than inside it, and
+// the branch cannot run without them. Extracted from source for the same
+// reason the branch is: a key code that quietly went missing is an absence,
+// and an absence reads clean in review.
+function extractKeyCodeHelper() {
+  const table = source.search(/const KEY_CODES/);
+  if (table < 0) throw new Error("no KEY_CODES table in background.ts — renamed?");
+  const fn = source.indexOf("function keyCodeFor", table);
+  if (fn < 0) throw new Error("no keyCodeFor in background.ts — renamed?");
+  const open = source.indexOf("{", fn);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) return source.slice(table, i + 1);
+  }
+  throw new Error("unterminated keyCodeFor");
+}
+
 // Runs the extracted branch against a fake dbg and returns the params of
 // every Input.dispatchKeyEvent it sent.
 function dispatch(action) {
@@ -46,9 +64,8 @@ function dispatch(action) {
       if (cmd.method === "Input.dispatchKeyEvent") sent.push(cmd.params);
     },
   };
-  const body = extractKeyBranch();
   const fn = vm.runInNewContext(
-    `(async (t, action, dbg, tabId) => { ${body} })`,
+    `(async (t, action, dbg, tabId) => { ${extractKeyCodeHelper()}\n${extractKeyBranch()} })`,
   );
   return fn("key", action, dbg, 7).then(() => sent);
 }
@@ -89,6 +106,36 @@ function check(name, cond, detail) {
     "an unmodified key sends no bitmask",
     enter[0] && enter[0].modifiers === undefined,
     `Enter params were ${JSON.stringify(enter[0])}`,
+  );
+
+  // A key with no key code is an event Chrome can decline to act on — a press
+  // that reports success and types nothing. Measured on session ad0337c9,
+  // where a nine-step Google Docs run ended on a title field holding
+  // "Untitled dbrobrbrottoottobottotodocument".
+  check(
+    "a named key carries its code",
+    enter[0] && enter[0].windowsVirtualKeyCode === 13,
+    `Enter keyCode was ${enter[0] && enter[0].windowsVirtualKeyCode}`,
+  );
+  check(
+    "a named key sends no text payload",
+    enter[0] && enter[0].text === undefined,
+    `Enter text was ${JSON.stringify(enter[0] && enter[0].text)}`,
+  );
+  check(
+    "a character key carries its own code and its text",
+    ctrlA[0] && ctrlA[0].windowsVirtualKeyCode === 65,
+    `a keyCode was ${ctrlA[0] && ctrlA[0].windowsVirtualKeyCode}`,
+  );
+  check(
+    "a modified key is a rawKeyDown, or the page never sees the shortcut",
+    ctrlA[0] && ctrlA[0].type === "rawKeyDown",
+    `a type was ${ctrlA[0] && ctrlA[0].type}`,
+  );
+  check(
+    "keyUp is always keyUp, modifier or not",
+    enter[1] && enter[1].type === "keyUp" && ctrlA[1] && ctrlA[1].type === "keyUp",
+    `up types were ${JSON.stringify([enter[1] && enter[1].type, ctrlA[1] && ctrlA[1].type])}`,
   );
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

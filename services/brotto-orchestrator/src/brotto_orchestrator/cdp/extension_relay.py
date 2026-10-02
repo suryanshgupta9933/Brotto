@@ -11,6 +11,18 @@ from ..dev.ax_tree_extractor import SemanticTarget
 
 log = logging.getLogger("brotto.ext_relay")
 
+# The keys the extension carries a CDP key code for. Anything outside this set
+# is rejected rather than forwarded: a key name Chrome cannot resolve is a
+# no-op that still reports success, and a model that reaches for the wrong
+# spelling then watches the field it is trying to clear refuse to clear. A
+# recorded run sent `ControlOrMeta+a` three times — it is a Playwright alias —
+# and got three rounds of "Pressed ControlOrMeta+a: ok" with nothing pressed.
+_PRESSABLE_KEYS = frozenset({
+    "Backspace", "Delete", "Enter", "Escape", "Space", "Tab",
+    "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp",
+    "End", "Home", "PageDown", "PageUp",
+})
+
 # ponytail: 2s ceiling on a best-effort lookup. A slower extension degrades to
 # the accessible-name check (over-redact, not under-redact); raise it only if
 # live runs show real timeouts.
@@ -219,6 +231,14 @@ class ExtensionCDPRelay:
         return f"Typed into [{ref}]"
 
     async def press_key(self, key: str, modifiers: int = 0) -> str:
+        if key not in _PRESSABLE_KEYS:
+            return (
+                f"Error executing: press_key {key!r} is not a key this client can "
+                f"dispatch, so nothing was pressed. Use one of "
+                f"{', '.join(sorted(_PRESSABLE_KEYS))} — optionally with a "
+                f"modifiers bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8), e.g. "
+                f'{{"key": "a", "modifiers": 4}} to select all.'
+            )
         log.info("[%s] press_key %r modifiers=%d", self._sid, key, modifiers)
         await self._send_action({"type": "key", "key": key, "modifiers": modifiers})
         return "ok"

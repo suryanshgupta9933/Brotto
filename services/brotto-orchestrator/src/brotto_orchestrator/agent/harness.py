@@ -519,6 +519,72 @@ async def _ask_user_text(deps: AgentDeps, audit, *, turn: int, action: str,
     return str(reply)
 
 
+async def _await_login(deps: AgentDeps, cdp, *, timeout: float = 300.0,
+                       poll: float = 2.0) -> str | None:
+    """Wait out a sign-in wall. "resume"/"skip" from the user, or the wall
+    going away on its own. None only on timeout.
+
+    This used to be one `wait_for(queue.get(), 300)`, resumed by a single
+    extension signal. That signal was gated twice — on `tabId ===
+    activeTabId`, and on the URL actually changing — so a sign-in completed
+    anywhere else never resumed the run: an OAuth popup, a second tab the
+    user opened to sign in, or an SSO form that swaps itself without moving
+    off the path. Each is a real sign-in flow and each waited out the full
+    300s while the panel promised the task "resumes automatically".
+
+    The wall is already readable from here, over the same CDP relay that
+    detected it a moment ago, so the server watches it itself rather than
+    trusting one browser-side edge. `check_login_page` is reused rather than
+    re-implemented, and the extension signal stays a *fast path* — resume
+    still lands immediately when it does fire — so the two cannot disagree
+    about whether the user is still signed out.
+
+    Only title and url are re-read, not the AX tree: two cheap calls against
+    a multi-second observation, and the tree's only contribution here is the
+    two content force-triggers. Missing one just means the next step's full
+    check re-prompts, which is a loop the harness already handles.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    # The queue is shared with approvals and `ask_human`. The extension
+    # pushes "resume" from a navigation event, asynchronously, and it can
+    # land here after we have already resumed by our own check — where the
+    # next `get()` would read it as the answer to a *different* question,
+    # auto-approving a navigation the user was never asked about. Only
+    # "resume" is dropped: it is the one reply no human sends into the void,
+    # so a "skip" or an answer sitting here is a real one and goes back.
+    orphans: list[str] = []
+    while not deps.human_input_queue.empty():
+        try:
+            item = str(deps.human_input_queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+        if item.lower() != "resume":
+            orphans.append(item)
+    for item in orphans:
+        deps.human_input_queue.put_nowait(item)
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return None
+        try:
+            return await asyncio.wait_for(
+                deps.human_input_queue.get(), timeout=min(poll, remaining),
+            )
+        except asyncio.TimeoutError:
+            pass
+        try:
+            title = await cdp.get_page_title()
+            url = await cdp.get_current_url()
+        except Exception as exc:
+            # A dead relay or a tab mid-navigation is a reason to try again
+            # in two seconds, never a reason to fail the run.
+            log.debug("[%s] login poll: %s", deps.user_id, type(exc).__name__)
+            continue
+        if not check_login_page(title, "", url):
+            return "resume"
+
+
 async def _redact_if_secret(deps: AgentDeps, ref: str) -> bool:
     """Is this field a password? Never raises.
 
@@ -987,7 +1053,9 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             if _EXEC_FAILURE in cleared:
                 return cleared
             result = await cdp.type_text_to_ref(args["ref"], args["text"])
-            return f"Typed into [{args['ref']}]: {result}"
+            if _EXEC_FAILURE in result:
+                return result
+            return f"Typed into [{args['ref']}]"
 
         elif action == "press_key":
             # modifiers is CDP's bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8).
@@ -995,7 +1063,9 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             # type a query and never run it.
             key = args["key"]
             result = await cdp.press_key(key, _as_int(args.get("modifiers"), 0))
-            return f"Pressed {key}: {result}"
+            if _EXEC_FAILURE in result:
+                return result
+            return f"Pressed {key}"
 
         elif action == "scroll":
             direction = args.get("direction", "down")
@@ -1966,11 +2036,8 @@ class AgentHarness:
                     "page_title": page_title,
                     "task": deps.task,
                 })
-                try:
-                    reply = await asyncio.wait_for(
-                        deps.human_input_queue.get(), timeout=300,
-                    )
-                except asyncio.TimeoutError:
+                reply = await _await_login(deps, deps.cdp)
+                if reply is None:
                     await deps.ws_send({"type": "login_timeout"})
                     audit.resolve_prompt(pid, decision="timeout", response="",
                                          wait_ms=int((time.perf_counter() - t_lp) * 1000))

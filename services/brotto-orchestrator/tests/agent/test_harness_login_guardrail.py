@@ -157,3 +157,82 @@ async def test_the_sign_in_wall_says_where_and_what_for(monkeypatch, tmp_path):
     assert prompt["args"]["page_title"] == "Sign in"
     assert prompt["args"]["task"] == "book the cheapest flight to Lisbon"
     assert prompt["decision"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_a_wall_that_clears_itself_resumes_with_nothing_from_the_user(monkeypatch):
+    """The sign-in completed, but nothing told the server.
+
+    The old wait was one `wait_for(queue.get(), 300)` woken by a single
+    extension signal, gated on `tabId === activeTabId` *and* on the URL
+    changing. A sign-in in an OAuth popup, a second tab, or an SSO form
+    that swaps in place trips none of that — the user was signed in and
+    the run sat there for the full 300s, which is what "it doesn't continue
+    automatically" meant.
+
+    Here nothing is ever put on the queue: the page simply stops looking
+    like a login page. This only returns quickly if the server re-checks
+    the wall itself, so a regression is a 300s hang rather than a slow
+    failure.
+    """
+    _stub_plan(monkeypatch)
+    deps = _login_deps()
+    sent: list[dict] = []
+
+    async def ws_send(msg: dict) -> None:
+        sent.append(msg)
+
+    deps.ws_send = ws_send
+
+    # The wall is detected, then gone two seconds later. No queue traffic
+    # and no user reply at any point.
+    reads = {"n": 0}
+
+    async def get_page_title() -> str:
+        reads["n"] += 1
+        return "Sign in" if reads["n"] <= 1 else "My repositories"
+
+    async def get_current_url() -> str:
+        return "http://example.com/login" if reads["n"] <= 1 else "http://example.com/"
+
+    deps.cdp.get_page_title = get_page_title
+    deps.cdp.get_current_url = get_current_url
+
+    result = await asyncio.wait_for(AgentHarness().run(deps), timeout=15)
+
+    assert result.status == "completed"
+    assert not [m for m in sent if m.get("type") == "login_timeout"]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_resume_cannot_answer_the_next_question():
+    """A "resume" the user sent too late must not answer anything.
+
+    `human_input_queue` is shared by the login wall, approvals and
+    `ask_human`. The extension pushes "resume" from a navigation event it
+    saw; if the server had already resumed by its own page check, that item
+    is still queued, and the next approval would read it as a yes. So the
+    wait drops an orphan "resume" — and only that, because a "skip" or a
+    typed answer in the queue is always a real one.
+    """
+    from brotto_orchestrator.agent.harness import _await_login
+
+    cdp = MagicMock()
+    # Still a wall, so the only way out is the queue — and the queue's
+    # "resume" is the orphan that must not count as an answer.
+    cdp.get_page_title = AsyncMock(return_value="Sign in")
+    cdp.get_current_url = AsyncMock(return_value="http://example.com/login")
+
+    deps = _login_deps()
+    deps.cdp = cdp
+    deps.human_input_queue.put_nowait("resume")
+
+    # The orphan was dropped, so nothing answers the wall and the wait runs
+    # out its own short deadline rather than returning the queued "resume".
+    assert await _await_login(deps, cdp, timeout=0.3, poll=0.05) is None
+
+    # A genuine reply is not collateral: it is still there to be read.
+    deps2 = _login_deps()
+    deps2.cdp = cdp
+    deps2.human_input_queue.put_nowait("skip")
+    assert await _await_login(deps2, cdp, timeout=5, poll=0.05) == "skip"
