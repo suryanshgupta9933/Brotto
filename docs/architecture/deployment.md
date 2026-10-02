@@ -104,16 +104,42 @@ front of it, permanently. The server selects the protocol *name* back
 
 ## What still needs doing before this is publicly reachable
 
-Recorded here rather than as a task list because each is a launch gate, not
-a deployment step:
+Nothing is open. Each of these was a launch gate and each is closed as of
+2026-10-03:
 
-- `POST /run` is unauthenticated and launches a headless browser; it should
-  be refused outside dev.
+| Gate | Closed by |
+|---|---|
+| `/ws/ext` accepted any caller | `AGENT_SECRET`, sent as a WS subprotocol |
+| `GET /v1/sessions` enumerated every task title | the same secret, 404 not 403 |
+| Session deletion did not exist, or was partial | `DELETE /v1/sessions[/{id}]` |
+| Nothing on disk ever expired | `BROTTO_RETENTION_DAYS`, swept at startup |
+| `POST /run` launched a headless browser for anyone | refused outright when `BROTTO_ENV=prod` |
+| `ax_diff` wrote page text into the audit document | a character count, and nothing else |
 
-`/ws/ext` auth, the `/v1/sessions` enumeration, session deletion and
-`BROTTO_RETENTION_DAYS` were all open gates and are closed as of 2026-10-03 —
-see `tests/test_agent_auth.py`, `tests/test_session_delete.py` and
-`tests/test_retention.py`.
+Tests: `tests/test_agent_auth.py`, `tests/test_session_delete.py`,
+`tests/test_retention.py`, `tests/test_run_refused_in_prod.py`.
+
+**The one dependency to keep in mind:** prod is what the *image* sets, not
+what the code defaults to. `BROTTO_ENV` unset means dev — no secret required,
+`/run` open, `AGENT_MODEL` pre-seeded. That is right for `python main.py` and
+wrong for a box on a network, so `Dockerfile` and `docker-compose.yml` both
+carry `BROTTO_ENV: prod` and a test asserts both. A hand-rolled install that
+skips them is a development server, and the startup log says so.
+
+## This image did not build until 2026-10-03
+
+`docker compose up` from a clean clone — the quickstart the README leads with
+— failed on the first step: the builder stage ran `pip wheel -r
+requirements.txt` without ever copying that file in. The runtime stage below it
+did copy it, which is exactly why the omission read clean in review. The build
+had only ever been exercised against a working tree.
+
+So: **a Dockerfile that has never been built from a clone has not been
+verified.** The 145MB no-Chromium result, the empty `GET /v1/sessions`, the
+404s without the secret, the state surviving `docker restart`, the retention
+sweep firing at startup and `DELETE` taking the scratchpad with the document
+were all measured on a fresh clone, and those are the only measurements in
+this file that count.
 
 ## Deleting a session
 

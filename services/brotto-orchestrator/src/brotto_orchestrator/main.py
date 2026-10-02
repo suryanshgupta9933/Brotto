@@ -29,7 +29,22 @@ if not os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_AUTH_TOKEN"):
 # server then uses whatever the operator configured (extension settings,
 # .env, AGENT_MODEL, etc.) and raises "no model configuration" if
 # nothing resolves.
-if os.getenv("BROTTO_ENV", "dev") == "dev":
+def _is_prod() -> bool:
+    """Whether this process opted out of the dev defaults.
+
+    Unset means *dev*, not prod. The comment this replaces claimed the
+    opposite — that a deploy forgetting BROTTO_ENV would get the safe
+    behaviour — and the code has always done the reverse, on this and on the
+    two `script` guards. Prod is what the Dockerfile's `ENV` and compose's
+    `environment:` both set, redundantly, and that redundancy is the launch
+    gate rather than this default. A bare `brotto` on a box is a development
+    server: no secret required, `/run` open, dev model defaults. It is
+    documented as one and binds nothing a self-hoster would expose.
+    """
+    return os.getenv("BROTTO_ENV", "dev") != "dev"
+
+
+if not _is_prod():
     # MiniMax-M3, not M3.1-Flash-Preview. The Flash model *requires*
     # thinking — it 400s on thinking.type="disabled" and reasons on every
     # step, which measured ~6.1s per call against ~1.5s here. The agent
@@ -1239,7 +1254,7 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
                         scripted_planner = None
                         script_name = script_request
                         if script_name:
-                            if os.getenv("BROTTO_ENV", "dev") != "dev":
+                            if _is_prod():
                                 log.warning("[%s] ignoring task_start script in prod  name=%s",
                                             user_id, script_name)
                             else:
@@ -1295,6 +1310,15 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
 
 @app.post("/run")
 async def run_task(request: Request):
+    # Refused outright in prod, not merely authenticated. Nothing in the
+    # shipped product calls this: the extension drives the agent over
+    # /ws/ext, in the user's own logged-in browser. This launches a headless
+    # Chromium on a caller-supplied task and URL, so on a reachable port it
+    # is a browser the operator did not ask for, driven by whoever found it.
+    if _is_prod():
+        log.warning("/run: refused  BROTTO_ENV=prod")
+        return _error(404, "not found")
+
     body = await _json_body(request)
     task = body.get("task", "")
     start_url = body.get("start_url", "about:blank")
@@ -1326,7 +1350,7 @@ async def run_task(request: Request):
         scripted_planner = None
         script_name = body.get("script")
         if script_name:
-            if os.getenv("BROTTO_ENV", "dev") != "dev":
+            if _is_prod():
                 log.warning("/run: ignoring script in prod  name=%s", script_name)
             else:
                 from .testing.scripts import SCRIPT_NAMES, build_script
