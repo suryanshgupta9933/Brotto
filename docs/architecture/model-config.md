@@ -5,7 +5,7 @@ Read before touching `model/{config,catalog,registry,store,resolver,pricing}.py`
 
 ## Model adapter
 
-**One catalogue, nine providers** (`brotto_orchestrator.model.catalog.PROVIDER_CATALOG`).
+**One catalogue, eight providers** (`brotto_orchestrator.model.catalog.PROVIDER_CATALOG`).
 This is the single source of truth: the factories, the `GET /v1/models` endpoint,
 and both extension screens are all generated from it, so adding a model is one
 edit. It replaced three hand-kept copies that had already drifted.
@@ -287,6 +287,12 @@ than only checking the response shape.
 - **`_inline_model()` is one parser for three call sites** (this, `task_start`,
   `/v1/suggestions`). They were three separate literal parses, which is how a
   check ends up answering `ok` for a config the run would refuse.
+
+**The gate sits after the steer, clarify and in-flight branches.** A steer is a
+correction to a task already running and a clarify answer is an answer, not a
+new run — neither should be blocked on a pre-flight that re-resolves a config
+that is not changing. Ordering is invisible in a return value, so it is pinned
+on the source by `scripts/test-model-check.test.js` rather than left to review.
 
 **A 400 is classified by body, not by status.** MiniMax and OpenAI answer an
 exhausted balance with a 400 and a sentence — "insufficient balance" — rather

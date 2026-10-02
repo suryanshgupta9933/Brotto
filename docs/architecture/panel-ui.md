@@ -239,7 +239,8 @@ busy.
 `WORKING_LINES`. A machine key rather than a sentence — the wording is
 presentation, it lives where rendering lives, and a line edit never needs a
 server deploy. An unrecognised `kind` falls back to the server's own text, so
-the bubble still shows something.
+the bubble still shows something. The frame is not audited — it is a progress
+signal, not a record of anything the agent did.
 
 **The real bug was a wired feature nobody sent.** `canonical_step` had a panel
 handler, a bubble builder and a closer function, and had never once run —

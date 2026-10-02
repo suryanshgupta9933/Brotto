@@ -678,6 +678,40 @@ measurably non-zero, and is `find_element` the right shape for the case where
 it is. That is a measurement before it is a schema change, and it is not
 picked from a benchmark table.
 
+### The model could not press a key
+
+A 19-step HDFC UPI run burned 158s and ~19 model calls without executing a single
+search. Gmail's search box commits on Enter and there was **no way to press
+it**. Three defects compounded, and only the first is visible in a diff of the
+action layer:
+
+- **No `press_key` action.** The extension already implemented the dispatch —
+  `background.ts` reads `t === "key"` — and nothing constructed it. Dead code,
+  and `ActionCall` had no such `Literal`. `press_key(key, modifiers)` now exists
+  on both relays.
+- **`modifiers` was dropped in the key handler.** The relay sent
+  `{type:"key", key:"a", modifiers:2}` and the extension read only
+  `action.key`, so `clear_ref` dispatched a bare `"a"` and **typed a letter into
+  the field instead of clearing it**. That is why the model saw its own query
+  still sitting in the box and misread the stall as an unrun search.
+- **`scroll` read `amount_px` while the model sends `amount`**, so every scroll
+  silently became 300px. A param name mismatch in the wrong direction is
+  invisible: the action succeeds and does something plausible.
+
+**Ruled out, because it looked like the cause:** the `[redacted:password]` on
+those same args in the audit. Redaction happens at audit-write time
+(`harness.py` → `_scrubbed`); `_execute_action` receives the original
+call. It is over-redaction of a search box, not the bug — the second symptom
+that reads like a cause.
+
+The prompt now documents the semantics: `type_text` only *inserts*, so follow
+it with `press_key Enter`, or use `navigate`, **which had already worked at step
+2** of the same run.
+
+Pinned by `scripts/test-key-dispatch.test.js`, which extracts the branch and
+evals it. A dropped field is an *absence*, and an absence reads clean in
+review.
+
 ## Mid-task steering
 
 The only way to redirect a running task was Stop, which discards the transcript. Now the composer stays live while `executing`: it posts `{"type":"steer"}` and the correction lands on the next turn.
