@@ -8,6 +8,41 @@ Read before touching `clients/brotto-extension/src/{background,debugger}.ts`,
 - `model_config` (provider, model, context_window) → `chrome.storage.local` — persists across browser restarts (not sensitive)
 - `api_key` → `chrome.storage.session` — in-memory only, cleared on browser restart; mirrors the existing pause-state pattern
 - The first read after an extension update runs a one-shot migration that re-saves any legacy `{modelConfig: {model_config, api_key}}` shape into the new layout
+- `deviceId` (one `crypto.randomUUID()`) → `chrome.storage.local`. See below; it is not a credential and nothing authenticates with it.
+
+## The install id is the user; the peer address never was
+
+The server stores two things per user: their blocklist and approved domains
+(`logs/user_policies/`) and their remembered model config (`logs/user_models/`).
+Both are **keyed by an opaque string that becomes a filename**, and for its
+whole life that string was `websocket.client.host`.
+
+It is not an identity. Two ways it fails, both silent:
+
+- A laptop joins a different network and gets a new address. Every approval
+  the user gave last week is still on disk, under a key they have never seen,
+  and the panel shows them an empty list.
+- **The server runs in a container.** Every request arrives from the docker
+  gateway, so it is at least *stable* — and the user migrates from a local
+  `python main.py`, where the key was their real address, and silently lands
+  in a different file with the same behaviour. This is not hypothetical: it is
+  the documented deployment.
+
+So the extension generates one uuid per install and sends it. The server
+prefers it everywhere (`_caller_key` in `main.py`) and falls back to the peer
+address when it is absent, so an extension predating this keeps working. Four
+routes resolve one — `task_start` over the WebSocket, and `device_id` on
+`/v1/model/check`, `user_id` on `/v1/policy` and `/v1/policy_ack`. They have to
+agree: `/v1/policy` reads the in-memory registry, so a panel asking under one
+key while the socket wrote under another gets an empty blocklist with a 200.
+
+**Session history is not affected** — `logs/sessions/` is not keyed by caller
+at all, which is why it migrates to a container untouched.
+
+The two functions are duplicated across `background.ts` and `sidepanel.js`
+because those are two separate bundles (the service worker is bundled by
+esbuild, the panel is copied verbatim). They must read the same storage key,
+and only one of the two ever writes it.
 
 ## Domain blocking — one list, the user's
 
@@ -78,12 +113,12 @@ Two things make that a real grant rather than a per-run cache:
 - **`approved_domains` on the user's own policy file.** The grant is written by
   `persist.grant_domain` on approve and read back by `_seed_granted_domains` at
   the top of every run, into the `visited_domains` set that every domain gate
-  already consults. The file is keyed by `deps.client_ip` — the same key
+  already consults. The file is keyed by the caller's install id — the same key
   `/v1/policy_ack` uses — so the grant lands beside that user's blacklist
   instead of in a second store nothing else reads. It is a **read-modify-write**:
   the harness and the panel write two different fields of one file, and a grant
   written as a whole-payload `save_if_changed` would have emptied the blocklist
-  in a file named after a hash of an IP, where the damage is invisible in review.
+  in a file named after a hash of the key, where the damage is invisible in review.
 - **The audit is the fallback, not the store.** A resume restores approved
   domains from `policy_events` with `user_decision == "approved"`, and that
   filter now accepts `first_time_seen` as well as `first_navigation`. Both now

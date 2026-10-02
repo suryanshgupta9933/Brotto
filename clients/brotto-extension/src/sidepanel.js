@@ -434,7 +434,7 @@ async function checkModelReady() {
     const res = await fetch(`${base}/v1/model/check`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model_config: cfg || undefined, api_key: apiKey }),
+      body: JSON.stringify({ model_config: cfg || undefined, api_key: apiKey, device_id: await deviceId() }),
     });
     if (!res.ok) return { ok: true };  // could not check — not the model's fault
     body = await res.json();
@@ -922,6 +922,23 @@ function refillComposer(task) {
   goalEl.focus();
 }
 
+// A stable id for *this install*, so the server can key the user's blocklist
+// and remembered model to something that survives a network change. The
+// client IP was the only identity available and it is not one: a laptop that
+// leaves Wi-Fi gets a new address, and a server in a container sees the docker
+// gateway rather than the machine. Either way the user's approved sites
+// silently reset.
+// Deliberately not a uuid per session and not derived from anything
+// identifying: it is a handle for "the same browser", nothing more. The
+// blocklist it keys is the user's own file on their own disk.
+async function deviceId() {
+  const stored = await chrome.storage.local.get('deviceId');
+  if (typeof stored.deviceId === 'string' && stored.deviceId) return stored.deviceId;
+  const id = crypto.randomUUID();
+  await chrome.storage.local.set({ deviceId: id });
+  return id;
+}
+
 async function authHeaders() {
   const stored = await chrome.storage.local.get('settings');
   const secret = stored.settings && typeof stored.settings.agentSecret === 'string'
@@ -1253,7 +1270,7 @@ async function hydrateSettingsPanel() {
   // here.
   let effective = null;
   try {
-    const r = await fetch(`${base}/v1/policy`);
+    const r = await fetch(`${base}/v1/policy?user_id=${encodeURIComponent(await deviceId())}`);
     if (r.ok) effective = await r.json();
   } catch (e) {
     console.warn('[brotto] could not reach server for policy check:', e);
@@ -1394,7 +1411,7 @@ if (saveSettingsBtn) {
       const r = await fetch(`${base}/v1/policy_ack`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: { blacklist: settings.blacklist } }),
+        body: JSON.stringify({ settings: { blacklist: settings.blacklist }, user_id: await deviceId() }),
       });
       serverOk = r.ok;
       console.log('[brotto] policy_ack http status', r.status);

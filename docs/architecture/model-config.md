@@ -83,7 +83,7 @@ only, and reaching them is the entire point of the adapter.
 
 **Per-task resolution** (`resolver.resolve_model_config`):
 1. inline_config / inline_creds (from extension's task_start)
-2. per-user JSON file keyed by client IP
+2. per-user JSON file keyed by the install's `device_id` (peer address if it sends none)
 3. env vars (`AGENT_MODEL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`)
 
 ### `base_url` lives on the config, not the credentials

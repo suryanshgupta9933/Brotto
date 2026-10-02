@@ -40,6 +40,22 @@ let serverUrl: string = DEFAULT_SERVER;
 // The orchestrator's AGENT_SECRET. Read from settings on each use rather
 // than cached: a user who pastes it and immediately retries should not
 // have to restart the service worker for the socket to stop being refused.
+// A stable id for *this install*, so the server can key the user's blocklist
+// and remembered model to something that survives a network change. The
+// client IP was the only identity available and it is not one: a laptop that
+// leaves Wi-Fi gets a new address, and a server in a container sees the docker
+// gateway rather than the machine. Either way the user's approved sites
+// silently reset. Mirrors sidepanel.js `deviceId()` — the panel and the
+// service worker are separate bundles and must read the same stored value, so
+// this key is written by whichever asks first.
+async function deviceId(): Promise<string> {
+  const stored = await chrome.storage.local.get("deviceId");
+  if (typeof stored.deviceId === "string" && stored.deviceId) return stored.deviceId;
+  const id = crypto.randomUUID();
+  await chrome.storage.local.set({ deviceId: id });
+  return id;
+}
+
 async function agentSecret(): Promise<string> {
   const stored = await chrome.storage.local.get("settings");
   const s = stored.settings as { agentSecret?: unknown } | undefined;
@@ -797,6 +813,9 @@ async function startRelay(
       // the server has to tell them apart.
       resume: opts.resume === true,
       user_policy: userPolicy,
+      // The user's blocklist and remembered model are stored under this key,
+      // not under the peer address — see deviceId().
+      device_id: await deviceId(),
     };
     if (stored.model_config) payload.model_config = stored.model_config;
     if (stored.api_key) payload.api_key = stored.api_key;

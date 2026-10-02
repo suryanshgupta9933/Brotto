@@ -50,9 +50,16 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
   const sandbox = {
     console, Date, JSON, Promise,
     plannerUrlEl: { value: "http://localhost:8000" },
+    // deviceId() is real, extracted below: it is what the panel sends as the
+    // server's caller key, so a stub here would let a dropped `device_id`
+    // field pass.
+    crypto: { randomUUID: () => "d3adb33f-0000-4000-8000-000000000001" },
     chrome: {
       storage: {
-        local: { get: async () => stored },
+        local: {
+          get: async (key_) => (key_ === "deviceId" ? {} : stored),
+          set: async () => {},
+        },
         session: { get: async () => ({ modelApiKey: key }) },
       },
     },
@@ -67,6 +74,7 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(extract("checkModelReady"), sandbox);
+  vm.runInContext(extract("deviceId"), sandbox);
   return { calls, sandbox, run: () => vm.runInContext("checkModelReady()", sandbox) };
 }
 
@@ -128,8 +136,14 @@ async function main() {
   // this gate would replace "Server unreachable, retrying" with "your API key
   // was rejected", which sends the user to fix something that isn't broken.
   {
-    const { run } = panelWith(() => jsonResponse({ ok: true, model: "anthropic:claude-sonnet-5-5" }));
+    const { run, calls } = panelWith(() => jsonResponse({ ok: true, model: "anthropic:claude-sonnet-5-5" }));
     check("a passing check starts the run", (await run()).ok === true);
+    // The server keys the remembered model by this, not by the peer address
+    // — a container sees the docker gateway. A dropped field is an absence,
+    // and an absence reads clean in review.
+    check("…and carries the install id so the server can key the user",
+      calls[0].body.device_id === "d3adb33f-0000-4000-8000-000000000001",
+      JSON.stringify(calls[0].body));
   }
   {
     const { run } = panelWith(() => { throw new TypeError("failed to fetch"); });

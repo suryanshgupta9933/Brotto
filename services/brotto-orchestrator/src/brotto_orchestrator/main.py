@@ -247,6 +247,29 @@ def _authed(request: Request) -> bool:
     )
 
 
+def _caller_key(transport, explicit: object = None) -> str:
+    """The key the user's blocklist and remembered model are stored under.
+
+    A client-supplied id wins over the peer address. The address was the
+    only identity available and it is not one: the same browser gets a new
+    key the moment it joins a different network, and a server in a
+    container sees the docker gateway rather than the machine that dialled
+    it. Both cases silently reset an approved-sites list the user believed
+    was remembered. The extension generates one uuid per install and sends
+    it as `device_id`; an extension that predates it falls back to the
+    address, which is where this behaviour has always been.
+
+    The value reaches disk through `policy/persist.py` (sha256 of the key)
+    and `model/store.py` (a filename filtered to alnum, `.` and `-`), so an
+    arbitrary string is safe to accept — the length cap is just a bound on
+    what gets hashed.
+    """
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()[:128]
+    client = getattr(transport, "client", None)
+    return client.host if client else "unknown"
+
+
 def _error(status: int, message: str, **extra) -> JSONResponse:
     """The one error shape.
 
@@ -503,7 +526,7 @@ async def check_model(request: Request):
     from pydantic_ai.models import ModelRequestParameters
 
     body = await _json_body(request)
-    client_host = request.client.host if request.client else "unknown"
+    client_host = _caller_key(request, body.get("device_id"))
     inline_config = _inline_model(body.get("model_config"))
     api_key = body.get("api_key")
     inline_creds = (
@@ -556,11 +579,10 @@ async def check_model(request: Request):
 @app.get("/v1/policy")
 async def get_effective_policy(request: Request):
     from .policy import UserPolicy
-    # Caller identity: prefer explicit query, fall back to client IP
-    # (SessionRegistry tracks per-IP for the lifetime of the server).
-    caller = request.query_params.get("user_id") or (
-        request.client.host if request.client else "unknown"
-    )
+    # Caller identity: prefer the install id the extension sends, fall back
+    # to the peer address (SessionRegistry tracks per-key for the lifetime of
+    # the server).
+    caller = _caller_key(request, request.query_params.get("user_id"))
     user_payload = registry.get_user_policy_payload(caller)
     user_pol: UserPolicy | None = None
     if isinstance(user_payload, dict):
@@ -666,7 +688,7 @@ async def delete_all_sessions(request: Request):
 async def policy_ack(request: Request):
     body = await _json_body(request)
     settings = body.get("settings") or {}
-    user_id = body.get("user_id") or request.client.host if request.client else "unknown"
+    user_id = _caller_key(request, body.get("user_id"))
     blacklist = settings.get("blacklist") or []
     # Mirror on the session registry so a later GET /v1/policy returns
     # this user's view (handles the "Save with no WS open" case from
@@ -731,7 +753,7 @@ async def suggestions(request: Request):
     title = str(body.get("title", "") or "")
     page_text = str(body.get("page_text", "") or "")
 
-    client_host = request.client.host if request.client else "unknown"
+    client_host = _caller_key(request, body.get("device_id"))
     inline_config = _inline_model(body.get("model_config"))
     api_key = body.get("api_key")
     inline_creds = (
@@ -889,13 +911,11 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     eval_queue: asyncio.Queue = asyncio.Queue()
     relay = ExtensionCDPRelay(ws_send, obs_queue, eval_queue, session_id)
 
-    # ponytail: key policy storage by CLIENT IP, not session_id. session_id
-    # is fresh per /v1/sessions call, so anything stashed under it is dead
-    # the moment the next task opens a new session. IP is the closest thing
-    # to "user identity" we have without auth, and matches the key used
-    # by /v1/policy GET and /v1/policy_ack — making the three callers
-    # finally agree.
-    client_host = websocket.client.host if websocket.client else "unknown"
+    # ponytail: not session_id — that is fresh per /v1/sessions call, so
+    # anything stashed under it is dead the moment the next task opens a
+    # new session. The key is the install's `device_id`, and it matches the
+    # one /v1/policy and /v1/policy_ack use — making the four callers agree.
+    client_host = _caller_key(websocket, msg.get("device_id"))
 
     # Parse per-task model config (BYOK) from task_start. Additive — older
     # extension builds that don't send these still work via env-var fallback.
