@@ -1,6 +1,6 @@
 # Brotto Privacy Policy
 
-**Effective date:** 2026-10-02
+**Effective date:** 2026-10-03
 
 Brotto has a single purpose:
 
@@ -8,36 +8,31 @@ Brotto has a single purpose:
 
 Everything below describes what that purpose requires and nothing more.
 
-This policy explains what Brotto does with data. It describes two deployment modes, because the answer
-is different for each:
+This policy explains what Brotto does with data.
 
-- **Self-hosted** — you run the orchestrator yourself. The server is software on your own machine, so
-  "the server" below means your machine.
-- **Hosted** — you connect the extension to a Brotto-operated server. The server is operated by us,
-  it runs on our hardware, and **the pages you visit are written to a file on it and kept there.**
+Brotto has one deployment. **You run the orchestrator.** It is open-source software you install on
+your own machine or your own server, and the extension talks to whatever address you type into its
+settings. There is no Brotto-operated service, we run no servers, and "the server" below means the
+machine you chose to run it on.
 
-If you do not know which mode you are in, you are self-hosted: nothing is sent to us unless you
-explicitly configured a server address that is not your own.
+That is the whole privacy story, and it is worth being precise about it: whoever operates the machine
+the orchestrator runs on can read the pages the agent reads. There is no operator between the agent and
+your documents in this product, because there is no operator at all. It is a property of the
+deployment, not a promise from us.
 
-The rest of this policy describes both modes together. Wherever it matters, it says which mode it is
-talking about — because "the server writes this to disk" means something quite different when that
-server is your laptop and something quite different when it is ours.
+If you would rather not trust anyone with that — including yourself in six months — do not have an
+agent work on pages you would not paste into a chat window.
 
 ## Summary
 
 Brotto is built so that we collect as little as possible. There is no analytics, no telemetry, no
-advertising, no tracking across sites, and we do not sell or share data with anyone for marketing. The
-data that moves during a task is the data the task inherently requires: what the page looks like to a
-computer, and the model provider you chose.
+advertising, no tracking across sites, and we do not sell or share data with anyone for marketing. We
+do not operate the server, so we do not receive your data. The data that moves during a task is the
+data the task inherently requires: what the page looks like to a computer, and the model provider you
+chose.
 
-Two things in this policy are worth reading even if you read nothing else, because they are the
-difference between self-hosted and hosted:
-
-- In **hosted** mode, we receive what the agent reads off your screen, and the server writes it to a
-  file that stays on our disk. It is not a stream we relay and forget.
-
-**Your model API key is never written to disk by Brotto, in either mode.** It is held in memory and
-used to call your model provider.
+**Your model API key is never written to disk by Brotto.** It is held in memory and used to call your
+model provider.
 
 ## What the extension stores on your device
 
@@ -54,8 +49,8 @@ used to call your model provider.
 Because the key lives in `chrome.storage.session`, it is not written to disk by Chrome and is gone when
 the browser exits. You will be asked for it again next session.
 
-The server address and the last page URL are the two rows worth a second look if you are hosted: both
-name a page you were on, and the server address tells us which Brotto server you are on.
+The server address and the last page URL are the two rows worth a second look: both name a page you
+were on, and the server address names the machine that ran your agent.
 
 ## What leaves your device during a task
 
@@ -81,10 +76,11 @@ page in order to act on it. Which provider receives it is entirely your choice, 
 determines which company's privacy policy governs that data. If you point Brotto at your own endpoint,
 that data goes to your own machine and no model company sees it at all.
 
-**In self-hosted mode, none of this reaches us.** In hosted mode, both the key and the page
-observations reach our server in order to get to your model provider — and the observations do not stop
-there. Our server saves the URL, the page title, and a short digest of each page to a file on its own
-disk, and that file is still there after the task ends. The next section says exactly what is in it.
+**None of this reaches us.** The orchestrator is software on your machine, so both the key and the page
+observations go from your browser to your machine and on to your model provider. The observations do
+not stop at the model call, though: the server saves the URL, the page title, and a short digest of
+each page to a file on its own disk, and that file is still there after the task ends. The next section
+says exactly what is in it.
 
 ## What the orchestrator writes to disk
 
@@ -107,20 +103,20 @@ written**, so a password you type is not stored in the audit file.
 That redaction applies to what the agent *types*, and the page text that reaches the model provider is
 redacted separately. What is kept on disk is narrower than either: a 200-character digest of each page.
 A page that displays a token, an account number, or an email address may still put a fragment of it in
-that digest. If that matters for a site you use, the safest thing is to run self-hosted, or not to have
-the agent work on that site.
+that digest. If that matters for a site you use, the safest thing is to not have the agent work on that
+site.
 
 The files are named after the connection that created them, so that separate users on one server do not
 share settings. That name is derived from your client address. The model-configuration file is named
-with the address in plain text; the policy file is named with a scrambled version of it. In hosted mode,
-that means the server holds a record of which address used it. It is not used for advertising or
-analytics.
+with the address in plain text; the policy file is named with a scrambled version of it. It is not
+used for advertising or analytics — the machine holding them is yours, and nothing is sent anywhere
+with it.
 
 **The approved-sites list is a record of where you have let Brotto work.** When you approve a site in
 an approval card, its domain is added to your policy file and stays there until you clear it, so you
-are not asked about that site again. That means a hosted server holds a list of the domains you have
-given an agent access to. Nothing else about those sites is kept — no URLs, no page content, no dates
-of use — and the list is yours to remove: delete the policy file, or the approved list inside it, and
+are not asked about that site again. That means the server holds a list of the domains you have given
+an agent access to. Nothing else about those sites is kept — no URLs, no page content, no dates of
+use — and the list is yours to remove: delete the policy file, or the approved list inside it, and
 every site goes back to asking. Blocking a domain is separate from approving it, and blocking one
 always wins.
 
@@ -133,8 +129,8 @@ software, not because you should expect to meet it.
 
 If you leave the side panel open on a page with no task running, Brotto can read that page's **visible
 text**, URL, and title and send them to suggest something you might want to do. That request goes to
-the orchestrator and on to your model provider, so in hosted mode we see the same page text here as we
-would during a task. No action is taken on the page, and no file is written for it — the suggestion is
+the orchestrator and on to your model provider, so the same page text leaves your machine here as it would
+during a task. No action is taken on the page, and no file is written for it — the suggestion is
 held in the panel's memory, which is discarded when the browser closes.
 
 This reads a page you are looking at without a task in flight. **It is off unless you turn it on**, and
@@ -153,27 +149,26 @@ not share data with analytics providers, advertising networks, data brokers, or 
 
 The model providers we support — Anthropic, OpenAI, MiniMax, Gemini, OpenRouter, DeepSeek and Groq —
 each have their own privacy policy and terms governing what they receive and how long they keep it.
-Those terms are between you and them, and we do not control them. In hosted mode we are also a party to
-this data: we hold it on our own disk for as long as the retention section above describes.
+Those terms are between you and them, and we do not control them. Your orchestrator is also a party to
+this data, in the sense that it holds the page observations in memory while it waits for the model to
+answer.
 
 ## Retention and deletion
 
 Nothing expires on a timer. **Deletion is entirely yours**, and it is immediate:
 
 - **Session records** — the audit file and the scratchpad, described above — are written to disk and
-  stay there until you remove them. Nothing expires on a schedule.
+  stay there until you remove them. Nothing expires on a schedule unless you ask for it: the server has
+  a `BROTTO_RETENTION_DAYS` setting that will age sessions out, and it is **off by default**.
   - **In the panel:** each conversation in **Session history** has a delete button, and there is a
     **Delete all** above the list. Both ask you to confirm first — the question names the conversation
     by its own first message, or names how many are about to go. There is no undo.
   - **On the server:** `curl -X DELETE -H "Authorization: Bearer $AGENT_SECRET" \
     http://localhost:8000/v1/sessions/<id>` removes one; `DELETE /v1/sessions` removes every one.
     The files live in `logs/sessions/`, so removing them by hand works exactly the same way.
-  - **In hosted mode:** you cannot delete them yourself — they are on our disk. Ask us, using the
-    contact address at the end of this policy, and we will remove them. We are not promising a time
-    limit for that, because there is not one in the product today.
 - **Local extension data** is removed by clearing the extension's storage, or by uninstalling it.
-- **Your API key** is not retained by Brotto anywhere. In hosted mode it is held in server memory for
-  the duration of a task and not written to disk.
+- **Your API key** is not retained by Brotto anywhere. It is held in the orchestrator's memory for the
+  duration of a task and not written to disk.
 
 ## Security
 
@@ -188,13 +183,15 @@ Nothing expires on a timer. **Deletion is entirely yours**, and it is immediate:
 - The blocked-domains list is yours alone. There is no server-side floor, so nothing Brotto's operators
   configure can add a site you did not block yourself.
 
-**A known gap in hosted mode, stated plainly.** The server's web endpoints — including the one that
-lists your conversations and the one that returns a full session record — currently ask for no
-password. Anyone who can reach the server's address can read the list of sessions on it, which
-includes what each task was about, and can fetch a whole session record. On a self-hosted server this
-only exposes sessions to people already on your network, which is the same trust you give any other
-service you run. On a hosted server it is a real weakness, and it is being fixed; we are describing it
-here rather than waiting for you to find it.
+**The endpoints are authenticated, and the bind address is the other half of that.** The server requires
+an `AGENT_SECRET` you set yourself, and the extension sends it as a WebSocket subprotocol rather than in
+the URL — a `?token=` would write your secret in plain text into the access log of your server and of
+any proxy in front of it. With the secret unset, every caller is treated as trusted and the server says
+so in its startup log, so if you expose the port to a network, set the secret first. The default
+`docker compose` binds to `127.0.0.1` for exactly this reason.
+
+One endpoint is deliberately left open, and it is not a session one: `POST /run` launches a headless
+browser with no authentication. Do not put it on a public interface.
 
 No system is perfect. A browser agent operating with your session has the same access you do, and a
 compromise of the extension or the server would have the same effect. Do not use it on accounts where
@@ -210,5 +207,4 @@ Material changes will be noted in the repository's commit history and dated at t
 
 ## Contact
 
-Questions about this policy: open an issue in the repository, or use the contact address published with
-the hosted service.
+Questions about this policy: open an issue in the repository.

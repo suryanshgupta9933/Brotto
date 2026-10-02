@@ -167,8 +167,8 @@ The full reasoning, including what was tried and why it failed, is in
 Read these before you point it at anything you care about. Both are written to be specific rather
 than reassuring.
 
-- **[PRIVACY.md](PRIVACY.md)** — what is stored where, in self-hosted and hosted modes, including
-  which parts of your pages transit the server and which never touch its disk.
+- **[PRIVACY.md](PRIVACY.md)** — what is stored where, which parts of your pages transit the server
+  and which never touch its disk, and how to delete any of it.
 - **[SECURITY.md](SECURITY.md)** — the threat model, the known gaps, and how to report one.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — how to work on the repo.
 
