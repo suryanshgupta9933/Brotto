@@ -508,6 +508,12 @@ async def get_effective_policy(request: Request):
 
 @app.post("/v1/sessions")
 async def create_session(request: Request):
+    # Mints a session and allocates registry state, so it is gated like
+    # the reads — otherwise anyone reaching the port can fill the registry
+    # up to its 256-entry prune without ever holding the secret.
+    if not _authed(request):
+        return _error(404, "not found")
+
     session_id = str(uuid.uuid4())
     registry.get_or_create(session_id)
     _prune_sessions()
@@ -666,18 +672,25 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     Extension → server: task_start | observation | human_reply | ping
     Server → extension: observe | action | step_progress | ask_human | task_result | pong
 
-    The secret arrives as `?token=` because a browser cannot set headers
-    on a WebSocket. Checked before accept, so an unauthenticated caller
+    The secret arrives as a WebSocket subprotocol: a browser cannot set
+    headers on a WebSocket, and `?token=` would write the secret in plain
+    text into the access log of this server and of any Caddy in front of
+    it, permanently. Checked before accept, so an unauthenticated caller
     never gets a socket it can drive.
     """
+    offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
     if not validate_request(
-        websocket.headers.get("authorization"), websocket.query_params.get("token")
+        websocket.headers.get("authorization"),
+        offered[1] if len(offered) > 1 else websocket.query_params.get("token"),
     ):
         log.warning("[%s] extension rejected — bad token", session_id)
         await websocket.close(code=4001)
         return
 
-    await websocket.accept()
+    # Select the protocol *name*, never the secret: this goes back in the
+    # response headers, and echoing the credential would reintroduce the
+    # leak in the one place the handshake is otherwise clean.
+    await websocket.accept(subprotocol="brotto-v1" if offered else None)
     log.info("[%s] extension connected", session_id)
 
     obs_queue: asyncio.Queue = asyncio.Queue()

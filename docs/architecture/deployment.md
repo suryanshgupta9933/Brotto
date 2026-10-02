@@ -75,8 +75,11 @@ The extension needs a `wss://` URL. Put Caddy or nginx in front for TLS.
 `AGENT_SECRET` gates `/ws/ext` and the session endpoints, so widening the
 bind to `0.0.0.0` is only safe once one is actually set — with an unset
 secret every caller is trusted, and the startup log says so. The extension
-carries the secret in Settings → Connection; the relay sends it as
-`?token=` because a browser cannot set headers on a WebSocket.
+carries the secret in Settings → Connection; the relay sends it as a
+WebSocket **subprotocol**, not a query parameter, because `?token=` writes
+it in plain text into the access log of this server and of any proxy in
+front of it, permanently. The server selects the protocol *name* back
+(`brotto-v1`) rather than echoing the secret.
 
 ## What still needs doing before this is publicly reachable
 

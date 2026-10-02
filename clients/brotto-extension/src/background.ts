@@ -51,12 +51,23 @@ async function authHeaders(): Promise<Record<string, string>> {
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
-// A browser cannot set headers on a WebSocket, so the secret rides the
-// query string for the relay. Harmless on a loopback self-host and
-// required the moment one sits behind a reverse proxy.
-function withToken(url: string, secret: string): string {
-  if (!secret) return url;
-  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(secret);
+// A browser cannot set headers on a WebSocket. The subprotocol is the one
+// transport that does not leak: the query string would put the secret in
+// plain text in the server's access log and in Caddy's, permanently, and
+// `Sec-WebSocket-Protocol` reaches neither.
+//
+// The server selects "brotto-v1" back rather than echoing the secret, so
+// the response carries nothing either.
+const RELAY_PROTOCOL = "brotto-v1";
+
+function authedWs(url: string, secret: string): WebSocket {
+  // RFC 6455 subprotocols are restricted to token characters, and a
+  // pasted secret can be anything. One that does not fit is simply not
+  // sent; the server then refuses, which is better than a malformed
+  // handshake that fails as a network error.
+  return /^[A-Za-z0-9._~-]{1,120}$/.test(secret)
+    ? new WebSocket(url, [RELAY_PROTOCOL, secret])
+    : new WebSocket(url);
 }
 // The task currently being driven, kept so a reconnect can re-send task_start
 // without the panel having to be open. Module state, not storage.session:
@@ -750,7 +761,7 @@ async function startRelay(
       : session.websocket_url.replace(/^http/, "ws");
   }
 
-  ws = new WebSocket(withToken(wsUrl, await agentSecret()));
+  ws = authedWs(wsUrl, await agentSecret());
 
   ws.onopen = async () => {
     startHeartbeat();
