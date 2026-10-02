@@ -27,6 +27,7 @@ import os
 import re
 import secrets
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -860,6 +861,35 @@ def delete_all(*, dir: Path | None = None) -> int:
     """Remove every session's files. Returns the count of documents removed."""
     d = dir or default_dir()
     return sum(1 for p in _session_documents(d) if delete(p.stem, dir=d))
+
+
+def prune_older_than(days: float, *, dir: Path | None = None) -> int:
+    """Remove sessions untouched for longer than `days`. Returns the count.
+
+    Age is the document's own mtime, which the atomic rewrite bumps on every
+    step — so this measures "last activity", not "when it started", and an
+    abandoned run still ages out.
+
+    A session with a live trail is never pruned regardless of its age. A run
+    that has been going for a month is not stale, and `delete()` marking it
+    deleted would silently discard the turns it is still producing.
+    """
+    d = dir or default_dir()
+    cutoff = time.time() - days * 86400
+    with _LIVE_LOCK:
+        live = set(_LIVE)
+    pruned = 0
+    for p in _session_documents(d):
+        if p.stem in live:
+            continue
+        try:
+            if p.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        if delete(p.stem, dir=d):
+            pruned += 1
+    return pruned
 
 
 def _session_documents(d: Path) -> list[Path]:

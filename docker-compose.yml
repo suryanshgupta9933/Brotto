@@ -45,13 +45,20 @@ services:
       BROTTO_SESSIONS_DIR: /data/sessions
       BROTTO_USER_POLICY_DIR: /data/user_policies
       BROTTO_USER_MODEL_DIR: /data/user_models
+      # Age sessions out after N days without use. Unset keeps everything,
+      # which is the default on purpose: the data is the user's own disk, and
+      # nothing should expire until they ask. 0 means off, not "delete
+      # everything", and a value that is not a number is logged and skipped
+      # rather than crashing startup. See docs/architecture/deployment.md.
+      # BROTTO_RETENTION_DAYS: 30
     volumes:
       - brotto-data:/data
 
-# Bound to loopback on purpose. The orchestrator has no authentication
-# until AGENT_SECRET is wired in, and binding to 0.0.0.0 would publish
-# that to the network. Put a TLS-terminating reverse proxy in front and
-# change this to "8000:8000" only once the secret is set — the extension
-# needs a wss:// URL, not a plaintext one.
+# Bound to loopback on purpose. AGENT_SECRET gates /ws/ext and the session
+# endpoints, but with an unset secret every caller is trusted, so exposing
+# this on a network would hand your logged-in browser to anyone who can
+# reach the port. compose refuses to start without the secret (see above).
+# Put a TLS-terminating reverse proxy in front and change this to "8000:8000"
+# — the extension needs a wss:// URL, not a plaintext one.
 volumes:
   brotto-data:

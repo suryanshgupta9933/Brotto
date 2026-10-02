@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 
@@ -115,7 +116,65 @@ for _noisy in ("httpx", "httpcore", "websockets", "uvicorn.access"):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Brotto Orchestrator", version="2.0.0")
+# Retention is the user's setting, not ours: unset means keep everything,
+# and a value of 0 disables the sweep rather than deleting the lot. The
+# default is deliberately absent — a self-hoster who wants their history
+# aged out has to say so.
+RETENTION_DAYS_ENV = "BROTTO_RETENTION_DAYS"
+RETENTION_SWEEP_SECONDS = 3600
+
+
+def retention_days() -> float | None:
+    """Configured retention in days, or None when the sweep is off."""
+    raw = os.environ.get(RETENTION_DAYS_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        days = float(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number — keeping every session", RETENTION_DAYS_ENV, raw)
+        return None
+    return days if days > 0 else None
+
+
+def sweep_retention() -> int:
+    """Age sessions out. Returns how many went."""
+    from .agent.audit import prune_older_than
+
+    days = retention_days()
+    if days is None:
+        return 0
+    try:
+        pruned = prune_older_than(days)
+    except Exception as exc:  # a sweep must never take the server down
+        log.warning("retention sweep failed: %s", type(exc).__name__)
+        return 0
+    if pruned:
+        log.info("retention sweep  pruned=%d  older_than=%sd", pruned, days)
+    return pruned
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    sweep_retention()
+    stop = asyncio.Event()
+
+    async def tick() -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=RETENTION_SWEEP_SECONDS)
+            except asyncio.TimeoutError:
+                await asyncio.to_thread(sweep_retention)
+
+    sweeper = asyncio.create_task(tick())
+    try:
+        yield
+    finally:
+        stop.set()
+        sweeper.cancel()
+
+
+app = FastAPI(title="Brotto Orchestrator", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

@@ -241,18 +241,14 @@ trailing `…`: a page whose digest was never cut is complete, and `digest == bo
 is simply what a short page looks like — labelling that as a resume casualty
 would send the model navigating back for nothing.
 
-**…which is no longer the resume path.** With every page captured every step,
-a resume that recalled only digests was handing the model a degraded tool and
-asking it to cope. Bodies now go to a **separate JSON sidecar,
-`<session_id>.pages.json`**, written by the same `set_scratchpad` call as the
-manifest — they have to be in step, and that is the only thing that persists
-memory. **JSON, not the manifest format:** page text is arbitrary content from an
-arbitrary site and can contain a line shaped like `[r9 step=9 sel=page …]` or a
-`# NOTES` heading; a line-based format would have needed an escaping scheme
-invented for it. The manifest format predates bodies and files on disk keep
-parsing byte-identically. A missing or corrupt bodies file degrades to digests
-rather than raising — losing the whole manifest to gain the bodies is the wrong
-trade, and `recall_memory` already says out loud when that is what the model got.
+**…which is no longer the resume path, and never was.** With every page
+captured every step, a resume that recalled only digests was handing the model
+a degraded tool and asking it to cope. The fix was a separate JSON sidecar,
+`<session_id>.pages.json`, carrying the bodies — and that sidecar was then
+switched off entirely, because 200KB of a person's inbox per twenty pages,
+unredacted, on someone else's disk is not a cost worth paying. The digest is
+what the manifest holds now and `recall_memory` says out loud when that is all
+the model got. `docs/architecture/privacy.md` has the current shape.
 
 **Left alone deliberately:** `page_text` (~3.4K tokens) sits *after* the AX tree,
 which changes every step, so it is re-prefilled uncached every step. Moving it

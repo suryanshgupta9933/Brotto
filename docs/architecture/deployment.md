@@ -49,8 +49,29 @@ session history and security policy are lost on every restart:
 
 | Variable | Default | Holds |
 |---|---|---|
-| `BROTTO_SESSIONS_DIR` | `logs/sessions` | Per-session audit documents, page-text sidecars, scratchpads |
+| `BROTTO_SESSIONS_DIR` | `logs/sessions` | Per-session audit documents, scratchpads |
 | `BROTTO_USER_POLICY_DIR` | `logs/user_policies` | The user's secure-mode policy |
+
+## Retention
+
+`BROTTO_RETENTION_DAYS` ages sessions out. It is **unset by default**, and that
+is deliberate: the disk is the user's own, and a self-hoster who has never
+heard of the variable should keep everything.
+
+```
+BROTTO_RETENTION_DAYS=30     # drop anything untouched for a month
+BROTTO_RETENTION_DAYS=0      # off — and NOT "delete everything"
+BROTTO_RETENTION_DAYS=thirty # nonsense, logged, sweep skipped
+```
+
+The sweep runs once at startup and hourly after that. Startup is the part that
+matters: a setting that only took effect after the next task would arrive long
+after the disk filled up. A session with a live agent loop is never pruned at
+any age, and a pruned session takes its scratchpad with it — a document that
+outlives its own digests is worse than no retention.
+
+Age is the document's mtime, which the atomic rewrite bumps on every step, so
+this measures last activity rather than when the session started.
 
 ## `BROTTO_ENV=prod` is a cost control
 
@@ -88,13 +109,11 @@ a deployment step:
 
 - `POST /run` is unauthenticated and launches a headless browser; it should
   be refused outside dev.
-- There is no retention. `_prune_sessions` evicts in-memory state only and
-  never touches disk, so `logs/sessions/` grows without bound. The user can
-  delete by hand (`DELETE /v1/sessions`, or the panel), but nothing expires.
 
-`/ws/ext` auth, the `/v1/sessions` enumeration and session deletion were all
-open gates and are closed as of 2026-10-03 — see `tests/test_agent_auth.py`
-and `tests/test_session_delete.py`.
+`/ws/ext` auth, the `/v1/sessions` enumeration, session deletion and
+`BROTTO_RETENTION_DAYS` were all open gates and are closed as of 2026-10-03 —
+see `tests/test_agent_auth.py`, `tests/test_session_delete.py` and
+`tests/test_retention.py`.
 
 ## Deleting a session
 
