@@ -256,3 +256,54 @@ Tiers: inline (extension) → per-user file → env. Two rules that aren't obvio
 - A per-user config persists the *model* only, never a key — so after a browser
   restart it is unusable on its own and the resolver says so explicitly. It
   does now persist the **base URL**, which is the half that is not a secret.
+
+## The pre-flight (`POST /v1/model/check`)
+
+The panel asks the server "can this browser run anything?" before it starts a
+task. The server resolves the config through the same three tiers `task_start`
+uses, builds the same model, and makes **one real request** to the provider.
+`{"ok": true, "model": "provider:model"}` or
+`{"ok": false, "kind": ..., "error": <a sentence the user can act on>}`.
+
+**A check that never calls the provider answers `ok` for every key ever typed,
+including the wrong one.** That is the whole point of it, and it is why
+`tests/test_model_check_endpoint.py` asserts the fake model was *called* rather
+than only checking the response shape.
+
+**Three things about it that are not obvious:**
+
+- **A failed check is not a failed model.** A dead server, a 500, an
+  unparseable body — all return `ok: true` to the panel. The server being down
+  has its own reporting (connect, reconnect, the unreachable toast) and it
+  already works; routing it through this gate would replace "Server
+  unreachable, retrying" with "your API key was rejected", sending the user to
+  fix something that isn't broken.
+- **A pass is cached for 10 minutes in the panel, a failure never is.** Only a
+  pass is cached because caching a failure leaves a user who has just fixed
+  the key still blocked for the TTL — worse than not caching at all. The
+  cache is keyed on provider, model and *whether* a key was present, never on
+  the key itself; a re-paste in Settings clears it outright, since two keys of
+  the same length are indistinguishable without hashing a secret to find out.
+- **`_inline_model()` is one parser for three call sites** (this, `task_start`,
+  `/v1/suggestions`). They were three separate literal parses, which is how a
+  check ends up answering `ok` for a config the run would refuse.
+
+**A 400 is classified by body, not by status.** MiniMax and OpenAI answer an
+exhausted balance with a 400 and a sentence — "insufficient balance" — rather
+than a 402, so `_CREDIT_HINTS` reads the body. The keyword test is deliberately
+narrow: a schema complaint reported as `no_credits` would send someone to top
+up a paid account.
+
+**Transport failures are found by walking `__cause__`.** pydantic-ai wraps a
+connect failure in `ModelAPIError` and hangs the real error off the cause
+(`raise ModelAPIError(...) from e`), so a `ConnectionRefusedError` never
+reaches the handler directly. Every provider SDK it ships sits on httpx, so
+one `httpx.TransportError` test covers refused connections, DNS misses, TLS
+failures and timeouts. A LAN `base_url` that is down is the self-hosted user's
+common failure, and classifying it as `auth_failed` would send them to re-paste
+a key that was fine.
+
+`no_model` is the one kind the panel **rewrites**. The resolver's message names
+env vars and WS frame fields — accurate for an operator, useless to the person
+reading the panel, and it is the only message that path can produce. The panel
+replaces it with a sentence pointing at Settings.

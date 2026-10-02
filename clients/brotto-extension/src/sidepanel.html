@@ -142,6 +142,9 @@
     }
     /* Buttons invert on hover; the pill is a button now, so it must too. */
     .model-pill:hover, .model-pill:focus-visible { background: var(--ink); color: var(--paper); }
+    /* Unset model. Dashed, because nothing was chosen here — a solid border
+       reads as a settled value the way the old "Default" label did. */
+    .model-pill.no-model { border-style: dashed; color: var(--ink-3); }
     .model-pill-name {
       position: relative;
       flex: 1 1 auto;
@@ -527,7 +530,7 @@
     [hidden] { display: none !important; }
 
     /* ─── Dropdown (Ink & Rule) ───────────────────────────────────────────
-       One control, three instances: provider, security mode, and the model
+       One control, two instances: provider and the model
        field's suggestion list. The value host is always the element the rest
        of sidepanel.js already reads — a real <select> for the first two, the
        free-text <input> for the third — so choosing an option writes `.value`
@@ -653,8 +656,6 @@
       padding: 1px 4px;
     }
 
-    #policyModeHeader.secure { color: var(--ok); font-weight: 500; }
-
     .settings-actions-row { display: flex; gap: 8px; align-items: stretch; }
     /* The global reset at the top of this file zeroes padding on every
        element, UA button padding included, and `.btn` never puts it back — so
@@ -703,21 +704,6 @@
     .settings-verify.stale .dot { background: var(--wait); }
     .settings-verify.off   { color: var(--bad); }
     .settings-verify.off   .dot { background: var(--bad); }
-
-    .secure-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 2px 7px;
-      margin-left: 6px;
-      background: var(--ink);
-      color: var(--paper);
-      font-family: var(--font-mono);
-      font-size: 8.5px;
-      font-weight: 500;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-    }
 
     .policy-block-card {
       border: 1px solid var(--bad);
@@ -1303,6 +1289,27 @@
       color: var(--ink-2);
       white-space: nowrap;
     }
+    /* The page-context badge. Inverted against the header so it reads as an
+       event rather than as another piece of chrome — the header is all
+       low-contrast ink on paper, and a disclosure that looks like the
+       status dot is a disclosure nobody sees. Square, no shadow, same
+       mono-uppercase grammar as the connection label. */
+    .context-badge {
+      display: inline-flex;
+      align-items: center;
+      height: 14px;
+      padding: 0 5px;
+      background: var(--ink);
+      color: var(--paper);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .context-badge[hidden] { display: none; }
     /* Below 340px the wordmark is already hidden, so the label can go too
        and the dot carries the state. */
     @media (max-width: 340px) {
@@ -1609,6 +1616,16 @@
     <span id="connLabel" class="conn-label">Idle</span>
   </div>
 
+  <!-- ponytail: the page-context badge. A setting you cannot see taking
+       effect is not a disclosure, and PRIVACY.md promises one. Lives in
+       the header because that is the one region guaranteed to be on screen
+       when the read happens, and it is a live region so a screen reader
+       hears it too. Hidden entirely when the feature is off. -->
+  <div id="contextBadge" class="context-badge" role="status" aria-live="polite"
+       title="Brotto is reading the text of this page to suggest tasks" hidden>
+    Reading page
+  </div>
+
   <!-- Model pill: the agent's identity, always visible. The square spinner
        rides inside it and appears only while a task is running. -->
   <div id="modelPill" class="model-pill" role="button" tabindex="0"
@@ -1780,28 +1797,10 @@
       <h3>Security</h3>
 
       <div class="field">
-        <span class="lbl" id="securityModeLabel">Security mode</span>
-        <div class="dd" id="securityModeDd">
-          <select id="securityModeSetting" class="dd-native" tabindex="-1" aria-hidden="true">
-            <option value="normal">Normal</option>
-            <option value="secure">Secure</option>
-          </select>
-          <button type="button" id="security-mode-trigger" class="dd-trigger input"
-                  role="combobox" aria-expanded="false" aria-haspopup="listbox"
-                  aria-controls="security-mode-list" aria-labelledby="securityModeLabel">
-            <span class="dd-value">Normal</span>
-            <span class="dd-caret" aria-hidden="true"></span>
-          </button>
-          <ul id="security-mode-list" class="dd-list" role="listbox" hidden></ul>
-        </div>
-        <p id="policyModeHeader" class="settings-hint">Loading current policy…</p>
-      </div>
-
-      <div class="field">
         <label class="lbl" for="blacklistSetting">Domains Brotto refuses</label>
         <textarea id="blacklistSetting" class="input" rows="3"
           placeholder="competitor.com&#10;mail.personal.com"></textarea>
-        <p class="settings-hint">One domain per line. Wildcard <code>*.example.com</code> allowed. In secure mode Brotto refuses these sites outright.</p>
+        <p class="settings-hint">One domain per line. Wildcard <code>*.example.com</code> allowed. Brotto refuses these sites outright — always, with no override.</p>
       </div>
     </section>
 
@@ -1820,6 +1819,20 @@
         <span>
           When a task finishes or fails
           <em>Skipped when the panel is open and you're looking at it.</em>
+        </span>
+      </label>
+    </section>
+
+    <!-- ── Privacy ──────────────────────────────────────────────────── -->
+    <section class="settings-section">
+      <h3>Privacy</h3>
+      <label class="settings-toggle">
+        <input id="contextSuggestionsSetting" type="checkbox" />
+        <span>
+          Suggest tasks from the page I'm looking at
+          <em>Off by default. When on, Brotto reads this page's visible text
+          while no task is running and shows a "Reading page" badge while it
+          does. Never reads banking, password manager or payment pages.</em>
         </span>
       </label>
     </section>

@@ -28,9 +28,13 @@ login, where every screenshot-driven approach falls over three steps in.
   never written to disk by Brotto. See [PRIVACY.md](PRIVACY.md) for exactly what goes where — including
   the part where the key is transmitted to the orchestrator, because the orchestrator is what calls your
   model provider.
-- **Asks before the risky parts.** In secure mode you get an approval card before it sends an email,
-  takes a payment, deletes something, publishes, or changes a password — and optionally before it acts
-  on a site for the first time. The domain blocklist is yours alone; there is no server-side floor.
+- **Asks before the risky parts.** You get an approval card before it sends an email, takes a payment,
+  deletes something, publishes, or changes a password — and before it acts on a site for the first time.
+  There is no setting that turns this off. The domain blocklist is yours alone; there is no server-side
+  floor.
+- **Redacts what it reads.** Page text reaches the model with credentials, API keys, card numbers and
+  government identifiers already stripped, and page text is never written to disk — a run leaves a
+  manifest of short digests, not copies of your pages.
 - **Writes down what it did.** Every run produces a per-session audit record — each observation, prompt,
   action, approval and timing — which is what makes a conversation resumable and inspectable rather than
   a black box.
@@ -98,7 +102,7 @@ services/brotto-orchestrator/   Python: agent loop, CDP relay, model adapter, po
     agent/audit.py              the per-session audit document
     agent/prompt.py             the system prompt
     model/                      provider-agnostic model adapter
-    policy/                     secure-mode gates
+    policy/                     the blacklist and sensitive-action gates
 clients/brotto-extension/       Chrome MV3 side-panel extension
 docs/architecture/              why each subsystem is built the way it is
 docs/product/                   product strategy and decisions

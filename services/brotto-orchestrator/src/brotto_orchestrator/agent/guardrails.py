@@ -106,22 +106,20 @@ def check_critical_action(action: str, action_args: dict) -> bool:
 
 
 def check_sensitive_action(action: str, action_args: dict, policy) -> bool:
-    """True iff secure mode is on AND the action matches an entry in
-    `policy.sensitive_actions`. The list is matched as a substring against
-    either the action name or any string in action_args — admins author
-    both forms (``"payment"`` matches a ``payment`` action OR a click
-    with ``description="payment button"``).
+    """True iff the action matches an entry in `policy.sensitive_actions`.
+    The list is matched as a substring against either the action name or
+    any string in action_args — the user authors both forms (``"payment"``
+    matches a ``payment`` action OR a click with
+    ``description="payment button"``).
 
-    Normal mode → always False (the regex `CRITICAL_PATTERNS` guard above
-    still applies; sensitive_actions is the secure-mode-only escalation).
+    An empty list returns False; the regex `CRITICAL_PATTERNS` guard above
+    applies independently of this list.
 
     Terminal / internal / question actions are skipped — those are
     metadata, not things the user should approve. (E.g. a click with
     description matching `payment` should fire; but a memory recall whose
     page happens to mention "payment" should not.)
     """
-    if getattr(policy, "mode", None) != "secure":
-        return False
     patterns = getattr(policy, "sensitive_actions", None) or []
     if not patterns:
         return False

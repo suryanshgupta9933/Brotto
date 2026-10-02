@@ -45,7 +45,7 @@ used to call your model provider.
 |---|---|---|
 | Model configuration (provider, model name, context window) | `chrome.storage.local` | Until you clear it |
 | **Your model API key** | `chrome.storage.session` | **Memory only.** Cleared when the browser closes. Never written to disk by the extension. |
-| Secure-mode policy (blocked domains, sensitive-action list) | `chrome.storage.local` | Until you clear it |
+| Your policy (blocked domains, sensitive-action list) | `chrome.storage.local` | Until you clear it |
 | Session ID for the conversation | `chrome.storage.session` | Until the browser closes |
 | The address of the server you are connected to | `chrome.storage.session` | Kept until you change it |
 | The last page URL the agent saw | `chrome.storage.session` | Cleared when the browser closes |
@@ -67,6 +67,13 @@ When you start a task, the extension sends to the orchestrator:
    accessibility tree of interactive elements (role, accessible name, value, and a stable reference for
    each), and visible page text when the task calls for it.
 
+**Page text is redacted before it is sent.** Before any page text reaches the model, the orchestrator
+removes credentials, API keys, bearer tokens, payment card numbers and government identifiers, replacing
+each with `[redacted]`. This happens in code, on your machine, on every task, with no setting to turn it
+off. It is pattern matching, not a guarantee: it will miss an unfamiliar identifier format, and it will
+occasionally redact an innocuous number that happens to pass a checksum. The agent is told the redaction
+already happened and is instructed not to try to reconstruct a redacted value.
+
 The orchestrator then sends **the page observations to the model provider you selected**. Brotto ships
 with Anthropic, OpenAI, MiniMax, Gemini, OpenRouter, DeepSeek and Groq, and can be pointed at a
 compatible endpoint of your own. This is the core of what a browser agent does: the model has to see the
@@ -76,29 +83,32 @@ that data goes to your own machine and no model company sees it at all.
 
 **In self-hosted mode, none of this reaches us.** In hosted mode, both the key and the page
 observations reach our server in order to get to your model provider — and the observations do not stop
-there. Our server saves the URL, the page title, and the text of the pages the agent looked at to a file
-on its own disk, and that file is still there after the task ends. The next section says exactly what is
-in it.
+there. Our server saves the URL, the page title, and a short digest of each page to a file on its own
+disk, and that file is still there after the task ends. The next section says exactly what is in it.
 
 ## What the orchestrator writes to disk
 
 | File | Contents |
 |---|---|
 | `logs/sessions/<session_id>.json` | The audit record of your conversation: your messages, the page URL and title at each step, the prompts, the actions taken, approvals, timing, and errors. For the page itself it keeps counts and a summary of what changed — not the whole tree. |
-| `logs/sessions/<session_id>.pages.json` | **The full visible text of every page the agent looked at during the task, plus the URL of each one.** One entry per step, kept for the whole conversation so the agent can go back and re-read a page it has navigated away from. This is the most complete record of what you saw. |
-| `logs/sessions/<session_id>.scratchpad.txt` | The agent's working memory: a short excerpt from each captured page and its URL. A pointer into the file above, not a second copy of it. |
+| `logs/sessions/<session_id>.scratchpad.txt` | The agent's working memory: a short digest of each captured page and its URL. |
 | `logs/user_models/<client>.json` | Your model configuration: provider, model name, context window, and the address of your provider's API if you set a custom one. **Not your key.** If that address is on your own network, it is written to disk in the clear. |
-| `logs/user_policies/<hash>.json` | Your secure-mode policy: your mode, your blocked domains, and when you last saved it. |
+| `logs/user_policies/<hash>.json` | Your blocked-domains list, and when you last saved it. |
+
+**Page text is never written to disk.** Each step's page is recorded as a 200-character digest, so a run
+over an authenticated session leaves a record of *what* was visited and not copies of *what was on it*.
+A run resumed later recalls those digests rather than whole pages — that is the trade for keeping your
+pages off the filesystem, and it is not configurable.
 
 Values typed into a field the orchestrator identifies as a secret — anything with `type="password"`, or
 a field whose name reads like a credential, a token, or a code — are **redacted before the record is
 written**, so a password you type is not stored in the audit file.
 
-That redaction applies to what the agent *types*. It does not apply to page text: the
-`<session_id>.pages.json` file is written with the page's text as the page rendered it, with nothing
-removed. A page that displays a token, an account number, or an email address in its body will have
-that text in the file. If that matters for a site you use, the safest thing is to run self-hosted, or
-not to have the agent work on that site.
+That redaction applies to what the agent *types*, and the page text that reaches the model provider is
+redacted separately. What is kept on disk is narrower than either: a 200-character digest of each page.
+A page that displays a token, an account number, or an email address may still put a fragment of it in
+that digest. If that matters for a site you use, the safest thing is to run self-hosted, or not to have
+the agent work on that site.
 
 The files are named after the connection that created them, so that separate users on one server do not
 share settings. That name is derived from your client address. The model-configuration file is named
@@ -119,9 +129,14 @@ the orchestrator and on to your model provider, so in hosted mode we see the sam
 would during a task. No action is taken on the page, and no file is written for it — the suggestion is
 held in the panel's memory, which is discarded when the browser closes.
 
-This reads a page you are looking at without a task in flight. **It is off unless you turn it on, and it
-has no indicator in the panel**, so we are calling it out here rather than relying on you noticing a
-change. If you would rather it did not exist, turn it off in settings and do not enable it.
+This reads a page you are looking at without a task in flight. **It is off unless you turn it on**, and
+we are calling it out here rather than relying on you noticing a change. If you would rather it did not
+exist, do not enable it.
+
+Two things narrow what it will read. Pages whose address looks like a login, checkout, payment or account
+settings screen are skipped before the read, and a page carrying a password, card or one-time-code field
+is skipped even when its address looks ordinary. The panel shows a **"Reading page"** badge for exactly
+as long as a read is in progress, so the read is visible while it happens.
 
 ## Third parties
 
@@ -157,9 +172,11 @@ period. This is the current behaviour of the software, not a policy choice we ar
 - The extension requests `chrome.debugger` to read the accessibility tree and dispatch input, and
   `<all_urls>` host access so it can work on the site you name. Both are exercised only during a task
   you started.
-- Brotto prompts for approval before sensitive actions (sending email, payments, deletes, publishing,
-  changing passwords, and similar) when secure mode is on, and can be configured to ask before acting
-  on a site for the first time.
+- Brotto always asks for approval before sensitive actions (sending email, payments, deletes,
+  publishing, changing passwords, and similar), and always asks before acting on a site for the first
+  time. There is no setting that turns either off.
+- The blocked-domains list is yours alone. There is no server-side floor, so nothing Brotto's operators
+  configure can add a site you did not block yourself.
 
 **A known gap in hosted mode, stated plainly.** The server's web endpoints — including the one that
 lists your conversations and the one that returns a full session record — currently ask for no

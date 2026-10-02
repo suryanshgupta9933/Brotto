@@ -5,8 +5,29 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brotto-orchestrator"
 version = "0.1.0"
-description = "Browser automation orchestrator with agent loop and extension support"
+description = "An AI agent that works inside your own logged-in Chrome. Reads the accessibility tree instead of screenshots. Bring your own model key."
+readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Brotto contributors" }]
+keywords = [
+    "browser-automation",
+    "ai-agent",
+    "chrome-extension",
+    "accessibility-tree",
+    "llm",
+    "bring-your-own-key",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing :: Acceptance",
+    "Topic :: Utilities",
+]
 
 dependencies = [
     "fastapi>=0.104.0",
@@ -20,6 +41,12 @@ dependencies = [
 
 [project.scripts]
 brotto = "brotto_orchestrator.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/suryanshgupta9933/brotto"
+Repository = "https://github.com/suryanshgupta9933/brotto"
+Issues = "https://github.com/suryanshgupta9933/brotto/issues"
+Security = "https://github.com/suryanshgupta9933/brotto/blob/main/SECURITY.md"
 
 # ponytail: find, not an explicit list. An explicit list silently dropped
 # every subpackage (agent, model, policy, cdp, ...), so `pip install .`

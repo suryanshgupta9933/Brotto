@@ -107,24 +107,21 @@ let lastObservedUrl = "";
 // `user_policy` on each task_start. It is the whole policy — the server has
 // no operator-set floor to merge into it.
 // ponytail: write-on-save only — no debounce, no reactivity layer.
-// ponytail: whitelist was removed in the enterprise redesign — secure
-// mode now means "hard-block blacklisted + first-time-seen prompts on
-// new (domain, action) pairs". Keeping the type narrow to what we ship.
-let userPolicy: { mode: "normal" | "secure"; blacklist: string[] } = {
-  mode: "normal",
-  blacklist: [],
-};
+// ponytail: `whitelist` and `mode` were both removed. The list is the
+// whole policy and every gate on the server runs unconditionally, so there
+// is nothing for a flag to switch. Keeping the type narrow to what we ship.
+let userPolicy: { blacklist: string[] } = { blacklist: [] };
 
 // ponytail: Bug 1 — SW hydration on startup. Without this, every
 // extension reload resets userPolicy to defaults even though the user
-// saved a secure-mode policy. The sidepanel writes to chrome.storage
+// saved a blacklist. The sidepanel writes to chrome.storage
 // .local on Save; we mirror it into the SW's in-memory `userPolicy`
 // here so the next task_start ships the correct view.
 async function hydrateUserPolicy(): Promise<void> {
   try {
     const stored = await chrome.storage.local.get("settings");
     const s = stored.settings as
-      | { mode?: string; blacklist?: unknown; notifyBlocking?: boolean; notifyResults?: boolean }
+      | { blacklist?: unknown; notifyBlocking?: boolean; notifyResults?: boolean }
       | undefined;
     if (!s) return;
     // Both notify unless explicitly turned off. Brotto's premise is that you
@@ -133,7 +130,6 @@ async function hydrateUserPolicy(): Promise<void> {
     notifyBlocking = s.notifyBlocking !== false;
     notifyResults = s.notifyResults !== false;
     userPolicy = {
-      mode: s.mode === "secure" ? "secure" : "normal",
       blacklist: Array.isArray(s.blacklist)
         ? s.blacklist.filter((d): d is string => typeof d === "string")
         : [],
@@ -506,7 +502,13 @@ function sendObservationError(reason: string): void {
 // lost the same server doesn't retry in lockstep and knock it over again on
 // the way up. Ceiling: the attempts are not rescheduled past
 // RECONNECT_MAX_ATTEMPTS; past that the run ends as connection-lost.
-const RECONNECT_MAX_ATTEMPTS = 6;
+//
+// Three, not six. A socket that is not coming back is the common case when
+// the server is restarting or refused the task, and six attempts is ~30s of
+// "retrying" before the panel admits the run is over. Ceiling: if a real
+// network blip needs more than three, raise this — the backoff is not what
+// would need changing.
+const RECONNECT_MAX_ATTEMPTS = 3;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 
@@ -851,6 +853,38 @@ async function startRelay(
         // ponytail: failure_reason + summary field names — see the
         // matching note on the task_result handler.
         notifyUi({ type: "task_failed", failure_reason: "TASK_ERROR", summary: msg.error ?? "Unknown error" });
+        notifyUi({ type: "canonical_status", status: "failed" });
+        break;
+
+      // The server sends this one directly, before it has a result to wrap
+      // — a task_start it refuses to run (unknown provider, bad config). It
+      // had no case here, so the frame was dropped, `taskTerminalEmitted`
+      // stayed false, and the close that followed looked like a lost socket:
+      // the panel showed "Server unreachable, retrying 1 of 6" against a
+      // server that was alive and had already said no. Same absence, same
+      // symptom, one layer in. See test-no-orphan-frames.test.js.
+      case "task_failed":
+        if (taskTerminalEmitted) break;
+        taskTerminalEmitted = true;
+        taskInFlight = false;
+        setBadgeForResult();
+        notifyUi({
+          type: "task_failed",
+          failure_reason: msg.failure_reason ?? "TASK_FAILED",
+          summary: msg.summary ?? "The server could not run this task.",
+        });
+        notifyUi({ type: "canonical_status", status: "failed" });
+        break;
+
+      // The other terminal frame with no case: the server confirmed a cancel.
+      // Same shape as the two above — drop it and the panel keeps a live clock
+      // and a reconnect against a socket that closed on purpose.
+      case "task_cancelled":
+        if (taskTerminalEmitted) break;
+        taskTerminalEmitted = true;
+        taskInFlight = false;
+        setBadgeForResult();
+        notifyUi({ type: "task_failed", failure_reason: "CANCELLED", summary: msg.summary ?? "Task cancelled." });
         notifyUi({ type: "canonical_status", status: "failed" });
         break;
 
@@ -1232,11 +1266,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           // full settings object to chrome.storage.local; here we just
           // update the in-memory mirror used on the next task_start.
           const s = message.settings as
-            | { mode?: string; blacklist?: string[]; notifyBlocking?: boolean; notifyResults?: boolean }
+            | { blacklist?: string[]; notifyBlocking?: boolean; notifyResults?: boolean }
             | undefined;
           if (s) {
             userPolicy = {
-              mode: s.mode === "secure" ? "secure" : "normal",
               blacklist: Array.isArray(s.blacklist) ? s.blacklist : [],
             };
             // Notification prefs ride along on Save rather than growing their

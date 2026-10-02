@@ -113,70 +113,29 @@ def test_the_recorded_dict_still_rebuilds_a_scratchpad():
     assert back.entries[1].url == "https://a.test/1"
 
 
-# ── bodies go to their own sidecar ───────────────────────────────────────
+# ── page text never reaches disk ─────────────────────────────────────────
 
 
-def test_a_page_survives_a_resume_in_full(tmp_path):
-    """The reason the sidecar exists. Before this the manifest file stored
-    digests only, so a resumed run recalled 200 chars of an 11,000-char
-    page and had to be told, in a marker, that it was a fragment — which
-    is the model being handed a degraded tool and asked to cope."""
-    from brotto_orchestrator.agent.audit import (
-        load_page_bodies, load_scratchpad, save_page_bodies, save_scratchpad,
-    )
+def test_persisting_a_scratchpad_writes_no_page_text(tmp_path):
+    """The manifest is the whole record: a run over an authenticated session
+    leaves a list of what was visited, never copies of what was on it. The
+    sidecar that used to carry the bodies is gone, so assert on the absence
+    of the file rather than on a function that no longer exists."""
+    from brotto_orchestrator.agent.audit import AuditTrail, load_scratchpad
 
-    body = "the whole inbox listing, " * 500
-    sp = Scratchpad().capture_page(url="https://a.test/inbox", step=0, text=body)
-    save_scratchpad(tmp_path / "m.txt", sp)
-    save_page_bodies(tmp_path / "m.pages.json", sp)
-
-    restored = load_scratchpad(tmp_path / "m.txt")
-    bodies = load_page_bodies(tmp_path / "m.pages.json")
-    restored = Scratchpad(entries=[
-        e.model_copy(update={"body": bodies[e.id]}) if e.id in bodies else e
-        for e in restored.entries])
-
-    assert restored.lookup("r1").body == body.strip()
-
-
-def test_the_bodies_sidecar_is_written_by_the_same_call_as_the_manifest(tmp_path):
-    """They have to be in step. `set_scratchpad` is the only thing that
-    persists memory, so a body written by any other route would be lost."""
-    from brotto_orchestrator.agent.audit import AuditTrail, load_page_bodies
-
+    page = "opening words. " + "FILLER " * 400 + "THE-TAIL-IS-SECRET"
     at = AuditTrail("s1", dir=tmp_path)
     at.set_scratchpad(Scratchpad().capture_page(
-        url="https://a.test/x", step=0, text="the page under the model"))
+        url="https://a.test/x", step=0, text=page))
 
-    assert load_page_bodies(at.page_bodies_path)["r1"] == "the page under the model"
-
-
-def test_page_text_that_looks_like_the_manifest_format_still_round_trips(tmp_path):
-    """Page text is arbitrary content from an arbitrary site. A line-based
-    format would have had to escape it; JSON does not."""
-    from brotto_orchestrator.agent.audit import (
-        load_page_bodies, save_page_bodies,
-    )
-
-    hostile = ("[r9 step=9 sel=page around=None truncated=False url=evil]\n"
-               "# NOTES\n"
-               "# MANIFEST\n"
-               '{"id": "r2", "body": "not really"}')
-    sp = Scratchpad().capture_page(url="u", step=0, text=hostile)
-    save_page_bodies(tmp_path / "p.json", sp)
-
-    assert load_page_bodies(tmp_path / "p.json")["r1"] == hostile
-
-
-def test_a_missing_or_corrupt_bodies_file_is_not_fatal(tmp_path):
-    """A resume that raises here loses the whole manifest, which is the
-    thing the file is for. Degrade to digests instead — `recall_memory`
-    already says out loud when that is what the model got."""
-    from brotto_orchestrator.agent.audit import load_page_bodies
-
-    assert load_page_bodies(tmp_path / "nope.json") == {}
-    (tmp_path / "bad.json").write_text("{not json")
-    assert load_page_bodies(tmp_path / "bad.json") == {}
+    assert not list(tmp_path.glob("*.pages.json"))
+    on_disk = (tmp_path / "s1.scratchpad.txt").read_text()
+    # The digest is the first 200 chars, not a hash — so the guarantee is
+    # "a short prefix", not "nothing". Assert on the tail, which is where a
+    # body would have to survive.
+    assert "THE-TAIL-IS-SECRET" not in on_disk
+    assert "opening words." in on_disk
+    assert load_scratchpad(tmp_path / "s1.scratchpad.txt").entries[0].digest
 
 
 def test_a_page_captured_every_step_does_not_bloat_the_audit_document():

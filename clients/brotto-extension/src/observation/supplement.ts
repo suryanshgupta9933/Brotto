@@ -12,8 +12,8 @@
  *
  * So: surface it, marked. Two rules make that safe to do, and both live
  * outside this file — the line is rendered with `[hidden]` in
- * `agent/ax_filter.py`, and a supplemented node is not pre-approved under
- * secure mode in `agent/harness.py`. A control the site hid from assistive tech
+ * `agent/ax_filter.py`, and a supplemented node is not pre-approved in
+ * `agent/harness.py`. A control the site hid from assistive tech
  * still has to pass a first-time approval like anything else. Nothing here
  * changes what assistive technology sees.
  *

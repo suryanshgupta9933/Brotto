@@ -407,8 +407,13 @@ function main() {
       /border-radius:\s*0\s*!important/.test(panelHtml));
     check("Replay setup is a link, not a second button",
       /id="replaySetupBtn" class="settings-link"/.test(panelHtml));
-    check("the four sections are headed and separated by a hairline",
-      (panelHtml.match(/<h3>/g) || []).length === 4 &&
+    // Counted against the sections rather than a literal: a hardcoded 4 broke
+    // the moment a section was added, which is the opposite of what a test for
+    // "every section is headed" should do.
+    const sections = (panelHtml.match(/<section class="settings-section">/g) || []).length;
+    check("every Settings section is headed and separated by a hairline",
+      sections > 0 &&
+      (panelHtml.match(/<h3>/g) || []).length === sections &&
       /\.settings-section \+ \.settings-section \{[^}]*border-top: 1px solid var\(--rule\)/.test(panelHtml));
   }
 

@@ -651,33 +651,11 @@ Reason thoroughly in `reasoning`. Act precisely. Verify from the diff. Continue.
 """.strip()
 
 
-# Back-compat constant for tests that just want a stable substring. Kept
-# in sync with the body above (without the policy-injected lists).
-SECURE_MODE_PREAMBLE_LEGACY = """\
-## SECURE MODE ACTIVE
-
-You are operating under your organisation's security policy. This affects your
-behavior for every step of this task.
-
-Rules while secure mode is active:
-- Do not navigate to domains you have not been previously authorised to access.
-  Stay on the current working domain unless explicitly cleared by the user.
-- Before any irreversible action (delete, submit, payment, transfer, publish,
-  deploy, account change, sending email, external post), emit `ask_human` with a
-  clear question rather than guessing.
-- If the user's instruction would require breaking policy, decline with
-  `cannot_complete` and explain why. Do not improvise around policy.
-- When uncertain about user intent, prefer `ask_human`. Never invent or assume.
-- Trust the audit trail: every action you take is logged server-side with a
-  timestamp, the page URL, and the policy decision. Your user sees this log.
-""".strip()
-
-
-# ponytail: prepended to every user-prompt turn when policy.mode == "secure".
-# Built per-turn (not on Agent construction) so the LLM sees the strict
-# rules on every step without us having to rebuild the Agent.
-def secure_mode_preamble(policy) -> str:
-    """Render the secure-mode preamble with policy values interpolated.
+# ponytail: prepended to every user-prompt turn. Built per-turn (not on
+# Agent construction) so the LLM sees the rules on every step without us
+# having to rebuild the Agent.
+def policy_preamble(policy) -> str:
+    """Render the policy preamble with the user's own values interpolated.
 
     The LLM must see the actual blacklist + sensitive_actions on every
     step so it can decline tasks upfront that would require accessing
@@ -687,12 +665,11 @@ def secure_mode_preamble(policy) -> str:
     blacklist_lines = "\n".join(f"  - {d}" for d in (policy.blacklist or [])) or "  - (none)"
     sensitive_lines = "\n".join(f"  - {a}" for a in (policy.sensitive_actions or [])) or "  - (none)"
     return f"""\
-## SECURE MODE ACTIVE
+## BROTTO POLICY
 
-You are operating under your organisation's security policy. This affects your
-behavior for every step of this task.
+The user configured the rules below. They apply to every step of this task.
 
-### Domains you MUST NOT navigate to (organisation blacklist)
+### Domains you MUST NOT navigate to (the user's blacklist)
 {blacklist_lines}
 
 Any action whose target URL resolves to one of these domains — directly via
@@ -701,40 +678,30 @@ there — will be hard-blocked. If the user's task requires accessing any of
 these sites, emit `cannot_complete` immediately with a clear reason. Do NOT
 attempt the action hoping it will be approved; it will not.
 
-### Actions that always require explicit user approval (organisation sensitive list)
+### Actions that always require explicit user approval (the user's sensitive list)
 {sensitive_lines}
 
 These are irreversible or externally-visible actions. Before emitting any of
 them, emit `ask_human` with the exact target and what will happen. Never
 improvise around this list.
 
+### Data you will not see
+
+Page text reaches you after server-side redaction: credentials, API keys, bearer
+tokens, payment card numbers and government identifiers are already replaced with
+`[redacted]`. Treat that as final — do not try to reconstruct, guess, or infer a
+redacted value from context, and do not ask the user to paste one. If a task truly
+cannot proceed without a redacted value, say so in `ask_human` rather than
+completing it with a guess.
+
+This is a behavioural rule, not the boundary itself. The redaction runs in code
+before this prompt is built, so nothing you can decide affects whether it happens.
+
 ### General rules
 - Stay on the current working domain unless the user explicitly authorises otherwise.
 - When uncertain about user intent, prefer `ask_human`. Never invent or assume.
 - Trust the audit trail: every action you take is logged server-side with
   a timestamp, the page URL, and the policy decision. Your user sees this log.
-""".strip()
-
-
-# Back-compat constant for tests that just want a stable substring. Kept
-# in sync with the body above (without the policy-injected lists).
-SECURE_MODE_PREAMBLE_LEGACY = """\
-## SECURE MODE ACTIVE
-
-You are operating under your organisation's security policy. This affects your
-behavior for every step of this task.
-
-Rules while secure mode is active:
-- Do not navigate to domains you have not been previously authorised to access.
-  Stay on the current working domain unless explicitly cleared by the user.
-- Before any irreversible action (delete, submit, payment, transfer, publish,
-  deploy, account change, sending email, external post), emit `ask_human` with a
-  clear question rather than guessing.
-- If the user's instruction would require breaking policy, decline with
-  `cannot_complete` and explain why. Do not improvise around policy.
-- When uncertain about user intent, prefer `ask_human`. Never invent or assume.
-- Trust the audit trail: every action you take is logged server-side with a
-  timestamp, the page URL, and the policy decision. Your user sees this log.
 """.strip()
 
 

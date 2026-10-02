@@ -1,8 +1,7 @@
 # Architecture notes
 
-The long-form "we tried X, it failed because Y" behind each subsystem. `CLAUDE.md`
-carries the operative rules and constants; these files carry the reasoning, so a
-wrong fix is not re-derived a second time.
+The long-form "we tried X, it failed because Y" behind each subsystem. Each file
+carries the reasoning, so a wrong fix is not re-derived a second time.
 
 | File | Read before touching |
 |---|---|

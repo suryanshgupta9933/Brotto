@@ -24,9 +24,64 @@ describe a distinction that never occurred. Deleted: `policy/config.py`,
 `/v1/policy`, and the panel's floor section.
 
 `Policy` / `UserPolicy` stay, and `UserPolicy` is still a `Policy` subclass, so
-an old policy file on disk with the removed `whitelist` / `block_blacklisted`
-fields still parses — pydantic 2 drops unknown fields rather than rejecting them.
-That is pinned by `tests/test_policy_schema.py`.
+an old policy file on disk with the removed `whitelist` / `block_blacklisted` /
+`mode` fields still parses — pydantic 2 drops unknown fields rather than
+rejecting them. That is pinned by `tests/test_policy_schema.py`.
+
+## The mode was the policy engine, not a setting on it
+
+`Policy` used to carry `mode: "normal" | "secure"`, and the mode gated
+everything: `check_domain_policy` returned `n/a` unless the mode was secure, so
+a user's blacklist **did nothing at all** until they opted in. Same for
+first-time-seen prompts and the sensitive-action escalation. In normal mode
+Brotto had no policy at all.
+
+Two reasons that is the wrong shape, and neither is "it's more code":
+
+- **The permissive path was the default, and the sibling's name framed the
+  default as a downgrade.** For a product whose premise is that it drives the
+  browser you are already logged into, the safe behaviour has to be the one you
+  get without asking. A reviewer opening the Chrome Web Store listing saw a
+  control that turns protections *on*.
+- **The user's own blacklist was inert unless they found a second control.**
+  The one setting the mode existed to gate was the one setting the mode made
+  meaningless.
+
+`Policy` is now `blacklist` + `sensitive_actions`, and every gate runs
+unconditionally. `first_time_seen_prompt` was promoted to always-on and deleted.
+The `deps.policy is not None` guards in `harness.py` **stay** — `AgentDeps.policy`
+defaults to `None` and about twenty test files rely on it — and two of them were
+load-bearing in a way that only showed up here: `check_domain_policy` and
+`_guard_first_time_seen_blacklist` both dereferenced the policy unguarded, safe
+only because the old mode check short-circuited first.
+
+**The `main.py` half was the dangerous half**, and it reads as a no-op in a diff.
+`/v1/policy_ack` and the WS `policy_acknowledged` handler built their persisted
+snapshot as `{"mode": settings.get("mode"), ...}`. Once the client stopped
+sending a mode that became `{"mode": None}`, `UserPolicy.model_validate` rejected
+it, a bare `except Exception` swallowed the error, and the server served an empty
+`Policy()` — **the user's saved blacklist vanished from the panel with nothing
+logged anywhere.** When a field is removed from a wire payload, it has to leave
+the dicts that build it, not merely stop arriving.
+
+## Two boundaries that are structure, not settings
+
+Both are unconditional, and both should stay that way:
+
+- **Redaction happens in code**, at the single `deps.cdp.get_page_text()` call,
+  before the prompt is built — `agent/redact.py`. The model is *told* about it in
+  `policy_preamble` so it stops trying to reconstruct a `[redacted]` value, but
+  that instruction is a behavioural control, not the boundary. Anything the model
+  decides cannot change whether the redaction happened.
+- **Page text never reaches disk.** `capture_page` records a 200-character
+  digest; the `.pages.json` bodies sidecar and `Scratchpad.without_bodies()`
+  both existed only to be switched off in secure mode and are gone. A run over
+  an authenticated session leaves a manifest of what was visited, not copies of
+  what was on it. The known cost: a resumed run recalls digests, not pages.
+
+Note the digest is a *prefix* of the page, not a hash — a short page is its own
+digest. "Never written to disk" means "never beyond 200 characters per page", and
+a test that asserts on the wrong half of that passes for the wrong reason.
 
 ## Notifications
 
@@ -203,3 +258,46 @@ click it. Two rules follow, and both are load-bearing:
   `(domain, f"{action}:hidden")` for it, so a hidden destructive control cannot
   inherit an existing `(domain, "click")` approval the user gave for visible
   controls. Pinned by `test_a_hidden_destructive_control_is_not_pre_approved`.
+
+## A dropped terminal frame presents as "server unreachable"
+
+The panel said `Server unreachable… (retry 1 of 6)` against a server that was
+alive, healthy, and had already refused the task. Two independent defects
+stacked to produce that one wrong sentence.
+
+**The server refused a model choice it did not have.** `main.py` rejected any
+`model_config` whose provider was not in the registry. The panel sends
+`{provider: ""}` on **every** task until someone opens Settings, so an unset
+model — a completely normal state — was refused and the socket closed before
+`resolver.py` ever ran. `BROTTO_FORCE_ENV_MODEL` and a plain `AGENT_MODEL`
+both became unreachable, because the check that gated them sat upstream of the
+thing that reads them. An empty provider now falls through: only a *named*
+provider that is not in the registry is refused, and the resolver — the only
+component that knows about env and per-user configs — decides the rest.
+
+**The worker had no `case` for the frame the refusal sent.** On a refusal the
+server sends `{"type": "task_failed"}` **directly**, with no result to wrap.
+`background.ts` handled `task_result` and `task_error` but not `task_failed`,
+so the frame was dropped and `taskTerminalEmitted` stayed false. The close
+that followed was then read as a lost socket: `onclose` schedules a reconnect
+whenever `taskInFlight && !taskTerminalEmitted`, and it was about to satisfy
+both — against a server that had just said no, on a run that could never
+start. Six attempts, ~30 seconds of "retrying", and no way to tell it apart
+from a genuine outage.
+
+**The rule this generalises to:** a refused run and a lost socket are the same
+two events — a terminal frame then a close — and only the first frame tells
+them apart. Anything that drops a terminal frame converts one into the other.
+`task_cancelled` had the same hole and now has a case.
+
+`RECONNECT_MAX_ATTEMPTS` is **3**, down from 6. Six is ~30s of a spinner over a
+server that is not coming back; three is enough for a blip and short enough
+that the panel admits the run is over. Raise it if a real network needs more —
+the backoff, not the count, is what would not survive a bigger number.
+
+Pinned by `scripts/test-no-orphan-frames.test.js`, which now enumerates **both**
+boundaries — service-worker → panel, and server → worker. The second one is the
+gap that let this through: the panel-side suite was already here and green.
+It is scoped to terminal frames deliberately. A dropped terminal frame leaves
+a run with a live clock and a doomed reconnect; a dropped non-terminal frame
+loses an update. Only the first reads as a hang, so only the first is pinned.

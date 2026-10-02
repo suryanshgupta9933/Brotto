@@ -33,12 +33,13 @@ from .context import (
 from .ax_filter import budget_for_window, filter_ax_targets
 from .ax_diff import compute_ax_diff
 from .guardrails import check_login_page, check_critical_action, check_sensitive_action
+from .redact import redact_text
 from ..policy.gate import GateDecision, check_domain_policy, check_first_time_seen
 from ..policy.domains import etld1
-from .prompt import SYSTEM_PROMPT, secure_mode_preamble
+from .prompt import SYSTEM_PROMPT, policy_preamble
 from .audit import (
-    SCHEMA_VERSION, AuditTrail, REDACTED, is_secret_field, load_page_bodies,
-    load_scratchpad, read,
+    SCHEMA_VERSION, AuditTrail, REDACTED, is_secret_field, load_scratchpad,
+    read,
 )
 
 _HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
@@ -170,7 +171,7 @@ _CONTEXT_WINDOW_TOKENS = int(os.getenv("CONTEXT_WINDOW_TOKENS", "400000"))
 # User replies that approve a pending action (login, approval, policy gate).
 APPROVE_SET = frozenset({"yes", "y", "approve", "ok", "confirm"})
 
-# ponytail: _turn_to_prompt needs access to deps (for the secure-mode
+# ponytail: _turn_to_prompt needs access to deps (for the policy
 # preamble). The harness loop sets `_CURRENT_DEPS` before each agent call;
 # tests set `_TEST_DEPS` for the same purpose. Module globals are the
 # smallest change that avoids changing the prompt's call signature.
@@ -382,14 +383,14 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         if turn.steering else ""
     )
 
-    # ponytail: secure-mode preamble is injected here, not at Agent
+    # ponytail: the policy preamble is injected here, not at Agent
     # construction, so we don't need to rebuild the Agent per-task. The
     # test-helper reads `_TEST_DEPS` (a module global); the harness loop
     # sets `_CURRENT_DEPS` before each call.
     deps = _CURRENT_DEPS or _TEST_DEPS
-    secure_prefix = ""
-    if deps is not None and getattr(deps.policy, "mode", None) == "secure":
-        secure_prefix = secure_mode_preamble(deps.policy) + "\n\n"
+    policy_prefix = ""
+    if deps is not None and getattr(deps, "policy", None) is not None:
+        policy_prefix = policy_preamble(deps.policy) + "\n\n"
 
     conv_section = ""
     if deps is not None:
@@ -416,7 +417,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
             f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}{trunc}{here}: {e.digest}")
     manifest_section = "\n".join(manifest_lines) + "\n"
 
-    return f"""{secure_prefix}{conv_section}## Task
+    return f"""{policy_prefix}{conv_section}## Task
 {turn.task}
 
 ## Memory manifest (every page you have seen)
@@ -553,22 +554,12 @@ def _scrubbed(call: ActionCall, redact: bool) -> tuple[dict, str]:
     return args, f"{call.action}({args})"
 
 
-def _policy_mode(deps: AgentDeps | None) -> str | None:
-    """Read the policy mode off deps, defensively. Used to tag TaskResult
-    with the mode that was in force at the time of failure/completion."""
-    if deps is None:
-        return None
-    return getattr(getattr(deps, "policy", None), "mode", None)
-
-
 def _make_user_denied_result(step: int, domain: str | None, kind: str, deps: AgentDeps | None = None) -> TaskResult:
     return TaskResult(
         status="failed",
         summary=f"User denied {kind} approval" + (f" on {domain}" if domain else ""),
         failure_reason="user_denied",
-        steps_taken=step + 1,
-        policy_mode=_policy_mode(deps),
-    )
+        steps_taken=step + 1,    )
 
 
 def _make_policy_blocked_result(step: int, domain: str, deps: AgentDeps | None = None) -> TaskResult:
@@ -576,18 +567,14 @@ def _make_policy_blocked_result(step: int, domain: str, deps: AgentDeps | None =
         status="failed",
         summary=f"Blocked by policy: {domain}",
         failure_reason="policy_blocked",
-        steps_taken=step + 1,
-        policy_mode=_policy_mode(deps),
-    )
+        steps_taken=step + 1,    )
 
 
 def _make_model_not_found_result(provider: str, model_id: str, deps: AgentDeps | None = None) -> TaskResult:
     return TaskResult(
         status="failed",
         summary=f"Unknown model {provider}:{model_id}",
-        failure_reason="model_not_found",
-        policy_mode=_policy_mode(deps),
-    )
+        failure_reason="model_not_found",    )
 
 
 def _make_auth_failed_result(provider: str, deps: AgentDeps | None = None) -> TaskResult:
@@ -596,9 +583,7 @@ def _make_auth_failed_result(provider: str, deps: AgentDeps | None = None) -> Ta
     return TaskResult(
         status="failed",
         summary=f"Authentication failed for {provider}. Check the API key in extension settings.",
-        failure_reason="auth_failed",
-        policy_mode=_policy_mode(deps),
-    )
+        failure_reason="auth_failed",    )
 
 
 def _make_bad_decision_result(provider: str, model_id: str,
@@ -617,16 +602,14 @@ def _make_bad_decision_result(provider: str, model_id: str,
                  f"after 3 attempts. Try a different model, or rephrase the "
                  f"task."),
         failure_reason="invalid_decision",
-        steps_taken=deps.step_number if deps else 0,
-        policy_mode=_policy_mode(deps),
-    )
+        steps_taken=deps.step_number if deps else 0,    )
 
 
 def _looks_like_blacklist_hit(domain_pattern: str, free_text: str) -> bool:
     """Light heuristic for whether the agent's free-text reason mentions
-    a blacklisted domain. Used to decide whether a `cannot_complete` in
-    secure mode is a POLICY PREFLIGHT (agent declined upfront) vs a
-    generic failure. Matches by substring — case-insensitive — so
+    a blacklisted domain. Used to decide whether a `cannot_complete` is a
+    POLICY PREFLIGHT (agent declined upfront) vs a generic failure.
+    Matches by substring — case-insensitive — so
     "mail.google.com" / "Mail.Google.com" / "gmail" all hit. The pattern
     is the raw blacklist entry (which the user typed); the text is the
     agent's reason. False positives are tolerable here (just makes the
@@ -668,7 +651,7 @@ def _should_prompt_cross_domain_click(
     CDP results; the next iteration's observe-phase block catches
     anything we missed here.
     """
-    if deps.policy is None or getattr(deps.policy, "mode", None) != "secure":
+    if deps.policy is None:
         return (False, None)
     if not pre_url or not post_url:
         return (False, None)
@@ -698,6 +681,8 @@ def _guard_first_time_seen_blacklist(
     Returns True iff the page should be hard-blocked (caller sets
     `deps.result` + `break`s out of the actions loop).
     """
+    if deps.policy is None:
+        return False
     if check_domain_policy(current_url, deps.policy) != GateDecision.BLOCK:
         return False
     domain = etld1(current_url) or current_url
@@ -751,13 +736,13 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
 
     try:
         if action == "navigate":
-            # Pre-flight domain policy check (secure mode only). Re-validates
-            # the URL the agent wants to visit against the blacklist before
-            # sending it to CDP — catches the case where the agent proposes
-            # a navigate-to-blacklisted-site mid-flow even though the
-            # observe-phase check used the page's current URL. In secure
-            # mode, blacklist match is a hard block (no user override).
-            if deps.policy is not None and getattr(deps.policy, "mode", None) == "secure":
+            # Pre-flight domain policy check. Re-validates the URL the
+            # agent wants to visit against the blacklist before sending
+            # it to CDP — catches the case where the agent proposes a
+            # navigate-to-blacklisted-site mid-flow even though the
+            # observe-phase check used the page's current URL. A
+            # blacklist match is a hard block (no user override).
+            if deps.policy is not None:
                 target = args.get("url", "")
                 decision = check_domain_policy(target, deps.policy)
                 if decision == GateDecision.BLOCK:
@@ -837,8 +822,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             # click believing it was on the current domain. Re-check
             # synchronously here so a blacklisted redirect aborts in
             # the same step.
-            if (deps.policy is not None
-                    and getattr(deps.policy, "mode", None) == "secure"):
+            if deps.policy is not None:
                 post_url = await cdp.get_current_url()
                 decision = check_domain_policy(post_url, deps.policy)
                 if decision == GateDecision.BLOCK:
@@ -1090,23 +1074,26 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 status="completed",
                 summary=_unescape(args.get("summary", "")),
                 extracted_data=args.get("extracted_data"),
-                steps_taken=deps.step_number,
-                policy_mode=_policy_mode(deps),
-            )
+                steps_taken=deps.step_number,            )
             return "Task complete"
 
         elif action == "cannot_complete":
             reason = _unescape(args.get("reason", "") or "")
             tried = args.get("tried", [])
-            # ponytail: in secure mode, if the agent declines upfront
-            # (the preamble told it to), surface it as a POLICY PREFLIGHT
-            # failure rather than a generic "cannot_complete". The
-            # sidepanel uses this code to render the enterprise bubble.
-            # Otherwise (normal mode, or unrelated failure), preserve
-            # the existing behaviour — the agent's reason becomes
-            # both summary and failure_reason verbatim.
+            # ponytail: if the agent declines upfront (the preamble told
+            # it to), surface it as a POLICY PREFLIGHT failure rather than
+            # a generic "cannot_complete". The sidepanel uses this code to
+            # render the enterprise bubble. An unrelated decline still
+            # preserves the existing behaviour — the agent's reason
+            # becomes both summary and failure_reason verbatim.
+            #
+            # The `deps.policy is not None` guard is load-bearing, not
+            # defensive noise: it used to be implied by the mode check
+            # short-circuiting first, and `deps.policy.blacklist` on the
+            # next line is unguarded. AgentDeps.policy is None in ~20
+            # test files.
             preflight = (
-                getattr(deps.policy, "mode", None) == "secure"
+                deps.policy is not None
                 and any(_looks_like_blacklist_hit(d, reason) for d in (deps.policy.blacklist or []))
             )
             deps.result = TaskResult(
@@ -1114,9 +1101,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 summary=reason or "Task could not be completed",
                 failure_reason="policy_preflight" if preflight else (reason or None),
                 tried=tried,
-                steps_taken=deps.step_number,
-                policy_mode=_policy_mode(deps),
-            )
+                steps_taken=deps.step_number,            )
             # Audit row so the compliance trail shows the agent declined
             # upfront because of the org's policy, not because of any
             # network or runtime failure.
@@ -1251,9 +1236,7 @@ async def _plan_step(
         deps.result = TaskResult(
             status="failed",
             summary=f"scripted target not found: {e}",
-            failure_reason=f"scripted target did not resolve: {e}",
-            policy_mode=_policy_mode(deps),
-        )
+            failure_reason=f"scripted target did not resolve: {e}",        )
         return None
     except UserError as e:
         # Convert "Unknown model" failures to a model_not_found
@@ -1296,7 +1279,7 @@ async def _plan_step(
             )
         return None
     finally:
-        # _turn_to_prompt reads _CURRENT_DEPS for the secure-mode
+        # _turn_to_prompt reads _CURRENT_DEPS for the policy
         # preamble; clear it after the call so it doesn't leak
         # across tasks (the loop is sequential but the value
         # outlives this iteration otherwise).
@@ -1577,9 +1560,7 @@ class AgentHarness:
             return TaskResult(
                 status="failed",
                 summary="CDP not healthy at task start",
-                failure_reason="cdp_preflight_failed",
-                policy_mode=_policy_mode(deps),
-                # Pre-observe: no URL was ever observed, so this is "".
+                failure_reason="cdp_preflight_failed",                # Pre-observe: no URL was ever observed, so this is "".
                 final_url=deps.step_url,
             )
 
@@ -1635,9 +1616,7 @@ class AgentHarness:
             return TaskResult(
                 status="failed",
                 summary=state["why"],
-                failure_reason="task_refused",
-                policy_mode=_policy_mode(deps),
-                # No step ran, so this is the same pre-observe "" the CDP
+                failure_reason="task_refused",                # No step ran, so this is the same pre-observe "" the CDP
                 # preflight return carries.
                 final_url=deps.step_url,
             )
@@ -1688,25 +1667,17 @@ class AgentHarness:
             audit.record_policy(
                 step=-1, kind="policy_active", domain=None, action=None,
                 decision=(
-                    f"mode={deps.policy.mode}  "
                     f"blacklist={deps.policy.blacklist}  "
-                    f"first_time_seen_prompt={deps.policy.first_time_seen_prompt}"
+                    f"sensitive_actions={deps.policy.sensitive_actions}"
                 ),
             )
 
-        # Restore scratchpad if this task was previously interrupted.
-        # load_scratchpad returns a structured Scratchpad (entries); the
-        # bodies live beside it in a JSON sidecar, so a resumed run recalls
-        # whole pages rather than the 200-char digests the manifest renders.
-        # Legacy plain-text files (no # MEMORY v2 header) parse as notes-only.
+        # Restore scratchpad if this task was previously interrupted. Only
+        # the manifest survives, so a resumed run recalls 200-char digests
+        # rather than whole pages — the deliberate cost of never writing page
+        # text to disk. Legacy plain-text files (no # MEMORY v2 header) parse
+        # as notes-only.
         loaded = load_scratchpad(audit.scratchpad_path)
-        bodies = load_page_bodies(audit.page_bodies_path)
-        if bodies:
-            loaded = Scratchpad(
-                entries=[e.model_copy(update={"body": bodies[e.id]})
-                         if e.id in bodies else e for e in loaded.entries],
-                notes=loaded.notes,
-            )
         if loaded.entries or loaded.notes:
             deps.scratchpad = loaded
 
@@ -1777,6 +1748,18 @@ class AgentHarness:
             # one evaluate on the dev path. Shipped every step because the
             # accessibility tree often omits the value a question is about.
             page_text = await deps.cdp.get_page_text()
+            # Redacted here, at the one place page text enters the loop, so
+            # the prompt, the digest, the sidecar and the audit all carry the
+            # same string — redacting at each of those is four sites and one
+            # of them will be missed. Unconditional, not gated on secure
+            # mode: a live card number reaching a provider's logs is not a
+            # setting the user should have to know to turn on. Secure mode
+            # governs what else the model may see (see `page_text_untrusted`
+            # in prompt.py), not whether a credential is a credential.
+            page_text, redactions = redact_text(page_text)
+            if redactions:
+                log.info("page text: redacted %s", ", ".join(
+                    f"{n} {k}" for k, n in sorted(redactions.items())))
             # Captured in code, every step, before the turn is built — so
             # this step's own page is in the manifest the model reads. Done
             # here rather than as a `read_page_text` side effect because the
@@ -1806,11 +1789,10 @@ class AgentHarness:
             deps.prev_targets = targets
             timings["filter"] += time.perf_counter() - t1
 
-            # Guardrail: domain policy (secure mode only). No-op in normal
-            # mode. With the whitelist dropped, the only BLOCK path here is
-            # "we landed on (or got redirected to) a blacklisted URL
-            # mid-task". Hard block, no override.
-            if deps.policy is not None and getattr(deps.policy, "mode", None) == "secure":
+            # Guardrail: domain policy. With the whitelist dropped, the
+            # only BLOCK path here is "we landed on (or got redirected to)
+            # a blacklisted URL mid-task". Hard block, no override.
+            if deps.policy is not None:
                 decision = check_domain_policy(current_url, deps.policy)
                 if decision == GateDecision.BLOCK:
                     domain = etld1(current_url) or current_url
@@ -1832,9 +1814,7 @@ class AgentHarness:
                         summary=f"Blocked by policy: {domain}",
                         failure_reason="policy_blocked",
                         steps_taken=steps_run,
-                        timing=timing_report,
-                        policy_mode=_policy_mode(deps),
-                    )
+                        timing=timing_report,                    )
                     deps.result.final_url = deps.step_url
                     self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
                                task_index=deps.task_index)
@@ -1907,9 +1887,7 @@ class AgentHarness:
                         status="failed",
                         summary="User skipped login",
                         failure_reason="user_skipped_login",
-                        timing=timing_report,
-                        policy_mode=_policy_mode(deps),
-                    )
+                        timing=timing_report,                    )
                     deps.result.final_url = deps.step_url
                     self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
                                task_index=deps.task_index)
@@ -1991,12 +1969,12 @@ class AgentHarness:
                 latency_ms=int((time.perf_counter() - t_plan) * 1000),
             )
 
-            # Secure-mode escalation: curated list of irreversible actions
-            # that always require explicit approval in secure mode (even if
-            # the regex CRITICAL_PATTERNS misses them). Fires before the
-            # regex check so the bank-IT-curated list wins on overlap.
+            # Curated list of irreversible actions that always require
+            # explicit approval (even if the regex CRITICAL_PATTERNS misses
+            # them). Fires before the regex check so the user's curated
+            # list wins on overlap.
             t_ap = time.perf_counter()
-            if deps.policy is not None and getattr(deps.policy, "mode", None) == "secure":
+            if deps.policy is not None:
                 for c in decision.actions:
                     if not check_sensitive_action(c.action, c.action_args, deps.policy):
                         continue
@@ -2095,7 +2073,7 @@ class AgentHarness:
             # whether approved or denied — on deny the task aborts anyway,
             # but the cache entry prevents a retry-loop on a persistent
             # prompt-injection attempt.
-            if deps.policy is not None and getattr(deps.policy, "mode", None) == "secure":
+            if deps.policy is not None:
                 for c in decision.actions:
                     # Skip terminal / internal / question actions — they
                     # are metadata, not things the user needs to approve.
@@ -2179,10 +2157,6 @@ class AgentHarness:
                     "thought": decision.thought,
                     "url": current_url,
                     "context": context,
-                    # ponytail: tells the sidepanel to show the SECURE badge
-                    # on this step's bubble. Cheap to compute; piggybacks
-                    # on step_progress instead of a separate WS frame.
-                    "secure_mode": _policy_mode(deps) == "secure",
                 })
             else:
                 # ponytail: no external actions this step (e.g. a
@@ -2229,10 +2203,9 @@ class AgentHarness:
 
             # Memory is written in code on every step (`capture_page` runs
             # above, before the turn is built), so it is persisted every step
-            # rather than when an action touched it. The files are the source
-            # of truth — operators can inspect <sessions>/*.scratchpad.txt and
-            # *.pages.json to see what memory was built, and a resume reads
-            # both back.
+            # rather than when an action touched it. Only the manifest
+            # reaches disk: a run over an authenticated session leaves a
+            # record of what was visited, never copies of what was on it.
             audit.set_scratchpad(deps.scratchpad)
 
             # Record
@@ -2283,9 +2256,7 @@ class AgentHarness:
             summary=f"Stopped after {self.MAX_STEPS} steps without finishing",
             failure_reason="runaway_backstop",
             steps_taken=self.MAX_STEPS,
-            timing=timing_report,
-            policy_mode=_policy_mode(deps),
-        )
+            timing=timing_report,        )
         deps.result.final_url = deps.step_url
         self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
                                task_index=deps.task_index)

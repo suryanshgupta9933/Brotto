@@ -14,7 +14,7 @@ const $modelVisionBadge = document.getElementById('modelVisionBadge');
 const $modelContextWindow = document.getElementById('modelContextWindow');
 
 // ── Ink & Rule dropdown ──────────────────────────────────────────────────
-// One control, three instances: provider, security mode, and the model
+// One control, two instances: provider and the model
 // field's suggestion list. The value host is always the element the rest of
 // this file already reads — a real <select> for the first two, the free-text
 // <input> for the third — so choosing an option writes `host.value` and fires
@@ -291,6 +291,11 @@ if ($modelSave) {
         : chrome.storage.session.remove('modelApiKey'),
     ]);
     setModelPill(model);
+    // A re-pasted key is usually a *different* key, and the pre-flight cache
+    // only knows whether some key was present — it cannot tell them apart
+    // without hashing a secret to find out. Dropping the pass here is exact,
+    // and costs one probe on the next send.
+    modelCheckPass = null;
     if ($modelStatus) {
       $modelStatus.textContent = 'Saved.';
       setTimeout(() => { $modelStatus.textContent = ''; }, 2000);
@@ -302,9 +307,16 @@ if ($modelSave) {
 // Storage is the only source the panel has — the server's resolved config
 // (env var, per-IP file) isn't visible from here, so the pill shows what
 // this browser last saved and nothing more.
+//
+// "Default" was the wrong word for the unset case: it reads as a neutral
+// choice, and in the header it was mistaken for a leftover security-mode
+// selector. "Server default" names what it actually means — this browser
+// chose nothing, and the server decides.
+const MODEL_UNSET_LABEL = 'Server default';
+
 function setModelPill(model) {
   if (!modelPillName) return;
-  const label = model || 'Default';
+  const label = model || MODEL_UNSET_LABEL;
   // Two copies of the name: the track travels exactly one copy's width, so
   // the tail hands off to the head without a visible seam.
   const track = document.createElement('div');
@@ -318,7 +330,12 @@ function setModelPill(model) {
     track.appendChild(copy);
   }
   modelPillName.replaceChildren(track);
-  if (modelPill) modelPill.title = `${model ? 'Model: ' + model : 'Model: server default'} — open settings to change it`;
+  if (modelPill) {
+    modelPill.classList.toggle('no-model', !model);
+    modelPill.title = model
+      ? `Model: ${model} — open settings to change it`
+      : 'No model chosen in this browser — the server picks. Open settings to choose one.';
+  }
   fitModelPill();
   // Geist may still be loading when this first runs, which would measure the
   // fallback face and under-report the overflow.
@@ -363,7 +380,88 @@ async function hydrateModelSettings() {
   // Don't re-hydrate the API key field — it's in chrome.storage.session
   // and we deliberately don't surface it in the UI (no plaintext display).
 }
-// ── Wire the three dropdowns to the value hosts the rest of this file uses.
+// ── Pre-flight: can this browser run anything at all?
+//
+// The check is a real request to the provider, not a local sanity check: a
+// rejected key and an exhausted balance are both invisible from here, and both
+// used to surface as a run that died after the first step with the reason
+// buried in a failure bubble. The server does the call and classifies it, so
+// the panel never has to know an HTTP status from any of eight vendors.
+//
+// A failure to *check* is not a failure of the model. The server being down,
+// or a proxy in the way, must not turn into "your model is broken" — those
+// have their own reporting (connect / reconnect) and it already works. So
+// anything that isn't a clean answer from the endpoint passes through and
+// lets the run start.
+const MODEL_CHECK_TITLE = {
+  no_model: 'No model is set',
+  auth_failed: 'Your API key was rejected',
+  no_credits: 'Out of credit with the provider',
+  rate_limited: 'The provider is rate-limiting this key',
+  unknown_model: 'That model is not available',
+  unreachable: 'Cannot reach the model provider',
+};
+
+// Only a pass is cached. Caching a failure would leave a user who fixes the
+// key still blocked until the TTL expired, which is the one outcome worse than
+// not caching at all.
+//
+// ponytail: 10 minutes. MiniMax-M3 measured 2–5s per probe with thinking
+// disabled, and a user starting five tasks in a row should pay that once.
+// Ceiling: a key revoked mid-session goes unnoticed for up to this long.
+const MODEL_CHECK_TTL_MS = 10 * 60 * 1000;
+let modelCheckPass = null;
+
+async function checkModelReady() {
+  const [local, session_] = await Promise.all([
+    chrome.storage.local.get('modelConfig'),
+    chrome.storage.session.get('modelApiKey'),
+  ]);
+  const raw = local.modelConfig;
+  const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
+  const apiKey = session_.modelApiKey || undefined;
+  // The key is the provider, the model and whether a key was pasted — never
+  // the key itself. Changing any of those has to re-run the probe.
+  const sig = `${cfg ? `${cfg.provider}:${cfg.model}` : ''}|${apiKey ? 'k' : 'nokey'}`;
+  if (modelCheckPass && modelCheckPass.sig === sig
+      && Date.now() - modelCheckPass.at < MODEL_CHECK_TTL_MS) {
+    return { ok: true, model: modelCheckPass.model };
+  }
+
+  const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
+  let body;
+  try {
+    const res = await fetch(`${base}/v1/model/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_config: cfg || undefined, api_key: apiKey }),
+    });
+    if (!res.ok) return { ok: true };  // could not check — not the model's fault
+    body = await res.json();
+  } catch {
+    return { ok: true };
+  }
+  if (!body || body.ok !== false) {
+    modelCheckPass = { sig, at: Date.now(), model: body && body.model };
+    return { ok: true, model: body && body.model };
+  }
+  // The resolver's own "no model configuration available" names env vars and
+  // frame fields — accurate for an operator, useless to the person reading
+  // the panel, and they can only act on the settings screen anyway.
+  if (body.kind === 'no_model') {
+    return {
+      ok: false,
+      kind: 'no_model',
+      body: 'Brotto has no model to run on: this browser has none saved, and '
+          + 'your server has none configured. Open **Settings → Model** to '
+          + 'choose a provider and model — Brotto will check the key before '
+          + 'it starts anything.',
+    };
+  }
+  return { ok: false, kind: body.kind, body: body.error || 'The model could not be used.' };
+}
+
+// ── Wire the dropdowns to the value hosts the rest of this file uses.
 const providerDd = $modelProvider && attachDropdown({
   root: document.getElementById('providerDd'),
   trigger: document.getElementById('model-provider-trigger'),
@@ -374,15 +472,6 @@ const providerDd = $modelProvider && attachDropdown({
   // it did when this was a native select: repopulate the model list, show or
   // hide the base-URL and key boxes, refresh the facts.
   setValue: (v) => { $modelProvider.value = v; $modelProvider.dispatchEvent(new Event('change')); },
-});
-
-const securityModeDd = attachDropdown({
-  root: document.getElementById('securityModeDd'),
-  trigger: document.getElementById('security-mode-trigger'),
-  list: document.getElementById('security-mode-list'),
-  getOptions: () => Array.from(securityModeSetting.children).map((o) => ({ value: o.value, label: o.textContent || o.value })),
-  getValue: () => securityModeSetting.value,
-  setValue: (v) => { securityModeSetting.value = v; securityModeSetting.dispatchEvent(new Event('change')); },
 });
 
 // The trigger shows the host's current value, so both selects need a sync
@@ -950,12 +1039,13 @@ function loginOutcome(p) {
 
 // ── Settings: load + save (first chrome.storage.local writes — today the
 // SW only reads `get("settings")`, so this is the seed for that key).
-const securityModeSetting = document.getElementById('securityModeSetting');
 const blacklistSetting    = document.getElementById('blacklistSetting');
 const saveSettingsBtn     = document.getElementById('saveSettingsBtn');
 const refreshPolicyBtn    = document.getElementById('refreshPolicyBtn');
 const notifyBlockingSetting = document.getElementById('notifyBlockingSetting');
 const notifyResultsSetting  = document.getElementById('notifyResultsSetting');
+const contextSuggestionsSetting = document.getElementById('contextSuggestionsSetting');
+const contextBadge = document.getElementById('contextBadge');
 const replaySetupBtn        = document.getElementById('replaySetupBtn');
 
 // setOptions re-points the panel; it has no gesture requirement, so the
@@ -974,7 +1064,6 @@ settingsBtn.addEventListener('click', async () => {
   applyServerAddressState();
   await hydrateSettingsPanel();
   settingsOverlay.classList.add('open');
-  securityModeDd?.sync();
   renderVerifyStatus();
 });
 
@@ -992,7 +1081,7 @@ async function hydrateSettingsPanel() {
   // ponytail: chrome.storage.local is the AUTHORITATIVE source for what
   // the SW will ship on the next task_start, so the fields are filled from
   // it and never from the server's view — otherwise the panel could show
-  // normal mode while the SW still ships yesterday's secure+blacklist.
+  // yesterday's blacklist while the SW ships today's.
   const stored = await chrome.storage.local.get('settings');
   const s = stored.settings || {};
   const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
@@ -1013,31 +1102,22 @@ async function hydrateSettingsPanel() {
   state.lastVerifiedAt = effective ? Date.now() : (state.lastVerifiedAt || null);
   state.serverReachable = !!effective;
 
-  // Mode + blacklist come from LOCAL storage — chrome.storage.local is what
+  // The blacklist comes from LOCAL storage — chrome.storage.local is what
   // the SW ships on the next task_start, so that is what the field has to
   // show. The server fetch above is a reachability probe, not a second
   // source of truth.
-  const mode = s.mode === 'secure' ? 'secure' : 'normal';
-  securityModeSetting.value = mode;
   const localBlacklist = Array.isArray(s.blacklist) ? s.blacklist : [];
   if (notifyBlockingSetting) notifyBlockingSetting.checked = s.notifyBlocking !== false;
   if (notifyResultsSetting) notifyResultsSetting.checked = s.notifyResults !== false;
+  // Default OFF, so this cannot be `!== false` the way the two notification
+  // settings are. Those ask "should I be quiet?", where absent means the
+  // documented default; this one reads the page with no task in flight, and
+  // absent must mean "do not". Getting that comparison backwards ships an
+  // ambient page read to every install, and the privacy policy says it
+  // doesn't happen unless asked for.
+  if (contextSuggestionsSetting) contextSuggestionsSetting.checked = s.contextSuggestions === true;
 
   blacklistSetting.value = localBlacklist.join('\n');
-
-  // Header line: how many domains the user has saved (local view).
-  // This count matches what the SW will actually ship on the next
-  // task_start.
-  const headerEl = document.getElementById('policyModeHeader');
-  if (headerEl) {
-    if (mode === 'secure') {
-      headerEl.textContent = `Mode: secure · ${localBlacklist.length} domain${localBlacklist.length === 1 ? '' : 's'} saved.`;
-      headerEl.classList.add('secure');
-    } else {
-      headerEl.textContent = 'Mode: normal — secure mode not active.';
-      headerEl.classList.remove('secure');
-    }
-  }
 }
 
 // ponytail: Q1 — refresh from server without re-opening Settings.
@@ -1107,10 +1187,10 @@ if (saveSettingsBtn) {
     const blacklist = blacklistSetting.value.split('\n').map((s) => s.trim()).filter(Boolean);
     const settings = {
       serverUrl: plannerUrlSetting.value || 'http://localhost:8000',
-      mode: securityModeSetting.value === 'secure' ? 'secure' : 'normal',
       blacklist,
       notifyBlocking: notifyBlockingSetting ? notifyBlockingSetting.checked : true,
       notifyResults: notifyResultsSetting ? notifyResultsSetting.checked : true,
+      contextSuggestions: contextSuggestionsSetting ? contextSuggestionsSetting.checked : false,
     };
     await chrome.storage.local.set({ settings });
     plannerUrlEl.value = settings.serverUrl;
@@ -1124,7 +1204,6 @@ if (saveSettingsBtn) {
       const ack = await chrome.runtime.sendMessage({
         type: 'policy_changed',
         settings: {
-          mode: settings.mode,
           blacklist: settings.blacklist,
           notifyBlocking: settings.notifyBlocking,
           notifyResults: settings.notifyResults,
@@ -1149,7 +1228,7 @@ if (saveSettingsBtn) {
       const r = await fetch(`${base}/v1/policy_ack`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: { mode: settings.mode, blacklist: settings.blacklist } }),
+        body: JSON.stringify({ settings: { blacklist: settings.blacklist } }),
       });
       serverOk = r.ok;
       console.log('[brotto] policy_ack http status', r.status);
@@ -1179,6 +1258,14 @@ if (saveSettingsBtn) {
       saveSettingsBtn.textContent = 'Save';
       saveSettingsBtn.disabled = false;
     }, 2200);
+
+    // A privacy setting that only takes effect on the next panel open is a
+    // setting the user cannot trust. `contextSuggestionsEnabled` reads storage
+    // at decision time, so a repaint is all it takes — but the debounce timer
+    // may already be holding a read that was scheduled under the old value,
+    // so it is cancelled rather than left to land.
+    clearTimeout(suggestionTimer);
+    if (!taskRunning) void currentTab().then(refreshEmptyState);
   });
 }
 
@@ -1678,6 +1765,24 @@ async function sendUserMessage() {
   // so the real question is whether a task is in flight, not what the phase
   // is called.
   if (state.taskInFlight) return;
+  // Pre-flight: is there a model this browser can actually run on? It sits
+  // here — after the steer and clarify branches, which never start a run and
+  // so never need one, and before anything that latches a run into being. A
+  // refusal therefore leaves nothing half-started: no transcript cleared, no
+  // clock, no taskInFlight. The words stay in the box, because the fix is a
+  // settings change and a user who has to retype a long task to apply it
+  // stops trying.
+  setPhase('connecting', 'Checking your model…');
+  const check = await checkModelReady();
+  if (!check.ok) {
+    setPhase('error', MODEL_CHECK_TITLE[check.kind] || 'The model is not usable');
+    appendFailureBubble({
+      title: MODEL_CHECK_TITLE[check.kind] || 'The model is not usable',
+      body: check.body,
+      footer: 'Your task is still in the box.',
+    });
+    return;
+  }
   // ponytail: soft length cap. Tasks > MAX_TASK_CHARS get a confirm dialog
   // because long compound instructions are a classic prompt-injection vector.
   // The server logs a warning on the same threshold (defense in depth) but
@@ -2121,6 +2226,9 @@ const FAILURE_NOTE = {
 
   // ── Brotto's own server ──
   internal: "Brotto's server hit an error. The details are in its log.",
+  // `task_error` carries the raw exception, which this run shows in the
+  // bubble footer — so it can't claim the details are only in the log.
+  server_error: "Brotto's server hit an error and stopped the run. The details are below.",
   cdp_preflight_failed: 'Brotto could not attach to the browser tab. Close DevTools on that page and try again.',
   policy_preflight: 'Brotto refused the task: the site is on your blocked list.',
   policy_blocked: 'Brotto stopped: the task was blocked by your security policy.',
@@ -2409,24 +2517,161 @@ const SUGGESTION_TTL_DEFAULT_MS = 24 * 60 * 60 * 1000;
 // crosses the wire only to be truncated on arrival.
 const PAGE_TEXT_CHARS = 2000;
 
+// Never read, on an idle panel, from a page whose whole purpose is holding
+// something the user would not paste into a chat window. This is a hardcoded
+// list on purpose: a user-configured blocklist cannot be the control here,
+// because the failure mode is "we shipped ambient reading and a bank login
+// was in the way of opting out". It is additive to the toggle, not a
+// replacement — turning page suggestions on still does not unlock these.
+//
+// Matched on the registrable host, so a subdomain cannot slip past by being
+// spelled differently. `accounts.` is covered by `google.com` itself.
+const CONTEXT_BLOCKED_HOSTS = [
+  // Banking and payments
+  'chase.com', 'bankofamerica.com', 'wellsfargo.com', 'citi.com', 'capitalone.com',
+  'americanexpress.com', 'discover.com', 'usbank.com', 'pnc.com', 'usaa.com',
+  'schwab.com', 'fidelity.com', 'vanguard.com', 'td.com', 'ally.com',
+  'barclays.co.uk', 'hsbc.co.uk', 'lloydsbank.com', 'natwest.com', 'monzo.com',
+  'revolut.com', 'wise.com', 'paypal.com', 'stripe.com', 'squareup.com',
+  'cash.app', 'venmo.com', 'zelle', 'plaid.com',
+  // Password managers and auth — the vault contents are the whole page
+  '1password.com', 'bitwarden.com', 'dashlane.com', 'lastpass.com',
+  'keepersecurity.com', 'proton.me', 'accounts.google.com', 'login.microsoftonline.com',
+  'appleid.apple.com', 'id.apple.com', 'github.com/login', 'okta.com', 'auth0.com',
+];
+
+// A path is blocked too where the page is a known-sensitive view on a host
+// that is otherwise ordinary. Matched as a prefix on the pathname.
+const CONTEXT_BLOCKED_PATHS = [
+  '/checkout', '/cart', '/payment', '/wallet', '/transfer', '/billpay',
+];
+
+// ponytail: a substring test would catch "paypal.evil.com" and miss
+// "paypal.com.br". Comparing the registrable-ish host means the list reads
+// the way a person would write it and cannot be evaded by a lookalike.
+function hostIsContextBlocked(url) {
+  let host;
+  let path;
+  try {
+    const u = new URL(url);
+    host = u.hostname.toLowerCase();
+    path = u.pathname.toLowerCase();
+  } catch {
+    return true; // unparseable is not a page we have any business reading
+  }
+  if (!host) return true; // about:blank, chrome://, file://
+  const bare = host.replace(/^www\./, '');
+  if (CONTEXT_BLOCKED_HOSTS.includes(bare)) return true;
+  if (CONTEXT_BLOCKED_HOSTS.includes(host)) return true;
+  return CONTEXT_BLOCKED_PATHS.some((p) => path === p || path.startsWith(`${p}/`));
+}
+
+// ponytail: this runs inside the page, so it has to be self-contained —
+// Chrome serialises the source and the module scope does not exist in that
+// realm. Keeping the decision and the read in ONE injection is the point: two
+// round trips leave a window where the page changes between the check and the
+// read, and a lookalike domain is precisely the case the check exists for.
+function pageContextProbe(limit) {
+  const SENSITIVE_AUTOCOMPLETE = [
+    'cc-name', 'cc-number', 'cc-csc', 'cc-exp', 'cc-exp-month', 'cc-exp-year',
+    'current-password', 'new-password', 'one-time-code', 'otp',
+  ];
+  // Token match, not substring: a substring test for "auth" also matches
+  // "author", which is a field on half the pages that would otherwise pass.
+  const SENSITIVE_TOKENS = new Set([
+    'pass', 'passwd', 'pwd', 'password', 'passwords', 'secret', 'token',
+    'apikey', 'auth', 'authorization', 'credential', 'credentials', 'bearer',
+    'cvv', 'cvc', 'cvc2', 'cardnumber', 'ssn', 'pin', 'otp',
+  ]);
+  // Long enough to be unambiguous, so a substring test is safe for these.
+  const SENSITIVE_SUBSTRINGS = [
+    'password', 'passwd', 'secret', 'credential', 'api_key', 'apikey',
+    'authorization', 'private_key', 'cvv', 'cardnumber', 'socialsecurity',
+  ];
+  const SENSITIVE_PATH =
+    /\/(login|log-in|signin|sign-in|sign-in|signup|sign-up|auth|authenticate|sso|oauth|oauth2|callback|2fa|mfa|otp|verify|verification|checkout|payment|payments|billing|invoice|wallet|transfer|remit|cards?|account\/settings|security\/settings|privacy\/settings)/;
+
+  const block = (reason) => ({ sensitive: true, reason, text: '' });
+  let path = '';
+  try { path = (location.pathname + location.search).toLowerCase(); }
+  catch { return block('no-location'); }
+  if (SENSITIVE_PATH.test(path)) return block('sensitive-path');
+
+  let fields;
+  try { fields = document.querySelectorAll('input, textarea, select'); }
+  catch { return block('no-dom'); }
+
+  for (const el of fields) {
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (type === 'password') return block('password-field');
+    if (type === 'hidden') continue;
+
+    const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+    if (ac && SENSITIVE_AUTOCOMPLETE.some((t) => ac.includes(t))) return block('autocomplete');
+
+    const name = [
+      el.getAttribute('name'), el.getAttribute('id'),
+      el.getAttribute('aria-label'), el.getAttribute('placeholder'),
+    ].filter(Boolean).join(' ').toLowerCase();
+    if (!name) continue;
+    for (const tok of name.split(/[^a-z0-9]+/)) {
+      if (SENSITIVE_TOKENS.has(tok)) return block('sensitive-field');
+    }
+    if (SENSITIVE_SUBSTRINGS.some((s) => name.includes(s))) return block('sensitive-field');
+  }
+
+  const text = (document.body && document.body.innerText) || '';
+  // A bare run of digits is an order number as often as a card. One sitting
+  // next to the words "card" or "expiry" is a checkout page, and a checkout
+  // page is the one place an idle read has no business being.
+  if (/(?:card number|expiry|security code|debit|credit|iban|routing number|sort code)/i.test(text)
+      && /(?:\d[ -]?){13,19}/.test(text)) {
+    return block('card-shaped');
+  }
+  return { sensitive: false, reason: '', text: text.slice(0, limit) };
+}
+
 // Read on demand, and only while the panel is open. A permanently injected
 // content script would put Brotto into every site the user visits, and the
 // debugger would raise Chrome's "debugging this browser" banner — a heavy
 // thing to show someone who opened a panel to read a list. chrome:// pages
 // and a few others refuse the script outright, and that is reported as
 // absence rather than guessed around.
-async function readPageContext(tabId) {
+//
+// Two gates, and the cheap one runs first. The host list needs no injection
+// and settles the known names; the in-page probe settles the ones nobody
+// listed, which is the case that actually arrives. The caller decides whether
+// to call at all: this reads a page with no task in flight, so it runs only
+// when the user has opted in and the badge says so for as long as it takes.
+async function readPageContext(tabId, tabUrl) {
   if (typeof tabId !== 'number') return '';
+  if (hostIsContextBlocked(tabUrl)) return '';
+  showContextBadge(true);
   try {
     const [res] = await chrome.scripting.executeScript({
       target: { tabId },
-      func: (limit) => (document.body?.innerText || '').slice(0, limit),
+      func: pageContextProbe,
       args: [PAGE_TEXT_CHARS],
     });
-    return (res?.result || '').trim();
+    const out = res?.result;
+    // Logged, not shown: "Brotto never suggests anything on <site>" is
+    // otherwise indistinguishable from the server being down, and this is the
+    // one line that tells them apart.
+    if (out?.sensitive) console.debug('[brotto] page context withheld:', out.reason, tabUrl);
+    return (out?.text || '').trim();
   } catch {
     return '';
+  } finally {
+    showContextBadge(false);
   }
+}
+
+// The disclosure itself. PRIVACY.md promises the user can see it happen, and
+// a setting you cannot watch taking effect is not a disclosure — so the badge
+// is on for the whole duration of the read and not just the moment of it.
+function showContextBadge(on) {
+  if (!contextBadge) return;
+  contextBadge.hidden = !on;
 }
 
 // One key in flight at a time. Rapid tab switching would otherwise queue a
@@ -2487,9 +2732,9 @@ async function readSuggestionCache() {
   return stored[SUGGESTION_CACHE_KEY] || {};
 }
 
-async function writeSuggestionCache(key, lines, ttl) {
+async function writeSuggestionCache(key, lines, ttl, fromContext = false) {
   const cache = await readSuggestionCache();
-  cache[key] = { at: Date.now(), ttl, lines };
+  cache[key] = { at: Date.now(), ttl, lines, context: fromContext };
   const trimmed = Object.entries(cache)
     .sort((a, b) => b[1].at - a[1].at)
     .slice(0, SUGGESTION_CACHE_MAX);
@@ -2504,6 +2749,13 @@ async function fetchSuggestions(url, title, pageText = '') {
   try {
     const cache = await readSuggestionCache();
     const hit = cache[key];
+    // A cache entry built from page text is skipped once the user turns page
+    // suggestions off. Nothing new is read, but replaying a line set the model
+    // derived from their page after they opted out is the behaviour the opt-in
+    // is meant to prevent, and it survives a restart, which is long enough to
+    // be the only symptom a user notices.
+    const contextAllowed = await contextSuggestionsEnabled();
+    if (hit && hit.context && !contextAllowed) return null;
     if (hit && hit.lines && hit.lines.length
         && Date.now() - hit.at < (hit.ttl || SUGGESTION_TTL_DEFAULT_MS)) {
       return hit.lines;
@@ -2535,6 +2787,7 @@ async function fetchSuggestions(url, title, pageText = '') {
       key,
       data.lines,
       data.context_used ? SUGGESTION_TTL_CONTEXT_MS : SUGGESTION_TTL_DEFAULT_MS,
+      data.context_used === true,
     );
     return data.lines;
   } catch {
@@ -2569,10 +2822,31 @@ function refreshEmptyState(tab) {
   if (!url || !plannerUrlEl.value) return;
   clearTimeout(suggestionTimer);
   suggestionTimer = setTimeout(async () => {
-    const pageText = await readPageContext(tab.id);
+    // The gate, in the one place that decides whether a page is read with no
+    // task in flight. Off means the page is never opened, the model is asked
+    // from the URL and title alone, and a fresh install reads nothing at all.
+    // A task-driven read goes through the debugger relay instead and is not
+    // gated here — the user asked for that one.
+    const pageText = contextSuggestionsEnabled()
+      ? await readPageContext(tab.id, url)
+      : '';
     const lines = await fetchSuggestions(url, tab?.title || '', pageText);
     if (lines) paintSuggestions(lines);
   }, SUGGESTION_DEBOUNCE_MS);
+}
+
+// Read from local storage at the moment of the decision rather than from a
+// variable captured at hydration: the toggle can be flipped without a reload,
+// and a stale in-memory copy here is exactly the bug where the page gets read
+// after the user turned it off.
+async function contextSuggestionsEnabled() {
+  try {
+    const s = await chrome.storage.local.get('settings');
+    const st = s?.settings || {};
+    return st.contextSuggestions === true;
+  } catch {
+    return false;
+  }
 }
 
 // sidepanel.html ships with the suggestions box empty. The first fill waits
@@ -3599,10 +3873,11 @@ function renderPolicyFailureCard(message) {
     // so the footer surfaces it without the user having to read the body.
     const blockedDomain = summaryText.match(/blacklists?\s+([^\s.,;]+)/i)?.[1] || '';
     return {
-      title: "Task not permitted by your Brotto server's policy",
+      title: "Task not permitted by your Brotto policy",
       body: summaryText ||
-        "This task is out of scope for secure mode. Brotto declined it before navigating "
-        + "anywhere. Ask whoever runs your Brotto server if you think this is wrong.",
+        "This task is out of scope for the domains you blocked. Brotto declined it before "
+        + "navigating anywhere. Check the blocked-domains list in settings if you think "
+        + "this is wrong.",
       footer: blockedDomain ? `Blocked domain: ${blockedDomain}` : '',
     };
   }
@@ -3681,8 +3956,20 @@ function handleEvent(message) {
     // ponytail: the session-create retry in startRelay. A server that is
     // down used to fail as one silent throw; the user saw the panel sit on
     // "Starting…" with nothing to explain it.
+    //
+    // The sentence goes in the toast, not the pill. The header has no room
+    // for it — "Server unreachable… (retry 1 of 6)" truncated mid-word and
+    // pushed the rest of the header off screen. The pill keeps the same
+    // one-word shape as its siblings (Connected / Connecting… / Disconnected
+    // / Idle), and the retry count is live information: one toast replacing
+    // the next restates it in place rather than stacking six identical lines.
     case 'server_unreachable':
-      setConnPill('reconnecting', `Server unreachable… (retry ${message.attempt ?? '?'} of ${message.of ?? '?'})`);
+      setConnPill('reconnecting', 'Reconnecting');
+      toast(
+        `Server unreachable — retrying (${message.attempt ?? '?'}/${message.of ?? '?'})`,
+        'bad',
+        4000,
+      );
       break;
 
     case 'canonical_status': {
@@ -3826,6 +4113,29 @@ function handleEvent(message) {
         role: 'done',
         text: messageText,
         finalAnswer: message.finalAnswer,
+      });
+      break;
+
+    case 'task_error':
+      // ponytail: main.py sends this from its `finally` for anything the
+      // harness raised and nobody handled — an unresolvable model config, a
+      // resolver raise, a bug. It used to have no case here at all, so the
+      // frame was dropped: no stopTimer, no setOutcome, no card cleanup. The
+      // clock ran forever and OUTCOME sat on WORKING while the server was
+      // already dead — indistinguishable from a slow step, and the socket
+      // close on top of it started a reconnect that could never succeed.
+      //
+      // A server frame with no case here is an infinite run. Adding one to
+      // the set below is the whole fix; see test-no-orphan-frames.test.js.
+      if (alreadyTerminal('task_error')) break;
+      clearBlockingCards();
+      void saveSession({ status: 'failed', elapsed: timerActiveEl && timerActiveEl.textContent });
+      setOutcome('failed', message.error, 'server_error');
+      stopTimer();
+      setPhase('error', FAILURE_NOTE.server_error);
+      appendFailureBubble({
+        title: FAILURE_NOTE.server_error,
+        footer: String(message.error ?? '').trim(),
       });
       break;
 
@@ -4068,7 +4378,7 @@ goalEl.focus();
     // — but appendMessage writes class "message error" (a space), so the
     // selector never matched and the notice sat in the chat forever.
     state.serverReachable = false;
-    setConnPill(null, 'Server unreachable');
+    setConnPill('error', 'Disconnected');
     toast('Server unreachable — settings still work locally', 'bad', 5000);
   }
   // Last, so it runs whether or not the health probe succeeded: the panel

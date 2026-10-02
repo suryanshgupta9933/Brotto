@@ -1,16 +1,17 @@
-"""Pure decision functions for the secure-mode gate.
+"""Pure decision functions for the policy gate.
 
-In secure mode, the only policy enforcement is:
+Enforcement is:
   - blacklist match → BLOCK (task terminates; no user override)
+  - a (domain, action) pair not yet seen → prompt
 
-In normal mode, NONE of these ever prompt — byte-identical to pre-feat
-harness code. That contract is what keeps the default behavior unchanged
-when no floor policy is configured.
+Both were previously gated on `mode == "secure"`, which made the
+permissive path the default and gave it a name implying the other one
+was a hardening option. There is no mode.
 
 # ponytail: removed whitelist (impractical for admins to maintain;
 # "approve the rest" is the wrong mental model for a bank). Removed
-# block_blacklisted flag (blacklist match is always a hard block in
-# secure mode — no user override path). See schema.py header for the
+# block_blacklisted flag (blacklist match is always a hard block — no
+# user override path). See schema.py header for the
 # full rationale.
 """
 
@@ -36,10 +37,8 @@ def check_domain_policy(url: str, policy: Policy) -> GateDecision:
       2. blacklist pattern matches eTLD+1 or hostname → block
       3. Otherwise → allow
 
-    Always returns n/a in normal mode.
+    Always returns n/a for a URL that cannot be parsed.
     """
-    if policy.mode != "secure":
-        return GateDecision.N_A
     domain = etld1(url)
     if domain is None:
         return GateDecision.N_A
@@ -66,13 +65,10 @@ def check_first_time_seen(
     seen: set[tuple[str, str]],
     policy: Policy,
 ) -> bool:
-    """True iff the (domain, action) pair has not been seen this session
-    AND secure mode + first_time_seen_prompt are both enabled.
+    """True iff the (domain, action) pair has not been seen this session.
 
     Caller adds the key to `seen` after acting on the result (whether
     approved or denied) — re-asking on deny would loop, and on approve
     we don't want to re-prompt on every subsequent step.
     """
-    if policy.mode != "secure" or not policy.first_time_seen_prompt:
-        return False
     return key not in seen

@@ -301,3 +301,58 @@ need covering every time.
 
 **Not verified in a browser.** `▛▜▙▟` and `▖▘▝▗` at 11px in Geist Mono are the
 two most likely to render as tofu boxes rather than read as motion.
+
+## A frame with no case is a run that never ends
+
+The panel's WS message switch is a bare `switch (message.type)` with a
+`default:` that logs and drops. That is the right default for a frame the panel
+genuinely does not care about — and it is exactly what made a bug invisible.
+
+`main.py` sends `{"type": "task_error", "error": str(exc)}` from its `finally`,
+for any exception the harness raised and nothing handled: an unresolvable model
+config, a resolver raise, a bug. **`sidepanel.js` had no `case 'task_error'`.**
+So the frame was dropped: `stopTimer()` never ran, `setOutcome()` never ran,
+`clearBlockingCards()` never ran. The ACTIVE clock counted forever and OUTCOME
+sat on WORKING while the server was already dead — indistinguishable from a slow
+step. The socket close on top of it then tripped `scheduleReconnect()`, so the
+header showed "retry 1 of 6" against a server that had crashed and could never
+resume it. The two symptoms looked like one bug and were two.
+
+**This is the failure mode of an absence.** A missing `case` leaves a diff that
+reads clean — there is nothing in the change to question. So
+`scripts/test-no-orphan-frames.test.js` enumerates the frames crossing the
+service-worker → panel boundary (brace-matching every `notifyUi({…})` call in
+`background.ts`, not a hand-kept list) and fails on any the panel does not
+handle. Transport frames the panel is allowed to drop go in an `IGNORED` map
+with a reason, because an unexplained exemption is the same hole wearing a
+label. Verified to fail: excising the `task_error` case from a copy of the panel
+turns four checks red and exits 1.
+
+The rule for the next frame author: **a server frame is either rendered, or
+listed in `IGNORED` with a reason.** There is no third state.
+
+### Header text has a width budget
+
+`SERVER UNREACHABLE… (RETRY 1 OF 6)` in the status pill truncated mid-word and
+pushed the rest of the header off screen. The pill carries one word —
+`Connected` / `Connecting…` / `Reconnecting` / `Disconnected` / `Idle` — and
+anything longer goes in the toast, which is full-width above the composer and is
+the same treatment as "Address copied". `toast()` replaces rather than stacks,
+which is right for a retry counter: the number updating in place is the
+information, and six stacked copies of the same line are just a slower sentence.
+
+### The model pill is a settings button, and it is not a mode selector
+
+`#modelPill` is a `div role="button"` that opens Settings. When no model is
+chosen it used to read `Default` — a word that reads as a settled value, and in
+the header was mistaken for a leftover normal/secure selector. It now reads
+`Server default` and takes a dashed border via `.model-pill.no-model`, because
+this browser chose nothing and the server decides. **The panel cannot see the
+server's resolved config** — not the env var, not the per-user file — which is
+why the label names the source rather than claiming a value.
+
+An unset model therefore **warns and starts the run**, never blocks:
+`BROTTO_FORCE_ENV_MODEL=1` makes an empty *panel* model entirely legitimate, and
+refusing to start would break the ordinary case where the server is configured
+and the browser isn't. The notice reuses `appendFailureBubble`, so it is the
+theme's own failure card and costs no new CSS.

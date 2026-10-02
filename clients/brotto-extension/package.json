@@ -7,7 +7,7 @@
     "build": "node build.mjs",
     "build:tsc": "tsc --noEmit",
     "watch": "tsc --watch",
-    "test": "npm run build && node --test tests/*.test.js",
+    "test": "npm run build && node --test ../../scripts/*.test.js",
     "clean": "rm -rf dist"
   },
   "keywords": [
@@ -18,7 +18,13 @@
     "browser-automation",
     "model-agnostic"
   ],
-  "author": "Inventic",
+  "homepage": "https://github.com/suryanshgupta9933/brotto#readme",
+  "bugs": "https://github.com/suryanshgupta9933/brotto/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/suryanshgupta9933/brotto.git"
+  },
+  "author": "Brotto contributors",
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/chrome": "^0.0.268",

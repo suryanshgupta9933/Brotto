@@ -165,6 +165,36 @@ class _BadRequest(Exception):
     """A body that arrived and cannot be used. Always a 400."""
 
 
+def _inline_model(payload: object) -> ModelConfig | None:
+    """The extension's `model_config` frame as a `ModelConfig`, or None.
+
+    Three call sites read this shape (task_start, /v1/suggestions,
+    /v1/model/check) and they were three separate literal parses. The
+    consequence of that is the check answering `ok` for a config the run
+    would refuse — which is the one thing a pre-flight check exists to
+    prevent. One parser, so all three agree.
+
+    An empty or absent provider is None, not a ModelConfig: the panel sends
+    `{provider: ""}` until the user opens Settings, and naming a provider we
+    don't know is a different failure from naming none at all.
+    """
+    if not isinstance(payload, dict):
+        return None
+    provider = str(payload.get("provider", "") or "")
+    if not provider:
+        return None
+    try:
+        return ModelConfig(
+            provider=provider,
+            model=str(payload.get("model", "")),
+            context_window=int(payload.get("context_window") or 400_000),
+            base_url=payload.get("base_url") or None,
+        )
+    except (ValueError, TypeError) as exc:
+        log.warning("invalid model_config from extension: %s", exc)
+        return None
+
+
 async def _json_body(request: Request) -> dict:
     """Parse a JSON body, or raise _BadRequest naming the problem.
 
@@ -256,10 +286,9 @@ def _persist_user_policy(user_key: str, payload: dict | None) -> None:
         wrote = _user_policy_persist.save_if_changed(user_key, payload)
         if wrote:
             log.info(
-                "user-policy saved  user_key=%s  blacklist=%s  mode=%s",
+                "user-policy saved  user_key=%s  blacklist=%s",
                 user_key,
                 payload.get("blacklist"),
-                payload.get("mode"),
             )
         # else: silent no-op save; this is the common case when the
         # user clicks Save without changing anything.
@@ -296,6 +325,133 @@ async def get_models():
     })
 
 
+# Vendors that answer an exhausted balance with a 400 and a sentence rather
+# than a 402 — MiniMax and OpenAI both do — so a status code alone throws away
+# the only field that names the problem the user has to fix.
+_CREDIT_HINTS = ("insufficient", "balance", "credit", "quota", "billing", "arrear", "payment")
+
+
+def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
+    """(kind, sentence) for a failed pre-flight probe.
+
+    The `kind` is what the panel branches on; the sentence is what the user
+    reads, and it is written for someone who does not know what a provider
+    error is. Every branch names the fix.
+    """
+    from pydantic_ai.exceptions import ModelHTTPError
+
+    if isinstance(exc, ModelHTTPError):
+        status = exc.status_code
+        body = str(getattr(exc, "body", "") or "").lower()
+        if status in (401, 403):
+            return (
+                "auth_failed",
+                "Your API key was rejected by the provider "
+                f"(HTTP {status}). It is most likely expired, revoked, or "
+                "pasted with a stray space — open Settings → Model and paste "
+                "it again.",
+            )
+        if status == 402 or (status == 400 and any(h in body for h in _CREDIT_HINTS)):
+            return (
+                "no_credits",
+                "The provider accepted your key but has no credit left for "
+                "it. Top up the account, or switch to a different model in "
+                "Settings → Model.",
+            )
+        if status == 429:
+            return (
+                "rate_limited",
+                "The provider is rate-limiting this key (HTTP 429). Wait a "
+                "moment, or switch models in Settings → Model.",
+            )
+        return ("error", f"The provider returned HTTP {status}: {body[:300] or 'no detail'}")
+    # pydantic-ai wraps a transport failure in ModelAPIError and hangs the
+    # real error off `__cause__` (`raise ModelAPIError(...) from e`). Every
+    # provider SDK it ships sits on httpx, so TransportError covers refused
+    # connections, DNS misses, TLS failures and timeouts in one test.
+    import httpx
+
+    seen: set[int] = set()
+    node: BaseException | None = exc
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        if isinstance(node, httpx.TransportError | TimeoutError | OSError):
+            return (
+                "unreachable",
+                "Brotto could not reach the provider. Check the base URL and "
+                "that the machine running it is online.",
+            )
+        node = node.__cause__ or node.__context__
+    return ("error", str(exc)[:400])
+
+
+# ponytail: one request to the provider, before the user pays for a run.
+#
+# The panel calls this before it starts a task, so a missing model, a rejected
+# key and an empty balance arrive as a sentence naming the fix — rather than
+# as a run that fails 30 seconds in with the same information buried in a
+# failure bubble.
+#
+# It resolves through the same three tiers as `task_start` and builds the model
+# the same way, so "ok" means the run can start and not merely that some other
+# code path reached a provider. What it cannot prove is that the provider
+# accepted the request *shape* — that is what the run itself is for.
+@app.post("/v1/model/check")
+async def check_model(request: Request):
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from pydantic_ai.models import ModelRequestParameters
+
+    body = await _json_body(request)
+    client_host = request.client.host if request.client else "unknown"
+    inline_config = _inline_model(body.get("model_config"))
+    api_key = body.get("api_key")
+    inline_creds = (
+        UserCredentials(api_key=api_key, base_url=getattr(inline_config, "base_url", None))
+        if api_key else None
+    )
+
+    try:
+        cfg, creds = resolve_model_config(client_host, inline_config, inline_creds)
+    except ValueError as exc:
+        # ValueError never carries a key — the resolver names the env var, not
+        # the secret. This is the "no model is set anywhere" case, which is
+        # the one the panel turns into a prompt to open Settings.
+        log.warning("model check: nothing resolved: %s", exc)
+        return JSONResponse(content={"ok": False, "kind": "no_model", "error": str(exc)})
+
+    factory = PROVIDER_REGISTRY.get(cfg.provider)
+    if factory is None or not factory.validate_model_id(cfg.model):
+        named = f"{cfg.provider}:{cfg.model}"
+        return JSONResponse(content={
+            "ok": False, "kind": "unknown_model",
+            "error": f"{named} is not a model Brotto knows about. Pick one from "
+                      "the list in Settings → Model.",
+        })
+
+    try:
+        model = factory.build(cfg.model, creds)
+        await model.request(
+            [ModelRequest(parts=[UserPromptPart(content="ping")])],
+            model_settings=factory.model_settings(cfg.model),
+            model_request_parameters=ModelRequestParameters(),
+        )
+    except Exception as exc:
+        kind, message = _classify_probe_failure(exc)
+        log.warning("model check failed for %s/%s: %s (%s)",
+                    cfg.provider, cfg.model, kind, type(exc).__name__)
+        return JSONResponse(content={
+            "ok": False, "kind": kind, "error": message,
+            "model": f"{cfg.provider}:{cfg.model}",
+        })
+
+    log.info("model check ok for %s/%s", cfg.provider, cfg.model)
+    return JSONResponse(content={
+        "ok": True,
+        "model": f"{cfg.provider}:{cfg.model}",
+        "context_window": cfg.context_window,
+    })
+
+
 @app.get("/v1/policy")
 async def get_effective_policy(request: Request):
     from .policy import UserPolicy
@@ -313,7 +469,6 @@ async def get_effective_policy(request: Request):
             user_pol = None
     effective = user_pol or Policy()
     return JSONResponse(content={
-        "mode": effective.mode,
         "blacklist": effective.blacklist,
         "sensitive_actions": effective.sensitive_actions,
         "caller": caller,
@@ -375,17 +530,23 @@ async def policy_ack(request: Request):
     body = await _json_body(request)
     settings = body.get("settings") or {}
     user_id = body.get("user_id") or request.client.host if request.client else "unknown"
-    mode = settings.get("mode")
     blacklist = settings.get("blacklist") or []
     # Mirror on the session registry so a later GET /v1/policy returns
     # this user's view (handles the "Save with no WS open" case from
     # the audit work earlier). Persist to disk too.
-    snapshot = {"mode": mode, "blacklist": blacklist}
+    #
+    # The snapshot is the whole document — building it as
+    # `{"mode": settings.get("mode"), ...}` while the field no longer
+    # exists wrote a literal `None`, which then failed UserPolicy
+    # validation on the next GET, was swallowed by the bare except
+    # above, and silently served an empty blacklist. Add a key here
+    # only if Policy actually declares it.
+    snapshot = {"blacklist": blacklist}
     registry.set_user_policy(user_id, snapshot)
     _persist_user_policy(user_id, snapshot)
     log.warning(
-        "[%s] POLICY: user saved settings  mode=%s  blacklist=%s",
-        user_id, mode, blacklist,
+        "[%s] POLICY: user saved settings  blacklist=%s",
+        user_id, blacklist,
     )
     try:
         from .agent.audit import append_policy_event
@@ -424,18 +585,7 @@ async def suggestions(request: Request):
     page_text = str(body.get("page_text", "") or "")
 
     client_host = request.client.host if request.client else "unknown"
-    inline_config = None
-    cfg_payload = body.get("model_config")
-    if isinstance(cfg_payload, dict) and cfg_payload.get("provider"):
-        try:
-            inline_config = ModelConfig(
-                provider=str(cfg_payload["provider"]),
-                model=str(cfg_payload.get("model", "")),
-                context_window=int(cfg_payload.get("context_window") or 400_000),
-                base_url=cfg_payload.get("base_url") or None,
-            )
-        except (ValueError, TypeError) as exc:
-            log.warning("invalid model_config in /v1/suggestions: %s", exc)
+    inline_config = _inline_model(body.get("model_config"))
     api_key = body.get("api_key")
     inline_creds = (
         UserCredentials(api_key=api_key, base_url=getattr(inline_config, "base_url", None))
@@ -598,8 +748,16 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     parsed_model_cfg = None
     if isinstance(model_cfg_payload, dict):
         provider_name = model_cfg_payload.get("provider", "")
-        if provider_name not in PROVIDER_REGISTRY:
-            log.warning("[%s] unknown provider %r — closing", session_id, provider_name)
+        # An empty provider is the extension saying it has nothing chosen, not
+        # naming a provider we don't know — the panel sends `{provider: ""}`
+        # on every task until the user opens Settings. Refusing it closed the
+        # socket before the resolver ever ran, so BROTTO_FORCE_ENV_MODEL and a
+        # plain AGENT_MODEL both became unreachable: the run could not start
+        # and the failure reached the user as "server unreachable" rather than
+        # as the model choice it was. Fall through and let the resolver decide,
+        # which is the only thing that knows about env and per-user configs.
+        if provider_name and provider_name not in PROVIDER_REGISTRY:
+            log.warning("[%s] unknown provider %r — refusing the task", session_id, provider_name)
             await ws_send({
                 "type": "task_failed",
                 "failure_reason": "model_not_found",
@@ -607,16 +765,7 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
             })
             await websocket.close(code=4000)
             return
-        try:
-            parsed_model_cfg = ModelConfig(
-                provider=provider_name,
-                model=str(model_cfg_payload.get("model", "")),
-                context_window=int(model_cfg_payload.get("context_window") or 400_000),
-                base_url=model_cfg_payload.get("base_url") or None,
-            )
-        except (ValueError, TypeError) as e:
-            log.warning("[%s] invalid model_config in task_start: %s", session_id, e)
-            parsed_model_cfg = None
+        parsed_model_cfg = _inline_model(model_cfg_payload)
 
         if remember_key and parsed_model_cfg is not None:
             try:
@@ -639,9 +788,8 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         registry.set_user_policy(client_host, user_policy_payload)
         _persist_user_policy(client_host, user_policy_payload)
     effective_policy = user_policy or Policy()
-    log.info("[%s] effective_policy  mode=%s  blacklist=%d",
-             session_id, effective_policy.mode,
-             len(effective_policy.blacklist))
+    log.info("[%s] effective_policy  blacklist=%d",
+             session_id, len(effective_policy.blacklist))
 
     deps = AgentDeps(
         user_id=session_id,
@@ -669,7 +817,6 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     try:
         await ws_send({
             "type": "policy_effective",
-            "mode": effective_policy.mode,
             "blacklist": effective_policy.blacklist,
             "sensitive_actions": effective_policy.sensitive_actions,
         })
@@ -824,15 +971,13 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     # survives a session restart — see the ponytail note
                     # at the task_start handler above.
                     snapshot = {
-                        "mode": settings.get("mode"),
                         "blacklist": settings.get("blacklist") or [],
                     }
                     registry.set_user_policy(client_host, snapshot)
                     _persist_user_policy(client_host, snapshot)
                     log.warning(
-                        "[%s] POLICY: user saved settings  mode=%s  blacklist=%s",
+                        "[%s] POLICY: user saved settings  blacklist=%s",
                         session_id,
-                        settings.get("mode"),
                         settings.get("blacklist"),
                     )
                     try:
@@ -842,7 +987,6 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                             step=None, kind="policy_acknowledged",
                             domain=None, action=None,
                             decision=(
-                                f"mode={settings.get('mode')}  "
                                 f"blacklist={settings.get('blacklist')}"
                             ),
                         )
@@ -926,11 +1070,10 @@ async def websocket_agent(websocket: WebSocket, user_id: str):
                     except Exception as exc:
                         log.warning("[%s] invalid user_policy, ignoring: %s", user_id, exc)
                 effective_policy = user_policy or Policy()
-                log.info("[%s] submit_task  task=%r  start_url=%s  effective_mode=%s",
-                         user_id, task_text[:80], start_url, effective_policy.mode)
-                log.info("[%s] effective_policy  mode=%s  blacklist=%d",
-                         user_id, effective_policy.mode,
-                         len(effective_policy.blacklist))
+                log.info("[%s] submit_task  task=%r  start_url=%s",
+                         user_id, task_text[:80], start_url)
+                log.info("[%s] effective_policy  blacklist=%d",
+                         user_id, len(effective_policy.blacklist))
 
                 async def _run_task(task: str, start_url: str) -> None:
                     from .dev.playwright_browser import PlaywrightBrowser
@@ -1013,8 +1156,7 @@ async def run_task(request: Request):
         except Exception as exc:
             log.warning("/run: invalid user_policy, ignoring: %s", exc)
     effective_policy = user_policy or Policy()
-    log.info("/run  task=%r  start_url=%s  effective_mode=%s",
-             task[:80], start_url, effective_policy.mode)
+    log.info("/run  task=%r  start_url=%s", task[:80], start_url)
 
     if not task:
         return _error(400, "task required")

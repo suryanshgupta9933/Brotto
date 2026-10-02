@@ -35,9 +35,8 @@ than assumed, and ranking under a budget is the same move as that compression â€
 same source, less tree, better tree.
 
 This is the only one of the five perception fixes the fixture suite can attest to,
-because it is the only server-side one. `auth-inbox` is green because of it. See
-"Wave 0 blockers â€” perception" in `docs/product/brotto-current-state.md` for why the
-other four still read red.
+because it is the only server-side one. `auth-inbox` is green because of it. The
+other four are extension-side and have no headless test that exercises them.
 
 ### What a step costs
 
