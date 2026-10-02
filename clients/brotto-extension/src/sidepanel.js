@@ -291,6 +291,11 @@ if ($modelSave) {
         : chrome.storage.session.remove('modelApiKey'),
     ]);
     setModelPill(model);
+    // A re-pasted key is usually a *different* key, and the pre-flight cache
+    // only knows whether some key was present — it cannot tell them apart
+    // without hashing a secret to find out. Dropping the pass here is exact,
+    // and costs one probe on the next send.
+    modelCheckPass = null;
     if ($modelStatus) {
       $modelStatus.textContent = 'Saved.';
       setTimeout(() => { $modelStatus.textContent = ''; }, 2000);
@@ -375,6 +380,87 @@ async function hydrateModelSettings() {
   // Don't re-hydrate the API key field — it's in chrome.storage.session
   // and we deliberately don't surface it in the UI (no plaintext display).
 }
+// ── Pre-flight: can this browser run anything at all?
+//
+// The check is a real request to the provider, not a local sanity check: a
+// rejected key and an exhausted balance are both invisible from here, and both
+// used to surface as a run that died after the first step with the reason
+// buried in a failure bubble. The server does the call and classifies it, so
+// the panel never has to know an HTTP status from any of eight vendors.
+//
+// A failure to *check* is not a failure of the model. The server being down,
+// or a proxy in the way, must not turn into "your model is broken" — those
+// have their own reporting (connect / reconnect) and it already works. So
+// anything that isn't a clean answer from the endpoint passes through and
+// lets the run start.
+const MODEL_CHECK_TITLE = {
+  no_model: 'No model is set',
+  auth_failed: 'Your API key was rejected',
+  no_credits: 'Out of credit with the provider',
+  rate_limited: 'The provider is rate-limiting this key',
+  unknown_model: 'That model is not available',
+  unreachable: 'Cannot reach the model provider',
+};
+
+// Only a pass is cached. Caching a failure would leave a user who fixes the
+// key still blocked until the TTL expired, which is the one outcome worse than
+// not caching at all.
+//
+// ponytail: 10 minutes. MiniMax-M3 measured 2–5s per probe with thinking
+// disabled, and a user starting five tasks in a row should pay that once.
+// Ceiling: a key revoked mid-session goes unnoticed for up to this long.
+const MODEL_CHECK_TTL_MS = 10 * 60 * 1000;
+let modelCheckPass = null;
+
+async function checkModelReady() {
+  const [local, session_] = await Promise.all([
+    chrome.storage.local.get('modelConfig'),
+    chrome.storage.session.get('modelApiKey'),
+  ]);
+  const raw = local.modelConfig;
+  const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
+  const apiKey = session_.modelApiKey || undefined;
+  // The key is the provider, the model and whether a key was pasted — never
+  // the key itself. Changing any of those has to re-run the probe.
+  const sig = `${cfg ? `${cfg.provider}:${cfg.model}` : ''}|${apiKey ? 'k' : 'nokey'}`;
+  if (modelCheckPass && modelCheckPass.sig === sig
+      && Date.now() - modelCheckPass.at < MODEL_CHECK_TTL_MS) {
+    return { ok: true, model: modelCheckPass.model };
+  }
+
+  const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
+  let body;
+  try {
+    const res = await fetch(`${base}/v1/model/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_config: cfg || undefined, api_key: apiKey }),
+    });
+    if (!res.ok) return { ok: true };  // could not check — not the model's fault
+    body = await res.json();
+  } catch {
+    return { ok: true };
+  }
+  if (!body || body.ok !== false) {
+    modelCheckPass = { sig, at: Date.now(), model: body && body.model };
+    return { ok: true, model: body && body.model };
+  }
+  // The resolver's own "no model configuration available" names env vars and
+  // frame fields — accurate for an operator, useless to the person reading
+  // the panel, and they can only act on the settings screen anyway.
+  if (body.kind === 'no_model') {
+    return {
+      ok: false,
+      kind: 'no_model',
+      body: 'Brotto has no model to run on: this browser has none saved, and '
+          + 'your server has none configured. Open **Settings → Model** to '
+          + 'choose a provider and model — Brotto will check the key before '
+          + 'it starts anything.',
+    };
+  }
+  return { ok: false, kind: body.kind, body: body.error || 'The model could not be used.' };
+}
+
 // ── Wire the dropdowns to the value hosts the rest of this file uses.
 const providerDd = $modelProvider && attachDropdown({
   root: document.getElementById('providerDd'),
@@ -1679,6 +1765,24 @@ async function sendUserMessage() {
   // so the real question is whether a task is in flight, not what the phase
   // is called.
   if (state.taskInFlight) return;
+  // Pre-flight: is there a model this browser can actually run on? It sits
+  // here — after the steer and clarify branches, which never start a run and
+  // so never need one, and before anything that latches a run into being. A
+  // refusal therefore leaves nothing half-started: no transcript cleared, no
+  // clock, no taskInFlight. The words stay in the box, because the fix is a
+  // settings change and a user who has to retype a long task to apply it
+  // stops trying.
+  setPhase('connecting', 'Checking your model…');
+  const check = await checkModelReady();
+  if (!check.ok) {
+    setPhase('error', MODEL_CHECK_TITLE[check.kind] || 'The model is not usable');
+    appendFailureBubble({
+      title: MODEL_CHECK_TITLE[check.kind] || 'The model is not usable',
+      body: check.body,
+      footer: 'Your task is still in the box.',
+    });
+    return;
+  }
   // ponytail: soft length cap. Tasks > MAX_TASK_CHARS get a confirm dialog
   // because long compound instructions are a classic prompt-injection vector.
   // The server logs a warning on the same threshold (defense in depth) but
@@ -1707,22 +1811,6 @@ async function sendUserMessage() {
   state.taskCount = continuing ? (state.taskCount || 1) + 1 : 1;
   clearMessages({ keepTranscript: continuing });
   appendMessage({ role: 'user', text });
-  // ponytail: an unset model is a warning, not a block. The server usually
-  // does have one — BROTTO_FORCE_ENV_MODEL, AGENT_MODEL, or a per-user file —
-  // and none of those are visible from here, so refusing to start would break
-  // the ordinary case where the server is configured and the browser isn't.
-  // What it must not do is let an unconfigured run look configured, which is
-  // what the header's neutral "Default" label did.
-  const stored = await chrome.storage.local.get('modelConfig');
-  const rawCfg = stored.modelConfig;
-  const chosen = rawCfg && typeof rawCfg.provider === 'string' ? rawCfg : rawCfg?.model_config;
-  if (!chosen) {
-    appendFailureBubble({
-      title: 'No model chosen in this browser',
-      body: "Brotto will run on your server's default model. To use a different one, or to bring your own key, open **Settings → Model**.",
-      footer: 'The pill in the header shows which model is in use.',
-    });
-  }
   state.lastGoal = text;
   goalEl.value = '';
   goalEl.style.height = 'auto';
