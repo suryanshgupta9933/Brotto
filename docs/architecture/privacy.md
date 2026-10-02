@@ -23,24 +23,21 @@ So the privacy posture is not "we do not collect your data". It is:
 
 | Data | Where | Lifetime |
 |---|---|---|
-| Page text, every step | `logs/sessions/<id>.pages.json`, server | **forever** — nothing prunes it |
-| AX tree, page text chars, `ax_diff` | inside the audit document, server | forever |
-| Task title, action names, URLs, typed input | inside the audit document, server | forever |
+| Page digests (200 chars each) | `logs/sessions/<id>.scratchpad.txt`, server | until deleted |
+| AX-tree sizes, page-text chars, changed-element chars | inside the audit document, server | until deleted |
+| Task title, action names, URLs, typed input | inside the audit document, server | until deleted |
 | Model config, `base_url` | `chrome.storage.local`, user | until cleared |
 | API key | `chrome.storage.session`, user | until browser restart |
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Audit request bodies | whatever the model provider logs | theirs, not ours |
 
-The `.pages.json` sidecar is the boundary. It exists because page text is
-arbitrary content and would corrupt the manifest's line format inside the
-audit document — a sound reason — and it is also **the single largest privacy
-liability in the codebase**, because it is 200KB of a person's inbox per twenty
-pages, unredacted, retained indefinitely.
-
-`ax_diff` is a second copy of the same content in a worse place: it is written
-into the audit document itself, so it lands in the *main* record rather than
-the sidecar, and it is never scrubbed. It is the reason "the sidecar is the
-boundary" is currently a description rather than a guarantee.
+Page text itself is **not** written to disk, and neither is the AX diff that
+used to quote it. The `.pages.json` sidecar that was meant to hold page bodies
+lost its last writer, and `ax_diff` went the same way in 2026-10-03: both were
+counts and short digests, never content. Two tests hold that line —
+`test_persisting_a_scratchpad_writes_no_page_text` and
+`test_the_audit_document_holds_no_page_content`. The model still reads the page;
+the record only says how much of it there was.
 
 ## The four rules
 
@@ -57,12 +54,16 @@ that is rule 2 violated in code, and it is closed by the auth work, not by a
 docstring.
 
 **3. Redaction is not a privacy boundary.** `is_secret_field` runs at audit-write
-time and catches *typed* secrets. It does not catch the page. A `.pages.json`
-is unredacted by design, because the model needs to read the page.
+time and catches *typed* secrets. It does not catch the page. What keeps the
+page off disk is not redaction — it is that the write path for page content was
+removed, which is a shape decision, and one that can be undone by a well-meaning
+`begin_turn(..., ax_diff=…)`.
 
 **4. Retention is a feature, not a cleanup task.** `_prune_sessions` evicts
-in-memory state and never touches disk, so files accumulate forever. A
-hosted user currently has no way to delete their own.
+in-memory state and never touches disk. The user can now delete a session or
+all of them (`DELETE /v1/sessions/{id}`, `DELETE /v1/sessions`, both behind
+`AGENT_SECRET`), and the panel exposes it behind a confirmation. Nothing
+*expires* on its own yet — that is `BROTTO_RETENTION_DAYS`, still unbuilt.
 
 ## Where this is going: local-first
 
@@ -73,7 +74,7 @@ The target is that the orchestrator holds **no session history at all**.
 │ extension                       │        │ orchestrator             │
 │  IndexedDB                      │        │  no state dir            │
 │    sessions/<id>.json           │        │  no audit.py             │
-│    sessions/<id>.pages.json     │        │  no policy files         │
+│    sessions/<id>.scratchpad.txt│        │  no policy files         │
 │  chrome.storage.local           │        │                          │
 │    model_config, policy, prefs  │        │  per step:               │
 │                                  │        │    in  page + history    │
@@ -91,18 +92,16 @@ client sends it up each step; the server keeps nothing.
 Why this is cheap rather than a rewrite:
 
 - The history is **small**. `step_summaries` is a digest per step; the scratchpad
-  manifest is a 200-char digest per page. The bodies are the big part, and they
-  only ship when the model calls `recall_memory(id)` — which is already rare
-  (the write path was deleted entirely, and the prompt tells the model not to
-  recall the page it is standing on). A client-side fetch on that call is
-  near-free.
+  manifest is a 200-char digest per page. Neither carries page content — that
+  was already true before the relocation, so what moves is metadata, not
+  bodies.
 - **Resume and panel replay become client-side reads.** Both already rebuild
   from `tasks[]`/`turns[]`/`prompts[]` — `scripts/test-replay.test.js` already
   extracts and evals that code. It is reading a file; it can read an IndexedDB
   record instead.
-- **`.pages.json` moves wholesale** into IndexedDB. `chrome.storage.local` is
-  ~10MB and needs `unlimitedStorage`; IndexedDB is the right home for hundreds
-  of megabytes of page text and needs no permission.
+- **The audit document moves wholesale** into IndexedDB. `chrome.storage.local`
+  is ~10MB and needs `unlimitedStorage`; IndexedDB is the right home for an
+  unbounded transcript history and needs no permission.
 
 What is lost, honestly: **server-side observability**. We could see a run
 crash; now we cannot. That is the trade, and it is the correct trade for a
@@ -111,20 +110,22 @@ logging stays and still gives us everything except content.
 
 ## What is true today, and must not be oversold
 
-**Until the local-first refactor lands, the page text is on the server's disk.**
-No amount of documentation changes that. So:
+**Until the local-first refactor lands, the run's shape is on the server's
+disk.** No page text, no page bodies, no AX diff — but the URLs, the titles,
+the task text, the action names and the typed input are. So:
 
-- `PRIVACY.md` describes the *target* and the *current* state honestly, and the
-  deletion path is real (delete the files) rather than theoretical.
-- The launch gates are partly closed. `/ws/ext` is now gated on
-  `AGENT_SECRET`, which is the privacy control — but only when one is set,
-  and "no secret" is a warning rather than a refusal so that loopback dev
-  still works. A file full of someone's bank statement behind a server
-  with no secret set is still the thing to avoid.
-- Sequence: **auth** (done 2026-10-03), then **retention and delete**, then
-  local-first. Doing local-first first leaves an open door pointed at a
-  directory that no longer has the interesting files — which is fine, but
-  the door should be closed either way.
+- `PRIVACY.md` describes the *current* state honestly, and the deletion path
+  is real: `DELETE /v1/sessions/{id}` takes the document, the scratchpad and
+  the pages sidecar together, so there is no "part of it survived".
+- The launch gates are partly closed. `/ws/ext` and the session endpoints are
+  gated on `AGENT_SECRET`, which is the privacy control — but only when one is
+  set, and "no secret" is a warning rather than a refusal so that loopback dev
+  still works. A file full of someone's browsing behind a server with no secret
+  set is still the thing to avoid.
+- Sequence: **auth** (done 2026-10-03), **delete** (done 2026-10-03), then
+  **retention**, then local-first. Doing local-first first leaves an open door
+  pointed at a directory that no longer has the interesting files — which is
+  fine, but the door should be closed either way.
 
 ## Writing new code here
 

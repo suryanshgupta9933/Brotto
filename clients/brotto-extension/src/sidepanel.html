@@ -359,6 +359,10 @@
       padding-bottom: 10px;
       border-bottom: 2px solid var(--ink);
     }
+    /* Two controls on the right of a head: the close icon must not absorb
+       the clicks meant for the one beside it. */
+    .settings-head-actions { display: flex; align-items: center; gap: 8px; }
+    }
     .settings-title { color: var(--ink); }
 
     .settings-section { display: flex; flex-direction: column; gap: 6px; }
@@ -449,25 +453,55 @@
        grouped with the wrong row. */
     .history-list { display: flex; flex-direction: column; margin-top: 2px; }
 
+    /* The row is a <button> next to a delete <button>, so the ledger rule and
+       the hover wash belong to the wrapper — two adjacent buttons otherwise
+       draw one line twice and highlight only half the row. */
+    .history-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: start;
+      border-bottom: 1px solid var(--rule);
+    }
+    .history-row:hover { background: var(--paper-2); }
+
     .history-item {
       display: grid;
       grid-template-columns: 8px 1fr;
       gap: 9px;
       padding: 13px 0;
       /* The row is a <button>, so the UA's 2px outset border applies to every
-         side this doesn't name. Zero it, then draw back only the ledger line. */
+         side this doesn't name. Zero it; the rule above is drawn instead. */
       border: 0;
-      border-bottom: 1px solid var(--rule);
       background: none;
       font: inherit;
       color: inherit;
       text-align: left;
       cursor: pointer;
-      transition: background var(--t);
     }
+
+    /* Hidden until the row is hovered or the button itself has focus — a
+       trash icon on all 20 rows reads as decoration. Keyboard focus shows it
+       too, so it is never a control only a mouse can reach. */
+    .history-delete {
+      align-self: center;
+      width: 26px;
+      height: 26px;
+      margin-right: 2px;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--ink-3);
+      cursor: pointer;
+      opacity: 0;
+      display: grid;
+      place-items: center;
+    }
+    .history-row:hover .history-delete,
+    .history-delete:focus-visible { opacity: 1; }
+    .history-delete:hover { color: var(--bad); }
+    .history-delete svg { width: 13px; height: 13px; }
     /* No top border on the first row: .settings-head already closes with a
        2px black rule, and a hairline 20px under it reads as a second one. */
-    .history-item:hover { background: var(--paper-2); }
 
     /* Status is a 6px square, not a dot — at this size the mark is only
        legible because the system has no curves. Colour carries the state.
@@ -523,6 +557,31 @@
       text-transform: uppercase;
       margin-bottom: 7px;
     }
+
+    /* ─── Confirm ──────────────────────────────────────────────────────
+       Centred rather than sliding in: this is a question about the thing
+       under the cursor, not a place to go. Same scrim idiom as the other
+       overlays so the click-to-dismiss already works. */
+    .overlay-center { align-items: center; justify-content: center; }
+    .confirm-panel {
+      width: 280px;
+      max-width: calc(100% - 32px);
+      background: var(--paper);
+      border: 2px solid var(--ink);
+      padding: 18px 18px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .confirm-body {
+      margin: 0;
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: var(--ink-2);
+      overflow-wrap: anywhere;
+    }
+    .confirm-body strong { color: var(--ink); font-weight: 600; }
+    .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
     /* The history list and the replayed chat swap in the same overlay, so
        [hidden] still has to beat a class selector — the UA's
@@ -1886,14 +1945,33 @@
   <div id="historyPanel" class="overlay-panel">
     <div class="settings-head">
       <span class="settings-title">Session history</span>
-      <button id="historyClose" class="btn-icon" aria-label="Close history">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-          <path d="M5 5l14 14M19 5L5 19"></path>
-        </svg>
-      </button>
+      <div class="settings-head-actions">
+        <button id="historyDeleteAll" class="btn btn-danger" type="button" hidden>Delete all</button>
+        <button id="historyClose" class="btn-icon" aria-label="Close history">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <path d="M5 5l14 14M19 5L5 19"></path>
+          </svg>
+        </button>
+      </div>
     </div>
     <div id="historyList" class="history-list"></div>
 
+  </div>
+</div>
+
+<!-- ── Confirm ─────────────────────────────────────────────────────
+     Irreversible, so it asks. `window.confirm` cannot be styled and this
+     panel has a shape for everything else it asks. Two callers: one row,
+     and the whole list. -->
+<div id="confirmOverlay" class="overlay overlay-center" role="alertdialog" aria-modal="true"
+     aria-labelledby="confirmTitle" aria-describedby="confirmBody">
+  <div class="confirm-panel">
+    <span id="confirmTitle" class="settings-title"></span>
+    <p id="confirmBody" class="confirm-body"></p>
+    <div class="confirm-actions">
+      <button id="confirmCancel" class="btn" type="button">Keep it</button>
+      <button id="confirmOk" class="btn btn-danger" type="button">Delete</button>
+    </div>
   </div>
 </div>
 

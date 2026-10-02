@@ -634,6 +634,51 @@ historyOverlay.addEventListener('click', (e) => {
   if (e.target === historyOverlay) historyOverlay.classList.remove('open');
 });
 
+// ── Confirm ────────────────────────────────────────────────────────────────
+// Erasure is the one thing here with no undo, so it asks. `window.confirm`
+// cannot be styled and everything else this panel asks has a shape.
+//
+// The body is passed as text nodes, never innerHTML: it carries the user's
+// own task text, and a task named `<img onerror=…>` must render as a sentence.
+const confirmOverlay = document.getElementById('confirmOverlay');
+const confirmTitle = document.getElementById('confirmTitle');
+const confirmBody = document.getElementById('confirmBody');
+const confirmOk = document.getElementById('confirmOk');
+const confirmCancel = document.getElementById('confirmCancel');
+
+let confirmSettle = null;
+
+function askConfirm(title, body, okLabel = 'Delete') {
+  if (confirmSettle) confirmSettle(false);
+  confirmTitle.textContent = title;
+  confirmBody.replaceChildren();
+  body.forEach((part) => {
+    const span = document.createElement(typeof part === 'string' ? 'span' : 'strong');
+    span.textContent = part;
+    confirmBody.appendChild(span);
+  });
+  confirmOk.textContent = okLabel;
+  confirmOverlay.classList.add('open');
+  confirmOk.focus();
+  return new Promise((resolve) => { confirmSettle = resolve; });
+}
+
+function closeConfirm(answer) {
+  confirmOverlay.classList.remove('open');
+  const settle = confirmSettle;
+  confirmSettle = null;
+  if (settle) settle(answer);
+}
+
+confirmOk.addEventListener('click', () => closeConfirm(true));
+confirmCancel.addEventListener('click', () => closeConfirm(false));
+confirmOverlay.addEventListener('click', (e) => {
+  if (e.target === confirmOverlay) closeConfirm(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && confirmOverlay.classList.contains('open')) closeConfirm(false);
+});
+
 // ponytail: sessions are a flat chrome.storage.local list, newest first,
 // capped so the panel's boot read stays trivial. The list is read on every
 // history open rather than held in memory — the whole point is that it
@@ -707,6 +752,7 @@ function formatSessionTime(ts) {
 async function renderHistory() {
   historyList.hidden = false;
   const sessions = await listSessions();
+  document.getElementById('historyDeleteAll').hidden = sessions.length === 0;
   if (sessions.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'history-empty';
@@ -716,6 +762,8 @@ async function renderHistory() {
     return;
   }
   historyList.replaceChildren(...sessions.map((s) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'history-row';
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'history-item';
@@ -750,9 +798,80 @@ async function renderHistory() {
       if (i === bits.length - 1) span.className = 'when';
       meta.appendChild(span);
     });
-    return row;
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'history-delete';
+    del.setAttribute('aria-label', `Delete “${s.task || 'this conversation'}”`);
+    del.title = 'Delete this conversation';
+    del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+      + 'stroke-width="2" stroke-linecap="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"></path></svg>';
+    del.addEventListener('click', () => void deleteSession(s));
+
+    wrap.append(row, del);
+    return wrap;
   }));
 }
+
+// ── Erasure ────────────────────────────────────────────────────────────────
+// Two files, not one: the transcript on the server and the row in this
+// browser. Removing only the row would leave the conversation on the
+// server's disk and out of the list — the worst of both.
+async function deleteSession(entry) {
+  const ok = await askConfirm(
+    'Delete this conversation?',
+    ['This deletes “', entry.task || 'this conversation', '” and everything in it. '
+      + 'There is no way back.'],
+  );
+  if (!ok) return;
+
+  const remaining = (await listSessions()).filter((s) => s !== entry);
+  await chrome.storage.local.set({ [SESSIONS_KEY]: remaining });
+  // The row goes from the panel first. A server that is down, or a secret
+  // that is wrong, must not leave the user staring at a button that does
+  // nothing — and the row is the half they can see.
+  await renderHistory();
+
+  if (!entry.session_id) return;   // written before the panel knew ids
+  try {
+    const res = await fetch(`${serverBase()}/v1/sessions/${encodeURIComponent(entry.session_id)}`, {
+      method: 'DELETE',
+      headers: await authHeaders(),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    toast('Deleted from the server');
+  } catch {
+    toast('Removed here, but the server did not answer — this one may still be on disk',
+      'bad', 6000);
+  }
+}
+
+async function deleteAllSessions() {
+  const sessions = await listSessions();
+  const ok = await askConfirm(
+    'Delete every conversation?',
+    [`This deletes all ${sessions.length} conversation`
+      + `${sessions.length === 1 ? '' : 's'} in the list and every file behind `
+      + 'them on the server. There is no way back.'],
+  );
+  if (!ok) return;
+  await chrome.storage.local.set({ [SESSIONS_KEY]: [] });
+  await renderHistory();
+  try {
+    const res = await fetch(`${serverBase()}/v1/sessions`, {
+      method: 'DELETE',
+      headers: await authHeaders(),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    toast('Everything deleted');
+  } catch {
+    toast('Cleared the list, but the server did not answer — files may still be on disk',
+      'bad', 6000);
+  }
+}
+
+document.getElementById('historyDeleteAll')
+  .addEventListener('click', () => void deleteAllSessions());
 
 // ── Replaying a session from history ──────────────────────────────────────
 // A history row is a conversation, not a report, so clicking one puts that
@@ -781,12 +900,15 @@ async function authHeaders() {
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
+// Same base as the panel's other server calls (fetchSuggestions, settings
+// verify): the settings field is the source of truth, and state.plannerUrl
+// is empty until a task has connected at least once in this panel.
+function serverBase() {
+  return (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
+}
+
 async function fetchAudit(sessionId) {
-  // Same base as the panel's other server calls (fetchSuggestions, settings
-  // verify): the settings field is the source of truth, and state.plannerUrl
-  // is empty until a task has connected at least once in this panel.
-  const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
-  const res = await fetch(`${base}/v1/sessions/${encodeURIComponent(sessionId)}/audit`, {
+  const res = await fetch(`${serverBase()}/v1/sessions/${encodeURIComponent(sessionId)}/audit`, {
     headers: await authHeaders(),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

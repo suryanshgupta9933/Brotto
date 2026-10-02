@@ -89,8 +89,30 @@ a deployment step:
 - `POST /run` is unauthenticated and launches a headless browser; it should
   be refused outside dev.
 - There is no retention. `_prune_sessions` evicts in-memory state only and
-  never touches disk, so `logs/sessions/` grows without bound.
-- There is no way for the user to delete a session.
+  never touches disk, so `logs/sessions/` grows without bound. The user can
+  delete by hand (`DELETE /v1/sessions`, or the panel), but nothing expires.
 
-`/ws/ext` auth and the `/v1/sessions` enumeration were both open gates and
-are closed as of 2026-10-03 — see `tests/test_agent_auth.py`.
+`/ws/ext` auth, the `/v1/sessions` enumeration and session deletion were all
+open gates and are closed as of 2026-10-03 — see `tests/test_agent_auth.py`
+and `tests/test_session_delete.py`.
+
+## Deleting a session
+
+`audit.delete(session_id)` takes the document, the scratchpad and the pages
+sidecar together, and drops the session from the live registry. Two details
+are the difference between a delete that works and one that looks like it
+does:
+
+- `Path.unlink(missing_ok=True)` returns `None` whether or not the file was
+  there, so the first version of this reported success for a session that
+  never existed. Catch `FileNotFoundError` instead.
+- The agent loop holds an `AuditTrail` **reference**, not a registry lookup,
+  so popping `_LIVE` does not stop its next flush from recreating the file.
+  Every mutation goes through `_record`, so one `_deleted` flag there is the
+  whole fix.
+
+`DELETE` on a session that is already gone answers `200 {"deleted": false}`
+rather than an error: a second delete is not a failure the user has to
+understand. An unauthenticated one answers 404, like every other session
+route — this server holds the user's own transcripts, and a 403 confirms
+there is something worth probing.

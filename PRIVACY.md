@@ -158,17 +158,19 @@ this data: we hold it on our own disk for as long as the retention section above
 
 ## Retention and deletion
 
-Brotto has no automatic deletion. Nothing expires on a timer, and nothing is cleaned up after a
-period. This is the current behaviour of the software, not a policy choice we are making about it:
+Nothing expires on a timer. **Deletion is entirely yours**, and it is immediate:
 
-- **Session records** — the audit file, the page-text file, and the scratchpad, described above — are
-  written to disk and stay there indefinitely. There is no code anywhere in the server that deletes
-  them.
-  - **Self-hosted:** you delete them. Remove the file, or the `logs/sessions/` directory, and the
-    conversation is gone. They are ordinary files in a folder you own.
-  - **Hosted:** you cannot delete them yourself — they are on our disk. Ask us, using the contact
-    address at the end of this policy, and we will remove them. We are not promising a time limit for
-    that, because there is not one in the product today.
+- **Session records** — the audit file and the scratchpad, described above — are written to disk and
+  stay there until you remove them. Nothing expires on a schedule.
+  - **In the panel:** each conversation in **Session history** has a delete button, and there is a
+    **Delete all** above the list. Both ask you to confirm first — the question names the conversation
+    by its own first message, or names how many are about to go. There is no undo.
+  - **On the server:** `curl -X DELETE -H "Authorization: Bearer $AGENT_SECRET" \
+    http://localhost:8000/v1/sessions/<id>` removes one; `DELETE /v1/sessions` removes every one.
+    The files live in `logs/sessions/`, so removing them by hand works exactly the same way.
+  - **In hosted mode:** you cannot delete them yourself — they are on our disk. Ask us, using the
+    contact address at the end of this policy, and we will remove them. We are not promising a time
+    limit for that, because there is not one in the product today.
 - **Local extension data** is removed by clearing the extension's storage, or by uninstalling it.
 - **Your API key** is not retained by Brotto anywhere. In hosted mode it is held in server memory for
   the duration of a task and not written to disk.
