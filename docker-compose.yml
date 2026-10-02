@@ -1,0 +1,53 @@
+# Brotto orchestrator — self-host.
+#
+#   cp .env.example .env      # set AGENT_SECRET
+#   docker compose up -d
+#
+# Deliberately not here: a model API key. Brotto is bring-your-own-key,
+# so the key is entered in the extension by the person using it and never
+# reaches this box. The only secret this file needs is AGENT_SECRET, and
+# it lives in a local .env that .dockerignore keeps out of the image.
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: brotto-orchestrator
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"   # see note below before changing this
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # The one secret the operator supplies. `${VAR:?message}` makes
+      # compose refuse to start with a readable explanation rather than
+      # a bare "stat .env: no such file", and it does not silently fall
+      # back to the development .env — which holds a model key and an
+      # AGENT_MODEL, and would defeat BROTTO_ENV=prod below.
+      #
+      # Note this is a *deployment* .env beside this file, distinct from
+      # services/brotto-orchestrator/.env, which is the development one.
+      # Do not point the container at the development file.
+      AGENT_SECRET: ${AGENT_SECRET:?set AGENT_SECRET in the shell, or in a .env file beside docker-compose.yml}
+      # Repeated here, not only in the Dockerfile: a stale or missing
+      # value is the exact failure this guards against. In dev mode the
+      # server pre-seeds AGENT_MODEL and propagates ANTHROPIC_AUTH_TOKEN,
+      # so a user who forgets to paste a key spends the operator's model
+      # credits. It fails silently and looks like a successful run.
+      BROTTO_ENV: prod
+      # Both state directories must be on the volume or session history
+      # and security policy vanish on every container restart.
+      BROTTO_SESSIONS_DIR: /data/sessions
+      BROTTO_USER_POLICY_DIR: /data/user_policies
+    volumes:
+      - brotto-data:/data
+
+# Bound to loopback on purpose. The orchestrator has no authentication
+# until AGENT_SECRET is wired in, and binding to 0.0.0.0 would publish
+# that to the network. Put a TLS-terminating reverse proxy in front and
+# change this to "8000:8000" only once the secret is set — the extension
+# needs a wss:// URL, not a plaintext one.
+volumes:
+  brotto-data:

@@ -1,0 +1,39 @@
+# The build context is the repo root, so this file is what keeps the
+# image small and keeps secrets out of layers.
+
+# Secrets. `.env` must never be baked in: an image layer is recoverable
+# even after a later layer is deleted, and this repo's .env carries the
+# operator's model API key. A self-hoster passes AGENT_SECRET as an
+# environment variable at run time instead.
+.env
+.env.*
+!.env.example
+
+# Session state and audit documents. These are per-machine and can hold
+# the full page text of pages the agent read. Baking them in would ship
+# one user's browsing into the next person's image.
+logs/
+**/logs/
+*.pages.json
+*.scratchpad.txt
+
+# Not needed to run the server. Playwright lives in requirements-dev.txt
+# and is dev-only — the shipping path is the Chrome extension.
+tests/
+services/brotto-orchestrator/tests/
+scripts/
+docs/
+clients/
+.github/
+
+.venv/
+**/__pycache__/
+**/*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+.git/
+.gitignore
+.DS_Store
