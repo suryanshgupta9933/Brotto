@@ -36,6 +36,28 @@ let lastSelfFocusAt = 0;
 const SELF_FOCUS_GRACE_MS = 1500;
 let sessionId: string | null = null;
 let serverUrl: string = DEFAULT_SERVER;
+
+// The orchestrator's AGENT_SECRET. Read from settings on each use rather
+// than cached: a user who pastes it and immediately retries should not
+// have to restart the service worker for the socket to stop being refused.
+async function agentSecret(): Promise<string> {
+  const stored = await chrome.storage.local.get("settings");
+  const s = stored.settings as { agentSecret?: unknown } | undefined;
+  return typeof s?.agentSecret === "string" ? s.agentSecret.trim() : "";
+}
+
+async function authHeaders(): Promise<Record<string, string>> {
+  const secret = await agentSecret();
+  return secret ? { Authorization: `Bearer ${secret}` } : {};
+}
+
+// A browser cannot set headers on a WebSocket, so the secret rides the
+// query string for the relay. Harmless on a loopback self-host and
+// required the moment one sits behind a reverse proxy.
+function withToken(url: string, secret: string): string {
+  if (!secret) return url;
+  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(secret);
+}
 // The task currently being driven, kept so a reconnect can re-send task_start
 // without the panel having to be open. Module state, not storage.session:
 // a service-worker restart drops the in-flight run anyway.
@@ -656,7 +678,7 @@ async function startRelay(
         try {
           const resp = await fetch(`${serverUrl}/v1/sessions`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...(await authHeaders()) },
             body: "{}",
           });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -682,7 +704,7 @@ async function startRelay(
       : session.websocket_url.replace(/^http/, "ws");
   }
 
-  ws = new WebSocket(wsUrl);
+  ws = new WebSocket(withToken(wsUrl, await agentSecret()));
 
   ws.onopen = async () => {
     startHeartbeat();

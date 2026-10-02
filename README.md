@@ -183,10 +183,11 @@ for the duration of a task and is never written to disk.
 
 This is a working system, not a finished product. These are the real ones:
 
-- **The server has no authentication.** The WebSocket the extension uses is accepted without a token,
-  and `AGENT_SECRET` is wired only onto the Playwright connector path, which is disabled by default.
-  Anyone who can reach a Brotto server's address can drive the agent against that user's logged-in
-  browser. Do not expose one to a network you do not control. This is the top open item.
+- **The server trusts anyone who has no secret.** `AGENT_SECRET` gates the extension WebSocket and the
+  session endpoints, so anyone who can reach a Brotto server's address *and knows the secret* can drive
+  the agent against that user's logged-in browser. Paste the secret into Settings → Connection, and keep
+  the `127.0.0.1` bind unless you have. An unset secret is a warning in the server log, not a refusal, so
+  that local development works without one.
 - **There is no benchmark.** Nobody has measured Brotto's completion rate against anything, because
   nobody has built the harness. Any reliability number you see anywhere is a guess.
 - **Perception is partial.** No shadow-DOM traversal beyond the geometry fallback, no canvas

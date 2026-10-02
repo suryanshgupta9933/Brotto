@@ -519,6 +519,7 @@ const settingsOverlay = document.getElementById('settingsOverlay');
 const settingsPanel   = document.getElementById('settingsPanel');
 const settingsClose   = document.getElementById('settingsClose');
 const plannerUrlSetting = document.getElementById('plannerUrlSetting');
+const agentSecretSetting = document.getElementById('agentSecretSetting');
 
 // Preserved DOM IDs for background.ts compatibility
 const plannerUrlEl    = document.getElementById('plannerUrl');
@@ -772,12 +773,22 @@ function refillComposer(task) {
   goalEl.focus();
 }
 
+async function authHeaders() {
+  const stored = await chrome.storage.local.get('settings');
+  const secret = stored.settings && typeof stored.settings.agentSecret === 'string'
+    ? stored.settings.agentSecret.trim()
+    : '';
+  return secret ? { Authorization: `Bearer ${secret}` } : {};
+}
+
 async function fetchAudit(sessionId) {
   // Same base as the panel's other server calls (fetchSuggestions, settings
   // verify): the settings field is the source of truth, and state.plannerUrl
   // is empty until a task has connected at least once in this panel.
   const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
-  const res = await fetch(`${base}/v1/sessions/${encodeURIComponent(sessionId)}/audit`);
+  const res = await fetch(`${base}/v1/sessions/${encodeURIComponent(sessionId)}/audit`, {
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -1187,6 +1198,7 @@ if (saveSettingsBtn) {
     const blacklist = blacklistSetting.value.split('\n').map((s) => s.trim()).filter(Boolean);
     const settings = {
       serverUrl: plannerUrlSetting.value || 'http://localhost:8000',
+      agentSecret: (agentSecretSetting ? agentSecretSetting.value.trim() : ''),
       blacklist,
       notifyBlocking: notifyBlockingSetting ? notifyBlockingSetting.checked : true,
       notifyResults: notifyResultsSetting ? notifyResultsSetting.checked : true,
@@ -1194,7 +1206,9 @@ if (saveSettingsBtn) {
     };
     await chrome.storage.local.set({ settings });
     plannerUrlEl.value = settings.serverUrl;
-    console.log('[brotto] settings saved', settings);
+    // agentSecret is redacted: this line goes to a devtools console that
+    // users paste into issue reports.
+    console.log('[brotto] settings saved', { ...settings, agentSecret: settings.agentSecret ? '<set>' : '' });
 
     // 1. Push the in-memory mirror to the SW so the next task_start
     //    ships it. Bug 7: wait for the SW's success ack so we don't
@@ -4362,6 +4376,9 @@ goalEl.focus();
   // the task was on. Hydrate both fields from storage first; everything below
   // and every other call site reads plannerUrlEl, so this one read covers them.
   const { settings } = await chrome.storage.local.get('settings');
+  if (agentSecretSetting && settings && typeof settings.agentSecret === 'string') {
+    agentSecretSetting.value = settings.agentSecret;
+  }
   const saved = (settings && typeof settings.serverUrl === 'string') ? settings.serverUrl.trim() : '';
   if (saved) {
     plannerUrlEl.value = saved;

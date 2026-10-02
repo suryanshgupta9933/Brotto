@@ -57,7 +57,7 @@ from .model.config import ModelConfig, UserCredentials
 from .model.registry import PROVIDER_REGISTRY
 from .model.resolver import resolve_model_config
 from .model.store import save_user_config
-from .session.auth import validate_token
+from .session.auth import auth_enabled, validate_request
 from .session.observation_validator import validate_observation
 from .session.registry import SessionRegistry
 from .policy import Policy, UserPolicy
@@ -85,6 +85,21 @@ log.info(
     ("set (len=%d)" % len(_auth_token)) if _auth_token else "<unset>",
     os.environ.get("BROTTO_ENV", "<unset>"),
 )
+
+# The unauthenticated case is the one worth shouting about: /ws/ext is
+# the only path a Chrome Web Store install uses, and anyone who can reach
+# this port can drive the agent against the user's logged-in browser.
+# On a loopback self-host that is the user, so it is a warning, not a
+# refusal — putting this behind a reverse proxy is the moment it matters.
+if auth_enabled():
+    log.info("AGENT_SECRET is set — /ws/ext and the session endpoints require it")
+elif os.environ.get("AGENT_SECRET"):
+    log.warning("AGENT_AUTH_DISABLED=true — AGENT_SECRET is set but ignored")
+else:
+    log.warning(
+        "AGENT_SECRET is unset: every caller is trusted. Fine on localhost; "
+        "set it before exposing this server on a network."
+    )
 
 # ponytail: match the sidepanel's MAX_TASK_CHARS. Anything over this is
 # logged as a warning (defense in depth) but NOT blocked — the sidepanel
@@ -144,6 +159,18 @@ def _prune_sessions() -> int:
         log.info("session eviction  dropped=%d  tracked=%d  cap=%d",
                  dropped, len(sessions), MAX_TRACKED_SESSIONS)
     return dropped
+
+
+def _authed(request: Request) -> bool:
+    """HTTP flavour of the WebSocket check.
+
+    A bad key answers 404 rather than 403: 403 confirms the route and
+    the failure mode are worth probing, and this server holds the user's
+    own transcripts.
+    """
+    return validate_request(
+        request.headers.get("authorization"), request.query_params.get("token")
+    )
 
 
 def _error(status: int, message: str, **extra) -> JSONResponse:
@@ -494,20 +521,23 @@ async def create_session(request: Request):
 
 
 @app.get("/v1/sessions")
-async def list_session_audits():
+async def list_session_audits(request: Request):
     """Index of every session on disk, newest first.
 
-    Unauthenticated, like /health and /v1/policy — it summarises runs
-    the caller already owns, on their own server. A future auth layer
-    gates all of them together.
+    Gated on AGENT_SECRET, which is what closes the enumeration: this
+    returned every session's task title to any caller that could reach
+    the port. On a self-host that caller is the user, but a self-hoster
+    who puts Caddy in front of it is publishing their own task history.
     """
     from .agent.audit import list_sessions as _list
 
+    if not _authed(request):
+        return _error(404, "not found")
     return JSONResponse(content={"sessions": _list()})
 
 
 @app.get("/v1/sessions/{session_id}/audit")
-async def read_audit(session_id: str):
+async def read_audit(session_id: str, request: Request):
     """The full nested document for one session.
 
     A damaged file returns 200 with `corrupt: true` rather than an
@@ -516,6 +546,8 @@ async def read_audit(session_id: str):
     """
     from .agent.audit import read as _read
 
+    if not _authed(request):
+        return _error(404, "not found")
     doc = _read(session_id)
     if not doc.get("found"):
         return _error(404, "unknown session")
@@ -633,7 +665,18 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
 
     Extension → server: task_start | observation | human_reply | ping
     Server → extension: observe | action | step_progress | ask_human | task_result | pong
+
+    The secret arrives as `?token=` because a browser cannot set headers
+    on a WebSocket. Checked before accept, so an unauthenticated caller
+    never gets a socket it can drive.
     """
+    if not validate_request(
+        websocket.headers.get("authorization"), websocket.query_params.get("token")
+    ):
+        log.warning("[%s] extension rejected — bad token", session_id)
+        await websocket.close(code=4001)
+        return
+
     await websocket.accept()
     log.info("[%s] extension connected", session_id)
 
@@ -1039,8 +1082,8 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
 
 @app.websocket("/ws/{user_id}")
 async def websocket_agent(websocket: WebSocket, user_id: str):
-    token = websocket.headers.get("authorization", "").replace("Bearer ", "")
-    if not validate_token(token):
+    token = websocket.headers.get("authorization", "")
+    if not validate_request(token, websocket.query_params.get("token")):
         log.warning("[%s] rejected — bad token", user_id)
         await websocket.close(code=4001)
         return

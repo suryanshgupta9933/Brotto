@@ -116,14 +116,15 @@ No amount of documentation changes that. So:
 
 - `PRIVACY.md` describes the *target* and the *current* state honestly, and the
   deletion path is real (delete the files) rather than theoretical.
-- The launch gates are still blocking. A file full of someone's bank statement
-  behind an **unauthenticated** `/ws/ext` (`main.py`, a bare
-  `await websocket.accept()`) is not a launch state; auth is not a
-  nice-to-have after privacy, it is the privacy control.
-- Sequence: **auth now** (it bounds who can read the files at all), then
-  retention, then local-first. Doing local-first first leaves an open door
-  pointed at a directory that no longer has the interesting files — which is
-  fine, but the door should be closed either way.
+- The launch gates are partly closed. `/ws/ext` is now gated on
+  `AGENT_SECRET`, which is the privacy control — but only when one is set,
+  and "no secret" is a warning rather than a refusal so that loopback dev
+  still works. A file full of someone's bank statement behind a server
+  with no secret set is still the thing to avoid.
+- Sequence: **auth** (done 2026-10-03), then **retention and delete**, then
+  local-first. Doing local-first first leaves an open door pointed at a
+  directory that no longer has the interesting files — which is fine, but
+  the door should be closed either way.
 
 ## Writing new code here
 

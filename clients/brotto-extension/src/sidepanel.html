@@ -1852,6 +1852,13 @@
         <p id="settingsVerifyStatus" class="settings-hint settings-verify">Verifying server…</p>
       </div>
 
+      <div class="field">
+        <label class="lbl" for="agentSecretSetting">Agent secret</label>
+        <input id="agentSecretSetting" class="input" type="password"
+               placeholder="paste your AGENT_SECRET" autocomplete="off" spellcheck="false">
+        <p class="settings-hint">The <code>AGENT_SECRET</code> from your Brotto server's <code>.env</code>. Leave this empty if you run the server on your own machine without one.</p>
+      </div>
+
       <div class="settings-actions-row">
         <button id="refreshPolicyBtn" class="btn"
                 type="button" title="Re-fetch the effective policy from the server">

@@ -37,10 +37,14 @@ services:
       # so a user who forgets to paste a key spends the operator's model
       # credits. It fails silently and looks like a successful run.
       BROTTO_ENV: prod
-      # Both state directories must be on the volume or session history
-      # and security policy vanish on every container restart.
+      # Every state directory must be on the volume or session history,
+      # security policy and the remembered model config all vanish on
+      # every container restart. The third one was easy to miss: store.py
+      # defaults to logs/user_models, which is inside the image, so
+      # "remember my model" silently reset while the other two persisted.
       BROTTO_SESSIONS_DIR: /data/sessions
       BROTTO_USER_POLICY_DIR: /data/user_policies
+      BROTTO_USER_MODEL_DIR: /data/user_models
     volumes:
       - brotto-data:/data
 

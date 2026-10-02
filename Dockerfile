@@ -34,7 +34,8 @@ ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     BROTTO_ENV=prod \
     BROTTO_SESSIONS_DIR=/data/sessions \
-    BROTTO_USER_POLICY_DIR=/data/user_policies
+    BROTTO_USER_POLICY_DIR=/data/user_policies \
+    BROTTO_USER_MODEL_DIR=/data/user_models
 
 # BROTTO_ENV=prod is set here rather than left to the operator to
 # remember, and it is a cost control, not a formality: the default is
@@ -53,7 +54,7 @@ COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels \
         -r requirements.txt /wheels/brotto_orchestrator-*.whl \
  && rm -rf /wheels /requirements.txt \
- && mkdir -p /data/sessions /data/user_policies \
+ && mkdir -p /data/sessions /data/user_policies /data/user_models \
  && chown -R brotto:brotto /data
 
 USER brotto

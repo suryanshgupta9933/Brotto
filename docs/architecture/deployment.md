@@ -71,24 +71,23 @@ model key. `.dockerignore` excludes both from the build context.
 
 ## Reverse proxy and TLS
 
-The extension needs a `wss://` URL. The compose file binds
-`127.0.0.1:8000` on purpose: until `AGENT_SECRET` is validated on the
-WebSocket, binding to `0.0.0.0` publishes an unauthenticated endpoint that
-can drive an agent against a logged-in browser. Put Caddy or nginx in front
-for TLS, and only then widen the bind.
+The extension needs a `wss://` URL. Put Caddy or nginx in front for TLS.
+`AGENT_SECRET` gates `/ws/ext` and the session endpoints, so widening the
+bind to `0.0.0.0` is only safe once one is actually set — with an unset
+secret every caller is trusted, and the startup log says so. The extension
+carries the secret in Settings → Connection; the relay sends it as
+`?token=` because a browser cannot set headers on a WebSocket.
 
 ## What still needs doing before this is publicly reachable
 
 Recorded here rather than as a task list because each is a launch gate, not
 a deployment step:
 
-- `validate_token` is not yet wired into `/ws/ext/{session_id}`, and
-  `AGENT_SECRET` currently defaults to the literal string `"dev-secret"`
-  with `AGENT_AUTH_DISABLED` defaulting to `true`. That is worse than no
-  auth, because it looks configured.
-- `GET /v1/sessions` returns every session's task title to any caller and
-  its docstring asserts it only summarises the caller's own runs.
 - `POST /run` is unauthenticated and launches a headless browser; it should
   be refused outside dev.
 - There is no retention. `_prune_sessions` evicts in-memory state only and
   never touches disk, so `logs/sessions/` grows without bound.
+- There is no way for the user to delete a session.
+
+`/ws/ext` auth and the `/v1/sessions` enumeration were both open gates and
+are closed as of 2026-10-03 — see `tests/test_agent_auth.py`.
