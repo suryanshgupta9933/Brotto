@@ -205,7 +205,7 @@ def test_plan_step_catches_it_and_records_why(tmp_path, monkeypatch):
     audit = AuditTrail("s1")
     audit.begin_task("go")
     turn_no = audit.begin_turn(step=0, url="u", page_title="t", ax_targets=1,
-                               ax_chars=1, ax_diff="", page_text_chars=0)
+                               ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     deps = AgentDeps(user_id="u", task="go", cdp=None, ws_send=None)
     deps.step_number = 16
 

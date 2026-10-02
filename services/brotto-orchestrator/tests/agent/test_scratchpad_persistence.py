@@ -138,6 +138,24 @@ def test_persisting_a_scratchpad_writes_no_page_text(tmp_path):
     assert load_scratchpad(tmp_path / "s1.scratchpad.txt").entries[0].digest
 
 
+def test_the_audit_document_holds_no_page_content(tmp_path):
+    """The diff quotes the page verbatim, so it used to be the one place raw
+    page content reached disk. The prompt still gets it; the document keeps
+    how much there was."""
+    from brotto_orchestrator.agent.audit import AuditTrail, read
+
+    quoted = "+ StaticText “balance due 4,200.00” was added"
+    at = AuditTrail("s1", dir=tmp_path)
+    turn = at.begin_turn(step=0, url="https://bank.test/", page_title="Bank",
+                         ax_targets=41, ax_chars=12345,
+                         ax_diff_chars=len(quoted), page_text_chars=9000)
+
+    obs = read("s1", dir=tmp_path)["turns"][turn]["observation"]
+    assert obs["ax_diff_chars"] == len(quoted)
+    assert "ax_diff" not in obs
+    assert "4,200.00" not in json.dumps(obs)
+
+
 def test_a_page_captured_every_step_does_not_bloat_the_audit_document():
     """The cap, restated for the shape that actually happens: a page a
     step, not a page a read."""

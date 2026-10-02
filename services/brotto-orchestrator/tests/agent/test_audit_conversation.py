@@ -61,7 +61,7 @@ def test_a_user_message_survives_a_run_cancelled_before_any_turn(trail):
 def test_an_assistant_message_points_at_the_turn_it_came_from(trail):
     idx = trail.begin_task("go")
     turn = trail.begin_turn(step=0, url="https://x.test", page_title="X",
-                            ax_targets=1, ax_chars=10, ax_diff="",
+                            ax_targets=1, ax_chars=10, ax_diff_chars=0,
                             page_text_chars=0)
     mid = trail.add_message(role="assistant", content="found 5 repos",
                             task=idx, turn=turn)
@@ -110,11 +110,11 @@ def test_every_turn_carries_the_task_it_belongs_to(trail):
     a two-task conversation, and the gap is invisible in a one-task run."""
     first = trail.begin_task("research")
     t1 = trail.begin_turn(step=0, url="https://a.test", page_title="A",
-                          ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+                          ax_targets=1, ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     trail.end_turn(t1, timings={})
     second = trail.begin_task("write the post")
     t2 = trail.begin_turn(step=0, url="https://b.test", page_title="B",
-                          ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+                          ax_targets=1, ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     trail.end_turn(t2, timings={})
     assert [t["task"] for t in _doc(trail)["turns"]] == [first, second] == [0, 1]
 

@@ -92,7 +92,7 @@ def test_mid_task_document_is_readable(client, sessions_dir):
     t = AuditTrail("s1", dir=sessions_dir)
     t.set_goal("still going")
     turn = t.begin_turn(step=0, url="https://github.com/", page_title="GitHub",
-                        ax_targets=10, ax_chars=100, ax_diff="",
+                        ax_targets=10, ax_chars=100, ax_diff_chars=0,
                         page_text_chars=0)
     t.record_model(turn, thought="working", reasoning="…", tokens_in=1,
                    tokens_out=1, context_pct=0.0, latency_ms=1)

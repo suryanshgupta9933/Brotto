@@ -540,26 +540,30 @@ class AuditTrail:
 
     # ── turns ───────────────────────────────────────────────────
     def begin_turn(self, *, step: int, url: str, page_title: str,
-                   ax_targets: int, ax_chars: int, ax_diff: str,
+                   ax_targets: int, ax_chars: int, ax_diff_chars: int,
                    page_text_chars: int) -> int:
         # Key order is causal and load-bearing: model -> prompts -> actions,
         # because that is the order they happen in and the order a replay
         # walks. Test asserts on it.
         idx = self._record(
             self._begin_turn, step=step, url=url, page_title=page_title,
-            ax_targets=ax_targets, ax_chars=ax_chars, ax_diff=ax_diff,
-            page_text_chars=page_text_chars)
+            ax_targets=ax_targets, ax_chars=ax_chars,
+            ax_diff_chars=ax_diff_chars, page_text_chars=page_text_chars)
         return -1 if idx is None else idx
 
     def _begin_turn(self, *, step: int, url: str, page_title: str,
-                    ax_targets: int, ax_chars: int, ax_diff: str,
+                    ax_targets: int, ax_chars: int, ax_diff_chars: int,
                     page_text_chars: int) -> int:
         obs: dict = {}
         _text(obs, "url", url)
         _text(obs, "page_title", page_title)
         obs["ax_targets"] = ax_targets
         obs["ax_chars"] = ax_chars
-        _text(obs, "ax_diff", ax_diff)
+        # Counts, never content. This dict is the shape page text must not
+        # take: the AX diff quotes the page verbatim, and it used to be the
+        # one place raw page content reached disk. The prompt still gets the
+        # text — the document gets how much there was.
+        obs["ax_diff_chars"] = ax_diff_chars
         obs["page_text_chars"] = page_text_chars
         turn = {
             "seq": self._next_seq(),

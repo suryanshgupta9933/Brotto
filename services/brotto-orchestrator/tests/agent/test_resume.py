@@ -54,7 +54,7 @@ def test_resume_state_is_reconstructible_from_the_document(sessions_dir):
     t.set_goal("find it")
     for step in range(3):
         turn = t.begin_turn(step=step, url=f"u{step}", page_title="t",
-                            ax_targets=1, ax_chars=1, ax_diff="",
+                            ax_targets=1, ax_chars=1, ax_diff_chars=0,
                             page_text_chars=0)
         t.record_model(turn, thought=f"step {step}", reasoning="r",
                        tokens_in=1, tokens_out=1, context_pct=0.0,
@@ -72,10 +72,10 @@ def test_an_unfinished_turn_is_not_a_resume_point(sessions_dir):
     t = AuditTrail("s1", dir=sessions_dir)
     t.set_goal("g")
     a = t.begin_turn(step=0, url="u", page_title="t", ax_targets=1,
-                     ax_chars=1, ax_diff="", page_text_chars=0)
+                     ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     t.end_turn(a, timings={})
     t.begin_turn(step=1, url="u", page_title="t", ax_targets=1,
-                 ax_chars=1, ax_diff="", page_text_chars=0)  # never ended
+                 ax_chars=1, ax_diff_chars=0, page_text_chars=0)  # never ended
     doc = read("s1", dir=sessions_dir)
     assert doc["turns"][1]["ended_at"] is None
     assert [x["step"] for x in doc["turns"] if x["ended_at"]] == [0]
@@ -85,7 +85,7 @@ def test_approved_but_unexecuted_action_is_not_replayed(sessions_dir):
     t = AuditTrail("s1", dir=sessions_dir)
     t.set_goal("g")
     turn = t.begin_turn(step=0, url="u", page_title="t", ax_targets=1,
-                        ax_chars=1, ax_diff="", page_text_chars=0)
+                        ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     pid = t.record_prompt(turn, kind="critical_action", action="click",
                           args={}, domain=None, reason="…")
     t.resolve_prompt(pid, decision="approved", response="yes", wait_ms=10)
@@ -117,7 +117,7 @@ def _crashed_run(session_id: str, *, completed: int = 3, sessions_dir: Path,
     for step in range(completed):
         turn = t.begin_turn(step=step, url=f"https://example.com/{step}",
                             page_title="Example", ax_targets=1, ax_chars=1,
-                            ax_diff="", page_text_chars=0)
+                            ax_diff_chars=0, page_text_chars=0)
         t.record_action(turn, action="navigate",
                         args={"url": f"https://example.com/{step}"},
                         outcome=f"Navigated to https://example.com/{step}",
@@ -131,7 +131,7 @@ def _crashed_run(session_id: str, *, completed: int = 3, sessions_dir: Path,
         # begun, never ended — the socket died mid-step
         t.begin_turn(step=step, url=f"https://example.com/{step}",
                      page_title="Example", ax_targets=1, ax_chars=1,
-                     ax_diff="", page_text_chars=0)
+                     ax_diff_chars=0, page_text_chars=0)
     t.close()
 
 
@@ -284,7 +284,7 @@ def test_a_finished_run_keeps_its_turns_when_a_resume_is_refused(sessions_dir):
     for step in range(2):
         turn = t.begin_turn(step=step, url=f"https://example.com/{step}",
                             page_title="Example", ax_targets=1, ax_chars=1,
-                            ax_diff="", page_text_chars=0)
+                            ax_diff_chars=0, page_text_chars=0)
         t.record_action(turn, action="navigate", args={}, outcome="Navigated",
                         ok=True, redacted=False, duration_ms=1)
         t.end_turn(turn, timings={})

@@ -22,7 +22,7 @@ def _seed(t: AuditTrail) -> int:
                 context_window=1_000_000, source="env")
     t.set_policy({"mode": "secure", "blacklist": ["mail.google.com"]})
     return t.begin_turn(step=0, url="https://github.com/", page_title="GitHub",
-                        ax_targets=41, ax_chars=12345, ax_diff="+3",
+                        ax_targets=41, ax_chars=12345, ax_diff_chars=2,
                         page_text_chars=890)
 
 
@@ -58,7 +58,7 @@ def test_seq_is_monotonic_across_turns(trail):
     a = _seed(trail)
     trail.end_turn(a, timings={"observe": 0.3})
     b = trail.begin_turn(step=1, url="u", page_title="t", ax_targets=1,
-                          ax_chars=1, ax_diff="", page_text_chars=0)
+                          ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     p = trail.record_prompt(b, kind="ask_human", action="ask_human",
                             args={}, domain=None, reason="Which repo?")
     assert trail.document()["turns"][1]["prompts"][0]["seq"] \
@@ -243,7 +243,7 @@ def test_list_sessions_returns_newest_first(tmp_path):
 def test_long_field_is_capped_and_marked(trail):
     t2 = AuditTrail("s1", dir=trail.dir)
     turn = t2.begin_turn(step=0, url="u", page_title="t", ax_targets=1,
-                         ax_chars=1, ax_diff="", page_text_chars=0)
+                         ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     t2.record_model(turn, thought="x" * (MAX_FIELD_CHARS + 500),
                     reasoning="r", tokens_in=1, tokens_out=1,
                     context_pct=0.0, latency_ms=1)
@@ -371,7 +371,7 @@ def test_policy_event_during_a_run_goes_through_the_live_writer(tmp_path):
     t = AuditTrail("live", dir=tmp_path)
     t.set_goal("g")
     t.begin_turn(step=0, url="u", page_title="t", ax_targets=1, ax_chars=1,
-                 ax_diff="", page_text_chars=0)
+                 ax_diff_chars=0, page_text_chars=0)
 
     append_policy_event("live", step=None, kind="policy_acknowledged",
                         domain=None, action=None, decision="mode=secure")

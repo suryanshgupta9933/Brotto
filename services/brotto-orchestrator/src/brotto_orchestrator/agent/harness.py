@@ -1995,7 +1995,7 @@ class AgentHarness:
             a_turn = audit.begin_turn(
                 step=step, url=current_url, page_title=page_title,
                 ax_targets=len(targets), ax_chars=len(filtered_ax),
-                ax_diff=ax_diff, page_text_chars=len(page_text),
+                ax_diff_chars=len(ax_diff), page_text_chars=len(page_text),
             )
 
             # Guardrail: login detection. Skipped under a scripted planner:

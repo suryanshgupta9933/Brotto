@@ -24,7 +24,7 @@ def _finished_run(sessions, session_id, goal, status="completed", summary="done"
     idx = t.begin_task(goal)
     t.add_message(role="user", content=goal, task=idx, turn=None)
     turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
-                        ax_targets=1, ax_chars=10, ax_diff="", page_text_chars=0)
+                        ax_targets=1, ax_chars=10, ax_diff_chars=0, page_text_chars=0)
     t.add_message(role="assistant", content=summary, task=idx, turn=turn)
     t.end_turn(turn, timings={})
     t.set_status(status)
@@ -152,7 +152,7 @@ def test_a_followup_into_an_abandoned_run_is_allowed(sessions):
     t = AuditTrail("c4", dir=sessions)
     t.begin_task("go")
     t.begin_turn(step=0, url="https://x.test", page_title="X",
-                 ax_targets=1, ax_chars=10, ax_diff="", page_text_chars=0)
+                 ax_targets=1, ax_chars=10, ax_diff_chars=0, page_text_chars=0)
     t.close()
     state = harness_mod._conversation_state("c4", resume=False)
     assert state["action"] == "new_task"
@@ -168,7 +168,7 @@ def test_an_abandoned_run_does_not_get_its_approvals_replayed(sessions):
     t = AuditTrail("c4b", dir=sessions)
     t.begin_task("go")
     turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
-                        ax_targets=1, ax_chars=10, ax_diff="", page_text_chars=0)
+                        ax_targets=1, ax_chars=10, ax_diff_chars=0, page_text_chars=0)
     t.record_action(turn, action="click", args={"ref": "e3"},
                     outcome="approved and clicked", ok=True, redacted=False,
                     duration_ms=1)
@@ -193,7 +193,7 @@ def test_the_abandoned_task_is_sealed_and_its_record_kept(sessions):
     t.begin_task("the original ask")
     t.add_message(role="user", content="the original ask", task=0, turn=None)
     t.begin_turn(step=0, url="https://x.test", page_title="X",
-                 ax_targets=1, ax_chars=10, ax_diff="", page_text_chars=0)
+                 ax_targets=1, ax_chars=10, ax_diff_chars=0, page_text_chars=0)
     t.close()
     result, _ = _followup(sessions, "c4c", "second thing")
     assert result.status == "completed"
@@ -211,7 +211,7 @@ def test_a_crash_resume_still_resumes(sessions):
     t = AuditTrail("c5", dir=sessions)
     t.begin_task("go")
     t.begin_turn(step=0, url="https://x.test", page_title="X",
-                 ax_targets=1, ax_chars=10, ax_diff="", page_text_chars=0)
+                 ax_targets=1, ax_chars=10, ax_diff_chars=0, page_text_chars=0)
     t.end_turn(0, timings={})
     t.close()
     state = harness_mod._conversation_state("c5", resume=True)
@@ -257,7 +257,7 @@ def test_a_new_prompt_works_after_any_stop_reason(sessions, status, open_turn):
     t = AuditTrail("mx", dir=sessions)
     t.begin_task("the ask")
     turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
-                        ax_targets=1, ax_chars=10, ax_diff="",
+                        ax_targets=1, ax_chars=10, ax_diff_chars=0,
                         page_text_chars=0)
     if not open_turn:
         t.end_turn(turn, timings={})
@@ -278,7 +278,7 @@ def test_only_an_unfinished_run_can_be_resumed(sessions):
     t = AuditTrail("mz", dir=sessions)
     t.begin_task("ask")
     turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
-                        ax_targets=1, ax_chars=10, ax_diff="",
+                        ax_targets=1, ax_chars=10, ax_diff_chars=0,
                         page_text_chars=0)
     t.end_turn(turn, timings={})
     t.close()
@@ -323,7 +323,7 @@ def test_a_resume_of_a_later_task_keeps_its_turns_in_the_right_segment(sessions)
     t.begin_task("research")
     t.begin_task("write the post")
     t.begin_turn(step=0, url="https://x.test", page_title="X",
-                 ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+                 ax_targets=1, ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     t.close()
 
     assert harness_mod._conversation_state("c8", resume=True)["action"] == "resume"
@@ -332,7 +332,7 @@ def test_a_resume_of_a_later_task_keeps_its_turns_in_the_right_segment(sessions)
     harness_mod._adopt_document(reopened, read("c8", dir=sessions))
     assert reopened.resume_task() == 1
     nxt = reopened.begin_turn(step=1, url="https://x.test", page_title="X",
-                              ax_targets=1, ax_chars=1, ax_diff="",
+                              ax_targets=1, ax_chars=1, ax_diff_chars=0,
                               page_text_chars=0)
     reopened.add_message(role="assistant", content="posted", task=1, turn=nxt)
     reopened.close()
@@ -401,7 +401,7 @@ def test_a_resume_carries_the_conversation_that_came_before_it(sessions):
     t.begin_task("first goal")
     t.add_message(role="user", content="first goal", task=0, turn=None)
     turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
-                        ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+                        ax_targets=1, ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     t.add_message(role="assistant", content="the answer", task=0, turn=turn)
     t.end_turn(turn, timings={})
     t.begin_task("second goal")
@@ -526,7 +526,7 @@ def test_a_capped_answer_is_still_whole_on_disk(sessions):
     t = AuditTrail("n5", dir=sessions)
     t.begin_task("deep dive")
     turn = t.begin_turn(step=0, url="https://x.test", page_title="X",
-                        ax_targets=1, ax_chars=1, ax_diff="", page_text_chars=0)
+                        ax_targets=1, ax_chars=1, ax_diff_chars=0, page_text_chars=0)
     t.add_message(role="assistant", content=long_answer, task=0, turn=turn)
     t.close()
     assert _doc(sessions, "n5")["messages"][-1]["content"] == long_answer
