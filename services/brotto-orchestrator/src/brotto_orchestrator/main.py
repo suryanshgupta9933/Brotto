@@ -560,6 +560,31 @@ async def read_audit(session_id: str, request: Request):
     return JSONResponse(content=doc)
 
 
+@app.delete("/v1/sessions/{session_id}")
+async def delete_session(session_id: str, request: Request):
+    """Erase one session. `audit.delete` takes every file it owns.
+
+    Separate from delete-all and behind the same secret: this is the one
+    route where a wrong id is the difference between "I erased it" and
+    "I erased the wrong one".
+    """
+    from .agent.audit import delete as _delete
+
+    if not _authed(request):
+        return _error(404, "not found")
+    return JSONResponse(content={"deleted": _delete(session_id)})
+
+
+@app.delete("/v1/sessions")
+async def delete_all_sessions(request: Request):
+    """Erase every session on this server."""
+    from .agent.audit import delete_all as _delete_all
+
+    if not _authed(request):
+        return _error(404, "not found")
+    return JSONResponse(content={"deleted": _delete_all()})
+
+
 # ponytail: separate HTTP endpoint for save-time notification. The
 # WS-based `policy_acknowledged` only works while a task is in flight;
 # this one logs even when the user clicks Save with no task running.

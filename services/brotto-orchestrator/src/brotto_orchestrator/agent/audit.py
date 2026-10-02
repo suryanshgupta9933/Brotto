@@ -286,6 +286,10 @@ class AuditTrail:
         # of one, and `resume_task` corrects it for a resume of a later one.
         self._task_index = 0
         self._prompt_index: dict[str, tuple[int, dict]] = {}
+        # Set by `delete()` while the loop is still holding this object. The
+        # caller keeps a reference, not a lookup, so dropping the `_LIVE`
+        # entry alone does not stop the next flush from rewriting the file.
+        self._deleted = False
         self._doc: dict = {
             "schema_version": SCHEMA_VERSION,
             "session_id": session_id,
@@ -378,9 +382,13 @@ class AuditTrail:
     def _record(self, fn, *args, **kwargs) -> Any:
         """Run one mutation under the lock, then flush. Never raises.
 
-        Returns whatever `fn` returned, or None if it blew up.
+        Returns whatever `fn` returned, or None if it blew up, or None if
+        this session has been deleted — every mutation goes through here, so
+        this is the one place that has to know.
         """
         with self._lock:
+            if self._deleted:
+                return None
             try:
                 out = fn(*args, **kwargs)
                 self._flush()
@@ -813,19 +821,59 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
                            "tokens_in": 0, "tokens_out": 0, "errors": 1}}
 
 
-def list_sessions(*, dir: Path | None = None) -> list[dict]:
-    """Index of every session on disk, newest first."""
+def delete(session_id: str, *, dir: Path | None = None) -> bool:
+    """Remove one session's files. Returns whether anything was there.
+
+    A session is only deleted when *all* of it is gone. Leaving the
+    scratchpad behind would leave page digests on disk for a session the
+    user believes they erased, and leaving the live trail in `_LIVE` is
+    worse: the running loop rewrites the whole document on its next
+    flush, so the "deleted" session reappears in the history list.
+    """
+    if not _is_document_stem(session_id):
+        return False
     d = dir or default_dir()
-    out = []
+    removed = False
+    for name in (f"{session_id}.json", f"{session_id}.scratchpad.txt", f"{session_id}.pages.json"):
+        # pages.json has no writer — page text stopped reaching disk — but
+        # `read` and `list_sessions` already name it, and a sidecar written
+        # by an older build is still on the user's disk.
+        try:
+            (d / name).unlink()
+            removed = True
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning("audit: could not remove %s/%s: %s", d, name, exc)
+    with _LIVE_LOCK:
+        live = _LIVE.pop(session_id, None)
+    if live is not None:
+        live._deleted = True
+    return removed
+
+
+def delete_all(*, dir: Path | None = None) -> int:
+    """Remove every session's files. Returns the count of documents removed."""
+    d = dir or default_dir()
+    return sum(1 for p in _session_documents(d) if delete(p.stem, dir=d))
+
+
+def _session_documents(d: Path) -> list[Path]:
+    """Every session document on disk, newest first, sidecars excluded."""
     try:
         files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return []
-    for p in files:
-        # `<id>.pages.json` matches the glob and would otherwise be listed —
-        # and readable — as if it were a session.
-        if not _is_document_stem(p.stem):
-            continue
+    return [p for p in files if _is_document_stem(p.stem)]
+
+
+def list_sessions(*, dir: Path | None = None) -> list[dict]:
+    """Index of every session on disk, newest first."""
+    d = dir or default_dir()
+    out = []
+    # `<id>.pages.json` matches the glob and would otherwise be listed —
+    # and readable — as if it were a session. `_session_documents` filters.
+    for p in _session_documents(d):
         doc = read(p.stem, dir=d)
         out.append({
             "session_id": doc.get("session_id", p.stem),
