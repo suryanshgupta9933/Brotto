@@ -61,4 +61,11 @@ services:
 # Put a TLS-terminating reverse proxy in front and change this to "8000:8000"
 # — the extension needs a wss:// URL, not a plaintext one.
 volumes:
+  # Named exactly, not namespaced with the compose project. Without this the
+  # volume is `<project>_brotto-data`, where the project is the checkout
+  # directory's name — so cloning into ~/brotto instead of ~/work/brotto
+  # silently starts a fresh, empty /data and the user's history reads as gone.
+  # This is every session document and their policy on their own disk, so the
+  # volume name is load-bearing.
   brotto-data:
+    name: brotto-data
