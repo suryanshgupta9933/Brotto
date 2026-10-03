@@ -44,7 +44,7 @@ if (existsSync(assetsDir)) {
   mkdirSync(destAssetsDir, { recursive: true });
   for (const file of readdirSync(assetsDir)) {
     const ext = file.slice(file.lastIndexOf('.') + 1).toLowerCase();
-    if (['svg', 'png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+    if (['svg', 'png', 'jpg', 'jpeg', 'webp', 'woff2', 'txt'].includes(ext)) {
       copyFileSync(join(assetsDir, file), join(destAssetsDir, file));
     }
   }

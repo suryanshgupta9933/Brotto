@@ -31,6 +31,10 @@ do not operate the server, so we do not receive your data. The data that moves d
 data the task inherently requires: what the page looks like to a computer, and the model provider you
 chose.
 
+**The extension makes no outbound requests of its own.** Its interface fonts are bundled with it, so
+opening the side panel contacts nothing. The only network traffic the extension starts is to the server
+address you configured, and from there to the model provider you configured.
+
 **Your model API key is never written to disk by Brotto.** It is held in memory and used to call your
 model provider.
 

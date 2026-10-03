@@ -324,8 +324,20 @@ all five sets deterministically: the picker is a coin toss, so testing only the
 drawn set leaves four of five unexercised most runs, and both motion branches
 need covering every time.
 
-**Not verified in a browser.** `▛▜▙▟` and `▖▘▝▗` at 11px in Geist Mono are the
-two most likely to render as tofu boxes rather than read as motion.
+**Verified in a browser 2026-10-03.** `▛▜▙▟` and `▖▘▝▗` render as real
+quarter-block shapes, not tofu. This was a live risk while the face came from
+`fonts.googleapis.com`: the glyphs live in a **separate `symbols` subset** of
+Geist Mono, loaded on demand and therefore the one most likely to be absent
+when a spinner starts drawing. Bundling every subset closed it — the check is
+that `document.fonts.load("400 16px 'Geist Mono'", "▛▜▙▟▖▘▝▗")` resolves with
+that face in `loaded`, which it does not if the subset is missing.
+
+**The font is bundled, not fetched.** Geist and Geist Mono live in
+`src/assets/*.woff2` with `@font-face` in `panel-tokens.css`, and the build
+copies `woff2` alongside the other asset extensions. They came from
+`fonts.googleapis.com` on every side-panel open, which told Google your IP and
+that Brotto was installed — on every use of a product whose claim is that your
+pages reach only the model you chose. Adding a webfont again reopens it.
 
 ## A frame with no case is a run that never ends
 
