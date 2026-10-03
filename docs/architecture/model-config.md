@@ -81,6 +81,18 @@ validated model ids against *Anthropic's* list, so the minimax factory rejected
 OpenAI's own. vLLM, DeepSeek and most gateways implement chat completions
 only, and reaching them is the entire point of the adapter.
 
+**The dependency mirrors the factories, one extra each.** `requirements.txt`
+asks for `pydantic-ai-slim[anthropic,google,openai]`, and those three extras
+are exactly the `pydantic_ai.models.*` and `pydantic_ai.providers.*` modules
+`registry.py` imports. It was `pydantic-ai` — the meta-package — which
+resolves to *every* optional integration (mcp, fastmcp, google-genai, logfire,
+evals, mistral, tavily, xai): ~120 installed packages, most of the self-host
+image, and most of what `pip-audit` had to read on every CI run. There is no
+`anthropic` requirement either, because nothing imports the SDK directly — the
+`anthropic` extra supplies it at the version pydantic-ai was tested against.
+**A fourth factory in the catalog means a fourth extra here**, or that provider
+ImportErrors on a self-hoster's box and not on yours.
+
 **Per-task resolution** (`resolver.resolve_model_config`):
 1. inline_config / inline_creds (from extension's task_start)
 2. per-user JSON file keyed by the install's `device_id` (peer address if it sends none)

@@ -29,14 +29,21 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
+# ponytail: mirrors requirements.txt exactly, and there is a reason it
+# is duplicated rather than read from that file. setuptools can source
+# this list dynamically (`dynamic = ["dependencies"]` +
+# [tool.setuptools.dynamic]), which would make requirements.txt the only
+# copy — but the Dockerfile builds the wheel in a stage that copies
+# pyproject.toml alone, so the build would break on a missing
+# requirements.txt. One line of Dockerfile fixes that; it is a real
+# improvement, not a reason to keep two lists drifting.
 dependencies = [
-    "fastapi>=0.104.0",
-    "uvicorn[standard]>=0.24.0",
-    "pydantic>=2.0",
-    "pydantic-ai>=0.0.1",
-    "aiohttp>=3.9.0",
-    "anthropic>=0.21.0",
-    "python-dotenv>=1.0.0",
+    "fastapi>=0.142.2,<1.0",
+    "uvicorn[standard]>=0.54.0,<1.0",
+    "pydantic>=2.13.5,<3.0",
+    "pydantic-ai-slim[anthropic,google,openai]>=2.53.0,<3.0",
+    "aiohttp>=3.14.3,<4.0",
+    "python-dotenv>=1.2.4,<2.0",
 ]
 
 [project.scripts]
@@ -57,12 +64,13 @@ Security = "https://github.com/suryanshgupta9933/brotto/blob/main/SECURITY.md"
 [tool.setuptools.packages.find]
 where = ["services/brotto-orchestrator/src"]
 
+# ponytail: mirrors requirements-dev.txt, which is what CI installs.
 [dependency-groups]
 dev = [
-    "playwright>=1.40.0",
-    "pytest>=7.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0",
+    "playwright>=1.63.0,<2.0",
+    "pytest>=9.1.1,<10.0",
+    "pytest-asyncio>=1.4.0,<2.0",
+    "pytest-cov>=7.1.0,<8.0",
 ]
 
 [tool.pytest.ini_options]

@@ -1,4 +1,14 @@
-playwright>=1.40.0
-pytest>=7.0
-pytest-asyncio>=0.21.0
-pytest-cov>=4.0
+# Development and test dependencies. Not installed into the self-host
+# image — the product path is the Chrome extension, and the server never
+# launches a browser.
+#
+# Keep in sync with [dependency-groups].dev in pyproject.toml.
+#
+# pytest and pytest-asyncio crossed two majors since these were last
+# pinned (7.x -> 9.x, 0.x -> 1.x). The suite was run against both before
+# these floors were set.
+
+playwright>=1.63.0,<2.0
+pytest>=9.1.1,<10.0
+pytest-asyncio>=1.4.0,<2.0
+pytest-cov>=7.1.0,<8.0
