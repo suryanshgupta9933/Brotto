@@ -38,6 +38,10 @@ for k in ("ANTHROPIC_API_KEY", "AGENT_AUTH_DISABLED", "AGENT_MODEL"):
 from fastapi.testclient import TestClient  # noqa: E402
 
 from brotto_orchestrator import main as main_mod  # noqa: E402
+
+
+
+
 from brotto_orchestrator.agent import harness as harness_mod  # noqa: E402
 
 
@@ -87,27 +91,27 @@ def _drain_until(ws, target_type: str, max_msgs: int = 50) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_first_message_must_be_task_start(agent_disabled):
+def test_first_message_must_be_task_start(agent_disabled, session_id):
     """A non-task_start first message closes the WS."""
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-bad-first") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-bad-first")}") as ws:
             ws.send_text(json.dumps({"type": "ping"}))
             with pytest.raises(Exception):
                 # Server closes with code 4000
                 ws.receive_text()
 
 
-def test_task_start_with_empty_task_closes(agent_disabled):
+def test_task_start_with_empty_task_closes(agent_disabled, session_id):
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-empty-task") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-empty-task")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "  "}))
             with pytest.raises(Exception):
                 ws.receive_text()
 
 
-def test_task_start_missing_task_field_closes(agent_disabled):
+def test_task_start_missing_task_field_closes(agent_disabled, session_id):
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-missing-task") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-missing-task")}") as ws:
             ws.send_text(json.dumps({"type": "task_start"}))
             with pytest.raises(Exception):
                 ws.receive_text()
@@ -118,10 +122,10 @@ def test_task_start_missing_task_field_closes(agent_disabled):
 # ---------------------------------------------------------------------------
 
 
-def test_ping_returns_pong(agent_disabled):
+def test_ping_returns_pong(agent_disabled, session_id):
     """Ping must round-trip without invoking the harness."""
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-ping") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-ping")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
             ws.send_text(json.dumps({"type": "ping"}))
             pong = _drain_until(ws, "pong")
@@ -133,7 +137,7 @@ def test_ping_returns_pong(agent_disabled):
 # ---------------------------------------------------------------------------
 
 
-def test_duplicate_observation_seq_is_dropped_at_boundary(agent_disabled):
+def test_duplicate_observation_seq_is_dropped_at_boundary(agent_disabled, session_id):
     """Two observations with the same seq — only one is processed.
 
     We can't directly observe the agent's processing state, but we
@@ -142,7 +146,7 @@ def test_duplicate_observation_seq_is_dropped_at_boundary(agent_disabled):
     itself is covered in test_observation_validator.py.
     """
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-dup") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-dup")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
 
             for _ in range(3):
@@ -159,10 +163,10 @@ def test_duplicate_observation_seq_is_dropped_at_boundary(agent_disabled):
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
 
-def test_observation_seq_gap_is_warned_but_accepted(agent_disabled):
+def test_observation_seq_gap_is_warned_but_accepted(agent_disabled, session_id):
     """A gap is OK — the WS contract holds; the warning is in the log."""
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-gap") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-gap")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
             ws.send_text(json.dumps({
                 "type": "observation",
@@ -182,10 +186,10 @@ def test_observation_seq_gap_is_warned_but_accepted(agent_disabled):
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
 
-def test_observation_without_seq_is_legacy_compatible(agent_disabled):
+def test_observation_without_seq_is_legacy_compatible(agent_disabled, session_id):
     """A legacy extension that omits seq still works."""
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-legacy") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-legacy")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
             ws.send_text(json.dumps({
                 "type": "observation",
@@ -202,10 +206,10 @@ def test_observation_without_seq_is_legacy_compatible(agent_disabled):
 # ---------------------------------------------------------------------------
 
 
-def test_evaluate_result_round_trips(agent_disabled):
+def test_evaluate_result_round_trips(agent_disabled, session_id):
     """evaluate_result is accepted and routed to the eval queue."""
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-eval") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-eval")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
 
             # Drain whatever the harness emits on startup so we can
@@ -215,17 +219,17 @@ def test_evaluate_result_round_trips(agent_disabled):
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
 
-def test_human_reply_accepted(agent_disabled):
+def test_human_reply_accepted(agent_disabled, session_id):
     """human_reply is accepted (queued; not consumed here)."""
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-human") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-human")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
             ws.send_text(json.dumps({"type": "human_reply", "content": "yes"}))
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
 
-def test_steer_message_does_not_touch_human_input_queue(agent_disabled, monkeypatch):
+def test_steer_message_does_not_touch_human_input_queue(agent_disabled, monkeypatch, session_id):
     """`steer` is a live correction, not an answer to a pending prompt.
 
     Every approval site does a bare `await deps.human_input_queue.get()` and
@@ -251,7 +255,7 @@ def test_steer_message_does_not_touch_human_input_queue(agent_disabled, monkeypa
     monkeypatch.setattr(main_mod.harness, "run", rec.run.__get__(main_mod.harness))
 
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-steer") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-steer")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
             # Drain the task_start ack so the deps object is registered before
             # the steer arrives — a control frame sent in the same breath can
@@ -270,20 +274,20 @@ def test_steer_message_does_not_touch_human_input_queue(agent_disabled, monkeypa
             assert deps.human_input_queue.empty()
 
 
-def test_unknown_message_type_is_logged_not_fatal(agent_disabled):
+def test_unknown_message_type_is_logged_not_fatal(agent_disabled, session_id):
     """An unknown message type is logged and ignored — WS stays open."""
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-unknown") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-unknown")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
             ws.send_text(json.dumps({"type": "totally_made_up_type"}))
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
 
-def test_malformed_json_does_not_crash_the_session(agent_disabled):
+def test_malformed_json_does_not_crash_the_session(agent_disabled, session_id):
     """A frame that isn't valid JSON is logged and ignored."""
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/proto-badjson") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("proto-badjson")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "noop"}))
             ws.send_text("not even json {{{")
             ws.send_text(json.dumps({"type": "ping"}))
@@ -295,10 +299,10 @@ def test_malformed_json_does_not_crash_the_session(agent_disabled):
 # ---------------------------------------------------------------------------
 
 
-def test_separate_sessions_have_independent_trackers(agent_disabled):
+def test_separate_sessions_have_independent_trackers(agent_disabled, session_id):
     """Two concurrent sessions must not share a sequence tracker."""
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/session-A") as wsA:
+        with client.websocket_connect(f"/ws/ext/{session_id("session-A")}") as wsA:
             wsA.send_text(json.dumps({"type": "task_start", "task": "noop"}))
             wsA.send_text(json.dumps({
                 "type": "observation", "seq": 5,
@@ -307,7 +311,7 @@ def test_separate_sessions_have_independent_trackers(agent_disabled):
             wsA.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(wsA, "pong") == {"type": "pong"}
 
-        with client.websocket_connect("/ws/ext/session-B") as wsB:
+        with client.websocket_connect(f"/ws/ext/{session_id("session-B")}") as wsB:
             wsB.send_text(json.dumps({"type": "task_start", "task": "noop"}))
             # Session B can start fresh at seq=1 even though A is at 5.
             wsB.send_text(json.dumps({

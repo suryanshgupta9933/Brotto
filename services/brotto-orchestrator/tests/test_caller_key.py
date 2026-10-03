@@ -220,3 +220,52 @@ def test_an_unauthenticated_write_leaves_no_file(client, tmp_path):
     client.post("/v1/policy_ack", json={"user_id": OTHER, "settings": {"blacklist": ["x"]}})
     assert list((tmp_path / "policies").glob("*.json")) == []
 
+
+
+# ── the two siblings the guard was missing from ──────────────────────────────
+#
+# `device_id` was hardened and the two other caller-controlled identifiers
+# were not, so the same primitive was still open one field over.
+
+def test_a_session_id_that_is_not_a_uuid_is_refused(client):
+    """The url path of the relay socket, before anything is logged.
+
+    This id is a log field on every line of the relay and the stem of the
+    document written under logs/sessions/, and it arrives before the secret
+    is checked — so an arbitrary string here forges operator output and
+    names a file, on a route the caller has not authenticated for.
+
+    The close *code* is the assertion, not the exception. With no secret
+    offered every id is refused anyway, so `raises(WebSocketDisconnect)`
+    passes against the unfixed server too: 4004 is the id, 4001 is the
+    credential, and only the first one means this guard ran.
+    """
+    from starlette.websockets import WebSocketDisconnect
+
+    for bad in ("aaa%0aINFO:%20forged", "not-a-uuid", "%2e%2e"):
+        with pytest.raises(WebSocketDisconnect) as caught:
+            with client.websocket_connect(f"/ws/ext/{bad}") as ws:
+                ws.receive_text()
+        assert caught.value.code == 4004, f"{bad!r} refused for the wrong reason"
+
+
+def test_a_uuid_session_id_is_not_blocked_by_the_guard(client):
+    """The guard must not break a legitimate reconnect."""
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect) as caught:
+        with client.websocket_connect(f"/ws/ext/{INSTALL_ID}") as ws:
+            ws.receive_text()
+    assert caught.value.code == 4001
+
+
+def test_a_foreign_origin_cannot_read_the_transcript(client):
+    """Any page the operator visits is an origin, and on a secret-less
+    install `*` let it read the session index. The extension is the only
+    legitimate cross-origin client; a loopback panel is the other."""
+    evil = client.get("/health", headers={"Origin": "https://evil.example"})
+    assert "https://evil.example" not in evil.headers.get("access-control-allow-origin", "")
+
+    for ok in (f"chrome-extension://{'a' * 32}", "http://localhost:5173"):
+        r = client.get("/health", headers={"Origin": ok})
+        assert r.headers.get("access-control-allow-origin") == ok

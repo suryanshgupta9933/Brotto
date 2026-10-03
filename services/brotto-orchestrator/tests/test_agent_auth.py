@@ -79,7 +79,7 @@ def test_whitespace_in_the_secret_is_ignored(monkeypatch):
     assert validate_token("s3cret") is True
 
 
-def test_relay_carries_the_secret_in_the_subprotocol(monkeypatch, tmp_path):
+def test_relay_carries_the_secret_in_the_subprotocol(monkeypatch, tmp_path, session_id):
     """The secret must never reach an access log.
 
     `?token=` writes it in plain text into this server's log and into any
@@ -95,13 +95,13 @@ def test_relay_carries_the_secret_in_the_subprotocol(monkeypatch, tmp_path):
     client = TestClient(live_app)
 
     with client.websocket_connect(
-        "/ws/ext/abc", subprotocols=["brotto-v1", "s3cret"]
+        f"/ws/ext/{session_id('relay-subprotocol')}", subprotocols=["brotto-v1", "s3cret"]
     ) as ws:
         # The response echoes the protocol name, never the credential.
         assert ws.accepted_subprotocol == "brotto-v1"
 
 
-def test_relay_refuses_a_bad_subprotocol(monkeypatch, tmp_path):
+def test_relay_refuses_a_bad_subprotocol(monkeypatch, tmp_path, session_id):
     from brotto_orchestrator.main import app as live_app
 
     monkeypatch.setenv("AGENT_SECRET", "s3cret")
@@ -110,14 +110,17 @@ def test_relay_refuses_a_bad_subprotocol(monkeypatch, tmp_path):
 
     from starlette.websockets import WebSocketDisconnect
 
-    with pytest.raises(WebSocketDisconnect):
+    with pytest.raises(WebSocketDisconnect) as caught:
         with client.websocket_connect(
-            "/ws/ext/abc", subprotocols=["brotto-v1", "wrong"]
+            f"/ws/ext/{session_id('relay-wrong-secret')}", subprotocols=["brotto-v1", "wrong"]
         ) as ws:
             ws.receive_text()
+    # 4001 is the credential. 4004 would mean the id was rejected first and
+    # the wrong secret was never actually tested.
+    assert caught.value.code == 4001
 
 
-def test_relay_refuses_no_token_at_all(monkeypatch, tmp_path):
+def test_relay_refuses_no_token_at_all(monkeypatch, tmp_path, session_id):
     from brotto_orchestrator.main import app as live_app
 
     monkeypatch.setenv("AGENT_SECRET", "s3cret")
@@ -127,5 +130,5 @@ def test_relay_refuses_no_token_at_all(monkeypatch, tmp_path):
     from starlette.websockets import WebSocketDisconnect
 
     with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/ws/ext/abc") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("abc")}") as ws:
             ws.receive_text()

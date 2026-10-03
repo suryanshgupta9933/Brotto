@@ -7,6 +7,8 @@ dev box it forces every resolution onto .env, which quietly rewrites
 what the resolver tests are actually exercising.
 """
 
+import uuid
+
 import pytest
 
 
@@ -27,3 +29,22 @@ def _isolated_sessions_dir(tmp_path, monkeypatch):
     making it autouse rather than a per-file fixture.
     """
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path / "sessions"))
+
+
+@pytest.fixture
+def session_id():
+    """Mints a session id the server would actually accept."""
+    return _uuid_id
+
+
+def _uuid_id(label: str) -> str:
+    """A session id the server would actually mint.
+
+    The relay socket refuses any id that is not a uuid — the id is a log
+    field on every line of the relay and the stem of the document written
+    under logs/sessions/, and it arrives before the secret is checked, so
+    an arbitrary string there forges operator output and names a file.
+    Tests cannot keep readable labels in the url; the label stays in the
+    test name.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, f"test:{label}"))

@@ -51,6 +51,45 @@ they had guessed the id for.
 **Session history is not affected** — `logs/sessions/` is not keyed by caller
 at all, which is why it migrates to a container untouched.
 
+### The two other caller-controlled strings got the same guard, one field over
+
+Hardening `device_id` and leaving its siblings alone closed a door on four
+routes while the same primitive stood open next to it. There are exactly two,
+and both are **id-shaped strings that become a log field and a filename**:
+
+- **`session_id`, from the `/ws/ext/{session_id}` path.** Worse than
+  `device_id`, because it is *in the url*: the guard has to run before the
+  auth check, since the rejection log line already interpolates it. A
+  `task_start` then carried it into `AuditTrail`, whose `__init__` builds
+  `f"{session_id}.json"` with no validation — `read` and `delete` both guard
+  with `_is_document_stem`, the write never did. So `/ws/ext/aaa%0aINFO%3A%20forged`
+  let an **unauthenticated** caller forge operator log output and name a file
+  under `logs/sessions/`. Now closed with the same `_UUID` the install id
+  uses, since `POST /v1/sessions` mints uuid4 and nothing else is legitimate.
+  Closed `4004`, distinct from the secret's `4001` so a valid id and a valid
+  credential stay distinguishable.
+- **CORS.** `allow_origins=["*"]` **with** `allow_credentials=True` makes
+  Starlette echo the caller's `Origin`, so **any page the operator visited
+  could read the transcript** on a secret-less install — a simple
+  `GET /v1/sessions` needs no preflight and no secret. The documented
+  mitigation ("compose binds 127.0.0.1") does not apply: a browser reaches
+  loopback fine. Gating the four routes did not help, same data by another
+  door. The only legitimate cross-origin client is the extension, whose origin
+  is `chrome-extension://<id>` with a Chrome id (`[a-p]{32}`), plus loopback
+  for the dev panel. Credentials are off: every call authenticates with the
+  `AGENT_SECRET` header, never a cookie.
+
+`_is_document_stem` would not have been enough for either — it rejects paths
+and dots, but `"aaa\nINFO".isprintable()` and no dot means a newline rides
+straight into the log. That is why the guard is the uuid regex and not the
+filesystem predicate.
+
+**Tests cannot use readable session ids in a url any more.** `session_id` in
+`tests/conftest.py` mints a uuid5 from a label, so the label survives in the
+test name. Assert the *close code*, not `raises(WebSocketDisconnect)` — with no
+secret offered every id is refused anyway, so the exception alone passes
+against an unfixed server.
+
 The two functions are duplicated across `background.ts` and `sidepanel.js`
 because those are two separate bundles (the service worker is bundled by
 esbuild, the panel is copied verbatim). They must read the same storage key,

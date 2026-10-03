@@ -377,7 +377,7 @@ def _drain_until(ws, target_type: str, max_msgs: int = 50) -> dict:
     raise AssertionError(f"never saw {target_type!r} after {max_msgs} messages")
 
 
-def test_a_reconnect_does_not_start_a_second_agent(sessions_dir, harness_calls):
+def test_a_reconnect_does_not_start_a_second_agent(sessions_dir, harness_calls, session_id):
     """A second socket for a live session is refused, not doubled.
 
     Two harness.runs on one browser is two agents clicking one tab, each
@@ -389,13 +389,13 @@ def test_a_reconnect_does_not_start_a_second_agent(sessions_dir, harness_calls):
     from brotto_orchestrator import main as main_mod
 
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/dup-live") as first:
+        with client.websocket_connect(f"/ws/ext/{session_id("dup-live")}") as first:
             first.send_text(json.dumps({"type": "task_start", "task": "go"}))
             # policy_effective is sent after the agent task is registered, so
             # seeing it means the session already has a live agent.
             _drain_until(first, "policy_effective")
 
-            with client.websocket_connect("/ws/ext/dup-live") as second:
+            with client.websocket_connect(f"/ws/ext/{session_id("dup-live")}") as second:
                 second.send_text(json.dumps({"type": "task_start", "task": "go"}))
                 refused = _drain_until(second, "task_failed")
                 assert refused["failure_reason"] == "duplicate_task_start"
@@ -407,7 +407,7 @@ def test_a_reconnect_does_not_start_a_second_agent(sessions_dir, harness_calls):
     assert len(harness_calls) == 1
 
 
-def test_the_refusal_is_recorded_in_the_session_document(sessions_dir, harness_calls):
+def test_the_refusal_is_recorded_in_the_session_document(sessions_dir, harness_calls, session_id):
     from fastapi.testclient import TestClient
 
     from brotto_orchestrator import main as main_mod
@@ -415,23 +415,23 @@ def test_the_refusal_is_recorded_in_the_session_document(sessions_dir, harness_c
     # A live agent has flushed at least once, so there is a document for the
     # refusal to land in. (With no document there is nothing to write to —
     # the writer drops events for sessions it has never seen.)
-    live = AuditTrail("dup-logged", dir=sessions_dir)
+    live = AuditTrail(session_id("dup-logged"), dir=sessions_dir)
     live.set_goal("go")
     live.close()
 
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/dup-logged") as first:
+        with client.websocket_connect(f"/ws/ext/{session_id("dup-logged")}") as first:
             first.send_text(json.dumps({"type": "task_start", "task": "go"}))
             _drain_until(first, "policy_effective")
-            with client.websocket_connect("/ws/ext/dup-logged") as second:
+            with client.websocket_connect(f"/ws/ext/{session_id("dup-logged")}") as second:
                 second.send_text(json.dumps({"type": "task_start", "task": "go"}))
                 _drain_until(second, "task_failed")
 
-    events = read("dup-logged", dir=sessions_dir).get("policy_events", [])
+    events = read(session_id("dup-logged"), dir=sessions_dir).get("policy_events", [])
     assert any(e.get("kind") == "duplicate_task_start" for e in events), events
 
 
-def test_a_reconnect_beat_ing_the_old_socket_is_accepted(sessions_dir, monkeypatch):
+def test_a_reconnect_beat_ing_the_old_socket_is_accepted(sessions_dir, monkeypatch, session_id):
     """A teardown that has begun is not a rival agent.
 
     The refused case above is two sockets with one healthy agent. This is
@@ -463,10 +463,10 @@ def test_a_reconnect_beat_ing_the_old_socket_is_accepted(sessions_dir, monkeypat
     monkeypatch.setattr(main_mod.harness, "run", stub.__get__(main_mod.harness))
 
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/race-live") as first:
+        with client.websocket_connect(f"/ws/ext/{session_id("race-live")}") as first:
             first.send_text(json.dumps({"type": "task_start", "task": "go"}))
             _drain_until(first, "policy_effective")
-            with client.websocket_connect("/ws/ext/race-live") as second:
+            with client.websocket_connect(f"/ws/ext/{session_id("race-live")}") as second:
                 second.send_text(json.dumps({"type": "task_start", "task": "go"}))
                 # policy_effective, not task_failed: the guard let it through.
                 _drain_until(second, "policy_effective")
@@ -474,7 +474,7 @@ def test_a_reconnect_beat_ing_the_old_socket_is_accepted(sessions_dir, monkeypat
     assert len(calls) == 2
 
 
-def test_a_cancel_frame_marks_the_session_as_user_stopped(sessions_dir, harness_calls, monkeypatch):
+def test_a_cancel_frame_marks_the_session_as_user_stopped(sessions_dir, harness_calls, monkeypatch, session_id):
     """The extension says goodbye before closing; the server believes it.
 
     A closed socket alone cannot say whether the run should be resumable,
@@ -490,11 +490,11 @@ def test_a_cancel_frame_marks_the_session_as_user_stopped(sessions_dir, harness_
     monkeypatch.setattr(main_mod, "mark_cancelled", marked.append)
 
     with TestClient(main_mod.app) as client:
-        with client.websocket_connect("/ws/ext/cancel-say") as ws:
+        with client.websocket_connect(f"/ws/ext/{session_id("cancel-say")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "go"}))
             _drain_until(ws, "policy_effective")
             ws.send_text(json.dumps({"type": "cancel"}))
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
-    assert marked == ["cancel-say"]
+    assert marked == [session_id("cancel-say")]

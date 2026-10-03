@@ -193,8 +193,15 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Brotto Orchestrator", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    # The only legitimate browser client is the extension, whose origin is
+    # chrome-extension://<id> with a Chrome id ([a-p]{32}), plus loopback for
+    # the dev panel. Reflecting any origin — "*" with allow_credentials makes
+    # Starlette echo the caller's Origin — let any page the operator happened
+    # to visit read their transcripts off a secret-less install, and the
+    # "compose binds 127.0.0.1" mitigation does not apply: a browser reaches
+    # loopback fine. Credentials stay off; every call authenticates with the
+    # AGENT_SECRET header, not a cookie, so nothing here needs them.
+    allow_origin_regex=r"^(chrome-extension://[a-p]{32}|https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?)$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -818,6 +825,17 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     it, permanently. Checked before accept, so an unauthenticated caller
     never gets a socket it can drive.
     """
+    # The url path, so it is caller-controlled before a word is logged.
+    # `device_id` got this treatment for the same reason and on the same
+    # frame; without it this id is a log-forging primitive on every log line
+    # below and the stem of the document written under logs/sessions/.
+    # Session ids are minted as uuid4 by POST /v1/sessions, so nothing else
+    # is a legitimate one.
+    if not _UUID.match(session_id):
+        log.warning("extension rejected — session id is not a uuid")
+        await websocket.close(code=4004)
+        return
+
     offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
     if not validate_request(
         websocket.headers.get("authorization"),
