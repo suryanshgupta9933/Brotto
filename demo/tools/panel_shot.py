@@ -10,7 +10,16 @@ there is no second copy to disagree.
 
     .venv/bin/python demo/tools/panel_shot.py
 
-Writes `demo/public/shots/<name>.png` at 2x for the video to scale down.
+Writes two things:
+
+* `demo/public/shots/<name>.png` — one still per beat, at 2x.
+* `demo/public/seq/*.png` — the run itself, captured state by state, plus a
+  generated `demo/src/seq.ts` naming them in order and how long each holds.
+
+The sequence is the difference between a screenshot and a demo. One still of the
+panel is a picture of a thing that does nothing; the same panel captured as a
+sequence has its steps arriving, its counter counting and its approval card
+sliding up — which is the whole product in a dozen frames.
 """
 
 from __future__ import annotations
@@ -24,7 +33,10 @@ from playwright.sync_api import sync_playwright
 
 REPO = Path(__file__).resolve().parents[2]
 PANEL = REPO / "clients/brotto-extension/src/sidepanel.html"
-OUT = Path(__file__).resolve().parents[1] / "public/shots"
+DEMO = Path(__file__).resolve().parents[1]
+OUT = DEMO / "public/shots"
+SEQ = DEMO / "public/seq"
+SEQ_TS = DEMO / "src/seq.ts"
 
 # Seeded before the panel's first read so hydration finds what a returning user
 # would have: a saved server, a model, and a history that is not empty.
@@ -109,11 +121,149 @@ def emit(page, frame: dict) -> None:
     page.evaluate("(f) => window.__emit(f)", frame)
 
 
+def scroll_top(page) -> None:
+    """Pin the message list to the top.
+
+    The panel follows the run — every append sets `scrollTop = scrollHeight` — so
+    by step 14 the status bar (steps / active / context) has scrolled out of the
+    viewport entirely. That is correct behaviour and wrong for a video: those
+    three numbers are the part that visibly counts. Scrolling back before each
+    capture keeps them on screen for the whole run.
+
+    The approval frame does scroll to the card instead, because that is the one
+    state whose *content* matters more than its chrome.
+    """
+    page.evaluate("() => { const m = document.getElementById('messages'); if (m) m.scrollTop = 0; }")
+
+
+VIEW_W, VIEW_H = 420, 540
+# The page is captured at 2x, so the PNGs carry twice the pixels the panel
+# occupies on screen. Spots are recorded in that pixel space rather than in CSS
+# px because the composition draws the panel 1:1 — an 840x1080 panel image in an
+# 840x1080 slot stays razor sharp, and the panel's own 11px body text lands at
+# 11px on the 1920px frame instead of the 5px it shrank to when the panel was
+# displayed at its 420px CSS width. The two spaces agreeing is the whole point;
+# mixing them puts every callout at half the offset it should be.
+#
+# The window is 540 CSS px of a panel that is ~1080 tall, not the whole thing.
+# A 420x1080 strip is one ninth of a 16:9 frame; showing it large enough to
+# read means showing *part* of it, and the part worth showing is the top: the
+# status bar that counts the run, the card that is making the claim, and the
+# composer underneath it. Anything lower is reached by scrolling the panel
+# before the capture, which is what `reveal` does.
+DPR = 2
+
+
+def spot(page, into: dict, name: str, selector: str) -> None:
+    """Record where a callout should point, in the PNG's own pixel space.
+
+    Measured rather than eyeballed. A hand-placed rectangle drifts the moment
+    the panel's padding changes, and it drifts *silently* — the box still draws,
+    it just frames the wrong thing. This is the last element matching the
+    selector, because cards are appended and the video wants the newest one.
+    """
+    rect = page.evaluate(
+        """(sel) => {
+            const els = document.querySelectorAll(sel);
+            const el = els[els.length - 1];
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return { x: r.left, y: r.top, w: r.width, h: r.height };
+        }""",
+        selector,
+    )
+    if rect is None:
+        return
+    top = max(0.0, rect["y"])
+    bottom = min(float(VIEW_H), rect["y"] + rect["h"])
+    if bottom - top < 8:
+        return  # scrolled out of the viewport; there is nothing to point at
+    into[name] = {
+        "x": round(max(0.0, rect["x"]) * DPR, 1),
+        "y": round(top * DPR, 1),
+        "w": round(rect["w"] * DPR, 1),
+        "h": round((bottom - top) * DPR, 1),
+    }
+
+
 def shoot(page, name: str) -> None:
     page.wait_for_timeout(700)  # let the working line's 700ms hold resolve
     OUT.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(OUT / f"{name}.png"))
     print(f"  {name}.png")
+
+
+class Run:
+    """The run, recorded as the video plays it.
+
+    `hold` is how many frames the video shows that state for. It is written by
+    hand rather than sampled at a constant rate because the real run is not
+    evenly paced — steps land in bursts, and the approval takes a beat to arrive
+    because the panel animates it in. A uniform sample flattens exactly the part
+    a viewer needs to notice.
+    """
+
+    def __init__(self, page):
+        self.page = page
+        self.frames: list[dict] = []
+        self.spots: dict[str, dict] = {}
+
+    def mark(self, name: str, selector: str) -> None:
+        spot(self.page, self.spots, name, selector)
+
+    def capture(self, label: str, hold: int, follow: bool = False, reveal: str | None = None) -> None:
+        if reveal:
+            self.page.evaluate(
+                "(sel) => { const els = document.querySelectorAll(sel);"
+                " const el = els[els.length - 1]; if (el) el.scrollIntoView({ block: 'start' }); }",
+                reveal,
+            )
+        elif not follow:
+            scroll_top(self.page)
+        self.page.wait_for_timeout(500)
+        SEQ.mkdir(parents=True, exist_ok=True)
+        name = f"{len(self.frames):02d}-{label}.png"
+        self.page.screenshot(path=str(SEQ / name))
+        self.frames.append({"src": f"seq/{name}", "hold": hold})
+        print(f"  seq/{name}  ({hold}f)")
+
+    def write_module(self) -> None:
+        """Emit the ordering as a TS module rather than a JSON sidecar.
+
+        The video must not hold a second copy of the order — that is a list
+        hand-kept in sync with a list written here, which is precisely how the
+        three model catalogues drifted. One writer, one artefact.
+        """
+        rows = "\n".join(f'  {{ src: "{f["src"]}", hold: {f["hold"]} }},' for f in self.frames)
+        marks = "\n".join(
+            f'  {name}: {{ x: {s["x"]}, y: {s["y"]}, w: {s["w"]}, h: {s["h"]} }},'
+            for name, s in self.spots.items()
+        )
+        SEQ_TS.write_text(
+            "// GENERATED by demo/tools/panel_shot.py — do not edit.\n"
+            "//\n"
+            "// The run, in order, as the video plays it. `hold` is how many frames\n"
+            "// that state is on screen. `SPOTS` is where each callout points, measured\n"
+            "// off the live DOM rather than eyeballed. Regenerate with:\n"
+            "//\n"
+            "//     .venv/bin/python demo/tools/panel_shot.py\n"
+            "\n"
+            "export type RunFrame = { src: string; hold: number };\n"
+            "export type Spot = { x: number; y: number; w: number; h: number };\n"
+            "\n"
+            "export const RUN: RunFrame[] = [\n"
+            f"{rows}\n"
+            "];\n"
+            "\n"
+            "export const SPOTS: Record<string, Spot> = {\n"
+            f"{marks}\n"
+            "};\n"
+            "\n"
+            f"export const RUN_FRAMES = {sum(f['hold'] for f in self.frames)};\n"
+        )
+        print(f"  wrote {SEQ_TS.relative_to(REPO)}  ({len(self.frames)} frames, "
+              f"{sum(f['hold'] for f in self.frames)} frames of run, "
+              f"{len(self.spots)} callout spots)")
 
 
 # The panel probes the server on open. A `file://` origin gets a CORS failure
@@ -159,8 +309,8 @@ def main() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(
-            viewport={"width": 420, "height": 900},
-            device_scale_factor=2,
+            viewport={"width": VIEW_W, "height": VIEW_H},
+            device_scale_factor=DPR,
         )
         page.route("**/v1/**", route_server)
         page.route("**/health", route_server)
@@ -183,6 +333,7 @@ def main() -> int:
             return 1
 
         shoot(page, "panel-idle")
+        run = Run(page)
 
         # A run in flight. Every frame below is one the relay really sends, and
         # every number the status bar shows is the panel's own arithmetic on it:
@@ -206,6 +357,31 @@ def main() -> int:
                 {"index": 4, "text": "Sort by cheapest, and read the first three results"},
             ],
         })
+        # The plan is the first thing a viewer should read, so it gets the
+        # longest hold of the opening states.
+        run.capture("plan", 18)
+        run.mark("plan", ".plan-card")
+        run.mark("composer", "#inputArea")
+
+        STEPS = [
+            "Read the November fare calendar",
+            "Set departure 4 Nov, return 18 Nov",
+            "Toggled “direct only”",
+            "Sorted by cheapest",
+            "Opened the cheapest result",
+            "Compared the three lowest fares",
+            "Checked the layover filter",
+            "Read the fare rules",
+            "Confirmed baggage is included",
+            "Checked departure times",
+            "Re-sorted including taxes",
+            "Opened the return leg",
+            "Confirmed both legs are direct",
+        ]
+        # Sampled, not every step: fourteen captures of a card list is fourteen
+        # near-identical frames, and the video only needs the count to move.
+        SAMPLE_AT = {3: 9, 5: 8, 8: 8, 11: 7}
+
         emit(page, {
             "type": "step_card",
             "index": 0,
@@ -215,6 +391,7 @@ def main() -> int:
         })
         emit(page, {"type": "canonical_step", "kind": "observe"})
         shoot(page, "panel-plan")
+        run.capture("opened", 13)
 
         # 13 more steps, so the counter reads the 14 the history row claims.
         for i in range(1, 14):
@@ -222,26 +399,16 @@ def main() -> int:
                 "type": "step_card",
                 "index": i,
                 "iconKind": "click" if i % 3 else "type_text",
-                "clientText": [
-                    "Read the November fare calendar",
-                    "Set departure 4 Nov, return 18 Nov",
-                    "Toggled “direct only”",
-                    "Sorted by cheapest",
-                    "Opened the cheapest result",
-                    "Compared the three lowest fares",
-                    "Checked the layover filter",
-                    "Read the fare rules",
-                    "Confirmed baggage is included",
-                    "Checked departure times",
-                    "Re-sorted including taxes",
-                    "Opened the return leg",
-                    "Confirmed both legs are direct",
-                ][i - 1],
+                "clientText": STEPS[i - 1],
             })
+            if i in SAMPLE_AT:
+                run.capture(f"step{i}", SAMPLE_AT[i])
         emit(page, {
             "type": "context_update",
             "context": {"tokens": 412_000, "window": 1_000_000, "pct": 41.2},
         })
+        run.capture("working", 11)
+
         emit(page, {
             "type": "approval_request",
             "id": "a1",
@@ -249,6 +416,10 @@ def main() -> int:
             "action": {"type": "click", "url": "https://kayak.com/checkout"},
         })
         shoot(page, "panel-approval")
+        # Longest hold in the run. The card animates in, and this is the state
+        # the whole "asks" beat is about — cutting away from it early loses it.
+        run.mark("approval", ".approval-card")
+        run.capture("asks", 24, follow=True)
 
         emit(page, {"type": "approval_resolved", "id": "a1", "approved": True})
         emit(page, {
@@ -269,11 +440,20 @@ def main() -> int:
                 ),
             },
         })
+        run.mark("answer", ".final-answer")
         shoot(page, "panel-done")
+        # Scrolling to the very bottom tucks the answer behind the composer, and
+        # scrolling to the top buries it under fourteen step cards. The answer is
+        # the whole point of this state, so it gets the frame.
+        run.capture("done", 28, reveal=".final-answer")
+        run.mark("answer", ".final-answer")
 
         page.evaluate("() => document.getElementById('historyBtn')?.click()")
+        page.wait_for_timeout(700)
+        run.mark("deleteAll", "#historyDeleteAll")
         shoot(page, "panel-history")
 
+        run.write_module()
         browser.close()
 
     if errors:

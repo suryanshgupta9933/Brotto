@@ -423,3 +423,48 @@ is the panel's own arithmetic** — `startedAt` seeds its clock, `index` counts 
 steps, `context.pct` is what it draws as CONTEXT. The harness writes frames and
 never touches the DOM, which is what keeps the screenshot evidence rather than
 decoration.
+
+The one DOM read is `getBoundingClientRect()`, for the callout rectangles. That
+is the exception that proves the rule: a hand-placed box drifts the moment the
+panel's padding changes, and it drifts *silently* — it keeps drawing, framing
+the wrong card. Those rects go into a **generated `demo/src/seq.ts`**, not a JSON
+sidecar and not a list in the composition, because a hand-kept frame order is a
+second copy that drifts exactly like the three model catalogues did.
+
+#### A panel screenshot is only evidence if it is legible
+
+The first Brag cut staged the panel at its 420px CSS width, and the shots were
+captured at 2x. Downscaling an 840px image into a 420px slot put the panel's own
+11px body text at **five pixels** on a 1920px frame — the reviewer saw texture
+and reported "the screenshots look so off", which is exactly the right thing to
+report about a screenshot that cannot be read. Drawing the shot 1:1 at 840x1080
+fixed it and made the panel the hero it was supposed to be.
+
+**Capture, shot size and draw size are therefore one 2x pixel space** —
+`VIEW_W`/`VIEW_H`/`DPR` in the harness, `PANEL_W`/`PANEL_H` in the composition,
+and the callout rects all in it. Change one and the callouts land at the wrong
+offset. The window is **420x540 CSS px of a ~1080px panel**: a full column is a
+ninth of a 16:9 frame and cannot be shown at a readable size at all, so the
+capture takes the top — status bar, claim card, composer — and a beat whose
+evidence is lower scrolls the panel first.
+
+**The panel follows the run.** Every append sets `scrollTop = scrollHeight`, so
+by step 14 the status bar (steps / active / context — the part that visibly
+counts) has scrolled out of the viewport entirely. Correct behaviour, wrong for
+a video; the harness pins `#messages` to the top before each capture, and lets
+the approval and answer frames scroll to their card instead, because there the
+content matters more than the chrome.
+
+#### `opacity: 0` is not a bug a still-frame skim catches
+
+`Shot` and `RunPanel` took their frame as an `at` prop. Every call site passed
+the literal `0`, and `panelIn(0)` is `opacity: 0` — so the panel was invisible
+for the entire cut while the callouts, which read `useCurrentFrame()`, drew
+normally. The composition rendered "correctly": type in the left column, a
+rectangle around a card, and nothing in between. It read as bad staging rather
+than as a missing image, and no single still shows that the difference between
+"deliberately empty panel" and "panel at zero opacity" is invisible.
+
+They call `useCurrentFrame()` themselves now. **A prop a caller has to remember
+is a prop a caller gets wrong**, and the failure mode of getting this one wrong
+is indistinguishable from a design choice.
