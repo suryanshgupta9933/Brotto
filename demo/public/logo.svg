@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- Brotto mark: a solid square with a rectangular notch cut into its right
+       wall. The notch is the action window — the place the agent works through.
+       Solid (not stroked) so it survives the 16px toolbar render. -->
+  <path d="M2 2h20v7h-8v6h8v7H2z" fill="#000000"/>
+</svg>
