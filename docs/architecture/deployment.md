@@ -182,6 +182,13 @@ sweep firing at startup and `DELETE` taking the scratchpad with the document
 were all measured on a fresh clone, and those are the only measurements in
 this file that count.
 
+CI now builds the image on every push and PR (`docker-build` in
+`.github/workflows/ci.yml`), from the checked-out tree with no working-tree
+state, which is the condition that was violated here. The omission survived
+review because a build step and a reviewed file are different artefacts; the
+job removes the gap between them. It builds but does not run the container —
+`docker compose up` and the healthcheck are still verified by hand.
+
 ## Deleting a session
 
 `audit.delete(session_id)` takes the document, the scratchpad and the pages

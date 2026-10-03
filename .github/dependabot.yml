@@ -1,0 +1,28 @@
+version: 2
+
+updates:
+  # Workflow actions. Grouped: the file pins checkout, setup-node,
+  # setup-python, upload-artifact and the two docker actions, so an
+  # ungrouped config opens six PRs for one upstream release.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    # The only package-lock.json in the repo.
+    directory: /clients/brotto-extension
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: pip
+    # requirements.txt is at the repo root and is what the Dockerfile and
+    # CI both install from.
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

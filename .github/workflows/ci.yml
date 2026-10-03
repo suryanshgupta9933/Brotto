@@ -38,6 +38,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
+      # A gate, and it can be one because requirements.txt bounds every
+      # floor to a verified version and every cap to the next major. It
+      # was advisory while the floors were `pydantic-ai>=0.0.1`, where the
+      # audit read a ~120-package tree the project does not use and an
+      # upstream release could redden the build on its own. The tree is
+      # ~40 packages now, all three factories' extras and nothing else.
+      - name: Audit Python dependencies
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt
+
       # ponytail: services/brotto-orchestrator/src is the only thing on
       # PYTHONPATH that makes `brotto_orchestrator` importable. The old
       # Dockerfile already used this env var.
@@ -73,6 +84,13 @@ jobs:
         working-directory: clients/brotto-extension
         run: npm ci
 
+      # A gate, and the steadier of the two audits: package-lock.json pins
+      # exact versions, so this reports on the tree that is literally
+      # installed. The Python audit re-resolves, bounded but not pinned.
+      - name: Audit npm dependencies
+        working-directory: clients/brotto-extension
+        run: npm audit --audit-level=high
+
       # ponytail: tsc --noEmit catches type errors without emitting
       # files. Run before the real build so the type-error signal is
       # surfaced even if esbuild happily swallows any.
@@ -84,6 +102,19 @@ jobs:
         working-directory: clients/brotto-extension
         run: npm run build
 
+      # The 16 scripts/*.test.js files are the only check for panel
+      # rendering, replay, key dispatch, the model-check gate order and the
+      # observation guards — CLAUDE.md names each one. They extract the real
+      # functions out of the shipped sources and eval them, so a run here is
+      # the same check a developer gets locally. Runs after Build because
+      # they read the bundles. ~6s.
+      #
+      # ponytail: `npm test` would be one line but re-runs `npm run build`
+      # first; the build is already the step above.
+      - name: Run extension JS tests
+        working-directory: clients/brotto-extension
+        run: node --test ../../scripts/*.test.js
+
       # ponytail: surface the bundle for download in the Actions UI —
       # useful for QA to grab the exact artifact a green run produced.
       - name: Upload extension bundle
@@ -93,3 +124,29 @@ jobs:
           path: clients/brotto-extension/dist
           if-no-files-found: error
           retention-days: 7
+
+  # ─── Self-host image builds ───────────────────────────────────────
+  # The image is the whole product for a self-hoster, and it has shipped
+  # broken before: the Dockerfile did not build at all until 2026-10-03.
+  # Nothing else here proves it builds — test_compose_volume.py reads the
+  # compose file, it does not build the image.
+  docker-build:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # gha layer cache: the builder stage compiles wheels, so an uncached
+      # run is minutes. ponytail: `docker build -t brotto:ci .` is the
+      # one-line alternative and verifies the same thing — drop this if the
+      # runner minutes ever matter more than the wait.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: brotto:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
