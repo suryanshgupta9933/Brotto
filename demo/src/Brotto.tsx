@@ -422,15 +422,18 @@ export const Brotto: React.FC = () => {
   return (
     <AbsoluteFill style={{ background: ink.paper, fontFamily: FONT_UI, color: ink.ink }}>
       <Fonts />
-      {/* The bed is a 10.67s loop generated from scratch (see the README), so it
-          is ours to loop and there is no attribution to carry. `extend` keeps the
-          media frame counting across loops, which is what makes the closing fade
-          land where it is placed instead of restarting every 10.67s. */}
+      {/* The same generated cue as the launch cut, looped. It is a 25.4s piece
+          written to `Brag`'s scene starts, so the accents do not line up with
+          this cut's — but it ends on a full cadence with a ring-out, which is
+          the one place a loop can be invisible. Quieter than Brag's 0.32: this
+          runs 54s and the visuals carry it. `extend` keeps the media frame
+          counting across loops, so the closing fade lands where it is placed
+          rather than restarting every 25.4s. */}
       <Audio
         src={staticFile("bed.mp3")}
         loop
         loopVolumeCurveBehavior="extend"
-        volume={interpolate(frame, [0, 20, DURATION - 70, DURATION], [0, 0.13, 0.13, 0], clamp)}
+        volume={interpolate(frame, [0, 20, DURATION - 70, DURATION], [0, 0.24, 0.24, 0], clamp)}
       />
       <TransitionSeries>
         {SCENES.map(([Scene, durationInFrames], i) => (

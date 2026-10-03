@@ -33,9 +33,13 @@ const PANEL_W = 840;
 const PANEL_H = 1080;
 const PANEL_X = W - PANEL_W - 48;
 const TYPE_X = 96;
-/* The last 210px is the gutter the callout label and its leader line live in. */
-const TYPE_W = PANEL_X - TYPE_X - 210;
-const GUTTER = 210;
+/* The last 280px is the gutter the callout label and its leader line live in.
+ * 280, not a round 210: the longest label is "per-site consent", and 16 mono
+ * uppercase characters at 21px with the letter-spacing below need 246px. At 150
+ * usable it silently clipped to "per-site consent" minus its last letter, which
+ * reads as a typo rather than as a layout fault. */
+const TYPE_W = PANEL_X - TYPE_X - 280;
+const GUTTER = 280;
 
 /** The panel arriving. A 140px slide, not just a fade — the previous cut moved
  *  between two identical framings, which is part of what read as static. */
@@ -115,12 +119,16 @@ const RunPanel: React.FC = () => {
   );
 };
 
-/** A frame drawn around the thing on screen that proves the claim, with a
- *  leader line running out of the panel and back to the label in the gutter.
- *  The rectangles are measured off the live panel by `tools/panel_shot.py` — a
- *  hand-placed one drifts silently, framing the wrong card while still looking
- *  deliberate. The label is clamped to the frame: the history drawer's delete
- *  button sits 22px from the top, and an unclamped label drew off the edge. */
+/** A leader line running out of the panel to a label in the gutter. It used to
+ *  end in a rectangle drawn around the card — a box, on top of a panel that is
+ *  itself a stack of boxes, which is a second outline of something the viewer
+ *  can already see. The line and the label are enough: they say *this row*.
+ *
+ *  The anchor is measured off the live panel by `tools/panel_shot.py`, so a
+ *  panel that changes moves the label with it instead of leaving it pointing at
+ *  the gap where a card used to be. The label is clamped to the frame: the
+ *  history drawer's delete button sits 45px from the top, and an unclamped
+ *  label drew off the edge. */
 const Callout: React.FC<{ spot: Spot; label: string; at: number; lead: number }> = ({
   spot,
   label,
@@ -148,9 +156,9 @@ const Callout: React.FC<{ spot: Spot; label: string; at: number; lead: number }>
       <div
         style={{
           position: "absolute",
-          left: left - LEAD - 18 - (GUTTER - 60),
+          left: left - LEAD - 18 - (GUTTER - 30),
           top: Math.max(6, Math.min(PANEL_H - 44, midY - 13)),
-          width: GUTTER - 60,
+          width: GUTTER - 30,
           textAlign: "right",
           fontFamily: FONT_MONO,
           fontSize: 21,
@@ -163,18 +171,6 @@ const Callout: React.FC<{ spot: Spot; label: string; at: number; lead: number }>
       >
         {label}
       </div>
-      <div
-        style={{
-          position: "absolute",
-          left,
-          top: spot.y - 8,
-          width: spot.w + 16,
-          height: spot.h + 16,
-          border: `2px solid ${ink.ink}`,
-          opacity: t,
-          transform: `scale(${0.93 + 0.07 * t})`,
-        }}
-      />
     </>
   );
 };
@@ -353,7 +349,7 @@ const SCENES: [React.FC, number][] = [
         head={<>It reads the page&rsquo;s structure, not a screenshot.</>}
         cap="Every link, field and button is addressable — which is why a click lands where it should."
         panel={<RunPanel />}
-        callout={{ spot: "plan", label: "per-site consent", lead: RUN_FRAMES - 40 }}
+        callout={{ spot: "plan", label: "per-site consent", lead: 3 }}
       />
     ),
     RUN_FRAMES,
@@ -407,13 +403,13 @@ export const Brag: React.FC = () => {
   return (
     <AbsoluteFill style={{ background: ink.paper, fontFamily: "Geist, sans-serif", color: ink.ink }}>
       <Fonts />
-      {/* The same generated bed as the explainer (see README), sitting lower
-          because this cut moves faster. */}
+      {/* The generated cue (see README and `tools/bed.mjs`), scored to this cut's
+          scene starts rather than looped under them. The fade-out is 20 frames,
+          not 60: the last chord resolves at 24.0s and the cut runs to 25.4s, so a
+          two-second fade would swallow the one moment the music lands. */}
       <Audio
         src={staticFile("bed.mp3")}
-        loop
-        loopVolumeCurveBehavior="extend"
-        volume={interpolate(frame, [0, 18, DURATION - 60, DURATION], [0, 0.11, 0.11, 0], clamp)}
+        volume={interpolate(frame, [0, 12, DURATION - 20, DURATION], [0, 0.32, 0.32, 0], clamp)}
       />
       {/* The poster covers frame 0 and nothing else. Platforms that grab a
           thumbnail off the first frame would otherwise get the hook

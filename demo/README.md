@@ -85,11 +85,31 @@ desync the audio.
 `public/geist-mono-latin.woff2`. A `staticFile()` that resolves to a network
 fetch is a render that breaks on the day the CDN does.
 
-**The music bed is generated, not licensed.** `public/bed.mp3` is a 10.67s
-loop rendered from sine arithmetic — a four-bar i–VI–III–VII pad, a plucked
-arpeggio, a sub, and a 350ms crossfade at the seam so the repeat is inaudible.
-It is looped under the whole video with a 20-frame fade in and a 70-frame fade
-out. It is ours, so there is no attribution to carry and nothing to clear.
+**The music is generated, not licensed.** `public/bed.mp3` comes from
+`tools/bed.mjs` — pure stdlib plus the ffmpeg the Remotion CLI already ships, so
+there is nothing to install and no attribution to carry. It is ours in the sense
+that matters: the arithmetic is in the repo.
+
+```console
+node tools/bed.mjs   # -> public/bed.mp3, ~1.5s
+```
+
+**It is scored to the cut, not looped under it.** The previous bed was a 10.7s
+cycle, which on a 25.4s video seam-auditions twice at moments nobody chose, and
+a fixed cycle cannot hit an edit. `bed.mjs` places every accent on the beat
+nearest a scene start — 100bpm, so a beat is 0.6s and the seven scene starts
+land within 0.2s of a beat. Seven layers: a detuned pad, a sub, a sixteenth-note
+arpeggio that enters on the Reveal rather than the hook, a shaker from the Asks
+onward, a pitch-drop accent on each cut, two risers, and a Schroeder reverb.
+The last chord resolves at 24.0s and rings into the cut at 25.4s.
+
+Two things the first mix got wrong, both invisible in the code. The arpeggio
+was mixed 5× below the pad and was inaudible — the pad and sub are a continuous
+floor, so a layer under them disappears rather than being subtle. And the level
+was set by eye against a file whose normalisation had changed; the script now
+prints peak, RMS and a per-half-second energy profile, which is how the inaudible
+layer was found without listening to the result. `Brotto` loops the same file at
+a lower volume; the cue ends on a cadence, so the loop point is inaudible there.
 
 **Scene lengths are not round numbers.** Bet is 420 frames and SelfHost is 265.
 Each scene is sized to its own content, because a scene that cuts while its last

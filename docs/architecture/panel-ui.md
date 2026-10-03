@@ -424,12 +424,21 @@ steps, `context.pct` is what it draws as CONTEXT. The harness writes frames and
 never touches the DOM, which is what keeps the screenshot evidence rather than
 decoration.
 
-The one DOM read is `getBoundingClientRect()`, for the callout rectangles. That
-is the exception that proves the rule: a hand-placed box drifts the moment the
-panel's padding changes, and it drifts *silently* — it keeps drawing, framing
-the wrong card. Those rects go into a **generated `demo/src/seq.ts`**, not a JSON
-sidecar and not a list in the composition, because a hand-kept frame order is a
-second copy that drifts exactly like the three model catalogues did.
+The one DOM read is `getBoundingClientRect()`, for the callout anchors. That
+is the exception that proves the rule: a hand-placed anchor drifts the moment the
+panel's padding changes, and it drifts *silently* — the label keeps drawing,
+pointing at whatever moved into its place. Those rects go into a **generated
+`demo/src/seq.ts`**, not a JSON sidecar and not a list in the composition, because
+a hand-kept frame order is a second copy that drifts exactly like the three model
+catalogues did.
+
+**An anchor is only as good as the frame it is anchored to.** The Reads beat used
+to lead its callout at `RUN_FRAMES - 40`, by which point the plan card it names
+had left the screen and the approval card was standing where the rect said the
+plan card was — so the label read "per-site consent" while pointing at "approval
+needed". The plan card is on screen for the first 18 frames of the run, so the
+lead is 3. Measuring the rect correctly does not help if the *frame* is wrong,
+and a wrong frame is a semantic error, not a pixel one.
 
 #### A panel screenshot is only evidence if it is legible
 
@@ -460,9 +469,9 @@ content matters more than the chrome.
 `Shot` and `RunPanel` took their frame as an `at` prop. Every call site passed
 the literal `0`, and `panelIn(0)` is `opacity: 0` — so the panel was invisible
 for the entire cut while the callouts, which read `useCurrentFrame()`, drew
-normally. The composition rendered "correctly": type in the left column, a
-rectangle around a card, and nothing in between. It read as bad staging rather
-than as a missing image, and no single still shows that the difference between
+normally. The composition rendered "correctly": type in the left column, a box
+around a card, and nothing in between. It read as bad staging rather than as a
+missing image, and no single still shows that the difference between
 "deliberately empty panel" and "panel at zero opacity" is invisible.
 
 They call `useCurrentFrame()` themselves now. **A prop a caller has to remember

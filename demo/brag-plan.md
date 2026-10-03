@@ -92,11 +92,17 @@ lower scroll the panel before the capture.
 The complaint the first cut drew was "not a lot of motion", and it was right:
 one still held for ninety frames behind a 5% scale. What there is now, per
 scene: the panel slides in 140px and fades over 12 frames, the shot drifts
-1.000 → 1.035 across the scene, the callout rectangle scales 0.93 → 1 while its
-leader line draws leftward, the type enters staggered, and a rule draws under
-the claim over frames 34–64. The Reads scene replaces the drift with a
-four-frame crossfade between captured states, because those frames are already
-changing and a moving container makes a run look like it is sliding.
+1.000 → 1.035 across the scene, the callout leader line draws leftward, the type
+enters staggered, and a rule draws under the claim over frames 34–64. The Reads
+scene replaces the drift with a four-frame crossfade between captured states,
+because those frames are already changing and a moving container makes a run
+look like it is sliding.
+
+**There are no rectangles.** The callout used to end in a box drawn around the
+card, on top of a panel that is itself a stack of boxes — a second outline of
+something already on screen. The line and the label say *this row* on their own.
+The anchor is still measured off the live DOM, so a panel that changes moves the
+label with it instead of leaving it pointing at a gap.
 
 ## Readability
 
@@ -107,7 +113,10 @@ is fully settled for 1.6s before the cut.
 
 ## Sound
 
-The same generated bed as the explainer, trimmed harder: this cut moves faster,
-so the music sits lower (0.11 peak) and the bed's arpeggio does the cutting
-rather than a sound effect per scene. Adding a click to each of six cuts buys
-nothing at 25 seconds and turns the track into a metronome.
+The cue is written to this cut rather than looped under it — `tools/bed.mjs`
+puts every accent on the beat nearest a scene start, so the music cuts where
+the picture cuts. There is no sound effect per cut; the accent layer is a pitch
+drop in the cue itself, which is the difference between scoring and a
+metronome. The bed sits at 0.32 (≈ -27dBFS RMS in the render), low enough that
+the type stays the loudest thing on screen and high enough to be felt with the
+sound off. It resolves at 24.0s and rings into the cut.
