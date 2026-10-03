@@ -8,6 +8,7 @@
   "dependencies": {
     "@remotion/cli": "4.0.532",
     "@remotion/media": "4.0.532",
+    "@remotion/transitions": "4.0.532",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "remotion": "4.0.532"
@@ -23,6 +24,7 @@
   "scripts": {
     "dev": "remotion studio",
     "render": "remotion render Brotto out/brotto-demo.mp4",
+    "render:brag": "remotion render Brag out/brag.mp4",
     "upgrade": "remotion upgrade",
     "lint": "eslint src && tsc"
   }

@@ -393,3 +393,33 @@ An unset model therefore **warns and starts the run**, never blocks:
 refusing to start would break the ordinary case where the server is configured
 and the browser isn't. The notice reuses `appendFailureBubble`, so it is the
 theme's own failure card and costs no new CSS.
+
+### The panel renders headless, so assets are never hand-built
+
+`demo/tools/panel_shot.py` loads the shipped `sidepanel.html` in Chromium behind
+a `chrome` shim and drives it through **the real `chrome.runtime.onMessage`
+listener** — the same entry point a relay frame arrives at. Nothing in it
+re-implements a card. This is the only way to get a panel screenshot that does
+not start lying the day the panel changes; a mock would be a second copy of the
+UI, and every marketing still is a place it can drift.
+
+Three things that are not obvious and cost a run each:
+
+- **Seed `chrome.storage`, then stub the server.** A `file://` origin gets CORS
+  failures that are indistinguishable from a stopped server, so every shot
+  carries the "server unreachable" toast until five `page.route()` endpoints
+  answer. `state.serverReachable` is set from the *policy* call's body, not from
+  `/health`.
+- **`/v1/sessions` must return server-shaped rows.** `historyEntries()` prefers
+  the server's list over the seeded local array, so seeding `sessions` alone
+  renders an empty history. It also reads `row.dataset.status` off the panel's
+  own vocabulary (`done` / `error`), not the server's (`completed` / `failed`) —
+  wrong status, missing icon, no error.
+- **Plan steps are objects, not strings.** `appendPlanCard` reads `step.index`
+  and `step.text`; a string renders `undefined` in both.
+
+The frames are the ones the relay really sends, and **every number in the shot
+is the panel's own arithmetic** — `startedAt` seeds its clock, `index` counts its
+steps, `context.pct` is what it draws as CONTEXT. The harness writes frames and
+never touches the DOM, which is what keeps the screenshot evidence rather than
+decoration.

@@ -105,3 +105,6 @@ skills-lock.json
 
 # Visual brainstorming companion
 .superpowers/
+
+# Rendered videos. The .txt stays — it is a deliverable; the mp4 does not belong in history.
+brag-output/*.mp4

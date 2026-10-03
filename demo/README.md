@@ -1,16 +1,24 @@
 # The Brotto demo
 
-The product video at the top of the [root README](../README.md). 1920×1080,
-1619 frames at 30fps — 54 seconds.
+Two videos, one renderer. Remotion renders them from React components, so a fix
+to a scene is a diff you can review, not a re-record.
 
-Remotion renders it from React components, so the video is versioned as code:
-a fix to a scene is a diff you can review, not a re-record.
+| Composition | Cut | Length | For |
+|---|---|---|---|
+| `Brotto` | the long explainer | 1619 frames / 54s | the README, people deciding whether to read it |
+| `Brag` | the launch cut | 560 frames / 18.7s | a post, where the first two seconds are the whole pitch |
+
+`Brag`'s plan — the angle, the storyboard and why each scene is the length it
+is — is [`brag-plan.md`](./brag-plan.md). Read it before changing a scene
+length; both cuts derive their total from the scene table.
 
 ```console
 npm install
 npm run dev      # Remotion Studio, scrub the timeline, hot-reload
 npm run render   # -> out/brotto-demo.mp4
 npm run lint     # eslint + tsc
+
+npx remotion render Brag out/brag.mp4
 ```
 
 ## Things that are deliberate
@@ -19,6 +27,32 @@ npm run lint     # eslint + tsc
 a real run. The video's argument is that Brotto reads the accessibility tree
 rather than taking an impression of a screenshot — a fabricated panel would
 undercut the one claim the video is making.
+
+**They are also generated, not photographed.** `tools/panel_shot.py` loads the
+shipped `clients/brotto-extension/src/sidepanel.html` in Chromium behind a
+`chrome` shim, then drives it through genuine relay frames delivered to the
+genuine `chrome.runtime.onMessage` listener. Nothing re-implements the panel, so
+a card that looks wrong in the video is wrong in the product — there is no
+second copy to start lying the day the real one changes.
+
+```console
+../.venv/bin/python tools/panel_shot.py   # -> public/shots/*.png at 2x
+```
+
+Two details in there are load-bearing and are easy to get wrong on a re-run.
+Every number the status bar shows is the panel's *own* arithmetic — `startedAt`
+seeds its clock, `index` counts its steps, `context.pct` is what it renders for
+CONTEXT — so the harness writes frames, never DOM. And the five `page.route()`
+stubs are not optional: a `file://` origin gets CORS failures that look exactly
+like a stopped server, so without them every shot carries the "server
+unreachable" toast.
+
+**Frame 0 is the poster.** `{frame === 0 ? … : null}` overlays the outro still
+on the first frame and nothing else, so a platform that grabs its thumbnail off
+frame 0 gets a card rather than the hook mid-entrance. It replaces the frame
+rather than adding one — a one-frame *scene* cannot sit in a `TransitionSeries`
+at all, because the next transition is 8 frames long, and adding a frame would
+desync the audio.
 
 **Fonts are bundled, not fetched.** `public/geist-latin.woff2` and
 `public/geist-mono-latin.woff2`. A `staticFile()` that resolves to a network

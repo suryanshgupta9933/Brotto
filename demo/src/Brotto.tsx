@@ -212,7 +212,7 @@ const Bet: React.FC = () => {
       <div style={{ flex: 1, height: 880, position: "relative" }}>
         <div style={{ position: "absolute", inset: 0, display: "flex", justifyContent: "center", opacity: shotOut }}>
           <div style={{ ...enter(f, 196, 24) }}>
-            <PanelShot src="panel-task-completion.webp" h={860} at={f} over={300} />
+            <PanelShot src="shots/panel-done.png" h={860} at={f} over={300} />
           </div>
         </div>
         <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", opacity: treeIn, transform: `translateY(${interpolate(f, [300, 322], [24, 0], clamp)}px)` }}>
@@ -239,9 +239,9 @@ const SHOTS = 3;
 const Does: React.FC = () => {
   const f = useCurrentFrame();
   const shots = [
-    { src: "panel-idle.webp", kicker: "Idle", head: "Ask it anything about this page.", cap: "The panel offers what the page in front of you could be asked to do." },
-    { src: "panel-task-completion.webp", kicker: "Working", head: "It works in your session.", cap: "A real run over a real inbox, with a plan and the result." },
-    { src: "panel-session-history.webp", kicker: "History", head: "Nothing is kept you can’t see.", cap: "Every run, on your own disk, yours to delete." },
+    { src: "shots/panel-idle.png", kicker: "Idle", head: "Ask it anything about this page.", cap: "The panel offers what the page in front of you could be asked to do." },
+    { src: "shots/panel-done.png", kicker: "Working", head: "It works in your session.", cap: "A real run over a real site, with a plan, an approval, and the result." },
+    { src: "shots/panel-history.png", kicker: "History", head: "Nothing is kept you can’t see.", cap: "Every run, on your own disk, yours to delete." },
   ];
   return (
     <AbsoluteFill>
