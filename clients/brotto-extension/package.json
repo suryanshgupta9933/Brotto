@@ -27,7 +27,7 @@
   "author": "Brotto contributors",
   "license": "Apache-2.0",
   "devDependencies": {
-    "@types/chrome": "^0.0.268",
+    "@types/chrome": "^0.3.4",
     "@types/node": "^20.11.0",
     "esbuild": "^0.28.1",
     "typescript": "^5.3.3"
