@@ -188,6 +188,23 @@ async function main() {
     // window and 400 on the next step. The fallback can only under-fill.
     check("an unknown id never resolves to more than the provider's smallest known window",
       api.contextWindow(list, "custom", "made-up") <= 128000);
+
+    // `hydrateModelSettings` reads only local storage, so it lands before
+    // `initModelSettings` fetches `/v1/models` and the list is still null.
+    // `provider()` indexed `list.providers` straight, which threw on every
+    // panel open — an unhandled rejection, and on a slow connection exactly
+    // what a real fetch makes likely. Wrapped, because the failure mode *is*
+    // the throw and an uncaught one takes the whole runner down.
+    try {
+      check("a null catalogue does not throw before load() resolves",
+        api.provider(null, "anthropic") === null);
+      check("…and the window still falls back rather than reading undefined",
+        api.contextWindow(null, "anthropic", "claude-sonnet-5-5") === 128000,
+        String(api.contextWindow(null, "anthropic", "claude-sonnet-5-5")));
+    } catch (e) {
+      failures++;
+      console.log(`FAIL a null catalogue does not throw before load() resolves\n     ${e}`);
+    }
   }
 
   // ── The side panel's rendering ───────────────────────────────────────────

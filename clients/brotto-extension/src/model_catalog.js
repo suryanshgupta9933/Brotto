@@ -80,8 +80,13 @@ async function load(baseUrl) {
   }
 }
 
+// `list` is null until `load()` resolves, and renderModelFacts runs once
+// before that — from hydrateModelSettings, which only touches local storage and
+// so lands first. Every other caller here already guards; this one threw an
+// unhandled rejection on every panel open, which is also what a real server
+// call on a slow connection makes likely rather than a race nobody sees.
 function provider(list, id) {
-  return (list.providers || []).find((p) => p.id === id) || null;
+  return ((list?.providers) || []).find((p) => p.id === id) || null;
 }
 
 // The context window drives the AX-tree budget (window/20). A free-text model
