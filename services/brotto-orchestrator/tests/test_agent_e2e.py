@@ -1,14 +1,8 @@
 """E2E smoke test: agent harness with TestModel (no real LLM calls)."""
 
 import asyncio
-import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-
-os.environ.setdefault("ANTHROPIC_API_KEY", "test")
-os.environ.setdefault("AGENT_AUTH_DISABLED", "true")
-os.environ.setdefault("AGENT_MODEL", "test")  # use pydantic_ai TestModel
-
 
 def test_login_guardrail():
     from brotto_orchestrator.agent.guardrails import check_login_page
@@ -25,7 +19,6 @@ def test_login_guardrail():
     assert not check_login_page("Dashboard", "password textbox", "https://app.com/home")
     # Nothing login-ish.
     assert not check_login_page("Dashboard", "welcome", "http://app.com/home")
-
 
 def test_login_guardrail_gmail_google_false_positive():
     """Regression: Google Search has 'password' in AX (password manager
@@ -56,7 +49,6 @@ def test_login_guardrail_gmail_google_false_positive():
         gmail_ax,
         "https://mail.google.com/mail/u/0/#inbox",
     )
-
 
 def test_login_guardrail_second_factor():
     """2FA / OTP is still logging in, so the agent must keep waiting.
@@ -97,7 +89,6 @@ def test_login_guardrail_second_factor():
     # Session expired mid-page still force-triggers.
     assert check_login_page("Acme Portal", "Your session has expired. Please sign in.", "")
 
-
 def test_login_guardrail_does_not_fire_on_ordinary_pages():
     """The 2FA markers must not cost us the Gmail/Google false-positive guard.
 
@@ -124,14 +115,12 @@ def test_login_guardrail_does_not_fire_on_ordinary_pages():
     assert not check_login_page("Register for the webinar", "", "https://events.example.com/register")
     assert not check_login_page("Join the meeting", "", "https://app.slack.com/call")
 
-
 def test_critical_action_guardrail():
     from brotto_orchestrator.agent.guardrails import check_critical_action
 
     assert check_critical_action("click", {"description": "delete account"})
     assert check_critical_action("click", {"description": "confirm payment"})
     assert not check_critical_action("click", {"ref": "btn_save", "description": "save draft"})
-
 
 @pytest.mark.asyncio
 async def test_approval_card_never_leaks_internals():
@@ -215,7 +204,6 @@ async def test_approval_card_never_leaks_internals():
     )
     assert "recall_memory" in _NEVER_APPROVE
 
-
 @pytest.mark.asyncio
 async def test_approval_card_body_is_human_readable():
     """A genuine critical action still fires — and the card says what in
@@ -294,7 +282,6 @@ async def test_approval_card_body_is_human_readable():
     assert "CRITICAL_PATTERNS" not in card["reasoning"]
     assert "Deleting the account." in card["reasoning"]  # thought carried instead
 
-
 def test_ax_filter():
     from brotto_orchestrator.agent.ax_filter import filter_ax_targets
     from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
@@ -310,7 +297,6 @@ def test_ax_filter():
     assert "lnk_1" in result
     assert "txt_1" in result
     assert "gen_1" not in result  # stripped generic with no name
-
 
 @pytest.mark.asyncio
 async def test_harness_completes_with_test_model():
@@ -374,7 +360,6 @@ async def test_harness_completes_with_test_model():
         assert any(m.get("type") == "step_progress" for m in messages)
     finally:
         harness_mod.agent = original_agent
-
 
 @pytest.mark.asyncio
 async def test_harness_blocks_on_approval_when_queue_is_empty():
@@ -446,7 +431,6 @@ async def test_harness_blocks_on_approval_when_queue_is_empty():
         )
     finally:
         harness_mod.agent = original
-
 
 @pytest.mark.asyncio
 async def test_harness_unblocks_when_approval_sentinel_is_queued():
@@ -536,7 +520,6 @@ async def test_harness_unblocks_when_approval_sentinel_is_queued():
             pass
     finally:
         harness_mod.agent = original
-
 
 if __name__ == "__main__":
     # Quick self-check without pytest

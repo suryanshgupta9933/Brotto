@@ -9,19 +9,14 @@ unmeasurable: every number derived from it was a tautology of the bug.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 
 import pytest
-
-os.environ.setdefault("ANTHROPIC_API_KEY", "test")
-os.environ.setdefault("AGENT_AUTH_DISABLED", "true")
 
 from unittest.mock import AsyncMock  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from brotto_orchestrator.cdp.extension_relay import ExtensionCDPRelay  # noqa: E402
-
 
 def _relay(targets: list[dict]) -> ExtensionCDPRelay:
     relay = ExtensionCDPRelay(
@@ -32,11 +27,9 @@ def _relay(targets: list[dict]) -> ExtensionCDPRelay:
     }
     return relay
 
-
 # The string harness.py keys `ok` off. Named so a refactor that breaks the
 # contract fails here rather than silently re-recording failures as successes.
 FAIL_PREFIX = "Error executing"
-
 
 @pytest.mark.asyncio
 async def test_a_ref_absent_from_the_tree_is_a_failure():
@@ -49,7 +42,6 @@ async def test_a_ref_absent_from_the_tree_is_a_failure():
     assert "0:99" in out
     relay._ws_send.assert_not_called()
 
-
 @pytest.mark.asyncio
 async def test_absent_and_offscreen_are_distinguishable():
     """One `None` used to mean both, so a hallucination and an off-screen
@@ -61,7 +53,6 @@ async def test_absent_and_offscreen_are_distinguishable():
     assert out.startswith(FAIL_PREFIX)
     assert "not in the current AX tree" not in out
     assert "off-screen" in out, f"off-screen read as absent: {out!r}"
-
 
 @pytest.mark.asyncio
 async def test_a_ref_with_coordinates_still_clicks():
@@ -77,7 +68,6 @@ async def test_a_ref_with_coordinates_still_clicks():
         {"type": "action", "action": {"type": "click", "x": 10, "y": 20}}
     )
 
-
 @pytest.mark.asyncio
 async def test_type_text_into_a_hallucinated_ref_does_not_type():
     """The HDFC failure class: focus silently no-ops, then the text lands in
@@ -88,7 +78,6 @@ async def test_type_text_into_a_hallucinated_ref_does_not_type():
 
     assert out.startswith(FAIL_PREFIX)
     relay._ws_send.assert_not_called()
-
 
 @pytest.mark.asyncio
 async def test_the_harness_stops_type_text_when_focus_failed():
@@ -112,7 +101,6 @@ async def test_the_harness_stops_type_text_when_focus_failed():
     assert out.startswith(FAIL_PREFIX)
     cdp.clear_ref.assert_not_awaited()
     cdp.type_text_to_ref.assert_not_awaited()
-
 
 def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
     """The harness decorates the relay's outcome as `Clicked [ref]: <result>`,
@@ -163,7 +151,6 @@ def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
         f"grounding failure recorded as ok=True: {clicks[0]['outcome']!r}"
     )
 
-
 @pytest.mark.asyncio
 async def test_a_bare_node_id_resolves_to_its_composite_ref():
     """The model drops the frame prefix, and did so 4/4 times on a live Gmail
@@ -187,7 +174,6 @@ async def test_a_bare_node_id_resolves_to_its_composite_ref():
         {"type": "action", "action": {"type": "click", "x": 30, "y": 40}}
     )
 
-
 @pytest.mark.asyncio
 async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
     """`_locate` is the one place all four route through, so one case per
@@ -203,7 +189,6 @@ async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
     ):
         out = await method(*args)
         assert not out.startswith(FAIL_PREFIX), f"{method.__name__}: {out!r}"
-
 
 @pytest.mark.asyncio
 async def test_a_bare_node_id_present_in_two_frames_is_refused_not_guessed():
@@ -222,7 +207,6 @@ async def test_a_bare_node_id_present_in_two_frames_is_refused_not_guessed():
     assert "0:42" in out, f"refusal does not name the real refs: {out!r}"
     relay._ws_send.assert_not_called()
 
-
 @pytest.mark.asyncio
 async def test_a_hallucinated_bare_node_id_is_still_a_grounding_failure():
     """The fallback must not become a hole: a number the page has never seen
@@ -234,7 +218,6 @@ async def test_a_hallucinated_bare_node_id_is_still_a_grounding_failure():
     assert out.startswith(FAIL_PREFIX)
     assert "not in the current AX tree" in out
     relay._ws_send.assert_not_called()
-
 
 @pytest.mark.asyncio
 async def test_an_exact_composite_ref_wins_over_the_bare_fallback():
@@ -252,7 +235,6 @@ async def test_an_exact_composite_ref_wins_over_the_bare_fallback():
     relay._ws_send.assert_called_once_with(
         {"type": "action", "action": {"type": "click", "x": 2, "y": 2}}
     )
-
 
 def test_the_prompt_does_not_demonstrate_a_bare_number_as_a_ref():
     """Live Gmail run: the model emitted `ref: 13829` instead of `0:13829`,

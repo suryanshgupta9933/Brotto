@@ -18,6 +18,31 @@ def _no_dev_model_override(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _offline_auth(monkeypatch):
+    """Pin the model and auth env every test sees.
+
+    Seven files used to do this with a module-level
+    `os.environ.setdefault(...)`, which runs at *import* — so it mutates
+    os.environ for the whole session and only in the order pytest
+    happens to collect them. The suite passed because alphabetical order
+    put test_agent_e2e.py before test_ws_protocol.py, and it failed the
+    moment coverage reordered the imports. A developer's real
+    AGENT_SECRET in .env was the trigger: load_dotenv() sets it, and
+    auth_enabled() then returns True for every test that runs before the
+    first setdefault.
+
+    An autouse fixture is per-test and order-independent. It clears the
+    auth pair rather than forcing it open — a test that needs auth *on*
+    sets both variables itself (test_caller_key.py, test_agent_auth.py),
+    and a fixture that pinned them shut would override exactly those.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("AGENT_MODEL", "test")  # use pydantic_ai TestModel
+    monkeypatch.delenv("AGENT_SECRET", raising=False)
+    monkeypatch.delenv("AGENT_AUTH_DISABLED", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_sessions_dir(tmp_path, monkeypatch):
     """Point the audit trail at a per-test directory.
 

@@ -9,14 +9,8 @@ human_input_queue. This test verifies that contract from the server side.
 from __future__ import annotations
 
 import asyncio
-import os
 
 import pytest
-
-os.environ.setdefault("ANTHROPIC_API_KEY", "test")
-os.environ.setdefault("AGENT_AUTH_DISABLED", "true")
-os.environ.setdefault("AGENT_MODEL", "test")
-
 
 class FakeCDP:
     """Returns a login-looking page until `advance()` is called."""
@@ -45,7 +39,6 @@ class FakeCDP:
     def advance(self) -> None:
         """Switch the fixture to the post-login page."""
         self._on_login = False
-
 
 @pytest.mark.asyncio
 async def test_login_pause_unblocks_on_resume_reply():

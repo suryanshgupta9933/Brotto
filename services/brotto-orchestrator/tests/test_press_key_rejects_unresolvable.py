@@ -10,16 +10,11 @@ to see the field it was typing into — spent three steps retyping into it.
 from __future__ import annotations
 
 import asyncio
-import os
 from unittest.mock import AsyncMock
 
 import pytest
 
-os.environ.setdefault("ANTHROPIC_API_KEY", "test")
-os.environ.setdefault("AGENT_AUTH_DISABLED", "true")
-
 EXEC_FAILURE = "Error executing"
-
 
 def _relay():
     from brotto_orchestrator.cdp.extension_relay import ExtensionCDPRelay
@@ -29,7 +24,6 @@ def _relay():
         obs_queue=asyncio.Queue(),
         session_id="test",
     )
-
 
 @pytest.mark.asyncio
 async def test_a_playwright_alias_key_is_rejected_and_nothing_is_sent():
@@ -42,14 +36,12 @@ async def test_a_playwright_alias_key_is_rejected_and_nothing_is_sent():
     # come back ok regardless of what Chrome did with it.
     relay._ws_send.assert_not_called()
 
-
 @pytest.mark.asyncio
 async def test_the_rejection_names_a_spelling_that_works():
     """A refusal the model cannot act on is just a slower dead end."""
     result = await _relay().press_key("ControlOrMeta+a")
     assert "modifiers" in result
     assert "Enter" in result
-
 
 @pytest.mark.asyncio
 async def test_a_dispatchable_key_is_forwarded_unchanged():

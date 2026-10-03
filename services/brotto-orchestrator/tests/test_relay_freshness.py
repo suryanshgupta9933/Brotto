@@ -4,13 +4,8 @@ to wait_for_redirect polls, not just serve a stale cache."""
 from __future__ import annotations
 
 import asyncio
-import os
 
 import pytest
-
-os.environ.setdefault("ANTHROPIC_API_KEY", "test")
-os.environ.setdefault("AGENT_AUTH_DISABLED", "true")
-
 
 @pytest.mark.asyncio
 async def test_get_current_url_drains_pending_observation():
@@ -45,7 +40,6 @@ async def test_get_current_url_drains_pending_observation():
     )
     assert ws_send.call_count == 0, "get_current_url must not request a new observation when one is queued"
 
-
 @pytest.mark.asyncio
 async def test_get_page_title_drains_pending_observation():
     """Same drain-on-read contract for title."""
@@ -62,7 +56,6 @@ async def test_get_page_title_drains_pending_observation():
     await obs_queue.put({"url": "https://app.example.com/", "title": "Dashboard", "axTargets": []})
 
     assert (await relay.get_page_title()) == "Dashboard"
-
 
 @pytest.mark.asyncio
 async def test_get_current_url_no_pending_keeps_cache():
@@ -82,7 +75,6 @@ async def test_get_current_url_no_pending_keeps_cache():
     url = await relay.get_current_url()
     assert url == "https://login.example.com/"
     assert ws_send.call_count == 0
-
 
 # Import AsyncMock at module level so the @pytest.mark.asyncio tests above
 # can use it without per-test imports.

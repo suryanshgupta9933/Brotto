@@ -195,6 +195,38 @@ review because a build step and a reviewed file are different artefacts; the
 job removes the gap between them. It builds but does not run the container —
 `docker compose up` and the healthcheck are still verified by hand.
 
+## The suite passed by accident, and coverage is what found out
+
+Seven test files opened with `os.environ.setdefault("AGENT_AUTH_DISABLED",
+"true")`. That runs at **import**, so it mutates `os.environ` for the whole
+session and only in the order pytest happens to collect. Alphabetically
+`test_agent_e2e.py` landed before `test_ws_protocol.py`, which is the only
+reason the latter passed — and `main.py`'s `load_dotenv()` had already put a
+real `AGENT_SECRET` from the developer's `.env` into the environment, so
+`auth_enabled()` returned True for everything collected before the first
+`setdefault`.
+
+Turning on coverage is what surfaced it. `--cov` reorders the imports, 51
+tests failed, and the honest reading was **not** "coverage breaks the suite"
+but "the suite never depended on anything but collection order". A single
+run reproduces it without any tooling:
+
+```bash
+AGENT_SECRET=whatever pytest tests/test_ws_protocol.py   # 13 failed
+pytest tests/test_ws_protocol.py                          # 15 passed
+```
+
+The fix is one autouse fixture in `conftest.py` that clears `AGENT_SECRET`
+and `AGENT_AUTH_DISABLED` per test, alongside the `BROTTO_FORCE_ENV_MODEL`
+and `BROTTO_SESSIONS_DIR` fixtures that were already there for this class of
+leak. It clears rather than pins them open: a test that needs auth *on* sets
+both itself (`test_caller_key.py`, `test_agent_auth.py`), and a fixture that
+forced them shut silently overrode exactly those.
+
+Coverage is 77%. CI prints it and ratchets `--cov-fail-under=75` so it fails
+on a *drop*; there is no target to climb to, and no test was written to move
+the number.
+
 ## Deleting a session
 
 `audit.delete(session_id)` takes the document, the scratchpad and the pages

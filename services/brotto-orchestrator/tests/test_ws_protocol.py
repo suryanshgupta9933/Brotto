@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -32,23 +31,15 @@ SRC_PATH = REPO_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-for k in ("ANTHROPIC_API_KEY", "AGENT_AUTH_DISABLED", "AGENT_MODEL"):
-    os.environ.setdefault(k, "test")
-
 from fastapi.testclient import TestClient  # noqa: E402
 
 from brotto_orchestrator import main as main_mod  # noqa: E402
 
-
-
-
 from brotto_orchestrator.agent import harness as harness_mod  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
 
 @pytest.fixture
 def agent_disabled(monkeypatch):
@@ -71,7 +62,6 @@ def agent_disabled(monkeypatch):
     monkeypatch.setattr(main_mod.harness, "run", stub_run.__get__(main_mod.harness))
     yield
 
-
 def _drain_until(ws, target_type: str, max_msgs: int = 50) -> dict:
     """Read WS messages until we see one whose `type` matches target_type.
 
@@ -85,11 +75,9 @@ def _drain_until(ws, target_type: str, max_msgs: int = 50) -> dict:
             return msg
     raise AssertionError(f"never saw {target_type!r} after {max_msgs} messages")
 
-
 # ---------------------------------------------------------------------------
 # task_start — the gating frame
 # ---------------------------------------------------------------------------
-
 
 def test_first_message_must_be_task_start(agent_disabled, session_id):
     """A non-task_start first message closes the WS."""
@@ -100,14 +88,12 @@ def test_first_message_must_be_task_start(agent_disabled, session_id):
                 # Server closes with code 4000
                 ws.receive_text()
 
-
 def test_task_start_with_empty_task_closes(agent_disabled, session_id):
     with TestClient(main_mod.app) as client:
         with client.websocket_connect(f"/ws/ext/{session_id("proto-empty-task")}") as ws:
             ws.send_text(json.dumps({"type": "task_start", "task": "  "}))
             with pytest.raises(Exception):
                 ws.receive_text()
-
 
 def test_task_start_missing_task_field_closes(agent_disabled, session_id):
     with TestClient(main_mod.app) as client:
@@ -116,11 +102,9 @@ def test_task_start_missing_task_field_closes(agent_disabled, session_id):
             with pytest.raises(Exception):
                 ws.receive_text()
 
-
 # ---------------------------------------------------------------------------
 # ping / pong — no harness interaction
 # ---------------------------------------------------------------------------
-
 
 def test_ping_returns_pong(agent_disabled, session_id):
     """Ping must round-trip without invoking the harness."""
@@ -131,11 +115,9 @@ def test_ping_returns_pong(agent_disabled, session_id):
             pong = _drain_until(ws, "pong")
             assert pong == {"type": "pong"}
 
-
 # ---------------------------------------------------------------------------
 # D9 sequence dedup — boundary test
 # ---------------------------------------------------------------------------
-
 
 def test_duplicate_observation_seq_is_dropped_at_boundary(agent_disabled, session_id):
     """Two observations with the same seq — only one is processed.
@@ -162,7 +144,6 @@ def test_duplicate_observation_seq_is_dropped_at_boundary(agent_disabled, sessio
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
-
 def test_observation_seq_gap_is_warned_but_accepted(agent_disabled, session_id):
     """A gap is OK — the WS contract holds; the warning is in the log."""
     with TestClient(main_mod.app) as client:
@@ -185,7 +166,6 @@ def test_observation_seq_gap_is_warned_but_accepted(agent_disabled, session_id):
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
-
 def test_observation_without_seq_is_legacy_compatible(agent_disabled, session_id):
     """A legacy extension that omits seq still works."""
     with TestClient(main_mod.app) as client:
@@ -200,11 +180,9 @@ def test_observation_without_seq_is_legacy_compatible(agent_disabled, session_id
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
-
 # ---------------------------------------------------------------------------
 # Control frames — non-observation messages
 # ---------------------------------------------------------------------------
-
 
 def test_evaluate_result_round_trips(agent_disabled, session_id):
     """evaluate_result is accepted and routed to the eval queue."""
@@ -218,7 +196,6 @@ def test_evaluate_result_round_trips(agent_disabled, session_id):
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
-
 def test_human_reply_accepted(agent_disabled, session_id):
     """human_reply is accepted (queued; not consumed here)."""
     with TestClient(main_mod.app) as client:
@@ -227,7 +204,6 @@ def test_human_reply_accepted(agent_disabled, session_id):
             ws.send_text(json.dumps({"type": "human_reply", "content": "yes"}))
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
-
 
 def test_steer_message_does_not_touch_human_input_queue(agent_disabled, monkeypatch, session_id):
     """`steer` is a live correction, not an answer to a pending prompt.
@@ -273,7 +249,6 @@ def test_steer_message_does_not_touch_human_input_queue(agent_disabled, monkeypa
             assert deps.steering == "no, Tuesday"
             assert deps.human_input_queue.empty()
 
-
 def test_unknown_message_type_is_logged_not_fatal(agent_disabled, session_id):
     """An unknown message type is logged and ignored — WS stays open."""
     with TestClient(main_mod.app) as client:
@@ -282,7 +257,6 @@ def test_unknown_message_type_is_logged_not_fatal(agent_disabled, session_id):
             ws.send_text(json.dumps({"type": "totally_made_up_type"}))
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
-
 
 def test_malformed_json_does_not_crash_the_session(agent_disabled, session_id):
     """A frame that isn't valid JSON is logged and ignored."""
@@ -293,11 +267,9 @@ def test_malformed_json_does_not_crash_the_session(agent_disabled, session_id):
             ws.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(ws, "pong") == {"type": "pong"}
 
-
 # ---------------------------------------------------------------------------
 # Session registry — sequence tracker is per-session across reconnects
 # ---------------------------------------------------------------------------
-
 
 def test_separate_sessions_have_independent_trackers(agent_disabled, session_id):
     """Two concurrent sessions must not share a sequence tracker."""
@@ -321,7 +293,6 @@ def test_separate_sessions_have_independent_trackers(agent_disabled, session_id)
             wsB.send_text(json.dumps({"type": "ping"}))
             assert _drain_until(wsB, "pong") == {"type": "pong"}
 
-
 def test_task_start_parses_with_model_config():
     from brotto_orchestrator.contracts import TaskStart
     msg = TaskStart.model_validate(
@@ -341,7 +312,6 @@ def test_task_start_parses_with_model_config():
     assert msg.model_cfg.model == "MiniMax-M3"
     assert msg.api_key == "sk-test"
     assert msg.remember_key is False
-
 
 def test_task_start_parses_without_model_config():
     from brotto_orchestrator.contracts import TaskStart

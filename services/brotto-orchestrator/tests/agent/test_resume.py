@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,21 +29,14 @@ from brotto_orchestrator.agent.harness import (
     AgentHarness, _resume_state, mark_cancelled,
 )
 
-for _k in ("ANTHROPIC_API_KEY", "AGENT_AUTH_DISABLED", "AGENT_MODEL"):
-    os.environ.setdefault(_k, "test")
-
-
 # ── fixtures ────────────────────────────────────────────────────────────────
-
 
 @pytest.fixture
 def sessions_dir(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path))
     return tmp_path
 
-
 # ── document invariants (from the plan) ──────────────────────────────────────
-
 
 def test_resume_state_is_reconstructible_from_the_document(sessions_dir):
     # The whole basis of resume: agent.run is called with a rebuilt prompt
@@ -65,7 +57,6 @@ def test_resume_state_is_reconstructible_from_the_document(sessions_dir):
     assert len(completed) == 3
     assert [x["step"] for x in completed] == [0, 1, 2]
 
-
 def test_an_unfinished_turn_is_not_a_resume_point(sessions_dir):
     # Review Focus #3: a turn that was in flight when the socket died
     # must be re-run, not half-recorded.
@@ -79,7 +70,6 @@ def test_an_unfinished_turn_is_not_a_resume_point(sessions_dir):
     doc = read("s1", dir=sessions_dir)
     assert doc["turns"][1]["ended_at"] is None
     assert [x["step"] for x in doc["turns"] if x["ended_at"]] == [0]
-
 
 def test_approved_but_unexecuted_action_is_not_replayed(sessions_dir):
     t = AuditTrail("s1", dir=sessions_dir)
@@ -95,7 +85,6 @@ def test_approved_but_unexecuted_action_is_not_replayed(sessions_dir):
     assert p["decision"] == "approved"
     assert doc["turns"][0]["actions"] == []
 
-
 def test_a_corrupt_document_resumes_as_interrupted_not_restarted(sessions_dir):
     p = sessions_dir / "s1.json"
     p.write_text('{"schema_ver')
@@ -105,9 +94,7 @@ def test_a_corrupt_document_resumes_as_interrupted_not_restarted(sessions_dir):
     # The caller marks it interrupted with the reason rather than
     # silently running the task again from step 0.
 
-
 # ── what resume rebuilds ────────────────────────────────────────────────────
-
 
 def _crashed_run(session_id: str, *, completed: int = 3, sessions_dir: Path,
                  in_flight: int = 1, approved_domain: str | None = None) -> None:
@@ -134,7 +121,6 @@ def _crashed_run(session_id: str, *, completed: int = 3, sessions_dir: Path,
                      ax_diff_chars=0, page_text_chars=0)
     t.close()
 
-
 def test_completed_turns_become_step_summaries(sessions_dir):
     _crashed_run("r1", sessions_dir=sessions_dir)
     state = _resume_state("r1")
@@ -143,7 +129,6 @@ def test_completed_turns_become_step_summaries(sessions_dir):
     assert state["summaries"][0].action_taken == "navigate"
     assert "example.com/1" in state["summaries"][1].outcome
 
-
 def test_an_in_flight_turn_is_re_run_not_half_recorded(sessions_dir):
     _crashed_run("r2", sessions_dir=sessions_dir, completed=3, in_flight=1)
     state = _resume_state("r2")
@@ -151,18 +136,15 @@ def test_an_in_flight_turn_is_re_run_not_half_recorded(sessions_dir):
     assert [s.step for s in state["summaries"]] == [0, 1, 2]
     assert state["first_step"] == 3
 
-
 def test_only_approved_domains_are_restored(sessions_dir):
     _crashed_run("r3", sessions_dir=sessions_dir, approved_domain="github.com")
     assert _resume_state("r3")["visited"] == {"github.com"}
-
 
 def test_a_fresh_session_has_nothing_to_resume(sessions_dir):
     state = _resume_state("never-ran")
     assert state["summaries"] == []
     assert state["first_step"] == 0
     assert state["why"] == ""
-
 
 def test_a_cancelled_run_is_never_resumed(sessions_dir):
     """The other half of the correctness bar: stop means stop."""
@@ -174,9 +156,7 @@ def test_a_cancelled_run_is_never_resumed(sessions_dir):
     assert state["summaries"] == []
     assert "cancelled" in state["why"]
 
-
 # ── through the harness ──────────────────────────────────────────────────────
-
 
 def _cdp() -> MagicMock:
     cdp = MagicMock()
@@ -186,7 +166,6 @@ def _cdp() -> MagicMock:
     cdp.get_page_title = AsyncMock(return_value="Example")
     cdp.get_page_text = AsyncMock(return_value="")
     return cdp
-
 
 def _done_script():
     from brotto_orchestrator.testing.scripted_planner import (
@@ -198,7 +177,6 @@ def _done_script():
         on_exhausted="task_complete",
     )
 
-
 def _run_sync(deps: AgentDeps):
     # resume=True: every caller here is exercising the crash-resume path. The
     # default (resume=False) now means "a follow-up task", which starts at
@@ -207,7 +185,6 @@ def _run_sync(deps: AgentDeps):
         return await AgentHarness().run(deps, resume=True)
     return asyncio.new_event_loop().run_until_complete(_go())
 
-
 def _deps(cdp, *, task_id: str) -> AgentDeps:
     async def ws_send(_msg: dict) -> None:
         return None
@@ -215,7 +192,6 @@ def _deps(cdp, *, task_id: str) -> AgentDeps:
     return AgentDeps(user_id="t", task="find the thing", cdp=cdp,
                      task_id=task_id, ws_send=ws_send,
                      scripted_planner=_done_script())
-
 
 def test_the_loop_continues_at_the_resumed_step(sessions_dir):
     _crashed_run("h1", sessions_dir=sessions_dir, approved_domain="github.com")
@@ -231,7 +207,6 @@ def test_the_loop_continues_at_the_resumed_step(sessions_dir):
     # user approved before the socket died.
     doc = read("h1", dir=sessions_dir)
     assert [t["step"] for t in doc["turns"]] == [0, 1, 2, 3, 3]
-
 
 def test_a_corrupt_document_runs_nothing(sessions_dir):
     broken = '{"schema_version": 1, "turns": ['
@@ -250,7 +225,6 @@ def test_a_corrupt_document_runs_nothing(sessions_dir):
     # The whole point: not one action re-run from a document we can't read.
     cdp.get_targets.assert_not_called()
     assert deps.step_summaries == []
-
 
 def test_a_document_from_another_schema_version_runs_nothing(sessions_dir):
     (sessions_dir / "h3.json").write_text(json.dumps({
@@ -275,7 +249,6 @@ def test_a_document_from_another_schema_version_runs_nothing(sessions_dir):
     assert doc["errors"][0]["code"] == "task_refused"
     cdp.get_targets.assert_not_called()
 
-
 def test_a_finished_run_keeps_its_turns_when_a_resume_is_refused(sessions_dir):
     """The same, for the ordinary case: a run that already completed and is
     then re-entered with its own session id."""
@@ -299,13 +272,11 @@ def test_a_finished_run_keeps_its_turns_when_a_resume_is_refused(sessions_dir):
     assert [x["step"] for x in doc["turns"]] == [0, 1]
     assert doc["result"]["summary"] == "found it"
 
-
 # ── stopped vs dropped ──────────────────────────────────────────────────────
 #
 # A dropped socket and a user cancel look identical to the server: the agent
 # task is cancelled either way. These two tests are the pair that keeps them
 # apart, and they fail in opposite directions if the flag is wrong.
-
 
 def _run_then_cancel(task_id: str) -> AgentDeps:
     """Run the harness and cancel its task, the way a closed socket does."""
@@ -331,13 +302,11 @@ def _run_then_cancel(task_id: str) -> AgentDeps:
 
     return asyncio.new_event_loop().run_until_complete(_go())
 
-
 def test_a_dropped_socket_leaves_the_run_resumable(sessions_dir):
     _crashed_run("k1", sessions_dir=sessions_dir)
     _run_then_cancel("k1")
     assert read("k1", dir=sessions_dir)["status"] == "running"
     assert _resume_state("k1")["first_step"] == 3
-
 
 def test_a_user_cancelled_run_is_sealed_and_never_resumed(sessions_dir):
     _crashed_run("k2", sessions_dir=sessions_dir)
@@ -348,9 +317,7 @@ def test_a_user_cancelled_run_is_sealed_and_never_resumed(sessions_dir):
     assert state["summaries"] == []
     assert "cancelled" in state["why"]
 
-
 # ── one agent per live session ──────────────────────────────────────────────
-
 
 @pytest.fixture
 def harness_calls(monkeypatch):
@@ -368,14 +335,12 @@ def harness_calls(monkeypatch):
     monkeypatch.setattr(main_mod.harness, "run", stub.__get__(main_mod.harness))
     return calls
 
-
 def _drain_until(ws, target_type: str, max_msgs: int = 50) -> dict:
     for _ in range(max_msgs):
         msg = ws.receive_json()
         if msg.get("type") == target_type:
             return msg
     raise AssertionError(f"never saw {target_type!r} after {max_msgs} messages")
-
 
 def test_a_reconnect_does_not_start_a_second_agent(sessions_dir, harness_calls, session_id):
     """A second socket for a live session is refused, not doubled.
@@ -406,7 +371,6 @@ def test_a_reconnect_does_not_start_a_second_agent(sessions_dir, harness_calls, 
 
     assert len(harness_calls) == 1
 
-
 def test_the_refusal_is_recorded_in_the_session_document(sessions_dir, harness_calls, session_id):
     from fastapi.testclient import TestClient
 
@@ -429,7 +393,6 @@ def test_the_refusal_is_recorded_in_the_session_document(sessions_dir, harness_c
 
     events = read(session_id("dup-logged"), dir=sessions_dir).get("policy_events", [])
     assert any(e.get("kind") == "duplicate_task_start" for e in events), events
-
 
 def test_a_reconnect_beat_ing_the_old_socket_is_accepted(sessions_dir, monkeypatch, session_id):
     """A teardown that has begun is not a rival agent.
@@ -472,7 +435,6 @@ def test_a_reconnect_beat_ing_the_old_socket_is_accepted(sessions_dir, monkeypat
                 _drain_until(second, "policy_effective")
 
     assert len(calls) == 2
-
 
 def test_a_cancel_frame_marks_the_session_as_user_stopped(sessions_dir, harness_calls, monkeypatch, session_id):
     """The extension says goodbye before closing; the server believes it.

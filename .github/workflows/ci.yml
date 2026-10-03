@@ -52,12 +52,22 @@ jobs:
       # ponytail: services/brotto-orchestrator/src is the only thing on
       # PYTHONPATH that makes `brotto_orchestrator` importable. The old
       # Dockerfile already used this env var.
+      #
+      # Coverage has been measurable since pytest-cov landed in
+      # requirements-dev and was never once invoked. It could not be:
+      # seven test files set AGENT_AUTH_DISABLED at *import*, so a
+      # developer's real AGENT_SECRET from .env turned auth on for every
+      # test collected before the first one — and coverage reorders the
+      # imports. conftest.py now clears the pair per-test and 51 tests
+      # stop failing. 77% today; --cov-fail-under is a ratchet against
+      # a drop, not a target to climb (raise it when it climbs).
       - name: Run tests
         working-directory: ${{ github.workspace }}
         env:
           PYTHONPATH: ${{ github.workspace }}/services/brotto-orchestrator/src
         run: |
-          pytest services/brotto-orchestrator/tests -v --tb=short
+          pytest services/brotto-orchestrator/tests -v --tb=short \
+            --cov=brotto_orchestrator --cov-report=term --cov-fail-under=75
 
   # ─── Extension: type-check + bundle ────────────────────────────────
   build-extension:
