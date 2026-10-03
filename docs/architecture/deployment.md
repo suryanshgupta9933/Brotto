@@ -18,6 +18,12 @@ dependencies to an image that is a documented self-host quickstart
 
 The runtime dependency list is 7 pure-Python packages.
 
+The image lands at ~510 MB, and it is worth saying where that goes so nobody
+re-adds a browser chasing the number: `python:3.12-slim` is the base, and
+`pip install` of the provider SDKs is 193 MB of it, with 29 MB of wheels in
+the builder layer. There was a 145 MB figure here for a while. It was Docker's
+*shared size* column read as the image size, and `docker images` prints both.
+
 ## Sizing a VM
 
 The memory ceiling is one in-flight model call streaming out of the
@@ -176,7 +182,7 @@ did copy it, which is exactly why the omission read clean in review. The build
 had only ever been exercised against a working tree.
 
 So: **a Dockerfile that has never been built from a clone has not been
-verified.** The 145MB no-Chromium result, the empty `GET /v1/sessions`, the
+verified.** The no-Chromium image, the empty `GET /v1/sessions`, the
 404s without the secret, the state surviving `docker restart`, the retention
 sweep firing at startup and `DELETE` taking the scratchpad with the document
 were all measured on a fresh clone, and those are the only measurements in
