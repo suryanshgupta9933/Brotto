@@ -16,6 +16,13 @@ import { FONT_MONO, FONT_UI, FPS, ink } from "./tokens";
 
 const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 
+/** The capture viewport, in CSS px. A width has to be stated: a box with a
+ *  height and no width shrink-to-fits, so the panel came back at whatever width
+ *  its content happened to want — roughly half this — and the cards were
+ *  unreadable. Every panel frame in both compositions goes through here. */
+export const PANEL_W = 420;
+export const PANEL_H = 1080;
+
 /** A real screenshot of the panel, in a hairline frame. No shadow — see tokens.
  *  The slow push is what stops a still from reading as a still. `perceptual-scale`
  *  keeps the perceived rate even as the scale grows; without it the drift slows
@@ -26,7 +33,7 @@ const PanelShot: React.FC<{ src: string; h: number; at: number; over: number }> 
   at,
   over,
 }) => (
-  <div style={{ height: h, border: `1px solid ${ink.rule2}`, background: ink.paper, overflow: "hidden" }}>
+  <div style={{ height: h, width: PANEL_W, border: `1px solid ${ink.rule2}`, background: ink.paper, overflow: "hidden" }}>
     <Img
       src={staticFile(src)}
       style={{

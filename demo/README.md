@@ -6,7 +6,7 @@ to a scene is a diff you can review, not a re-record.
 | Composition | Cut | Length | For |
 |---|---|---|---|
 | `Brotto` | the long explainer | 1619 frames / 54s | the README, people deciding whether to read it |
-| `Brag` | the launch cut | 560 frames / 18.7s | a post, where the first two seconds are the whole pitch |
+| `Brag` | the launch cut | 763 frames / 25.4s | a post, where the first two seconds are the whole pitch |
 
 `Brag`'s plan — the angle, the storyboard and why each scene is the length it
 is — is [`brag-plan.md`](./brag-plan.md). Read it before changing a scene
@@ -18,7 +18,7 @@ npm run dev      # Remotion Studio, scrub the timeline, hot-reload
 npm run render   # -> out/brotto-demo.mp4
 npm run lint     # eslint + tsc
 
-npx remotion render Brag out/brag.mp4
+npm run render:brag   # -> out/brag.mp4
 ```
 
 ## Things that are deliberate
@@ -36,7 +36,7 @@ a card that looks wrong in the video is wrong in the product — there is no
 second copy to start lying the day the real one changes.
 
 ```console
-../.venv/bin/python tools/panel_shot.py   # -> public/shots/*.png at 2x
+../.venv/bin/python tools/panel_shot.py   # -> public/shots/*.png + public/seq/*.png at 2x
 ```
 
 Two details in there are load-bearing and are easy to get wrong on a re-run.
@@ -46,6 +46,33 @@ CONTEXT — so the harness writes frames, never DOM. And the five `page.route()`
 stubs are not optional: a `file://` origin gets CORS failures that look exactly
 like a stopped server, so without them every shot carries the "server
 unreachable" toast.
+
+**The panel is captured 420x540 and drawn 1:1, and both halves have to agree.**
+`VIEW_W`/`VIEW_H` in the harness, the shot dimensions, and `PANEL_W`/`PANEL_H`
+in the composition are the same 2x pixel space, so the callout rectangles land
+where the card actually is. Two things this bought: the panel's own 11px body
+text now lands at 11px on the 1920px frame rather than the 5px it shrank to
+when the panel was drawn at its 420px CSS width, and the panel occupies 44% of
+the frame instead of 22%. The window is 540 CSS px of a ~1080px panel — a full
+column cannot be shown at a readable size, and the top is the part worth
+showing: the status bar, the card, the composer. Beats whose evidence is lower
+scroll the panel before capturing.
+
+**The run is a sequence, not a still.** `tools/panel_shot.py` also writes
+`public/seq/*.png` and generates `src/seq.ts` naming them in order and how long
+each holds, which is what `RunPanel` plays back with a four-frame crossfade
+between states. One still of the panel is a picture of a thing that does
+nothing; the same panel captured state by state has its steps arriving and its
+counter moving, which is the product in a dozen frames. The module is generated
+rather than hand-written because a hand-kept list of frames is a second copy
+that drifts — the same failure as the three model catalogues.
+
+**Nothing takes a frame number as a prop.** `Shot` and `RunPanel` used to accept
+`at`, and every call site passed the literal `0`, which `panelIn(0)` turns into
+`opacity: 0` — the panel was invisible for the whole cut and only the callouts
+drew, which reads as "the screenshots look off" rather than as a bug. They call
+`useCurrentFrame()` themselves now, because a prop a caller has to remember is
+a prop a caller gets wrong.
 
 **Frame 0 is the poster.** `{frame === 0 ? … : null}` overlays the outro still
 on the first frame and nothing else, so a platform that grabs its thumbnail off
