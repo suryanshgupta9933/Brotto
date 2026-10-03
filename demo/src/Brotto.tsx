@@ -1,21 +1,46 @@
+import { Fragment } from "react";
 import {
   AbsoluteFill,
   Img,
-  Sequence,
   interpolate,
   staticFile,
   useCurrentFrame,
+  useVideoConfig,
 } from "remotion";
+import { Audio } from "@remotion/media";
+import { TransitionSeries, linearTiming } from "@remotion/transitions";
+import { fade } from "@remotion/transitions/fade";
 import { Fonts } from "./Fonts";
-import { AxRow, Kicker, Rule, enter } from "./atoms";
-import { FONT_MONO, FONT_UI, ink } from "./tokens";
+import { AxRow, EASE, Kicker, Rule, enter } from "./atoms";
+import { FONT_MONO, FONT_UI, FPS, ink } from "./tokens";
 
 const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 
-/** A real screenshot of the panel, in a hairline frame. No shadow — see tokens. */
-const PanelShot: React.FC<{ src: string; h: number }> = ({ src, h }) => (
+/** A real screenshot of the panel, in a hairline frame. No shadow — see tokens.
+ *  The slow push is what stops a still from reading as a still. `perceptual-scale`
+ *  keeps the perceived rate even as the scale grows; without it the drift slows
+ *  down exactly as it becomes noticeable. */
+const PanelShot: React.FC<{ src: string; h: number; at: number; over: number }> = ({
+  src,
+  h,
+  at,
+  over,
+}) => (
   <div style={{ height: h, border: `1px solid ${ink.rule2}`, background: ink.paper, overflow: "hidden" }}>
-    <Img src={staticFile(src)} style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: "top" }} />
+    <Img
+      src={staticFile(src)}
+      style={{
+        width: "100%",
+        height: "100%",
+        objectFit: "cover",
+        objectPosition: "top",
+        scale: interpolate(at, [0, over], [1, 1.05], {
+          ...clamp,
+          easing: EASE,
+          output: "perceptual-scale",
+        }),
+      }}
+    />
   </div>
 );
 
@@ -187,7 +212,7 @@ const Bet: React.FC = () => {
       <div style={{ flex: 1, height: 880, position: "relative" }}>
         <div style={{ position: "absolute", inset: 0, display: "flex", justifyContent: "center", opacity: shotOut }}>
           <div style={{ ...enter(f, 196, 24) }}>
-            <PanelShot src="panel-task-completion.webp" h={860} />
+            <PanelShot src="panel-task-completion.webp" h={860} at={f} over={300} />
           </div>
         </div>
         <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", opacity: treeIn, transform: `translateY(${interpolate(f, [300, 322], [24, 0], clamp)}px)` }}>
@@ -204,6 +229,13 @@ const Bet: React.FC = () => {
 };
 
 // ── 4. what it does, in three real panels ─────────────────────────────────────
+// HOLD lives out here, not inside the component, because the scene's own length
+// is derived from it. When the two were written separately they drifted, and a
+// scene shorter than its last animation cut mid-entrance — which reads as a
+// missing feature rather than as a fast edit.
+export const HOLD = 96;
+const SHOTS = 3;
+
 const Does: React.FC = () => {
   const f = useCurrentFrame();
   const shots = [
@@ -211,36 +243,33 @@ const Does: React.FC = () => {
     { src: "panel-task-completion.webp", kicker: "Working", head: "It works in your session.", cap: "A real run over a real inbox, with a plan and the result." },
     { src: "panel-session-history.webp", kicker: "History", head: "Nothing is kept you can’t see.", cap: "Every run, on your own disk, yours to delete." },
   ];
-  const HOLD = 108;
   return (
     <AbsoluteFill>
-      <Sequence from={0} durationInFrames={shots.length * HOLD}>
-        {shots.map((s, i) => {
-          const local = f - i * HOLD;
-          const vis = interpolate(local, [-1, 0, HOLD, HOLD + 1], [0, 1, 1, 0], clamp);
-          if (vis === 0) return null;
-          return (
-            <AbsoluteFill key={s.src} style={{ opacity: vis, flexDirection: "row", gap: 90, alignItems: "center", padding: "0 140px" }}>
-              <div style={{ width: 760, flexShrink: 0 }}>
-                <div style={enter(local, 6, 16)}>
-                  <Kicker>{s.kicker}</Kicker>
-                </div>
-                <Headline size={54} style={{ marginTop: 26, ...enter(local, 14, 18) }}>
-                  {s.head}
-                </Headline>
-                <div style={{ fontSize: 29, color: ink.ink2, marginTop: 24, ...enter(local, 26, 18) }}>
-                  {s.cap}
-                </div>
+      {shots.map((s, i) => {
+        const local = f - i * HOLD;
+        const vis = interpolate(local, [-1, 0, HOLD, HOLD + 1], [0, 1, 1, 0], clamp);
+        if (vis === 0) return null;
+        return (
+          <AbsoluteFill key={s.src} style={{ opacity: vis, flexDirection: "row", gap: 90, alignItems: "center", padding: "0 140px" }}>
+            <div style={{ width: 760, flexShrink: 0 }}>
+              <div style={enter(local, 6, 16)}>
+                <Kicker>{s.kicker}</Kicker>
               </div>
-              <div style={{ flex: 1, display: "flex", justifyContent: "center" }}>
-                <div style={enter(local, 10, 20)}>
-                  <PanelShot src={s.src} h={860} />
-                </div>
+              <Headline size={54} style={{ marginTop: 26, ...enter(local, 14, 18) }}>
+                {s.head}
+              </Headline>
+              <div style={{ fontSize: 29, color: ink.ink2, marginTop: 24, ...enter(local, 26, 18) }}>
+                {s.cap}
               </div>
-            </AbsoluteFill>
-          );
-        })}
-      </Sequence>
+            </div>
+            <div style={{ flex: 1, display: "flex", justifyContent: "center" }}>
+              <div style={enter(local, 10, 20)}>
+                <PanelShot src={s.src} h={860} at={local} over={HOLD} />
+              </div>
+            </div>
+          </AbsoluteFill>
+        );
+      })}
     </AbsoluteFill>
   );
 };
@@ -355,45 +384,57 @@ const End: React.FC = () => {
 };
 
 // ── composition ───────────────────────────────────────────────────────────────
-// Each scene is sized to its own content, not to a round number. Bet needed
-// 420 and SelfHost 265: both were shorter than their last `enter()`, so the AX
-// rows were still staggering and the payoff line had not fired when the scene
-// cut. A hard cut mid-animation reads as a missing feature, not a fast edit.
-const S = {
-  title: [0, 150],
-  problem: [150, 430],
-  bet: [430, 850],
-  does: [850, 1174],
-  asks: [1174, 1390],
-  selfHost: [1390, 1655],
-  end: [1655, 1715],
-} as const;
+// Scenes are durations, not absolute start times, because `<TransitionSeries>`
+// overlaps them and no absolute start is stable once an overlap exists. Each is
+// still sized to its own content rather than to a round number: Bet needed 420
+// and SelfHost 265, both of which were previously shorter than their last
+// `enter()`, so the scene cut mid-animation and it read as a missing feature
+// rather than as a fast edit.
+const CUT = linearTiming({ durationInFrames: 10 });
+
+const SCENES: [React.FC, number][] = [
+  [Title, 150],
+  [Problem, 280],
+  [Bet, 420],
+  [Does, SHOTS * HOLD],
+  [Asks, 216],
+  [SelfHost, 265],
+  [End, 60],
+];
+
+// Transitions overlap, so the composition is shorter than the sum. Deriving it
+// here is the whole reason to keep this in one place — a hand-written total in
+// Root.tsx silently truncates the last scene by however much it drifted.
+export const DURATION =
+  SCENES.reduce((n, [, d]) => n + d, 0) -
+  (SCENES.length - 1) * CUT.getDurationInFrames({ fps: FPS });
 
 export const Brotto: React.FC = () => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
   return (
     <AbsoluteFill style={{ background: ink.paper, fontFamily: FONT_UI, color: ink.ink }}>
       <Fonts />
-      <Sequence from={S.title[0]} durationInFrames={S.title[1] - S.title[0]}>
-        <Title />
-      </Sequence>
-      <Sequence from={S.problem[0]} durationInFrames={S.problem[1] - S.problem[0]}>
-        <Problem />
-      </Sequence>
-      <Sequence from={S.bet[0]} durationInFrames={S.bet[1] - S.bet[0]}>
-        <Bet />
-      </Sequence>
-      <Sequence from={S.does[0]} durationInFrames={S.does[1] - S.does[0]}>
-        <Does />
-      </Sequence>
-      <Sequence from={S.asks[0]} durationInFrames={S.asks[1] - S.asks[0]}>
-        <Asks />
-      </Sequence>
-      <Sequence from={S.selfHost[0]} durationInFrames={S.selfHost[1] - S.selfHost[0]}>
-        <SelfHost />
-      </Sequence>
-      <Sequence from={S.end[0]} durationInFrames={S.end[1] - S.end[0]}>
-        <End />
-      </Sequence>
+      {/* The bed is a 10.67s loop generated from scratch (see the README), so it
+          is ours to loop and there is no attribution to carry. `extend` keeps the
+          media frame counting across loops, which is what makes the closing fade
+          land where it is placed instead of restarting every 10.67s. */}
+      <Audio
+        src={staticFile("bed.mp3")}
+        loop
+        loopVolumeCurveBehavior="extend"
+        volume={interpolate(frame, [0, 20, DURATION - 70, DURATION], [0, 0.13, 0.13, 0], clamp)}
+      />
+      <TransitionSeries>
+        {SCENES.map(([Scene, durationInFrames], i) => (
+          <Fragment key={i}>
+            {i > 0 ? <TransitionSeries.Transition presentation={fade()} timing={CUT} /> : null}
+            <TransitionSeries.Sequence durationInFrames={durationInFrames} premountFor={fps}>
+              <Scene />
+            </TransitionSeries.Sequence>
+          </Fragment>
+        ))}
+      </TransitionSeries>
     </AbsoluteFill>
   );
 };

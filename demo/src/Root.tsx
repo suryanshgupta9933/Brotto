@@ -1,5 +1,5 @@
 import { Composition } from "remotion";
-import { Brotto } from "./Brotto";
+import { Brotto, DURATION } from "./Brotto";
 import { FPS, H, W } from "./tokens";
 
 export const RemotionRoot: React.FC = () => {
@@ -7,7 +7,7 @@ export const RemotionRoot: React.FC = () => {
     <Composition
       id="Brotto"
       component={Brotto}
-      durationInFrames={1715}
+      durationInFrames={DURATION}
       fps={FPS}
       width={W}
       height={H}

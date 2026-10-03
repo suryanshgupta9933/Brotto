@@ -1,4 +1,4 @@
-import { interpolate } from "remotion";
+import { Easing, interpolate } from "remotion";
 import { FONT_MONO, ink } from "./tokens";
 
 const clamp = {
@@ -6,10 +6,16 @@ const clamp = {
   extrapolateRight: "clamp",
 } as const;
 
+// Ease-out-expo. Every animation in the demo goes through `enter`, so this one
+// constant is what the whole video's pacing reads as. Linear was the bug: it
+// spends the second half of a fade arriving, and an arrival is the part you
+// look away from.
+export const EASE = Easing.bezier(0.16, 1, 0.3, 1);
+
 /** Fade and lift a block in. Returns style, so callers stay declarative. */
 export const enter = (frame: number, at: number, dur = 16) => ({
-  opacity: interpolate(frame, [at, at + dur], [0, 1], clamp),
-  transform: `translateY(${interpolate(frame, [at, at + dur], [16, 0], clamp)}px)`,
+  opacity: interpolate(frame, [at, at + dur], [0, 1], { ...clamp, easing: EASE }),
+  transform: `translateY(${interpolate(frame, [at, at + dur], [16, 0], { ...clamp, easing: EASE })}px)`,
 });
 
 /** The 10px uppercase mono label the design system uses for every stat and eyebrow. */
