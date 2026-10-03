@@ -163,7 +163,7 @@ answer.
 
 ## Retention and deletion
 
-Nothing expires on a timer. **Deletion is entirely yours**, and it is immediate:
+Nothing expires on a timer unless you ask it to. **Deletion is entirely yours**, and it is immediate:
 
 - **Session records** — the audit file and the scratchpad, described above — are written to disk and
   stay there until you remove them. Nothing expires on a schedule unless you ask for it: the server has

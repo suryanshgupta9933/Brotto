@@ -36,9 +36,12 @@ What Brotto does provide:
 
 What Brotto does **not** provide, and you should not assume:
 
-- No authentication on the orchestrator. Anyone who can reach it can drive a browser. Do not expose it
-  to a network you do not control.
-- No isolation between concurrent users. Identity is the client IP address.
+- **Authentication is on only if you set a secret.** The orchestrator requires `AGENT_SECRET` on every
+  route the extension calls, including the WebSocket. With no secret set it logs a warning and serves
+  **open** — anyone who can reach it can drive a browser. Do not expose an unconfigured server to a
+  network you do not control.
+- No isolation between concurrent users. Identity is a random per-install id the extension generates on
+  your machine. It is not a real user account, and it is not a credential.
 - No protection against a hostile page. Secure mode reduces the blast radius; it does not eliminate it.
 
 ## Out of scope

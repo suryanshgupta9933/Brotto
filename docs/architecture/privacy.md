@@ -59,11 +59,35 @@ page off disk is not redaction — it is that the write path for page content wa
 removed, which is a shape decision, and one that can be undone by a well-meaning
 `begin_turn(..., ax_diff=…)`.
 
+**3a. `redact_text` had one call site, and PRIVACY.md promised two.** The policy
+says page text is redacted "on every task, with no setting to turn it off". That
+was true of `harness.py` and false of `suggest.py`: the idle-suggestions path
+reads a page with **no task in flight** and shipped its text to the provider
+raw. Not a subtle leak — a card number visible on a checkout page, sent by a
+feature the user never turned on for that page.
+
+The lesson is the shape, not the missing call: **a promise made in a published
+policy is an invariant that has exactly as many call sites as the code has
+paths.** `grep -rn redact_text src/` returned one hit and read like a complete
+answer. It is the same class as the auth work above — a control named in public
+prose, implemented in one place, with the second place unbuilt. Both are now
+pinned by a test that asserts the secret is absent from the prompt that would be
+sent, not that a function was called.
+
 **4. Retention is a feature, not a cleanup task.** `_prune_sessions` evicts
 in-memory state and never touches disk. The user can now delete a session or
 all of them (`DELETE /v1/sessions/{id}`, `DELETE /v1/sessions`, both behind
-`AGENT_SECRET`), and the panel exposes it behind a confirmation. Nothing
-*expires* on its own yet — that is `BROTTO_RETENTION_DAYS`, still unbuilt.
+`AGENT_SECRET`), and the panel exposes it behind a confirmation.
+`BROTTO_RETENTION_DAYS` is **built** — an hourly sweep in `main.py` ages
+sessions out, and it is off unless the operator sets the variable. (An earlier
+note here said "still unbuilt", which was true when written and stopped being
+true; PRIVACY.md has been right the whole time, which is why the public doc
+gets the last word when the two disagree.)
+
+Note that deletion is scoped to sessions. `logs/user_policies/` and
+`logs/user_models/` are keyed by install id and survive it — and the policy
+file is the one holding the approved-sites list. PRIVACY.md now says so, but
+there is still no "delete everything" path.
 
 ## Where this is going: local-first
 
