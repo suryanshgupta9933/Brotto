@@ -22,6 +22,7 @@ from brotto_orchestrator.model.config import ModelConfig, UserCredentials
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
 
 from .prompt import SUGGESTION_PROMPT
+from .redact import redact_text
 
 log = logging.getLogger(__name__)
 
@@ -146,10 +147,21 @@ async def generate(
         factory.build(cfg.model, creds),
         system_prompt=SUGGESTION_PROMPT + _PLAIN_OUTPUT_SUFFIX,
     )
+    # Redacted first, and unconditional, exactly as the task path does it.
+    # PRIVACY.md promises page text is redacted before it is sent, and this
+    # is a second call site that promise did not know about — so a page read
+    # with *no task in flight* went to the provider raw. Unconditional for
+    # the harness's reason: a live card number reaching a provider's logs is
+    # not a setting the user should have to know to turn on.
+    page_text, redactions = redact_text(page_text)
+    if redactions:
+        log.info("suggestion page text: redacted %s", ", ".join(
+            f"{n} {k}" for k, n in sorted(redactions.items())))
     # Capped before the strip, not after: a direct caller can hand over a whole
     # document and the angle brackets have to come out of the payload either
     # way. Head-truncated, because the part of a page that carries what a
-    # question would be about is the part already in view.
+    # question would be about is the part already in view. After the redaction,
+    # so a secret straddling the boundary goes out whole or not at all.
     text = page_text[:MAX_PAGE_TEXT].replace("<", "").replace(">", "")
     body = f"  <text>\n{text}\n  </text>\n" if text else '  <text unavailable="true" />\n'
     # < > stripped from url and title for the same reason: all three values are

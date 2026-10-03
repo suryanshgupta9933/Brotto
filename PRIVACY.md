@@ -40,9 +40,11 @@ model provider.
 |---|---|---|
 | Model configuration (provider, model name, context window) | `chrome.storage.local` | Until you clear it |
 | **Your model API key** | `chrome.storage.session` | **Memory only.** Cleared when the browser closes. Never written to disk by the extension. |
+| **Your server secret** (`AGENT_SECRET`) | `chrome.storage.local` | Until you clear it. It authorizes reading every transcript on your server, so treat it like a password. |
+| An install id — a random identifier generated once, with no relationship to you, your machine, or your network | `chrome.storage.local` | Until you clear it |
 | Your policy (blocked domains, sensitive-action list) | `chrome.storage.local` | Until you clear it |
 | Session ID for the conversation | `chrome.storage.session` | Until the browser closes |
-| The address of the server you are connected to | `chrome.storage.session` | Kept until you change it |
+| The address of the server you are connected to | `chrome.storage.local` | Kept until you change it |
 | The last page URL the agent saw | `chrome.storage.session` | Cleared when the browser closes |
 | A running transcript of the current task — your messages, the cards Brotto is showing you | `chrome.storage.session` | Cleared when the browser closes |
 
@@ -65,7 +67,8 @@ When you start a task, the extension sends to the orchestrator:
 **Page text is redacted before it is sent.** Before any page text reaches the model, the orchestrator
 removes credentials, API keys, bearer tokens, payment card numbers and government identifiers, replacing
 each with `[redacted]`. This happens in code, on your machine, on every task, with no setting to turn it
-off. It is pattern matching, not a guarantee: it will miss an unfamiliar identifier format, and it will
+off — and on the suggestions path too, which reads a page with no task running and is the easiest place
+for this to be forgotten. It is pattern matching, not a guarantee: it will miss an unfamiliar identifier format, and it will
 occasionally redact an innocuous number that happens to pass a checksum. The agent is told the redaction
 already happened and is instructed not to try to reconstruct a redacted value.
 
@@ -86,13 +89,17 @@ says exactly what is in it.
 
 | File | Contents |
 |---|---|
-| `logs/sessions/<session_id>.json` | The audit record of your conversation: your messages, the page URL and title at each step, the prompts, the actions taken, approvals, timing, and errors. For the page itself it keeps counts and a summary of what changed — not the whole tree. |
+| `logs/sessions/<session_id>.json` | The audit record of your conversation: your messages, the page URL and title at each step, the prompts, the actions taken, approvals, timing, and errors. It also holds the text you **typed** into a field, and the model's own written reasoning about what it saw. For the page itself it keeps counts and a summary of what changed — not the whole tree. |
 | `logs/sessions/<session_id>.scratchpad.txt` | The agent's working memory: a short digest of each captured page and its URL. |
-| `logs/user_models/<client>.json` | Your model configuration: provider, model name, context window, and the address of your provider's API if you set a custom one. **Not your key.** If that address is on your own network, it is written to disk in the clear. |
+| `logs/user_models/<install-id>.json` | Your model configuration: provider, model name, context window, and the address of your provider's API if you set a custom one. **Not your key.** If that address is on your own network, it is written to disk in the clear. |
 | `logs/user_policies/<hash>.json` | Your blocked-domains list; the sites you have approved Brotto to work on; and when you last saved it. |
 
-**Page text is never written to disk.** Each step's page is recorded as a 200-character digest, so a run
-over an authenticated session leaves a record of *what* was visited and not copies of *what was on it*.
+**The page itself is never written to disk — but the record of it is not empty.** Each step's page is
+recorded as a 200-character digest, so a run over an authenticated session leaves a record of *what* was
+visited and not copies of *what was on it*. Two things about that step survive on disk in full: **the text
+you typed** (only fields that look like credential fields are masked), and **the model's own prose about
+the page**, which is its paraphrase rather than a copy. A run over your mail or your documents therefore
+leaves readable traces of both.
 A run resumed later recalls those digests rather than whole pages — that is the trade for keeping your
 pages off the filesystem, and it is not configurable.
 
@@ -106,11 +113,11 @@ A page that displays a token, an account number, or an email address may still p
 that digest. If that matters for a site you use, the safest thing is to not have the agent work on that
 site.
 
-The files are named after the connection that created them, so that separate users on one server do not
-share settings. That name is derived from your client address. The model-configuration file is named
-with the address in plain text; the policy file is named with a scrambled version of it. It is not
-used for advertising or analytics — the machine holding them is yours, and nothing is sent anywhere
-with it.
+The files are named after the install that created them, so that separate users on one server do not
+share settings. That name is the random install id the extension generated on your machine — not your
+name, not your IP address, and not your network. The model-configuration file is named with the install
+id in plain text; the policy file is named with a scrambled version of it. It is not used for
+advertising or analytics — the machine holding them is yours, and nothing is sent anywhere with it.
 
 **The approved-sites list is a record of where you have let Brotto work.** When you approve a site in
 an approval card, its domain is added to your policy file and stays there until you clear it, so you
@@ -121,9 +128,10 @@ every site goes back to asking. Blocking a domain is separate from approving it,
 always wins.
 
 One caveat worth knowing rather than guessing at: the server also accepts an identifier a client can
-supply in place of your address, and it will use that instead. The Brotto extension does not send one
-today, so your address is what is used. It is mentioned here because it is a real property of the
-software, not because you should expect to meet it.
+supply in place of that install id, and it will use that instead. The Brotto extension supplies its own
+install id, so that is what is used. A client that sends something else — or nothing at all — falls back
+to the connection's address. It is mentioned here because it is a real property of the software, not
+because you should expect to meet it.
 
 ## Suggestions on an idle page (optional)
 
@@ -167,6 +175,12 @@ Nothing expires on a timer. **Deletion is entirely yours**, and it is immediate:
     http://localhost:8000/v1/sessions/<id>` removes one; `DELETE /v1/sessions` removes every one.
     The files live in `logs/sessions/`, so removing them by hand works exactly the same way.
 - **Local extension data** is removed by clearing the extension's storage, or by uninstalling it.
+- **Deleting sessions does not delete your settings.** `DELETE /v1/sessions` and the panel's **Delete
+  all** cover the session records only. Your blocked-domains list and your **approved-sites list**
+  (`logs/user_policies/`) and your model configuration (`logs/user_models/`) are separate files, keyed by
+  your install id, and survive. If you want the approved-sites list gone — which is the one that records
+  which domains you have let an agent work on — delete that file by hand, or clear the approved list
+  inside the panel's policy screen.
 - **Your API key** is not retained by Brotto anywhere. It is held in the orchestrator's memory for the
   duration of a task and not written to disk.
 

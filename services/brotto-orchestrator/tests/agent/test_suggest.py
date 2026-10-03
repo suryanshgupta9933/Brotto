@@ -11,6 +11,8 @@ key, no network.
 
 from __future__ import annotations
 
+import pytest
+
 from brotto_orchestrator.agent.suggest import (
     MAX_CHARS,
     MAX_LINES,
@@ -138,3 +140,57 @@ def test_a_refusal_alongside_real_suggestions_drops_only_itself():
         "I don't have enough here to suggest anything specific.",
         "Summarise the mail that arrived today",
     ]) == ["Summarise the mail that arrived today"]
+
+
+# ── the page text that reaches the provider ───────────────────────────────
+#
+# `_normalise` is the output contract and the tests above are all no-model,
+# no-key, no-network. Redaction is the *input* contract, and it is the one
+# PRIVACY.md names: "page text is redacted before it is sent... on every
+# task, with no setting to turn it off." The task path honoured that from
+# one call site and the suggestion path was a second one nobody counted, so
+# a page read with no task in flight reached the provider raw.
+
+async def _prompt_generate(monkeypatch, page_text: str) -> str:
+    """The prompt `generate` would hand the provider. No model, no key."""
+    from brotto_orchestrator.agent import suggest as suggest_mod
+    from brotto_orchestrator.model.config import ModelConfig, UserCredentials
+
+    sent: list[str] = []
+
+    class _StubAgent:
+        def __init__(self, _model, system_prompt=""):
+            pass
+
+        async def run(self, prompt, **kwargs):
+            sent.append(prompt)
+            return _Run("Summarise the open thread.")
+
+    class _Run:
+        def __init__(self, output):
+            self.output = output
+
+    monkeypatch.setattr(suggest_mod, "Agent", _StubAgent)
+    cfg = ModelConfig("anthropic", "claude-sonnet-4-5", 400_000)
+    await suggest_mod.generate(
+        "https://mail.google.com/mail/u/0/#inbox", "Inbox", cfg,
+        UserCredentials(api_key="k", base_url=None), page_text,
+    )
+    return sent[0]
+
+
+@pytest.mark.asyncio
+async def test_a_card_number_in_the_page_never_reaches_the_provider(monkeypatch):
+    prompt = await _prompt_generate(
+        monkeypatch, "Your card 4111 1111 1111 1111 expires 04/27\nAda - Q3 budget"
+    )
+    assert "4111 1111 1111 1111" not in prompt
+    assert "Q3 budget" in prompt, "redaction must not eat the page it was asked about"
+
+
+@pytest.mark.asyncio
+async def test_a_bearer_token_in_the_page_never_reaches_the_provider(monkeypatch):
+    prompt = await _prompt_generate(
+        monkeypatch, "Authorization: Bearer sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\nhello"
+    )
+    assert "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA" not in prompt
