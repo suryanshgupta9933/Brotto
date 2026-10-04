@@ -25,6 +25,8 @@
     "dev": "remotion studio",
     "render": "remotion render Brotto out/brotto-demo.mp4",
     "render:draft1": "remotion render Draft1 out/draft1.mp4",
+    "render:draft2": "remotion render Draft2 out/draft2.mp4",
+    "render:draft3": "remotion render Draft3 out/draft3.mp4",
     "upgrade": "remotion upgrade",
     "lint": "eslint src && tsc"
   }

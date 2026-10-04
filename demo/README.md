@@ -1,16 +1,22 @@
 # The Brotto demo
 
-Two videos, one renderer. Remotion renders them from React components, so a fix
+Four videos, one renderer. Remotion renders them from React components, so a fix
 to a scene is a diff you can review, not a re-record.
 
 | Composition | Cut | Length | For |
 |---|---|---|---|
 | `Brotto` | the long explainer | 1619 frames / 54s | the README, people deciding whether to read it |
-| `Draft1` | the launch cut | 763 frames / 25.4s | a post, where the first two seconds are the whole pitch |
+| `Draft1` | the login wall | 763 frames / 25.4s | a post, where the first two seconds are the whole pitch |
+| `Draft2` | the accessibility tree | 588 frames / 19.6s | the moat: refs, not coordinates |
+| `Draft3` | the disk | 573 frames / 19.1s | the other moat: nothing leaves your machine |
 
-`Draft1`'s plan — the angle, the storyboard and why each scene is the length it
-is — is [`draft1-plan.md`](./draft1-plan.md). Read it before changing a scene
-length; both cuts derive their total from the scene table.
+The three short cuts are variations, not a series. Each argues one part of the
+same case off the same real panel, and each is a candidate for a different
+audience rather than chapter two of the first. Their plans —
+[`draft1-plan.md`](./draft1-plan.md), [`draft2-plan.md`](./draft2-plan.md),
+[`draft3-plan.md`](./draft3-plan.md) — carry the angle and the storyboard. Read
+one before changing a scene length; every cut derives its total from its scene
+table.
 
 ```console
 npm install
@@ -19,6 +25,8 @@ npm run render   # -> out/brotto-demo.mp4
 npm run lint     # eslint + tsc
 
 npm run render:draft1   # -> out/draft1.mp4
+npm run render:draft2   # -> out/draft2.mp4
+npm run render:draft3   # -> out/draft3.mp4
 ```
 
 ## Things that are deliberate
@@ -76,11 +84,11 @@ a prop a caller gets wrong.
 
 **The staging is one module because it is one pixel space.** `src/stage.tsx`
 holds `PANEL_W`/`PANEL_H`/`PANEL_X`/`TYPE_X`/`GUTTER` and the `Shot`, `Callout`,
-`Beat` and `Outro` components the short cut draws with. The point of pulling it
-out of `Draft1.tsx` is the next cut: with more than one, the difference between a
-shared constant and a second copy of it, and a constant that drifts is a callout
-pointing at a gap where a card used to be. A draft that copies these constants
-gets them right; a draft that re-derives them does not.
+`Beat` and `Outro` components every short cut draws with. With three cuts that is
+the difference between a shared constant and three copies of it, and a constant
+that drifts in one cut is a callout pointing at a gap where a card used to be.
+A draft that copies these constants gets them right; a draft that re-derives them
+does not.
 
 `Callout` clamps its label to the panel's left edge, which is the one place the
 clamp is not cosmetic. An anchor in the panel's right half — the history drawer's
@@ -125,6 +133,37 @@ was set by eye against a file whose normalisation had changed; the script now
 prints peak, RMS and a per-half-second energy profile, which is how the inaudible
 layer was found without listening to the result. `Brotto` loops the same file at
 a lower volume; the cue ends on a cadence, so the loop point is inaudible there.
+
+**One generator, three cues.** The short cuts are 25.4s, 19.6s and 19.1s and
+their scene boundaries fall on different beats, so `bed.mjs` takes the cut's
+length, its accent positions and its resolve as flags rather than there being
+three copies of the piece. The progression repeats to fill whatever length it is
+given, so a second bed is different arguments to the same music — which is the
+point, since three parallel copies of a generator is how the three model
+catalogues in this repo went stale at the same time.
+
+```console
+node tools/bed.mjs --out public/bed2.mp3 --dur 19.6 --accents 0,4,12,18,24 --resolve 32
+node tools/bed.mjs --out public/bed3.mp3 --dur 19.1 --accents 0,4,10,16,23 --resolve 31
+```
+
+**The accessibility tree is captured, not typed.** `Draft2` argues that a ref is
+a handle on a real element rather than a guess at a pixel, and a hand-written
+tree would be a drawing of the product rather than the product. The harness
+reads it over the same CDP session that drives the panel —
+`Accessibility.getFullAXTree`, formatted by the same rules as
+`agent/ax_filter.py` — and resolves each node's rect with `DOM.getBoxModel` in
+the same 2x space the composition draws, so the line the model sees and the box
+the video lights are provably one node. `AX_TREE` is generated into `src/seq.ts`
+for the same reason `RUN` and `SPOTS` are: a kept-by-hand list of frames or
+names is a second copy that drifts.
+
+The tree's listitems come back nameless, and that is faithful rather than a
+capture bug — Chrome puts a row's text in a child `StaticText`, which
+`KEEP_ROLES` drops because `page_text` already carries it on the real path. So
+`Draft2` argues about the correspondence between a ref and an element, which is
+the part that is actually the moat, rather than about reading the page back out
+of the tree.
 
 **Scene lengths are not round numbers.** Bet is 420 frames and SelfHost is 265.
 Each scene is sized to its own content, because a scene that cuts while its last

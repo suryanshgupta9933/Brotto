@@ -432,6 +432,23 @@ pointing at whatever moved into its place. Those rects go into a **generated
 a hand-kept frame order is a second copy that drifts exactly like the three model
 catalogues did.
 
+**The same session can read the panel's accessibility tree**, which is how the
+second short cut shows a real `[0:98] button "APPROVE PLAN"` rather than a typed
+one. `Accessibility.getFullAXTree` over the CDP session the harness is already
+driving, formatted by the same rules as `agent/ax_filter.py`, and each node's
+rect resolved with `DOM.getBoxModel({backendNodeId})` — **`backendNodeId`
+directly, no `DOM.resolveNode` first**: that call returns an `object` handle with
+no `node` key, and feeding it straight into `getBoxModel` fails with *"Either
+nodeId, backendNodeId or objectId must be specified"*, which is thirteen null
+boxes and a cut that points at nothing.
+
+Line and box come from one `getFullAXTree` response, so the ref printed in the
+video and the rectangle it lights are provably the same node. **It is also why
+the listitems come back nameless** — Chrome puts a row's text in a child
+`StaticText`, which `KEEP_ROLES` drops because `page_text` already carries it.
+That is faithful to the product rather than a capture fault, and it moved the
+cut's argument to the ref/element correspondence, which is the moat anyway.
+
 **An anchor is only as good as the frame it is anchored to.** The Reads beat used
 to lead its callout at `RUN_FRAMES - 40`, by which point the plan card it names
 had left the screen and the approval card was standing where the rect said the
@@ -442,7 +459,7 @@ and a wrong frame is a semantic error, not a pixel one.
 
 #### A panel screenshot is only evidence if it is legible
 
-The first Brag cut staged the panel at its 420px CSS width, and the shots were
+The first short cut staged the panel at its 420px CSS width, and the shots were
 captured at 2x. Downscaling an 840px image into a 420px slot put the panel's own
 11px body text at **five pixels** on a 1920px frame — the reviewer saw texture
 and reported "the screenshots look so off", which is exactly the right thing to
@@ -477,3 +494,22 @@ missing image, and no single still shows that the difference between
 They call `useCurrentFrame()` themselves now. **A prop a caller has to remember
 is a prop a caller gets wrong**, and the failure mode of getting this one wrong
 is indistinguishable from a design choice.
+
+#### A callout label is in the gutter, and the gutter is not where you put it
+
+Three short cuts share `demo/src/stage.tsx`, so the staging is one module and one
+2x pixel space rather than three copies of the constants. That is the fix for
+most of it.
+
+The one thing the shared layout still had to learn is that **the label does not
+choose its own position — the anchor does.** `Callout` derives it from
+`min(left - LEAD - 18, PANEL_X)`, and the clamp is load-bearing: DELETE ALL sits
+at x≈700 of 840, so a right-aligned label in the 280px gutter starts at ≈1384,
+which is *inside* the panel. The result was "DELETE EVERYTHING" drawn across the
+history drawer's own title bar — text on top of the thing it names, in both the
+first cut and the third.
+
+The leader takes up the slack and runs the long way to the element, 690px across
+the panel's header. That looks like a lot of rule, and it is still the cheap
+option: a routed leader is a drawing, and a label that overlaps its own target is
+a semantic error that a still-frame skim reads as a styling choice.

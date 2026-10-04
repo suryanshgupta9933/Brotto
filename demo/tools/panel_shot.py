@@ -186,6 +186,88 @@ def spot(page, into: dict, name: str, selector: str) -> None:
     }
 
 
+# The roles the agent actually keeps. Mirrors `KEEP_ROLES` in
+# `agent/ax_filter.py` — the same list, because the video is claiming to show
+# what the model is shown, and a capture with a different filter would be
+# showing something else.
+KEEP_ROLES = {
+    "button", "link", "textbox", "searchbox", "combobox", "checkbox",
+    "radio", "menuitem", "tab", "listitem", "heading", "dialog", "alert",
+    "form", "main", "nav", "option", "switch", "slider", "spinbutton",
+    "gridcell", "row", "rowgroup", "table", "list",
+}
+STRIP_ROLES = {"generic", "none", "presentation", "separator"}
+
+
+def ax_tree(page, limit: int = 60) -> list[dict]:
+    """The accessibility tree of the panel, as the model would be shown it.
+
+    Read over CDP with the same call the extension makes (`getFullAXTree`),
+    because a different reader would give a different tree and the whole point
+    of the cut is that this is the real one. Lines are formatted exactly as
+    `agent/ax_filter.py` formats them — `[ref] role "name"`, two spaces per
+    level — so a viewer who has read the source recognises it.
+
+    Each line also carries the box of the element it names, in the same 2x
+    pixel space as `SPOTS`. A ref the model addresses and a rect the video
+    highlights have to be the same node, and resolving that here is cheaper than
+    trusting a selector to keep pointing at the right one.
+    """
+    cdp = page.context.new_cdp_session(page)
+    cdp.send("Accessibility.enable")
+    nodes = cdp.send("Accessibility.getFullAXTree").get("nodes", [])
+    by_id = {n["nodeId"]: n for n in nodes}
+    found: list[dict] = []
+
+    def box(node: dict) -> dict | None:
+        backend = node.get("backendDOMNodeId")
+        if backend is None:
+            return None
+        try:
+            quad = cdp.send("DOM.getBoxModel", {"backendNodeId": backend})["model"]["content"]
+        except Exception:
+            return None
+        xs, ys = quad[0::2], quad[1::2]
+        x, y, w, h = min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+        if w < 4 or h < 4:
+            return None
+        top = max(0.0, y)
+        bottom = min(float(VIEW_H), y + h)
+        if bottom - top < 8:
+            return None  # scrolled out of the frame; nothing to point at
+        return {
+            "x": round(x * DPR, 1), "y": round(top * DPR, 1),
+            "w": round(w * DPR, 1), "h": round((bottom - top) * DPR, 1),
+        }
+
+    def walk(node_id, depth: int) -> None:
+        n = by_id.get(node_id)
+        if n is None or len(found) >= limit:
+            return
+        role = (n.get("role") or {}).get("value", "").lower()
+        name = (n.get("name") or {}).get("value", "")
+        if role in KEEP_ROLES and role not in STRIP_ROLES and (name or role):
+            line = f'[0:{n["nodeId"]}] {role}'
+            if name:
+                line += f' "{name[:60]}"'
+            found.append({
+                "line": "  " * depth + line,
+                "ref": f'[0:{n["nodeId"]}]',
+                "name": name[:60],
+                "box": box(n),
+            })
+            depth += 1
+        for child in n.get("childIds", []) or []:
+            walk(child, depth)
+
+    for root in nodes:
+        if "parentId" not in root:
+            walk(root["nodeId"], 0)
+            if len(found) >= limit:
+                break
+    return found
+
+
 def shoot(page, name: str) -> None:
     page.wait_for_timeout(700)  # let the working line's 700ms hold resolve
     OUT.mkdir(parents=True, exist_ok=True)
@@ -207,9 +289,21 @@ class Run:
         self.page = page
         self.frames: list[dict] = []
         self.spots: dict[str, dict] = {}
+        self.ax: list[dict] = []
 
     def mark(self, name: str, selector: str) -> None:
         spot(self.page, self.spots, name, selector)
+
+    def read_tree(self) -> None:
+        """Read the panel's accessibility tree while the plan is on screen.
+
+        The panel is a real DOM, so the tree a CDP reader gives it is the same
+        shape the model gets for a real page — which is the point of capturing
+        it here rather than writing the lines by hand. A hand-written tree would
+        be a drawing of the product; this one is the product.
+        """
+        self.ax = ax_tree(self.page)
+        print(f"  ax tree: {len(self.ax)} lines")
 
     def capture(self, label: str, hold: int, follow: bool = False, reveal: str | None = None) -> None:
         if reveal:
@@ -239,6 +333,15 @@ class Run:
             f'  {name}: {{ x: {s["x"]}, y: {s["y"]}, w: {s["w"]}, h: {s["h"]} }},'
             for name, s in self.spots.items()
         )
+        lines = "\n".join(
+            f"  {{ line: {l}, ref: {r}, name: {n}, box: "
+            + (f'{{ x: {b["x"]}, y: {b["y"]}, w: {b["w"]}, h: {b["h"]} }}' if b else "null")
+            + " },"
+            for l, r, n, b in (
+                (json.dumps(a["line"]), json.dumps(a["ref"]), json.dumps(a["name"]), a["box"])
+                for a in self.ax
+            )
+        )
         SEQ_TS.write_text(
             "// GENERATED by demo/tools/panel_shot.py — do not edit.\n"
             "//\n"
@@ -259,11 +362,20 @@ class Run:
             f"{marks}\n"
             "};\n"
             "\n"
+            "// The panel's own accessibility tree, read over CDP while the plan was\n"
+            "// on screen, formatted the way `agent/ax_filter.py` formats it for the\n"
+            "// model. `box` is the element that line names, in the same pixel space\n"
+            "// as SPOTS, so Draft2 can light a ref up on the panel it addresses.\n"
+            "export type AxNode = { line: string; ref: string; name: string; box: Spot | null };\n"
+            "export const AX_TREE: AxNode[] = [\n"
+            f"{lines}\n"
+            "];\n"
+            "\n"
             f"export const RUN_FRAMES = {sum(f['hold'] for f in self.frames)};\n"
         )
         print(f"  wrote {SEQ_TS.relative_to(REPO)}  ({len(self.frames)} frames, "
               f"{sum(f['hold'] for f in self.frames)} frames of run, "
-              f"{len(self.spots)} callout spots)")
+              f"{len(self.spots)} callout spots, {len(self.ax)} tree lines)")
 
 
 # The panel probes the server on open. A `file://` origin gets a CORS failure
@@ -362,6 +474,7 @@ def main() -> int:
         run.capture("plan", 18)
         run.mark("plan", ".plan-card")
         run.mark("composer", "#inputArea")
+        run.read_tree()
 
         STEPS = [
             "Read the November fare calendar",

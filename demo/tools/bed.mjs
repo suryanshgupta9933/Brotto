@@ -8,44 +8,55 @@
 //
 //   node tools/bed.mjs   ->  public/bed.mp3
 //
+// A cut's scene starts are the only thing that differ between beds, so they are
+// the only thing passed in:
+//
+//   node tools/bed.mjs --out public/bed2.mp3 --dur 19.6 --accents 0,4,12,18,24 --resolve 32
+//
 // Pure stdlib, plus the ffmpeg the Remotion CLI already ships. No numpy, no tone
 // library, no build step.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const OUT = join(HERE, "..", "public", "bed.mp3");
+
+const flag = (name, fallback) => {
+  const i = process.argv.indexOf(`--${name}`);
+  return i === -1 ? fallback : process.argv[i + 1];
+};
+
+const OUT = join(HERE, "..", "public", flag("out", "bed.mp3"));
 
 const SR = 44100;
 const BPM = 100;
 const BEAT = 60 / BPM; // 0.6s
-const DUR = 763 / 30; // the Brag cut, so the cue cannot drift out from under it
+const DUR = Number(flag("dur", 763 / 30)); // this cut, so the cue cannot drift out from under it
 const N = Math.round(DUR * SR);
+const RESOLVE = Number(flag("resolve", 40));
 
 const mtof = (m) => 440 * 2 ** ((m - 69) / 12);
 
 // Am - F - C - G, the i-VI-III-VII the explainer already used, two beats apart
-// and now placed so each chord starts on a scene boundary.
-const CHORDS = [
-  { at: 0, pad: [57, 64, 69], sub: 45 },
-  { at: 4, pad: [53, 60, 65], sub: 41 },
-  { at: 8, pad: [55, 60, 64], sub: 36 },
-  { at: 12, pad: [55, 62, 67], sub: 43 },
-  { at: 16, pad: [57, 64, 69], sub: 45 },
-  { at: 20, pad: [53, 60, 65], sub: 41 },
-  { at: 24, pad: [55, 60, 64], sub: 36 },
-  { at: 28, pad: [55, 62, 67], sub: 43 },
-  { at: 32, pad: [57, 64, 69], sub: 45 },
-  { at: 36, pad: [53, 60, 65], sub: 41 },
-  { at: 40, pad: [57, 64, 69], sub: 45 },
+// and now placed so each chord starts on a scene boundary. Extended to whatever
+// the cut needs — the progression repeats, so a second bed is a different
+// length and a different accent list, not a different piece.
+const PROGRESSION = [
+  { pad: [57, 64, 69], sub: 45 },
+  { pad: [53, 60, 65], sub: 41 },
+  { pad: [55, 60, 64], sub: 36 },
+  { pad: [55, 62, 67], sub: 43 },
 ];
+const CHORDS = Array.from(
+  { length: Math.ceil(DUR / (BEAT * 4)) + 1 },
+  (_, i) => ({ at: i * 4, ...PROGRESSION[i % PROGRESSION.length] }),
+);
 
 // Scene starts in beats, rounded to the nearest beat. These are the accents.
-const ACCENTS = [0, 4, 9, 16, 22, 28, 33, 40];
+const ACCENTS = flag("accents", "0,4,9,16,22,28,33,40").split(",").map(Number);
 
 const chordAt = (beat) => {
   let c = CHORDS[0];
@@ -200,7 +211,7 @@ for (const { at, sub } of CHORDS) {
 for (const a of ACCENTS) {
   const start = Math.round(a * BEAT * SR);
   const len = Math.round(0.32 * SR);
-  const final = a === 40;
+  const final = a === RESOLVE;
   const amp = final ? 0.62 : 0.42;
   for (let k = 0; k < len; k++) {
     const t = k / SR;
@@ -211,8 +222,8 @@ for (const a of ACCENTS) {
   }
 }
 
-// Two risers, one into the Outro and one into the resolve.
-for (const at of [32, 39]) {
+// Two risers, one into the last scene and one into the resolve.
+for (const at of [RESOLVE - 8, RESOLVE - 1]) {
   const start = Math.round(at * BEAT * SR);
   const len = Math.round(BEAT * SR);
   let seed = 9876 + at;
@@ -314,7 +325,7 @@ if (outPeak > 1) {
 console.log(
   `bed.mp3  ${DUR.toFixed(2)}s  ${BPM}bpm  ${CHORDS.length} chords  ` +
     `peak ${outPeak.toFixed(3)}  rms ${Math.sqrt(rms / (N * 2)).toFixed(3)}  ` +
-    `final resolve at ${(40 * BEAT).toFixed(2)}s`,
+    `final resolve at ${(RESOLVE * BEAT).toFixed(2)}s`,
 );
 
 // The arrangement is a claim about loudness over time, and it is the one thing

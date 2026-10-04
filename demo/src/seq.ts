@@ -29,4 +29,25 @@ export const SPOTS: Record<string, Spot> = {
   deleteAll: { x: 587.4, y: 45.0, w: 144.6, h: 30.0 },
 };
 
+// The panel's own accessibility tree, read over CDP while the plan was
+// on screen, formatted the way `agent/ax_filter.py` formats it for the
+// model. `box` is the element that line names, in the same pixel space
+// as SPOTS, so Draft2 can light a ref up on the panel it addresses.
+export type AxNode = { line: string; ref: string; name: string; box: Spot | null };
+export const AX_TREE: AxNode[] = [
+  { line: "[0:28] button \"claude-sonnet-5-5\"", ref: "[0:28]", name: "claude-sonnet-5-5", box: { x: 480, y: 37.0, w: 176, h: 24.0 } },
+  { line: "[0:38] button \"Session history\"", ref: "[0:38]", name: "Session history", box: { x: 694, y: 23.0, w: 52, h: 52.0 } },
+  { line: "[0:43] button \"Open settings\"", ref: "[0:43]", name: "Open settings", box: { x: 758, y: 23.0, w: 52, h: 52.0 } },
+  { line: "[0:69] main", ref: "[0:69]", name: "", box: { x: 28, y: 132, w: 784, h: 733.5 } },
+  { line: "  [0:79] list", ref: "[0:79]", name: "", box: { x: 62, y: 463.8, w: 615.8, h: 186.8 } },
+  { line: "    [0:80] listitem", ref: "[0:80]", name: "", box: { x: 62, y: 463.8, w: 615.8, h: 37.7 } },
+  { line: "    [0:84] listitem", ref: "[0:84]", name: "", box: { x: 62, y: 513.4, w: 615.8, h: 37.7 } },
+  { line: "    [0:88] listitem", ref: "[0:88]", name: "", box: { x: 62, y: 563.1, w: 615.8, h: 37.7 } },
+  { line: "    [0:93] listitem", ref: "[0:93]", name: "", box: { x: 62, y: 612.8, w: 615.8, h: 37.7 } },
+  { line: "  [0:98] button \"APPROVE PLAN\"", ref: "[0:98]", name: "APPROVE PLAN", box: { x: 88, y: 690.5, w: 168.7, h: 26.0 } },
+  { line: "  [0:99] button \"MAKE CHANGES\"", ref: "[0:99]", name: "MAKE CHANGES", box: { x: 324.7, y: 690.5, w: 168.7, h: 26.0 } },
+  { line: "[0:5] textbox \"Task description\"", ref: "[0:5]", name: "Task description", box: { x: 56, y: 947.5, w: 628, h: 40.6 } },
+  { line: "[0:105] button \"Send\"", ref: "[0:105]", name: "Send", box: { x: 730, y: 923.5, w: 80, h: 88.6 } },
+];
+
 export const RUN_FRAMES = 126;
