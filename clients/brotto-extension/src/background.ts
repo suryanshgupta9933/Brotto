@@ -923,7 +923,7 @@ async function startRelay(
         setBadgeForResult();
         const r = msg.result ?? {};
         if (r.status === "completed") {
-          notifyUi({ type: "task_completed", summary: r.summary ?? "", steps: stepIndex, finalAnswer: r.summary ?? "", extracted_data: r.extracted_data, timing: r.timing ?? null });
+          notifyUi({ type: "task_completed", summary: r.summary ?? "", steps: stepIndex, finalAnswer: r.summary ?? "", extracted_data: r.extracted_data, timing: r.timing ?? null, cost_usd: r.cost_usd ?? null });
           notifyUi({ type: "canonical_status", status: "completed" });
         } else {
           // ponytail: field names match the sidepanel's task_failed

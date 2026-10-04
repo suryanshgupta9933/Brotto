@@ -22,6 +22,7 @@ from pydantic_ai.exceptions import (
 )
 
 from brotto_orchestrator.model.config import UserCredentials
+from brotto_orchestrator.model.pricing import lookup as _price_lookup, price_usage
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
 from brotto_orchestrator.model.resolver import resolve_model_config
 
@@ -188,6 +189,26 @@ _PLACEHOLDER_MODEL = os.getenv("AGENT_MODEL", "anthropic:MiniMax-M3")
 # Context window size (tokens) used for the side panel's CONTEXT cell
 # (% of context used). Override per model in .env. Defaults to 400k.
 _CONTEXT_WINDOW_TOKENS = int(os.getenv("CONTEXT_WINDOW_TOKENS", "400000"))
+
+# Ceiling on what one task may spend, in USD. Unset by default, and that is a
+# decision rather than an omission: Brotto is self-hosted, the key is the
+# user's, and a run costs them their own key's money — which is also the
+# user's own money on a subscription, so a default cap would spend their
+# tokens for them. Set it when the key is one whose bill is not theirs to
+# decide. Invalid text reads as no cap plus a warning rather than a $0 budget.
+_MAX_TASK_COST_USD: float | None = None
+try:
+    _cap = float(os.environ["BROTTO_MAX_TASK_COST_USD"])  # type: ignore[index]
+    if _cap > 0:
+        _MAX_TASK_COST_USD = _cap
+    else:
+        log.warning("BROTTO_MAX_TASK_COST_USD=%r is not a positive amount; "
+                    "no per-task cost ceiling", _cap)
+except KeyError:
+    pass
+except ValueError:
+    log.warning("BROTTO_MAX_TASK_COST_USD is not a number; "
+                "no per-task cost ceiling")
 
 # User replies that approve a pending action (login, approval, policy gate).
 APPROVE_SET = frozenset({"yes", "y", "approve", "ok", "confirm"})
@@ -1335,6 +1356,22 @@ def _resolve_model(deps: AgentDeps) -> tuple:
     return cached
 
 
+def _catalog_for(deps: AgentDeps):
+    """The catalog entry for the model this run is actually billing, or None.
+
+    Reads `deps._model_config` rather than calling `_resolve_model`, because
+    `_plan_step` sets that attribute only on the branch that builds a real
+    provider model. The scripted/test path deliberately never resolves one —
+    there is nothing to bill — and calling the resolver there would raise on
+    a run that has no model to raise about. None covers both that and a
+    model the catalog has no entry for; only the second is a pricing gap.
+    """
+    cfg = getattr(deps, "_model_config", None)
+    if cfg is None:
+        return None
+    return _price_lookup(cfg.provider, cfg.model)
+
+
 async def _plan_step(
     deps: AgentDeps, turn: AgentTurn, agent: Agent, audit=None
 ) -> tuple[AgentDecision, int, object] | None:
@@ -1716,8 +1753,21 @@ class AgentHarness:
         # scripted-planner path never calls `agent.run`, so these stay 0
         # there — a real fact (no model ran), not missing data.
         tokens: dict[str, int] = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0}
+        cost: float | None = None
         steps_run = 0
         task_start = time.perf_counter()
+
+        if _MAX_TASK_COST_USD is not None:
+            # A ceiling on a number that never arrives is not a small
+            # ceiling, it is no ceiling, and the failure would otherwise be
+            # silent for the whole run. Said once, here, before any of it.
+            _cfg = getattr(deps, "_model_config", None)
+            if _cfg is not None and _catalog_for(deps) is None:
+                log.warning(
+                    "[%s] BROTTO_MAX_TASK_COST_USD=%.2f is set but %s:%s is "
+                    "not in the catalog, so no step can be priced and the "
+                    "ceiling will not fire", deps.user_id, _MAX_TASK_COST_USD,
+                    _cfg.provider, _cfg.model)
 
         if not await deps.cdp.ping():
             return TaskResult(
@@ -1892,7 +1942,7 @@ class AgentHarness:
                 # right: built elsewhere it is 0-indexed, step+1, or unset.
                 deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
                 self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
-                               task_index=deps.task_index)
+                               task_index=deps.task_index, cost=cost)
                 return deps.result
 
             steps_run += 1
@@ -1985,7 +2035,7 @@ class AgentHarness:
                         timing=timing_report,                    )
                     deps.result.final_url = deps.step_url
                     self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
-                               task_index=deps.task_index)
+                               task_index=deps.task_index, cost=cost)
                     return deps.result
 
             # The turn opens here — after the policy block, before the
@@ -2055,7 +2105,7 @@ class AgentHarness:
                         timing=timing_report,                    )
                     deps.result.final_url = deps.step_url
                     self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
-                               task_index=deps.task_index)
+                               task_index=deps.task_index, cost=cost)
                     return deps.result
                 # reply == "resume" (or anything else): loop continues,
                 # next step re-runs check_login_page to confirm we're out.
@@ -2126,13 +2176,54 @@ class AgentHarness:
                 tokens_in = tokens_out = cache_read = cache_write = 0
             tokens_used = tokens_in if usage is not None else None
             context = _build_context(tokens_used, window=context_window)
+            # Price the step from the catalog rather than from
+            # `RunUsage.cost`: pydantic-ai has no cost calculation for
+            # AnthropicModel at all, so on Claude and MiniMax that field
+            # stays 0 and a total read off it is a confidently wrong $0.00.
+            step_cost = None
+            if usage is not None:
+                step_cost = price_usage(
+                    _catalog_for(deps),
+                    input_tokens=tokens_in, output_tokens=tokens_out,
+                    cache_read=cache_read, cache_write=cache_write,
+                )
+                if step_cost is not None:
+                    cost = (cost or 0.0) + step_cost
             audit.record_model(
                 a_turn, thought=decision.thought, reasoning=decision.reasoning,
                 tokens_in=tokens_in, tokens_out=tokens_out,
                 cache_read=cache_read, cache_write=cache_write,
+                cost_usd=step_cost,
                 context_pct=context["pct"] or 0.0,
                 latency_ms=int((time.perf_counter() - t_plan) * 1000),
             )
+
+            # The ceiling is checked here, after the call was already billed
+            # and recorded, and before the turn's actions dispatch. Anywhere
+            # earlier misses a step the user paid for; anywhere later has
+            # already clicked half of an action the ceiling was set to not
+            # pay for.
+            if _MAX_TASK_COST_USD is not None and cost is not None \
+                    and cost > _MAX_TASK_COST_USD:
+                timing_report = self._log_timings(
+                    deps.user_id, timings, steps_run,
+                    time.perf_counter() - task_start, cumulative_snapshots,
+                    tokens=tokens,
+                )
+                deps.result = TaskResult(
+                    status="failed",
+                    summary=(
+                        f"Stopped at step {steps_run}: this task reached "
+                        f"${cost:.2f}, over the ${_MAX_TASK_COST_USD:.2f} ceiling"
+                    ),
+                    failure_reason="budget_exhausted",
+                    steps_taken=steps_run,
+                    timing=timing_report,
+                )
+                deps.result.final_url = deps.step_url
+                self._close(audit, a_turn, deps.result, cumulative_snapshots,
+                            timings, task_index=deps.task_index, cost=cost)
+                return deps.result
 
             # Curated list of irreversible actions that always require
             # explicit approval (even if the regex CRITICAL_PATTERNS misses
@@ -2418,7 +2509,7 @@ class AgentHarness:
                 # right: built elsewhere it is 0-indexed, step+1, or unset.
                 deps.result.steps_taken = max(deps.result.steps_taken, steps_run)
                 self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
-                               task_index=deps.task_index)
+                               task_index=deps.task_index, cost=cost)
                 return deps.result
 
             audit.end_turn(a_turn, timings=_step_timings(timings, cumulative_snapshots))
@@ -2443,19 +2534,24 @@ class AgentHarness:
             timing=timing_report,        )
         deps.result.final_url = deps.step_url
         self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
-                               task_index=deps.task_index)
+                               task_index=deps.task_index, cost=cost)
         return deps.result
 
     @staticmethod
     def _close(audit, turn: int, result: TaskResult,
                snapshots: list[dict[str, float]],
-               timings: dict[str, float] | None, task_index: int) -> None:
+               timings: dict[str, float] | None, task_index: int,
+               cost: float | None = None) -> None:
         """End the open turn and seal the document.
 
         Every terminal path out of the loop ends here so no route can
         return without writing `result` and `status` — a document that
         reads "running" after the task is over is worse than no document.
+        The cost is stamped here for the same reason: it is the one point
+        every terminal route already passes, and a run that reports a
+        duration but not what it cost is half a bill.
         """
+        result.cost_usd = cost
         if turn >= 0:
             audit.end_turn(turn, timings=_step_timings(timings or {}, snapshots))
             # The turn that ends the task is the one a human most wants to

@@ -4302,6 +4302,14 @@ function handleEvent(message) {
           `observe=${ms(c.observe)}  plan=${ms(c.model_plan)}  exec=${ms(c.execute)}  ` +
           `login=${ms(c.login_pause)}  other=${ms((c.filter ?? 0) + (c.approval_pause ?? 0) + (c.ws_send_progress ?? 0))}`;
       }
+      // Priced from the catalog, and only shown when it is a real number.
+      // A model the catalog has no rate for is left off entirely rather than
+      // rendered as $0.00: the whole point of showing a cost is that the
+      // user can decide whether to keep spending, and a wrong $0.00 makes
+      // that decision for them.
+      if (typeof message.cost_usd === 'number' && Number.isFinite(message.cost_usd)) {
+        messageText += `\n\nCost: $${message.cost_usd.toFixed(2)} on your own key`;
+      }
       appendMessage({
         role: 'done',
         text: messageText,

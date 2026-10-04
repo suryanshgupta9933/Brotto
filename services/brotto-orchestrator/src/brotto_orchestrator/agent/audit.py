@@ -593,17 +593,19 @@ class AuditTrail:
     def record_model(self, turn: int, *, thought: str, reasoning: str,
                      tokens_in: int, tokens_out: int, context_pct: float,
                      latency_ms: int, cache_read: int = 0,
-                     cache_write: int = 0) -> None:
+                     cache_write: int = 0, cost_usd: float | None = None
+                     ) -> None:
         self._record(self._record_model, turn, thought=thought,
                      reasoning=reasoning, tokens_in=tokens_in,
                      tokens_out=tokens_out, context_pct=context_pct,
                      latency_ms=latency_ms, cache_read=cache_read,
-                     cache_write=cache_write)
+                     cache_write=cache_write, cost_usd=cost_usd)
 
     def _record_model(self, turn: int, *, thought: str, reasoning: str,
                       tokens_in: int, tokens_out: int, context_pct: float,
                       latency_ms: int, cache_read: int = 0,
-                      cache_write: int = 0) -> None:
+                      cache_write: int = 0, cost_usd: float | None = None
+                      ) -> None:
         t = self._turn(turn)
         if t is None:
             return
@@ -618,6 +620,11 @@ class AuditTrail:
         block["cache_write_tokens"] = cache_write
         block["context_pct"] = context_pct
         block["latency_ms"] = latency_ms
+        # Left out entirely when unpriced rather than written as 0.0 — same
+        # reason the tokens above are read off a default: a reader must be able
+        # to tell "this step cost nothing" from "this step cannot be priced".
+        if cost_usd is not None:
+            block["cost_usd"] = cost_usd
         t["model"] = block
         totals = self._doc["totals"]
         totals["tokens_in"] += tokens_in
@@ -626,6 +633,8 @@ class AuditTrail:
         # they are accumulated off a default rather than read directly.
         totals["cache_read_tokens"] = totals.get("cache_read_tokens", 0) + cache_read
         totals["cache_write_tokens"] = totals.get("cache_write_tokens", 0) + cache_write
+        if cost_usd is not None:
+            totals["cost_usd"] = totals.get("cost_usd", 0.0) + cost_usd
 
     def record_prompt(self, turn: int, *, kind: str, action: str, args: dict,
                       domain: str | None, reason: str) -> str:

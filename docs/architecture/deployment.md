@@ -118,8 +118,27 @@ outlives its own digests is worse than no retention.
 Age is the document's mtime, which the atomic rewrite bumps on every step, so
 this measures last activity rather than when the session started.
 
-## `BROTTO_ENV=prod` is a cost control
+## `BROTTO_MAX_TASK_COST_USD` bounds one task, and is off by default
 
+Every completed task now reports what it cost (`TaskResult.cost_usd`, shown in
+the panel beside the Timing block), priced from `model/catalog.py` rather than
+from the model's own usage record — pydantic-ai has no cost calculation for
+`AnthropicModel`, so on Claude and MiniMax that field is always `0`.
+
+Set `BROTTO_MAX_TASK_COST_USD=0.50` to stop a run that crosses it. The check
+sits at a step boundary, after the step was billed and recorded but before its
+actions dispatch, and seals the run with `failure_reason="budget_exhausted"`
+and both amounts in the summary.
+
+**It is unset by default, and that is deliberate.** Brotto is self-hosted, the
+key belongs to the user, and on a subscription the money is theirs too — a
+default ceiling would spend their tokens for them. Set it when the key is one
+whose bill is not theirs to decide. A non-positive or unparseable value arms
+nothing and logs a warning. A model the catalog has no published rate for
+cannot be priced, so a ceiling cannot bound it; that is logged once per run
+rather than passed over in silence.
+
+## `BROTTO_ENV=prod` is a cost control
 `BROTTO_ENV` defaults to `dev`, and dev pre-seeds
 `AGENT_MODEL=minimax:MiniMax-M3` and propagates `ANTHROPIC_AUTH_TOKEN` into
 `ANTHROPIC_API_KEY`. A user who connects without pasting a key therefore

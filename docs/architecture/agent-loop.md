@@ -817,6 +817,43 @@ Note the parallel to the stagnation removal above: a *detector* that guesses
 "this run is going nowhere" is unreliable, and its false positives cost more
 than the runaway it catches. The backstop reports nothing until it fires.
 
+### A cost ceiling, and what it may read
+
+`model/pricing.py` was built and correct with no caller. It now has one, and
+the number it produces lands in three places: `turns[].model.cost_usd`,
+`totals.cost_usd`, and `TaskResult.cost_usd` — which is the one the panel
+renders under the Timing block.
+
+**The cost is priced from the catalog, never from `RunUsage.cost`.**
+pydantic-ai has no cost calculation for `AnthropicModel` at all, so on Claude
+and MiniMax that field stays `0` — a total read off it is a confidently wrong
+`$0.00` for a run the user was billed for. This is also why an **unpriced
+model writes no key at all** rather than `0.0`: a budget cap is the consumer
+of this field, and a cap that cannot see a missing number spends exactly what
+it was set to bound. `_catalog_for()` reads `deps._model_config` rather than
+calling `_resolve_model`, because `_plan_step` sets that attribute only on the
+branch that builds a real provider model — the scripted/test path has nothing
+to bill, and calling the resolver there raises on a run that has no model to
+raise about.
+
+`BROTTO_MAX_TASK_COST_USD` is **unset by default**, and that is a decision
+rather than an omission: Brotto is self-hosted, the key is the user's, and the
+money is the user's own — so a default cap would spend their tokens for them.
+A non-positive or unparseable value logs a warning and arms nothing; a `$0.00`
+cap would end every run at its first step with a plausible-looking reason.
+
+**The ceiling is checked after `audit.record_model` and before the turn's
+actions dispatch.** Anywhere earlier misses a step the user already paid for;
+anywhere later has clicked half of an action the ceiling was set not to pay
+for. When it fires the result is `status: "failed"`,
+`failure_reason: "budget_exhausted"`, with the reached and ceiling amounts in
+the summary — the same shape as `runaway_backstop`, and the failure path in
+`sidepanel.js` needs no cost rendering because that summary already says it.
+
+**Not verified in a browser.** The four tests in `tests/test_task_cost.py`
+pin the audit shape and the cap's parse, not a run that actually crosses a
+ceiling.
+
 ### A model that cannot decide fails the run
 
 `agent.run(retries=_OUTPUT_RETRIES)`, now 3. When the model fails output

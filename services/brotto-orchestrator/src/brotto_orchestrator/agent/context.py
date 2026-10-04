@@ -180,6 +180,12 @@ class TaskResult(BaseModel):
     failure_reason: str | None = None
     tried: list[str] = field(default_factory=list)
     timing: dict | None = None  # per-component seconds + wall clock, set by harness
+    # What the run cost, priced from the catalog by the harness. `None` means
+    # "not priced" — an unknown model, a vendor with no published rate, or a
+    # run that never reached a billable call — and is deliberately not `$0.00`.
+    # A budget cap reads this, and a cap that cannot see a missing number would
+    # spend exactly what it was set to bound.
+    cost_usd: float | None = None
     # ponytail: set by the harness to the URL observed at the start of the
     # final step, so a benchmark record can tell "navigated then failed"
     # apart from "never left the start page". Approximation: pre-step, not
