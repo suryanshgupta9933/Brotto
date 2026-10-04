@@ -9,13 +9,20 @@ Two failure modes this pins, both of which look correct in a diff:
   2. A ceiling that fires *after* the actions dispatch has already clicked
      half of what it was set not to pay for, and one that never fires because
      the model is unpriced silently spends everything.
+
+  3. Pricing that a free build can still reach. Cost is a paid feature, and it
+     is switched off at one point rather than at each of the three places that
+     would otherwise have to be right.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from brotto_orchestrator.agent import harness
 from brotto_orchestrator.agent.audit import AuditTrail
 from brotto_orchestrator.model import pricing
+from brotto_orchestrator.model.pricing import price_usage
 
 
 def test_a_priced_model_totals_the_runs_cost():
@@ -73,3 +80,30 @@ def test_the_budget_ceiling_shape_is_a_real_failure():
     )
     assert r.failure_reason == "budget_exhausted"
     assert "$0.83" in r.summary and "$0.50" in r.summary
+
+
+def _deps_for(provider: str, model: str):
+    return SimpleNamespace(_model_config=SimpleNamespace(provider=provider, model=model))
+
+
+def test_a_free_build_never_reaches_a_price(monkeypatch):
+    """One gate, three consumers.
+
+    Per-run cost and the per-task ceiling are paid features. `_catalog_for` is
+    the only way the loop reaches a price, so returning None with the flag off
+    is what makes the turn unpriced, `TaskResult.cost_usd` stay None and the
+    panel draw nothing. A second gate downstream would be a second thing to get
+    wrong, and the model here is priced — the only thing stopping it is the
+    flag."""
+    monkeypatch.setattr(harness, "_PRO_ENABLED", False)
+    assert harness._catalog_for(_deps_for("anthropic", "claude-sonnet-4-5")) is None
+
+
+def test_pro_prices_the_model_it_actually_ran_on(monkeypatch):
+    """The same call with the flag on returns the catalogue entry, so the
+    feature is a switch and not a removal."""
+    monkeypatch.setattr(harness, "_PRO_ENABLED", True)
+    info = harness._catalog_for(_deps_for("anthropic", "claude-sonnet-4-5"))
+    assert info is not None
+    assert price_usage(info, input_tokens=1_000, output_tokens=0,
+                       cache_read=0, cache_write=0) > 0

@@ -118,25 +118,43 @@ outlives its own digests is worse than no retention.
 Age is the document's mtime, which the atomic rewrite bumps on every step, so
 this measures last activity rather than when the session started.
 
-## `BROTTO_MAX_TASK_COST_USD` bounds one task, and is off by default
+## `BROTTO_PRO` switches the paid half on; cost is off without it
 
-Every completed task now reports what it cost (`TaskResult.cost_usd`, shown in
-the panel beside the Timing block), priced from `model/catalog.py` rather than
-from the model's own usage record — pydantic-ai has no cost calculation for
-`AnthropicModel`, so on Claude and MiniMax that field is always `0`.
+Per-run cost and the per-task ceiling are paid features. The free build has
+both the code and no way in: `BROTTO_PRO` is unset, `_catalog_for` returns
+`None`, and since that is the only path by which the loop reaches a price, the
+turn goes unpriced, `TaskResult.cost_usd` stays `None`, and the panel renders
+nothing because it only draws a cost it was handed.
 
-Set `BROTTO_MAX_TASK_COST_USD=0.50` to stop a run that crosses it. The check
-sits at a step boundary, after the step was billed and recorded but before its
-actions dispatch, and seals the run with `failure_reason="budget_exhausted"`
-and both amounts in the summary.
+| `BROTTO_PRO` | what the orchestrator does |
+|---|---|
+| unset | no pricing, no cost shown, no ceiling |
+| `1` / `true` / `yes` / `on` | every turn priced from `model/catalog.py`, cost shown in the panel, `BROTTO_MAX_TASK_COST_USD` honoured |
 
-**It is unset by default, and that is deliberate.** Brotto is self-hosted, the
-key belongs to the user, and on a subscription the money is theirs too — a
-default ceiling would spend their tokens for them. Set it when the key is one
-whose bill is not theirs to decide. A non-positive or unparseable value arms
-nothing and logs a warning. A model the catalog has no published rate for
-cannot be priced, so a ceiling cannot bound it; that is logged once per run
-rather than passed over in silence.
+**One gate, not three.** Pricing, the panel line and the ceiling are the three
+things that have to be off together, and they are all downstream of
+`_catalog_for`. A second guard in the panel or in `_close` would be a second
+place for a free build to leak one of them.
+
+Pricing comes from `model/catalog.py` rather than from the model's own usage
+record — pydantic-ai has no cost calculation for `AnthropicModel`, so on Claude
+and MiniMax that field is always `0`.
+
+Under Pro, set `BROTTO_MAX_TASK_COST_USD=0.50` to stop a run that crosses it.
+The check sits at a step boundary, after the step was billed and recorded but
+before its actions dispatch, and seals the run with
+`failure_reason="budget_exhausted"` and both amounts in the summary. A
+`BROTTO_MAX_TASK_COST_USD` that arrives **without** `BROTTO_PRO` is refused
+with a warning rather than half-honoured — a free build that can be capped is
+still a build that knows what things cost.
+
+**The ceiling is unset even under Pro, and that is deliberate.** Brotto is
+self-hosted, the key belongs to the user, and on a subscription the money is
+theirs too — a default ceiling would spend their tokens for them. Set it when
+the key is one whose bill is not theirs to decide. A non-positive or
+unparseable value arms nothing and logs a warning. A model the catalog has no
+published rate for cannot be priced, so a ceiling cannot bound it; that is
+logged once per run rather than passed over in silence.
 
 ## `BROTTO_ENV=prod` is a cost control
 `BROTTO_ENV` defaults to `dev`, and dev pre-seeds

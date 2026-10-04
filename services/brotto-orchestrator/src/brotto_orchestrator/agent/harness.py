@@ -191,25 +191,36 @@ _PLACEHOLDER_MODEL = os.getenv("AGENT_MODEL", "anthropic:MiniMax-M3")
 # (% of context used). Override per model in .env. Defaults to 400k.
 _CONTEXT_WINDOW_TOKENS = int(os.getenv("CONTEXT_WINDOW_TOKENS", "400000"))
 
-# Ceiling on what one task may spend, in USD. Unset by default, and that is a
-# decision rather than an omission: Brotto is self-hosted, the key is the
-# user's, and a run costs them their own key's money — which is also the
-# user's own money on a subscription, so a default cap would spend their
-# tokens for them. Set it when the key is one whose bill is not theirs to
-# decide. Invalid text reads as no cap plus a warning rather than a $0 budget.
+# Whether the paid half of Brotto is switched on. One flag, and everything
+# paid keys off it — pricing, the cost the panel renders, and the per-task
+# ceiling. `_catalog_for` is the single gate: it is the only way the loop
+# reaches a price, so returning None here switches all three off at once and
+# the free build cannot leak one of them by being wired up differently.
+_PRO_ENABLED = os.getenv("BROTTO_PRO", "").strip().lower() in ("1", "true", "yes", "on")
+
+# Ceiling on what one task may spend, in USD. Off unless BROTTO_PRO is set, and
+# a `BROTTO_MAX_TASK_COST_USD` that arrives without it is ignored rather than
+# half-honoured — a free build that can be capped is still a build that knows
+# what things cost. Within Pro, the default is unset: the key is the user's and
+# a default cap would spend their tokens for them. Invalid text reads as no cap
+# plus a warning rather than a $0 budget.
 _MAX_TASK_COST_USD: float | None = None
-try:
-    _cap = float(os.environ["BROTTO_MAX_TASK_COST_USD"])  # type: ignore[index]
-    if _cap > 0:
-        _MAX_TASK_COST_USD = _cap
-    else:
-        log.warning("BROTTO_MAX_TASK_COST_USD=%r is not a positive amount; "
-                    "no per-task cost ceiling", _cap)
-except KeyError:
-    pass
-except ValueError:
-    log.warning("BROTTO_MAX_TASK_COST_USD is not a number; "
+if "BROTTO_MAX_TASK_COST_USD" in os.environ and not _PRO_ENABLED:
+    log.warning("BROTTO_MAX_TASK_COST_USD is set but BROTTO_PRO is not; "
                 "no per-task cost ceiling")
+elif _PRO_ENABLED:
+    try:
+        _cap = float(os.environ["BROTTO_MAX_TASK_COST_USD"])  # type: ignore[index]
+        if _cap > 0:
+            _MAX_TASK_COST_USD = _cap
+        else:
+            log.warning("BROTTO_MAX_TASK_COST_USD=%r is not a positive amount; "
+                        "no per-task cost ceiling", _cap)
+    except KeyError:
+        pass
+    except ValueError:
+        log.warning("BROTTO_MAX_TASK_COST_USD is not a number; "
+                    "no per-task cost ceiling")
 
 # User replies that approve a pending action (login, approval, policy gate).
 APPROVE_SET = frozenset({"yes", "y", "approve", "ok", "confirm"})
@@ -1360,13 +1371,22 @@ def _resolve_model(deps: AgentDeps) -> tuple:
 def _catalog_for(deps: AgentDeps):
     """The catalog entry for the model this run is actually billing, or None.
 
+    This is also where the paid half is switched off: every price the loop sees
+    arrives through here, so a free build (BROTTO_PRO unset) returns None and
+    the turn is not priced, `TaskResult.cost_usd` stays None, and the panel
+    renders nothing because it only draws a cost it is given. One guard covers
+    all three, which is the point — a second gate somewhere downstream is a
+    second thing to get wrong.
+
     Reads `deps._model_config` rather than calling `_resolve_model`, because
     `_plan_step` sets that attribute only on the branch that builds a real
     provider model. The scripted/test path deliberately never resolves one —
     there is nothing to bill — and calling the resolver there would raise on
-    a run that has no model to raise about. None covers both that and a
-    model the catalog has no entry for; only the second is a pricing gap.
+    a run that has no model to raise about. None also covers a model the
+    catalog has no entry for; only that one is a pricing gap.
     """
+    if not _PRO_ENABLED:
+        return None
     cfg = getattr(deps, "_model_config", None)
     if cfg is None:
         return None
