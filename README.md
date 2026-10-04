@@ -15,9 +15,8 @@ you run the orchestrator yourself.
 </div>
 
 
-<img src="https://github.com/user-attachments/assets/1f6d0aca-5206-4e68-8f26-72d586323108" width="820" alt="Brotto finishing a task in Gmail">
+https://github.com/user-attachments/assets/1f6d0aca-5206-4e68-8f26-72d586323108
 
-**The real extension, on a real Gmail tab, logged in as a real person.**
 
 ---
 
