@@ -18,18 +18,17 @@ decide*, and a way to run it unattended. The audit document already records
 enough to score most of it from — outcome, step count, failure reason, cost,
 latency per component.
 
-### The cache-read anomaly, before anything is priced against it
+### The cache-read anomaly — settled 2026-10-05, needs one live run to confirm
 
-`cache_read_tokens` is 0 in 17 of the 20 recorded runs, including the long
-one. The design assumes the stable prompt prefix is cached, and the logs do not
-show it. Two possibilities, and they point opposite ways: the provider is not
-reporting the bucket Brotto reads, or the prefix genuinely is not being cached
-and every run is being billed at the full uncached rate.
+`cache_read_tokens` was 0 in every recorded run while the design assumed a
+cached prefix. The cause was not a reporting gap: nothing was asking for a
+cache. Anthropic caching is opt-in and the `cache_control` breakpoint was never
+set, so a stable 8–9.5K prefix was being re-billed at the full input rate on
+every step. `AnthropicFactory.model_settings` now sets it, for Anthropic only.
 
-Until it is settled, the cost figures in the README are the pessimistic ones —
-correct if nothing is cached, an overstatement if all of it is — and
-`BROTTO_MAX_TASK_COST_USD` is calibrated against numbers that may be an order
-of magnitude too high. A cap tuned on wrong numbers is worse than no cap.
+What is left is confirmation: the flag is pinned by a test, but that the API
+honours it and `cache_read_tokens` goes non-zero has not been observed on a real
+run. A MiniMax cache story is also open, and deliberately not guessed.
 
 ### An action schema the model cannot guess
 

@@ -209,6 +209,28 @@ The AX tree and page text (~12K tokens) are uncacheable every step and always
 were: the page genuinely changes. Nothing here wants reordering — a stable
 prefix is already stable.
 
+**…and a stable prefix is not a cached prefix.** This section described a
+cache that was never asked for. Anthropic caching is opt-in: without a
+`cache_control` breakpoint the API caches nothing, returns nothing, and
+`RunUsage.cache_read_tokens` reads 0 — which is exactly what every recorded run
+showed, on the one recorded run that had enough steps to matter. The ordering
+above was necessary and not sufficient, and the logs said so for months while
+the design note said otherwise.
+
+`AnthropicFactory.model_settings` now sets `anthropic_cache: "5m"`, and only
+for `provider_id == "anthropic"`. A write bills at 1.25× the input rate, so
+the flag repays itself from the second step; the 5-minute TTL spans the ~30s
+step interval. MiniMax speaks the same shape through the same factory and its
+cache behaviour is unverified, and the failure is asymmetric the way the
+thinking allowlist's is — a provider that rejects the field 400s on every
+step, omitting it costs only money. Gemini and the OpenAI-compatible vendors
+cache automatically above their own minimums, so they get no flag.
+
+**Not verified against a live API.** The flag's presence and its restriction
+are pinned by `tests/model/test_registry_settings.py`; that Anthropic honours
+it, and that `cache_read_tokens` goes non-zero, is read from their docs and
+needs one real run to confirm.
+
 ### Resume
 
 `AgentHarness.run(deps, *, resume_from=0)`. This works because the harness is

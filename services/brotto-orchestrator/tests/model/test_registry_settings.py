@@ -98,3 +98,29 @@ def test_an_unknown_model_id_does_not_raise():
     for pid, factory in PROVIDER_REGISTRY.items():
         settings = factory.model_settings("some-model-nobody-has-heard-of")
         assert settings["max_tokens"] == _OUTPUT_TOKEN_CAP, pid
+
+
+def test_anthropic_is_asked_to_cache_its_prefix():
+    """Prompt caching is opt-in on Anthropic. Without a `cache_control`
+    breakpoint nothing is cached, which is why `cache_read_tokens` read 0 in
+    every recorded run while the design assumed a cached prefix — the flag
+    was simply never set. The harness resends 8–9.5K of identical system
+    prompt, security preamble and conversation history every step, and a
+    cache hit bills at a tenth of the input rate."""
+    factory = PROVIDER_REGISTRY["anthropic"]
+    for model_id in _ALL:
+        assert factory.model_settings(model_id).get("anthropic_cache") == "5m"
+
+
+def test_no_unverified_vendor_is_asked_to_cache():
+    """MiniMax speaks the Anthropic shape from its own id through the same
+    factory, and its cache semantics are unverified. The failure is
+    asymmetric the same way the thinking allowlist's is: a provider that
+    rejects the field 400s on every step, while omitting it costs only
+    money. Gemini and the OpenAI-compatible vendors cache automatically
+    above their own minimums and get no flag."""
+    for pid, factory in PROVIDER_REGISTRY.items():
+        if pid == "anthropic":
+            continue
+        for model_id in _ALL:
+            assert "anthropic_cache" not in factory.model_settings(model_id), (pid, model_id)

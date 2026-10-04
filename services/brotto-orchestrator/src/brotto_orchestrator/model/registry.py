@@ -47,6 +47,24 @@ _THINKING_DISABLE_OK: dict[str, frozenset[str]] = {
     "minimax": frozenset({"MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"}),
 }
 
+# Prompt caching is opt-in on Anthropic: without a `cache_control` breakpoint
+# the API caches nothing, which is why `cache_read_tokens` was 0 in every
+# recorded run while the design assumed a cached prefix. The harness resends
+# the same 8–9.5K of system prompt, security preamble and conversation history
+# on every step, and Anthropic bills a cache hit at a tenth of the input rate,
+# so this is the largest single cost lever in the loop.
+#
+# `anthropic` only, deliberately. MiniMax speaks this shape from its own id
+# through the same factory, and its cache semantics are unverified: the
+# failure is asymmetric and the same reasoning as the thinking allowlist
+# above — a provider that rejects the field is a 400 on every step, while
+# omitting it costs only money. Gemini and the OpenAI-compatible vendors cache
+# automatically above their own minimum, so they need no flag and get none.
+#
+# A write costs 1.25x the input rate, so the flag pays for itself from the
+# second step on; the 5-minute TTL spans Brotto's ~30s steps comfortably.
+_CACHE_OK: frozenset[str] = frozenset({"anthropic"})
+
 
 class BaseFactory:
     """Shared behaviour. Subclasses override `build`; only Anthropic needs to
@@ -89,6 +107,8 @@ class AnthropicFactory(BaseFactory):
 
     def model_settings(self, model_id: str) -> dict[str, Any]:
         settings = super().model_settings(model_id)
+        if self.provider_id in _CACHE_OK:
+            settings["anthropic_cache"] = "5m"
         if model_id in _THINKING_DISABLE_OK.get(self.provider_id, frozenset()):
             settings["anthropic_thinking"] = {"type": "disabled"}
         return settings

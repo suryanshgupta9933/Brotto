@@ -100,11 +100,11 @@ and 4,521 output tokens — priced from the catalogue on 2026-10-05:
 | Claude Sonnet 4.5 | **$0.80** |
 | GPT-5.6 Sol | **$1.06** |
 
-These are the pessimistic numbers: the harness sends the same system prompt and
-conversation history every step, so a provider that caches the prefix bills most
-of that input at a tenth of the rate. Output dominates anyway, and a run that
-finds nothing after twenty steps is not cheaper — it has simply spent the same
-money to learn less.
+These are the pessimistic numbers. The harness sends the same system prompt and
+conversation history on every step, and asks Claude to cache that prefix — which
+bills most of the input at a tenth of the rate, so the Sonnet line is an
+over-estimate. Output dominates anyway, and a run that finds nothing after
+twenty steps is not cheaper — it has simply spent the same money to learn less.
 
 ---
 
