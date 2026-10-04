@@ -12,20 +12,11 @@ you run the orchestrator yourself.
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4.svg)](clients/brotto-extension)
 
-<img src="docs/images/panel-task-completion.webp" width="380" alt="Brotto finishing a task in Gmail">
-
 </div>
 
-<!--
-  Video: drop the rendered demo at docs/images/brotto-demo.mp4, then replace this
-  block with the <video> tag below. The render is `demo/README.md` — four cuts,
-  one per claim, all off the same real panel.
 
-  <video src="docs/images/brotto-demo.mp4" width="720" autoplay loop muted playsinline></video>
--->
+https://github.com/user-attachments/assets/1f6d0aca-5206-4e68-8f26-72d586323108
 
-**A 25-second demo is rendering.** In the meantime: the panel screenshot above
-is the real extension on a real Gmail tab, not a mock-up.
 
 ---
 
