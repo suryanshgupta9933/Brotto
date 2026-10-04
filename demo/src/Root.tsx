@@ -1,6 +1,6 @@
 import { Composition } from "remotion";
-import { Brag, DURATION as BRAG_DURATION } from "./Brag";
 import { Brotto, DURATION } from "./Brotto";
+import { Draft1, DURATION as DRAFT1_DURATION } from "./Draft1";
 import { FPS, H, W } from "./tokens";
 
 export const RemotionRoot: React.FC = () => {
@@ -14,12 +14,12 @@ export const RemotionRoot: React.FC = () => {
         width={W}
         height={H}
       />
-      {/* The 20s launch cut. Shorter, hook-first, and built on the same panel
-          screenshots — see brag-plan.md. */}
+      {/* The short cuts. Each argues a different part of the same case, off the
+          same panel screenshots — see the plan beside each one. */}
       <Composition
-        id="Brag"
-        component={Brag}
-        durationInFrames={BRAG_DURATION}
+        id="Draft1"
+        component={Draft1}
+        durationInFrames={DRAFT1_DURATION}
         fps={FPS}
         width={W}
         height={H}

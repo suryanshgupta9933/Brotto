@@ -6,10 +6,10 @@ to a scene is a diff you can review, not a re-record.
 | Composition | Cut | Length | For |
 |---|---|---|---|
 | `Brotto` | the long explainer | 1619 frames / 54s | the README, people deciding whether to read it |
-| `Brag` | the launch cut | 763 frames / 25.4s | a post, where the first two seconds are the whole pitch |
+| `Draft1` | the launch cut | 763 frames / 25.4s | a post, where the first two seconds are the whole pitch |
 
-`Brag`'s plan — the angle, the storyboard and why each scene is the length it
-is — is [`brag-plan.md`](./brag-plan.md). Read it before changing a scene
+`Draft1`'s plan — the angle, the storyboard and why each scene is the length it
+is — is [`draft1-plan.md`](./draft1-plan.md). Read it before changing a scene
 length; both cuts derive their total from the scene table.
 
 ```console
@@ -18,7 +18,7 @@ npm run dev      # Remotion Studio, scrub the timeline, hot-reload
 npm run render   # -> out/brotto-demo.mp4
 npm run lint     # eslint + tsc
 
-npm run render:brag   # -> out/brag.mp4
+npm run render:draft1   # -> out/draft1.mp4
 ```
 
 ## Things that are deliberate
@@ -49,7 +49,7 @@ unreachable" toast.
 
 **The panel is captured 420x540 and drawn 1:1, and both halves have to agree.**
 `VIEW_W`/`VIEW_H` in the harness, the shot dimensions, and `PANEL_W`/`PANEL_H`
-in the composition are the same 2x pixel space, so the callout rectangles land
+in the composition are the same 2x pixel space, so the callout anchors land
 where the card actually is. Two things this bought: the panel's own 11px body
 text now lands at 11px on the 1920px frame rather than the 5px it shrank to
 when the panel was drawn at its 420px CSS width, and the panel occupies 44% of
@@ -73,6 +73,21 @@ that drifts — the same failure as the three model catalogues.
 drew, which reads as "the screenshots look off" rather than as a bug. They call
 `useCurrentFrame()` themselves now, because a prop a caller has to remember is
 a prop a caller gets wrong.
+
+**The staging is one module because it is one pixel space.** `src/stage.tsx`
+holds `PANEL_W`/`PANEL_H`/`PANEL_X`/`TYPE_X`/`GUTTER` and the `Shot`, `Callout`,
+`Beat` and `Outro` components the short cut draws with. The point of pulling it
+out of `Draft1.tsx` is the next cut: with more than one, the difference between a
+shared constant and a second copy of it, and a constant that drifts is a callout
+pointing at a gap where a card used to be. A draft that copies these constants
+gets them right; a draft that re-derives them does not.
+
+`Callout` clamps its label to the panel's left edge, which is the one place the
+clamp is not cosmetic. An anchor in the panel's right half — the history drawer's
+DELETE ALL sits at x≈700 of 840 — otherwise pushes a right-aligned label clean
+off the 280px gutter and over the panel it is annotating, so the label ends up
+drawn on top of the thing it names. The leader takes up the slack and runs the
+long way to the element; the short way costs correctness, and a rule is cheap.
 
 **Frame 0 is the poster.** `{frame === 0 ? … : null}` overlays the outro still
 on the first frame and nothing else, so a platform that grabs its thumbnail off

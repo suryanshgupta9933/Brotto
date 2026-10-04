@@ -422,10 +422,10 @@ export const Brotto: React.FC = () => {
   return (
     <AbsoluteFill style={{ background: ink.paper, fontFamily: FONT_UI, color: ink.ink }}>
       <Fonts />
-      {/* The same generated cue as the launch cut, looped. It is a 25.4s piece
-          written to `Brag`'s scene starts, so the accents do not line up with
+      {/* The same generated cue as the short cuts, looped. It is a 25.4s piece
+          written to `Draft1`'s scene starts, so the accents do not line up with
           this cut's — but it ends on a full cadence with a ring-out, which is
-          the one place a loop can be invisible. Quieter than Brag's 0.32: this
+          the one place a loop can be invisible. Quieter than Draft1's 0.32: this
           runs 54s and the visuals carry it. `extend` keeps the media frame
           counting across loops, so the closing fade lands where it is placed
           rather than restarting every 25.4s. */}
