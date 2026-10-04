@@ -21,6 +21,7 @@ from pydantic_ai.exceptions import (
     UserError, ModelHTTPError, ModelRetry, UnexpectedModelBehavior,
 )
 
+from brotto_orchestrator.cdp.extension_relay import TabUnreachable
 from brotto_orchestrator.model.config import UserCredentials
 from brotto_orchestrator.model.pricing import lookup as _price_lookup, price_usage
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
@@ -1959,13 +1960,40 @@ class AgentHarness:
 
             # Observe
             t0 = time.perf_counter()
-            targets = await deps.cdp.get_targets()
-            current_url = await deps.cdp.get_current_url()
-            page_title = await deps.cdp.get_page_title()
-            # Free on the extension path (already in the cached observation);
-            # one evaluate on the dev path. Shipped every step because the
-            # accessibility tree often omits the value a question is about.
-            page_text = await deps.cdp.get_page_text()
+            # A tab Brotto cannot read is a failed run, not an empty page.
+            # The extension already says so on the wire; catching it here
+            # turns that into a `failure_reason` a person can act on, rather
+            # than a generic server error from three frames up.
+            try:
+                targets = await deps.cdp.get_targets()
+                current_url = await deps.cdp.get_current_url()
+                page_title = await deps.cdp.get_page_title()
+                # Free on the extension path (already in the cached
+                # observation); one evaluate on the dev path. Shipped every
+                # step because the accessibility tree often omits the value a
+                # question is about.
+                page_text = await deps.cdp.get_page_text()
+            except TabUnreachable as e:
+                timing_report = self._log_timings(
+                    deps.user_id, timings, steps_run,
+                    time.perf_counter() - task_start, cumulative_snapshots,
+                    tokens=tokens,
+                )
+                deps.result = TaskResult(
+                    status="failed",
+                    summary=(
+                        f"Brotto lost the tab at step {steps_run}: {e}. "
+                        "Opening DevTools on the tab ends the debugging "
+                        "session — close it and the task can pick up again."
+                    ),
+                    failure_reason="tab_unreachable",
+                    steps_taken=steps_run,
+                    timing=timing_report,
+                )
+                deps.result.final_url = deps.step_url
+                self._close(audit, a_turn, deps.result, cumulative_snapshots,
+                            timings, task_index=deps.task_index, cost=cost)
+                return deps.result
             # Redacted here, at the one place page text enters the loop, so
             # the prompt, the digest, the sidecar and the audit all carry the
             # same string — redacting at each of those is four sites and one

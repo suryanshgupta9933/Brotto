@@ -1129,7 +1129,13 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                         )
                 elif t == "observation_error":
                     log.warning("[%s] ← observation_error  err=%s", session_id, incoming.get("error"))
-                    await obs_queue.put({"url": "", "title": "", "axTargets": []})
+                    # Wake the waiter, but do not pretend this is a page. It
+                    # used to be a blank observation, which the harness built
+                    # a step from and handed to the model as though the site
+                    # had rendered nothing — so a debugger Chrome had ended
+                    # under us read as a web page with no controls on it. The
+                    # relay raises on this key; see `_unwrap_observation`.
+                    await obs_queue.put({"__error__": incoming.get("error") or "observation failed"})
                 elif t == "evaluate_result":
                     log.debug("[%s] ← evaluate_result  len=%d", session_id, len(incoming.get("value", "")))
                     await eval_queue.put(incoming.get("value", ""))

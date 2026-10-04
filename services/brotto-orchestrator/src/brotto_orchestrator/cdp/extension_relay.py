@@ -29,6 +29,27 @@ _PRESSABLE_KEYS = frozenset({
 _ATTRS_TIMEOUT = 2.0
 
 
+class TabUnreachable(RuntimeError):
+    """The extension could not read the tab — it lost the debugger, or there
+    was no tab to read.
+
+    Distinct from a grounding failure on purpose. A ref that does not resolve
+    is the model being wrong about a page it could see; this is the page not
+    being available at all, and handing the model a blank observation for it
+    makes a broken instrument look like an empty website.
+    """
+
+
+def _unwrap_observation(obs: dict) -> dict:
+    """The frame the extension sends when it *could not* read the page, rather
+    than what it read. `main.py` puts this on the observation queue in place of
+    an observation so the waiter wakes immediately; it is not a page, and the
+    one consumer that would have treated it as one is what this guards."""
+    if "__error__" in obs:
+        raise TabUnreachable(str(obs["__error__"]))
+    return obs
+
+
 class ExtensionCDPRelay:
     """Implements the CDPRelay interface; delegates CDP to the browser extension over WebSocket.
 
@@ -70,6 +91,7 @@ class ExtensionCDPRelay:
         except asyncio.TimeoutError:
             log.error("[%s] timed out waiting for observation", self._sid)
             raise
+        obs = _unwrap_observation(obs)
         self._cached_obs = obs
         log.debug(
             "[%s] observation received  url=%s  ax=%d",
@@ -86,6 +108,7 @@ class ExtensionCDPRelay:
         except asyncio.TimeoutError:
             log.error("[%s] timed out waiting for post-action observation after %s", self._sid, action)
             raise
+        obs = _unwrap_observation(obs)
         self._cached_obs = obs
         log.debug(
             "[%s] post-action observation  url=%s  ax=%d",

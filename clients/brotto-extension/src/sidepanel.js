@@ -2416,6 +2416,7 @@ const FAILURE_NOTE = {
   // bubble footer — so it can't claim the details are only in the log.
   server_error: "Brotto's server hit an error and stopped the run. The details are below.",
   cdp_preflight_failed: 'Brotto could not attach to the browser tab. Close DevTools on that page and try again.',
+  tab_unreachable: 'Brotto lost the tab it was driving. Opening DevTools on a page ends the debugging session — close DevTools and send the task again.',
   policy_preflight: 'Brotto refused the task: the site is on your blocked list.',
   policy_blocked: 'Brotto stopped: the task was blocked by your security policy.',
 
