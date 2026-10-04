@@ -52,11 +52,18 @@ category. The review is the gate, not the build.
 
 ### Idle-page suggestions, re-measured
 
-Suggestions are on by default, which is a real escalation: it reads the page
-you are looking at with no task in flight and no indicator that it did. It
-needs an indicator and a real usefulness measurement before that default is
-defensible. Three earlier prompt revisions looked fine in a diff and were only
-caught by reading the sentences the model actually produced.
+The first half of this was wrong when written: suggestions are **off** by
+default (`settings.contextSuggestions === true` is the only thing that enables
+them), a fresh install reads nothing, and a sensitive page is refused outright.
+What is left is the disclosure *after* the read — a "Reading page" badge covers
+the seconds the read takes, but the lines it produced sit on screen long after
+the badge is gone, and they did not say where they came from. That is now a
+caption under the buttons, and it survives a cache hit, which is the common
+case after a reopen.
+
+What is still owed is the usefulness measurement. Three earlier prompt
+revisions looked fine in a diff and were only caught by reading the sentences
+the model actually produced.
 
 ## Not planned
 

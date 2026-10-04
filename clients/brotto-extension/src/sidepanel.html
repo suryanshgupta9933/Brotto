@@ -877,6 +877,17 @@
     }
     .suggestion:hover { color: var(--ink); padding-left: 4px; }
     .suggestion:disabled { color: var(--ink-3); cursor: default; padding-left: 0; }
+    /* The other half of the disclosure: the badge says the page is being read,
+       this says the lines you are looking at are what it was read for. */
+    .suggestion-note {
+      margin: 9px 0 0;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--ink-3);
+    }
 
     /* ─── Message bubbles ─────────────────────────────────────────────── */
     .message {

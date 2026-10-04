@@ -154,6 +154,10 @@ settings screen are skipped before the read, and a page carrying a password, car
 is skipped even when its address looks ordinary. The panel shows a **"Reading page"** badge for exactly
 as long as a read is in progress, so the read is visible while it happens.
 
+Suggestions made from a page you read are labelled **"Read from the text of this page."** underneath, and
+suggestions Brotto made from a page's address and title alone are not. The label is part of the
+suggestion, so it comes back with it after you reopen the panel.
+
 ## Third parties
 
 The only third party that receives your page data is **the model provider you selected**. Brotto does

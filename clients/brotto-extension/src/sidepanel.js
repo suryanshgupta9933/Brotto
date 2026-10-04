@@ -2884,7 +2884,12 @@ function fillComposer(text) {
   goalEl.dispatchEvent(new Event('input'));
 }
 
-function paintSuggestions(lines) {
+// `fromContext` is the disclosure that outlives the read. The badge covers
+// the seconds the page is open; these lines are what the model made of it, and
+// they stay on screen long after the badge is gone. Without the caption a user
+// cannot tell a suggestion written from their page from one written from its
+// URL, and PRIVACY.md says they can see the difference.
+function paintSuggestions(lines, fromContext = false) {
   // Re-checked at paint time, not just at call time: a task can start during
   // the await, and a late reply must not repaint a panel the transcript owns.
   const box = document.getElementById('suggestions');
@@ -2897,6 +2902,12 @@ function paintSuggestions(lines) {
     btn.textContent = text;
     btn.addEventListener('click', () => fillComposer(text));
     box.appendChild(btn);
+  }
+  if (fromContext) {
+    const note = document.createElement('p');
+    note.className = 'suggestion-note';
+    note.textContent = 'Read from the text of this page.';
+    box.appendChild(note);
   }
 }
 
@@ -2945,7 +2956,7 @@ async function fetchSuggestions(url, title, pageText = '') {
     if (hit && hit.context && !contextAllowed) return null;
     if (hit && hit.lines && hit.lines.length
         && Date.now() - hit.at < (hit.ttl || SUGGESTION_TTL_DEFAULT_MS)) {
-      return hit.lines;
+      return { lines: hit.lines, fromContext: hit.context === true };
     }
 
     const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
@@ -2977,7 +2988,7 @@ async function fetchSuggestions(url, title, pageText = '') {
       data.context_used ? SUGGESTION_TTL_CONTEXT_MS : SUGGESTION_TTL_DEFAULT_MS,
       data.context_used === true,
     );
-    return data.lines;
+    return { lines: data.lines, fromContext: data.context_used === true };
   } catch {
     // Server down, or never configured. The fallback is already painted, so
     // there is nothing to report and nothing to retry.
@@ -3018,8 +3029,8 @@ function refreshEmptyState(tab) {
     const pageText = contextSuggestionsEnabled()
       ? await readPageContext(tab.id, url)
       : '';
-    const lines = await fetchSuggestions(url, tab?.title || '', pageText);
-    if (lines) paintSuggestions(lines);
+    const hit = await fetchSuggestions(url, tab?.title || '', pageText);
+    if (hit) paintSuggestions(hit.lines, hit.fromContext);
   }, SUGGESTION_DEBOUNCE_MS);
 }
 
