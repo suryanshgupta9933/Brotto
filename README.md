@@ -16,6 +16,17 @@ you run the orchestrator yourself.
 
 </div>
 
+<!--
+  Video: drop the rendered demo at docs/images/brotto-demo.mp4, then replace this
+  block with the <video> tag below. The render is `demo/README.md` — four cuts,
+  one per claim, all off the same real panel.
+
+  <video src="docs/images/brotto-demo.mp4" width="720" autoplay loop muted playsinline></video>
+-->
+
+**A 25-second demo is rendering.** In the meantime: the panel screenshot above
+is the real extension on a real Gmail tab, not a mock-up.
+
 ---
 
 ## Why your own browser
@@ -53,6 +64,9 @@ faster, and it works on the information the web already publishes.
   task, with no setting to disable.
 - **Eight providers, bring your own key.** Anthropic, OpenAI, MiniMax, Gemini, OpenRouter, DeepSeek,
   Groq, or any OpenAI-compatible endpoint you run yourself.
+- **Tells you what the run cost.** Priced from the model catalogue after every step, on your key, and
+  set `BROTTO_MAX_TASK_COST_USD` to stop a task that crosses a ceiling. Off by default — the money is
+  yours to decide about.
 - **Knows your key is broken before it wastes a run.** One real request to your provider before a
   task starts, so an expired key is a sentence rather than a failed run.
 - **Keeps a full audit trail.** Every run writes a per-session record — each observation, prompt,
@@ -72,6 +86,47 @@ faster, and it works on the information the web already publishes.
 </tr>
 </table>
 </div>
+
+---
+
+## What it costs
+
+One real recorded run — a 19-step task over a live inbox, 242,237 input tokens
+and 4,521 output tokens — priced from the catalogue on 2026-10-05:
+
+| model | this run |
+|---|---|
+| MiniMax-M3 | **$0.08** |
+| Claude Sonnet 4.5 | **$0.80** |
+| GPT-5.6 Sol | **$1.06** |
+
+These are the pessimistic numbers: the harness sends the same system prompt and
+conversation history every step, so a provider that caches the prefix bills most
+of that input at a tenth of the rate. Output dominates anyway, and a run that
+finds nothing after twenty steps is not cheaper — it has simply spent the same
+money to learn less.
+
+---
+
+## Why not the alternatives
+
+**Browser Use, Skyvern, Nanobrowser** — all three run in a cloud browser you
+have never logged into. That is the whole difference. A cloud browser has no
+cookie jar, so every site starts at the sign-in wall, which is why they sell
+credential storage as a feature. It has no reputation, so the sites you actually
+care about serve it a bot challenge. And on the reading side, most of them
+started from screenshots and added the accessibility tree afterwards — the
+parts that are hard to retrofit.
+
+**Claude in Chrome / Operator / ChatGPT Agent** — genuinely good, and the right
+first thing to try. What Brotto is for is the case where the answer has to run
+against *your* accounts with *your* key, stay on your disk, and be yours to
+delete, rather than being a product someone else runs. The blocklist is the
+tell: Brotto has no server-side policy floor, because there is no server.
+
+**Playwright / Puppeteer scripts** — better, if the task is fixed. Brotto is
+for the task you can describe in a sentence and cannot script, which is the
+majority of what anyone actually wants automated.
 
 ---
 
@@ -152,6 +207,8 @@ This is a working system, not a finished product.
   into a canvas, and an out-of-process iframe is invisible.
 - **No benchmark exists.** Nobody has measured Brotto's completion rate against anything, because
   nobody has built the harness. Any reliability number you see is a guess.
+- **A step costs tens of seconds**, most of it generating, not reading. On a long task that adds up
+  faster than a person clicking would.
 - **The reconnect path and offline history are unit-tested logic only** — not verified in a browser.
 - **Long tasks can outlive the service worker.** Chrome suspends MV3 workers after ~30s idle.
 
@@ -168,6 +225,7 @@ resumable rather than guessable.
 subsystem, each carrying the reasoning behind the design and what was tried before it.
 [`agent-loop.md`](docs/architecture/agent-loop.md) and
 [`conversation.md`](docs/architecture/conversation.md) are the two worth starting with.
+[`ROADMAP.md`](ROADMAP.md) is what is being built next, and what is deliberately not.
 
 ---
 
