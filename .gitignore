@@ -82,12 +82,24 @@ clients/brotto-extension/crx-signing.pem
 # tree ships, the other does not.
 
 # The old note this replaced, kept because the history matters: /docs/ and
-# /CLAUDE.md were ignored here while 27 files under docs/ were
-# already tracked (force-added). That made the lines inert for existing
-# files and actively harmful for new ones: every new doc was local-only
-# unless you remembered `git add -f`, including release-plan.md and
-# cws-submission.md, which gate the Chrome Web Store submission. Both are
-# now tracked and the ignore rules are gone.
+# /CLAUDE.md were ignored here while 27 files under docs/ were already tracked
+# (force-added), which made the lines inert for existing files and actively
+# harmful for new ones — a doc could be local-only unless you remembered
+# `git add -f`, including release-plan.md and cws-submission.md, which gate the
+# Chrome Web Store submission. A `git add -f` also leaves the file tracked
+# forever, so the ignore rule stops meaning anything for it.
+
+# Six files were in exactly that state and have been untracked with
+# `git rm --cached` — still on disk, no longer in history:
+#   .superpowers/…/task-3-report.md   an AI-dev task report
+#   PLAN.md, decisions.md              the build plan and the D1–D10 lock record
+#   brag-output/                      the video and its share copy
+#   clients/…/preview.html, .preview/  local panel previews
+# The reasoning behind D1–D10 now lives in docs/architecture/, which ships.
+/PLAN.md
+/decisions.md
+/brag-output/
+/clients/brotto-extension/preview.html
 
 # Local agent config — absolute paths and per-machine permissions.
 .claude/settings.local.json

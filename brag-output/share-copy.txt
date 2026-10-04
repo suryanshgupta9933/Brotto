@@ -1,5 +1,0 @@
-Brotto runs the agent inside the browser you already signed into — so your
-accounts are open to it, because they were always open to you. No login wall, no
-stored credentials, no operator in between. Self-hosted, Apache-2.0, 20 seconds.
-
-Every frame is the real side panel, screenshotted from the shipped extension.
