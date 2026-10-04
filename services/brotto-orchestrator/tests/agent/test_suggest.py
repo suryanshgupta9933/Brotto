@@ -146,7 +146,7 @@ def test_a_refusal_alongside_real_suggestions_drops_only_itself():
 #
 # `_normalise` is the output contract and the tests above are all no-model,
 # no-key, no-network. Redaction is the *input* contract, and it is the one
-# PRIVACY.md names: "page text is redacted before it is sent... on every
+# The README's Privacy section names: "page text is redacted before it is sent... on every
 # task, with no setting to turn it off." The task path honoured that from
 # one call site and the suggestion path was a second one nobody counted, so
 # a page read with no task in flight reached the provider raw.

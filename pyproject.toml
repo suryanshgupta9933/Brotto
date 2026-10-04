@@ -53,7 +53,7 @@ brotto = "brotto_orchestrator.cli:main"
 Homepage = "https://github.com/suryanshgupta9933/brotto"
 Repository = "https://github.com/suryanshgupta9933/brotto"
 Issues = "https://github.com/suryanshgupta9933/brotto/issues"
-Security = "https://github.com/suryanshgupta9933/brotto/blob/main/SECURITY.md"
+Security = "https://github.com/suryanshgupta9933/brotto/blob/main/README.md#security"
 
 # ponytail: find, not an explicit list. An explicit list silently dropped
 # every subpackage (agent, model, policy, cdp, ...), so `pip install .`

@@ -3,20 +3,34 @@
 What is being built next, and — as importantly — what is deliberately not.
 Ordered by what unblocks someone using Brotto today.
 
-## Next
+## In progress
 
 ### A benchmark harness
 
-The README currently says nobody has measured Brotto's completion rate, because
-nobody has built the harness. That sentence is the largest single gap in the
-project: a browser agent's whole claim is a reliability number, and Brotto
-currently has none.
+The README says nobody has measured Brotto's completion rate, because nobody has
+built the harness. That is the largest single gap in the project: a browser
+agent's whole claim is a reliability number, and Brotto has none.
 
 It needs a task set (things a real person wants automated, not synthetic
 click-paths), a scoring rule that distinguishes *refused* from *failed to
 decide*, and a way to run it unattended. The audit document already records
 enough to score most of it from — outcome, step count, failure reason, cost,
 latency per component.
+
+## Next
+
+### Pro: the paid half, and what it hangs off
+
+Per-run cost and the per-task ceiling are paid features. The code is built and
+the free build cannot reach it: `BROTTO_PRO` is unset, `_catalog_for` returns
+`None`, and since that is the loop's only route to a price, nothing is priced,
+`TaskResult.cost_usd` stays `None` and the panel draws no cost.
+
+`BROTTO_MAX_TASK_COST_USD` without `BROTTO_PRO` is refused with a warning
+rather than half-honoured — a free build that can be capped is still a build
+that knows what things cost. What Pro still needs is a way to switch the flag
+on that is not "edit the compose file", and whatever that mechanism is, it is
+the only thing standing between the pricing and a stranger's key.
 
 ### The cache-read anomaly — settled 2026-10-05, needs one live run to confirm
 
@@ -47,7 +61,7 @@ is the fix, and it is not cheap: about thirty call sites construct an
 
 The extension is loadable unpacked and the manifest and `welcome.html` are in
 shape. What is missing is a review-ready package: icons at the required sizes,
-screenshots, a privacy-practices disclosure that matches `PRIVACY.md`, and a
+screenshots, a privacy-practices disclosure that matches the README, and a
 category. The review is the gate, not the build.
 
 ### Idle-page suggestions, re-measured
@@ -87,7 +101,9 @@ document would be a second memory that disagrees with the first.
 
 ## Last shipped
 
-- Per-task cost, priced from the catalogue, with an optional ceiling
+- Privacy, security and contributing folded into the README
+- Idle-page suggestions labelled with the page they came from
+- Per-task cost, priced from the catalogue — now behind `BROTTO_PRO`
 - Session retention — `BROTTO_RETENTION_DAYS`, swept at startup, off by default
 - Access-control-tree capture, cross-origin frames included, pooled over CDP
 - The rescan gate — a settled page is observed once, not four times

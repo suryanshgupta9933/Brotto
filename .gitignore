@@ -71,7 +71,7 @@ clients/brotto-extension/crx-signing.pem
 # simply not in this repository.
 /docs/product/
 /docs/superpowers/
-/docs/CONTRIBUTING.md
+/docs/product/CONTRIBUTING.md
 /CLAUDE.md
 /phase1.md
 

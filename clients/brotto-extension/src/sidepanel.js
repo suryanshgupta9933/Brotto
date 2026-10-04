@@ -2853,7 +2853,7 @@ async function readPageContext(tabId, tabUrl) {
   }
 }
 
-// The disclosure itself. PRIVACY.md promises the user can see it happen, and
+// The disclosure itself. The README's Privacy section promises the user can see it happen, and
 // a setting you cannot watch taking effect is not a disclosure — so the badge
 // is on for the whole duration of the read and not just the moment of it.
 function showContextBadge(on) {
@@ -2888,7 +2888,7 @@ function fillComposer(text) {
 // the seconds the page is open; these lines are what the model made of it, and
 // they stay on screen long after the badge is gone. Without the caption a user
 // cannot tell a suggestion written from their page from one written from its
-// URL, and PRIVACY.md says they can see the difference.
+// URL, and the README's Privacy section says they can see the difference.
 function paintSuggestions(lines, fromContext = false) {
   // Re-checked at paint time, not just at call time: a task can start during
   // the await, and a late reply must not repaint a panel the transcript owns.

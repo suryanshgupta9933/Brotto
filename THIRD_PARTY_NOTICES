@@ -37,7 +37,7 @@ Pinned in `clients/brotto-extension/package.json` and locked in
 
 ## Model
 
-The agent layer is model-agnostic (D6). The active model is configured at runtime via the `AGENT_MODEL` environment variable; no model id is hardcoded in source. See `CONTRIBUTING.md` → Repository Hygiene — Model Neutrality and `decisions.md` → D6. No model weights are bundled with this repository.
+The agent layer is model-agnostic (D6). The active model is configured at runtime via the `AGENT_MODEL` environment variable; no model id is hardcoded in source. See the README's Contributing section → Repository hygiene — model neutrality and `decisions.md` → D6. No model weights are bundled with this repository.
 
 ## License Compatibility
 

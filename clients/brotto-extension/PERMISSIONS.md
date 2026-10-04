@@ -123,9 +123,12 @@ panel. Nothing else is injected. No script is ever executed in the page.
 - Capped at 2000 characters.
 - No background polling; it runs when the panel refreshes its idle state.
 
-> **This reads your page with no task in flight.** It is disclosed in
-> `PRIVACY.md`. It is on by default today and a settings toggle is on the
-> Phase 1 roadmap.
+> **This reads your page with no task in flight.** It is disclosed in the
+> [Privacy section of the repository README](https://github.com/suryanshgupta9933/brotto#privacy).
+> It is **off by default** — a fresh install reads nothing — and turns on in
+> Settings. While a read is in progress the panel shows a "Reading page" badge,
+> and the suggestions it produced are labelled afterwards, because those lines
+> outlive the badge.
 
 ---
 
@@ -208,7 +211,7 @@ to find them.
 
 ## Privacy
 
-See [`PRIVACY.md`](../../PRIVACY.md) for the full statement.
+See The [repository README](https://github.com/suryanshgupta9933/brotto#privacy) has the full statement.
 
 **Not accessed:** browsing history, bookmarks, saved passwords or cookies as a
 credential store, other extensions' data, system files. No screenshots are

@@ -5,7 +5,7 @@ and dispatches clicks, typing, keys and scrolling into it on behalf of the orche
 
 It is a side-panel app, not a popup, and it has no accounts, no pairing, and no telemetry. See the
 [repository README](../../README.md) for the product and the orchestrator, and
-[PRIVACY.md](../../PRIVACY.md) for what leaves your machine.
+[the Privacy section of the README](https://github.com/suryanshgupta9933/brotto#privacy) for what leaves your machine.
 
 ## Build
 

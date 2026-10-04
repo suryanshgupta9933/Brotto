@@ -148,7 +148,7 @@ async def generate(
         system_prompt=SUGGESTION_PROMPT + _PLAIN_OUTPUT_SUFFIX,
     )
     # Redacted first, and unconditional, exactly as the task path does it.
-    # PRIVACY.md promises page text is redacted before it is sent, and this
+    # The README's Privacy section promises page text is redacted before it is sent, and this
     # is a second call site that promise did not know about — so a page read
     # with *no task in flight* went to the provider raw. Unconditional for
     # the harness's reason: a live card number reaching a provider's logs is

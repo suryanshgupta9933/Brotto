@@ -59,7 +59,7 @@ page off disk is not redaction — it is that the write path for page content wa
 removed, which is a shape decision, and one that can be undone by a well-meaning
 `begin_turn(..., ax_diff=…)`.
 
-**3a. `redact_text` had one call site, and PRIVACY.md promised two.** The policy
+**3a. `redact_text` had one call site, and the README's Privacy section promised two.** The policy
 says page text is redacted "on every task, with no setting to turn it off". That
 was true of `harness.py` and false of `suggest.py`: the idle-suggestions path
 reads a page with **no task in flight** and shipped its text to the provider
@@ -81,12 +81,12 @@ all of them (`DELETE /v1/sessions/{id}`, `DELETE /v1/sessions`, both behind
 `BROTTO_RETENTION_DAYS` is **built** — an hourly sweep in `main.py` ages
 sessions out, and it is off unless the operator sets the variable. (An earlier
 note here said "still unbuilt", which was true when written and stopped being
-true; PRIVACY.md has been right the whole time, which is why the public doc
+true; the README's Privacy section has been right the whole time, which is why the public doc
 gets the last word when the two disagree.)
 
 Note that deletion is scoped to sessions. `logs/user_policies/` and
 `logs/user_models/` are keyed by install id and survive it — and the policy
-file is the one holding the approved-sites list. PRIVACY.md now says so, but
+file is the one holding the approved-sites list. The README's Privacy section now says so, but
 there is still no "delete everything" path.
 
 ## Where this is going: local-first
@@ -138,7 +138,7 @@ logging stays and still gives us everything except content.
 disk.** No page text, no page bodies, no AX diff — but the URLs, the titles,
 the task text, the action names and the typed input are. So:
 
-- `PRIVACY.md` describes the *current* state honestly, and the deletion path
+- The README's Privacy section describes the *current* state honestly, and the deletion path
   is real: `DELETE /v1/sessions/{id}` takes the document, the scratchpad and
   the pages sidecar together, so there is no "part of it survived".
 - The launch gates are partly closed. `/ws/ext` and the session endpoints are
