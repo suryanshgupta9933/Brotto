@@ -60,9 +60,8 @@ server uses this in exactly one place, `read_page_text`, to run a bounded
 
 The server composes that string and sends it over the relay; the extension
 runs what it is given. So the *current use* is a page-text read, but the
-*mechanism* is not restricted to one — the extension trusts the relay.
-
-This matters because the relay is unauthenticated. See "Known limitations".
+*mechanism* is not restricted to one — holding `AGENT_SECRET` is equivalent
+to holding your browser session. See "Known limitations".
 
 ### Security controls
 
@@ -197,12 +196,19 @@ Notification text is the domain and event type. No page content is included.
 Stated here rather than omitted, because a reviewer or a user should be able
 to find them.
 
-1. **The relay is unauthenticated.** `/ws/ext/{session_id}` accepts any
-   connection. Anyone who can reach your Brotto server URL can drive the agent
-   against your logged-in browser. Auth is scheduled and not yet shipped. For
-   now, run the server on loopback or a trusted network.
-2. **Combined with `Runtime.evaluate`**, that means a hostile relay could run
-   JavaScript in your browser, not merely click things.
+1. **The relay is authenticated, and `AGENT_SECRET` is the whole trust
+   boundary.** `/ws/ext/{session_id}` requires the secret, and the handshake
+   selects a fixed `brotto-v1` subprotocol back rather than echoing the
+   credential. A wrong secret gets a close that does not confirm the route
+   exists. Anyone who holds the secret can drive the agent against your
+   logged-in browser *and*, through `Runtime.evaluate`, run JavaScript in it —
+   the same reach your own account has, by design. `docker compose` refuses to
+   start without the secret and binds the port to `127.0.0.1`. If you widen
+   that bind, who knows the secret is yours to decide.
+2. **An unset secret means an open server.** A developer on loopback has no
+   secret and needs none, so refusing to start would break every local run. On
+   loopback that is correct and nothing else needs it. Anywhere else it
+   publishes your transcripts.
 3. **Brotto is not a sandbox.** It runs with your permissions, in your
    session. Secure mode and the domain blocklist are the user's, and there is
    no server-side floor.
