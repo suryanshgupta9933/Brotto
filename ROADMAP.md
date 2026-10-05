@@ -5,17 +5,22 @@ Ordered by what unblocks someone using Brotto today.
 
 ## In progress
 
-### A benchmark harness
+### Scoring the harness against a real model
 
-The README says nobody has measured Brotto's completion rate, because nobody has
-built the harness. That is the largest single gap in the project: a browser
-agent's whole claim is a reliability number, and Brotto has none.
+The harness is built: eight fixtures, a scoring rule that separates *refused*
+from *failed to decide*, an unattended runner, and a recorded baseline. What it
+does not have is a number.
 
-It needs a task set (things a real person wants automated, not synthetic
-click-paths), a scoring rule that distinguishes *refused* from *failed to
-decide*, and a way to run it unattended. The audit document already records
-enough to score most of it from — outcome, step count, failure reason, cost,
-latency per component.
+The baseline in `tests/fixtures/baseline.json` runs the **scripted planner** —
+no model, no API key — so it measures AX extraction, filtering and action
+dispatch, and says nothing about the agent's judgement. That was the right
+first half: it is what makes a change to `ax_filter` measurable at all.
+
+The second half is pointing the same runner at a real model and scoring runs
+from the audit document each one already writes. Until that reports, the
+README's "no published benchmark yet" stays true, and that sentence is the most
+expensive one in the product — it is an invitation to assume somebody else's
+reliability number is better.
 
 ## Next
 

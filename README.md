@@ -173,26 +173,19 @@ This is a working system, not a finished product.
 - **Chrome only.** `chrome.debugger` has no Firefox equivalent.
 - **Perception is partial.** No shadow-DOM traversal beyond a geometry fallback, nothing rendered
   into a canvas, and an out-of-process iframe is invisible.
-- **No published benchmark yet.** The harness is being built — see [In progress](#in-progress). Until
-  it reports, any reliability number you see anywhere is a guess, including ours.
+- **No published benchmark yet.** The harness runs, but against a scripted planner — it measures
+  perception and actions with no model in the loop. Until it scores real runs, any reliability number
+  you see anywhere is a guess, including ours.
 - **Long tasks can outlive the service worker.** Chrome suspends MV3 workers after ~30s idle.
-
----
-
-## In progress
-
-- **A benchmark harness** — a fixed task set, a scoring rule that tells a *refusal* apart from a
-  *failure to decide*, and unattended runs scored from the audit record each run already writes
-  (outcome, step count, failure reason, cost, latency). This is what turns "it works" into a number
-  you can hold it to.
 
 ---
 
 ## What's next
 
-- **Chrome Web Store listing.** The extension is loadable unpacked and the manifest and welcome page
-  are in shape; what is missing is a review-ready package — icons at the required sizes, screenshots,
-  and a category. The review is the gate, not the build.
+- **Chrome Web Store listing.** The manifest and welcome page are in shape and the build rasterises
+  the icon at every size the store asks for. What is missing is a review-ready package — a bumped
+  version, store-sized screenshots, a category — and then the review clock, which is a week or two
+  with these permissions. The gate is the review, not the build.
 - **The `action_args` schema.** The agent's actions take a bare object, so the output tool's JSON
   schema tells the model nothing about any action's argument names. Every argument is a guess from the
   prompt prose, and the guesses are inconsistent. Typing it as a union is a real fix, not a patch.
