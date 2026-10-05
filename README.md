@@ -209,7 +209,8 @@ why.
 
 **There is no Pro to buy today.** Nothing in this section is available, and the free build you get
 from this repository is the whole product as it stands. It is written down so the direction is
-visible, not so you can go looking for a button.
+visible, not so you can go looking for a button. Brotto stays Apache 2.0 and open — Pro is what
+gets built on top of it.
 
 **Planned, and not built:**
 
@@ -220,16 +221,9 @@ visible, not so you can go looking for a button.
   own token bill, so it costs you nothing extra to have.
 - **Routines.** Save a task as a named recipe and run it again later. Local to your machine; syncing
   a routine to a second device is a separate thing that needs an operator, and there is no operator.
-
-**Built and gated off.** The code is in the free build and cannot be reached — one flag,
-`BROTTO_PRO`, decides all of it:
-
-- **Per-run cost, priced for the model you actually ran on.** Steps are priced from the catalogue
-  after every call, and the total lands in the audit record next to the run it belongs to. A run
-  whose model has no published rate shows nothing rather than a confident wrong number.
-- **A ceiling on what one task may spend.** `BROTTO_MAX_TASK_COST_USD=0.50` ends a run at a step
-  boundary once it crosses, after the step is recorded and before its actions fire, and names both
-  amounts in the summary.
+- **Per-run cost, and a ceiling on what one task may spend.** Steps priced from the catalogue after
+  every call, and a limit that ends a run at a step boundary once it crosses — after the step is
+  recorded, before its actions fire, with both amounts named in the summary.
 
 Two things this will never be, whatever it becomes: **Brotto does not keep your documents**, on any
 tier, and **Brotto does not mark up your tokens** — there is no margin, no credit balance and
