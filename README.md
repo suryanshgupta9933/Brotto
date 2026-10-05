@@ -205,10 +205,24 @@ why.
 
 ---
 
-## Pro
+## Pro (planned, not released)
 
-The features below are paid, and the free build you get from this repository has the code for them
-and no way in — one flag, `BROTTO_PRO`, decides all of it at once.
+**There is no Pro to buy today.** Nothing in this section is available, and the free build you get
+from this repository is the whole product as it stands. It is written down so the direction is
+visible, not so you can go looking for a button.
+
+**Planned, and not built:**
+
+- **Multi-tab parallelism.** Brotto works one tab at a time today. Pro is several tasks running at
+  once across tabs.
+- **A speed pack.** Fewer seconds per step on the same model — larger observation budgets, prompt
+  caching that actually engages, and cheaper models routed well. It pays for itself out of your
+  own token bill, so it costs you nothing extra to have.
+- **Routines.** Save a task as a named recipe and run it again later. Local to your machine; syncing
+  a routine to a second device is a separate thing that needs an operator, and there is no operator.
+
+**Built and gated off.** The code is in the free build and cannot be reached — one flag,
+`BROTTO_PRO`, decides all of it:
 
 - **Per-run cost, priced for the model you actually ran on.** Steps are priced from the catalogue
   after every call, and the total lands in the audit record next to the run it belongs to. A run
@@ -217,8 +231,10 @@ and no way in — one flag, `BROTTO_PRO`, decides all of it at once.
   boundary once it crosses, after the step is recorded and before its actions fire, and names both
   amounts in the summary.
 
-For everyone else, your key is your money and Brotto does not look at it. That is the free version's
-position, not an omission from it.
+Two things this will never be, whatever it becomes: **Brotto does not keep your documents**, on any
+tier, and **Brotto does not mark up your tokens** — there is no margin, no credit balance and
+nothing to top up. Your key, your money, and the free version's position is that we do not look at
+it.
 
 ---
 

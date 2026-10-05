@@ -21,16 +21,42 @@ latency per component.
 
 ### Pro: the paid half, and what it hangs off
 
-Per-run cost and the per-task ceiling are paid features. The code is built and
-the free build cannot reach it: `BROTTO_PRO` is unset, `_catalog_for` returns
-`None`, and since that is the loop's only route to a price, nothing is priced,
-`TaskResult.cost_usd` stays `None` and the panel draws no cost.
+**Pro does not exist yet and there is nothing to buy.** What follows is the
+shape it is planned to take, and it is narrower than
+`docs/product/launch-roadmap.md` §3 because that document was written for a
+*hosted* Pro with an operator behind it. The free tier is self-hosted and there
+is no operator, so three of its six items are gone rather than deferred:
+**server-side history and replay** (free already has local history, export and
+delete — the Pro delta was always *sync*, which needs an operator),
+**cross-device routine sync** (same reason; local routines survive, sync does
+not), and the **support SLA** (staffing, not code).
 
-`BROTTO_MAX_TASK_COST_USD` without `BROTTO_PRO` is refused with a warning
-rather than half-honoured — a free build that can be capped is still a build
-that knows what things cost. What Pro still needs is a way to switch the flag
-on that is not "edit the compose file", and whatever that mechanism is, it is
-the only thing standing between the pricing and a stranger's key.
+**Planned, unbuilt — the friction each one removes:**
+
+| Feature | Friction it removes | Needs an operator? |
+|---|---|---|
+| Multi-tab parallelism | One tab at a time, the largest ceiling there is | No |
+| Speed pack | ~30s per step: larger observation budgets, a prompt cache that engages, cheaper models routed well | No |
+| Routines (local recipes) | Describing the same task again, every time | No |
+
+None of the three needs an operator, which is the point — a Pro built on them
+does not reopen the hosted tier that "Not planned" closed. The speed pack is
+worth noting separately: it pays for itself out of the user's own token bill,
+so it needs no extra spend to be worth having.
+
+**Deliberately not Pro, even once it exists:** the benchmark harness, reconnect
+robustness, and idle-page suggestions. Those are quality and trust; charging for
+them would say the free build is the broken one.
+
+**Built and gated.** Per-run cost and the per-task ceiling are the two things
+that exist. The free build has the code and cannot reach it: `BROTTO_PRO` is
+unset, `_catalog_for` returns `None`, and since that is the loop's only route
+to a price, nothing is priced, `TaskResult.cost_usd` stays `None` and the panel
+draws no cost. `BROTTO_MAX_TASK_COST_USD` without `BROTTO_PRO` is refused with a
+warning rather than half-honoured — a free build that can be capped is still a
+build that knows what things cost. What Pro still needs is a way to switch the
+flag on that is not "edit the compose file", and whatever that mechanism is, it
+is the only thing standing between the pricing and a stranger's key.
 
 ### The cache-read anomaly — settled 2026-10-05, needs one live run to confirm
 
