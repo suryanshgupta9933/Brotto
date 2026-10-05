@@ -27,11 +27,13 @@ class ModelConfig:
         if self.context_window <= 0:
             raise ValueError("context_window must be positive")
         if self.base_url is not None:
-            # Client-supplied, and /ws/ext is unauthenticated, so an unchecked
-            # value is a request-forgery primitive: point the server at
-            # file:// or an internal host and it will POST there with the
-            # caller's key. Scheme-only, because refusing private ranges would
-            # break the http://localhost:11434/v1 case this exists for.
+            # Client-supplied, so an unchecked value is a request-forgery
+            # primitive: point the server at an internal host and it will POST
+            # there. The caller's own key travels with it — resolve_model_config
+            # never attaches a server-side secret to a caller-supplied base_url,
+            # so this is not key exfiltration. Scheme-only, because refusing
+            # private ranges would break the http://localhost:11434/v1 case this
+            # exists for.
             if not self.base_url.lower().startswith(_BASE_URL_SCHEMES):
                 raise ValueError("base_url must start with http:// or https://")
 

@@ -132,3 +132,59 @@ def test_relay_refuses_no_token_at_all(monkeypatch, tmp_path, session_id):
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(f"/ws/ext/{session_id("abc")}") as ws:
             ws.receive_text()
+
+
+def test_the_placeholder_secret_is_refused(monkeypatch):
+    """`.env.example` used to ship a working secret.
+
+    It was enforced, not ignored, so a user who copied the file without
+    editing it was running with a credential published in this repository —
+    guarding a relay that can drive their logged-in browser. The file now
+    ships empty and compose's `${AGENT_SECRET:?}` fires; this is the backstop
+    for `python main.py` and for a `.env` copied before the change.
+    """
+    from brotto_orchestrator.session.auth import is_placeholder
+
+    assert is_placeholder("replace-me-with-secrets-token-urlsafe-32")
+    assert not is_placeholder("some-real-random-secret")
+
+
+def test_the_example_file_does_not_ship_a_usable_secret():
+    """The guard above is useless if the file still hands out a working value.
+
+    Read as text rather than parsed, so a comment or a key without a trailing
+    newline cannot pass.
+    """
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[3]
+    body = (repo / ".env.example").read_text()
+    assigned = [
+        line.split("=", 1)[1].strip()
+        for line in body.splitlines()
+        if line.startswith("AGENT_SECRET=")
+    ]
+    assert assigned == [""], f".env.example ships a value: {assigned}"
+
+
+def test_the_playwright_socket_refuses_a_non_uuid_user_id(monkeypatch, tmp_path):
+    """`user_id` was logged before the token check, with no uuid guard.
+
+    That is the same log-forging primitive already closed on `device_id` and
+    `session_id`. It must be rejected before anything is written to a log.
+    """
+    from brotto_orchestrator.main import app as live_app
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setenv("AGENT_SECRET", "s3cret")
+    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path))
+    client = TestClient(live_app)
+
+    with pytest.raises(WebSocketDisconnect) as caught:
+        with client.websocket_connect(
+            "/ws/forged", headers={"authorization": "Bearer s3cret"}
+        ) as ws:
+            ws.receive_text()
+    # 4004 is the id. 4001 would mean it reached the credential check, which
+    # is the thing being fixed.
+    assert caught.value.code == 4004

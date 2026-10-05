@@ -74,7 +74,7 @@ from .model.config import ModelConfig, UserCredentials
 from .model.registry import PROVIDER_REGISTRY
 from .model.resolver import resolve_model_config
 from .model.store import save_user_config
-from .session.auth import auth_enabled, validate_request
+from .session.auth import auth_enabled, is_placeholder, validate_request
 from .session.observation_validator import validate_observation
 from .session.registry import SessionRegistry
 from .policy import Policy, UserPolicy
@@ -108,6 +108,21 @@ log.info(
 # this port can drive the agent against the user's logged-in browser.
 # On a loopback self-host that is the user, so it is a warning, not a
 # refusal — putting this behind a reverse proxy is the moment it matters.
+# The one startup refusal, and it runs first so nothing above it can report a
+# placeholder secret as healthy. An unset secret is only a warning because a
+# developer on loopback has none and needs none — but a secret that is a known
+# placeholder is not that case. It is a credential published in this repository,
+# and it gates a relay that can drive the operator's logged-in browser. Warning
+# would repeat the failure that produced it: the value was enforced, so it
+# looked secure.
+if os.environ.get("AGENT_SECRET") and is_placeholder(os.environ["AGENT_SECRET"]):
+    raise SystemExit(
+        "AGENT_SECRET is the placeholder from .env.example, which is published "
+        "in this repository. Refusing to start.\n"
+        "Generate a real one:\n"
+        "  python3 -c 'import secrets;print(secrets.token_urlsafe(32))'"
+    )
+
 if auth_enabled():
     log.info("AGENT_SECRET is set — /ws/ext and the session endpoints require it")
 elif os.environ.get("AGENT_SECRET"):
@@ -452,7 +467,7 @@ async def context_limit():
 # this caller — the last-known user policy, verbatim. The extension calls
 # this on Settings open to fill the blacklist field with what the server
 # actually holds, so a stale local cache cannot quietly diverge.
-# Unauthenticated (same as /health) — payload only contains domain lists,
+# Behind AGENT_SECRET — payload only contains domain lists,
 # not secrets; this is fine for the demo. Add auth before any production
 # deployment.
 # Unauthenticated like /health and /v1/policy — the payload is a model
@@ -876,7 +891,14 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
         msg = json.loads(raw)
-        log.debug("[%s] ← %s", session_id, raw[:200])
+        # Log the shape, not the frame. `raw[:200]` looked safe and was not:
+        # api_key is appended last in `background.ts`, but on a short task with
+        # an empty user_policy it lands around character 138, well inside the
+        # window. The startup log's length-only convention is undone by this
+        # line, so the key is removed before anything is written.
+        _logged = {k: v for k, v in msg.items() if k != "api_key"}
+        _logged["api_key"] = "<redacted>" if "api_key" in msg else None
+        log.debug("[%s] ← %s", session_id, json.dumps(_logged)[:200])
         if msg.get("type") != "task_start":
             log.warning("[%s] expected task_start, got %s — closing", session_id, msg.get("type"))
             await websocket.close(code=4000)
@@ -1257,6 +1279,23 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
 
 @app.websocket("/ws/{user_id}")
 async def websocket_agent(websocket: WebSocket, user_id: str):
+    # Same two guards `/ws/ext` and every session route already have, and for
+    # the same reasons. `user_id` was logged unvalidated *before* the token
+    # check, so anyone who could reach this port could forge log lines — the
+    # identical primitive that was closed on `device_id` and `session_id`.
+    if not _UUID.match(user_id):
+        await websocket.close(code=4004)
+        return
+
+    # `/run` refuses in prod because it launches a browser on a caller-supplied
+    # task. This route launches one too, headless=False at `submit_task`, so
+    # the refusal was one-sided: the capability was refused over HTTP and
+    # served over WebSocket.
+    if _is_prod():
+        log.warning("/ws/%s: refused  BROTTO_ENV=prod", user_id)
+        await websocket.close(code=4004)
+        return
+
     token = websocket.headers.get("authorization", "")
     if not validate_request(token, websocket.query_params.get("token")):
         log.warning("[%s] rejected — bad token", user_id)
