@@ -147,6 +147,18 @@ class OpenAICompatibleFactory(BaseFactory):
         from pydantic_ai.providers.openai import OpenAIProvider
 
         base_url = creds.base_url or self.default_base_url
+        # `custom` is the one provider with no default endpoint, and
+        # OpenAIProvider falls back to api.openai.com when given none. So a
+        # user who picked "Custom (OpenAI-compatible)" to reach a LAN vLLM
+        # box, left the field blank, and pasted their key would have that
+        # key POSTed to OpenAI on the first step. Refuse instead — the
+        # panel's model check turns this into a sentence before any run.
+        if self.provider_id == "custom" and not base_url:
+            raise ValueError(
+                "the custom provider needs a base_url — it has no default "
+                "endpoint, and omitting it sends your API key to "
+                "api.openai.com"
+            )
         kwargs: dict[str, object] = {"api_key": creds.api_key}
         if base_url is not None:
             kwargs["base_url"] = base_url

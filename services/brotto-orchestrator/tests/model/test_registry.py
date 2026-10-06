@@ -127,3 +127,28 @@ def test_provider_registry_returns_factory_for_known_provider():
     from brotto_orchestrator.model.registry import ProviderFactory
     f = PROVIDER_REGISTRY["anthropic"]
     assert isinstance(f, ProviderFactory)
+
+def test_custom_without_a_base_url_refuses_rather_than_falling_back_to_openai():
+    """`custom` is the only provider with no default endpoint, and
+    OpenAIProvider falls back to api.openai.com when given none. A user who
+    picked Custom to reach a LAN vLLM box, left the field blank and pasted
+    their key would have that key POSTed to OpenAI on the first step."""
+    factory = PROVIDER_REGISTRY["custom"]
+    with pytest.raises(ValueError, match="needs a base_url"):
+        factory.build("some-model", UserCredentials(api_key="sk-x", base_url=None))
+
+
+def test_custom_with_a_base_url_builds_against_it():
+    model = PROVIDER_REGISTRY["custom"].build(
+        "some-model",
+        UserCredentials(api_key="sk-x", base_url="http://192.168.1.5:8000/v1"),
+    )
+    assert model.base_url.startswith("http://192.168.1.5:8000")
+
+
+def test_openai_still_defaults_to_its_own_endpoint():
+    """The guard is keyed on provider_id, so it must not touch openai."""
+    model = PROVIDER_REGISTRY["openai"].build(
+        "gpt-5.6-sol", UserCredentials(api_key="sk-x", base_url=None)
+    )
+    assert model.base_url.startswith("https://api.openai.com/")
