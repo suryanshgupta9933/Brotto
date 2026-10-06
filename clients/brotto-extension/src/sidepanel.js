@@ -686,6 +686,29 @@ document.addEventListener('keydown', (e) => {
 // orchestrator down still shows what it knows about.
 const SESSION_LIMIT = 20;
 const SESSIONS_KEY = 'sessions';
+// Ids the user deleted, kept so a replay cannot put them back. A task's
+// events are buffered in the service worker and re-run through handleEvent
+// on every panel open — including the terminal event that calls
+// saveSession. Delete the row, reopen the panel, and the buffered log
+// re-created it: the user's delete was undone by a log they never asked
+// to replay. Bounded, because the only thing that must survive is the
+// window between the delete and the next reopen.
+const DELETED_KEY = 'deletedSessions';
+const DELETED_LIMIT = 200;
+
+async function noteDeleted(ids) {
+  const clean = ids.filter((id) => typeof id === 'string' && id);
+  if (clean.length === 0) return;
+  const { [DELETED_KEY]: prev } = await chrome.storage.local.get(DELETED_KEY);
+  const next = [...new Set([...(Array.isArray(prev) ? prev : []), ...clean])];
+  await chrome.storage.local.set({ [DELETED_KEY]: next.slice(-DELETED_LIMIT) });
+}
+
+async function wasDeleted(sessionId) {
+  if (!sessionId) return false;
+  const { [DELETED_KEY]: prev } = await chrome.storage.local.get(DELETED_KEY);
+  return Array.isArray(prev) && prev.includes(sessionId);
+}
 
 async function listSessions() {
   const { sessions } = await chrome.storage.local.get(SESSIONS_KEY);
@@ -733,6 +756,7 @@ async function saveSession({ status, steps, elapsed }) {
   // happen, and a replay on a freshly opened panel has none.
   const sid = state.sessionId;
   if (sid) {
+    if (await wasDeleted(sid)) return;
     const existing = sessions.find((s) => s.session_id === sid);
     if (existing) {
       if (!state.taskCount) return;
@@ -854,6 +878,7 @@ async function deleteSession(entry) {
     entry.session_id ? s.session_id !== entry.session_id : s !== entry
   ));
   await chrome.storage.local.set({ [SESSIONS_KEY]: remaining });
+  if (entry.session_id) await noteDeleted([entry.session_id]);
   // The row goes from the panel first. A server that is down, or a secret
   // that is wrong, must not leave the user staring at a button that does
   // nothing — and the row is the half they can see.
@@ -886,6 +911,7 @@ async function deleteAllSessions() {
   );
   if (!ok) return;
   await chrome.storage.local.set({ [SESSIONS_KEY]: [] });
+  await noteDeleted(sessions.map((s) => s.session_id));
   await renderHistory();
   try {
     const res = await fetch(`${serverBase()}/v1/sessions`, {

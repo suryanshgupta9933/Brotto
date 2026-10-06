@@ -1417,7 +1417,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           // context window. Backend returns {model, window}; the
           // harness's per-step messages carry the actual usage.
           try {
-            const r = await fetch(`${serverUrl}/context`);
+            // Read the URL fresh rather than using the module-level one.
+            // `serverUrl` is only assigned inside startRelay, so a user
+            // who changed the server in Settings and hit Save kept reading
+            // the *old* server's context window until the next task
+            // started — the one place the cached value leaked. Same read
+            // the task_start path already does.
+            const stored = await chrome.storage.local.get("settings");
+            const url: string =
+              (stored.settings as any)?.serverUrl || serverUrl || DEFAULT_SERVER;
+            const r = await fetch(`${url}/context`);
             if (!r.ok) {
               sendResponse({ success: false, error: `HTTP ${r.status}` });
               return;

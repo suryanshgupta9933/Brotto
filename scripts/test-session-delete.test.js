@@ -161,6 +161,8 @@ const sandbox = {
   historyDeleteAll,
   confirmOverlay, confirmTitle, confirmBody, confirmOk, confirmCancel,
   SESSIONS_KEY: "sessions",
+  DELETED_KEY: "deletedSessions",
+  DELETED_LIMIT: 200,
   chrome: {
     storage: {
       local: {
@@ -179,7 +181,7 @@ vm.createContext(sandbox);
 
 for (const fn of ["askConfirm", "closeConfirm", "deleteSession", "deleteAllSessions",
                   "serverBase", "authHeaders", "listSessions", "historyEntries",
-                  "renderHistory", "formatSessionTime"]) {
+                  "renderHistory", "formatSessionTime", "noteDeleted", "wasDeleted"]) {
   vm.runInContext(extract(fn), sandbox);
 }
 
