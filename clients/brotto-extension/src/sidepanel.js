@@ -710,6 +710,24 @@ async function wasDeleted(sessionId) {
   return Array.isArray(prev) && prev.includes(sessionId);
 }
 
+// Every history write goes through here. `chrome.storage.local.set` rejects
+// on a quota error or a torn-down context, and these callers are all
+// `void`ed or un-awaited from event handlers, so the rejection used to
+// vanish: the row was built, the transcript was finished, and the
+// conversation simply was not there next time. A history that silently
+// drops is worse than one that says it failed.
+async function saveSessions(rows) {
+  try {
+    await chrome.storage.local.set({ [SESSIONS_KEY]: rows });
+    return true;
+  } catch (err) {
+    console.warn('[brotto] could not save history:', err);
+    toast('Brotto could not save this conversation — your browser storage refused it',
+      'bad', 6000);
+    return false;
+  }
+}
+
 async function listSessions() {
   const { sessions } = await chrome.storage.local.get(SESSIONS_KEY);
   return Array.isArray(sessions) ? sessions : [];
@@ -785,7 +803,7 @@ async function saveSession({ status, steps, elapsed }) {
       existing.status = status;
       existing.steps = steps || state.stepCount || 0;
       existing.elapsed = elapsed || '—';
-      await chrome.storage.local.set({ [SESSIONS_KEY]: sessions });
+      await saveSessions(sessions);
       return;
     }
   } else if (state.startTime && sessions[0]?.startedAt === state.startTime) {
@@ -800,7 +818,7 @@ async function saveSession({ status, steps, elapsed }) {
     session_id: sid || null,
     task_count: state.taskCount || 1,
   });
-  await chrome.storage.local.set({ [SESSIONS_KEY]: sessions.slice(0, SESSION_LIMIT) });
+  await saveSessions(sessions.slice(0, SESSION_LIMIT));
 }
 
 function formatSessionTime(ts) {
@@ -896,7 +914,7 @@ async function deleteSession(entry) {
   const remaining = (await listSessions()).filter((s) => (
     entry.session_id ? s.session_id !== entry.session_id : s !== entry
   ));
-  await chrome.storage.local.set({ [SESSIONS_KEY]: remaining });
+  await saveSessions(remaining);
   if (entry.session_id) await noteDeleted([entry.session_id]);
   // The row goes from the panel first. A server that is down, or a secret
   // that is wrong, must not leave the user staring at a button that does
@@ -929,7 +947,7 @@ async function deleteAllSessions() {
       + 'them on the server. There is no way back.'],
   );
   if (!ok) return;
-  await chrome.storage.local.set({ [SESSIONS_KEY]: [] });
+  await saveSessions([]);
   await noteDeleted(sessions.map((s) => s.session_id));
   await renderHistory();
   try {

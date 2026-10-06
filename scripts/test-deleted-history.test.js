@@ -65,7 +65,7 @@ const sandbox = {
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
-for (const fn of ["noteDeleted", "wasDeleted", "saveSession"]) {
+for (const fn of ["noteDeleted", "wasDeleted", "saveSession", "saveSessions"]) {
   vm.runInContext(extract(fn), sandbox);
 }
 
@@ -127,6 +127,22 @@ async function run() {
     store.deletedSessions.length === 200
       && store.deletedSessions[store.deletedSessions.length - 1] === "s259",
     `length ${store.deletedSessions?.length}`);
+
+  // ── A refused write is told, not swallowed ──────────────────────────────
+  // saveSession is called as `void saveSession(...)` from an event handler,
+  // so a rejecting storage.local.set used to take the row with it and the
+  // conversation simply was not there next time.
+  reset();
+  const toasts = [];
+  sandbox.toast = (text, kind) => toasts.push({ text, kind });
+  sandbox.console.warn = () => {};
+  sandbox.chrome.storage.local.set = async () => { throw new Error("QUOTA_BYTES quota exceeded"); };
+  sandbox.state.sessionId = "ddd";
+  await sandbox.saveSession({ status: "done", steps: 1, elapsed: "9s", task: "something else" });
+  check("a refused history write tells the user",
+    toasts.length === 1 && toasts[0].kind === "bad"
+      && /could not save/i.test(toasts[0].text),
+    JSON.stringify(toasts));
 
   console.log(failures === 0 ? "\nall ok" : `\n${failures} failed`);
   process.exit(failures === 0 ? 0 : 1);

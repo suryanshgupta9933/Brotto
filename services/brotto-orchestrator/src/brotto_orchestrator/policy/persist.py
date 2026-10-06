@@ -87,6 +87,13 @@ def save_if_changed(user_key: str, payload: dict[str, Any]) -> bool:
     enriched = dict(payload)
     enriched["_saved_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
     enriched["_content_sha256"] = new_hash
+    # The filename is a one-way hash of the key, so without this the key is
+    # simply gone once written — and `load_all` can only key by the stem, i.e.
+    # by the hash. Hydration then stored every returning user's policy under a
+    # key nothing ever looks up, so a restart dropped the saved blacklist and
+    # every standing domain grant. It is underscore-prefixed, so it stays out
+    # of the content hash and a re-save of unchanged content is still a no-op.
+    enriched["_user_key"] = user_key
 
     fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", dir=_DIR)
     try:
@@ -122,13 +129,15 @@ def load(user_key: str) -> dict[str, Any] | None:
 
 
 def load_all() -> dict[str, dict[str, Any]]:
-    """Bulk-load every persisted user policy, keyed by filename stem.
+    """Bulk-load every persisted user policy, keyed by the user key.
 
-    Used at server startup to seed SessionRegistry. The original user
-    key (IP or UUID) isn't recoverable from the hash; callers should
-    treat the loaded keys as opaque identifiers. The wire protocol uses
-    `caller` (request.client.host) which is matched by sidepanel's
-    `user_id` query parameter.
+    Keyed on `_user_key` — the key the file was written for — not on the
+    filename stem. The stem is `sha256(key)[:32]` and the hash is one-way, so
+    keying by it handed the registry a map nothing could look up against, and
+    a server restart silently dropped every returning user's saved blacklist
+    and domain grants. Files written before this field existed have no
+    recoverable key, so they fall back to the stem and are unreachable — the
+    same as before, and the user re-saves once.
     """
     if not _DIR.exists():
         return {}
@@ -136,9 +145,12 @@ def load_all() -> dict[str, dict[str, Any]]:
     for path in _DIR.glob("*.json"):
         try:
             with path.open() as f:
-                out[path.stem] = json.load(f)
+                payload = json.load(f)
         except (json.JSONDecodeError, OSError):
             continue
+        if not isinstance(payload, dict):
+            continue
+        out[str(payload.get("_user_key") or path.stem)] = payload
     return out
 
 

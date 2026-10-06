@@ -190,8 +190,7 @@ vm.createContext(sandbox);
 
 for (const fn of ["askConfirm", "closeConfirm", "deleteSession", "deleteAllSessions",
                   "serverBase", "authHeaders", "listSessions", "historyEntries",
-                  "renderHistory", "formatSessionTime", "noteDeleted", "wasDeleted",
-                  "panelStatus"]) {
+                  "renderHistory", "formatSessionTime", "noteDeleted", "wasDeleted", "panelStatus", "saveSessions"]) {
   vm.runInContext(extract(fn), sandbox);
 }
 

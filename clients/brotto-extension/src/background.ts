@@ -561,7 +561,12 @@ async function setBadge(state: BadgeState): Promise<void> {
 }
 
 function setBadgeForResult(): void {
-  void setBadge(panelConnected ? "idle" : "done");
+  // "Panel open" is not "user watching" — the panel stays connected while the
+  // user works in another tab, which is the normal state for a ten-minute
+  // task. Clearing the badge there left a finished task with no badge and no
+  // notification if Do Not Disturb swallowed it, so it read as never having
+  // run. The badge goes to whoever is not looking.
+  void setBadge(panelConnected && panelWatching ? "idle" : "done");
 }
 
 // ── WebSocket observation sender ─────────────────────────────────────────────
@@ -1570,7 +1575,20 @@ async function initialize(): Promise<void> {
     // default of true already covers the case where no activation has been
     // seen yet, which is exactly the case where the panel really is on screen.
     port.onMessage.addListener((msg: { watching?: unknown }) => {
-      if (typeof msg?.watching === "boolean") panelWatching = msg.watching;
+      if (typeof msg?.watching !== "boolean") return;
+      if (!msg.watching) { panelWatching = false; return; }
+      // Focus is not watching. The side panel takes focus the moment the user
+      // comes back to Chrome, even when the tab in front is not the one Brotto
+      // is driving — so setting `true` here made the panel swallow the result
+      // notification for a task that had just finished, with the user looking
+      // at a different tab the whole time. This handler and tabs.onActivated
+      // were both writing one variable, and whichever fired last won.
+      // The tab is the authority on "can they see the work", so focus only
+      // asks it to re-read.
+      if (activeTabId === null) { panelWatching = true; return; }
+      void chrome.tabs.get(activeTabId)
+        .then((tab) => { panelWatching = tab.active === true; })
+        .catch(() => { panelWatching = false; });
     });
     port.onDisconnect.addListener(() => { panelConnected = false; });
   });
