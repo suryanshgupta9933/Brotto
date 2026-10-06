@@ -147,8 +147,15 @@ So you type your server URL once. The panel also remembers your model choice.
 
 - `chrome.storage.local` only. Never `chrome.storage.sync`, so nothing is
   synced to a Google account.
-- No credentials in `local`, no browsing history, no task transcripts. The API
-  key is session-only by design, so a stolen profile does not yield it.
+- Two credentials are stored, and which is which matters. The **model API
+  key** is session-only (`chrome.storage.session`, cleared on browser
+  restart), so a stolen profile does not yield it. The **`AGENT_SECRET`** —
+  the token that authenticates this extension to your Brotto server — *is*
+  written to `local` under `settings`, because a self-hoster restarting
+  their browser should not have to re-enter it. Holding it is close to
+  holding the browser session itself; see the limitations below.
+- No browsing history and no task transcripts in the extension. Transcripts
+  live in the orchestrator's `logs/sessions/` on your own disk, not here.
 
 ---
 
