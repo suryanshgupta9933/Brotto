@@ -23,7 +23,7 @@ def run_server() -> None:
     print("STARTING BROTTO ORCHESTRATOR")
     print("=" * 60)
     print("\nServer configuration:")
-    print("  - Host: 0.0.0.0")
+    print("  - Host: 127.0.0.1")
     print("  - Port: 8000")
     print("  - WebSocket: /ws/ext/{session_id} (extension mode)")
     print("\nTo load extension:")
@@ -34,9 +34,12 @@ def run_server() -> None:
     import uvicorn
     from brotto_orchestrator.main import app
 
+    # Loopback, matching docker-compose and docs/architecture/deployment.md.
+    # With no AGENT_SECRET set every caller is trusted, so a wide bind here
+    # hands the logged-in browser to anything that can reach the port.
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8000,
         reload=False,
         log_level="info",

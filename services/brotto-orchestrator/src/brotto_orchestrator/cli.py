@@ -36,7 +36,13 @@ def main() -> None:
         prog="brotto",
         description="Brotto orchestrator — drives a Chrome extension over CDP.",
     )
-    parser.add_argument("--host", default="0.0.0.0", help="bind address (default: %(default)s)")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address (default: %(default)s). Widening this exposes a relay "
+        "that can drive the logged-in browser, so it needs a TLS terminator in "
+        "front and an AGENT_SECRET set — see docs/architecture/deployment.md.",
+    )
     parser.add_argument("--port", type=int, default=8000, help="bind port (default: %(default)s)")
     parser.add_argument("--reload", action="store_true", help="auto-reload on source changes")
     args = parser.parse_args()

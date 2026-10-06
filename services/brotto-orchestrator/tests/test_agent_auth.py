@@ -188,3 +188,35 @@ def test_the_playwright_socket_refuses_a_non_uuid_user_id(monkeypatch, tmp_path)
     # 4004 is the id. 4001 would mean it reached the credential check, which
     # is the thing being fixed.
     assert caught.value.code == 4004
+
+
+def test_no_server_entry_point_binds_all_interfaces():
+    """The from-source path used to publish the relay by default.
+
+    docker-compose binds 127.0.0.1 and refuses to start without a secret,
+    but `brotto_orchestrator.cli --port 8000` — which the README tells
+    people to run instead when they don't want Docker — defaulted to
+    0.0.0.0, and the development .env carries no AGENT_SECRET. That is the
+    combination compose exists to prevent: an unauthenticated relay that
+    can drive the logged-in browser, on every interface.
+
+    Widening stays a deliberate act. Nothing should put a wide bind back
+    without also making the reader say why it is safe.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    sources = [
+        root / "main.py",
+        root / "services/brotto-orchestrator/src/brotto_orchestrator/cli.py",
+        root / "services/brotto-orchestrator/src/brotto_orchestrator/main.py",
+    ]
+    wide_bind = re.compile(r'host\s*=\s*"0\.0\.0\.0"|default\s*=\s*"0\.0\.0\.0"')
+
+    offenders = [
+        f"{path.relative_to(root)}: {match.group(0)}"
+        for path in sources
+        for match in wide_bind.finditer(path.read_text())
+    ]
+    assert not offenders, "all-interfaces bind reintroduced in: " + ", ".join(offenders)
