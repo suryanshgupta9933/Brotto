@@ -66,8 +66,12 @@ def probe(monkeypatch):
 
     def install(exc=None, model_id="claude-sonnet-5-5"):
         fake = _FakeModel(exc)
-        monkeypatch.setattr(registry.PROVIDER_REGISTRY["anthropic"], "build",
-                            lambda _id, _creds: fake)
+        # Every factory, not just Anthropic's: a classification test that
+        # names Gemini in its body but posts `provider: anthropic` proves
+        # nothing about the Gemini path, and the fixture was silently
+        # letting that stand.
+        for factory in registry.PROVIDER_REGISTRY.values():
+            monkeypatch.setattr(factory, "build", lambda _id, _creds: fake)
         holder["fake"] = fake
         return fake
 
@@ -153,6 +157,37 @@ def test_a_rejected_key_is_reported_as_auth_failed(client, probe, status):
     assert body["kind"] == "auth_failed"
     # The sentence is what the user acts on, so it has to say what to do.
     assert "Settings" in body["error"]
+
+
+def test_a_gemini_rejected_key_is_reported_as_auth_failed(client, probe):
+    """Google answers a bad key with a 400, not a 401.
+
+    Verified against Google's own error reference: `400 INVALID_ARGUMENT`
+    with "API key not valid. Please pass a valid API key." Status code
+    alone put every Gemini user with a bad key in the generic branch, where
+    they read a raw provider body instead of being told to paste the key
+    again.
+    """
+    probe["install"](_http_error(
+        400, '{"error":{"code":400,"status":"INVALID_ARGUMENT",'
+             '"message":"API key not valid. Please pass a valid API key."}}'))
+    body = _send(client,
+                 model_config={"provider": "gemini", "model": "gemini-3.5-flash"},
+                 api_key="bad-key").json()
+    assert body["kind"] == "auth_failed"
+    assert "Settings" in body["error"]
+
+
+def test_a_rejected_key_is_not_mistaken_for_an_empty_balance(client, probe):
+    """Both arrive as a 400, so the ordering of the two hint sets is the
+    part that can regress: a key that says "invalid" must not reach the
+    credit branch and send a paid user to top up."""
+    probe["install"](_http_error(
+        400, '{"error":{"message":"API key not valid. Please pass a valid API key."}}'))
+    body = _send(client,
+                 model_config={"provider": "gemini", "model": "gemini-3.5-flash"},
+                 api_key="bad-key").json()
+    assert body["kind"] == "auth_failed"
 
 
 def test_an_empty_balance_sent_as_402_is_no_credits(client, probe):

@@ -1424,7 +1424,17 @@ async def _plan_step(
         else:
             cfg, creds = _resolve_model(deps)
             context_window = cfg.context_window
-            factory = PROVIDER_REGISTRY[cfg.provider]
+            factory = PROVIDER_REGISTRY.get(cfg.provider)
+            if factory is None:
+                # Same sentence the unknown-model branch below produces, so
+                # the handler a few lines down turns this into a
+                # `model_not_found` result. Bare-indexed, an unrecognised
+                # provider raised a KeyError that nothing in the run loop
+                # catches — the task dies with no TaskResult, no
+                # failure_reason, and nothing in the panel. Nothing
+                # validates the provider string: it comes from a hand-edited
+                # per-user JSON file or from `AGENT_MODEL=typo:model` in .env.
+                raise UserError(f"Unknown model {cfg.provider}:{cfg.model}")
             if not factory.validate_model_id(cfg.model):
                 raise UserError(
                     f"Unknown model {cfg.provider}:{cfg.model}"

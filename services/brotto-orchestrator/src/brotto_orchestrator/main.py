@@ -502,6 +502,17 @@ async def get_models():
 # than a 402 — MiniMax and OpenAI both do — so a status code alone throws away
 # the only field that names the problem the user has to fix.
 _CREDIT_HINTS = ("insufficient", "balance", "credit", "quota", "billing", "arrear", "payment")
+# A rejected key is not always a 401. Google's own error reference answers
+# 400 INVALID_ARGUMENT / "API key not valid. Please pass a valid API key." —
+# so a Gemini user with a bad key landed in the generic branch and read a
+# raw body instead of being told to paste it again. Checked before the credit
+# hints because both arrive as 400 and a rejected key is the more specific
+# of the two diagnoses.
+_AUTH_HINTS = (
+    "api key not valid", "invalid api key", "api_key_invalid", "unauthorized",
+    "invalid authentication credentials", "authenticationcredentials",
+    "permission denied", "invalid api-key",
+)
 
 
 def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
@@ -516,7 +527,9 @@ def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, ModelHTTPError):
         status = exc.status_code
         body = str(getattr(exc, "body", "") or "").lower()
-        if status in (401, 403):
+        if status in (401, 403) or (
+            status == 400 and any(h in body for h in _AUTH_HINTS)
+        ):
             return (
                 "auth_failed",
                 "Your API key was rejected by the provider "
