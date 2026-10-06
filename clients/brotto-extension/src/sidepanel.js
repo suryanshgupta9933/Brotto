@@ -715,6 +715,25 @@ async function listSessions() {
   return Array.isArray(sessions) ? sessions : [];
 }
 
+// The server and the panel spelled the same outcome differently — the
+// document writes `completed`, the stylesheet styles `done` — and the row's
+// mark is chosen by `data-status`, so every conversation finished on the
+// server rendered with no mark at all. One vocabulary, mapped where the two
+// meet; the stylesheet stays the only place that says what a state looks
+// like. `running`, `corrupt` and `unknown` have no style and fall through to
+// the neutral grey, which is right for a row in none of those four states.
+const SERVER_STATUS = {
+  completed: 'done',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  interrupted: 'interrupted',
+  orphaned: 'interrupted',
+};
+
+function panelStatus(status) {
+  return SERVER_STATUS[status] || status || 'done';
+}
+
 async function historyEntries() {
   const local = await listSessions();
   try {
@@ -724,7 +743,7 @@ async function historyEntries() {
     if (!Array.isArray(sessions)) return local;
     return sessions.map((s) => ({
       task: s.task || s.title || '(no task text)',
-      status: s.status,
+      status: panelStatus(s.status),
       steps: s.steps,
       // Elapsed time is what the loop reported; the index has no record of it.
       elapsed: '—',

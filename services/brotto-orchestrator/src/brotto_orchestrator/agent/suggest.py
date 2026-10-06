@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
@@ -23,6 +24,14 @@ from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
 
 from .prompt import SUGGESTION_PROMPT
 from .redact import redact_text
+
+
+@dataclass
+class SuggestionSet:
+    """What `generate` produced, and what it was made from."""
+
+    lines: list[str]
+    context_used: bool
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +145,17 @@ async def generate(
     creds: UserCredentials,
     page_text: str = "",
 ) -> list[str]:
+    """The lines, plus whether this page's text actually went to the model.
+
+    `context_used` is the panel's disclosure — it is what tells the user the
+    suggestion came from the page in front of them rather than from the URL
+    alone. It used to be reconstructed by the HTTP layer from `bool(page_text)`
+    on the *request*, which is the client's claim, not this function's
+    knowledge: anything between here and the prompt (a redaction that empties
+    the text, a future change that stops sending it) would leave the caption
+    asserting a read that never happened. So the flag travels with the lines
+    from the one place that knows.
+    """
     factory = PROVIDER_REGISTRY.get(cfg.provider)
     # The registry is indexed unguarded everywhere else, but this is reached
     # from a public HTTP endpoint with client-supplied config, so a bad
@@ -184,4 +204,4 @@ async def generate(
         len(lines),
         f"{len(text)} chars" if text else "unavailable",
     )
-    return lines
+    return SuggestionSet(lines=lines, context_used=bool(text))

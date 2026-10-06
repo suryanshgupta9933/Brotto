@@ -827,7 +827,7 @@ async def suggestions(request: Request):
         return _error(502, str(exc))
 
     try:
-        lines = await generate(url, title, cfg, creds, page_text=page_text)
+        result = await generate(url, title, cfg, creds, page_text=page_text)
     except Exception as exc:
         # 502 rather than 500 so the panel can tell "your server couldn't do
         # this" from "your request was malformed" and keep its fallback.
@@ -836,7 +836,9 @@ async def suggestions(request: Request):
     # context_used is what the panel needs to decide how long to keep the
     # result: a line derived from page text is page content, and storing one
     # in chrome.storage.local for a day is a leak the user never agreed to.
-    return JSONResponse(content={"lines": lines, "context_used": bool(page_text)})
+    # It comes from `generate`, which is what actually put the text in the
+    # prompt — not from whether the request carried a `page_text` field.
+    return JSONResponse(content={"lines": result.lines, "context_used": result.context_used})
 
 
 # ---------------------------------------------------------------------------

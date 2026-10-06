@@ -34,6 +34,14 @@ function extract(name) {
   throw new Error(`unterminated function ${name}`);
 }
 
+// The status table, read out of the source rather than restated here: a copy
+// would keep passing after the table changed underneath it.
+function readServerStatus() {
+  const m = source.match(/const SERVER_STATUS = (\{[\s\S]*?\n\});/);
+  if (!m) throw new Error("no SERVER_STATUS table in sidepanel.js — renamed?");
+  return vm.runInNewContext(`(${m[1]})`);
+}
+
 // ── Fake DOM ───────────────────────────────────────────────────────────────
 let uid = 0;
 const focused = [];
@@ -161,6 +169,7 @@ const sandbox = {
   historyDeleteAll,
   confirmOverlay, confirmTitle, confirmBody, confirmOk, confirmCancel,
   SESSIONS_KEY: "sessions",
+  SERVER_STATUS: readServerStatus(),
   DELETED_KEY: "deletedSessions",
   DELETED_LIMIT: 200,
   chrome: {
@@ -181,7 +190,8 @@ vm.createContext(sandbox);
 
 for (const fn of ["askConfirm", "closeConfirm", "deleteSession", "deleteAllSessions",
                   "serverBase", "authHeaders", "listSessions", "historyEntries",
-                  "renderHistory", "formatSessionTime", "noteDeleted", "wasDeleted"]) {
+                  "renderHistory", "formatSessionTime", "noteDeleted", "wasDeleted",
+                  "panelStatus"]) {
   vm.runInContext(extract(fn), sandbox);
 }
 
@@ -341,7 +351,7 @@ sandbox.askConfirm = (...args) => {
   // anything the server knows and it does not is a conversation the user
   // cannot see — and cannot delete.
   const ON_DISK = [
-    { session_id: "ccc", title: "cancel the hotel booking", status: "done",
+    { session_id: "ccc", title: "cancel the hotel booking", status: "completed",
       steps: 9, task_count: 2, started_at: "2026-10-03T04:12:00.000+00:00" },
     { session_id: "ddd", task: "apply for the card", status: "interrupted",
       steps: 3, task_count: 1, started_at: "2026-10-02T18:40:00.000+00:00" },
@@ -362,10 +372,13 @@ sandbox.askConfirm = (...args) => {
   check("a two-task conversation says so",
     firstRow.querySelector(".history-meta").textContent.includes("2 tasks"),
     firstRow.querySelector(".history-meta").textContent);
-  check("a run that never finished is marked as it ended",
+  // The document writes `completed`; the stylesheet styles `done`. Unmapped,
+  // every conversation finished on the server rendered with no mark at all.
+  check("the server's vocabulary is mapped to the one the row is styled by",
     historyList.children[0].children[0].dataset.status === "done"
       && historyList.children[1].children[0].dataset.status === "interrupted",
-    historyList.children[1].children[0].dataset.status);
+    `completed -> ${historyList.children[0].children[0].dataset.status}, `
+    + `interrupted -> ${historyList.children[1].children[0].dataset.status}`);
 
   // Deleting a row the server supplied. This browser watched the same run, so
   // it has a local row too — but a *different object*, rebuilt from the index
@@ -390,6 +403,17 @@ sandbox.askConfirm = (...args) => {
   check("and clears the stale local row with it",
     stored.length === 2 && !stored.some((s) => s.session_id === "ccc"),
     JSON.stringify(stored));
+
+  // Every status the audit can leave behind, so a new one added later cannot
+  // silently fall through to the neutral grey.
+  const SEEN = ["completed", "failed", "cancelled", "interrupted", "orphaned",
+                "running", "corrupt", "unknown"];
+  check("every status the audit can write lands on a styled one",
+    SEEN.every((x) => typeof sandbox.panelStatus(x) === "string" && sandbox.panelStatus(x))
+      && sandbox.panelStatus("completed") === "done"
+      && sandbox.panelStatus("orphaned") === "interrupted"
+      && sandbox.panelStatus("running") === "running",
+    SEEN.map((x) => `${x}->${sandbox.panelStatus(x)}`).join(" "));
 
   // ── No server, no empty list ──────────────────────────────────────────
   reset(SESSIONS);

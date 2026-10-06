@@ -174,3 +174,37 @@ def test_delete_route_refuses_a_path(client, auth):
     assert r.status_code in (200, 404)
     if r.status_code == 200:
         assert r.json() == {"deleted": False}
+
+
+def test_delete_removes_an_interrupted_write_leftover(sessions_dir):
+    """The atomic write stages into `<id>.json.tmp` before os.replace, so a
+    crash between the two leaves a whole document on disk. `list_sessions`
+    globs `*.json` and will never show it — which is exactly why naming it
+    here is the only thing that clears it."""
+    _seed(sessions_dir, "sess-tmp")
+    orphan = sessions_dir / "sess-tmp.json.tmp"
+    orphan.write_text('{"tasks": [{"goal": "find the cheapest flight"}]}')
+
+    assert delete("sess-tmp", dir=sessions_dir) is True
+    assert not orphan.exists()
+
+
+def test_delete_all_removes_a_staging_file_whose_document_is_gone(sessions_dir):
+    """delete_all walks the `*.json` glob, so a staging file left by a
+    crashed write belongs to no session as far as it is concerned. Without
+    this sweep, delete-all left a user's transcript on disk that nothing in
+    the product would ever list or remove."""
+    orphan = sessions_dir / "gone.json.tmp"
+    orphan.write_text('{"tasks": [{"goal": "book the hotel"}]}')
+    _seed(sessions_dir, "live-one")
+
+    assert delete_all(dir=sessions_dir) == 1
+    assert not orphan.exists()
+    assert not list_sessions(dir=sessions_dir)
+
+
+def test_a_staging_file_never_counts_as_a_session(sessions_dir):
+    """It must stay invisible to the index either way — the sweep is a
+    cleanup, not a way for debris to show up in the user's history."""
+    (sessions_dir / "stray.json.tmp").write_text('{"title": "not a session"}')
+    assert list_sessions(dir=sessions_dir) == []

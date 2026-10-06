@@ -51,7 +51,10 @@ def generate(monkeypatch):
 
     async def _fake(url, title, cfg, creds, page_text=""):
         seen.append((url, title, page_text))
-        return ["Summarise the open issues.", "Read the oldest one.", "Draft a reply."]
+        return suggest_mod.SuggestionSet(
+            lines=["Summarise the open issues.", "Read the oldest one.", "Draft a reply."],
+            context_used=bool(page_text),
+        )
 
     monkeypatch.setattr(suggest_mod, "generate", _fake)
     return seen
@@ -163,3 +166,40 @@ def test_a_malformed_model_config_does_not_500(client, generate, bad):
     # request — a 500 leaves the user on the fallback lines with no idea why.
     r = client.post("/v1/suggestions", json={"url": "https://x.com/", "model_config": bad})
     assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_context_used_reports_the_prompt_not_the_request(monkeypatch):
+    """`context_used` is the panel's disclosure — it tells the user the
+    suggestion came from the page rather than the URL alone. It has to come
+    from what `generate` actually put in the prompt, not from whether the
+    request happened to carry a page_text field, or it can assert a read
+    that never happened."""
+    import brotto_orchestrator.agent.suggest as suggest_mod
+    from brotto_orchestrator.model.config import ModelConfig, UserCredentials
+
+    class _StubAgent:
+        def __init__(self, _model, system_prompt=""):
+            pass
+
+        async def run(self, prompt, **kwargs):
+            self.prompt = prompt
+            return type("_R", (), {"output": "Summarise the thread."})()
+
+    monkeypatch.setattr(suggest_mod, "Agent", _StubAgent)
+
+    cfg = ModelConfig("anthropic", "claude-sonnet-4-5", 400_000)
+    creds = UserCredentials(api_key="k", base_url=None)
+
+    used = await suggest_mod.generate(
+        "https://mail.google.com/mail/u/0/#inbox", "Inbox", cfg, creds,
+        page_text="Ada - Q3 budget",
+    )
+    assert used.context_used is True
+    assert used.lines
+
+    unused = await suggest_mod.generate(
+        "https://mail.google.com/mail/u/0/#inbox", "Inbox", cfg, creds,
+        page_text="",
+    )
+    assert unused.context_used is False

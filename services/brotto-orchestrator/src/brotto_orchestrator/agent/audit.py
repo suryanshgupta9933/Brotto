@@ -848,10 +848,16 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
         return False
     d = dir or default_dir()
     removed = False
-    for name in (f"{session_id}.json", f"{session_id}.scratchpad.txt", f"{session_id}.pages.json"):
+    for name in (f"{session_id}.json", f"{session_id}.json.tmp",
+                 f"{session_id}.scratchpad.txt", f"{session_id}.pages.json"):
         # pages.json has no writer — page text stopped reaching disk — but
         # `read` and `list_sessions` already name it, and a sidecar written
         # by an older build is still on the user's disk.
+        # The .tmp is the atomic write's staging file, so it holds a whole
+        # document whenever a write was interrupted between the two steps.
+        # `list_sessions` globs `*.json` and would never show it, which is
+        # exactly why it has to be named here rather than swept: the user
+        # is told the session is erased, and this would be what is left.
         try:
             (d / name).unlink()
             removed = True
@@ -869,7 +875,18 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
 def delete_all(*, dir: Path | None = None) -> int:
     """Remove every session's files. Returns the count of documents removed."""
     d = dir or default_dir()
-    return sum(1 for p in _session_documents(d) if delete(p.stem, dir=d))
+    count = sum(1 for p in _session_documents(d) if delete(p.stem, dir=d))
+    # A staging file whose document is already gone belongs to no session as
+    # far as `_session_documents` is concerned — it globs `*.json` — so the
+    # loop above never reaches it and delete-all would leave it behind.
+    # That is the whole residue of an interrupted write: a user's transcript
+    # on disk that nothing in the product will ever list or remove.
+    for p in d.glob("*.json.tmp"):
+        try:
+            p.unlink()
+        except OSError as exc:
+            log.warning("audit: could not remove %s: %s", p, exc)
+    return count
 
 
 def prune_older_than(days: float, *, dir: Path | None = None) -> int:
