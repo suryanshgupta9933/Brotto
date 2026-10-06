@@ -100,7 +100,8 @@ def test_delete_refuses_paths_and_sidecars(sessions_dir, evil):
 def test_delete_all_empties_the_directory(sessions_dir):
     for sid in ("aaa", "bbb", "ccc"):
         _seed(sessions_dir, sid)
-    assert delete_all(dir=sessions_dir) == 3
+    deleted, residue = delete_all(dir=sessions_dir)
+    assert (deleted, residue) == (3, 0)
     assert list_sessions(dir=sessions_dir) == []
     assert list(sessions_dir.iterdir()) == [], "a sidecar survived delete-all"
 
@@ -108,11 +109,13 @@ def test_delete_all_empties_the_directory(sessions_dir):
 def test_delete_all_does_not_count_sidecars_as_sessions(sessions_dir):
     _seed(sessions_dir, "aaa")
     (sessions_dir / "aaa.pages.json").write_text("{}")
-    assert delete_all(dir=sessions_dir) == 1
+    deleted, residue = delete_all(dir=sessions_dir)
+    assert (deleted, residue) == (1, 0)
 
 
 def test_delete_all_on_an_empty_directory_is_zero(sessions_dir):
-    assert delete_all(dir=sessions_dir) == 0
+    deleted, residue = delete_all(dir=sessions_dir)
+    assert (deleted, residue) == (0, 0)
 
 
 # ── the routes ───────────────────────────────────────────────────────────────
@@ -164,7 +167,7 @@ def test_delete_all_route_empties_the_directory(client, auth, sessions_dir):
         _seed(sessions_dir, sid)
     r = client.delete("/v1/sessions", headers=auth)
     assert r.status_code == 200
-    assert r.json() == {"deleted": 2}
+    assert r.json() == {"deleted": 2, "residue": 0}
     assert list(sessions_dir.iterdir()) == []
 
 
@@ -199,7 +202,8 @@ def test_delete_all_removes_a_staging_file_whose_document_is_gone(sessions_dir):
     orphan.write_text('{"tasks": [{"goal": "book the hotel"}]}')
     _seed(sessions_dir, "live-one")
 
-    assert delete_all(dir=sessions_dir) == 1
+    deleted, residue = delete_all(dir=sessions_dir)
+    assert (deleted, residue) == (1, 0)
     assert not orphan.exists()
     assert not list_sessions(dir=sessions_dir)
 
@@ -224,7 +228,8 @@ def test_delete_all_removes_a_page_sidecar_whose_document_is_gone(sessions_dir):
     orphan.write_text(json.dumps({"r1": "Inbox 664 Starred Snoozed" * 40}))
     _seed(sessions_dir, "live-one")
 
-    assert delete_all(dir=sessions_dir) == 1
+    deleted, residue = delete_all(dir=sessions_dir)
+    assert (deleted, residue) == (1, 0)
     assert not orphan.exists()
     assert not list_sessions(dir=sessions_dir)
 
@@ -238,3 +243,68 @@ def test_a_page_sidecar_is_still_removed_with_its_own_session(sessions_dir):
 
     assert delete("sess-sidecar", dir=sessions_dir) is True
     assert not sidecar.exists()
+
+
+def test_delete_all_removes_an_orphaned_scratchpad(sessions_dir):
+    """The sidecar current builds still write, and the one that made this
+    worst: it holds a digest of every page the run visited. Its document is
+    gone, so the `*.json` glob never reaches it."""
+    orphan = sessions_dir / "gone.scratchpad.txt"
+    orphan.write_text("# MEMORY v2\n[r1 step=0] a page you visited\n")
+    _seed(sessions_dir, "live-one")
+
+    deleted, residue = delete_all(dir=sessions_dir)
+    assert (deleted, residue) == (1, 0)
+    assert not orphan.exists()
+
+
+def test_both_delete_paths_clear_every_residue_shape(sessions_dir):
+    """The drift that caused this. `delete` and `delete_all` each held their
+    own hand-written list of the files a session owns, and a sidecar named in
+    one but not the other was stranded by the action that promises to erase
+    it — that is how 76KB of Gmail text outlived its session. Both now read
+    one constant, so one file of each shape is enough to hold them together."""
+    from brotto_orchestrator.agent import audit
+
+    _seed(sessions_dir, "kept")
+    orphans = [sessions_dir / f"gone{ext}" for ext in audit._SESSION_RESIDUE_EXT]
+    for p in orphans:
+        p.write_text("x")
+
+    # Per-session path: the named stem's own four files.
+    assert delete("kept", dir=sessions_dir) is True
+    # Sweep path: the orphans whose documents are already gone.
+    deleted, residue = delete_all(dir=sessions_dir)
+    assert (deleted, residue) == (0, 0)
+    assert [p.name for p in orphans if p.exists()] == []
+
+
+def test_residue_is_reported_when_a_file_cannot_be_removed(sessions_dir, monkeypatch):
+    """A file held open, or on a read-only mount, stays put. The user must
+    not be told their mail is erased when it is not — the panel's toast is
+    built from this number, and a log line is not a thing they read."""
+    _seed(sessions_dir, "live-one")
+
+    def _refuse(self, *a, **kw):
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(Path, "unlink", _refuse)
+    deleted, residue = delete_all(dir=sessions_dir)
+    assert deleted == 0, "nothing could be removed, so nothing was deleted"
+    assert residue == 1, "the one seeded scratchpad, reported"
+    assert (sessions_dir / "live-one.json").exists()
+
+
+def test_delete_all_route_reports_residue_to_the_panel(client, auth, sessions_dir,
+                                                      monkeypatch):
+    """The number has to survive to the response, or the honest toast has
+    nothing to be built from."""
+    _seed(sessions_dir, "aaa")
+
+    def _refuse(self, *a, **kw):
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(Path, "unlink", _refuse)
+    r = client.delete("/v1/sessions", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["residue"] > 0

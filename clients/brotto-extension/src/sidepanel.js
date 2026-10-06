@@ -956,7 +956,16 @@ async function deleteAllSessions() {
       headers: await authHeaders(),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    toast('Everything deleted');
+    // The server counts what it could not unlink — a sidecar held open, or
+    // owned by another user. Saying "everything deleted" anyway is the one
+    // answer that must never be wrong about erasure.
+    const residue = (await res.json().catch(() => ({}))).residue || 0;
+    if (residue > 0) {
+      toast(`Deleted the list, but ${residue} file${residue === 1 ? '' : 's'} `
+        + 'could not be removed and may still be on disk', 'bad', 8000);
+    } else {
+      toast('Everything deleted');
+    }
   } catch {
     toast('Cleared the list, but the server did not answer — files may still be on disk',
       'bad', 6000);

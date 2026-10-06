@@ -185,6 +185,9 @@ Nothing expires on a timer unless you ask it to. **Deletion is entirely yours**,
   - **In the panel:** each conversation in **Session history** has a delete button, and there is a
     **Delete all** above the list. Both ask you to confirm first — the question names the conversation
     by its own first message, or names how many are about to go. There is no undo.
+  - **If a file cannot be removed** — open on another program, or on a read-only mount — **Delete all**
+    says so rather than reporting a clean sweep. The message tells you how many files are still there;
+    remove them by hand from `logs/sessions/`.
   - **On the server:** `curl -X DELETE -H "Authorization: Bearer $AGENT_SECRET" \
     http://localhost:8000/v1/sessions/<id>` removes one; `DELETE /v1/sessions` removes every one.
     The files live in `logs/sessions/`, so removing them by hand works exactly the same way.

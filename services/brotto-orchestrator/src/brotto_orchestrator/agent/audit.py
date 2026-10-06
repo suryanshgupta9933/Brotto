@@ -809,6 +809,22 @@ def _is_document_stem(name: str) -> bool:
     return bool(name) and name == Path(name).name and "." not in name
 
 
+# The audit document itself, and then everything a session owns beside it.
+# `delete` builds `<stem><ext>` per session; `delete_all` sweeps `*<ext>` for
+# the residue whose document is already gone. One list, because these two have
+# to agree and have not before: a sidecar named in `delete` but not swept by
+# `delete_all` is stranded on the user's disk by exactly the action that
+# promises to erase it, and the panel says it was erased. `*.pages.json` is
+# the shape that bit — 76KB of real Gmail text beside a document someone
+# removed by hand. `*.scratchpad.txt` is the one current builds still write.
+_DOCUMENT_EXT = ".json"
+_SESSION_RESIDUE_EXT: tuple[str, ...] = (
+    ".json.tmp",
+    ".scratchpad.txt",
+    ".pages.json",
+)
+
+
 def read(session_id: str, *, dir: Path | None = None) -> dict:
     """Read one document. Never raises: a damaged file is reported.
 
@@ -848,8 +864,7 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
         return False
     d = dir or default_dir()
     removed = False
-    for name in (f"{session_id}.json", f"{session_id}.json.tmp",
-                 f"{session_id}.scratchpad.txt", f"{session_id}.pages.json"):
+    for name in (f"{session_id}{ext}" for ext in (_DOCUMENT_EXT, *_SESSION_RESIDUE_EXT)):
         # pages.json has no writer — page text stopped reaching disk — but
         # `read` and `list_sessions` already name it, and a sidecar written
         # by an older build is still on the user's disk.
@@ -872,28 +887,41 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
     return removed
 
 
-def delete_all(*, dir: Path | None = None) -> int:
-    """Remove every session's files. Returns the count of documents removed."""
+def delete_all(*, dir: Path | None = None) -> tuple[int, int]:
+    """Remove every session's files. Returns `(documents, residue_left)`.
+
+    The second number is the count of files that could not be removed — held
+    open, or owned by another user. It is part of the return because the
+    alternative is a caller announcing a complete erasure it did not
+    perform, and the only thing standing between that and the user is a log
+    line they will not read.
+    """
     d = dir or default_dir()
     count = sum(1 for p in _session_documents(d) if delete(p.stem, dir=d))
-    # A staging file whose document is already gone belongs to no session as
-    # far as `_session_documents` is concerned — it globs `*.json` — so the
-    # loop above never reaches it and delete-all would leave it behind.
-    # That is the whole residue of an interrupted write: a user's transcript
-    # on disk that nothing in the product will ever list or remove.
+    # Residue whose document is already gone belongs to no session as far as
+    # `_session_documents` is concerned — it globs `*.json` — so the loop
+    # above never reaches it. Whatever is left here is a user's own content on
+    # their disk that nothing in the product will ever list or remove: the
+    # residue of an interrupted write, or a sidecar whose document someone
+    # deleted by hand.
     #
-    # `*.pages.json` is the same hole with page text in it. Nothing writes a
-    # sidecar any more, but a build that did left one beside its document, so
-    # removing that document by hand — or losing it to a partial restore —
-    # stranded full page bodies the loop above cannot reach. The panel would
-    # report every session erased.
-    for pattern in ("*.json.tmp", "*.pages.json"):
-        for p in d.glob(pattern):
+    # Failures are counted and returned, not swallowed. A file held open or
+    # owned by another user stays put, and the caller answers "everything
+    # deleted" — so the user is told their mail is erased and it is not.
+    residue = 0
+    for ext in _SESSION_RESIDUE_EXT:
+        for p in d.glob(f"*{ext}"):
             try:
                 p.unlink()
             except OSError as exc:
-                log.warning("audit: could not remove %s: %s", p, exc)
-    return count
+                residue += 1
+                log.error("audit: could not remove %s: %s", p, exc)
+    if residue:
+        log.error(
+            "audit: delete_all left %d file(s) on disk — the erasure is "
+            "incomplete and the caller must say so", residue,
+        )
+    return count, residue
 
 
 def prune_older_than(days: float, *, dir: Path | None = None) -> int:

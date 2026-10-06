@@ -338,6 +338,26 @@ sandbox.askConfirm = (...args) => {
     JSON.stringify(calls));
   check("and empties this browser's list", stored.length === 0, JSON.stringify(stored));
 
+  // ── The server could not remove everything ────────────────────────────
+  // A file on a read-only mount stays put. "Everything deleted" is the one
+  // answer that must never be wrong about erasure.
+  reset();
+  await sandbox.renderHistory();
+  calls.length = 0;
+  nextAnswer = true;
+  sandbox.fetch = async (url, opts = {}) => {
+    calls.push({ url, ...opts });
+    return { ok: true, status: 200, json: async () => ({ deleted: 2, residue: 1 }) };
+  };
+  await sandbox.deleteAllSessions();
+  check("an incomplete erase is not reported as complete",
+    calls.some((c) => c.toast && c.toast.includes("may still be on disk")),
+    JSON.stringify(calls));
+  check("and it names how many files are left",
+    calls.some((c) => c.toast && c.toast.includes("1 file")),
+    JSON.stringify(calls));
+  sandbox.fetch = fakeFetch;
+
   reset([]);
   await sandbox.renderHistory();
   check("delete all is hidden on an empty list", historyDeleteAll.hidden === true);

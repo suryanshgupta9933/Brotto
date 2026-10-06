@@ -151,6 +151,13 @@ the task text, the action names and the typed input are. So:
 - The README's Privacy section describes the *current* state honestly, and the deletion path
   is real: `DELETE /v1/sessions/{id}` takes the document, the scratchpad and
   the pages sidecar together, so there is no "part of it survived".
+- `delete` and `delete_all` read **one** list, `_SESSION_RESIDUE_EXT`
+  (`audit.py`). They used to hold separate hand-written ones, and a sidecar
+  named in one but not the other was stranded by the one that swept less —
+  a `.pages.json` beside a document someone deleted by hand, 76KB of Gmail,
+  reported as erased. `delete_all` also returns how many files it could not
+  remove, because a file on a read-only mount stays put and the alternative
+  was a log line the user will never read standing in for the truth.
 - The launch gates are partly closed. `/ws/ext` and the session endpoints are
   gated on `AGENT_SECRET`, which is the privacy control — but only when one is
   set, and "no secret" is a warning rather than a refusal so that loopback dev

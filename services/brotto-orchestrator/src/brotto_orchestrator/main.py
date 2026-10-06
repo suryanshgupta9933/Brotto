@@ -744,7 +744,12 @@ async def delete_all_sessions(request: Request):
 
     if not _authed(request):
         return _error(404, "not found")
-    return JSONResponse(content={"deleted": _delete_all()})
+    deleted, residue = _delete_all()
+    # `residue` travels back because a file that could not be unlinked is
+    # still on disk, and the panel is the only thing that can tell the user
+    # their deletion did not finish. Answering `deleted: n` regardless would
+    # claim an erasure that did not happen.
+    return JSONResponse(content={"deleted": deleted, "residue": residue})
 
 
 # ponytail: separate HTTP endpoint for save-time notification. The
