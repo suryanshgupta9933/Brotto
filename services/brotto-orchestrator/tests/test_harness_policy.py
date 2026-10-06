@@ -907,3 +907,33 @@ def test_persist_load_strips_bookkeeping(tmp_path, monkeypatch):
     visible = {k: v for k, v in loaded.items() if not k.startswith("_")}
     assert persist._payload_hash(visible) == hash_first
 
+
+
+def test_a_task_start_policy_write_cannot_erase_grants(monkeypatch, tmp_path):
+    """Every run used to wipe the domain approvals from the last one.
+
+    `_persist_user_policy` writes the document wholesale via
+    `save_if_changed`, and the two WebSocket callers pass `{blacklist}`
+    only — the sidepanel's `userPolicy` carries nothing else. So the grant
+    made on run N was gone before run N+1 seeded `visited_domains`, and
+    the user was asked to approve the same site on every single task.
+    `/v1/policy_ack` had worked around this at its call site; the other
+    two had not.
+
+    The payload here is shaped like the one `task_start` builds, which is
+    what makes the regression legible: if a future caller widens that
+    payload's fields, this still asserts the grant survived.
+    """
+    from brotto_orchestrator.main import _persist_user_policy
+    from brotto_orchestrator.policy import persist
+
+    monkeypatch.setattr(persist, "_DIR", tmp_path)
+
+    _persist_user_policy("device-a", {"blacklist": ["blocked.example"]})
+    persist.grant_domain("device-a", "bank.example")
+
+    # A later task_start: the sidepanel's policy view, which knows only
+    # about the blacklist.
+    _persist_user_policy("device-a", {"blacklist": ["blocked.example"]})
+
+    assert persist.load_granted_domains("device-a") == ["bank.example"]

@@ -435,17 +435,30 @@ def _persist_user_policy(user_key: str, payload: dict | None) -> None:
     stays accurate and we avoid needless disk IO. A WARNING is logged
     on disk failures; the in-memory cache still works for the current
     run, but the next restart will lose the change.
+
+    `approved_domains` is carried across from disk rather than taken from
+    `payload`. `save_if_changed` writes the document wholesale, and the two
+    WebSocket callers pass `{blacklist}` only — the sidepanel's `userPolicy`
+    carries nothing else. So without this the grant the user made last run is
+    erased at the start of this one, and they are asked to approve the same
+    site on every task. That was true of `/v1/policy_ack` too, which worked
+    around it at the call site; carrying the key here fixes both at the one
+    function every writer routes through.
     """
     if payload is None:
         return
     try:
         from .policy import persist as _user_policy_persist
-        wrote = _user_policy_persist.save_if_changed(user_key, payload)
+        merged = dict(payload)
+        if "approved_domains" not in merged:
+            merged["approved_domains"] = _user_policy_persist.load_granted_domains(user_key)
+        wrote = _user_policy_persist.save_if_changed(user_key, merged)
         if wrote:
             log.info(
-                "user-policy saved  user_key=%s  blacklist=%s",
+                "user-policy saved  user_key=%s  blacklist=%s  granted=%s",
                 user_key,
                 payload.get("blacklist"),
+                merged["approved_domains"],
             )
         # else: silent no-op save; this is the common case when the
         # user clicks Save without changing anything.

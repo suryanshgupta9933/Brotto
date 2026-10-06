@@ -3026,7 +3026,13 @@ function refreshEmptyState(tab) {
     // from the URL and title alone, and a fresh install reads nothing at all.
     // A task-driven read goes through the debugger relay instead and is not
     // gated here — the user asked for that one.
-    const pageText = contextSuggestionsEnabled()
+    //
+    // The `await` is load-bearing. contextSuggestionsEnabled is async, so
+    // without it the ternary tests a Promise — always truthy — and the
+    // `: ''` branch is dead. That reads identically to the opt-in working
+    // and does the opposite, on every idle paint, which is the privacy
+    // claim PRIVACY.md makes in absolute terms.
+    const pageText = (await contextSuggestionsEnabled())
       ? await readPageContext(tab.id, url)
       : '';
     const hit = await fetchSuggestions(url, tab?.title || '', pageText);
