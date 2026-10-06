@@ -2455,11 +2455,6 @@ class AgentHarness:
                         "[%s] POLICY: user APPROVED first-time-seen  step=%d  domain=%s  action=%s",
                         deps.user_id, step, domain, c.action,
                     )
-                    audit.record_policy(
-                        step=step, kind="first_time_seen", domain=domain,
-                        action=c.action, decision="require_approval",
-                        user_decision="approved",
-                    )
             timings["approval_pause"] += time.perf_counter() - t_ap
             if deps.result is not None:
                 continue

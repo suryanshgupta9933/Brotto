@@ -454,11 +454,14 @@ def _persist_user_policy(user_key: str, payload: dict | None) -> None:
             merged["approved_domains"] = _user_policy_persist.load_granted_domains(user_key)
         wrote = _user_policy_persist.save_if_changed(user_key, merged)
         if wrote:
+            # Counts, not the lists themselves — the domains are the user's
+            # browsing, and this log is the one place a self-hoster's
+            # rotated log files will hand them to whoever reads them.
             log.info(
-                "user-policy saved  user_key=%s  blacklist=%s  granted=%s",
+                "user-policy saved  user_key=%s  blacklist=%d  granted=%d",
                 user_key,
-                payload.get("blacklist"),
-                merged["approved_domains"],
+                len(payload.get("blacklist") or []),
+                len(merged["approved_domains"]),
             )
         # else: silent no-op save; this is the common case when the
         # user clicks Save without changing anything.
@@ -1206,12 +1209,22 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     deps.steering = content
                     await ws_send({"type": "steer_ack", "length": len(content)})
                 elif t == "revoke":
-                    # ponytail: user clicked Revoke on a prior approval within
-                    # the post-approval window. Clear the first-time-seen
-                    # cache so the next step re-prompts. With deny-aborts-task
-                    # semantics, approved actions can't be "undone" — the task
-                    # is over once an action runs. Revoke just resets what
-                    # the next task would do.
+                    # ponytail: user clicked "Clear approval" within the
+                    # post-approval window. Clears the first-time-seen cache so
+                    # the next step re-prompts. With deny-aborts-task semantics
+                    # an approved action can't be undone — the task is over
+                    # once it runs.
+                    #
+                    # It does NOT un-approve a *domain*. Approving one does
+                    # three things: seen_first_time.add, visited_domains.add,
+                    # and grant_domain to the policy file. Clearing the first
+                    # leaves the other two, and the domain gate short-circuits
+                    # on visited_domains before consulting seen_first_time — so
+                    # for a domain approval this frame is a no-op, and the disk
+                    # grant outlives it regardless. Real revocation is a
+                    # separate feature (the frame needs the domain, and
+                    # persist needs a revoke_domain); do not imply the button
+                    # does more than it does.
                     log.warning(
                         "[%s] POLICY: user REVOKED prior approval — clearing seen_first_time",
                         session_id,
