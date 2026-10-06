@@ -107,6 +107,12 @@ leaves readable traces of both.
 A run resumed later recalls those digests rather than whole pages — that is the trade for keeping your
 pages off the filesystem, and it is not configurable.
 
+**If you used an earlier build, read this one.** Those builds kept a page-bodies sidecar beside each
+session file, and it does hold whole pages — tens of kilobytes per session. Nothing writes it any more,
+but the files a previous build wrote are still on your disk. Deleting a session removes one, and **Delete
+all** removes every one including any left behind on their own; to clear them all, delete
+`logs/sessions/*.pages.json` by hand. If you started on a recent build, you have none.
+
 Values typed into a field the orchestrator identifies as a secret — anything with `type="password"`, or
 a field whose name reads like a credential, a token, or a code — are **redacted before the record is
 written**, so a password you type is not stored in the audit file.

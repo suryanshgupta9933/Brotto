@@ -39,6 +39,16 @@ counts and short digests, never content. Two tests hold that line —
 `test_the_audit_document_holds_no_page_content`. The model still reads the page;
 the record only says how much of it there was.
 
+**A sidecar written before that still exists on an upgrading user's disk**, and
+it holds what the current code no longer writes: tens of kilobytes of real page
+text per session. It has no writer, so nothing updates or appends to it — but
+nothing lists it either, which is the hazard. `delete()` names it alongside the
+session it belongs to, and `delete_all()` sweeps it as an orphan; a user who
+deletes the `.json` by hand strands it. Someone debugging "where did this disk
+usage come from" on an upgraded install should look for `*.pages.json` beside
+the session files. This repo's own `logs/sessions/` carried two, from Gmail
+runs.
+
 ## The four rules
 
 **1. Count events, never pages.** `tasks_run`, `active_users`, `signup` are
@@ -156,7 +166,13 @@ the task text, the action names and the typed input are. So:
 Before adding a field, an endpoint or a metric, ask: **is this user content,
 and where does it land?**
 
-- Content going into an audit document → the sidecar, and it is the user's.
 - Content going into a counter → it does not.
 - Content going onto the operator's disk at all → it needs a reason that
   survives "would I be comfortable if this leaked".
+
+Note what is *not* on that list any more: "content going into an audit
+document → the sidecar." The sidecar had no writer before this rule stopped
+being true, and following it would put page bodies back on disk behind a
+privacy document that promises they never land there. Audit documents carry
+counts and digests; anything that needs the body is fetched from the page
+again, because the page is still there.

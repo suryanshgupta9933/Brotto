@@ -6,6 +6,7 @@ the part that survived is the part with the page digests in it.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -208,3 +209,32 @@ def test_a_staging_file_never_counts_as_a_session(sessions_dir):
     cleanup, not a way for debris to show up in the user's history."""
     (sessions_dir / "stray.json.tmp").write_text('{"title": "not a session"}')
     assert list_sessions(dir=sessions_dir) == []
+
+
+def test_delete_all_removes_a_page_sidecar_whose_document_is_gone(sessions_dir):
+    """The same hole as the staging file, with page text in it.
+
+    Nothing writes a `.pages.json` sidecar any more, but a build that did
+    left one beside its document — real page bodies, tens of kilobytes. Once
+    that document is removed by hand the sidecar belongs to no session as far
+    as the `*.json` glob is concerned, so delete-all walked past it and the
+    panel reported every session erased while the pages stayed on disk.
+    """
+    orphan = sessions_dir / "gone.pages.json"
+    orphan.write_text(json.dumps({"r1": "Inbox 664 Starred Snoozed" * 40}))
+    _seed(sessions_dir, "live-one")
+
+    assert delete_all(dir=sessions_dir) == 1
+    assert not orphan.exists()
+    assert not list_sessions(dir=sessions_dir)
+
+
+def test_a_page_sidecar_is_still_removed_with_its_own_session(sessions_dir):
+    """The per-session path already named it; this pins that the new sweep
+    did not replace that with a glob that only catches orphans."""
+    _seed(sessions_dir, "sess-sidecar")
+    sidecar = sessions_dir / "sess-sidecar.pages.json"
+    sidecar.write_text(json.dumps({"r1": "Inbox 664 Starred Snoozed"}))
+
+    assert delete("sess-sidecar", dir=sessions_dir) is True
+    assert not sidecar.exists()

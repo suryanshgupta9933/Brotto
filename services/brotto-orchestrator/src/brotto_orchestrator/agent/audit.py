@@ -881,11 +881,18 @@ def delete_all(*, dir: Path | None = None) -> int:
     # loop above never reaches it and delete-all would leave it behind.
     # That is the whole residue of an interrupted write: a user's transcript
     # on disk that nothing in the product will ever list or remove.
-    for p in d.glob("*.json.tmp"):
-        try:
-            p.unlink()
-        except OSError as exc:
-            log.warning("audit: could not remove %s: %s", p, exc)
+    #
+    # `*.pages.json` is the same hole with page text in it. Nothing writes a
+    # sidecar any more, but a build that did left one beside its document, so
+    # removing that document by hand — or losing it to a partial restore —
+    # stranded full page bodies the loop above cannot reach. The panel would
+    # report every session erased.
+    for pattern in ("*.json.tmp", "*.pages.json"):
+        for p in d.glob(pattern):
+            try:
+                p.unlink()
+            except OSError as exc:
+                log.warning("audit: could not remove %s: %s", p, exc)
     return count
 
 
