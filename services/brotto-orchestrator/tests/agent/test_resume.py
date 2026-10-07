@@ -202,7 +202,7 @@ def test_the_loop_continues_at_the_resumed_step(sessions_dir):
     # The three restored summaries plus the one the resumed loop added, and
     # the new one is step 3 — not a second run from step 0.
     assert [s.step for s in deps.step_summaries] == [0, 1, 2, 3]
-    assert deps.visited_domains == {"github.com"}
+    assert deps.visited_domains == {"github.com", "example.com"}
     # The prior turns survive the resume: a reader must still see what the
     # user approved before the socket died.
     doc = read("h1", dir=sessions_dir)

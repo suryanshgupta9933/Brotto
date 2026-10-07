@@ -11,6 +11,43 @@ from ..dev.ax_tree_extractor import SemanticTarget
 
 log = logging.getLogger(__name__)
 
+# Select-all, through the DOM's own selection API. Shared by both relays so
+# dev and product clear a field the same way — a second copy of this string
+# would drift, and it is the kind of text where drifting is invisible.
+#
+# There is no cross-platform key chord for select-all: Meta on macOS, Ctrl
+# everywhere else. A relay that hardcoded Ctrl meant "move to line start" on a
+# Mac, so the field kept its old text, `type_text` appended to it, and the
+# model's only remaining move was Backspace — one character per step, for ten
+# steps, on a field that ended up holding
+# "Protect mainmainProteProtect mainProtect mainct ma" (session 7d567b66).
+# Branching on `sys.platform` or sniffing `navigator.platform` fixes only the
+# machine you tested on.
+#
+# `select()` is the spec's own "select the text in this control" and involves
+# no keyboard, so it is the same operation on every OS. A contenteditable —
+# Google Docs, a rich-text comment box — has no `.select()` and needs a Range.
+# Returns a verb rather than nothing, so the caller can tell a cleared field
+# from a click that hit something unselectable.
+SELECT_ALL_JS = (
+    "(function () {"
+    "  var el = document.activeElement;"
+    "  if (!el || el === document.body) return 'no-focus';"
+    "  try {"
+    "    if (typeof el.select === 'function') { el.select(); return 'select-all'; }"
+    "    if (el.isContentEditable) {"
+    "      var sel = document.getSelection();"
+    "      var range = document.createRange();"
+    "      range.selectNodeContents(el);"
+    "      sel.removeAllRanges();"
+    "      sel.addRange(range);"
+    "      return 'select-all';"
+    "    }"
+    "  } catch (e) { return 'error: ' + (e && e.name); }"
+    "  return 'not-a-text-field: ' + el.tagName;"
+    "})()"
+)
+
 
 class CDPRelay:
     """Wraps a PlaywrightBrowser for dev mode.
@@ -79,8 +116,21 @@ class CDPRelay:
         focused = await self.focus_ref(ref)
         if focused.startswith("Error executing"):
             return focused
-        if self._browser.page:
-            await self._browser.page.keyboard.press("Control+A")
+        if not self._browser.page:
+            return "Error executing: no page is attached"
+        # The same DOM expression the extension path uses, so dev and product
+        # clear a field identically. There is no cross-platform key chord for
+        # select-all — Meta on macOS, Ctrl elsewhere — and branching on
+        # `sys.platform` would make the dev path correct only on the machine
+        # it was written on. `select()` is the spec's own "select the text in
+        # this control" and behaves the same on every OS.
+        result = await self._browser.page.evaluate(SELECT_ALL_JS)
+        if result != "select-all":
+            return (
+                f"Error executing: ref {ref!r} could not be cleared — the page "
+                f"said {result!r}. If it is not a text field, use click or "
+                f"press_key instead."
+            )
         return "ok"
 
     async def type_text_to_ref(self, ref: str, text: str) -> str:

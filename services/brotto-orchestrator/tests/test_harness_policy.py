@@ -15,6 +15,8 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
 
 # ── Schema regression ───────────────────────────────────────────────────────
 
@@ -937,3 +939,60 @@ def test_a_task_start_policy_write_cannot_erase_grants(monkeypatch, tmp_path):
     _persist_user_policy("device-a", {"blacklist": ["blocked.example"]})
 
     assert persist.load_granted_domains("device-a") == ["bank.example"]
+
+
+# ── The page the task started on is not a site to ask about ─────────────────
+
+
+class _FakeCDP:
+    """Only the one call the seeder makes."""
+
+    def __init__(self, url: str):
+        self.url = url
+
+    async def get_current_url(self) -> str:
+        return self.url
+
+
+async def _seed_starting(url: str):
+    from brotto_orchestrator.agent.harness import _seed_starting_domain
+    from brotto_orchestrator.agent.context import AgentDeps
+
+    deps = AgentDeps(user_id="u", task="x", cdp=_FakeCDP(url),
+                     ws_send=None, client_ip="10.0.0.9")
+    await _seed_starting_domain(deps)
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_the_page_the_task_started_on_is_not_re_asked():
+    """The user wrote the task while looking at this page, so approving it was
+    the prompt with only one answer — and it fired before Brotto had done
+    anything at all. The eTLD+1 is what gets seeded, not the whole URL."""
+    deps = await _seed_starting("https://mail.google.com/mail/u/0/#inbox")
+    assert deps.visited_domains == {"google.com"}
+
+
+@pytest.mark.asyncio
+async def test_a_different_site_still_asks_after_starting_elsewhere():
+    """The other half of the same fix, and the half that matters for safety:
+    seeding the starting page grants *that* site, not the run."""
+    deps = await _seed_starting("https://mail.google.com/mail/u/0/#inbox")
+    assert "github.com" not in deps.visited_domains
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_tab_does_not_abort_the_task():
+    """A tab Brotto cannot read is a failed run elsewhere, not a reason to
+    refuse to start. The seeder swallows it and every gate simply re-asks."""
+    from brotto_orchestrator.agent.harness import _seed_starting_domain
+    from brotto_orchestrator.agent.context import AgentDeps
+
+    class _NoDebugger:
+        async def get_current_url(self):
+            raise RuntimeError("no debugger attached")
+
+    deps = AgentDeps(user_id="u", task="x", cdp=_NoDebugger(),
+                     ws_send=None, client_ip="10.0.0.9")
+    await _seed_starting_domain(deps)
+    assert deps.visited_domains == set()

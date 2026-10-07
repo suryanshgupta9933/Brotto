@@ -951,6 +951,29 @@ def _seed_granted_domains(deps: AgentDeps) -> None:
         log.warning("could not load domain grants: %s", exc)
 
 
+async def _seed_starting_domain(deps: AgentDeps) -> None:
+    """Treat the page the task started on as already-approved.
+
+    The user pointed Brotto at that page — they were looking at it when they
+    wrote the instruction. Asking "Allow Brotto to work on <that page>?"
+    before anything has happened spends a round trip on a question with only
+    one answer, and it is the one prompt in the run that is genuinely free.
+
+    Same `visited_domains` set every domain gate already reads, so this
+    silences exactly that prompt: a cross-domain click, a blacklist hit, an
+    `aria-hidden` target and an irreversible action are all untouched, and
+    the first hop *off* this page still asks.
+    """
+    try:
+        domain = etld1(await deps.cdp.get_current_url())
+    except Exception as exc:  # noqa: BLE001 — a missing grant just re-asks
+        log.warning("[%s] could not read the starting domain: %s",
+                    deps.user_id, type(exc).__name__)
+        return
+    if domain:
+        deps.visited_domains.add(domain)
+
+
 async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                           turn: int = -1) -> str:
     """Execute a single action. Returns outcome string."""
@@ -2002,6 +2025,8 @@ class AgentHarness:
             except Exception as exc:
                 log.warning("[%s] model config unresolved before step 0: %s",
                             deps.user_id, type(exc).__name__)
+
+        await _seed_starting_domain(deps)
 
         for step in range(first_step, self.MAX_STEPS):
             deps.step_number = step

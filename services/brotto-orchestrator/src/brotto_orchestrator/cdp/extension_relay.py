@@ -8,6 +8,7 @@ import uuid
 from typing import Callable, Awaitable
 
 from ..dev.ax_tree_extractor import SemanticTarget
+from .relay import SELECT_ALL_JS
 
 log = logging.getLogger("brotto.ext_relay")
 
@@ -22,6 +23,17 @@ _PRESSABLE_KEYS = frozenset({
     "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp",
     "End", "Home", "PageDown", "PageUp",
 })
+
+# Observation frames that arrived unprompted. `webNavigation.onCommitted`
+# pushes one the instant a navigation commits — before the new page has
+# rendered — and reading it as a step's tree shows the model the page *before*
+# the thing it just clicked opened. See `_get_observation`.
+#
+# An *absent* reason is not this list. An extension predating the `reason`
+# field sends none, and skipping its frames would make every step request a
+# fresh observation, get one, discard it, and request again forever. Only an
+# extension that positively says "navigated" is trusted to mean it.
+_UNSOLICITED = frozenset({"navigated"})
 
 # ponytail: 2s ceiling on a best-effort lookup. A slower extension degrades to
 # the accessible-name check (over-redact, not under-redact); raise it only if
@@ -74,24 +86,49 @@ class ExtensionCDPRelay:
         self._eval_queue: asyncio.Queue = eval_queue or asyncio.Queue()
         self._sid = session_id
         self._cached_obs: dict | None = None
+        self._pushed_obs: dict | None = None
         self._attrs: asyncio.Queue = asyncio.Queue()
         self._pending_attrs: set[str] = set()
 
     # ---------- Internal ----------
 
     async def _get_observation(self) -> dict:
-        """Return fresh observation; request one from extension if queue is empty."""
-        if self._obs_queue.empty():
-            log.debug("[%s] requesting observation", self._sid)
-            await self._ws_send({"type": "observe"})
-        else:
-            log.debug("[%s] using queued observation", self._sid)
-        try:
-            obs = await asyncio.wait_for(self._obs_queue.get(), timeout=30)
-        except asyncio.TimeoutError:
-            log.error("[%s] timed out waiting for observation", self._sid)
-            raise
-        obs = _unwrap_observation(obs)
+        """Return a fresh observation for this step's page.
+
+        A frame the server did not ask for is not a frame it may read as the
+        page. `webNavigation.onCommitted` pushes one the moment a navigation
+        commits — before the new page has rendered anything — and taking that
+        as a step's tree handed the model the page *before* the popover it had
+        just clicked opened. On session 7d567b66 that is four steps in which
+        the agent clicked the same branch selector three times, was told
+        `ok` each time, and never saw a single branch name: the accessibility
+        tree was byte-identical at 151 targets and 3244 chars of page text
+        across all four.
+
+        So unsolicited frames are kept for what they are good for — the URL
+        moved, which `_ensure_fresh_obs` and the login wait both read — and
+        the step asks for a real one instead.
+        """
+        while True:
+            if self._obs_queue.empty():
+                log.debug("[%s] requesting observation", self._sid)
+                await self._ws_send({"type": "observe"})
+            else:
+                log.debug("[%s] using queued observation", self._sid)
+            try:
+                raw = await asyncio.wait_for(self._obs_queue.get(), timeout=30)
+            except asyncio.TimeoutError:
+                log.error("[%s] timed out waiting for observation", self._sid)
+                raise
+            # Unwrap before the reason check: an observation_error carries no
+            # reason and must raise TabUnreachable rather than be skipped as
+            # one more frame to wait behind.
+            obs = _unwrap_observation(raw)
+            if raw.get("reason") not in _UNSOLICITED:
+                break
+            log.debug("[%s] skipping unsolicited observation (%s)",
+                      self._sid, raw.get("reason") or "untagged")
+            self._pushed_obs = obs
         self._cached_obs = obs
         log.debug(
             "[%s] observation received  url=%s  ax=%d",
@@ -100,15 +137,26 @@ class ExtensionCDPRelay:
         return obs
 
     async def _send_action(self, action: dict) -> None:
-        """Send action to extension; wait for the auto-sent post-action observation."""
+        """Send action to extension; wait for the auto-sent post-action observation.
+
+        Same rule as `_get_observation`: the frame answering *this* action is
+        the one tagged `"action"`. A navigation push that lands mid-wait
+        belongs to whatever the page did, not to this call.
+        """
         log.debug("[%s] sending action %s", self._sid, action)
         await self._ws_send({"type": "action", "action": action})
-        try:
-            obs = await asyncio.wait_for(self._obs_queue.get(), timeout=30)
-        except asyncio.TimeoutError:
-            log.error("[%s] timed out waiting for post-action observation after %s", self._sid, action)
-            raise
-        obs = _unwrap_observation(obs)
+        while True:
+            try:
+                raw = await asyncio.wait_for(self._obs_queue.get(), timeout=30)
+            except asyncio.TimeoutError:
+                log.error("[%s] timed out waiting for post-action observation after %s", self._sid, action)
+                raise
+            obs = _unwrap_observation(raw)
+            if raw.get("reason") in (None, "action"):
+                break
+            log.debug("[%s] skipping unsolicited observation (%s) while waiting "
+                      "for the post-action frame", self._sid, raw.get("reason") or "untagged")
+            self._pushed_obs = obs
         self._cached_obs = obs
         log.debug(
             "[%s] post-action observation  url=%s  ax=%d",
@@ -173,13 +221,24 @@ class ExtensionCDPRelay:
         or tabs.onUpdated) into the cache. Does NOT request a new
         observation — that's _get_observation's job. Keeps get_current_url
         / get_page_title cheap while still reflecting state changes that
-        arrived between agent steps."""
-        if self._cached_obs is not None and self._obs_queue.empty():
+        arrived between agent steps.
+
+        This is the *one* caller an unsolicited frame is good for: the URL
+        moving is exactly what it reliably knows. `_get_observation` refuses
+        them for a step's tree, so a skipped push lands in `_pushed_obs`
+        instead of being dropped — and this reads it back out.
+        """
+        if (self._cached_obs is not None and self._obs_queue.empty()
+                and self._pushed_obs is None):
             return
         try:
-            self._cached_obs = await asyncio.wait_for(self._obs_queue.get(), timeout=0.5)
+            pushed = await asyncio.wait_for(self._obs_queue.get(), timeout=0.5)
         except asyncio.TimeoutError:
-            pass
+            pushed = None
+        # Raw, deliberately: this path never unwrapped and does not start.
+        # `_get_observation` is the one that raises TabUnreachable.
+        self._cached_obs = pushed if pushed is not None else self._pushed_obs
+        self._pushed_obs = None
 
     async def get_current_url(self) -> str:
         await self._ensure_fresh_obs()
@@ -239,7 +298,33 @@ class ExtensionCDPRelay:
             return f"Error executing: ref {ref!r} {why}"
         log.debug("[%s] clear_ref %r — click + select-all", self._sid, ref)
         await self._ws_send({"type": "action", "action": {"type": "click", **coords}})
-        await self._ws_send({"type": "action", "action": {"type": "key", "key": "a", "modifiers": 2}})
+        # Select through the DOM, not a key chord. There is no cross-platform
+        # keyboard shortcut for select-all — Meta on macOS, Ctrl everywhere
+        # else — and this process cannot know which one the user's browser
+        # wants, because it usually runs in a container on someone else's
+        # machine. Sending Ctrl unconditionally meant "move to line start" on
+        # a Mac, so the field kept its old text, `type_text` appended to it,
+        # and the model's only remaining move was Backspace, one character per
+        # step, for ten steps (session 7d567b66, field left holding
+        # "Protect mainmainProteProtect mainProtect mainct ma").
+        #
+        # `HTMLInputElement.select()` is specified as "select the text in this
+        # control" with no keyboard involved, so it is the same operation on
+        # every OS. `Input.insertText` then replaces the selection, which is
+        # the contract `type_text_to_ref` already relies on.
+        await self._ws_send({"type": "evaluate", "expression": SELECT_ALL_JS})
+        try:
+            result = await asyncio.wait_for(self._eval_queue.get(), timeout=15)
+        except asyncio.TimeoutError:
+            log.error("[%s] timed out selecting all in %r", self._sid, ref)
+            return f"Error executing: ref {ref!r} could not be cleared — no answer from the page"
+        if result != "select-all":
+            log.warning("[%s] select-all on %r returned %r", self._sid, ref, result)
+            return (
+                f"Error executing: ref {ref!r} could not be cleared — the page "
+                f"said {result!r}. If it is not a text field, use click or "
+                f"press_key instead."
+            )
         return f"Cleared [{ref}]"
 
     async def type_text_to_ref(self, ref: str, text: str) -> str:
@@ -254,13 +339,19 @@ class ExtensionCDPRelay:
         return f"Typed into [{ref}]"
 
     async def press_key(self, key: str, modifiers: int = 0) -> str:
-        if key not in _PRESSABLE_KEYS:
+        # A letter is rejected bare but allowed modified. A bare letter would
+        # type into the field, which is `type_text`'s job; a modified one is a
+        # shortcut like select-all, and refusing those left the model unable to
+        # express the one thing that fixes a field it had corrupted — it fell
+        # back to End + Backspace, one character per step, for ten steps.
+        bare_letter = len(key) == 1 and key.isalnum()
+        if key not in _PRESSABLE_KEYS and not (bare_letter and modifiers):
             return (
                 f"Error executing: press_key {key!r} is not a key this client can "
                 f"dispatch, so nothing was pressed. Use one of "
-                f"{', '.join(sorted(_PRESSABLE_KEYS))} — optionally with a "
-                f"modifiers bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8), e.g. "
-                f'{{"key": "a", "modifiers": 4}} to select all.'
+                f"{', '.join(sorted(_PRESSABLE_KEYS))}, or a single letter with a "
+                f"modifiers bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8). To replace "
+                f"a field's contents, just use type_text with the value you want."
             )
         log.info("[%s] press_key %r modifiers=%d", self._sid, key, modifiers)
         await self._send_action({"type": "key", "key": key, "modifiers": modifiers})

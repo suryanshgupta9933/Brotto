@@ -593,11 +593,30 @@ function setBadgeForResult(): void {
 
 // ── WebSocket observation sender ─────────────────────────────────────────────
 
-async function sendObservation(tabId: number): Promise<void> {
+/**
+ * Send one observation to the server.
+ *
+ * `reason` says who asked for it, which the server needs in order to know
+ * whether this frame is one it is *allowed* to read as a step's page:
+ *
+ *   "observe"   — the server asked. Always fresh and always waited on.
+ *   "action"    — the post-action frame. Fresh in the same sense.
+ *   "navigated" — nobody asked. `webNavigation.onCommitted` fires this, and
+ *                 it fires the instant a navigation commits, which is before
+ *                 the new page has rendered anything.
+ *
+ * Without it the server takes whatever frame it finds queued, and a
+ * `navigated` push can become a step's accessibility tree. That is not a
+ * slightly-stale tree: it is a tree of the page before the popover opened,
+ * so the model is shown a dropdown that has not rendered yet and told
+ * `Clicked [0:37563]: ok`. Measured on session 7d567b66 — the agent clicked
+ * the same branch-selector three times and never saw one branch.
+ */
+async function sendObservation(tabId: number, reason: "observe" | "action" | "navigated"): Promise<void> {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   try {
     const obs = await captureObservation(tabId);
-    ws.send(JSON.stringify({ type: "observation", seq: ++observationSeq, ...obs }));
+    ws.send(JSON.stringify({ type: "observation", seq: ++observationSeq, reason, ...obs }));
     if (typeof obs.url === "string" && obs.url !== lastObservedUrl) {
       lastObservedUrl = obs.url;
       void persistSession();
@@ -882,7 +901,7 @@ async function startRelay(
     switch (msg.type) {
       case "observe":
         if (tid === null) { sendObservationError("no tab attached"); break; }
-        await sendObservation(tid);
+        await sendObservation(tid, "observe");
         break;
 
       case "action":
@@ -904,7 +923,7 @@ async function startRelay(
           break;
         }
         await executeAction(tid, msg.action);
-        await sendObservation(tid);
+        await sendObservation(tid, "action");
         break;
 
       case "canonical_step":
@@ -1721,7 +1740,7 @@ async function initialize(): Promise<void> {
     chrome.webNavigation.onCommitted.addListener((details) => {
       if (details.frameId !== 0) return;
       if (activeTabId === null || details.tabId !== activeTabId) return;
-      void sendObservation(details.tabId);
+      void sendObservation(details.tabId, "navigated");
       const url = details.url ?? "";
       if (waitingForLogin && url && url !== lastObservedUrl) {
         signalResume();

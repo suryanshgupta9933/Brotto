@@ -181,6 +181,9 @@ async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
     holds focus, which is the HDFC failure class."""
     relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
     await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+    # clear_ref selects through the DOM rather than a key chord, so it waits on
+    # the evaluate channel. The page it is aimed at is a textbox, so it answers.
+    await relay._eval_queue.put("select-all")
 
     for method, args in (
         (relay.focus_ref, ("7",)),

@@ -708,6 +708,34 @@ Pinned by `scripts/test-key-dispatch.test.js`, which extracts the branch and
 evals it. A dropped field is an *absence*, and an absence reads clean in
 review.
 
+### Select-all is not a keyboard shortcut
+
+The ruleset name field ended up holding `Protect mainmainProteProtect mainProtect mainct ma`
+and the agent could not clear it. `clear_ref` sent `Ctrl+A`, which is select-all on Windows
+and Linux and **"move to line start" on macOS** — so the field kept its text, `type_text`
+appended to it, and the model's only remaining move was `End` + `Backspace`, one character
+per step, for ten steps. `press_key` could not rescue it either: `_PRESSABLE_KEYS` has no
+letters, so `{"key": "a", "modifiers": …}` was refused as a key the client cannot dispatch.
+
+`clear_ref` now selects through the DOM: `el.select()`, or a Range over `el` when it is a
+`contenteditable`. Both relays share one constant, `SELECT_ALL_JS` in `relay.py`, so dev
+and product cannot drift.
+
+**The tempting fix is wrong.** `sys.platform` in the relay, or `navigator.platform` in the
+extension, would each be correct on the machine you tested on and wrong everywhere else —
+and the extension is talking to a user's laptop, not to the server, so the server has no
+business deciding what that keyboard wants. There is no cross-platform chord for select-all;
+the DOM has the operation without one. `scripts/test-select-all.test.js` runs the constant
+against a fake DOM and asserts **no keyboard token appears anywhere in the script**, which
+is the regression that would otherwise return quietly.
+
+A letter is now accepted by `press_key` when a modifier is present, and refused bare — a
+bare letter is `type_text`'s job, a modified one is a shortcut.
+
+**`type_text` replaces the field; it always did.** The prompt said so in one place and
+`only inserts characters` in another, and the second reading is what sends the model down
+the Backspace path.
+
 ## Mid-task steering
 
 The only way to redirect a running task was Stop, which discards the transcript. Now the composer stays live while `executing`: it posts `{"type":"steer"}` and the correction lands on the next turn.
@@ -731,6 +759,153 @@ Three gaps caused it, all of them assumptions the prompt did not state:
 - **The stagnation note pushed the wrong way.** It said *"try a completely different approach or call cannot_complete now"*, so a model that had already established "none" was being told the only two exits were more variation or failure. It now offers the third: report what you have, because a well-established empty result is a complete answer.
 
 There is also a per-navigation gate in `<how_to_think>`: *do I already have an answer, and what specific evidence will this step add?* A step that cannot name its evidence in one sentence does not navigate.
+
+### The agent was asking the user what it could go and look up
+
+A live run of *"go to my github and add branch protection"* spent four round trips on
+two questions — *which repository is yours?* and *are you signed in?* — both of which
+are rendered on the page it was already looking at. It asked them again after the user
+had restated the instruction, then sat waiting. The user-visible cost is not the seconds;
+it is that every question is a person coming back to the panel.
+
+Three separate instructions were pushing the same way, and each was individually
+defensible:
+
+- `policy_preamble`: *"When uncertain about user intent, prefer `ask_human`. Never invent
+  or assume."* — correct about irreversible actions, wrong about **facts**.
+- `<prompt_injection_defense>`: *"When in doubt, emit `ask_human`. False-positive prompts
+  are cheap. False-negative approvals are not."* — an accounting error, because in this
+  loop an approval is not free: it is a round trip plus a card the user has to read.
+- `<how_to_think>` said nothing about who the work belongs to, so the default was to hand
+  ambiguity back.
+
+`<how_to_think>` now carries **"You are the user, at speed"** — a shadow framing, a
+"look before you ask" rule (anything observable on the page is not a question), "have an
+opinion" (an instruction with an obvious first move does not need the goal spelled out),
+and an explicit bar for `ask_human`: **out of options, or a fork where a wrong guess does
+real damage**. Everything else is carried. The preamble and injection-defense lines were
+rewritten to agree rather than push back — a prompt that contradicts itself resolves
+unpredictably, and the injection section now reads that section as governing *trust*, not
+interruption frequency, since the irreversible-action card is mechanical anyway.
+
+### Asking less must not delete *how* to ask
+
+The fix above ran, and the next live run died at step 3 with `invalid_decision` —
+and the audit's `errors[]` carried the model saying, in full:
+
+> *"I notice the tool harness is returning a JSON validation error on my replies. Let me
+> respond again in plain text without trying to use the agent action format, since I need
+> clarification from you first. I'm currently unable to proceed because: 1. I'm signed out of
+> GitHub."*
+
+It wanted to ask. It wrote the question as **prose** instead of calling `ask_human`, prose
+is not valid tool-call JSON, and three retries produced the same prose.
+
+**The prompt had never said prose is not an option.** The only warning was about literal
+newlines *inside the summary string* — a different failure with the same consequence.
+Nothing stated that the reply has exactly one shape.
+
+The uncomfortable part is the cause. Token counts prove the edit was live
+(`tokens_in` 12537 → 13141, the size of what was added), and the two lines this change
+**deleted** were the only instructions that said to use `ask_human` at all:
+
+> `When in doubt, emit ask_human and let the user decide.`
+> `When uncertain about user intent, prefer ask_human. Never invent or assume.`
+
+So the change rationed *how often* to ask by removing *how* to ask, and the run found the
+gap. Reducing a behaviour and removing the mechanism are not the same edit — when a prompt
+change makes an action rarer, check that the action is still *reachable*.
+
+`<output_format>` now opens by naming the one valid shape, says prose is a malformed reply
+rather than a question, and routes each intent to its call: a question is `ask_human`, a
+finish is `task_complete`, anything else is one sentence of `thought` and keep working. Both
+directions are tool calls, so there is no path that ends in prose — including the dangerous
+one, where a model told to ask less settles for narrating its hesitation instead of acting.
+
+This is the same disease `_require_actions` was added for: pydantic-ai hands the model its
+own schema error as the retry prompt, and a model that does not understand the complaint
+repeats it. There it was reachable, because a validator could re-ask with an instruction.
+Here prose never parses, so nothing downstream can intervene — the prompt is the only place.
+
+### "My" is a session, not a search term
+
+The same run also misread the task itself. *"Go to **my** github and add branch protection"*
+went to `github.com/search?q=brotto`, which returns every public repository with that name
+on the internet. The model then stalled on "which one is yours" — a question the site had
+already answered — and concluded the user was signed out.
+
+A possessive in a task names a **session**. GitHub, Drive, a bank, an inbox all render
+who is signed in in the page chrome: the avatar, the profile link, the workspace name.
+`<navigation_and_exploration>` now resolves the owner *first* — go to the site, read the
+identity out of the chrome, then go to that account's own list (`?tab=repositories`,
+"My Drive") and look there. Site-wide search is the fallback for when there really is no
+session, and that is the one case worth a single `ask_human`.
+
+Search-first is not merely slower here. It is *unanswerable*: ten identically-named public
+repos contain no information about which one is the user's, so the agent cannot converge,
+and every further step spends money re-reading the same ambiguous list.
+
+### The page you were already on was a prompt
+
+That run also opened with *"Allow Brotto to work on google.com?"* before Brotto had done
+anything. `visited_domains` was seeded from `_seed_granted_domains` — **grants the user
+made on previous runs** — and nothing put the page the user was looking at when they
+wrote the task into it. So the one prompt with only one possible answer was also the one
+guaranteed to fire first.
+
+`_seed_starting_domain` runs once before the step loop and adds `etld1(current_url)` to
+that same set. It is deliberately the *same* set every gate already reads, so it silences
+exactly one prompt: a cross-domain click, a blacklist hit, an `aria-hidden` target and an
+irreversible action are untouched, and the first hop **off** the starting page still asks.
+It does not write a standing grant, so it does not launder the page into a permission that
+outlives the run.
+
+**`CRITICAL_PATTERNS` was deliberately left alone.** `confirm`, `approve` and `reject`
+are matched against `f"{action} {action_args}"` — the model's own description text — so a
+routine click described as "Confirm branch protection" can fire a card. That is a real
+over-firing risk and it did not appear in this run. Whether it does is measurable: the
+`policies` rows with `kind: "critical_action"` in `logs/sessions/`. Loosen it on evidence,
+not on a vibe.
+
+### A step's page has to be a frame we asked for
+
+The agent clicked GitHub's "Set target branch" three times and never saw one branch. Every
+action recorded `ok: true`, and the reason it went nowhere is visible in one column of the
+audit — steps 10 through 13, `ax_targets: 151` and `page_text_chars: 3244` at every one.
+**Byte-identical.** Not a stale rendering of a changed page; the same page four times.
+
+The correlate is in the timings. Per-step `observe` alternates **3.0s / 0.001s**, and the
+1ms steps are exactly the ones that got a free frame. `ExtensionCDPRelay._send_action`
+drains the post-action observation, but `webNavigation.onCommitted` *also* pushes one on
+its own, and `_get_observation` took whatever was on the queue without asking whether the
+server had requested it. So a push fired the instant a navigation committed — before the
+popover had rendered — became the next step's accessibility tree. The model was shown the
+page *before* the thing it had just clicked opened, and told `ok`.
+
+`sendObservation` now tags every frame with why it was sent — `observe`, `action`, or
+`navigated` — and `_get_observation` / `_send_action` skip `navigated` frames, stashing
+them in `_pushed_obs` for `_ensure_fresh_obs`, which is the one caller they are good for:
+the URL moved, which they know reliably.
+
+**An absent `reason` is not treated as unsolicited.** An extension predating the field
+sends none, and skipping untagged frames makes every step request an observation, discard
+it, and request again — forever, with no timeout to stop it, because the extension keeps
+answering. Only an extension that positively says `navigated` is trusted to mean it. The
+frame is unwrapped *before* the reason is checked, too: an `observation_error` carries no
+reason, and checking first would swallow it and hang the step instead of reporting a lost
+tab.
+
+**The diff was not the missing piece.** `compute_ax_diff` has always run and
+`### What changed after last action` has always been spliced into the prompt
+(`harness.py:500`). On those steps it said `(no changes detected)` — correctly, because a
+stale tree genuinely has nothing new in it. The model was told, in plain text, that its
+click changed nothing, and clicked again. That is the same failure as not being told; a
+correct signal that gets ignored needs the underlying fault fixed, not a louder signal.
+
+Note what this does *not* fix: a click that opens a menu still costs a step to learn it
+did. The post-action frame arrives after the model has already decided, so the diff is
+computed at the top of the *next* step and cannot collapse the two. What it fixes is the
+model clicking a toggle three times, open-shut-open, against a menu it could not see.
 
 ### Stagnation detection — removed, not fixed
 
