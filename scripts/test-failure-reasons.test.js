@@ -73,10 +73,32 @@ function noteKeys() {
   const start = panel.search(/const FAILURE_NOTE = \{/);
   if (start < 0) throw new Error("no FAILURE_NOTE table in sidepanel.js — renamed?");
   const body = panel.slice(start, panel.indexOf("\n};", start));
-  return new Set([...body.matchAll(/^\s*([a-z_]+):/gm)].map((m) => m[1]));
+  return new Set([...body.matchAll(/^\s*([A-Za-z_]+):/gm)].map((m) => m[1]));
+}
+
+/**
+ * Every code the *extension* writes, from background.ts.
+ *
+ * Same contract as above and the same trap: six client-side conditions
+ * (START_FAILED, NO_ACTIVE_TAB, TASK_ERROR, CANCELLED, WS_ERROR,
+ * CONNECTION_LOST) all reached the panel and all landed on the fallthrough,
+ * so a task the user cancelled was reported as "Something went wrong. The
+ * details are in Brotto's log" — and there is no Brotto log holding a tab
+ * that was never focused.
+ */
+function clientReasons() {
+  const worker = fs.readFileSync(
+    path.join(ROOT, "clients", "brotto-extension", "src", "background.ts"), "utf8");
+  const found = new Map();
+  for (const m of worker.matchAll(/failure_reason:\s*"([A-Za-z_]+)"/g)) {
+    const line = worker.slice(0, m.index).split("\n").length;
+    found.set(m[1], `background.ts:${line}`);
+  }
+  return found;
 }
 
 const reasons = serverReasons();
+const client = clientReasons();
 const notes = noteKeys();
 
 let failed = 0;
@@ -91,6 +113,7 @@ function check(ok, label, detail) {
 }
 
 console.log(`server reasons found: ${[...reasons.keys()].sort().join(", ")}`);
+console.log(`client reasons found: ${[...client.keys()].sort().join(", ")}`);
 console.log(`FAILURE_NOTE keys:    ${[...notes].sort().join(", ")}\n`);
 
 console.log("every code the server sends has a sentence the user can read");
@@ -100,6 +123,16 @@ for (const [reason, file] of [...reasons].sort()) {
     `${reason} has a FAILURE_NOTE entry`,
     `emitted by ${file}; failureNote() falls through to "the details are in ` +
       `Brotto's log" for an unmapped code`,
+  );
+}
+
+console.log("\nevery code the extension writes has a sentence too");
+for (const [reason, file] of [...client].sort()) {
+  check(
+    notes.has(reason),
+    `${reason} has a FAILURE_NOTE entry`,
+    `emitted by ${file}; it is a client-side condition, so the fallthrough ` +
+      `points the user at a log that never saw it`,
   );
 }
 

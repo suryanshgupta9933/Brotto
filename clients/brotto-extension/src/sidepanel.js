@@ -2549,6 +2549,18 @@ const FAILURE_NOTE = {
   user_denied: 'You declined the action, so Brotto stopped.',
   user_skipped_login: 'You skipped the sign-in, so Brotto stopped.',
   login_timeout: 'Brotto stopped waiting for the sign-in. Sign in, then press Resume.',
+
+  // ── Codes the extension writes itself ─────────────────────────────────
+  // These come from background.ts, not the server, and every one of them is
+  // a client-side condition whose cause is in the bubble footer right below.
+  // Falling through to "the details are in Brotto's log" is not just vague —
+  // there is no Brotto log for a tab that was never focused.
+  START_FAILED: "Brotto could not start the run. The reason is below — opening DevTools on a page ends the debugging session.",
+  NO_ACTIVE_TAB: "Brotto had no browser tab to work in. Open a page and send the task again.",
+  TASK_ERROR: "Brotto's server hit an error and stopped the run. The details are below.",
+  CANCELLED: "You stopped this task.",
+  WS_ERROR: "Brotto lost the connection to its server. Check that it's running, then send the task again.",
+  CONNECTION_LOST: "Brotto lost the connection to its server and could not get it back. Check that it's running, then send the task again.",
 };
 
 // A fetch to a server that is not there rejects with the same TypeError on
