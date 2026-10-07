@@ -1486,6 +1486,7 @@ if (saveSettingsBtn) {
     saveSettingsBtn.textContent = 'Saving…';
     renderVerifyStatus();
     let serverOk = false;
+    let serverNote = '';
     try {
       const base = settings.serverUrl.replace(/\/$/, '');
       const r = await fetch(`${base}/v1/policy_ack`, {
@@ -1494,6 +1495,18 @@ if (saveSettingsBtn) {
         body: JSON.stringify({ settings: { blacklist: settings.blacklist }, user_id: await deviceId() }),
       });
       serverOk = r.ok;
+      // A wrong key is a 404, not a 403, so on its own it reads as a missing
+      // route. /health is unauthenticated, so it is the one probe that tells
+      // a refused key apart from a server that is not there.
+      if (!serverOk && r.status === 404) {
+        try {
+          serverNote = (await fetch(`${base}/health`)).ok
+            ? ' server answered but rejected AGENT_SECRET'
+            : ' server unreachable';
+        } catch {
+          serverNote = ' server unreachable';
+        }
+      }
       console.log('[brotto] policy_ack http status', r.status);
     } catch (e) {
       console.warn('[brotto] policy_ack http failed (server may be offline):', e);
@@ -1514,7 +1527,7 @@ if (saveSettingsBtn) {
         : '⚠ Saved — SW did not ack (will retry on next task)';
     } else {
       state.serverReachable = false;
-      saveSettingsBtn.textContent = '⚠ Saved locally — server unreachable';
+      saveSettingsBtn.textContent = `⚠ Saved locally —${serverNote || ' server unreachable'}`;
     }
     renderVerifyStatus();
     setTimeout(() => {
@@ -4739,6 +4752,15 @@ goalEl.focus();
   try {
     const res = await fetch(url + '/health', { method: 'GET' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // `/health` is unauthenticated, so it says nothing about the key — and a
+    // wrong key is a 404 on every gated route. One more request here tells
+    // the panel apart from a server that is not running, at the moment the
+    // user is opening the panel to find out why nothing works.
+    const authed = await fetch(url + '/v1/policy', { method: 'GET', headers: await authHeaders() });
+    if (authed.status === 404) {
+      setConnPill('error', 'Key rejected');
+      toast('The server answered but rejected AGENT_SECRET — fix it in Settings', 'bad', 6000);
+    }
     state.plannerUrl = url;
     // The catalogue was loaded above against whatever URL the field held
     // then — the default, on a first open. Now that the saved server is

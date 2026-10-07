@@ -129,8 +129,12 @@ elif os.environ.get("AGENT_SECRET"):
     log.warning("AGENT_AUTH_DISABLED=true — AGENT_SECRET is set but ignored")
 else:
     log.warning(
-        "AGENT_SECRET is unset: every caller is trusted. Fine on localhost; "
-        "set it before exposing this server on a network."
+        "AGENT_SECRET is unset: every caller is trusted, so anyone who can "
+        "reach this port can drive the agent against your logged-in browser. "
+        "Fine on localhost. Before exposing this server, set AGENT_SECRET in "
+        "the .env beside docker-compose.yml and paste the same value into "
+        "Brotto's Settings — a wrong one is refused as a 404, which reads "
+        "like a missing route if the panel has nothing better to say."
     )
 
 # ponytail: match the sidepanel's MAX_TASK_CHARS. Anything over this is

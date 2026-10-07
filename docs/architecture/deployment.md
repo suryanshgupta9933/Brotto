@@ -184,6 +184,31 @@ it in plain text into the access log of this server and of any proxy in
 front of it, permanently. The server selects the protocol *name* back
 (`brotto-v1`) rather than echoing the secret.
 
+### A refused key looks like a missing route
+
+A wrong `AGENT_SECRET` is answered **404, not 403** — 403 would confirm the
+route is worth probing — so on its own it is indistinguishable from "no such
+endpoint", which is what every extension caller used to report. The panel
+spent three retries and three "Server unreachable" toasts telling a
+self-hoster to debug a server that was running perfectly.
+
+`/health` is the separator, and it works only because it is
+**unauthenticated**: the Docker healthcheck needs it, and it is the one probe
+that answers when the server is up and throws when it is not. An
+authenticated 404 plus a live `/health` means the key. Three call sites read
+that pair — session create (`describeAuthFailure`, `background.ts`), the
+Settings save (`sidepanel.js`) and the first-run wizard (`welcome.js`) — and
+each *stops* rather than retrying, because attempt 3 returns the same refusal
+as attempt 1.
+
+The startup warning names the `.env` beside `docker-compose.yml` for the
+same reason. No secret is generated for the user on purpose: an ephemeral one
+would change on every container restart and force a re-paste each time, which
+is a worse failure than the one it removes. The wizard collects it once and
+stores it in `settings.agentSecret` — `storage.local`, not `storage.session`,
+because it is a property of the server the user chose rather than of the
+session. (The *model* key stays in `storage.session` and is a different key.)
+
 ## What still needs doing before this is publicly reachable
 
 Nothing is open. Each of these was a launch gate and each is closed as of

@@ -210,6 +210,11 @@
         <p class="hint">Leave this as-is if you're using the Brotto service. Change it only if you run your own server.</p>
         <div id="serverStatus"></div>
       </div>
+      <div class="field">
+        <label for="agentSecret">Server key</label>
+        <input id="agentSecret" class="input" type="password" placeholder="Only if your server sets one" autocomplete="off" spellcheck="false" />
+        <p class="hint">The <code>AGENT_SECRET</code> from the <code>.env</code> beside your <code>docker-compose.yml</code>. A server that sets one turns auth on by itself; leave this blank if yours doesn't.</p>
+      </div>
     </section>
 
     <section class="step" data-step="3" aria-labelledby="s3h">
@@ -229,7 +234,7 @@
       <div class="field">
         <label for="apiKey">API key</label>
         <input id="apiKey" class="input" type="password" placeholder="Leave blank to use server default" autocomplete="off" />
-        <p class="hint">Stored for this browser session only, and cleared when you quit. If your server already has a key, you can leave this blank.</p>
+        <p class="hint">Stored for this browser session only, and cleared when you quit. A <code>docker compose</code> server carries no model key of its own, so if you self-host, paste one here.</p>
       </div>
     </section>
 

@@ -67,6 +67,28 @@ async function authHeaders(): Promise<Record<string, string>> {
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
+/** Why the server turned an authenticated call away, in words the user can act on.
+ *
+ * A wrong `AGENT_SECRET` gets **404, not 403** — 403 would confirm the route
+ * is worth probing — so on its own the status reads as "no such endpoint".
+ * `/health` is unauthenticated by design (the Docker healthcheck needs it),
+ * which makes it the one probe that separates a server that is not running
+ * from a server that refused the key. Without this the two are the same
+ * toast, and the user debugs the wrong machine. */
+async function describeAuthFailure(): Promise<string> {
+  try {
+    const health = await fetch(`${serverUrl}/health`, { method: "GET" });
+    if (health.ok) {
+      return "The server answered but rejected AGENT_SECRET. "
+        + "Check it in Settings against the AGENT_SECRET on your server "
+        + "(docker compose: the .env beside docker-compose.yml).";
+    }
+  } catch {
+    // Not running either. Fall through to the address sentence.
+  }
+  return `Can't reach ${serverUrl} — is the server running?`;
+}
+
 // A browser cannot set headers on a WebSocket. The subprotocol is the one
 // transport that does not leak: the query string would put the secret in
 // plain text in the server's access log and in Caddy's, permanently, and
@@ -748,6 +770,10 @@ async function startRelay(
       session_id = sessionId as string;
       wsUrl = `${serverUrl.replace(/^http/, "ws")}/ws/ext/${session_id}`;
     } else {
+      // Set only when the failure is not worth retrying — a refused key is
+      // the same answer on attempt 3 as on attempt 1, and three "server
+      // unreachable" toasts send the user to debug a server that is running.
+      let giveUp = "";
       for (let attempt = 1; attempt <= SESSION_ATTEMPTS; attempt++) {
         if (attempt > 1) {
           notifyUi({ type: "server_unreachable", attempt, of: SESSION_ATTEMPTS });
@@ -759,6 +785,9 @@ async function startRelay(
             headers: { "Content-Type": "application/json", ...(await authHeaders()) },
             body: "{}",
           });
+          // 404 is this server's answer to a wrong key — 403 would confirm
+          // the route is worth probing. See `describeAuthFailure`.
+          if (resp.status === 404) { giveUp = await describeAuthFailure(); break; }
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           session = await resp.json() as { session_id: string; websocket_url: string };
           break;
@@ -766,7 +795,7 @@ async function startRelay(
           console.warn(`[brotto] session create attempt ${attempt}/${SESSION_ATTEMPTS} failed:`, err);
         }
       }
-      if (!session) throw new Error(`Can't reach ${serverUrl} after ${SESSION_ATTEMPTS} attempts. Is the server running?`);
+      if (!session) throw new Error(giveUp || `Can't reach ${serverUrl} after ${SESSION_ATTEMPTS} attempts. Is the server running?`);
       session_id = session.session_id;
       sessionId = session_id;
     }

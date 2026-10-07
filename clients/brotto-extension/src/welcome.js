@@ -17,6 +17,7 @@ const $back = document.getElementById("backBtn");
 const $next = document.getElementById("nextBtn");
 const $skip = document.getElementById("skipBtn");
 const $serverUrl = document.getElementById("serverUrl");
+const $agentSecret = document.getElementById("agentSecret");
 const $serverStatus = document.getElementById("serverStatus");
 const $provider = document.getElementById("provider");
 const $model = document.getElementById("model");
@@ -72,15 +73,31 @@ $provider.addEventListener("change", populateModels);
 catalog = brottoModelCatalog.load($serverUrl.value.trim() || DEFAULT_SERVER);
 catalog.then(populateProviders);
 
-// A dead server address is the one mistake here that costs the user a
-// confused first task, so say so now rather than on their first send.
+// A dead server address, or a wrong key, is the mistake here that costs the
+// user a confused first task — so say so now rather than on their first send.
+// The two are one check: `/health` is unauthenticated, so it only proves the
+// server is up. A 404 from an authenticated route is this server's answer to a
+// refused key (403 would confirm the route is worth probing), which without
+// this reads as a missing endpoint and sends them to debug the wrong thing.
 async function checkServer() {
   const base = $serverUrl.value.trim() || DEFAULT_SERVER;
+  const secret = $agentSecret.value.trim();
   $serverStatus.textContent = "Checking…";
   $serverStatus.className = "";
   try {
     const res = await fetch(base + "/health", { method: "GET" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (secret) {
+      const authed = await fetch(base + "/v1/policy", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${secret}` },
+      });
+      if (authed.status === 404) {
+        $serverStatus.textContent = "Reachable, but that key was refused — check it against the AGENT_SECRET on your server";
+        $serverStatus.className = "bad";
+        return;
+      }
+    }
     $serverStatus.textContent = "Reachable";
     $serverStatus.className = "ok";
   } catch {
@@ -89,6 +106,7 @@ async function checkServer() {
   }
 }
 $serverUrl.addEventListener("blur", checkServer);
+$agentSecret.addEventListener("blur", checkServer);
 
 async function finish() {
   const server = $serverUrl.value.trim() || DEFAULT_SERVER;
@@ -98,12 +116,19 @@ async function finish() {
   const key = $apiKey.value.trim();
 
   // Same storage shapes sidepanel.js reads: config persists, key does not.
-  // The first-run screen has no base-URL field — a self-hosted endpoint is set
-  // in Settings, where there is room to explain it.
+  // The model key lives in storage.session (cleared with the browser), but
+  // agentSecret is part of `settings` and stays — it is a property of the
+  // server the user chose, not of the session, and retyping it every restart
+  // is the friction this field exists to remove.
   const saved = await chrome.storage.local.get("settings");
   await Promise.all([
     chrome.storage.local.set({
-      settings: { ...(saved.settings || {}), serverUrl: server, onboarded: true },
+      settings: {
+        ...(saved.settings || {}),
+        serverUrl: server,
+        agentSecret: $agentSecret.value.trim(),
+        onboarded: true,
+      },
       modelConfig: { provider, model, context_window: ctx },
     }),
     key ? chrome.storage.session.set({ modelApiKey: key }) : Promise.resolve(),
@@ -129,6 +154,7 @@ $skip.addEventListener("click", () => {
 (async () => {
   const stored = await chrome.storage.local.get("settings");
   $serverUrl.value = stored.settings?.serverUrl || DEFAULT_SERVER;
+  $agentSecret.value = stored.settings?.agentSecret || "";
   populateModels();
   show(1);
 })();
