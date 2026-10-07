@@ -1069,7 +1069,7 @@ async function startRelay(
         // to be forwarded — the panel draws the card with the Resume, and
         // nothing else carries the url and title it needs.
         waitingForLogin = false;
-        currentPrompt = "";
+        currentPrompt = null;
         notifyUi({
           type: "login_timeout",
           url: msg.url ?? "",
