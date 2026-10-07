@@ -118,3 +118,28 @@ async def test_a_non_ascii_letter_is_not_a_shortcut():
 
     assert out.startswith("Error executing")
     assert not sent
+
+
+@pytest.mark.asyncio
+async def test_a_letter_with_no_real_modifier_is_not_a_shortcut():
+    """The mask has to come before the guard, not after.
+
+    Masked afterwards, `press_key("a", 4096)` satisfies `bare_letter and
+    modifiers` on the truthy 4096, and is then dispatched with the modifier
+    stripped — a bare "a", which types into the field. That is the one
+    outcome the bare-letter guard exists to prevent, and it is also how the
+    extension produced `Pressed ControlOrMeta+a: ok` with nothing pressed.
+    """
+    from brotto_orchestrator.cdp.extension_relay import ExtensionCDPRelay
+
+    sent: list[dict] = []
+
+    async def ws_send(msg: dict) -> None:
+        sent.append(msg)
+
+    relay = ExtensionCDPRelay(ws_send, asyncio.Queue(), asyncio.Queue(), "t")
+
+    out = await relay.press_key("a", modifiers=4096)
+
+    assert out.startswith("Error executing")
+    assert not sent

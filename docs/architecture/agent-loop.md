@@ -717,6 +717,14 @@ appended to it, and the model's only remaining move was `End` + `Backspace`, one
 per step, for ten steps. `press_key` could not rescue it either: `_PRESSABLE_KEYS` has no
 letters, so `{"key": "a", "modifiers": …}` was refused as a key the client cannot dispatch.
 
+A modified letter is therefore allowed, and `modifiers` is masked to `0xF` — **before** the
+guard, not after. The ordering is the whole correctness of the mask: applied afterwards,
+`press_key("a", 4096)` satisfies `bare_letter and modifiers` on the truthy 4096 and is then
+dispatched with the modifier stripped, which is a bare `"a"` typing into the field — the
+exact outcome the guard exists to prevent. The failure is quiet from the caller's side and
+expensive: `_send_action` then waits the full observation timeout for a post-action frame
+that a keystroke never produces.
+
 `clear_ref` now selects through the DOM: `el.select()`, or a Range over `el` when it is a
 `contenteditable`. Both relays share one constant, `SELECT_ALL_JS` in `relay.py`, so dev
 and product cannot drift.

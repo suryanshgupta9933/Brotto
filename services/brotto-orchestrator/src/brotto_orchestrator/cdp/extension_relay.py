@@ -382,6 +382,12 @@ class ExtensionCDPRelay:
         # shortcut like select-all, and refusing those left the model unable to
         # express the one thing that fixes a field it had corrupted — it fell
         # back to End + Backspace, one character per step, for ten steps.
+        # Mask before the guard, not after: only those four bits are modifiers,
+        # anything above them is undefined in the extension's dispatch. Masked
+        # afterwards, `press_key("a", 4096)` would satisfy the guard on the
+        # truthy 4096 and then be dispatched as a bare "a" — which types into
+        # the field, the one outcome the guard exists to prevent.
+        modifiers &= 0xF
         # ASCII only: `str.isalnum()` is true for "é" and "क" too, and CDP
         # would happily dispatch a character the model had no reason to name.
         bare_letter = len(key) == 1 and key.isascii() and key.isalnum()
@@ -393,9 +399,6 @@ class ExtensionCDPRelay:
                 f"modifiers bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8). To replace "
                 f"a field's contents, just use type_text with the value you want."
             )
-        # Only those four bits are modifiers. Anything above them is undefined
-        # in the extension's dispatch, so drop it here rather than forward it.
-        modifiers &= 0xF
         log.info("[%s] press_key %r modifiers=%d", self._sid, key, modifiers)
         await self._send_action({"type": "key", "key": key, "modifiers": modifiers})
         return "ok"
