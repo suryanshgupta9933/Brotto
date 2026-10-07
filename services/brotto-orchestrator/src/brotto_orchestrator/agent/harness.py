@@ -132,6 +132,11 @@ def _as_int(value: object, default: int) -> int:
 # user is not "approving" an agent action, they're answering a question.
 # Card UI is different (no Approve/Deny buttons).
 _QUESTION_ACTIONS = {"ask_human"}
+
+# The outcome prefix an ask_human reply is wrapped in. Named so the
+# record-time scrubber can recover the reply from the outcome string
+# instead of re-deriving it.
+_ASK_REPLY_PREFIX = "User replied: "
 # Combined set: actions that should NEVER appear inside an approval card
 # (terminal + internal + question). Every card-emitting loop filters on this
 # before deciding whether to prompt — the internal four are the reason: their
@@ -537,19 +542,62 @@ async def _ask_user(deps: AgentDeps, audit, *, turn: int, kind: str,
     return approved
 
 
+def _reply_is_secret(question: str, reply: str) -> bool:
+    """True when an `ask_human` reply is the answer to a secret question.
+
+    `is_secret_field` is a *name* test, written for a DOM field's
+    attributes and accessible name. With `attributes=None` it reduces to
+    that pattern over the string, which is the right question to ask of an
+    ask_human exchange in either direction: "what's the verification code?"
+    invites an OTP into the reply box, and "my password is …" is the other
+    shape. The reply alone misses the first, because bare digits match no
+    name pattern — so the question is tested too, and either one redacts.
+
+    The asymmetry is the one the type_text path already accepts: a false
+    positive costs a replay that reads [redacted], a false negative costs
+    the secret on disk.
+    """
+    return is_secret_field(None, reply) or is_secret_field(None, question)
+
+
+def _recorded_reply_outcome(call: ActionCall, outcome: str) -> tuple[str, bool]:
+    """(outcome-for-disk, redacted) for an `ask_human` action.
+
+    The outcome string goes to disk *and* to the model in the next step's
+    prompt, so an ask_human reply is scrubbed for the record only — a
+    redacted answer is a task that cannot finish. Every other action
+    returns unchanged, which is the same shape `_scrubbed` gives type_text.
+    """
+    if call.action != "ask_human":
+        return outcome, False
+    reply = outcome[len(_ASK_REPLY_PREFIX):]
+    if not _reply_is_secret(str(call.action_args.get("question", "")), reply):
+        return outcome, False
+    return f"{_ASK_REPLY_PREFIX}{REDACTED}", True
+
+
 async def _ask_user_text(deps: AgentDeps, audit, *, turn: int, action: str,
                          args: dict, message: dict) -> str:
     """`ask_human` needs the reply itself, not a boolean, so it gets its
-    own thin variant over the same two audit calls."""
+    own thin variant over the same two audit calls.
+
+    Returns the *raw* reply — the caller wraps it into the action outcome
+    the model reads next step, and a redacted answer is a task that cannot
+    finish. Disk gets the scrubbed value; the prompt does not. Same split
+    `_scrubbed` makes for `type_text`.
+    """
+    question = str(args.get("question", ""))
     pid = audit.record_prompt(turn, kind="ask_human", action=action, args=args,
-                              domain=None,
-                              reason=str(args.get("question", "")))
+                              domain=None, reason=question)
     await deps.ws_send(message)
     t0 = time.perf_counter()
-    reply = await deps.human_input_queue.get()
-    audit.resolve_prompt(pid, decision="answered", response=str(reply),
-                         wait_ms=int((time.perf_counter() - t0) * 1000))
-    return str(reply)
+    reply = str(await deps.human_input_queue.get())
+    audit.resolve_prompt(
+        pid, decision="answered",
+        response=REDACTED if _reply_is_secret(question, reply) else reply,
+        wait_ms=int((time.perf_counter() - t0) * 1000),
+    )
+    return reply
 
 
 async def _await_login(deps: AgentDeps, cdp, *, timeout: float = 300.0,
@@ -1312,13 +1360,13 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             question = args.get("question", "")
             if audit is None:
                 await deps.ws_send({"type": "ask_human", "question": question})
-                return f"User replied: {await deps.human_input_queue.get()}"
+                return f"{_ASK_REPLY_PREFIX}{await deps.human_input_queue.get()}"
             reply = await _ask_user_text(
                 deps, audit, turn=turn, action="ask_human",
                 args={"question": question},
                 message={"type": "ask_human", "question": question},
             )
-            return f"User replied: {reply}"
+            return f"{_ASK_REPLY_PREFIX}{reply}"
 
         else:
             return f"Unknown action: {action}"
@@ -2514,10 +2562,14 @@ class AgentHarness:
                 action_trace.append(trace)
                 t_a = time.perf_counter()
                 outcome = await _execute_action(call, deps, audit=audit, turn=a_turn)
+                # `outcome` goes to disk here *and* to the model in the next
+                # step's prompt, so an ask_human reply is scrubbed for the
+                # record only — the model still gets the answer it needs.
+                rec_outcome, reply_redacted = _recorded_reply_outcome(call, outcome)
                 audit.record_action(
-                    a_turn, action=call.action, args=rec_args, outcome=outcome,
+                    a_turn, action=call.action, args=rec_args, outcome=rec_outcome,
                     ok=_EXEC_FAILURE not in outcome,
-                    redacted=redact,
+                    redacted=redact or reply_redacted,
                     duration_ms=int((time.perf_counter() - t_a) * 1000),
                 )
                 outcomes.append(outcome)
