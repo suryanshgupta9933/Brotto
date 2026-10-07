@@ -1609,9 +1609,21 @@ function recordFeedback(kind) {
 // case, so retry used to silently fail. Mirroring run_local_task also
 // guarantees the orchestrator sees a fresh session. The goal must be
 // captured BEFORE resetForNewTask — that fn clears state.lastGoal.
+//
+// The retry button sits on every assistant message, so it is clickable
+// mid-run. Retry is the one path that resets first and sends second, and
+// resetForNewTask clears the transcript, sets taskInFlight = false and
+// hides Stop — so a retry during a run wiped the live transcript, stopped
+// the clock's owner and started a second run while the first was still
+// writing frames into it. Guarded here rather than in sendMessage because
+// the damage is the reset, which happens before that call.
 function retryLastTask() {
   const goal = state.lastGoal;
   if (!goal) return;
+  if (state.taskInFlight) {
+    toast('Brotto is still working on this task.', 'warn');
+    return;
+  }
   resetForNewTask();
   void sendMessage({
     type: 'run_local_task',

@@ -190,6 +190,33 @@ check(
   "six attempts is ~30s of 'retrying' before the panel admits the run is over",
 );
 
+// ── Retrying mid-run orphans the run that is already going ─────────────────
+//
+// The retry button is on every assistant message, so it is clickable while a
+// task is in flight. retryLastTask was the one path that resets *before* it
+// sends: resetForNewTask() clears the transcript, drops taskInFlight and
+// hides Stop, and only then does sendMessage fire the second run — which then
+// takes the `if (state.taskInFlight) return` guard sendMessage has, because
+// retry just cleared it. The live run's frames kept arriving into a
+// transcript that no longer had them, with no Stop button to end it.
+//
+// Ordering is the whole bug and ordering is invisible in a return value, so
+// assert the guard precedes the reset rather than that a guard exists.
+console.log("\nretry cannot orphan a run that is already in flight");
+const retry = /function retryLastTask\(\)\s*\{([\s\S]*?)\n\}/.exec(panel);
+check(!!retry, "retryLastTask is findable");
+if (retry) {
+  const body = retry[1];
+  const guard = body.search(/state\.taskInFlight/);
+  const reset = body.search(/resetForNewTask\(\)/);
+  check(guard >= 0, "retryLastTask checks for a live run", body.trim());
+  check(
+    guard >= 0 && reset >= 0 && guard < reset,
+    "the check comes before the reset",
+    "resetForNewTask clears taskInFlight, so a guard after it always passes",
+  );
+}
+
 console.log(
   failed === 0
     ? "\nall checks passed"
