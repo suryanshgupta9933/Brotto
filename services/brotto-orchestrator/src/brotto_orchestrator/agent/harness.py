@@ -1288,7 +1288,13 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             deps.result = TaskResult(
                 status="failed",
                 summary=reason or "Task could not be completed",
-                failure_reason="policy_preflight" if preflight else (reason or None),
+                # A code, not the agent's sentence. `failure_reason` is a code
+                # by contract — the panel translates each one into a sentence
+                # naming the family and keeps `summary` as the detail, so a
+                # free-text reason matched nothing and rendered "Something went
+                # wrong. The details are in Brotto's log." over the reason
+                # itself, which was right there in the transcript.
+                failure_reason="policy_preflight" if preflight else "cannot_complete",
                 tried=tried,
                 steps_taken=deps.step_number,            )
             # Audit row so the compliance trail shows the agent declined
@@ -1460,7 +1466,7 @@ async def _plan_step(
         deps.result = TaskResult(
             status="failed",
             summary=f"scripted target not found: {e}",
-            failure_reason=f"scripted target did not resolve: {e}",        )
+            failure_reason="scripted_target_unresolved",        )
         return None
     except UserError as e:
         # Convert "Unknown model" failures to a model_not_found

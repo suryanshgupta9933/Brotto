@@ -2425,6 +2425,7 @@ const OUTCOME_BY_REASON = {
   user_denied: ['stopped', 'STOPPED BY YOU'],
   user_skipped_login: ['stopped', 'STOPPED BY YOU'],
   runaway_backstop: ['gave-up', 'TOO LONG'],
+  cannot_complete: ['gave-up', 'GAVE UP'],
   task_refused: ['error', 'COULD NOT RESUME'],
   policy_blocked: ['blocked', 'BLOCKED'],
   policy_preflight: ['blocked', 'BLOCKED'],
@@ -2491,6 +2492,20 @@ const FAILURE_NOTE = {
   tab_unreachable: 'Brotto lost the tab it was driving. Opening DevTools on a page ends the debugging session — close DevTools and send the task again.',
   policy_preflight: 'Brotto refused the task: the site is on your blocked list.',
   policy_blocked: 'Brotto stopped: the task was blocked by your security policy.',
+  scripted_target_unresolved: 'Brotto could not resolve an element on the page.',
+
+  // ── The run gave up ───────────────────────────────────────────────────
+  // `cannot_complete` is the agent declining, which is a legitimate end and
+  // not a fault: it says what it tried and why it could not finish, and that
+  // reason is the `summary` appended below this sentence. It used to arrive as
+  // the agent's own prose in `failure_reason`, so the lookup missed and the
+  // user got "the details are in Brotto's log" over a reason sitting in the
+  // transcript in plain English.
+  cannot_complete: 'Brotto could not find a way to finish this. What it tried is below.',
+  // Pro only: BROTTO_MAX_TASK_COST_USD is refused without BROTTO_PRO, so a
+  // free build cannot reach this. The sentence is here so the cap has one when
+  // it is switched on.
+  budget_exhausted: 'Brotto stopped: this task reached the cost limit you set.',
 
   // ── The run, not the software ──
   runaway_backstop: 'Brotto stopped after 150 steps without finishing. Try a smaller task.',

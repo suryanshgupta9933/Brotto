@@ -143,10 +143,13 @@ async def test_an_unknown_provider_is_not_reported_as_a_scripted_target(monkeypa
 async def test_unresolved_scripted_target_becomes_failed_result():
     """The other half: the typed handler still does its job, so an
     unresolvable scripted ref is reported as a perception gap rather than
-    crashing the run."""
+    crashing the run.
+
+    `failure_reason` is a code, not a sentence — the panel has a note for
+    each one and appends `summary` as the detail. The ref that failed to
+    resolve is in the summary, which is where the user reads it."""
     deps = _deps(scripted_planner=_UnresolvingPlanner())
     assert await _plan_step(deps, _turn(), agent=object()) is None
     assert deps.result.status == "failed"
-    assert deps.result.failure_reason == (
-        "scripted target did not resolve: ref 'Next' did not resolve"
-    )
+    assert deps.result.failure_reason == "scripted_target_unresolved"
+    assert "did not resolve" in deps.result.summary
