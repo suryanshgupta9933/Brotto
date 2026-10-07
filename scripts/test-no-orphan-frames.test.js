@@ -217,6 +217,41 @@ if (retry) {
   );
 }
 
+// ── A sign-in timeout suspends, it does not fail ───────────────────────────
+//
+// The harness waits 300s at a login wall and then suspends the run. That
+// arrives as two frames: `login_timeout` first (which carries the url, title
+// and task the resume card is drawn from) and then the ordinary `task_result`
+// -> `task_failed` that every ended run produces. The failure handler settles
+// blocking cards and stamps ERROR, so left alone it undoes the card the frame
+// before it just drew — on a run the user is one click from continuing.
+//
+// Ordering is the whole contract and is invisible in a return value.
+console.log("\na suspended run is not turned back into a failure");
+const timeoutCase = /case 'login_timeout':([\s\S]*?)\n\s*break;/.exec(panel);
+check(!!timeoutCase, "the login_timeout case is findable");
+if (timeoutCase) {
+  const body = timeoutCase[1];
+  check(/stopTimer\(\)/.test(body), "login_timeout stops the clock",
+    "nothing else will; the run is over and the socket is closing");
+  check(/resume:\s*true/.test(body), "login_timeout asks for a resumable card",
+    "the user needs the Resume, not the Continue that pokes a queue nothing reads");
+}
+check(
+  /function appendLoginCard\(\{[^}]*resume/.test(panel),
+  "appendLoginCard is what draws the Resume",
+  "without the parameter the timeout draws the same card as a live wall, whose button does nothing",
+);
+const failedCase = /case 'task_failed':([\s\S]*?)\n\s*break;/.exec(panel);
+check(!!failedCase, "the task_failed case is findable");
+if (failedCase) {
+  check(
+    /failure_reason === 'login_timeout'[\s\S]*?break;/.test(failedCase[1]),
+    "task_failed does not re-settle a suspended run",
+    "settleBlockingCards and setPhase('error') undo the resume card the frame before it drew",
+  );
+}
+
 console.log(
   failed === 0
     ? "\nall checks passed"

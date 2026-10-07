@@ -1577,6 +1577,13 @@ _TERMINAL_DOC_STATUSES = {
     "interrupted",
 }
 
+# `suspended` is deliberately absent and must stay that way. It is the one
+# TaskResult.status that means "not over" — the run stopped at a sign-in wall
+# the user walked away from — and `_resume_state` refuses any document whose
+# status is in the set above. Adding it here would make the Resume button the
+# panel offers on a `login_timeout` refuse the very document it exists to
+# continue. `tests/test_login_timeout_suspends.py` asserts the two together.
+
 
 def _conversation_state(session_id: str, *, resume: bool) -> dict:
     """Decide what a task_start means for this document.
@@ -2168,9 +2175,10 @@ class AgentHarness:
             #
             # ponytail: the only prompt site that does NOT go through
             # `_ask_user`. Its contract is different on both sides — a 300s
-            # timeout continues the loop instead of aborting, and "skip"
-            # aborts. Folding it into a helper that answers yes/no would
-            # have meant a signature carrying both contracts.
+            # timeout SUSPENDS the run (it was a `continue`, which re-raised
+            # the same wall every step until MAX_STEPS), and "skip" aborts.
+            # Folding it into a helper that answers yes/no would have meant a
+            # signature carrying both contracts.
             if deps.scripted_planner is None and check_login_page(
                 page_title, filtered_ax, current_url
             ):
@@ -2200,11 +2208,35 @@ class AgentHarness:
                 })
                 reply = await _await_login(deps, deps.cdp)
                 if reply is None:
-                    await deps.ws_send({"type": "login_timeout"})
                     audit.resolve_prompt(pid, decision="timeout", response="",
                                          wait_ms=int((time.perf_counter() - t_lp) * 1000))
                     timings["login_pause"] += time.perf_counter() - t_lp
-                    continue
+                    # The user walked away from a sign-in wall. This used to
+                    # `continue`, which re-ran the observe, re-raised the same
+                    # wall and asked again — and again, for up to MAX_STEPS
+                    # (150) — so a five-minute absence became five minutes of
+                    # re-prompting per wall, against a clock the user had
+                    # stopped watching. Suspend instead: the run ends here,
+                    # the document stays resumable, and the panel offers the
+                    # Resume that `login_timeout` has never had a handler for.
+                    await deps.ws_send({
+                        "type": "login_timeout",
+                        "url": current_url,
+                        "domain": etld1(current_url) or "",
+                        "page_title": page_title,
+                        "task": deps.task,
+                    })
+                    deps.result = TaskResult(
+                        status="suspended",
+                        summary=(f"Paused at a sign-in to {page_title}. "
+                                 f"Sign in, then resume to carry on."),
+                        failure_reason="login_timeout",
+                        steps_taken=deps.step_number,
+                    )
+                    deps.result.final_url = deps.step_url
+                    self._close(audit, a_turn, deps.result, cumulative_snapshots,
+                                timings, task_index=deps.task_index, cost=cost)
+                    return deps.result
                 if str(reply).lower() == "skip":
                     timings["login_pause"] += time.perf_counter() - t_lp
                     audit.resolve_prompt(pid, decision="skipped", response=str(reply),

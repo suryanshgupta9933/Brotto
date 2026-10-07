@@ -1034,6 +1034,23 @@ async function startRelay(
         break;
       }
 
+      case "login_timeout": {
+        // The 5-minute sign-in wait expired; the harness suspends the run and
+        // returns, so this is the last frame before the socket closes. It has
+        // to be forwarded — the panel draws the card with the Resume, and
+        // nothing else carries the url and title it needs.
+        waitingForLogin = false;
+        currentPrompt = "";
+        notifyUi({
+          type: "login_timeout",
+          url: msg.url ?? "",
+          domain: msg.domain ?? "",
+          page_title: msg.page_title ?? "",
+          task: msg.task ?? "",
+        });
+        break;
+      }
+
       case "evaluate": {
         try {
           if (tid === null) throw new Error("no tab attached");
@@ -1310,7 +1327,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           break;
         }
 
-        case "local_login_skip": {
+        case "local_login_resume": {
+        // The 5-minute sign-in wait expired and the server suspended the run
+        // (status "suspended", failure_reason "login_timeout"). The document
+        // is deliberately still resumable, so this is a fresh relay against
+        // the same session rather than a new task — `resume: true` is what
+        // tells the server to continue the unfinished run instead of
+        // appending another one.
+        taskInFlight = true;
+        reconnectAttempt = 0;
+        waitingForLogin = false;
+        sendResponse({ success: true });
+        void startRelay(currentGoal, serverUrl, undefined, { resume: true })
+          .catch((err: unknown) => {
+            console.warn("[brotto] resume after sign-in threw:", err);
+            notifyUi({ type: "task_error", error: String(err) });
+          });
+        break;
+      }
+
+      case "local_login_skip": {
           taskInFlight = false;
           stopRelay();
           sendResponse({ success: true });

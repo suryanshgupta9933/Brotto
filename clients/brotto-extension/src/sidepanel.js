@@ -746,6 +746,11 @@ const SERVER_STATUS = {
   cancelled: 'cancelled',
   interrupted: 'interrupted',
   orphaned: 'interrupted',
+  // Suspended at a sign-in the user has not finished. `interrupted` because
+  // that is the mark for "did not finish" and the stylesheet has no other
+  // neutral word for it — but unlike an orphaned run this one is resumable,
+  // and the row's own affordance is the card's Resume, not the row.
+  suspended: 'interrupted',
 };
 
 function panelStatus(status) {
@@ -2420,6 +2425,11 @@ const OUTCOME_WORD = {
   cancelled: ['stopped', 'STOPPED BY YOU'],
   interrupted: ['ended', 'ENDED BY ITSELF'],
   awaiting_human: ['waiting', 'WAITING FOR YOU'],
+  // Not a conclusion — the run stopped at something only the user can clear,
+  // and the card under it carries the Resume. Marked as waiting rather than
+  // ended, because "ENDED BY ITSELF" on a run the user is one click from
+  // continuing tells them the opposite of what happened.
+  suspended: ['waiting', 'PAUSED ON YOU'],
   running: ['working', 'WORKING'],
   // Recorded but never written any more. `stagnated` is a pre-removal status
   // from the detector the harness deleted, so it lands in runs already on disk;
@@ -2525,6 +2535,7 @@ const FAILURE_NOTE = {
   duplicate_task_start: 'A task is already running on this conversation.',
   user_denied: 'You declined the action, so Brotto stopped.',
   user_skipped_login: 'You skipped the sign-in, so Brotto stopped.',
+  login_timeout: 'Brotto stopped waiting for the sign-in. Sign in, then press Resume.',
 };
 
 // A fetch to a server that is not there rejects with the same TypeError on
@@ -3836,7 +3847,15 @@ function answerLabel(answer) {
 // ── Login required ────────────────────────────────────────────────────────
 // A function rather than inline markup because the history replay draws the
 // same card, resolved, out of the audit's `login_required` prompt.
-function appendLoginCard({ domain, url, title, task, outcome }) {
+//
+// `resume` is the third state, and it is not the same card with different
+// words. A live wall has a Continue button that pushes "resume" onto a queue
+// the loop is still blocked on. After `login_timeout` there is no loop — the
+// run is suspended and the socket is closed — so the button starts a fresh
+// relay with `resume: true` instead. Keeping them apart is the point: a
+// Continue that finds nothing to unblock is a button that does nothing and
+// says the task resumed.
+function appendLoginCard({ domain, url, title, task, outcome, resume }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
@@ -3893,6 +3912,30 @@ function appendLoginCard({ domain, url, title, task, outcome }) {
   bubble.appendChild(body);
   msg.appendChild(bubble);
   messagesEl.appendChild(msg);
+
+  // A suspended run has no loop to unblock, so it gets a Resume that starts
+  // a new relay against the same session instead of the Continue that pokes a
+  // queue nothing is reading.
+  if (resume) {
+    const resumeBtn = document.createElement('button');
+    resumeBtn.type = 'button';
+    resumeBtn.className = 'login-continue-btn';
+    resumeBtn.textContent = 'Resume';
+    resumeBtn.addEventListener('click', () => {
+      resumeBtn.disabled = true;
+      clearLoginPrompt();
+      setPhase('connecting', 'Resuming where Brotto left off…');
+      setOutcome('running');
+      try {
+        chrome.runtime.sendMessage({ type: 'local_login_resume' }, () => {
+          void chrome.runtime.lastError;
+        });
+      } catch { /* SW gone — same dead end the Continue button has */ }
+    });
+    messagesEl.appendChild(resumeBtn);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return;
+  }
 
   if (outcome) return;
 
@@ -4371,6 +4414,25 @@ function handleEvent(message) {
       });
       break;
 
+    case 'login_timeout':
+      // The 5-minute sign-in wait expired. The server suspended the run and
+      // ended the socket, so the clock has to stop here — nothing else will,
+      // and an ACTIVE timer that outran its run is the one clock reading that
+      // is always wrong. The card is replaced, not settled: the wall is still
+      // the thing blocking the user, and settling it would say they signed in.
+      stopTimer();
+      clearLoginPrompt();
+      setOutcome('suspended', 'Waiting for you to sign in', 'login_timeout');
+      appendLoginCard({
+        domain: message.domain || 'this site',
+        url: message.url || '',
+        title: message.page_title || '',
+        task: message.task || '',
+        outcome: 'Brotto stopped waiting after five minutes. Sign in, then resume — the task picks up where it left off.',
+        resume: true,
+      });
+      break;
+
     case 'context_update': {
       // ponytail: the server sends this INSTEAD of step_progress when a step
       // produced no visible action, so it means the step ended with nothing
@@ -4441,6 +4503,15 @@ function handleEvent(message) {
 
     case 'task_failed':
       if (alreadyTerminal('task_failed')) break;
+      // A suspend is not a failure, and the frame before this one already
+      // rendered the right thing: `login_timeout` stops the clock, marks the
+      // outcome PAUSED ON YOU and draws the card carrying the Resume.
+      // Everything below would undo all three — settleBlockingCards resolves
+      // the card ("the task stopped before you answered"), and setPhase
+      // 'error' stamps ERROR over a run the user is one click from
+      // continuing. The server sends `login_timeout` before it returns, so
+      // the card is always already up by the time this frame lands.
+      if (message.failure_reason === 'login_timeout') break;
       // ponytail: same as task_completed — every prompt settles on any
       // terminal event, so the user never sees a stale "Waiting" bubble
       // after the task has failed / been cancelled.

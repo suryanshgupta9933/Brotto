@@ -426,7 +426,7 @@ sandbox.askConfirm = (...args) => {
   // Every status the audit can leave behind, so a new one added later cannot
   // silently fall through to the neutral grey.
   const SEEN = ["completed", "failed", "cancelled", "interrupted", "orphaned",
-                "running", "corrupt", "unknown"];
+                "running", "corrupt", "unknown", "suspended"];
   check("every status the audit can write lands on a styled one",
     SEEN.every((x) => typeof sandbox.panelStatus(x) === "string" && sandbox.panelStatus(x))
       && sandbox.panelStatus("completed") === "done"

@@ -173,7 +173,13 @@ class ScriptTargetUnresolved(LookupError):
 
 
 class TaskResult(BaseModel):
-    status: Literal["completed", "failed", "awaiting_human", "stagnated"]
+    # `suspended` is the one status that is not a conclusion. The run stopped
+    # at something only the user can clear (a sign-in wall they walked away
+    # from), and the document stays resumable — deliberately NOT in the
+    # harness's `_TERMINAL_DOC_STATUSES`, so `_resume_state` will take it.
+    # Every other value seals the run for good.
+    status: Literal["completed", "failed", "awaiting_human", "stagnated",
+                    "suspended"]
     summary: str
     extracted_data: dict | None = None
     steps_taken: int = 0
