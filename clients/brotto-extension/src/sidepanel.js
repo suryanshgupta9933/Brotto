@@ -4373,36 +4373,18 @@ function handleEvent(message) {
       setPhase('done', message.summary ? message.summary.slice(0, 60) : 'Task complete');
       state.stepCount = message.steps || state.stepCount;
       updateStepCount();
-      let messageText = `${message.steps || state.stepCount} steps · ${message.summary || ''}`;
-      // If extracted_data exists, append it as structured facts (already formatted by agent)
-      if (message.extracted_data && typeof message.extracted_data === 'object') {
-        const facts = Object.entries(message.extracted_data)
-          .filter(([, v]) => v && typeof v === 'string')
-          .map(([k, v]) => {
-            const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-            return `${label}: ${v}`;
-          })
-          .join(' | ');
-        if (facts) messageText += `\n\n${facts}`;
-      }
-      if (message.timing && message.timing.components) {
-        const c = message.timing.components;
-        const ms = (s) => `${(s * 1000).toFixed(0)}ms`;
-        messageText += `\n\nTiming (${message.timing.steps} steps, ${message.timing.wall_s.toFixed(1)}s wall): ` +
-          `observe=${ms(c.observe)}  plan=${ms(c.model_plan)}  exec=${ms(c.execute)}  ` +
-          `login=${ms(c.login_pause)}  other=${ms((c.filter ?? 0) + (c.approval_pause ?? 0) + (c.ws_send_progress ?? 0))}`;
-      }
-      // Priced from the catalog, and only shown when it is a real number.
-      // A model the catalog has no rate for is left off entirely rather than
-      // rendered as $0.00: the whole point of showing a cost is that the
-      // user can decide whether to keep spending, and a wrong $0.00 makes
-      // that decision for them.
-      if (typeof message.cost_usd === 'number' && Number.isFinite(message.cost_usd)) {
-        messageText += `\n\nCost: $${message.cost_usd.toFixed(2)} on your own key`;
-      }
+      // Steps, extracted_data, per-component timings and cost were all formatted
+      // into `text` here, and the `done` branch of appendMessage never read it —
+      // so nothing was rendered and the cost line, the one thing built so the
+      // user could decide whether to keep spending, was silently dropped.
+      //
+      // Cost display is a Pro capability (BROTTO_PRO, harness.py `_PRO_ENABLED`);
+      // the server already withholds the number from a free build, so this is
+      // the client half of a feature that is switched off. See
+      // docs/product/decisions/2026-10-05-pro-open-core-architecture.md. When
+      // it lands, render it here — and render it into finalAnswer, not `text`.
       appendMessage({
         role: 'done',
-        text: messageText,
         finalAnswer: message.finalAnswer,
       });
       break;
@@ -4560,7 +4542,7 @@ function handleEvent(message) {
       if (m.type === 'task.completed') {
         setPhase('done', m.summary || 'Task complete');
         setOutcome('completed', m.summary);
-        appendMessage({ role: 'done', text: m.summary || 'Task completed successfully.', finalAnswer: m.finalAnswer });
+        appendMessage({ role: 'done', finalAnswer: m.finalAnswer });
       } else if (m.type === 'task.failed') {
         const note = failureNote(m.failure_reason, m.message);
         setPhase('error', note);
