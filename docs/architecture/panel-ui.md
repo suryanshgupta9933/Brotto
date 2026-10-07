@@ -134,9 +134,11 @@ into it is two characters per column.
 
 **Not one string reaches `innerHTML` unescaped, and this is a security
 property, not tidiness.** The model's own words are steerable by whatever text
-is on the page it is reading, so `appendPlanCard` builds the badge, the sites
-line and the step numbers with `textContent` and a `createTextNode`, and only
-the step body goes through `renderMarkdown`.
+is on the page it is reading, so every card that draws them — the approval
+card, the clarify card, the sign-in card — builds its label, its body and its
+metadata with `textContent` and a `createTextNode`, and only prose the user
+would have typed goes through `renderMarkdown`. (The deleted plan card held the
+same rule; the rule outlived it.)
 
 ## The server's index is the history
 
@@ -227,9 +229,17 @@ removes `.login-required-msg`, which a replayed card also carries, so the
 resolved ones are marked and excluded — the history behind a live prompt must
 not fade out because a new one arrived.
 
-**The plan card is dead in both paths.** Nothing emits a `plan` event, so
-`appendPlanCard` never runs live and has no audit record to replay from. It is
-untouched rather than resurrected — reviving it is a feature, not a fix.
+**The plan card was deleted, not left dead.** Nothing emitted a `plan` event,
+so `appendPlanCard` never ran live and had no audit record to replay from. It
+went on 2026-10-07 along with its `case 'plan':` handler and ~30 lines of CSS
+grouped against the live approval and clarify cards. The argument for keeping
+it was "untouched rather than resurrected — reviving it is a feature, not a
+fix", and that argument only ever covered *reviving* it; a handler nothing can
+reach is a claim the panel makes about itself and does not keep. This is the
+second instance of the same shape after `canonical_step`: fully built, fully
+reviewed, never run. Nothing in a diff points at a missing producer, so a test
+cannot force one to appear — the only reliable check is that the code is not
+there.
 
 **Not verified in a browser.** The replay rendering and the follow-up
 appending to the same server document both need a real pass. What *is* checked
@@ -415,8 +425,6 @@ Three things that are not obvious and cost a run each:
   renders an empty history. It also reads `row.dataset.status` off the panel's
   own vocabulary (`done` / `error`), not the server's (`completed` / `failed`) —
   wrong status, missing icon, no error.
-- **Plan steps are objects, not strings.** `appendPlanCard` reads `step.index`
-  and `step.text`; a string renders `undefined` in both.
 
 The frames are the ones the relay really sends, and **every number in the shot
 is the panel's own arithmetic** — `startedAt` seeds its clock, `index` counts its

@@ -3393,83 +3393,6 @@ function appendFailureBubble({ title, body, footer }) {
   return msg;
 }
 
-// ── Plan preview card ─────────────────────────────────────────────────────
-function appendPlanCard({ title, sites, steps }) {
-  const empty = messagesEl.querySelector('.empty-state');
-  if (empty) empty.remove();
-
-  const card = document.createElement('div');
-  card.className = 'plan-card';
-
-  const header = document.createElement('div');
-  header.className = 'plan-header';
-  // textContent, not innerHTML: `title` and `step.text` are the model's own
-  // words, and the model's words are steerable by whatever text is on the page
-  // it is reading. Escaping is not enough to be tidy here — it is the only
-  // thing standing between a page and this panel's DOM.
-  const badge = document.createElement('span');
-  badge.className = 'plan-badge';
-  badge.textContent = title || "Brotto's plan";
-  header.appendChild(badge);
-  card.appendChild(header);
-
-  if (sites && sites.length > 0) {
-    const sitesDiv = document.createElement('div');
-    sitesDiv.className = 'plan-sites';
-    sitesDiv.appendChild(document.createTextNode('Allow actions on: '));
-    const allowed = document.createElement('strong');
-    allowed.textContent = sites.join(', ');
-    sitesDiv.appendChild(allowed);
-    card.appendChild(sitesDiv);
-  }
-
-  if (steps && steps.length > 0) {
-    const approachTitle = document.createElement('div');
-    approachTitle.className = 'plan-approach-title';
-    approachTitle.textContent = 'Approach to follow:';
-    card.appendChild(approachTitle);
-
-    const ol = document.createElement('ol');
-    ol.className = 'plan-steps';
-    for (const step of steps) {
-      const li = document.createElement('li');
-      const num = document.createElement('span');
-      num.className = 'plan-step-num';
-      num.textContent = `${step.index}.`;
-      const text = document.createElement('span');
-      text.className = 'md';
-      text.innerHTML = renderMarkdown(step.text || '');
-      li.append(num, text);
-      ol.appendChild(li);
-    }
-    card.appendChild(ol);
-  }
-
-  const actions = document.createElement('div');
-  actions.className = 'plan-actions';
-
-  const approveBtn = document.createElement('button');
-  approveBtn.className = 'btn btn-primary btn-sm';
-  approveBtn.textContent = 'Approve plan';
-  approveBtn.addEventListener('click', () => {
-    appendMessage({ role: 'assistant', text: 'Approved the plan. Proceeding…' });
-    card.remove();
-  });
-  actions.appendChild(approveBtn);
-
-  const changeBtn = document.createElement('button');
-  changeBtn.className = 'btn btn-sm';
-  changeBtn.textContent = 'Make changes';
-  changeBtn.addEventListener('click', () => {
-    goalEl.focus();
-  });
-  actions.appendChild(changeBtn);
-
-  card.appendChild(actions);
-  messagesEl.appendChild(card);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
 // Copies the same address the row displays, not the raw one: the query
 // string can carry a session token and the row deliberately hides it. The
 // scheme is restored, because the row drops it for width and the clipboard
@@ -3863,7 +3786,7 @@ function setClarifyComposerMode(on) {
 }
 
 // The answer is the user's own words, so it goes in as text — the same
-// reasoning `appendPlanCard` uses for the model's strings.
+// reasoning every other place a model's strings reach the panel uses.
 function answerLabel(answer) {
   const a = String(answer ?? '').trim();
   return a ? `You: ${a}` : 'No answer — Brotto carried on with what it had';
@@ -4692,17 +4615,12 @@ function handleEvent(message) {
       });
       break;
 
-    // ── Plan preview (from orchestrator) ─────────────────────────────────
-    // Side panel receives a plan event when the orchestrator emits a plan.
-    // Background does not currently emit this; the handler is ready.
-    case 'plan': {
-      appendPlanCard({
-        title: message.title || "Brotto's plan",
-        sites: message.sites || [],
-        steps: message.steps || [],
-      });
-      break;
-    }
+    // The `plan` frame and `appendPlanCard` are gone. They were a fully built
+    // handler for a frame nothing sends — the panel, the background and the
+    // server all agreed it did not exist, which is the same shape as
+    // `canonical_step` before it got a caller: a feature that is wired,
+    // reviewed and never run. Nothing emitted it, so nothing could notice
+    // it going either.
 
     case 'tab_event': {
       // The status bar has no tab cell — the outcome cell took its place, and
