@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock
 
+import pytest
+
 from brotto_orchestrator.agent.context import ActionCall, AgentDeps
 from brotto_orchestrator.agent.harness import _execute_action
 
@@ -74,3 +76,45 @@ def test_scroll_honours_the_amount_the_model_asked_for():
         cdp,
     )
     assert cdp.scroll.await_args[0][1] == 3
+
+
+# ---------- the modifier mask, on the real relay ----------
+
+
+@pytest.mark.asyncio
+async def test_an_undefined_modifier_bit_is_dropped_not_forwarded():
+    """Only Alt/Ctrl/Meta/Shift exist. A higher bit is undefined in the
+    extension's dispatch, so it is stripped here rather than handed over for
+    the browser to interpret."""
+    from brotto_orchestrator.cdp.extension_relay import ExtensionCDPRelay
+
+    sent: list[dict] = []
+
+    async def ws_send(msg: dict) -> None:
+        sent.append(msg)
+
+    relay = ExtensionCDPRelay(ws_send, asyncio.Queue(), asyncio.Queue(), "t")
+    await relay._obs_queue.put({"url": "u", "axTargets": []})
+
+    await relay.press_key("a", modifiers=2 | 4096)
+
+    dispatched = sent[0]["action"]
+    assert dispatched["modifiers"] == 2, f"forwarded an undefined bit: {dispatched}"
+
+
+@pytest.mark.asyncio
+async def test_a_non_ascii_letter_is_not_a_shortcut():
+    """`str.isalnum()` is true for "é" and "क". CDP would dispatch them."""
+    from brotto_orchestrator.cdp.extension_relay import ExtensionCDPRelay
+
+    sent: list[dict] = []
+
+    async def ws_send(msg: dict) -> None:
+        sent.append(msg)
+
+    relay = ExtensionCDPRelay(ws_send, asyncio.Queue(), asyncio.Queue(), "t")
+
+    out = await relay.press_key("é", modifiers=2)
+
+    assert out.startswith("Error executing")
+    assert not sent

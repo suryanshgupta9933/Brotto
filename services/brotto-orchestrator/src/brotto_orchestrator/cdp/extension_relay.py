@@ -24,6 +24,12 @@ _PRESSABLE_KEYS = frozenset({
     "End", "Home", "PageDown", "PageUp",
 })
 
+# One budget for a whole observation read, skipping included. A page that
+# navigates in a loop keeps the extension pushing `navigated` frames, and a
+# per-read timeout restarts on every one of them — so the wait would have no
+# ceiling at all, set by a page the model never chose to open.
+_OBSERVATION_TIMEOUT = 30.0
+
 # Observation frames that arrived unprompted. `webNavigation.onCommitted`
 # pushes one the instant a navigation commits — before the new page has
 # rendered — and reading it as a step's tree shows the model the page *before*
@@ -109,6 +115,8 @@ class ExtensionCDPRelay:
         moved, which `_ensure_fresh_obs` and the login wait both read — and
         the step asks for a real one instead.
         """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _OBSERVATION_TIMEOUT
         while True:
             if self._obs_queue.empty():
                 log.debug("[%s] requesting observation", self._sid)
@@ -116,7 +124,10 @@ class ExtensionCDPRelay:
             else:
                 log.debug("[%s] using queued observation", self._sid)
             try:
-                raw = await asyncio.wait_for(self._obs_queue.get(), timeout=30)
+                raw = await asyncio.wait_for(
+                    self._obs_queue.get(),
+                    timeout=max(0.0, deadline - loop.time()),
+                )
             except asyncio.TimeoutError:
                 log.error("[%s] timed out waiting for observation", self._sid)
                 raise
@@ -145,9 +156,14 @@ class ExtensionCDPRelay:
         """
         log.debug("[%s] sending action %s", self._sid, action)
         await self._ws_send({"type": "action", "action": action})
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _OBSERVATION_TIMEOUT
         while True:
             try:
-                raw = await asyncio.wait_for(self._obs_queue.get(), timeout=30)
+                raw = await asyncio.wait_for(
+                    self._obs_queue.get(),
+                    timeout=max(0.0, deadline - loop.time()),
+                )
             except asyncio.TimeoutError:
                 log.error("[%s] timed out waiting for post-action observation after %s", self._sid, action)
                 raise
@@ -216,6 +232,25 @@ class ExtensionCDPRelay:
         log.info("[%s] get_targets → %d targets", self._sid, len(targets))
         return targets
 
+    def _absorb(self, obs: dict | None, solicited: bool) -> None:
+        """Take a frame the step did not ask for.
+
+        A commit tells us the URL moved. It does not tell us the new page:
+        this frame was captured before the navigation rendered, which is the
+        reason the step refused it. Installing it whole reinstates that
+        staleness through the other door — `_locate` resolves refs off
+        `_cached_obs`, so a later `get_current_url` would quietly hand the
+        step back the page it has already moved past.
+        """
+        if obs is None:
+            return
+        if solicited or self._cached_obs is None:
+            self._cached_obs = obs
+            return
+        self._cached_obs = {**self._cached_obs,
+                            "url": obs.get("url", ""),
+                            "title": obs.get("title", "")}
+
     async def _ensure_fresh_obs(self) -> None:
         """Drain any pending observation pushed by the SW (webNavigation
         or tabs.onUpdated) into the cache. Does NOT request a new
@@ -226,7 +261,8 @@ class ExtensionCDPRelay:
         This is the *one* caller an unsolicited frame is good for: the URL
         moving is exactly what it reliably knows. `_get_observation` refuses
         them for a step's tree, so a skipped push lands in `_pushed_obs`
-        instead of being dropped — and this reads it back out.
+        instead of being dropped — and this reads it back out, for its URL
+        alone.
         """
         if (self._cached_obs is not None and self._obs_queue.empty()
                 and self._pushed_obs is None):
@@ -237,7 +273,9 @@ class ExtensionCDPRelay:
             pushed = None
         # Raw, deliberately: this path never unwrapped and does not start.
         # `_get_observation` is the one that raises TabUnreachable.
-        self._cached_obs = pushed if pushed is not None else self._pushed_obs
+        self._absorb(pushed if pushed is not None else self._pushed_obs,
+                     solicited=pushed is not None
+                     and pushed.get("reason") not in _UNSOLICITED)
         self._pushed_obs = None
 
     async def get_current_url(self) -> str:
@@ -344,7 +382,9 @@ class ExtensionCDPRelay:
         # shortcut like select-all, and refusing those left the model unable to
         # express the one thing that fixes a field it had corrupted — it fell
         # back to End + Backspace, one character per step, for ten steps.
-        bare_letter = len(key) == 1 and key.isalnum()
+        # ASCII only: `str.isalnum()` is true for "é" and "क" too, and CDP
+        # would happily dispatch a character the model had no reason to name.
+        bare_letter = len(key) == 1 and key.isascii() and key.isalnum()
         if key not in _PRESSABLE_KEYS and not (bare_letter and modifiers):
             return (
                 f"Error executing: press_key {key!r} is not a key this client can "
@@ -353,6 +393,9 @@ class ExtensionCDPRelay:
                 f"modifiers bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8). To replace "
                 f"a field's contents, just use type_text with the value you want."
             )
+        # Only those four bits are modifiers. Anything above them is undefined
+        # in the extension's dispatch, so drop it here rather than forward it.
+        modifiers &= 0xF
         log.info("[%s] press_key %r modifiers=%d", self._sid, key, modifiers)
         await self._send_action({"type": "key", "key": key, "modifiers": modifiers})
         return "ok"

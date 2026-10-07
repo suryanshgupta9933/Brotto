@@ -895,6 +895,33 @@ frame is unwrapped *before* the reason is checked, too: an `observation_error` c
 reason, and checking first would swallow it and hang the step instead of reporting a lost
 tab.
 
+**Parking a push is not enough on its own — it has to be half-remembered.** `_pushed_obs`
+outlives the fresh frame that follows it, so `_ensure_fresh_obs` installs the parked push
+*whole* whenever it later finds the queue empty. That reinstates the exact bug through the
+URL path: `_locate` resolves refs off `_cached_obs`, so one `get_current_url` between two
+steps would hand the model the page it had already moved past. `_absorb` is the split — an
+unsolicited frame contributes its `url` and `title` and **not** its `axTargets`, because a
+commit tells you the URL moved and tells you nothing about the page it moved to.
+(`tests/test_observation_staleness.py` pins it by stashing a push, taking a real
+observation, then calling `_ensure_fresh_obs` with an empty queue: the URL follows the
+navigation and the tree does not.)
+
+**The 30s ceiling covers the skipping, not each read.** Both loops re-arm `wait_for(30)`
+per iteration, so a page that navigates in a loop — each commit pushing another `navigated`
+frame — restarts the budget on every one and never expires. The wait would be bounded only
+by how long a page the model never chose to open kept going. One `_OBSERVATION_TIMEOUT`
+deadline is taken before the loop. The regression is easy to write a test for and easy to
+write a test that *passes* for the wrong reason: a flood faster than the read timeout just
+exhausts itself. It has to arrive **slower** than the read timeout, which is the shape that
+loops.
+
+Shortening the budget inside that test is itself a trap. `test_failure_modes.py` purges
+every `brotto_orchestrator*` entry from `sys.modules` mid-session, so by the time this test
+runs a fresh `import` binds a *second* copy of the module and `sys.modules[cls.__module__]`
+returns that copy — neither is the dict the function actually reads, and only
+`fn.__globals__` is. The symptom is a test that passes alone and fails in the full run,
+which reads as flake and is not; chase it rather than retry it.
+
 **The diff was not the missing piece.** `compute_ax_diff` has always run and
 `### What changed after last action` has always been spliced into the prompt
 (`harness.py:500`). On those steps it said `(no changes detected)` — correctly, because a
