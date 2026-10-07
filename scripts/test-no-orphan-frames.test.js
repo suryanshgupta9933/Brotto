@@ -109,9 +109,26 @@ check(
   "without it OUTCOME stays on WORKING forever",
 );
 check(
-  /case 'task_error':[\s\S]*?clearBlockingCards\(\)/.test(panel),
-  "the task_error case clears blocking cards",
+  /case 'task_error':[\s\S]*?settleBlockingCards\(/.test(panel),
+  "the task_error case settles blocking cards",
   "an unanswered approval/login card would outlive the run",
+);
+
+// This check used to grep for a literal name, which is the whole bug it was
+// written to prevent: the call site said `clearBlockingCards` after the
+// function was renamed to `settleBlockingCards`, so the handler threw a
+// ReferenceError on its first line — no stopTimer, no outcome, no bubble, the
+// exact failure above — and this assertion passed on the broken name. A
+// textual check cannot see that a name resolves, so assert that it does.
+check(
+  /function settleBlockingCards\(/.test(panel),
+  "the blocking-card helper the cases call is actually defined",
+  "every other call site uses it too, so a rename here orphans them all",
+);
+check(
+  !/clearBlockingCards/.test(panel),
+  "no call site still uses the old name",
+  "an undefined call throws before the rest of the handler runs",
 );
 
 console.log("\nserver_unreachable renders in the toast, not the header pill");

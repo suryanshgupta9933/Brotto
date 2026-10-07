@@ -4419,7 +4419,7 @@ function handleEvent(message) {
       // A server frame with no case here is an infinite run. Adding one to
       // the set below is the whole fix; see test-no-orphan-frames.test.js.
       if (alreadyTerminal('task_error')) break;
-      clearBlockingCards();
+      settleBlockingCards('Brotto hit an error before you answered.');
       void saveSession({ status: 'failed', elapsed: timerActiveEl && timerActiveEl.textContent });
       setOutcome('failed', message.error, 'server_error');
       stopTimer();
