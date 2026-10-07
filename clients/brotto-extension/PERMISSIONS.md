@@ -42,26 +42,50 @@ complete set of CDP methods the extension issues:
 | Page | `Page.enable` / `Page.navigate` / `Page.getFrameTree` | Navigation, and enumerating frames |
 | DOM | `DOM.getDocument` / `getAttributes` / `resolveNode` | Resolving a tree ref to a node |
 | DOM | `DOM.getBoxModel` / `getNodeForLocation` | Turning a node into clickable coordinates |
-| Runtime | `Runtime.evaluate` | Reading page text — see below |
+| Runtime | `Runtime.evaluate` | Reading page text and stability — see below |
 
 **There is no `Page.captureScreenshot` anywhere in this extension.** The agent
 perceives the page through the Accessibility tree, not through images. It
 never screenshots, so it never has access to a picture of your screen.
 
-### `Runtime.evaluate` — the one honest caveat
+### `Runtime.evaluate` — four places, and only one of them is the server's
 
-The extension will evaluate JavaScript in the page. In the shipped code the
-server uses this in exactly one place, `read_page_text`, to run a bounded
-`innerText` read:
+This runs JavaScript in the page, so it is the one call here that can execute
+code rather than read state. Every call site is listed.
+
+**Composed by the server — one place.** A relay frame of type `evaluate`
+carries an expression the server built; `background.ts` forwards it to CDP
+unchanged. The only action that uses this is `read_page_text`, which composes a
+bounded `innerText` read:
 
 ```js
 (document.querySelector(<selector>) || document.body).innerText.substring(0, <max>)
 ```
 
-The server composes that string and sends it over the relay; the extension
-runs what it is given. So the *current use* is a page-text read, but the
-*mechanism* is not restricted to one — holding `AGENT_SECRET` is equivalent
-to holding your browser session. See "Known limitations".
+Because that expression arrives from the server, the *mechanism* is not
+restricted to that read — holding `AGENT_SECRET` is equivalent to holding your
+browser session. See "Known limitations".
+
+**Composed by the extension — three places, hardcoded in the bundle.** These
+are not reachable by anything the server sends; they are fixed strings in the
+shipped code, and they are the ones that run on every observation:
+
+| Site | What it evaluates | When |
+|---|---|---|
+| `observation/index.ts` | `{url, title, text: body.innerText}`, whitespace collapsed, capped at **20,000 characters** | every observation |
+| `observation/stability.ts` | installs a `MutationObserver` and reports whether the page has gone still | every observation |
+| `observation/supplement.ts` | a probe listing `aria-hidden` controls so they can be hit-tested | when the tree is supplemented |
+
+The supplement probe is a deliberate narrowing: locating those controls by
+hit-test would need a broader privilege than one bounded `Runtime.evaluate`,
+so the extension reads them in the page and hit-tests them over CDP instead.
+
+**The per-step page-text read is 20,000 characters, not the 2,000 below.** That
+2,000 belongs to the idle-suggestion read under `scripting`, which is a
+different code path. What the agent actually sees is smaller again — the
+observation is filtered down to an actionability-ranked budget before it
+reaches the model. The 20,000 characters do transit your own server, which you
+run; page text is not written to disk.
 
 ### Security controls
 
@@ -114,7 +138,10 @@ page, obtained on demand.
 
 `chrome.scripting.executeScript` reads `document.body.innerText`, capped at
 2000 characters, from the active tab — the one whose URL is shown in the
-panel. Nothing else is injected. No script is ever executed in the page.
+panel. This is the **idle-suggestion** read and nothing else. The page-text
+read during a task goes through `Runtime.evaluate` at a 20,000-character cap
+instead; see `debugger` above. Nothing else is injected, and no script is ever
+executed in the page by this path.
 
 ### Security controls
 
@@ -163,8 +190,8 @@ So you type your server URL once. The panel also remembers your model choice.
 
 ### Why it is required
 
-The side panel is where the conversation, the plan, the approval prompts and
-the results live. Without it you would have to watch a full browser tab.
+The side panel is where the conversation, the approval prompts and the results
+live. Without it you would have to watch a full browser tab.
 
 ### How it is used
 
