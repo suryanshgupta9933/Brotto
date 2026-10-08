@@ -60,13 +60,24 @@ references, the structure a screen reader already navigates by. No vision model,
 <div align="center">
 <table>
 <tr>
-<td width="25%"><img src="docs/images/panel-idle.webp" alt="The Brotto panel, idle, with suggestions"><br><sub><b>Idle.</b> The panel offers what the page in front of you could be asked to do.</sub></td>
-<td width="25%"><img src="docs/images/panel-task-completion.webp" alt="Brotto creating a branch protection ruleset on the Brotto repository"><br><sub><b>Working.</b> A real run on a real repo — the plan, the ruleset it wrote, and the result.</sub></td>
-<td width="25%"><img src="docs/images/panel-session-history.webp" alt="The session history list"><br><sub><b>History.</b> Every run, on your own disk, yours to delete.</sub></td>
-<td width="25%"><img src="docs/images/panel-settings.webp" alt="Brotto's settings: bring your own model key, and the sites it refuses"><br><sub><b>Yours.</b> Your model key, your server, and the list of sites Brotto refuses outright.</sub></td>
+<td width="33%"><img src="docs/images/panel-idle.webp" alt="The Brotto panel, idle, with suggestions"><br><sub><b>Idle.</b> The panel offers what the page in front of you could be asked to do.</sub></td>
+<td width="33%"><img src="docs/images/panel-session-history.webp" alt="The session history list"><br><sub><b>History.</b> Every run, on your own disk, yours to delete.</sub></td>
+<td width="33%"><img src="docs/images/panel-settings.webp" alt="Brotto's settings: bring your own model key, and the sites it refuses"><br><sub><b>Yours.</b> Your model key, your server, and the list of sites Brotto refuses outright.</sub></td>
 </tr>
 </table>
 </div>
+
+## One run, start to finish
+
+The same task, three moments: Brotto adding a branch protection ruleset to
+this repository. It reads the page, it asks when it is not sure, and it leaves
+the run on disk when it is done.
+
+<img src="docs/images/run-1-the-prompt.webp" alt="Brotto's panel with the task typed out: go to GitHub, find the Brotto repository, add a branch protection ruleset to main, and open a pull request for it" width="100%">
+
+<img src="docs/images/run-2-it-asks.webp" alt="Brotto stopping to clarify: it found two ways to add branch protection on the repository and is asking which one, with Skip and Say options" width="100%">
+
+<img src="docs/images/run-3-done.webp" alt="Brotto reporting DONE: it created a classic branch protection ruleset on the main branch of the Brotto repository, with targets, enforcement status, required checks and force-push settings" width="100%">
 
 ---
 
