@@ -60,24 +60,47 @@ references, the structure a screen reader already navigates by. No vision model,
 <div align="center">
 <table>
 <tr>
-<td width="33%"><img src="docs/images/panel-idle.webp" alt="The Brotto panel, idle, with suggestions"><br><sub><b>Idle.</b> The panel offers what the page in front of you could be asked to do.</sub></td>
-<td width="33%"><img src="docs/images/panel-session-history.webp" alt="The session history list"><br><sub><b>History.</b> Every run, on your own disk, yours to delete.</sub></td>
-<td width="33%"><img src="docs/images/panel-settings.webp" alt="Brotto's settings: bring your own model key, and the sites it refuses"><br><sub><b>Yours.</b> Your model key, your server, and the list of sites Brotto refuses outright.</sub></td>
+<td width="50%"><img src="docs/images/panel-idle.webp" alt="The Brotto panel, idle, with suggestions" width="100%"><br><sub><b>Idle.</b> The panel offers what the page in front of you could be asked to do.</sub></td>
+<td width="50%"><img src="docs/images/panel-settings.webp" alt="Brotto's settings: bring your own model key, and the sites it refuses" width="100%"><br><sub><b>Yours.</b> Your model key, your server, and the list of sites Brotto refuses outright.</sub></td>
 </tr>
 </table>
 </div>
 
+---
+
 ## One run, start to finish
 
-The same task, three moments: Brotto adding a branch protection ruleset to
-this repository. It reads the page, it asks when it is not sure, and it leaves
-the run on disk when it is done.
+One task, four moments: Brotto adding a branch protection ruleset to this
+repository. Every shot below is the real extension, in a real browser, on a
+public repo — nothing staged, nothing mocked.
+
+**1 · You ask for it in a sentence.**
+There is no form and no workflow to learn. The panel is a chat box, and
+whatever you can describe is the whole interface.
 
 <img src="docs/images/run-1-the-prompt.webp" alt="Brotto's panel with the task typed out: go to GitHub, find the Brotto repository, add a branch protection ruleset to main, and open a pull request for it" width="100%">
 
-<img src="docs/images/run-2-it-asks.webp" alt="Brotto stopping to clarify: it found two ways to add branch protection on the repository and is asking which one, with Skip and Say options" width="100%">
+**2 · It asks before it leaves.**
+GitHub is the first domain this run touches, so it stops and waits. A domain
+you approve is remembered for good — consent is for the site, not for the one
+verb — and a page Brotto has never seen cannot be pre-approved by anything but
+you.
 
-<img src="docs/images/run-3-done.webp" alt="Brotto reporting DONE: it created a classic branch protection ruleset on the main branch of the Brotto repository, with targets, enforcement status, required checks and force-push settings" width="100%">
+<img src="docs/images/run-2-before-it-navigates.webp" alt="Brotto's panel showing a first-navigation approval card for github.com, with ALLOW and DENY buttons" width="100%">
+
+**3 · It stops again when the page offers a choice.**
+GitHub has two ways to add branch protection, and picking wrong means clicking
+back through settings. Rather than guess, it hands you the question and waits.
+This is the same card you would get for a sign-in it cannot pass.
+
+<img src="docs/images/run-3-it-asks-when-unsure.webp" alt="Brotto's panel stopping to clarify that the repository has two ways to add branch protection, with Skip and Say options" width="100%">
+
+**4 · The run finishes, and the whole thing is on your disk.**
+The panel reports what it did and what it would do next. Nothing is sent here:
+the ruleset was written on github.com by your own session, and the transcript
+lands in `logs/sessions/` beside the rest of your files.
+
+<img src="docs/images/run-4-the-ruleset-it-wrote.webp" alt="Brotto reporting DONE: it created a classic branch protection ruleset on the main branch of the Brotto repository, with targets, enforcement status, required checks and force-push settings" width="100%">
 
 ---
 
