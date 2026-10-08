@@ -185,15 +185,45 @@ class ExtensionCDPRelay:
 
         The two failure states are kept apart because only one is a grounding
         error. Absent from `axTargets` means the model named a ref this page
-        does not have; present-but-no-box means it named a real element that is
-        off-screen. Collapsing them made a hallucination indistinguishable from
-        a correct guess at something scrolled out of view.
+        does not have; present-but-unclickable means it named a real element this page
+        will not act on. Collapsing them made a hallucination indistinguishable
+        from a correct guess at something off-screen.
+
+        Every refusal has to name what to do next, because the reason is the
+        only thing the model gets. An error it cannot act on produces the same
+        retry loop a silent success does, just with more steps spent on it.
+        That is not hypothetical: on session a7328461 the Create button at the
+        bottom of GitHub's new-branch-protection form was clicked ten times
+        across four attempts, every click resolved to coordinates, every click
+        was audited `ok: true`, and those coordinates were pointed past the
+        bottom of the window. `scroll` was never once suggested.
         """
         if not self._cached_obs:
             return None, "cannot resolve: no observation captured yet"
         targets = self._cached_obs.get("axTargets", [])
 
         def at(t: dict) -> tuple[dict | None, str]:
+            # Disabled first, of the three. It is a property of the element
+            # itself and no amount of scrolling or dismissing changes it, so it
+            # is the one answer that saves the step whatever else is true too.
+            if t.get("disabled"):
+                return None, (
+                    "is disabled — the page will ignore a click until whatever "
+                    "comes before it in the same form is filled in or checked. "
+                    "Do that first; this control cannot be clicked yet."
+                )
+            blocked = t.get("blocked")
+            if blocked == "occluded":
+                return None, (
+                    "is covered by another element — a click there would land on "
+                    "whatever is on top of it. Close or dismiss that (a banner, "
+                    "a cookie notice, an open menu), then click again."
+                )
+            if blocked == "off-screen":
+                return None, (
+                    "is off the visible page — scroll until you can see it, then "
+                    "click it again"
+                )
             if "x" in t and "y" in t:
                 return {"x": t["x"], "y": t["y"]}, ""
             return None, "is off-screen (no box model in the last observation)"
@@ -515,5 +545,9 @@ def _to_semantic(ax_targets: list[dict]) -> list[SemanticTarget]:
             # the accessibility tree, so it is rendered `[hidden]` and never
             # pre-approved under secure mode.
             hidden=bool(t.get("hidden", False)),
+            # Both absent on an extension that predates them, hence the
+            # `get`-with-default rather than a subscript.
+            disabled=bool(t.get("disabled", False)),
+            blocked=t.get("blocked"),
         ))
     return result

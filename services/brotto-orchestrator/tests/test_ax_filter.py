@@ -163,3 +163,78 @@ def test_budget_scales_with_the_context_window():
     # A small-window model stays bounded rather than getting a huge tree.
     assert budget_for_window(32_000) == 8_000
     assert budget_for_window(None) == 6_000
+
+
+def _m(ref, role, name, **kw):
+    return SemanticTarget(ref_id=ref, tag=role, role=role, name=name, **kw)
+
+
+# ── Markers for controls the page will not act on ────────────────────────────
+#
+# These render rather than drop. A control that is present and not clickable is
+# information: it is usually the answer to "why did nothing happen", and a
+# dropped line takes that answer with it.
+
+
+def test_an_off_screen_control_renders_marked():
+    """The `[off-screen]` marker had a renderer and no producer — a parameter
+    nothing passed, so the marker had never once appeared on a real run while
+    the code that would draw it sat there looking finished."""
+    out = filter_ax_targets(
+        [_m("0:1", "button", "Create", blocked="off-screen")], max_chars=100_000,
+    )
+    assert '[0:1] button [off-screen] "Create"' in out
+
+
+def test_a_covered_control_renders_marked():
+    out = filter_ax_targets(
+        [_m("0:1", "button", "Create", blocked="occluded")], max_chars=100_000,
+    )
+    assert '[covered]' in out
+
+
+def test_a_disabled_control_renders_marked():
+    """A form whose Create button is disabled is telling you which field above
+    it is not accepted yet — the single most useful thing on the page, and it
+    used to be invisible."""
+    out = filter_ax_targets(
+        [_m("0:1", "button", "Create", disabled=True)], max_chars=100_000,
+    )
+    assert '[disabled]' in out
+
+
+def test_markers_stack_and_stay_before_the_name():
+    """Order is what a reader parses. A marker after the quoted name reads as
+    part of the button's label."""
+    out = filter_ax_targets(
+        [_m("0:1", "button", "Create", disabled=True, blocked="occluded")],
+        max_chars=100_000,
+    )
+    assert '[0:1] button [disabled] [covered] "Create"' in out
+
+
+def test_an_unflagged_control_carries_no_marker():
+    """The markers are disclosures, not decoration. `[off-screen]` on an
+    element that is on screen is worse than no marker at all."""
+    out = filter_ax_targets([_m("0:1", "button", "Create")], max_chars=100_000)
+    assert "[" not in out.split("Create")[0].split("button")[1]
+
+
+def test_an_unmarked_hypothetical_parameter_is_gone():
+    """`viewport_coords` was the dead door: ax_filter accepted it, the tree
+    renderer honoured it, and no caller has ever passed one — so `[off-screen]`
+    had never rendered. A signature accepting a dead parameter is a feature that
+    looks like it works, and this file had one burned into it already."""
+    import inspect
+
+    assert "viewport_coords" not in inspect.signature(filter_ax_targets).parameters
+
+
+def test_a_disabled_control_sorts_below_a_live_one():
+    """The line about what the agent will try now. A page's worth of disabled
+    buttons is worth reading, but not before the one control that is live."""
+    targets = [_m(f"d{i}", "button", f"Disabled {i}", disabled=True) for i in range(200)]
+    targets.append(_m("live", "button", "Submit"))
+    out = filter_ax_targets(targets, max_chars=1200)
+    assert "Submit" in out
+    assert "not shown" in out

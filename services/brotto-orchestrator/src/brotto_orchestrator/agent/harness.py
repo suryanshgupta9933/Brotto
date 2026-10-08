@@ -157,6 +157,14 @@ _ACTION_LABEL = {
     "read_page_text": "read text off the page",
 }
 
+# Words that carry no identity, so a match on one of them identifies nothing.
+# "Add rule or save button" is three of these plus two real words; matching the
+# conjunction alone is what let a GitHub page return Brotto's own panel button.
+_FIND_STOPWORDS = frozenset({
+    "a", "an", "the", "or", "and", "to", "of", "for", "on", "in", "at", "is",
+    "it", "that", "this", "with", "my", "me", "please", "some", "any", "be",
+})
+
 
 def _card_label(action: str, action_args: dict) -> str:
     """Human phrasing for an approval card. Prefers what the model wrote
@@ -1213,25 +1221,33 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
         elif action == "find_element":
             targets = await cdp.get_targets()
             desc = args.get("description", "").lower()
-            # Search all targets including generic-role elements (e.g. score spans, badges)
+            # All the meaningful words must match. The old rule accepted a
+            # single word and reported it as `Found:` with a ref, and on
+            # session a7328461 `find_element("Add rule or save button")`
+            # returned Brotto's own "Open agents panel" — matched on the word
+            # "button", on a GitHub page, with nothing else in common. A
+            # confident answer the model then acts on is worse than none.
+            words = [w for w in desc.split() if w not in _FIND_STOPWORDS]
             scored: list[tuple[int, object]] = []
             for t in targets:
                 name_text = (t.name or "").lower()
                 value_text = str(t.value or "").lower()
                 combined = f"{t.role} {name_text} {value_text}"
-                # Prioritise: all words present > any word present
-                words = desc.split()
-                all_match = all(w in combined for w in words)
-                any_match = any(w in combined for w in words)
-                if all_match:
-                    scored.append((2, t))
-                elif any_match:
-                    scored.append((1, t))
+                # Fewer words matched, better match wins; `count` is the tie
+                # -break, not the filter.
+                hits = sum(1 for w in words if w in combined)
+                if words and hits == len(words):
+                    scored.append((hits, t))
             if scored:
-                scored.sort(key=lambda x: -x[0])
+                scored.sort(key=lambda p: -p[0])
                 t = scored[0][1]
-                return f"Found: [{t.ref_id}] {t.role} '{t.name}' value='{t.value}'"
-            return f"Element matching '{desc}' not found in {len(targets)} targets"
+                where = f" value='{t.value}'" if t.value else ""
+                return f"Found: [{t.ref_id}] {t.role} '{t.name}'{where}"
+            return (
+                f"No element on this page matches '{desc}'. Every word has to "
+                f"match one element's role, name or value — try fewer words, or "
+                f"read_page_text to see what this page actually calls it."
+            )
 
         elif action == "read_scratchpad":
             # Returns the manifest as a single blob so the agent can see

@@ -53,7 +53,13 @@ const MAX_GEOMETRY_ENTRIES = 2000;
 export interface GeometryResult {
   /** backendNodeId → centre of the content box, viewport coordinates. Absent
    *  means no box: the caller emits the target with no `x`/`y`, as today. */
-  boxes: Map<number, { x: number; y: number }>;
+  boxes: Map<number, { x: number, y: number }>;
+  /** backendNodeId → why it has a box but cannot be clicked: `off-screen` or
+   *  `occluded`. Absent for every id that is either clickable or has no box at
+   *  all. This is the difference between "scroll, then click" and "dismiss the
+   *  thing covering it", and a target with a reason is one the relay can refuse
+   *  out loud instead of clicking into nothing. */
+  blocked: Map<number, string>;
   /** Distinct ids asked for, after de-duplication by the caller's array. */
   requested: number;
   /** `boxes.size` after the fallback ran. */
@@ -82,6 +88,22 @@ export interface GeometryResult {
  * page would become a click in the same place. Today's code omits coordinates
  * there, and `targetsForFrame` and everything downstream depend on that.
  *
+ * Having a box is not the same as being clickable, and this is where that
+ * difference is cheapest to catch. An element scrolled past the fold still has
+ * client rects — its `y` is simply past the bottom of the window — so the old
+ * walk emitted a coordinate for it, the relay dispatched a click at a point
+ * that is over nothing at all, and the click reported success. Measured on a
+ * failed run (session a7328461, GitHub "new branch protection rule"): the
+ * Create button at the bottom of a long form was clicked ten times across four
+ * attempts, every click resolved, every click was audited `ok: true`, and the
+ * page never changed. Nothing in the model's context said so.
+ *
+ * So the centre — the point the click will actually be aimed at — is what gets
+ * tested, twice: against the viewport, and against whatever is already on top
+ * of it. `elementFromPoint` answers "what would a click here hit", which is the
+ * question, asked in the page, once, for the same batch that was already
+ * walking these elements.
+ *
  * No template literals or semicolons-at-EOL in here: the Node test slices this
  * constant out of the source between the backticks.
  */
@@ -102,7 +124,24 @@ const BOX_WALK = `function (paths) {
     if (!ok || !el) { out.push(null); continue; }
     if (el.getClientRects().length === 0) { out.push(null); continue; }
     const r = el.getBoundingClientRect();
-    out.push([Math.round((r.left + r.right) / 2), Math.round((r.top + r.bottom) / 2)]);
+    const x = Math.round((r.left + r.right) / 2);
+    const y = Math.round((r.top + r.bottom) / 2);
+    // Cheap first, because it is the common case on a long page and the hit
+    // test below is the expensive one. window.inner* is a superset of the
+    // clickable region, so this can only ever decline the genuinely gone.
+    if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) {
+      out.push({ blocked: "off-screen" });
+      continue;
+    }
+    // And then the thing actually sitting on top of it — a sticky header, a
+    // cookie banner, a modal backdrop. A click goes to the topmost element, so
+    // a coordinate under one clicks that instead. The contains() test covers
+    // the ordinary case where the point lands on a child; the reverse does not
+    // count, because clicking an ancestor of the element is not clicking it.
+    const hit = document.elementFromPoint(x, y);
+    if (!hit) { out.push({ blocked: "off-screen" }); continue; }
+    if (hit !== el && !el.contains(hit)) { out.push({ blocked: "occluded" }); continue; }
+    out.push({ x: x, y: y });
   }
   return out;
 }`;
@@ -163,6 +202,7 @@ export async function boxMap(
   backendNodeIds: number[],
 ): Promise<GeometryResult> {
   const boxes = new Map();
+  const blocked = new Map();
   const ids = [];
   const seen = new Set();
   for (const id of backendNodeIds ?? []) {
@@ -219,8 +259,11 @@ export async function boxMap(
         // sent, so the join is positional and needs no key from the page.
         for (let i = 0; i < ordered.length; i++) {
           const value = values[i];
-          if (Array.isArray(value) && value.length >= 2) {
-            boxes.set(ordered[i], { x: Math.round(value[0]), y: Math.round(value[1]) });
+          if (!value || typeof value !== "object") continue;
+          if (typeof value.x === "number" && typeof value.y === "number") {
+            boxes.set(ordered[i], { x: value.x, y: value.y });
+          } else if (value.blocked) {
+            blocked.set(ordered[i], String(value.blocked));
           }
         }
       }
@@ -243,6 +286,33 @@ export async function boxMap(
   // so a pool that counted only the successes would report a healthier number
   // than the loop it replaced.
   const uncovered = ids.filter((id) => !boxes.has(id));
+
+  // The viewport, once, and only when the fallback is about to run. A quad
+  // from `DOM.getBoxModel` is viewport-relative like every other coordinate
+  // here, and an element past the fold still has a quad — so without this the
+  // fallback reintroduces the exact dead click the bulk walk just closed, and
+  // it does so on the path taken whenever the bulk walk fails outright, which
+  // is the path that matters most.
+  //
+  // No hit test here. This path covers shadow-root and cross-frame nodes the
+  // page-side walk cannot reach by element path, and reachability is why they
+  // landed here; a second hit-test snippet to cover the rarer occlusion case
+  // on this path is not worth the surface. Off-screen is the one that costs
+  // the run its steps.
+  let viewport = null;
+  if (uncovered.length) {
+    try {
+      const metrics = await anyCommand(tabId, { method: "Page.getLayoutMetrics" });
+      const css = metrics?.cssLayoutViewport ?? metrics?.layoutViewport;
+      if (css?.clientWidth > 0 && css?.clientHeight > 0) {
+        viewport = { width: css.clientWidth, height: css.clientHeight };
+      }
+    } catch {
+      // No viewport to clamp against. Coordinates stand; the relay will find
+      // out the hard way, which is no worse than the behaviour this replaced.
+    }
+  }
+
   const found = await pooled(uncovered, CDP_CONCURRENCY, async (id) => {
     try {
       const box = await anyCommand(tabId, {
@@ -251,10 +321,12 @@ export async function boxMap(
       });
       const content = box?.model?.content;
       if (content && content.length >= 4) {
-        return {
-          x: Math.round((content[0] + content[2]) / 2),
-          y: Math.round((content[1] + content[3]) / 2),
-        };
+        const x = Math.round((content[0] + content[2]) / 2);
+        const y = Math.round((content[1] + content[3]) / 2);
+        if (viewport && (x < 0 || y < 0 || x >= viewport.width || y >= viewport.height)) {
+          return { blocked: "off-screen" };
+        }
+        return { x, y };
       }
     } catch {
       // No box — off-screen, display:none, or a stale id. Today's behaviour:
@@ -263,11 +335,14 @@ export async function boxMap(
     return null;
   });
   for (let i = 0; i < uncovered.length; i++) {
-    if (found[i]) boxes.set(uncovered[i], found[i]);
+    const hit = found[i];
+    if (!hit) continue;
+    if (hit.blocked) blocked.set(uncovered[i], hit.blocked);
+    else boxes.set(uncovered[i], hit);
   }
 
   return {
-    boxes, requested: ids.length, resolved: boxes.size,
+    boxes, blocked, requested: ids.length, resolved: boxes.size,
     fallback: uncovered.length, truncated, source,
   };
 }

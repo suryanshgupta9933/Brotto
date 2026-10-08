@@ -162,16 +162,28 @@ def _compute_annotations(targets: list["SemanticTarget"]) -> dict[str, str]:
 
 def filter_ax_targets(
     targets: list["SemanticTarget"],
-    viewport_coords: tuple[int, int, int, int] | None = None,
     max_chars: int = MAX_CHARS,
 ) -> str:
     """Filter SemanticTargets to a token-capped AX tree string.
 
-    viewport_coords: (x, y, width, height) bounding box — elements outside are marked off-screen.
-
     Elements are annotated to clarify their action:
     - [→ open] — primary action for this row (click to open/select the item)
     - [☐ select-only] — bulk-selection control (never opens the item)
+
+    An element the page will not act on is marked rather than dropped, because
+    a control that is present and not clickable is information — it is usually
+    the answer to "why did nothing happen":
+    - `[off-screen]` — scroll to it. The extension hit-tested the click point
+      in the page, so this means the coordinate is past the window.
+    - `[covered]` — something is on top of it; close that first.
+    - `[disabled]` — the page has it switched off until the rest of the form
+      is filled in.
+
+    There is no `viewport_coords` argument and there never was a caller for one.
+    It looked like the feature worked and it had never once rendered: a
+    parameter nothing passes is a dead door, and this file already had one
+    burned into it. The extension knows the viewport and hit-tests against it,
+    so it sends the verdict per target instead.
 
     A `hidden` target is one the extension's `aria-hidden` supplement found in
     the DOM and the accessibility tree deliberately omits. It renders as
@@ -223,6 +235,17 @@ def filter_ax_targets(
         # control is the one outcome that must never render.
         if getattr(t, "hidden", False):
             line += " [hidden]"
+        # A control the page will refuse. It renders, because a form whose
+        # Create button is disabled is telling you the field above it is not
+        # accepted yet — the single most useful thing on the page, and it used
+        # to be invisible.
+        if getattr(t, "disabled", False):
+            line += " [disabled]"
+        blocked = getattr(t, "blocked", None)
+        if blocked == "off-screen":
+            line += " [off-screen]"
+        elif blocked == "occluded":
+            line += " [covered]"
         if t.name:
             line += f' "{t.name[:80]}"'
         if t.value:
@@ -239,22 +262,22 @@ def filter_ax_targets(
             line = pad + line
 
         # Off-screen still ranks below in-viewport, and says so on the line.
-        offscreen = False
-        if viewport_coords and t.coordinates:
-            vx, vy, vw, vh = viewport_coords
-            cx, cy = t.coordinates.get("x", 0), t.coordinates.get("y", 0)
-            offscreen = not (vx <= cx <= vx + vw and vy <= cy <= vy + vh)
-            if offscreen:
-                line = f"[off-screen] {line}"
+        # Both facts now come from the same source: the extension's hit test.
+        offscreen = blocked == "off-screen"
 
         # Rank by what is actionable now. A stable sort keeps document order
         # within a rank, so a page that fits is unchanged. This is why the
         # inbox fixture's lone button survived a budget 200 headings had
         # eaten: the budget was never the problem, the ordering was.
+        #
+        # Unclickable sorts below clickable, ahead of unnamed. A page's worth
+        # of disabled buttons is worth reading, but not before the one control
+        # that is live — which is the control the model is going to try.
         lines.append((
             (
                 role not in ACTIONABLE_ROLES,
-                offscreen,
+                offscreen or bool(blocked),
+                getattr(t, "disabled", False),
                 not t.name,
                 depth.get(t.ref_id, 0),
             ),

@@ -255,3 +255,102 @@ def test_the_prompt_does_not_demonstrate_a_bare_number_as_a_ref():
         + "\n  ".join(offenders)
     )
 
+
+
+# ── A control that has a box and cannot be clicked ───────────────────────────
+#
+# Session a7328461: on GitHub's "new branch protection rule" page the agent
+# clicked Create ten times across four attempts. Every ref resolved, every
+# click was audited ok: true, and the page never changed. The button was past
+# the fold of a long form — it had a bounding box, so the relay dispatched a
+# coordinate over an empty viewport, and dispatch is the only thing any layer
+# knew how to report.
+#
+# The fix is upstream of this file: the extension hit-tests each centre in the
+# page and ships the *reason* with the target. What is pinned here is that a
+# reason is never converted into a coordinate, and that the sentence the model
+# gets names the next action — an error it cannot act on reproduces the same
+# retry loop a silent success does.
+
+
+@pytest.mark.asyncio
+async def test_an_off_screen_control_is_refused_not_clicked():
+    relay = _relay([{"ref": "0:7", "role": "button", "blocked": "off-screen"}])
+
+    out = await relay.click_ref("0:7")
+
+    assert out.startswith(FAIL_PREFIX)
+    assert "scroll" in out, f"refusal does not say what to do: {out!r}"
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_covered_control_is_refused_and_names_what_to_dismiss():
+    """Occlusion and off-screen want opposite actions. Telling the model to
+    scroll when something is on top is a step spent to learn nothing."""
+    relay = _relay([{"ref": "0:7", "role": "button", "blocked": "occluded"}])
+
+    out = await relay.click_ref("0:7")
+
+    assert out.startswith(FAIL_PREFIX)
+    assert "scroll" not in out, f"an occluded control was sent off to scroll: {out!r}"
+    assert "banner" in out, f"refusal does not name the usual culprits: {out!r}"
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_control_is_refused_and_points_at_the_form():
+    """A disabled Create button is the most useful line on a form: it is
+    telling you which field above it is not accepted yet."""
+    relay = _relay([{"ref": "0:7", "role": "button", "disabled": True}])
+
+    out = await relay.click_ref("0:7")
+
+    assert out.startswith(FAIL_PREFIX)
+    assert "disabled" in out and "form" in out, f"refusal is not actionable: {out!r}"
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_disabled_is_answered_before_off_screen():
+    """Both can be true. No amount of scrolling changes a disabled button, so
+    the answer that costs the model nothing has to win."""
+    relay = _relay([
+        {"ref": "0:7", "role": "button", "disabled": True, "blocked": "off-screen"},
+    ])
+
+    out = await relay.click_ref("0:7")
+
+    assert "disabled" in out, f"scroll was offered for a disabled control: {out!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_control_stops_type_text_as_well_as_click():
+    """`type_text` into a covered field lands in whatever the page decides is
+    on top, which for an occluded control is the thing covering it. `_locate`
+    is the one gate all four ref-taking methods route through, and this is
+    that claim measured."""
+    relay = _relay([
+        {"ref": "0:7", "role": "textbox", "x": 1, "y": 2, "blocked": "occluded"},
+    ])
+
+    out = await relay.type_text_to_ref("0:7", "hello")
+
+    assert out.startswith(FAIL_PREFIX)
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_target_with_a_box_and_no_reason_still_clicks():
+    """The refusal must not become a veto. Anything the extension did not
+    flag keeps the pre-existing behaviour, or this change trades a dead click
+    for a page where nothing can be clicked at all."""
+    relay = _relay([{"ref": "0:7", "role": "button", "x": 10, "y": 20}])
+    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+
+    out = await relay.click_ref("0:7")
+
+    assert not out.startswith(FAIL_PREFIX)
+    relay._ws_send.assert_called_once_with(
+        {"type": "action", "action": {"type": "click", "x": 10, "y": 20}}
+    )

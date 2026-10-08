@@ -99,7 +99,7 @@ const CDP_CONCURRENCY = vm.runInNewContext(
 );
 
 // The wrapper every case runs in: the extracted bodies, bound to a fake dbg.
-function moduleFor(dbgImpl) {
+function moduleFor(dbgImpl, opts = {}) {
   // Evaluated, not spread as text: `"2000" > 600` happens to be true in
   // JavaScript, and a cap that only works by coercion is not a cap.
   const consts = {};
@@ -138,6 +138,8 @@ function doc(children) {
 
 // The fake page: answers the `Runtime.callFunctionOn` the way Chrome would,
 // by walking `children` with the same element-index arithmetic BOX_WALK uses.
+// A spec may carry `blocked`, standing in for what BOX_WALK itself decides
+// inside the page — the join only cares about the shape of the answer.
 function pageFor(nodesById) {
   return (paths) =>
     paths.map((p) => {
@@ -147,7 +149,8 @@ function pageFor(nodesById) {
         cur = cur.children[i];
       }
       if (!cur || cur.noBox) return null;
-      return [cur.x, cur.y];
+      if (cur.blocked) return { blocked: cur.blocked };
+      return { x: cur.x, y: cur.y };
     });
 }
 
@@ -166,17 +169,63 @@ function check(name, cond, detail) {
 // ── the page-side function, on its own ──────────────────────────────────────
 
 // Runs BOX_WALK as the browser would: `this` is the Document node, and every
-// element answers `children`, `getClientRects`, `getBoundingClientRect`.
-function runBoxWalk(rootChildren) {
-  const fake = (kids, box) => ({
-    children: kids,
-    getClientRects: () => (box === null ? [] : [{ width: 10 }]),
-    getBoundingClientRect: () => box ?? { left: 0, right: 0, top: 0, bottom: 0 },
-  });
-  const root = { nodeType: 9, children: [] };
-  root.children = rootChildren.map((spec) =>
-    spec.noBox ? fake(spec.children || [], null) : fake(spec.children || [], spec.box || { left: 0, right: 0, top: 0, bottom: 0 }));
-  return vm.runInNewContext("(" + BOX_WALK + ")").call(root, [[0], [1]]);
+// element answers `children`, `getClientRects`, `getBoundingClientRect` and
+// `contains`. The sandbox supplies the two globals the hit test reads — the
+// window it checks against, and the page's own `elementFromPoint`.
+//
+// The hit resolver is a real one, not a stub that answers what the case wants.
+// Among the boxes containing the point it returns the innermost (smallest area),
+// which is how a browser resolves a point that lands on a child — and a spec
+// marked `top: true` always wins, which is how a sticky header, a modal
+// backdrop or a parent that paints over its child is modelled. A stub would let
+// the cases pass while the real comparison in BOX_WALK went untested, and that
+// comparison is the whole mechanism: it is what turns a silent dead click into
+// a refusal.
+//
+// `contains` is a subtree test over the built tree, not a set of everything on
+// the page — a flat set would report a banner as a descendant of every element
+// under it and quietly turn every occlusion back into a hit.
+function runBoxWalk(rootChildren, { paths, width = 1280, height = 800, overlay = false } = {}) {
+  const all = [];
+  const area = (r) => Math.max(0, r.right - r.left) * Math.max(0, r.bottom - r.top);
+  function build(spec) {
+    const self = {
+      getClientRects: () => (spec.noBox ? [] : [{ width: 10 }]),
+      getBoundingClientRect: () => spec.box ?? { left: 0, right: 0, top: 0, bottom: 0 },
+    };
+    self.children = (spec.children ?? []).map(build);
+    self.contains = (other) => self._subtree.includes(other);
+    self._top = !!spec.top;
+    self._subtree = [self, ...self.children.flatMap((c) => c._subtree)];
+    all.push(self);
+    return self;
+  }
+  const built = rootChildren.map(build);
+  const root = { nodeType: 9, children: built };
+  if (overlay) {
+    const banner = { _top: true, contains: () => false, getBoundingClientRect: () => ({ left: 0, right: width, top: 0, bottom: height }) };
+    all.push(banner);
+  }
+  const sandbox = {
+    window: { innerWidth: width, innerHeight: height },
+    document: {
+      elementFromPoint: (x, y) => {
+        const at = [];
+        for (const n of all) {
+          if (!n.getBoundingClientRect) continue;
+          const r = n.getBoundingClientRect();
+          if (area(r) === 0) continue;
+          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) at.push(n);
+        }
+        if (!at.length) return null;
+        const forced = at.filter((n) => n._top);
+        if (forced.length) return forced[forced.length - 1];
+        return at.reduce((a, b) => (area(a.getBoundingClientRect()) <= area(b.getBoundingClientRect()) ? a : b));
+      },
+    },
+  };
+  const walk = vm.runInNewContext("(" + BOX_WALK + ")", sandbox);
+  return walk.call(root, paths ?? rootChildren.map((_, i) => [i]));
 }
 
 (async () => {
@@ -193,7 +242,7 @@ function runBoxWalk(rootChildren) {
       { noBox: true },
     ]);
     check("a laid-out element yields its centre",
-      Array.isArray(out[0]) && out[0][0] === 20 && out[0][1] === 40,
+      out[0] && out[0].x === 20 && out[0].y === 40,
       `first rect was ${JSON.stringify(out[0])}`);
     check("an element with no box yields nothing, not (0,0)",
       out[1] === null || out[1] === undefined,
@@ -201,6 +250,53 @@ function runBoxWalk(rootChildren) {
     check("a path that walks off the tree yields nothing",
       walk.call({ nodeType: 9, children: [] }, [[7]])[0] == null,
       "an out-of-range path did not fail closed");
+  }
+
+  // 0b. Having a box is not the same as being clickable. This is the whole
+  //     point of the change: an element scrolled past the fold still has
+  //     client rects, so the old walk emitted a coordinate for it, the relay
+  //     clicked a point that is over nothing, and the click reported success.
+  //     Ten such clicks are session a7328461's entire failure.
+  {
+    const off = runBoxWalk([
+      { box: { left: 10, right: 30, top: 900, bottom: 940 } },
+    ]);
+    check("an element below the fold is blocked off-screen, not given a coordinate",
+      off[0] && off[0].blocked === "off-screen" && off[0].x === undefined,
+      `below the fold was ${JSON.stringify(off[0])}`);
+
+    const above = runBoxWalk([
+      { box: { left: 10, right: 30, top: -60, bottom: -20 } },
+    ]);
+    check("…and one above it too, because the window is not only the bottom edge",
+      above[0] && above[0].blocked === "off-screen",
+      `above the fold was ${JSON.stringify(above[0])}`);
+
+    const covered = runBoxWalk([
+      { box: { left: 10, right: 30, top: 20, bottom: 60 } },
+    ], { overlay: true });
+    check("a control under a banner is blocked occluded",
+      covered[0] && covered[0].blocked === "occluded",
+      `under an overlay was ${JSON.stringify(covered[0])}`);
+
+    // The comparison that must NOT fire: a point landing on a child of the
+    // element is a hit on the element. Refusing here would refuse every label,
+    // icon and span inside every button on the page.
+    const nested = runBoxWalk([
+      { box: { left: 10, right: 30, top: 20, bottom: 60 }, children: [{ box: { left: 12, right: 28, top: 30, bottom: 50 } }] },
+    ]);
+    check("a point landing on a child is a hit on the parent, not an occlusion",
+      nested[0] && nested[0].x === 20 && nested[0].y === 40,
+      `a nested hit was ${JSON.stringify(nested[0])}`);
+
+    // …and the reverse. Clicking an ancestor is not clicking the element under
+    // it, which is why the source checks `el.contains(hit)` and not the reverse.
+    const under = runBoxWalk([
+      { box: { left: 10, right: 30, top: 20, bottom: 60 }, top: true, children: [{ box: { left: 12, right: 28, top: 30, bottom: 50 } }] },
+    ], { paths: [[0, 0]] });
+    check("a point landing on an ancestor is an occlusion, not a hit",
+      under[0] && under[0].blocked === "occluded",
+      `an ancestor hit was ${JSON.stringify(under[0])}`);
   }
 
   // 1. THE POINT OF THE TASK. 600 nodes, three CDP calls.
@@ -252,7 +348,7 @@ function runBoxWalk(rootChildren) {
       calls.push(cmd);
       if (cmd.method === "DOM.getDocument") return { root: doc(nodes) };
       if (cmd.method === "DOM.resolveNode") return { object: { objectId: "obj-1" } };
-      if (cmd.method === "Runtime.callFunctionOn") return { result: { value: [[5, 7]] } };
+      if (cmd.method === "Runtime.callFunctionOn") return { result: { value: [{ x: 5, y: 7 }] } };
       if (cmd.method === "DOM.getBoxModel") return { model: { content: [0, 0, 10, 10] } };
       return {};
     });
@@ -410,6 +506,55 @@ function runBoxWalk(rootChildren) {
     check("…and the top-document node still does",
       JSON.stringify(paths.get(7)) === "[2]",
       `path for 7 was ${JSON.stringify(paths.get(7))}`);
+  }
+
+  // 9. The fallback must not reintroduce the dead click the bulk walk just
+  //    closed. This is the path taken whenever the bulk path fails outright,
+  //    so an unclamped `getBoxModel` here puts the exact bug back on the
+  //    branch that matters most — which is why the viewport is read at all,
+  //    and why it is read lazily: an observation the bulk path covered costs
+  //    no fourth call.
+  {
+    const calls = [];
+    const mod = moduleFor(async (_t, cmd) => {
+      calls.push(cmd);
+      if (cmd.method === "DOM.getDocument") throw new Error("target closed");
+      if (cmd.method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 800 } };
+      }
+      if (cmd.method === "DOM.getBoxModel") {
+        const id = cmd.params.backendNodeId;
+        // 11 sits inside the window; 22 is 900px down a long form.
+        return id === 11
+          ? { model: { content: [10, 20, 30, 60] } }
+          : { model: { content: [10, 900, 30, 940] } };
+      }
+      return {};
+    });
+    const out = await mod.boxMap(7, [11, 22]);
+    check("an on-screen fallback node still gets its coordinates",
+      out.boxes.get(11) && out.boxes.get(11).x === 20 && out.boxes.get(11).y === 40,
+      `get(11) was ${JSON.stringify(out.boxes.get(11))}`);
+    check("an off-screen one is refused by the fallback too",
+      out.boxes.has(22) === false && out.blocked.get(22) === "off-screen",
+      `boxes=${JSON.stringify([...out.boxes])} blocked=${JSON.stringify([...out.blocked])}`);
+  }
+
+  // 9b. …and the viewport is only fetched when there is something to clamp.
+  {
+    const calls = [];
+    const nodes0 = [{ backendNodeId: 100, x: 5, y: 7 }, { backendNodeId: 101, x: 9, y: 9 }];
+    const mod = moduleFor(async (_t, cmd) => {
+      calls.push(cmd);
+      if (cmd.method === "DOM.getDocument") return { root: doc(nodes0.map((n) => el(n.backendNodeId))) };
+      if (cmd.method === "DOM.resolveNode") return { object: { objectId: "obj-1" } };
+      if (cmd.method === "Runtime.callFunctionOn") return { result: { value: pageFor(nodes0)(cmd.params.arguments[0].value) } };
+      return {};
+    });
+    await mod.boxMap(7, [100, 101]);
+    check("a fully-covered observation spends no call on Page.getLayoutMetrics",
+      !calls.some((c) => c.method === "Page.getLayoutMetrics"),
+      `sent ${calls.map((c) => c.method).join(", ")}`);
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

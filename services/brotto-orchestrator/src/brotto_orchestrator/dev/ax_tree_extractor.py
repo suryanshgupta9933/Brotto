@@ -30,6 +30,16 @@ class SemanticTarget:
     # tree by design and the extension surfaced it from the DOM instead. Read by
     # ax_filter (renders `[hidden]`) and by the harness's approval gate.
     hidden: bool = False
+    # The page has this control switched off. A disabled button resolves, has a
+    # box, and does nothing when it is clicked — it was handed to the model
+    # unmarked and the audit recorded the click as a success. ax_filter renders
+    # `[disabled]` and the relay refuses it out loud.
+    disabled: bool = False
+    # It has a box and still cannot be clicked: `off-screen` (scrolled out of
+    # the viewport) or `occluded` (something is on top of it). The extension
+    # hit-tests the click point in the page, so this is what a click there
+    # would actually land on, not an inference from the coordinates.
+    blocked: Optional[str] = None
 
     def __post_init__(self):
         if self.coordinates is None:

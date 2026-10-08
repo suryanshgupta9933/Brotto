@@ -52,6 +52,7 @@ export async function targetsForFrame(
   tabId: number,
   surface: Surface,
   boxes?: GeometryResult["boxes"],
+  blockedMap?: GeometryResult["blocked"],
 ): Promise<object[]> {
   const nodes = surface.axNodes;
   const targets = [];
@@ -92,8 +93,21 @@ export async function targetsForFrame(
     const href  = propUrl(node);
     const parentId = keptAncestor(node.nodeId);
     const backendId = node.backendDOMNodeId;
+    // A disabled control is a real element with a real box that will do
+    // nothing when clicked. It was dropped on the floor until now: the model
+    // was handed the ref, the relay dispatched a click at a genuine
+    // coordinate, and the audit recorded `ok: true` for a button the page had
+    // switched off. Carried only when true — a field per target costs a
+    // thousand false values on a page this size.
+    const disabled = node.properties?.some(
+      (p) => p?.name === "disabled" && p?.value?.value === true,
+    ) === true;
+    const blocked = backendId ? blockedMap?.get(backendId) : undefined;
     let x, y;
-    if (backendId) {
+    // A blocked target has a box and still no coordinates. Emitting one
+    // anyway is the bug; emitting it *with* the reason is what lets the relay
+    // refuse in a sentence the model can act on.
+    if (backendId && !blocked) {
       // Prefer the bulk map. A miss falls through to the per-node call rather
       // than dropping coords — an off-screen target and an unmeasured one are
       // different, and the fallback is what keeps that distinction honest.
@@ -120,6 +134,8 @@ export async function targetsForFrame(
       ...(href    !== undefined ? { href }    : {}),
       ...(parentId !== undefined ? { parent: makeRef(surface.frameIndex, parentId) } : {}),
       ...(x !== undefined    ? { x, y }   : {}),
+      ...(blocked !== undefined ? { blocked } : {}),
+      ...(disabled ? { disabled: true } : {}),
       // The frame this node lives in, so a click can be routed to the right
       // one. Refs are per-observation, so this travels with the target rather
       // than being looked up later.
@@ -157,7 +173,9 @@ export async function extractAx(
   // legitimately has a dozen frames should not have twelve `getFullAXTree`
   // calls in flight against one debugger session.
   for (const surface of surfaces) {
-    const fromTree = await targetsForFrame(tabId, surface, geometry.boxes);
+    const fromTree = await targetsForFrame(
+      tabId, surface, geometry.boxes, geometry.blocked,
+    );
     perFrame.push(fromTree.length);
     targets.push(...fromTree);
     // aria-hidden controls the AX tree dropped on purpose. They carry

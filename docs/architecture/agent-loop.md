@@ -674,6 +674,112 @@ measurably non-zero, and is `find_element` the right shape for the case where
 it is. That is a measurement before it is a schema change, and it is not
 picked from a benchmark table.
 
+### Ten clicks, four attempts, zero changes — the same disease, one layer down
+
+Session `a7328461` (2026-10-08, 27 turns, cancelled): "go to my github … add
+branch protection rules". The agent reached GitHub's *new branch protection
+rule* form and clicked **Create** ten times across four attempts — steps 4–5,
+9–12, 16–18, 21–24. Every ref resolved. Every click was audited `ok: true`.
+The URL never changed. `ax_targets` froze at 127 for steps 20–26, and the
+127→132 delta at steps 4 and 10–12 was the *checkbox* expanding, not Create.
+
+Every layer that could have reported this was reporting success. This is the
+grounding bug above, not fixed — it is that bug's **next layer**: a ref that
+resolves perfectly to an element that cannot be clicked. The two-state
+`(coords, reason)` split assumed resolution was the interesting question. It is
+not; resolution is necessary and nowhere near sufficient.
+
+**Geometry handed out coordinates for elements that are not clickable.**
+`getClientRects().length === 0` is a `display:none` check, not a visibility
+check. An element scrolled past the fold still has client rects — its `y` is
+simply past the bottom of the window. So `boxMap` emitted a centre for Create,
+the relay dispatched a click at a point that is over nothing, and dispatch is
+the only thing any layer knows how to report. Ten times.
+
+The fix is to test the *point*, not the element, and to do it where the
+coordinates are minted. `BOX_WALK` runs in the page's own realm over the batch
+it was already walking, so this was free:
+
+```js
+if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) {
+  out.push({ blocked: "off-screen" });  continue;
+}
+const hit = document.elementFromPoint(x, y);
+if (hit !== el && !el.contains(hit)) { out.push({ blocked: "occluded" }); continue; }
+out.push({ x: x, y: y });
+```
+
+Two tests, cheapest first — the viewport clamp is the common case on a long
+page and `elementFromPoint` is the expensive one. The `contains` direction is
+the one that matters: a point landing on a child **is** a hit on the parent
+(refusing there would refuse every icon inside every button on the page), and a
+point landing on an **ancestor** is not — which is why the reverse test is
+absent. The result is a third map, `blocked`, alongside `boxes`: a target with a
+reason and no coordinates, which is a state that could not previously be
+expressed.
+
+**The `DOM.getBoxModel` fallback would have put the bug back.** It runs exactly
+when the bulk walk fails — shadow roots, cross-frame ids, a tab mid-navigation
+— which is the branch that matters most, and it returned the unclamped quad.
+It now reads `Page.getLayoutMetrics` **lazily**, only when `uncovered.length`,
+so a fully-covered observation still costs three calls. No hit test on that
+path: it covers nodes the page-side walk could not reach *by element path*, and
+a second snippet to catch the rarer occlusion there is not worth the surface.
+Off-screen is the one that costs the run its steps.
+
+**Three markers, and one of them had never rendered.** `ax_filter` accepted a
+`viewport_coords` argument, honoured it, and **no caller has ever passed one** —
+so `[off-screen]` had never once appeared on a real run while the code that
+would draw it sat there looking finished. That is the `canonical_step` failure
+CLAUDE.md documents for the panel, repeated in the tree renderer: a parameter
+nothing sends is a dead door, and it is invisible in review because every line
+around it is correct. The parameter is deleted, not implemented; the extension
+knows the viewport and hit-tests against it, so it ships the verdict per target
+instead. `test_an_unmarked_hypothetical_parameter_is_gone` asserts the signature
+so it cannot be reintroduced.
+
+**A refusal the model cannot act on reproduces the loop it replaced.** Each of
+the three states wants a *different* next action — scroll, dismiss, fix the
+form — and `off-screen` sent to a covered control spends a step to learn that
+scrolling changed nothing. `_locate` checks `disabled` **first** (no amount of
+scrolling changes a disabled button, so the answer that costs the model nothing
+must win), then `occluded`, then `off-screen`, and each sentence names what to
+do. A blocked target stops `type_text` too, not just `click` — an occluded
+field would otherwise take the text.
+
+**The prompt had to learn two new words.** `[off-screen]` was already described
+as "scroll to reveal them", so that one was covered by luck; `[covered]` and
+`[disabled]` were new vocabulary, and a marker the model has no action for is a
+marker it will click anyway. `SYSTEM_PROMPT` now has one section covering all
+three, and states the part that used to be false — that clicking one *is*
+refused before anything is sent.
+
+**What the audit could not see, and now can.** The audit stores no tree, no
+coordinates and no page text — `User data` is not ours, and a field carrying
+any of them is ~200KB of the user's document per page. That is why this failure
+was not *proven* from the session file: ten `ok: true` clicks and a frozen
+target count is a strong shape, but "the Create button was past the fold" was
+an inference from the form being long. **The fix does not reopen that.** It
+needs no new persisted field: the refusal sentence is in `outcome`, so a
+blocked control is countable in `logs/sessions/` by grepping for `off-screen`
+in an action outcome. The observability came from making the failure say what it
+is, not from recording more about the user's page.
+
+Also fixed in the same pass: `find_element("Add rule or save button")` returned
+`[0:17715] button 'Open agents panel'` — **Brotto's own UI, on a GitHub page**.
+It matched on the single word "add" out of five, with stopwords not filtered
+and no requirement that the meaningful words all match. It now requires every
+non-stopword to match, and its not-found message names the recovery rather than
+returning `Found:`.
+
+Pinned by `scripts/test-observation-geometry.test.js` (the walk, the occlusion
+directions, the fallback clamp) and `scripts/test-observation-surfaces.test.js`
+(the wiring: a blocked target gets the reason, no coordinates, and no per-node
+call to put one back), plus `tests/test_grounding_outcome.py` (the refusals)
+and `tests/test_ax_filter.py` (the markers). Every case was run against the
+pre-fix source first. **Not verified in a browser** — whether GitHub's Create
+button was in fact off-screen is inferred from the form, not observed.
+
 ### The model could not press a key
 
 A 19-step HDFC UPI run burned 158s and ~19 model calls without executing a single

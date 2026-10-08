@@ -98,7 +98,7 @@ function moduleFor(dbgImpl) {
        const enumerateSurfaces = (async function (tabId, limits) { ${BODIES.enumerateSurfaces} });
        const KEEP_ROLES = ${KEEP_ROLES_SRC.replace('const KEEP_ROLES = ', '')};
        const propUrl = (function (node) { ${BODIES.propUrl} });
-       const targetsForFrame = (async function (tabId, surface, boxes) { ${BODIES.targetsForFrame} });
+       const targetsForFrame = (async function (tabId, surface, boxes, blockedMap) { ${BODIES.targetsForFrame} });
        return { makeRef, originOf, selectFrames, enumerateSurfaces, targetsForFrame };
      })()`,
     sandbox,
@@ -131,13 +131,18 @@ function chain(depth) {
 let nextNodeId = 1;
 function axNode(role, name, opts = {}) {
   const nodeId = opts.nodeId ?? nextNodeId++;
+  // `properties` is the AX node's own attribute list: `url` for a link's
+  // destination, `disabled` for a control the page has switched off.
+  const properties = [];
+  if (opts.url !== undefined) properties.push({ name: "url", value: { value: opts.url } });
+  if (opts.disabled !== undefined) properties.push({ name: "disabled", value: { value: opts.disabled } });
   return {
     nodeId,
     ...(opts.parentId !== undefined ? { parentId: opts.parentId } : {}),
     role: { value: role },
     name: { value: name },
     ...(opts.backendId !== undefined ? { backendDOMNodeId: opts.backendId } : {}),
-    ...(opts.url !== undefined ? { properties: [{ name: "url", value: { value: opts.url } }] } : {}),
+    ...(properties.length ? { properties } : {}),
   };
 }
 
@@ -270,12 +275,15 @@ function check(name, cond, detail) {
     ] };
     const targets = await mod2.targetsForFrame(7, surface, new Map([
       [501, { x: 10, y: 20 }], [502, { x: 30, y: 40 }],
-    ]));
+    ]), new Map());
     check("a supplied box map supplies the coordinates",
       targets[0].x === 10 && targets[0].y === 20 && targets[1].x === 30 && targets[1].y === 40,
       `got ${JSON.stringify(targets.map((t) => [t.x, t.y]))}`);
     check("…and the per-node call is skipped entirely", boxCalls === 0,
       `DOM.getBoxModel was called ${boxCalls} times`);
+    check("…and an unflagged target carries no `blocked` field at all",
+      !("blocked" in targets[0]),
+      `got ${JSON.stringify(targets[0])}`);
 
     // The miss case is the one that must not regress silently: an id the map
     // does not cover falls back to the per-node call, so an off-screen target
@@ -287,12 +295,48 @@ function check(name, cond, detail) {
       }
       return {};
     });
-    const partial = await mod3.targetsForFrame(7, surface, new Map([[501, { x: 1, y: 2 }]]));
+    const partial = await mod3.targetsForFrame(7, surface, new Map([[501, { x: 1, y: 2 }]]), new Map());
     check("an id the map misses falls back to one per-node call", boxCalls === 1,
       `DOM.getBoxModel was called ${boxCalls} times`);
     check("…and the mapped node still took its bulk coordinates",
       partial[0].x === 1 && partial[1].x === 4,
       `got ${JSON.stringify(partial.map((t) => [t.x, t.y]))}`);
+
+    // The wiring the ten dead clicks on session a7328461 went through. A
+    // blocked target has a box and still gets no coordinates — and the per-node
+    // fallback must not be reached to put one back, or the reason travels with
+    // a coordinate and the relay clicks into the overlay anyway.
+    let blockedCalls = 0;
+    const mod4 = moduleFor(async (_t, cmd) => {
+      if (cmd.method === "DOM.getBoxModel") { blockedCalls++; return { model: { content: [0, 0, 8, 4] } }; }
+      return {};
+    });
+    const both = new Map([[501, { x: 10, y: 20 }], [502, { x: 30, y: 40 }]]);
+    const blocked = await mod4.targetsForFrame(7, surface, both, new Map([[501, "off-screen"]]));
+    check("a blocked target gets the reason and no coordinates",
+      blocked[0].blocked === "off-screen" && blocked[0].x === undefined,
+      `got ${JSON.stringify(blocked[0])}`);
+    check("…and no per-node call was spent trying to re-measure it",
+      blockedCalls === 0,
+      `DOM.getBoxModel was called ${blockedCalls} times`);
+    check("…while its unflagged sibling is untouched",
+      blocked[1].x === 30 && blocked[1].blocked === undefined,
+      `got ${JSON.stringify(blocked[1])}`);
+
+    // `disabled` is read off the AX node's own properties. It was dropped on
+    // the floor until now, and a dropped flag produces a click on a button the
+    // page has switched off — audited `ok: true`, done nothing.
+    const off = {
+      ...surface,
+      axNodes: [
+        axNode("button", "Pay", { backendId: 501, disabled: true }),
+        axNode("button", "Retry", { backendId: 502 }),
+      ],
+    };
+    const flags = await mod4.targetsForFrame(7, off, new Map(), new Map());
+    check("a disabled control is carried, and only it",
+      flags[0].disabled === true && !("disabled" in flags[1]),
+      `got ${JSON.stringify(flags.map((t) => [t.disabled]))}`);
   }
 
   // 5. A HOSTILE OR DEAD FRAME. One `getFullAXTree` rejects; the top frame's
