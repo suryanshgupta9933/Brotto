@@ -61,7 +61,7 @@ references, the structure a screen reader already navigates by. No vision model,
 <table>
 <tr>
 <td width="33%"><img src="docs/images/panel-idle.webp" alt="The Brotto panel, idle, with suggestions"><br><sub><b>Idle.</b> The panel offers what the page in front of you could be asked to do.</sub></td>
-<td width="33%"><img src="docs/images/panel-task-completion.webp" alt="Brotto summarising a Gmail inbox tab"><br><sub><b>Working.</b> A real run over a real inbox, with a plan and the result.</sub></td>
+<td width="33%"><img src="docs/images/panel-task-completion.webp" alt="Brotto creating a branch protection ruleset on the Brotto repository"><br><sub><b>Working.</b> A real run on a real repo — plan, the ruleset it wrote, and the result.</sub></td>
 <td width="33%"><img src="docs/images/panel-session-history.webp" alt="The session history list"><br><sub><b>History.</b> Every run, on your own disk, yours to delete.</sub></td>
 </tr>
 </table>
