@@ -12,6 +12,11 @@ build/
 *.egg-info/
 .egg-info/
 
+# Store upload staging — an unzipped copy of dist/ and the flattened store
+# icon. Both are regenerated from `npm run build` + `rsvg-convert -b '#ffffff'`.
+/clients/brotto-extension/brotto-1.0.0/
+/clients/brotto-extension/store/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -93,12 +98,10 @@ clients/brotto-extension/crx-signing.pem
 # `git rm --cached` — still on disk, no longer in history:
 #   .superpowers/…/task-3-report.md   an AI-dev task report
 #   PLAN.md, decisions.md              the build plan and the D1–D10 lock record
-#   brag-output/                      the video and its share copy
 #   clients/…/preview.html, .preview/  local panel previews
 # The reasoning behind D1–D10 now lives in docs/architecture/, which ships.
 /PLAN.md
 /decisions.md
-/brag-output/
 /clients/brotto-extension/preview.html
 
 # Local agent config — absolute paths and per-machine permissions.
