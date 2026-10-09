@@ -78,6 +78,11 @@ clients/brotto-extension/crx-signing.pem
 /docs/superpowers/
 /docs/product/CONTRIBUTING.md
 /CLAUDE.md
+# The pre-compaction CLAUDE.md (59k). Kept locally as the source the current
+# one was cut from — every rule and measurement is still in docs/architecture/,
+# which ships, so nothing is lost by ignoring this.
+/CLAUDE.md.full
+/CLAUDE.md.v[0-9]
 /phase1.md
 
 # Tracking is not the same as publishing, and the two used to be conflated —
