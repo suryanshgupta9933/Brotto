@@ -211,11 +211,23 @@ ${style.replace("</style>", `
        puts the white back. Visually a no-op: that is the panel's own --paper. */
     #messages { background: var(--paper); }
 
-    /* The two states are stacked in one grid cell rather than positioned with
-       z-index, so which one paints on top is decided by the grid and not by
-       the order inline styles happen to land in. */
-    #messages { display: grid; }
-    .scene { grid-area: 1 / 1; }
+    /* The two states are stacked by position, not by re-laying-out the list.
+       An earlier version made #messages a grid and overlapped the scenes in one
+       cell — which silently killed the panel's own alignment, because
+       .message.user/assistant ride on align-self, and align-self means the
+       BLOCK axis in a grid. The user's bubble stopped sitting right and the two
+       turns read as one column. #messages stays the flex column it ships as;
+       each scene takes that layout with it, and every value is inherited rather
+       than copied, so a change to the panel's spacing moves the scenes with it
+       and nothing here has to be kept in step by hand. */
+    .scene {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: inherit;
+      gap: inherit;
+      padding: inherit;
+    }
 
     /* The sign-in badge pulses forever, which keeps the renderer treating the
        page as live and costs frames for a 1.6s loop nobody reads at GIF speed.
