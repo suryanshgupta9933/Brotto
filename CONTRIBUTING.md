@@ -16,9 +16,12 @@ Direct pushes to `main` are blocked by branch protection — see below.
 Run the same checks CI runs locally:
 
 ```bash
-# Orchestrator tests (Python 3.12 + uv)
-uv sync --group dev
-uv run pytest services/brotto-orchestrator/tests -v
+# Orchestrator tests (Python 3.12 + pip)
+# pip, not uv, so this is the same dependency story as CI, the Dockerfile and
+# the Heroku deploy. uv.lock used to live here too, and Heroku's buildpack now
+# rejects an app carrying two package-manager files rather than guessing.
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest services/brotto-orchestrator/tests -v
 
 # Extension build (Node 20 + npm)
 cd clients/brotto-extension
