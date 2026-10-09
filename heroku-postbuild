@@ -6,6 +6,18 @@
 #
 # --no-deps: requirements.txt already landed the same list, and re-resolving
 # here is a second chance to pick a different version than the one verified.
+#
+# The AGENT_SECRET guard exists because this app is reachable from the public
+# internet and an unset secret is not a warning there, it is an open endpoint
+# that can drive the operator's logged-in browser. Failing at build time beats
+# serving it. Set it with `heroku config:set AGENT_SECRET=...`.
 set -euo pipefail
+
+if [ -z "${AGENT_SECRET:-}" ]; then
+  echo "AGENT_SECRET is unset. This dyno will bind 0.0.0.0 with an open relay." >&2
+  echo "Set one and redeploy:" >&2
+  echo "  heroku config:set AGENT_SECRET=\"\$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')\"" >&2
+  exit 1
+fi
 
 pip install --no-deps .

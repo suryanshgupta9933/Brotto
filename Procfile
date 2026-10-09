@@ -1,1 +1,1 @@
-web: brotto --host 0.0.0.0 --port $PORT
+web: BROTTO_ENV=prod brotto --host 0.0.0.0 --port $PORT

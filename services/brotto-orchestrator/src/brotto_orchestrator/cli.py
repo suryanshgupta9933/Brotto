@@ -5,12 +5,30 @@ from __future__ import annotations
 import argparse
 import sys
 
+_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
 
 def run_server(host: str, port: int, reload: bool) -> None:
     """Boot uvicorn with the FastAPI app."""
     import uvicorn
 
     from brotto_orchestrator.main import app
+    from brotto_orchestrator.session.auth import auth_enabled
+
+    # main.py already refuses a placeholder secret and warns on an unset one.
+    # The warning is right for a developer on loopback and wrong everywhere
+    # else: this process binds a relay that drives a logged-in browser, so an
+    # unset secret plus a non-loopback bind is an open endpoint, not a
+    # convenience. Pairing the two mistakes is what this refuses.
+    if host not in _LOOPBACK and not auth_enabled():
+        raise SystemExit(
+            f"Refusing to bind {host} with no AGENT_SECRET: this relay can drive "
+            "a logged-in browser, and with no secret every caller is trusted.\n"
+            "Set one and start again:\n"
+            "  export AGENT_SECRET=\"$(python3 -c 'import secrets;"
+            "print(secrets.token_urlsafe(32))')\"\n"
+            "If you only meant to reach this from this machine, bind 127.0.0.1."
+        )
 
     print("=" * 60)
     print("BROTTO ORCHESTRATOR SERVER")
