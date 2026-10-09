@@ -18,6 +18,10 @@ read.
 
 https://github.com/user-attachments/assets/1f6d0aca-5206-4e68-8f26-72d586323108
 
+> **Why the accessibility tree, not a screenshot** —
+> [The browser is not a picture](https://suryanshgupta9933.github.io/blog/2026-10-08-the-browser-is-not-a-picture.html)
+> — on the gap between a reference that resolves and a reference that can be
+> clicked, which is where most of the debugging actually is.
 
 ---
 
