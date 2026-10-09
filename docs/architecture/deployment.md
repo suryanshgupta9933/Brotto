@@ -242,6 +242,49 @@ stores it in `settings.agentSecret` — `storage.local`, not `storage.session`,
 because it is a property of the server the user chose rather than of the
 session. (The *model* key stays in `storage.session` and is a different key.)
 
+### A custom domain does not get a certificate on its own
+
+Heroku serves `*.herokuapp.com` from a wildcard that is already there. A
+custom domain is not covered by it, and Heroku will not issue for one until
+**Automatic Certificate Management is switched on for the app**:
+
+```
+$ heroku certs:auto
+=== Automatic Certificate Management is disabled on brotto-orchestrator
+```
+
+That is Settings → SSL Certificate → Automatic Certificate Management →
+Enable, in the dashboard. **There is no CLI command to enable it** —
+`heroku certs:auto` only reports status, and `certs:generate` produces a
+self-signed pair you then have to install on the app yourself. So the failure
+mode is a correct CNAME and a healthy dyno with no certificate, and
+`curl https://…` exits 35 with no server log line at all to explain it.
+
+DNS resolving is necessary but not sufficient, and the two get confused: the
+CNAME was right and verified (`heroku domains:wait` returned done) while the
+cert never appeared. Add the domain *after* DNS resolves, or remove and
+re-add it, if Heroku cached a pre-DNS check.
+
+### `heroku config:get -s` still prints the variable name
+
+```
+$ heroku config:get AGENT_SECRET -s
+AGENT_SECRET=wCtJm9ClXzBQYtGxEZHgaRZztlVLMuXaXHLrKQxW
+```
+
+The value is 43 characters; that line is 56. Sent as a bearer token it is the
+wrong key by a 13-character prefix — which, per the section above, answers
+**404**, the same status as a route that does not exist and the same status as
+a dyno that is simply not there. Strip it:
+
+```bash
+heroku config:get AGENT_SECRET -s | sed 's/^AGENT_SECRET=//' | tr -d '\n'
+```
+
+**And never read the secret into an assistant transcript**, which is the
+whole reason rotating is fiddly at all: the value only has to be read by the
+person who will paste it. Run the command yourself, in your own terminal.
+
 ## What still needs doing before this is publicly reachable
 
 Nothing is open. Each of these was a launch gate and each is closed as of
