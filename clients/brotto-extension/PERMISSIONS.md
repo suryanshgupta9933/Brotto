@@ -215,13 +215,25 @@ panel is closed you would not know.
 
 ### How it is used
 
-`chrome.notifications.create` / `update` / `clear`. Blocking events always
-notify. Results notify only when the panel is not focused — the whole point is
-that you can start a task and come back.
+`chrome.notifications.create` / `update` / `clear`. Both kinds are **on by
+default** and switchable in settings. Blocking events (approval, sign-in,
+clarification) notify whether or not the panel is open. Results notify only
+when the panel is not focused — the whole point is that you can start a task
+and come back.
 
 ### Security controls
 
-Notification text is the domain and event type. No page content is included.
+The notification body is Brotto's own words about the event: the reason for an
+approval, or the run's summary on completion or failure. It is not a copy of
+page text, **but the model's summary can quote what was on the page**, so a
+notification is page-derived and should be treated as one. Nothing identifying
+is added — in particular the domain you were on is not in the notification.
+
+Corrected 2026-10-09: this previously read *"Notification text is the domain and
+event type. No page content is included."* The domain was never in there, and
+the second half was wrong. It was also the only place in this file that
+understated a primitive rather than overstating it, which is the specific
+failure this document exists to prevent.
 
 ---
 

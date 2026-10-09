@@ -558,7 +558,7 @@ function maybeNotify(event: Record<string, unknown>): void {
   }
   // Only the three above are gated; anything else reaching here was never a
   // candidate. Logged so "no notification appeared" has an answer in the
-  // console — the default for results is off, which is otherwise invisible.
+  // console — the panel-watching gate above is invisible from the OS side.
   if (t === "task_completed" || t === "task_failed") {
     console.log(
       `[brotto] no notification for ${t}: notifyResults=${notifyResults} panelConnected=${panelConnected}`,
