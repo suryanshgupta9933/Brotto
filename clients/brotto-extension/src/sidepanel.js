@@ -344,13 +344,12 @@ function setModelPill(model) {
 
 // A name that fits sits dead still; only an overflowing one travels. Measuring
 // beats guessing — a marquee that always runs makes "gpt-6-luna" drift pointlessly.
-// Compare one copy (plus the gap it needs to hand off) against the window, so
-// the decision never depends on the two-copy track's own width.
+// offsetWidth already includes the handoff padding, so adding `gap` again counted
+// the gap twice and set .marquee on names that fit inside the window.
 function fitModelPill() {
   const copy = modelPillName?.firstElementChild?.firstElementChild;
   if (!copy) return;
-  const gap = parseFloat(getComputedStyle(copy).paddingRight) || 0;
-  modelPillName.classList.toggle('marquee', copy.offsetWidth + gap > modelPillName.clientWidth);
+  modelPillName.classList.toggle('marquee', copy.offsetWidth > modelPillName.clientWidth);
 }
 
 async function hydrateModelSettings() {
@@ -3652,6 +3651,14 @@ function resolveCard(card, outcomeClass, text) {
   for (const sel of ['.clarify-input-row', '.input-hint', '.clarify-actions', '.approval-actions', '.login-continue-btn']) {
     for (const el of card.querySelectorAll(sel)) el.remove();
   }
+  // ponytail: the sign-in fallback button is appended to the message list, not
+  // into the card, so the loop above cannot see it. Querying forward from the
+  // card covers it without moving the button into the card it belongs to.
+  let node = card.nextElementSibling;
+  while (node) {
+    if (node.classList.contains('login-continue-btn')) node.remove();
+    node = node.nextElementSibling;
+  }
   let outcome = card.querySelector(`.${outcomeClass}`);
   if (!outcome) {
     outcome = document.createElement('div');
@@ -3820,6 +3827,7 @@ function appendLoginCard({ domain, url, title, task, outcome, resume }) {
   const badge = document.createElement('div');
   badge.className = 'login-required-badge';
   badge.textContent = outcome ? `Sign-in needed · ${domain}` : `Waiting for sign-in · ${domain}`;
+  bubble.appendChild(badge);
 
   // What Brotto was trying to do, and where. A bare "please log in" is a
   // wall with no subject: the user cannot tell a sign-in for the task they

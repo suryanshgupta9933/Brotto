@@ -29,6 +29,20 @@ Consequences worth knowing:
   keyframe it used went with it; `clearLoginPrompt(outcome)` writes the outcome
   into `.login-required-outcome` and nothing is removed. `@keyframes msg-leave`
   stays — `.toast.leaving` still uses it.
+- **The sign-in Continue button is a sibling of the card, not a child.** It is
+  appended to the message list, so `resolveCard`'s `card.querySelectorAll(
+  '.login-continue-btn')` never reached it and the card resolved *with the
+  button still on screen* — a settled sign-in that still looked live. The card
+  is the record and it stays; the button is not part of it. `resolveCard` now
+  walks forward from the card and drops the sibling. Removing it in
+  `clearLoginPrompt` instead would leave the same gap open for any other card
+  that grows an out-of-card control.
+- **`fitModelPill` counted the handoff padding twice.** `offsetWidth` on the
+  track's span already contains its `padding-right: 20px`, and the fit test
+  added the same 20px again — so every model name overflowed by exactly one gap
+  and *every* pill marqueed, including names that fit. The measurement is
+  `offsetWidth > clientWidth` now. The two-copy track stays: it is what makes
+  the travel seamless for a name that genuinely does not fit.
 
 ## A card outlives the run that asked it
 
