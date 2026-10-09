@@ -7,21 +7,35 @@
 //
 // gsap.min.js is vendored rather than pulled from a CDN: the compositions run
 // through a headless renderer, and a build that silently depends on the network
-// is a build that can change under you. Verify with
-//   shasum -a 256 gifs/panel/gsap.min.js
-//   c174bfce53a729418d57a8ad8625e7247c793a22fef8e2851e3cfa3de9cd8280
+// is a build that can change under you. Vendoring only helps if something
+// checks the copy, so build.mjs verifies it and refuses to emit on a mismatch —
+// a digest in a comment is not a control.
 //
 //   node build.mjs            # all compositions
 //   node build.mjs approval   # one
 //
 // Then: npx hyperframes render -c approval.html --format=gif
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(HERE, "..", "..", "clients", "brotto-extension", "src");
+
+// gsap 3.14.2, from https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js
+const GSAP_SHA256 = "c174bfce53a729418d57a8ad8625e7247c793a22fef8e2851e3cfa3de9cd8280";
+
+const gsap = fs.readFileSync(path.join(HERE, "gsap.min.js"));
+const got = crypto.createHash("sha256").update(gsap).digest("hex");
+if (got !== GSAP_SHA256) {
+  throw new Error(
+    `gsap.min.js does not match the pinned gsap 3.14.2 copy.\n` +
+    `  expected ${GSAP_SHA256}\n  got      ${got}\n` +
+    `Refusing to emit compositions from a file that is not the one this was built against.`,
+  );
+}
 
 const panelHtml = fs.readFileSync(path.join(SRC, "sidepanel.html"), "utf8");
 
