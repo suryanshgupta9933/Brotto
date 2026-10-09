@@ -1040,3 +1040,69 @@ def test_a_client_save_does_not_drop_a_grant_only_disk_knows(tmp_path, monkeypat
     main._persist_user_policy("dev-1", {"blacklist": []})
 
     assert pol.load_granted_domains("dev-1") == ["bank.com"]
+
+
+def test_a_malformed_blacklist_leaves_the_stored_one_alone(tmp_path, monkeypatch):
+    """Fail-closed on the field that must never be lost.
+
+    The obvious coercion here is `_string_list` returning `[]` for junk,
+    and then `save_if_changed` writes the empty list over a populated
+    document. The user's blocklist disappears because of a bad payload —
+    strictly worse than the write not happening, and it is silent.
+
+    So a *present but malformed* blacklist raises into the caller's blanket
+    `except`, which leaves the stored document byte-for-byte.
+    """
+    from brotto_orchestrator import main
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+    main._persist_user_policy("dev-1", {"blacklist": ["bad.example"]})
+
+    for junk in ("bad.example", {"a": 1}, 7, ["ok.example", 42]):
+        main._persist_user_policy("dev-1", {"blacklist": junk})
+
+        assert pol.load("dev-1")["blacklist"] == ["bad.example"], junk
+
+
+def test_an_absent_blacklist_is_not_malformed(tmp_path, monkeypatch):
+    """The other half: absence is the normal case, not junk.
+
+    `_persist_user_policy` used to be handed payloads that omit the
+    blacklist entirely. If "absent" raised like "malformed" does, every
+    one of those callers would stop persisting grants.
+    """
+    from brotto_orchestrator import main
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+
+    main._persist_user_policy("dev-1", {"blacklist": ["bad.example"]})
+    main._persist_user_policy("dev-1", {"approved_domains": ["bank.com"]})
+
+    assert pol.load("dev-1")["blacklist"] == []
+
+
+def test_a_junk_grant_cannot_enter_the_navigation_gate(tmp_path, monkeypatch):
+    """The union has the opposite policy to the blacklist, on purpose.
+
+    A grant is a *permission*: a value that could never match an eTLD+1
+    is worthless, so it is dropped. A blacklist entry that got dropped is
+    a lost protection, so the whole write is refused instead. Neither
+    case may raise — raising on the grant would discard the user's real
+    blocklist over one corrupt entry.
+    """
+    from brotto_orchestrator import main
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+
+    main._persist_user_policy("dev-1", {
+        "blacklist": ["bad.example"],
+        "approved_domains": ["Bank.COM", "ok.example", "not a host", "*.evil.com", 42],
+    })
+
+    # Lowercased — `etld1()` always returns lowercase, so a case differential
+    # is two records for one site that look separately revocable.
+    assert pol.load_granted_domains("dev-1") == ["bank.com", "ok.example"]
+    assert pol.load("dev-1")["blacklist"] == ["bad.example"]

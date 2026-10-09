@@ -440,18 +440,59 @@ async def health():
     }
 
 
-def _string_list(value: object) -> list[str]:
-    """Coerce a caller-supplied field to a list of non-empty strings.
+_HOSTNAME = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\Z")
 
-    A bare string is a list of one, not a list of characters — the field
-    is either absent, a list, or junk, and junk must not reach
-    `set()` and raise where the caller cannot see it.
+
+def _string_list(value: object, field: str) -> list[str]:
+    """A caller-supplied list of strings, or a refusal.
+
+    **Fail-closed**, because the caller is deciding what must never be
+    clickable. An absent field is the normal case (the sidepanel omits
+    `approved_domains` from a policy Save) and yields `[]`. A field that
+    is *present but malformed* raises instead of coercing to `[]`, because
+    coercing writes an empty document over a populated one — the user's
+    blocklist disappears because of a bad payload, which is strictly
+    worse than the write not happening. The caller's blanket `except`
+    turns the raise into "leave the stored document alone".
+
+    A bare string is a list of one, not a list of characters.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple, set)):
+        raise ValueError(f"{field} is not a list of strings: {type(value).__name__}")
+    out = []
+    for v in value:
+        if not isinstance(v, str) or not v:
+            raise ValueError(f"{field} holds a non-string entry")
+        out.append(v)
+    return out
+
+
+def _granted_domains(value: object) -> list[str]:
+    """The caller's grants, filtered to things that could be a host.
+
+    The opposite policy to `_string_list`, and deliberately: a grant is
+    a *permission*, so a junk entry is worthless rather than dangerous to
+    keep, and raising here would let one corrupt grant discard the
+    user's whole blocklist write. Dropping the entry costs the user
+    nothing; keeping it would put a string that never matches an eTLD+1
+    into the first-navigation gate forever.
+
+    Lowercased because `etld1()` always returns lowercase — two records
+    for one site is a grant that looks revocable and is not.
     """
     if isinstance(value, str):
         value = [value]
     if not isinstance(value, (list, tuple, set)):
         return []
-    return [v for v in value if isinstance(v, str) and v]
+    out = set()
+    for v in value:
+        if isinstance(v, str) and _HOSTNAME.match(v):
+            out.add(v.lower())
+    return sorted(out)
 
 
 def _persist_user_policy(user_key: str, payload: dict | None) -> None:
@@ -472,22 +513,24 @@ def _persist_user_policy(user_key: str, payload: dict | None) -> None:
     empties on every restart. The client keeps its own copy in
     `chrome.storage.local` and ships it on each `task_start`, which makes the
     two complementary — neither store can lose what the other still holds.
+
+    The union is monotone with no revoke path, so the file only ever grows.
+    That is a real gap and it is a **feature**, not a fix: see
+    `revoke_domain` in `docs/product/decisions/2026-10-10-hosted-beta-accounts-and-the-secret.md`.
     """
     if payload is None:
         return
     try:
         from .policy import persist as _user_policy_persist
-        # Both lists arrive from a caller and are coerced, not trusted: a
-        # non-iterable here used to raise TypeError inside this same `try`,
-        # and the blanket except turned a junk field into a silently
-        # **dropped blacklist** — the one failure mode this function
-        # exists to prevent.
         merged = dict(payload)
-        sent = _string_list(merged.pop("approved_domains", None))
         merged["approved_domains"] = sorted(
-            set(_user_policy_persist.load_granted_domains(user_key)) | set(sent)
+            set(_user_policy_persist.load_granted_domains(user_key))
+            | set(_granted_domains(merged.pop("approved_domains", None)))
         )
-        merged["blacklist"] = _string_list(merged.get("blacklist"))
+        # Both lines must complete before `save_if_changed`, which rewrites
+        # the document wholesale — so the blacklist raising here costs the
+        # grant write too, and leaves the stored document exactly as it was.
+        merged["blacklist"] = _string_list(merged.get("blacklist"), "blacklist")
         wrote = _user_policy_persist.save_if_changed(user_key, merged)
         if wrote:
             # Counts, not the lists themselves — the domains are the user's
@@ -834,9 +877,12 @@ async def policy_ack(request: Request):
     }
     registry.set_user_policy(user_id, snapshot)
     _persist_user_policy(user_id, snapshot)
+    # Count, not the list: the blocked domains are the user's browsing, and
+    # this line plus the audit decision below are the two places a
+    # self-hoster's rotated log files hand them to whoever reads them.
     log.warning(
-        "[%s] POLICY: user saved settings  blacklist=%s",
-        user_id, blacklist,
+        "[%s] POLICY: user saved settings  blacklist=%d",
+        user_id, len(blacklist if isinstance(blacklist, list) else []),
     )
     try:
         from .agent.audit import append_policy_event
@@ -844,7 +890,7 @@ async def policy_ack(request: Request):
             f"client-{user_id}",
             step=None, kind="policy_acknowledged",
             domain=None, action=None,
-            decision=f"blacklist={blacklist}",
+            decision=f"blacklist_count={len(blacklist if isinstance(blacklist, list) else [])}",
         )
     except Exception as exc:
         log.warning("failed to persist policy_acknowledged: %s", exc)
@@ -1306,9 +1352,11 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     await ws_send({"type": "pong"})
                 elif t == "policy_acknowledged":
                     # Extension user clicked Save in sidepanel Settings.
-                    # Log the full new payload so the server has a record
-                    # independent of any task_start.
+                    # Record that it happened, independent of any
+                    # task_start — as a count, not the domains themselves.
                     settings = incoming.get("settings") or {}
+                    blacklist = settings.get("blacklist")
+                    n_blacklist = len(blacklist if isinstance(blacklist, list) else [])
                     # Update the in-memory mirror so GET /v1/policy returns
                     # the just-saved view without waiting for the next
                     # task_start. Persist to disk too. Keyed by IP so it
@@ -1320,9 +1368,9 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     registry.set_user_policy(client_host, snapshot)
                     _persist_user_policy(client_host, snapshot)
                     log.warning(
-                        "[%s] POLICY: user saved settings  blacklist=%s",
+                        "[%s] POLICY: user saved settings  blacklist=%d",
                         session_id,
-                        settings.get("blacklist"),
+                        n_blacklist,
                     )
                     try:
                         from .agent.audit import append_policy_event
@@ -1330,9 +1378,7 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                             session_id,
                             step=None, kind="policy_acknowledged",
                             domain=None, action=None,
-                            decision=(
-                                f"blacklist={settings.get('blacklist')}"
-                            ),
+                            decision=f"blacklist_count={n_blacklist}",
                         )
                     except Exception as exc:
                         log.warning("[%s] failed to persist policy_acknowledged: %s", session_id, exc)

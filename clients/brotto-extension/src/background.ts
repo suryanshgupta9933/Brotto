@@ -215,9 +215,16 @@ async function hydrateUserPolicy(): Promise<void> {
       // Grants live here too, not just on the server. The server's policy file
       // is wiped on every restart of an ephemeral-FS host, and a grant that
       // dies with the dyno is a grant the user is asked about again tomorrow.
-      approved_domains: strings(s.approved_domains),
+      // Lowercased on read so records written before the case guard collapse
+      // into one entry per site instead of two that look separately revocable.
+      approved_domains: [...new Set(strings(s.approved_domains).map((d) => d.toLowerCase()))].sort(),
     };
-    console.log("[brotto] userPolicy hydrated from storage:", userPolicy);
+    // Counts, never the lists: the domains ARE the user's browsing, and this
+    // console is what ends up pasted into a bug report.
+    console.log("[brotto] userPolicy hydrated from storage:", {
+      blacklist: userPolicy.blacklist.length,
+      approved_domains: userPolicy.approved_domains.length,
+    });
   } catch (e) {
     console.warn("[brotto] hydrateUserPolicy failed (using defaults):", e);
   }
@@ -969,13 +976,15 @@ async function startRelay(
         // still exists after a server restart that wipes the policy file —
         // "approving a site outlives the run" is a promise, and on an
         // ephemeral host the server copy alone cannot keep it.
-        const domain = String(msg.domain ?? "");
+        const domain = String(msg.domain ?? "").toLowerCase();
         // This frame becomes a *persisted authorization record* — what lands
         // in approved_domains is seeded into the first-navigation gate on
         // every future run. A junk value would sit in that gate forever, so
         // it has to look like a host before it is allowed to persist.
-        if (/^[a-z0-9.-]+$/i.test(domain) && domain.length <= 253 &&
-            !userPolicy.approved_domains.includes(domain)) {
+        // Lowercased to match `etld1()` server-side, so one site cannot
+        // become two grants that look separately revocable.
+        const isHost = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(domain);
+        if (isHost && !userPolicy.approved_domains.includes(domain)) {
           userPolicy.approved_domains = [...userPolicy.approved_domains, domain].sort();
           const s = (await chrome.storage.local.get("settings")).settings ?? {};
           await chrome.storage.local.set({
