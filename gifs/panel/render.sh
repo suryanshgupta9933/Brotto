@@ -10,8 +10,13 @@ cd "$(dirname "$0")"
 node build.mjs
 mkdir -p out
 
+# The pinned version, matching package.json. Bare `npx hyperframes` resolves
+# whatever is newest that day, so a re-render weeks from now is a different
+# renderer than the one that produced the committed GIFs.
+HF="npx --yes hyperframes@0.8.143"
+
 for card in approval clarify login; do
-  npx hyperframes render -c "$card.html" --format gif --gif-loop 0 \
+  $HF render -c "$card.html" --format gif --gif-loop 0 \
     -f 20 -o "renders/$card.gif" --quiet
   ffmpeg -v error -y -i "renders/$card.gif" \
     -vf "fps=15,scale=360:-1:flags=lanczos,split[a][b];\

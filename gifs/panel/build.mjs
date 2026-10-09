@@ -5,6 +5,12 @@
 // panel that differs from the one users get. Same reasoning as
 // scripts/*.test.js: a mockup is an absence nobody reviews.
 //
+// gsap.min.js is vendored rather than pulled from a CDN: the compositions run
+// through a headless renderer, and a build that silently depends on the network
+// is a build that can change under you. Verify with
+//   shasum -a 256 gifs/panel/gsap.min.js
+//   c174bfce53a729418d57a8ad8625e7247c793a22fef8e2851e3cfa3de9cd8280
+//
 //   node build.mjs            # all compositions
 //   node build.mjs approval   # one
 //
@@ -172,7 +178,7 @@ for (const [id, scene] of Object.entries(SCENES)) {
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="gsap.min.js"></script>
     <link rel="stylesheet" href="panel-tokens.css" />
 ${style.replace("</style>", `
     /* The composition frame. The panel sizes itself from its host, and the
