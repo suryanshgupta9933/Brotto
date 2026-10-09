@@ -265,6 +265,25 @@ CNAME was right and verified (`heroku domains:wait` returned done) while the
 cert never appeared. Add the domain *after* DNS resolves, or remove and
 re-add it, if Heroku cached a pre-DNS check.
 
+### Removing and re-adding a domain mints a new DNS target
+
+The re-add trick above has a cost: **`domains:remove` followed by
+`domains:add` assigns a fresh `*.herokudns.com` target and retires the old
+one immediately.** The record still in DNS then points at a name that no
+longer resolves, so the domain is not merely uncertificated — it is gone,
+with no error on the Heroku side beyond `Unable to resolve DNS for …`.
+
+```
+$ dig +short round-mayflower-….herokudns.com A     # empty — retired
+$ heroku domains
+agent.brotto.dev  CNAME  clear-pig-….herokudns.com
+```
+
+Read the target back out of `heroku domains` **after** any re-add, and treat
+it as the only authority on what DNS should say. Forcing a recheck is not
+worth breaking a working name: check `heroku certs:auto` first, because ACM
+being off is a dashboard toggle and never needed the re-add.
+
 ### `heroku config:get -s` still prints the variable name
 
 ```
