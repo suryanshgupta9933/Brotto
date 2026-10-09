@@ -251,7 +251,9 @@ This is a working system, not a finished product.
 
 Ordered by what unblocks the most people, not by what is most interesting.
 
-- **Remove the install step.** A one-command installer for the container, then a
+- **The store listing is under review.** The extension becomes one click to
+  install the moment it clears. That takes the install from six steps to one.
+- **Remove the last one.** A one-command installer for the container, then a
   hosted option. Everything above is one step too many for anyone who doesn't
   write code, and that is the constraint on everything else here.
 - **Google Docs and Sheets.** Canvas-rendered surfaces are the one place Brotto is
@@ -263,6 +265,11 @@ Ordered by what unblocks the most people, not by what is most interesting.
   is a guess — including ours.
 - **Routines.** Saved, reusable tasks — *every weekday, summarise these* — and
   re-running or resuming from the record.
+- **Cloud, and Pro on top of it.** A hosted relay so a session can be picked up
+  on a second device, and a paid tier built on that — see
+  [Pro](#pro-planned-not-released) for what that would and would not be. The
+  self-hosted build stays free and stays the privacy claim. What the cloud adds
+  is reach and cross-device, never custody of anything you can reach it with.
 - **The `action_args` schema.** The agent's actions take a bare object, so the output tool's JSON
   schema tells the model nothing about any action's argument names. Every argument is a guess from the
   prompt prose, and the guesses are inconsistent. Typing it as a union is a real fix, not a patch.
