@@ -5,6 +5,40 @@ Ordered by what unblocks someone using Brotto today.
 
 ## In progress
 
+### The one install step left
+
+The extension is on the Chrome Web Store, under review — one click as soon as it
+clears. What survives that is `docker compose up`, and it is the only thing
+between someone who does not write code and using Brotto.
+
+Removing it is a one-command installer for the **server half only**: check
+Docker, generate `AGENT_SECRET`, write `.env`, `compose up`, print the address
+and the secret. It is not the extension installer — the store is that, and is
+strictly better. This is the only work gated on the store clearing, so nothing
+else compounds until it does.
+
+A prebuilt extension zip on GitHub Releases covers the review window, so
+outreach replies have something to hand a stranger. It is deleted when the
+listing lands.
+
+## Next
+
+### Google Docs and Sheets — spiked separately, before anything is built
+
+Canvas surfaces are the one place Brotto is blind: no page text, no AX value, no
+screenshot to fall back on. The closest alternative shares the blindness, so
+this is a tie that costs both of us.
+
+Docs and Sheets are not the same problem, and neither answer is known. **Docs is
+a contenteditable DOM with a rich ARIA tree** and may largely already work — the
+documented canvas blindness may not apply to it at all. **Sheets genuinely
+draws its grid to canvas.** Measure both before writing anything; this may be a
+configuration fix rather than a subsystem. Whatever the spike finds becomes a
+first-run example, because "it works in your Google Doc and the obvious
+alternative doesn't" is the claim that converts a non-developer.
+
+This is sequenced before the benchmark, and the benchmark before routines.
+
 ### Scoring the harness against a real model
 
 The harness is built: eight fixtures, a scoring rule that separates *refused*
@@ -22,7 +56,14 @@ README's "no published benchmark yet" stays true, and that sentence is the most
 expensive one in the product — it is an invitation to assume somebody else's
 reliability number is better.
 
-## Next
+The numbers it has to move are weekly active runs and 30-day retention. Stars
+are a donation to a premise, not a usage signal.
+
+### Routines, replay and scheduling
+
+Saved reusable tasks — *every weekday, summarise these* — re-run or resumed from
+the audit document. Held back until the benchmark reports, because shipping
+automation on an unmeasured loop is the failure mode that costs the most.
 
 ### Pro: the paid half, and what it hangs off
 
@@ -90,10 +131,14 @@ is the fix, and it is not cheap: about thirty call sites construct an
 
 ### The Chrome Web Store listing
 
-The extension is loadable unpacked and the manifest and `welcome.html` are in
-shape. What is missing is a review-ready package: icons at the required sizes,
-screenshots, a privacy-practices disclosure that matches the README, and a
-category. The review is the gate, not the build.
+**Submitted, under review.** Icons, screenshots, the privacy-practices
+disclosure and the category are done; nothing is outstanding but the review
+itself. `debugger` plus `<all_urls>` is the combination reviewers slow down on,
+so the clock is budgeted at one to two weeks rather than days — which is why the
+server installer above is the thing being built in parallel, not after it.
+
+No code change was needed to submit: the origin allow-list matches any valid
+extension id, so the store-assigned id is allowed automatically.
 
 ### Idle-page suggestions, re-measured
 
@@ -112,8 +157,19 @@ the model actually produced.
 
 ## Not planned
 
-**A hosted tier.** There is no operator to protect, no marginal cost to defend
-and no signup to build. Every reason it was deferred still holds.
+**A hosted tier, for now.** There is no operator to protect, no marginal cost
+to defend and no signup to build. Every reason it was deferred still holds
+**while the free tier is self-hosted**, which is the product today.
+
+The direction is an ephemeral relay the extension connects to — nothing written
+server-side by default — for cross-device sessions and the Pro surface. It does
+not weaken the self-hosted default, which remains the privacy claim and the free
+product. It does need its own decision record, because the two on disk assume
+no operator; those files are superseded by new ones rather than edited.
+
+Pro sells compounding and performance — routines syncing, throughput, support —
+and **never custody**. The rule that survives: if a Pro feature can be phrased as
+"we keep your data", it is not a Pro feature.
 
 **Free-tier task caps.** 1 concurrent, 25/day. On a box the user runs, against
 a key the user owns, a cap spends the user's tokens for them. It is friction

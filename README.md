@@ -2,11 +2,12 @@
 
 # Brotto
 
-**Ask an AI to do a task in the browser you're already signed in to.**
+**It asks before it does anything you can't undo — and you can see exactly what it did.**
 
-It runs in your own Chrome, on your own tabs, with your own cookies.
-You bring the model key. There is no Brotto account, and no Brotto server —
-you run the orchestrator yourself.
+Tell Brotto a task in plain English and it carries that out in the browser tab
+you're already signed in to. Your inbox, your bank, your admin panel. Not a
+cloud browser you've never logged into, and not a screenshot of a page it can't
+read.
 
 [![CI](https://github.com/suryanshgupta9933/brotto/actions/workflows/ci.yml/badge.svg)](https://github.com/suryanshgupta9933/brotto/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -20,16 +21,66 @@ https://github.com/user-attachments/assets/1f6d0aca-5206-4e68-8f26-72d586323108
 
 ---
 
-## Why your own browser
+> **One step too many, and we know it.** The extension is on the Chrome Web
+> Store, under review — one click to install as soon as it clears. The agent
+> loop runs in a small container you start yourself, and that is the only thing
+> standing between someone who does not write code and using Brotto.
+> **Removing it is the top priority** — not a someday item. Everything else in
+> this README works around that one step; see [Self-host](#self-host) for what
+> it takes today.
 
-Most browser agents run in **a cloud browser you have never logged into**, so they re-authenticate,
-they trip bot detection, and they read the page as a **screenshot**. That falls over on exactly the
-tasks worth automating — your inbox, your bank, your admin panel — and screenshot vision burns
-context per pixel while still guessing that a rectangle is a button.
+---
 
-Brotto takes the opposite two bets. **It drives your tab**, so your cookies, MFA and SSO are simply
-there. And **it reads the accessibility tree, not pixels** — roles, labels, values and stable
-references, the structure a screen reader already navigates by. No vision model, no image tokens.
+## Why it can be trusted with a logged-in session
+
+An agent holding your cookies can do a lot of damage in one wrong click. Three
+things are built around that, and none of them can be switched off.
+
+**It stops and asks before anything irreversible.** Before it sends an email,
+takes a payment, deletes something, publishes, or changes a password — and
+before it visits a domain for the first time. There is no setting that turns
+this off, because an agent you can disable the safety on is an agent you cannot
+leave running.
+
+**It writes down what it did.** Every run produces a per-session record: each
+observation, prompt, action, approval and timing, in a document on your disk.
+That is what lets you read a run back afterwards, resume one that was
+interrupted, or delete it outright. It is a record, not a chat transcript.
+
+**It tells you why it couldn't act.** When a button is off-screen, covered by a
+cookie banner, or disabled, Brotto says so on the line the model reads — and
+records the reason *without a coordinate*, so it never retries the same wrong
+click. The alternative is "element no longer available, the page probably
+changed," which is not an explanation.
+
+You can also set a ceiling on what a single task is allowed to spend, and Brotto
+checks your model key is actually working before a run starts — so an expired
+key costs you a sentence rather than a failed task.
+
+---
+
+## Why it's built this way
+
+Two decisions, and everything else follows from them.
+
+**It drives your tab, not a cloud browser.** Most browser agents run somewhere
+you have never logged in. A cloud browser has no cookie jar, so every site
+starts at the sign-in wall, which is why those products sell credential storage
+as a feature — and it has no reputation, so the sites you actually care about
+serve it a bot challenge. Brotto works in the session you already have. Your
+cookies, your MFA, your SSO: simply there.
+
+**It reads the accessibility tree, not pixels.** Roles, labels, values and stable
+references — the structure a screen reader already navigates by. No vision
+model, no image tokens. It can tell a button from a heading, and it doesn't
+have to guess whether a rectangle is a button.
+
+The agent loop runs in a small container on your machine and the extension is a
+pure actuator — handed a target, asked for a box model. Chrome suspends
+Manifest V3 service workers when they go idle, so a loop living inside the
+extension inherits a lifetime nothing in your task controls. Keeping it in a
+process you control means a long run survives, and means the record of it has
+somewhere real to land.
 
 ---
 
@@ -37,21 +88,15 @@ references, the structure a screen reader already navigates by. No vision model,
 
 - **Works in your session.** Attach to a tab, give it a task, watch it work, detach. It never asks
   you to log in to anything.
-- **Asks before the risky parts.** An approval card before it sends an email, takes a payment,
-  deletes something, publishes, or changes a password — and before it acts on a site for the first
-  time. There is no setting that turns this off.
-- **Your blocklist is the only blocklist.** Blocked domains and the sensitive-action list are yours.
-  No server-side floor, no operator override.
 - **Redacts what it reads.** Credentials, API keys, bearer tokens, card numbers and government
   identifiers are stripped from page text before it reaches the model provider — in code, on every
   task, with no setting to disable.
+- **Your blocklist is the only blocklist.** Blocked domains and the sensitive-action list are yours.
+  No server-side floor, no operator override.
 - **Eight providers, bring your own key.** Anthropic, OpenAI, MiniMax, Gemini, OpenRouter, DeepSeek,
   Groq, or any OpenAI-compatible endpoint you run yourself.
-- **Knows your key is broken before it wastes a run.** One real request to your provider before a
-  task starts, so an expired key is a sentence rather than a failed run.
-- **Keeps a full audit trail.** Every run writes a per-session record — each observation, prompt,
-  action, approval and timing. It is what makes a conversation resumable and inspectable rather
-  than a black box.
+- **Resumes an interrupted run.** A stopped task is a state, not a lost conversation — pick it back
+  up from the record.
 
 ---
 
@@ -110,6 +155,12 @@ lands in `logs/sessions/` beside the rest of your files.
 Brotto is one container and one Chrome extension. The container holds the agent loop; it never
 launches a browser.
 
+**This step is on its way out.** It exists so the agent loop survives Chrome
+suspending the extension mid-task, and so each run has a real place to write its
+record. A one-command installer is next, and a hosted option after that, at which
+point there is nothing left to run yourself. The steps below are the whole of it
+until then.
+
 ```bash
 git clone https://github.com/suryanshgupta9933/brotto.git
 cd brotto
@@ -157,28 +208,6 @@ migrating from `python main.py`.
 
 ---
 
-## Why not the alternatives
-
-**Browser Use, Skyvern, Nanobrowser** — all three run in a cloud browser you
-have never logged into. That is the whole difference. A cloud browser has no
-cookie jar, so every site starts at the sign-in wall, which is why they sell
-credential storage as a feature. It has no reputation, so the sites you actually
-care about serve it a bot challenge. And on the reading side, most of them
-started from screenshots and added the accessibility tree afterwards — the
-parts that are hard to retrofit.
-
-**Claude in Chrome / Operator / ChatGPT Agent** — genuinely good, and the right
-first thing to try. What Brotto is for is the case where the answer has to run
-against *your* accounts with *your* key, stay on your disk, and be yours to
-delete, rather than being a product someone else runs. The blocklist is the
-tell: Brotto has no server-side policy floor, because there is no server.
-
-**Playwright / Puppeteer scripts** — better, if the task is fixed. Brotto is
-for the task you can describe in a sentence and cannot script, which is the
-majority of what anyone actually wants automated.
-
----
-
 ## Where your data goes
 
 - **The browser runs on your machine.** The agent loop runs on a server *you* run, so page
@@ -212,16 +241,28 @@ This is a working system, not a finished product.
 - **No published benchmark yet.** The harness runs, but against a scripted planner — it measures
   perception and actions with no model in the loop. Until it scores real runs, any reliability number
   you see anywhere is a guess, including ours.
-- **Long tasks can outlive the service worker.** Chrome suspends MV3 workers after ~30s idle.
+- **The panel can outlive the service worker.** Chrome suspends MV3 workers after
+  ~30s idle. The agent loop is on your server and survives this; the side panel
+  and its badge do not necessarily.
 
 ---
 
 ## What's next
 
-- **Chrome Web Store listing.** The manifest and welcome page are in shape and the build rasterises
-  the icon at every size the store asks for. What is missing is a review-ready package — a bumped
-  version, store-sized screenshots, a category — and then the review clock, which is a week or two
-  with these permissions. The gate is the review, not the build.
+Ordered by what unblocks the most people, not by what is most interesting.
+
+- **Remove the install step.** A one-command installer for the container, then a
+  hosted option. Everything above is one step too many for anyone who doesn't
+  write code, and that is the constraint on everything else here.
+- **Google Docs and Sheets.** Canvas-rendered surfaces are the one place Brotto is
+  blind. Worth checking separately — Docs renders a real DOM and may largely
+  already work, while Sheets genuinely draws to canvas.
+- **A published benchmark.** The harness runs, but against a scripted planner with
+  no model in the loop, so it measures perception and actions and says nothing
+  about judgement. Until it scores real runs, any reliability number in this space
+  is a guess — including ours.
+- **Routines.** Saved, reusable tasks — *every weekday, summarise these* — and
+  re-running or resuming from the record.
 - **The `action_args` schema.** The agent's actions take a bare object, so the output tool's JSON
   schema tells the model nothing about any action's argument names. Every argument is a guess from the
   prompt prose, and the guesses are inconsistent. Typing it as a union is a real fix, not a patch.
