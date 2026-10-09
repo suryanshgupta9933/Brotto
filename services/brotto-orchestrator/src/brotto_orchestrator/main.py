@@ -449,22 +449,25 @@ def _persist_user_policy(user_key: str, payload: dict | None) -> None:
     on disk failures; the in-memory cache still works for the current
     run, but the next restart will lose the change.
 
-    `approved_domains` is carried across from disk rather than taken from
-    `payload`. `save_if_changed` writes the document wholesale, and the two
-    WebSocket callers pass `{blacklist}` only — the sidepanel's `userPolicy`
-    carries nothing else. So without this the grant the user made last run is
-    erased at the start of this one, and they are asked to approve the same
-    site on every task. That was true of `/v1/policy_ack` too, which worked
-    around it at the call site; carrying the key here fixes both at the one
-    function every writer routes through.
+    `approved_domains` is a **union** of what the client sent and what is on
+    disk, never either one alone. `save_if_changed` writes the document
+    wholesale and the sidepanel's `user_policy` carries only the blacklist, so
+    keying off the payload alone erased the grant the user made last run and
+    re-asked about the same site every task. Keying off disk alone is not
+    enough either: that file is server-local, so on an ephemeral-FS host it
+    empties on every restart. The client keeps its own copy in
+    `chrome.storage.local` and ships it on each `task_start`, which makes the
+    two complementary — neither store can lose what the other still holds.
     """
     if payload is None:
         return
     try:
         from .policy import persist as _user_policy_persist
         merged = dict(payload)
-        if "approved_domains" not in merged:
-            merged["approved_domains"] = _user_policy_persist.load_granted_domains(user_key)
+        merged["approved_domains"] = sorted(
+            set(_user_policy_persist.load_granted_domains(user_key))
+            | set(merged.get("approved_domains") or [])
+        )
         wrote = _user_policy_persist.save_if_changed(user_key, merged)
         if wrote:
             # Counts, not the lists themselves — the domains are the user's

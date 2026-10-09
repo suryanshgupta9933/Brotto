@@ -1444,10 +1444,17 @@ if (saveSettingsBtn) {
     // floor to re-union on Save — the panel shows what will be enforced,
     // and that is exactly these lines.
     const blacklist = blacklistSetting.value.split('\n').map((s) => s.trim()).filter(Boolean);
+    // `chrome.storage.local.set` replaces `settings` wholesale, so any key
+    // this object omits is deleted. approved_domains is written by the
+    // service worker when the user approves a site — rebuilding the object
+    // without it silently revoked every standing grant the moment anyone
+    // opened Settings and pressed Save.
+    const priorSettings = (await chrome.storage.local.get('settings')).settings || {};
     const settings = {
       serverUrl: plannerUrlSetting.value || 'http://localhost:8000',
       agentSecret: (agentSecretSetting ? agentSecretSetting.value.trim() : ''),
       blacklist,
+      approved_domains: Array.isArray(priorSettings.approved_domains) ? priorSettings.approved_domains : [],
       notifyBlocking: notifyBlockingSetting ? notifyBlockingSetting.checked : true,
       notifyResults: notifyResultsSetting ? notifyResultsSetting.checked : true,
       contextSuggestions: contextSuggestionsSetting ? contextSuggestionsSetting.checked : false,
@@ -1491,7 +1498,7 @@ if (saveSettingsBtn) {
       const r = await fetch(`${base}/v1/policy_ack`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...await authHeaders() },
-        body: JSON.stringify({ settings: { blacklist: settings.blacklist }, user_id: await deviceId() }),
+        body: JSON.stringify({ settings: { blacklist: settings.blacklist, approved_domains: settings.approved_domains }, user_id: await deviceId() }),
       });
       serverOk = r.ok;
       // A wrong key is a 404, not a 403, so on its own it reads as a missing

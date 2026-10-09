@@ -498,7 +498,8 @@ def _click(ref, description="a button on the page"):
 # ── Standing grants survive the process ────────────────────────────────────
 
 
-def test_a_granted_domain_is_written_to_the_user_policy_file(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_a_granted_domain_is_written_to_the_user_policy_file(tmp_path, monkeypatch):
     """The whole point of the grant is that it outlives the run. Without a
     file, `_seed_granted_domains` finds nothing on the next task and the user
     is asked about the same site again — so this asserts the write, not just
@@ -511,12 +512,13 @@ def test_a_granted_domain_is_written_to_the_user_policy_file(tmp_path, monkeypat
     deps = AgentDeps(
         user_id="u", task="x", cdp=None, ws_send=None, client_ip="10.0.0.9",
     )
-    _persist_domain_grant(deps, "bank.com")
+    await _persist_domain_grant(deps, "bank.com")
 
     assert pol.load_granted_domains("10.0.0.9") == ["bank.com"]
 
 
-def test_a_grant_does_not_clobber_the_blacklist(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_a_grant_does_not_clobber_the_blacklist(tmp_path, monkeypatch):
     """The grant and the blacklist are two fields of ONE file, written by two
     different code paths — the harness on Approve, the panel on Save. A grant
     written as a whole-payload save would silently empty the user's blocklist,
@@ -532,7 +534,7 @@ def test_a_grant_does_not_clobber_the_blacklist(tmp_path, monkeypatch):
     deps = AgentDeps(
         user_id="u", task="x", cdp=None, ws_send=None, client_ip="10.0.0.9",
     )
-    _persist_domain_grant(deps, "bank.com")
+    await _persist_domain_grant(deps, "bank.com")
 
     on_disk = pol.load("10.0.0.9")
     assert on_disk["blacklist"] == ["bad.example"]
@@ -597,7 +599,8 @@ def test_a_user_with_no_policy_file_is_asked_as_normal(tmp_path, monkeypatch):
     assert deps.visited_domains == set()
 
 
-def test_a_hidden_control_never_becomes_a_standing_grant(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_a_hidden_control_never_becomes_a_standing_grant(tmp_path, monkeypatch):
     """Only the loop's bare-domain path calls `grant_domain`. A hidden target
     is approved per-run, so a grant written from it would launder a
     page-injected control into a permanent permission."""
@@ -615,7 +618,7 @@ def test_a_hidden_control_never_becomes_a_standing_grant(tmp_path, monkeypatch):
     # The loop's approve branch is guarded by nothing but the key shape, so
     # pin that the key is what stops it: a domain-keyed call would persist.
     if hidden_key == "shop.example":
-        _persist_domain_grant(deps, hidden_key)
+        await _persist_domain_grant(deps, hidden_key)
     assert pol.load_granted_domains("10.0.0.9") == []
 
 
@@ -996,3 +999,44 @@ async def test_an_unreadable_tab_does_not_abort_the_task():
                      ws_send=None, client_ip="10.0.0.9")
     await _seed_starting_domain(deps)
     assert deps.visited_domains == set()
+
+
+# ---------------------------------------------------------------------------
+# Grants must survive a host whose filesystem does not
+# ---------------------------------------------------------------------------
+
+def test_client_grants_survive_a_wiped_policy_file(tmp_path, monkeypatch):
+    """The policy file is server-local, and a dyno restart empties it. The
+    client keeps its own copy in chrome.storage.local and ships it on every
+    task_start, so the two stores have to union — keying off either one alone
+    silently re-asks the user about a site they already approved."""
+    from brotto_orchestrator import main
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+    # Ephemeral host: the disk starts empty on every boot.
+    assert pol.load_granted_domains("dev-1") == []
+
+    main._persist_user_policy("dev-1", {
+        "blacklist": ["bad.example"],
+        "approved_domains": ["bank.com"],
+    })
+
+    assert pol.load_granted_domains("dev-1") == ["bank.com"]
+    assert pol.load("dev-1")["blacklist"] == ["bad.example"]
+
+
+def test_a_client_save_does_not_drop_a_grant_only_disk_knows(tmp_path, monkeypatch):
+    """The mirror image: the client has not shipped the grant yet (it was made
+    this run, and the frame has not landed), but the file has it. Dropping it
+    here is the same bug from the other side."""
+    from brotto_orchestrator import main
+    from brotto_orchestrator.policy import persist as pol
+
+    monkeypatch.setattr(pol, "_DIR", tmp_path)
+    pol.grant_domain("dev-1", "bank.com")
+
+    # The sidepanel ships only the blacklist.
+    main._persist_user_policy("dev-1", {"blacklist": []})
+
+    assert pol.load_granted_domains("dev-1") == ["bank.com"]

@@ -181,7 +181,10 @@ let lastObservedUrl = "";
 // ponytail: `whitelist` and `mode` were both removed. The list is the
 // whole policy and every gate on the server runs unconditionally, so there
 // is nothing for a flag to switch. Keeping the type narrow to what we ship.
-let userPolicy: { blacklist: string[] } = { blacklist: [] };
+let userPolicy: { blacklist: string[]; approved_domains: string[] } = {
+  blacklist: [],
+  approved_domains: [],
+};
 
 // ponytail: Bug 1 — SW hydration on startup. Without this, every
 // extension reload resets userPolicy to defaults even though the user
@@ -192,7 +195,12 @@ async function hydrateUserPolicy(): Promise<void> {
   try {
     const stored = await chrome.storage.local.get("settings");
     const s = stored.settings as
-      | { blacklist?: unknown; notifyBlocking?: boolean; notifyResults?: boolean }
+      | {
+          blacklist?: unknown;
+          approved_domains?: unknown;
+          notifyBlocking?: boolean;
+          notifyResults?: boolean;
+        }
       | undefined;
     if (!s) return;
     // Both notify unless explicitly turned off. Brotto's premise is that you
@@ -200,10 +208,14 @@ async function hydrateUserPolicy(): Promise<void> {
     // the whole thing exists to deliver.
     notifyBlocking = s.notifyBlocking !== false;
     notifyResults = s.notifyResults !== false;
+    const strings = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((d): d is string => typeof d === "string") : [];
     userPolicy = {
-      blacklist: Array.isArray(s.blacklist)
-        ? s.blacklist.filter((d): d is string => typeof d === "string")
-        : [],
+      blacklist: strings(s.blacklist),
+      // Grants live here too, not just on the server. The server's policy file
+      // is wiped on every restart of an ephemeral-FS host, and a grant that
+      // dies with the dyno is a grant the user is asked about again tomorrow.
+      approved_domains: strings(s.approved_domains),
     };
     console.log("[brotto] userPolicy hydrated from storage:", userPolicy);
   } catch (e) {
@@ -952,6 +964,22 @@ async function startRelay(
         notifyUi({ type: "canonical_status", status: "executing" });
         break;
 
+      case "domain_granted": {
+        // The user approved a site this run. Keep our own copy so the grant
+        // still exists after a server restart that wipes the policy file —
+        // "approving a site outlives the run" is a promise, and on an
+        // ephemeral host the server copy alone cannot keep it.
+        const domain = String(msg.domain ?? "");
+        if (domain && !userPolicy.approved_domains.includes(domain)) {
+          userPolicy.approved_domains = [...userPolicy.approved_domains, domain].sort();
+          const s = (await chrome.storage.local.get("settings")).settings ?? {};
+          await chrome.storage.local.set({
+            settings: { ...s, approved_domains: userPolicy.approved_domains },
+          });
+        }
+        break;
+      }
+
       case "pong":
         // ponytail: Bug 5 — heartbeat response. Reset the deadline so the
         // next ping has a fresh 30s window. If pong stops arriving, the
@@ -1459,8 +1487,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             | { blacklist?: string[]; notifyBlocking?: boolean; notifyResults?: boolean }
             | undefined;
           if (s) {
+            // Rebuilding `userPolicy` from the settings message wholesale used
+            // to be safe because it was blacklist-only. It is not anymore:
+            // this fires on every Save, and dropping `approved_domains` here
+            // silently revoked every standing grant the moment the user
+            // touched an unrelated setting.
             userPolicy = {
               blacklist: Array.isArray(s.blacklist) ? s.blacklist : [],
+              approved_domains: userPolicy.approved_domains,
             };
             // Notification prefs ride along on Save rather than growing their
             // own message type — they live in the same settings object.

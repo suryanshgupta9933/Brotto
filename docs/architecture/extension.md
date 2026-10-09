@@ -170,6 +170,25 @@ Two things make that a real grant rather than a per-run cache:
   the harness and the panel write two different fields of one file, and a grant
   written as a whole-payload `save_if_changed` would have emptied the blocklist
   in a file named after a hash of the key, where the damage is invisible in review.
+- **The client holds a second copy, and the two are unioned.** That file is
+  server-local, so on a host that wipes its disk on restart — every ephemeral
+  dyno — the grant was gone by morning and the user was re-approving the same
+  site daily, which quietly made "outlives the run" false. `domain_granted` now
+  goes out to the extension, which writes `approved_domains` into the same
+  `chrome.storage.local` settings document the blacklist already lives in and
+  ships it back on every `task_start`; `_persist_user_policy` unions what the
+  client sent with what is on disk, so neither store can lose what the other
+  still holds. **The blocklist was never at risk** — `effective_policy` is built
+  from the client's copy on every task start, so the server file only ever fed
+  the pre-connect panel view.
+
+  Two rebuild sites rebuild the whole `userPolicy` object and had to be widened
+  or they revoked grants on a side effect: `hydrateUserPolicy` (browser start)
+  and the `policy_changed` case (which fires on **every** press of Save, so
+  opening Settings to change an unrelated field used to drop them all). The
+  panel's Save replaces `settings` wholesale, so it carries the prior
+  `approved_domains` forward for the same reason. Pinned by
+  `scripts/test-domain-grants.test.js`.
 - **The audit is the fallback, not the store.** A resume restores approved
   domains from `policy_events` with `user_decision == "approved"`, and that
   filter now accepts `first_time_seen` as well as `first_navigation`. Both now

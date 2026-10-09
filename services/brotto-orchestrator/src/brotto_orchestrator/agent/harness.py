@@ -929,18 +929,30 @@ def _grant_key(deps: AgentDeps) -> str:
     return deps.client_ip or "unknown"
 
 
-def _persist_domain_grant(deps: AgentDeps, domain: str) -> None:
-    """Write an approved domain to the user's policy file.
+async def _persist_domain_grant(deps: AgentDeps, domain: str) -> None:
+    """Record an approved domain in both places the user can reach it.
 
-    Swallows its own failure. This runs inside the approval path, and a
-    disk error must not turn a user's "Approve" into a crashed task — the
-    worst case is that they see this prompt one more time next session.
+    Swallows its own failures. This runs inside the approval path, and a
+    disk or socket error must not turn a user's "Approve" into a crashed
+    task — the worst case is that they see this prompt one more time next
+    session.
+
+    The policy file alone is not enough. It is server-local, and on a host
+    with an ephemeral filesystem it is wiped on every restart, so "approving a
+    site outlives the run" quietly became false there. The client already
+    owns the blocklist in `chrome.storage.local` and ships it on every
+    task_start; grants ride the same path, and this frame is what tells it a
+    grant exists.
     """
     try:
         from ..policy import persist as _persist
         _persist.grant_domain(_grant_key(deps), domain)
     except Exception as exc:  # noqa: BLE001 — never break a run over a grant
         log.warning("could not persist domain grant %s: %s", domain, exc)
+    try:
+        await deps.ws_send({"type": "domain_granted", "domain": domain})
+    except Exception as exc:  # noqa: BLE001 — same rule, second sink
+        log.warning("could not deliver domain grant %s: %s", domain, exc)
 
 
 def _seed_granted_domains(deps: AgentDeps) -> None:
@@ -2587,7 +2599,7 @@ class AgentHarness:
                         action=c.action, decision="require_approval",
                         user_decision="approved",
                     )
-                    _persist_domain_grant(deps, domain)
+                    await _persist_domain_grant(deps, domain)
                     log.warning(
                         "[%s] POLICY: user APPROVED first-time-seen  step=%d  domain=%s  action=%s",
                         deps.user_id, step, domain, c.action,
