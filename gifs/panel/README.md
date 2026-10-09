@@ -34,11 +34,12 @@ HyperFrames writes GIF directly; the ffmpeg pass is what makes them small enough
 to put on a page — raw output is ~10MB each because the crossfade re-quantises
 every frame.
 
-Three rules in the generated HTML depart from the panel, each commented in
-`build.mjs`: `.grain` is hidden (its 1.5% noise is invisible at GIF scale and
-costs ~4× the file size), and the two perpetual animations — the sign-in badge
-pulse and the model pill's marquee — are stopped, since a 6s loop has no room for
-a cycle nobody reads at GIF speed.
+Four rules in the generated HTML depart from the panel, each commented in
+`build.mjs`: `#messages` is given the panel's own `--paper` so Chrome captures a
+white backdrop behind the cards instead of a transparent one, `.grain` is hidden
+(its 1.5% noise is invisible at GIF scale and costs ~4× the file size), and the
+two perpetual animations — the sign-in badge pulse and the model pill's marquee —
+are stopped, since a 6s loop has no room for a cycle nobody reads at GIF speed.
 
 ## Not verified in a browser
 

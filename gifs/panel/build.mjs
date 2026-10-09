@@ -204,6 +204,13 @@ ${style.replace("</style>", `
     }
     #messages { position: relative; }
 
+    /* #messages is the one scrolling box in the panel, so Chrome rasterises it
+       as its own layer and captures that layer over a transparent backdrop —
+       the body paper behind it never makes it into the frame, and the whole
+       message area lands at alpha 0. Painting the token the body already paints
+       puts the white back. Visually a no-op: that is the panel's own --paper. */
+    #messages { background: var(--paper); }
+
     /* The two states are stacked in one grid cell rather than positioned with
        z-index, so which one paints on top is decided by the grid and not by
        the order inline styles happen to land in. */
