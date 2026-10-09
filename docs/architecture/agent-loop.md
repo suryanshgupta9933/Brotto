@@ -1001,6 +1001,10 @@ page *before* the thing it had just clicked opened, and told `ok`.
 them in `_pushed_obs` for `_ensure_fresh_obs`, which is the one caller they are good for:
 the URL moved, which they know reliably.
 
+The skip set is a named constant, `_UNSOLICITED`, and it holds exactly one member —
+`navigated`. Everything else, including a frame with no `reason` at all, is solicited and
+is served to the step.
+
 **An absent `reason` is not treated as unsolicited.** An extension predating the field
 sends none, and skipping untagged frames makes every step request an observation, discard
 it, and request again — forever, with no timeout to stop it, because the extension keeps

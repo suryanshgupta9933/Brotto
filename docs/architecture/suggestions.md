@@ -71,11 +71,36 @@ when it lands, so the box is never empty and never waits on a model call.
 
 **This reads the user's page with no task in flight.** That is a real
 escalation from "the user asked for something" to ambient, and it is the one
-default here that was chosen rather than tested. The user owns the key and the
-extension already held `<all_urls>`, so it ships on — TTL as the mitigation,
-and a `page text N chars` / `page text unavailable` line in the server log as
-the only place it is visible. **There is no indicator in the panel.** If that
-matters, it is the missing piece, not a refinement.
+default here that was chosen rather than tested.
+
+It is now **off by default**, and that default is enforced in one place:
+`contextSuggestionsEnabled()` accepts only an explicit `true`. A fresh install
+reads nothing at all. Turning it on is a disclosure problem, not a settings
+problem, and it needs **two** disclosures because the two have different
+lifetimes:
+
+- **`contextBadge`**, for the duration of the read — the seconds the text is
+  actually being fetched.
+- **A caption under the buttons**, after the lines land — because the lines
+  outlive the badge by minutes, and a badge alone leaves the most of the time
+  the user is looking at the result undisclosed.
+
+The caption's flag is the **server's** `context_used`, not the client's guess,
+and it is carried through the cache as `hit.context`. That matters because the
+common path is a cache replay: a line set that said "from this page" when it
+was generated and says nothing when it is re-shown an hour later is a caption
+that lies for most of what a user sees. Pinned by
+`scripts/test-suggestion-source.test.js`, since a caption that only appears on
+a fresh fetch is invisible in a diff and wrong for most of what a user sees.
+
+The cache key is `host + pathShape + YYYY-MM-DD` in `chrome.storage.local`,
+with numeric and UUID path segments collapsed to `:id`, capped at 40. Entries
+carry a TTL, and **it is short when page text was used**: "three emails from
+your manager" is page content, and a day-long entry is that content left on
+disk. Ten minutes context-derived, a day for URL-and-title-only, chosen from
+the server's `context_used` rather than guessed at from whether the read
+succeeded. The panel paints the fallback first and swaps in the generated set
+when it lands, so the box is never empty and never waits on a model call.
 
 **Read the real output before believing a change here.** Diff inspection found
 nothing wrong with either table version, and nothing wrong with the

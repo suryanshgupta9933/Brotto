@@ -69,6 +69,16 @@ page off disk is not redaction — it is that the write path for page content wa
 removed, which is a shape decision, and one that can be undone by a well-meaning
 `begin_turn(..., ax_diff=…)`.
 
+The shape, precisely: `begin_turn` takes `ax_diff_chars: int` — a **length**,
+not the diff. The caller measures; the audit document stores the number. The
+`.pages.json` sidecar that held the bodies lost its last writer when the
+scratchpad moved to a manifest, and `ax_diff` went with it. What is left per
+page is a 200-char digest. Two tests hold the line and both are load-bearing:
+`test_persisting_a_scratchpad_writes_no_page_text` and
+`test_the_audit_document_holds_no_page_content`. A signature that takes the
+content back puts it all on disk again, and no amount of `is_secret_field`
+behaviour catches it.
+
 **3a. `redact_text` had one call site, and the README's Privacy section promised two.** The policy
 says page text is redacted "on every task, with no setting to turn it off". That
 was true of `harness.py` and false of `suggest.py`: the idle-suggestions path
