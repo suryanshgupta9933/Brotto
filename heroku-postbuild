@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Heroku runs this after `pip install -r requirements.txt`. Without it the
+# `brotto` console script in [project.scripts] never exists, and the Procfile
+# fails with "command not found" — the Python buildpack installs
+# *dependencies* only, it does not install the project.
+#
+# --no-deps: requirements.txt already landed the same list, and re-resolving
+# here is a second chance to pick a different version than the one verified.
+set -euo pipefail
+
+pip install --no-deps .
