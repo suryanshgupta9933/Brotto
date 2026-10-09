@@ -46,7 +46,13 @@ def run_server(host: str, port: int, reload: bool) -> None:
     print("  3. Configure server URL in extension options")
     print("=" * 60)
 
-    uvicorn.run(app, host=host, port=port, reload=reload, log_level="info")
+    # workers=1 is an invariant, not a tuning knob: the session registry is a
+    # plain in-process dict, so POST /v1/sessions mints the id into whichever
+    # worker served the request and the WebSocket then lands on a coin flip —
+    # roughly half of all runs die on "session not found". Hosted platforms set
+    # WEB_CONCURRENCY for us (Heroku sends 2), and uvicorn treats that as
+    # "restart me" and exits 3 when handed an app object, so this overrides it.
+    uvicorn.run(app, host=host, port=port, reload=reload, log_level="info", workers=1)
 
 
 def main() -> None:

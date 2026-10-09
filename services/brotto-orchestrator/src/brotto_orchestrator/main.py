@@ -280,6 +280,11 @@ def _authed(request: Request) -> bool:
 # of entropy, so it cannot be guessed.
 _UUID = re.compile(r"\A[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 
+# Host and X-Forwarded-Proto are caller-supplied, and both end up in a URL the
+# extension will dial — and in a log line. Same discipline as _UUID: an allowlist
+# of one safe alphabet, so nothing downstream has to escape them.
+_HOST = re.compile(r"\A[A-Za-z0-9.\-]{1,253}(:\d{1,5})?\Z")
+
 
 def _caller_key(transport, explicit: object = None) -> str:
     """The key the user's blocklist and remembered model are stored under.
@@ -688,14 +693,17 @@ async def create_session(request: Request):
     # "ws", so a hardcoded localhost hands a remote client a socket pointed at
     # its own machine and the run dies silently on connect. Behind a TLS
     # terminator the socket scheme has to be wss or the handshake fails.
+    host = request.url.netloc
+    if not _HOST.match(host):
+        raise HTTPException(status_code=400, detail="unroutable host header")
     scheme = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
-    base = f"{'wss' if scheme == 'https' else 'ws'}://{request.url.netloc}"
-    ws_url = f"{base}/ws/ext/{session_id}"
-    log.info("session created  session_id=%s  ws_url=%s", session_id, ws_url)
+    if scheme not in ("http", "https"):
+        scheme = "http"
+    log.info("session created  session_id=%s", session_id)
     return JSONResponse(status_code=201, content={
         "session_id": session_id,
-        "websocket_url": ws_url,
-        "server_url": f"{scheme}://{request.url.netloc}",
+        "websocket_url": f"{'wss' if scheme == 'https' else 'ws'}://{host}/ws/ext/{session_id}",
+        "server_url": f"{scheme}://{host}",
     })
 
 
