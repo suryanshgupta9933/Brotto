@@ -184,6 +184,39 @@ it in plain text into the access log of this server and of any proxy in
 front of it, permanently. The server selects the protocol *name* back
 (`brotto-v1`) rather than echoing the secret.
 
+### One worker, and it is an invariant rather than a tuning knob
+
+`SessionRegistry` is a plain in-process dict. `POST /v1/sessions` mints the
+session id into whichever worker served that request, and the WebSocket the
+extension opens next is load-balanced independently — so on two workers
+roughly half of all runs die on "session not found". Shared state has to move
+to Redis before the ceiling moves.
+
+Hosted platforms set `WEB_CONCURRENCY` themselves rather than asking: Heroku
+sends 2. uvicorn reads that as "restart me", refuses an app object with
+*"You must pass the application as an import string"* and exits **3**, which
+reads as a crash with no cause in the log. Passing the import string is the
+wrong fix — it would have started two workers and produced the failure above.
+`cli.py` passes `workers=1` so the ceiling holds on every host, including
+Docker, instead of relying on a deploy config that is not in the repo.
+
+### The advertised address is the caller's, not `localhost`
+
+`/v1/sessions` returns a `websocket_url`, and `background.ts` dials it
+**verbatim** whenever it starts with `ws`. A hardcoded `ws://localhost:8000`
+therefore hands a remote client a socket pointed at its own machine, and the
+run dies silently on connect with nothing in either log. Both URLs are derived
+from the request instead, with the scheme taken from `X-Forwarded-Proto` and
+mapped to `wss://` — behind a TLS terminator a bare `ws://` will not handshake.
+
+`Host` and `X-Forwarded-Proto` are caller-supplied and both reach a URL that
+gets dialled, so the scheme is narrowed to `http`/`https` and netloc passes
+`_HOST`, the same one-safe-alphabet discipline as `_UUID`. Colons are in that
+set because Starlette builds an IPv6 netloc **unbracketed** (`::1:8000`, not
+`[::1]:8000`) — a stricter alphabet answers 400 to every IPv6 self-host. What
+the filter actually keeps out is CR, LF, space and `/`. The URL is no longer
+logged at all; the session id is the correlation handle.
+
 ### A refused key looks like a missing route
 
 A wrong `AGENT_SECRET` is answered **404, not 403** — 403 would confirm the

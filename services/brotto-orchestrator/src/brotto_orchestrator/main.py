@@ -60,7 +60,7 @@ if not _is_prod():
     os.environ.setdefault("AGENT_MODEL", "minimax:MiniMax-M3")
     os.environ.setdefault("CONTEXT_WINDOW_TOKENS", "1000000")
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -282,8 +282,12 @@ _UUID = re.compile(r"\A[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 
 # Host and X-Forwarded-Proto are caller-supplied, and both end up in a URL the
 # extension will dial — and in a log line. Same discipline as _UUID: an allowlist
-# of one safe alphabet, so nothing downstream has to escape them.
-_HOST = re.compile(r"\A[A-Za-z0-9.\-]{1,253}(:\d{1,5})?\Z")
+# of one safe alphabet, so nothing downstream has to escape them. Colons are in
+# the set because Starlette builds an IPv6 netloc *unbracketed* ("::1:8000"), and
+# cli.py already treats ::1 as loopback — a stricter alphabet 400s every IPv6
+# self-host. What the filter actually exists to keep out is CR, LF, space and
+# slash, none of which any branch can match.
+_HOST = re.compile(r"\A(?:[A-Za-z0-9.\-]{1,253}|\[?[0-9A-Fa-f:.]+\]?)(:\d{1,5})?\Z")
 
 
 def _caller_key(transport, explicit: object = None) -> str:
@@ -686,6 +690,14 @@ async def create_session(request: Request):
         return _error(404, "not found")
 
     session_id = str(uuid.uuid4())
+    # Validate before the registry write: a rejected host must not consume one
+    # of the 256 slots.
+    host = request.url.netloc
+    if not _HOST.match(host):
+        raise HTTPException(status_code=400, detail="unroutable host header")
+    scheme = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
+    if scheme not in ("http", "https"):
+        scheme = "http"
     registry.get_or_create(session_id)
     _prune_sessions()
     # Advertise the address the caller actually reached us on, not a fixed
@@ -693,12 +705,6 @@ async def create_session(request: Request):
     # "ws", so a hardcoded localhost hands a remote client a socket pointed at
     # its own machine and the run dies silently on connect. Behind a TLS
     # terminator the socket scheme has to be wss or the handshake fails.
-    host = request.url.netloc
-    if not _HOST.match(host):
-        raise HTTPException(status_code=400, detail="unroutable host header")
-    scheme = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
-    if scheme not in ("http", "https"):
-        scheme = "http"
     log.info("session created  session_id=%s", session_id)
     return JSONResponse(status_code=201, content={
         "session_id": session_id,
