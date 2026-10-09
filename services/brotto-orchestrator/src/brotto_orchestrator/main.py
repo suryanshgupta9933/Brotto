@@ -440,6 +440,20 @@ async def health():
     }
 
 
+def _string_list(value: object) -> list[str]:
+    """Coerce a caller-supplied field to a list of non-empty strings.
+
+    A bare string is a list of one, not a list of characters — the field
+    is either absent, a list, or junk, and junk must not reach
+    `set()` and raise where the caller cannot see it.
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [v for v in value if isinstance(v, str) and v]
+
+
 def _persist_user_policy(user_key: str, payload: dict | None) -> None:
     """Best-effort write of the user's last-known policy to disk.
 
@@ -463,11 +477,17 @@ def _persist_user_policy(user_key: str, payload: dict | None) -> None:
         return
     try:
         from .policy import persist as _user_policy_persist
+        # Both lists arrive from a caller and are coerced, not trusted: a
+        # non-iterable here used to raise TypeError inside this same `try`,
+        # and the blanket except turned a junk field into a silently
+        # **dropped blacklist** — the one failure mode this function
+        # exists to prevent.
         merged = dict(payload)
+        sent = _string_list(merged.pop("approved_domains", None))
         merged["approved_domains"] = sorted(
-            set(_user_policy_persist.load_granted_domains(user_key))
-            | set(merged.get("approved_domains") or [])
+            set(_user_policy_persist.load_granted_domains(user_key)) | set(sent)
         )
+        merged["blacklist"] = _string_list(merged.get("blacklist"))
         wrote = _user_policy_persist.save_if_changed(user_key, merged)
         if wrote:
             # Counts, not the lists themselves — the domains are the user's
@@ -476,7 +496,7 @@ def _persist_user_policy(user_key: str, payload: dict | None) -> None:
             log.info(
                 "user-policy saved  user_key=%s  blacklist=%d  granted=%d",
                 user_key,
-                len(payload.get("blacklist") or []),
+                len(merged["blacklist"]),
                 len(merged["approved_domains"]),
             )
         # else: silent no-op save; this is the common case when the

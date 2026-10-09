@@ -1461,9 +1461,16 @@ if (saveSettingsBtn) {
     };
     await chrome.storage.local.set({ settings });
     plannerUrlEl.value = settings.serverUrl;
-    // agentSecret is redacted: this line goes to a devtools console that
-    // users paste into issue reports.
-    console.log('[brotto] settings saved', { ...settings, agentSecret: settings.agentSecret ? '<set>' : '' });
+    // agentSecret is redacted, and the two policy lists are reduced to counts:
+    // this line goes to a devtools console that users paste into issue
+    // reports, and the domains ARE the user's browsing — the same reason the
+    // server logs counts rather than lists.
+    console.log('[brotto] settings saved', {
+      ...settings,
+      agentSecret: settings.agentSecret ? '<set>' : '',
+      blacklist: (settings.blacklist || []).length,
+      approved_domains: (settings.approved_domains || []).length,
+    });
 
     // 1. Push the in-memory mirror to the SW so the next task_start
     //    ships it. Bug 7: wait for the SW's success ack so we don't

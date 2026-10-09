@@ -970,7 +970,12 @@ async function startRelay(
         // "approving a site outlives the run" is a promise, and on an
         // ephemeral host the server copy alone cannot keep it.
         const domain = String(msg.domain ?? "");
-        if (domain && !userPolicy.approved_domains.includes(domain)) {
+        // This frame becomes a *persisted authorization record* — what lands
+        // in approved_domains is seeded into the first-navigation gate on
+        // every future run. A junk value would sit in that gate forever, so
+        // it has to look like a host before it is allowed to persist.
+        if (/^[a-z0-9.-]+$/i.test(domain) && domain.length <= 253 &&
+            !userPolicy.approved_domains.includes(domain)) {
           userPolicy.approved_domains = [...userPolicy.approved_domains, domain].sort();
           const s = (await chrome.storage.local.get("settings")).settings ?? {};
           await chrome.storage.local.set({
