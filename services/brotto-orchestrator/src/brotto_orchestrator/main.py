@@ -683,12 +683,19 @@ async def create_session(request: Request):
     session_id = str(uuid.uuid4())
     registry.get_or_create(session_id)
     _prune_sessions()
-    ws_url = f"ws://localhost:8000/ws/ext/{session_id}"
+    # Advertise the address the caller actually reached us on, not a fixed
+    # one: the extension dials `websocket_url` verbatim when it starts with
+    # "ws", so a hardcoded localhost hands a remote client a socket pointed at
+    # its own machine and the run dies silently on connect. Behind a TLS
+    # terminator the socket scheme has to be wss or the handshake fails.
+    scheme = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
+    base = f"{'wss' if scheme == 'https' else 'ws'}://{request.url.netloc}"
+    ws_url = f"{base}/ws/ext/{session_id}"
     log.info("session created  session_id=%s  ws_url=%s", session_id, ws_url)
     return JSONResponse(status_code=201, content={
         "session_id": session_id,
         "websocket_url": ws_url,
-        "server_url": "http://localhost:8000",
+        "server_url": f"{scheme}://{request.url.netloc}",
     })
 
 
