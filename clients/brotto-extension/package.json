@@ -28,7 +28,7 @@
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/chrome": "^0.0.268",
-    "@types/node": "^20.11.0",
+    "@types/node": "^26.6.4",
     "esbuild": "^0.28.1",
     "typescript": "^5.3.3"
   }
