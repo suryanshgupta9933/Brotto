@@ -66,6 +66,48 @@ Two things GitHub's docs call out that are easy to miss:
   now — it is a reporting nicety, not a gate, and changing the checkout for the
   whole job is a bigger diff than the fix warrants.
 
+### The upload 404s until Code Quality is enabled
+
+**Owner action, and it is UI-only.** Enable **Settings → Security → Code
+quality**. Until then `Orchestrator tests` fails with:
+
+```
+Coverage upload failed (HTTP 404): Not Found.
+```
+
+The 404 is easy to misread as a permissions bug, because the permissions really
+are the first thing anyone checks. They are correct —
+`contents: read` + `code-quality: write` is what
+[actions/upload-code-coverage#16](https://github.com/actions/upload-code-coverage/issues/16)
+confirms is sufficient, confirmed by a maintainer on 2026-09-24. The repo
+setting is what is missing, and a 404 is not the response GitHub documents for a
+missing permission.
+
+The setting is **not reachable over the API**. `PATCH /repos/{owner}/{repo}` with
+`security_and_analysis[code_quality][status]=enabled` returns `200` and silently
+drops the field, so a successful response proves nothing:
+
+```bash
+gh api --method PATCH repos/suryanshgupta9933/brotto \
+  -f 'security_and_analysis[code_quality][status]=enabled'
+# 200 OK — and `security_and_analysis` comes back with no code_quality key.
+```
+
+Verify the way that actually works:
+
+```bash
+gh api repos/suryanshgupta9933/brotto/code-quality/coverage   # 404 until enabled
+```
+
+This repo is public, so no GitHub Advanced Security purchase is involved —
+confirmed rather than assumed, because the same 404 appears on private repos for
+exactly that reason.
+
+**`fail-on-error: false` is not the fix.** It turns the step green while no
+report reaches the commit, which leaves the `code_coverage` rule silently
+unevaluated — the gate looks present and is not. That is the failure this whole
+change exists to remove, reintroduced one level up.
+
 ### A local coverage number is not the CI number
 
 `ci.yml`'s comment says 77%. **Running the same command on macOS can print 62%**
