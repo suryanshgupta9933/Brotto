@@ -13,6 +13,16 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Default-deny. Without this, every job inherits the repository default token,
+# and two of these three run npm install and pip install against PR-controlled
+# lockfiles. test-orchestrator widens to code-quality: write for the one upload
+# below — an explicit grant rather than the only declaration in the file.
+#
+# `actions/upload-artifact` and the buildx `type=gha` cache use the Actions
+# runtime token, not GITHUB_TOKEN, so neither needs a scope here.
+permissions:
+  contents: read
+
 jobs:
   # ─── Orchestrator: type + unit tests ────────────────────────────────
   test-orchestrator:
@@ -89,7 +99,10 @@ jobs:
       # keep in sync. `github-code-quality[bot]` comments the summary on the PR.
       - name: Upload coverage report
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-code-coverage@v1
+        # Pinned to a SHA, unlike the floating tags elsewhere in this file. It
+        # is the only step that runs with a write-scoped token, so a moved tag
+        # is the one here worth naming exactly. Dependabot opens the bump PR.
+        uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1
         with:
           file: coverage.xml
           language: Python
