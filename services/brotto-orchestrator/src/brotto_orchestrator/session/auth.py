@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hmac
 import os
+from typing import NamedTuple
+
+from . import jwt_auth
 
 # Every placeholder value `.env.example` has ever shipped. An earlier one was
 # `replace-me-with-secrets-token-urlsafe-32` — a *working* secret, because
@@ -47,6 +50,68 @@ def auth_enabled() -> bool:
     return False
 
 
+def auth_mode() -> str:
+    """Which credential this relay demands: "open", "secret" or "jwt".
+
+    Read at call time for the same reason `auth_enabled` is: load_dotenv()
+    runs at import of main.py and tests set the env after it.
+
+    `SUPABASE_JWT_SECRET` wins when both are set. A hosted relay that
+    kept accepting `AGENT_SECRET` would hand every beta user a shared
+    secret, which is the model this mode exists to replace — and it would
+    do so quietly, because both variables being set looks like a config
+    mistake rather than a downgrade.
+    """
+    if jwt_auth.jwt_enabled():
+        return "jwt"
+    if auth_enabled():
+        return "secret"
+    return "open"
+
+
+class AuthResult(NamedTuple):
+    """One credential check, with the three answers that are not the same.
+
+    `missing` exists because "a credential was required and none arrived"
+    and "a credential arrived and was wrong" are indistinguishable to a
+    user holding an extension too old to send one — the old build's
+    120-character cap means it sends nothing at all, and both cases used
+    to close 4001 byte-identically.
+    """
+
+    verdict: str  # "ok" | "missing" | "bad"
+    claims: jwt_auth.Claims | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.verdict == "ok"
+
+
+def authenticate(authorization: str | None, query_token: str | None = None) -> AuthResult:
+    """The one credential check, for every transport.
+
+    A browser cannot set headers on a WebSocket, so the extension relay
+    passes the credential as a WebSocket subprotocol. `?token=` is
+    accepted as a fallback for curl and the protocol tests. Both
+    spellings resolve here rather than at each call site, so adding a
+    route cannot pick the wrong one — and adding a *credential* cannot
+    leave one of the call sites checking only the old one.
+    """
+    token = (authorization or "").replace("Bearer ", "", 1).strip()
+    token = token or (query_token or "").strip()
+    if auth_mode() == "jwt":
+        if not token:
+            return AuthResult("missing")
+        claims = jwt_auth.verify_jwt(token)
+        return AuthResult("ok", claims) if claims else AuthResult("bad")
+    if validate_token(token):
+        return AuthResult("ok")
+    # Self-host gets no distinction: one credential has always answered
+    # one way, and a beta-only close code must not change what a
+    # self-hoster sees.
+    return AuthResult("bad")
+
+
 def validate_token(token: str) -> bool:
     if not auth_enabled():
         return True
@@ -54,12 +119,5 @@ def validate_token(token: str) -> bool:
 
 
 def validate_request(authorization: str | None, query_token: str | None = None) -> bool:
-    """Validate from either transport.
-
-    A browser cannot set headers on a WebSocket, so the extension relay
-    passes the secret as a WebSocket subprotocol. `?token=` is accepted as a
-    fallback for curl and the protocol tests. Both spellings resolve here
-    rather than at each call site, so adding a route cannot pick the wrong one.
-    """
-    token = (authorization or "").replace("Bearer ", "", 1).strip()
-    return validate_token(token or (query_token or "").strip())
+    """Validate from either transport. See `authenticate`."""
+    return authenticate(authorization, query_token).ok

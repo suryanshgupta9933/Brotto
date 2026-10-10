@@ -594,29 +594,178 @@ settingsOverlay.addEventListener('click', (e) => {
   if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');
 });
 
-// The hosted Brotto server's address. There isn't one yet — self-host is the
-// only deployment — so this is empty and the field below stays editable,
-// which is exactly how it behaves today. When a launch domain is chosen, set
-// it here and nothing else changes: the read-only state is derived by
-// comparing the field against this constant, not stored and not toggled.
-const HOSTED_SERVER_URL = '';
+// Which Brotto this panel is talking to comes from the SERVER, from
+// `auth_mode` on `/health` — "open" | "secret" | "jwt". The previous answer
+// was `HOSTED_SERVER_URL`, compared against the address the user typed, and a
+// comparison against typed text is a guess: a trailing slash, a typed
+// `http://`, a case difference each read as self-host. The server knows which
+// one it is, so it says.
+//
+// `jwt` is the cloud. Its sign-in yields a Supabase access token that is
+// written into `settings.agentSecret` — the same slot, the same `Bearer`
+// header, the same reader as a self-hoster's AGENT_SECRET. Nothing below
+// parses that token or branches on which kind it is.
+const CLOUD_SERVER_URL = 'https://agent.brotto.dev';
 
 const SELF_HOST_HINT = 'Where Brotto sends your tasks. Leave this alone unless you run your own Brotto server.';
-const HOSTED_HINT = 'Brotto is hosted. Run your own server to point it somewhere else.';
+const HOSTED_HINT = 'Brotto Cloud. Your address is fixed; run your own server to point it somewhere else.';
 
-function applyServerAddressState() {
+const cloudSignIn = document.getElementById('cloudSignIn');
+const cloudEmail = document.getElementById('cloudEmail');
+const cloudCode = document.getElementById('cloudCode');
+const cloudCodeBtn = document.getElementById('cloudCodeBtn');
+const cloudSignInBtn = document.getElementById('cloudSignInBtn');
+const cloudSignOutBtn = document.getElementById('cloudSignOutBtn');
+const agentSecretField = document.getElementById('agentSecretField');
+
+// `res.json()` on a body that is not JSON must not throw into the caller:
+// the init path reads a throw as "server unreachable", which is the one
+// diagnosis this file exists to get right. So it answers null and the panel
+// keeps whatever it knew.
+async function readAuthMode(res) {
+  try {
+    const body = await res.json();
+    return body && typeof body.auth_mode === 'string' ? body.auth_mode : null;
+  } catch {
+    return null;
+  }
+}
+
+// The address can change under us — the user edits the field in Settings —
+// so the mode is re-derived rather than remembered from panel open.
+async function refreshAuthMode() {
+  const base = (plannerUrlSetting.value || '').trim().replace(/\/$/, '');
+  try {
+    const res = await fetch(`${base}/health`, { method: 'GET' });
+    state.authMode = res.ok ? await readAuthMode(res) : null;
+  } catch {
+    state.authMode = null;
+  }
+  applyAuthMode();
+  return state.authMode;
+}
+
+function applyAuthMode() {
   if (!plannerUrlSetting) return;
-  const hosted = !!HOSTED_SERVER_URL && plannerUrlSetting.value.trim() === HOSTED_SERVER_URL;
-  plannerUrlSetting.readOnly = hosted;
-  plannerUrlSetting.classList.toggle('input--readonly', hosted);
+  const cloud = state.authMode === 'jwt';
+  if (cloud && !plannerUrlSetting.value.trim()) plannerUrlSetting.value = CLOUD_SERVER_URL;
+  plannerUrlSetting.readOnly = cloud;
+  plannerUrlSetting.classList.toggle('input--readonly', cloud);
   const hint = document.getElementById('serverAddressHint');
-  if (hint) hint.textContent = hosted ? HOSTED_HINT : SELF_HOST_HINT;
+  if (hint) hint.textContent = cloud ? HOSTED_HINT : SELF_HOST_HINT;
+  if (agentSecretField) agentSecretField.hidden = cloud;
+  if (cloudSignIn) cloudSignIn.hidden = !cloud;
+  if (cloudEmail) cloudEmail.value = cloud ? cloudEmail.value : '';
+  renderCloudSignInStatus();
 }
 
 plannerUrlSetting.addEventListener('input', () => {
   plannerUrlEl.value = plannerUrlSetting.value;
-  applyServerAddressState();
+  // The mode describes the address that WAS there, not the one just typed.
+  // Probing per keystroke is a request per character, so it is dropped here
+  // and re-derived on blur — and until then the field is editable, which is
+  // what someone pasting their own localhost must find.
+  state.authMode = null;
+  applyAuthMode();
 });
+plannerUrlSetting.addEventListener('blur', () => { void refreshAuthMode(); });
+
+// ── Cloud sign-in ─────────────────────────────────────────────────────────
+// The wizard's own two calls, restated where a user can reach them after
+// install. The token goes back into `settings.agentSecret`, so the Save
+// button, `authHeaders()` and the service worker need to know nothing about
+// which kind of token is in there.
+function setCloudStatus(text, tone) {
+  const el = document.getElementById('cloudSignInStatus');
+  if (!el) return;
+  // textContent, not innerHTML: the email in this line is typed text, and
+  // the panel's rule is that no unescaped string reaches innerHTML.
+  el.textContent = text || '';
+  el.className = tone ? `settings-hint ${tone}` : 'settings-hint';
+}
+
+// Signed in means the slot holds a token; signed out means it is empty. The
+// slot is the record, so this reads storage rather than a separate flag.
+async function cloudSignedIn() {
+  const stored = await chrome.storage.local.get('settings');
+  const secret = stored.settings && typeof stored.settings.agentSecret === 'string'
+    ? stored.settings.agentSecret.trim()
+    : '';
+  return secret.length > 0;
+}
+
+function renderCloudSignInStatus() {
+  if (!cloudSignIn || state.authMode !== 'jwt') return;
+  void cloudSignedIn().then((in) => {
+    if (state.authMode !== 'jwt') return;
+    setCloudStatus(in ? 'Signed in to Brotto Cloud.' : 'Signed out — send yourself a code to sign in.', in ? 'ok' : '');
+  });
+}
+
+async function storeAgentSecret(value) {
+  const stored = await chrome.storage.local.get('settings');
+  await chrome.storage.local.set({
+    settings: { ...(stored.settings || {}), agentSecret: value },
+  });
+  if (agentSecretSetting) agentSecretSetting.value = value;
+}
+
+async function postAuth(path, payload) {
+  const res = await fetch(`${serverBase()}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => null);
+  return { ok: res.ok, body };
+}
+
+async function requestSignInCode() {
+  const email = cloudEmail.value.trim();
+  if (!email) { setCloudStatus('Enter the email you signed up with.', 'bad'); return; }
+  setCloudStatus('Sending…');
+  try {
+    const { ok } = await postAuth('/v1/auth/request-code', { email });
+    setCloudStatus(ok ? `Code sent to ${email}. It can take a minute to arrive.` : 'That address could not be sent a code.', ok ? 'ok' : 'bad');
+  } catch {
+    setCloudStatus('Could not reach the server — check the address above.', 'bad');
+  }
+}
+
+async function exchangeSignInCode() {
+  const email = cloudEmail.value.trim();
+  const code = cloudCode.value.trim();
+  if (!email) { setCloudStatus('Enter the email you signed up with.', 'bad'); return false; }
+  if (!/^\d{6}$/.test(code)) { setCloudStatus('That code should be six digits.', 'bad'); return false; }
+  setCloudStatus('Signing in…');
+  let token = null;
+  try {
+    const { ok, body } = await postAuth('/v1/auth/exchange', { email, code });
+    if (ok && body && typeof body.access_token === 'string') token = body.access_token;
+  } catch { /* the sentence below is the user-facing failure */ }
+  if (!token) {
+    setCloudStatus('That code did not work. Send another and try again.', 'bad');
+    return false;
+  }
+  await storeAgentSecret(token);
+  cloudCode.value = '';
+  setCloudStatus('Signed in to Brotto Cloud.', 'ok');
+  return true;
+}
+
+// Signing out is not "clear the field". A stale token in the slot is a
+// server that refuses every call with a 404 — which reads exactly like a
+// wrong AGENT_SECRET, and the user goes looking in a .env that never
+// existed. So the way out is the way in: back through the wizard, which
+// asks which Brotto this is.
+async function signOutOfCloud() {
+  await storeAgentSecret('');
+  await chrome.sidePanel.setOptions({ path: 'welcome.html' });
+}
+
+if (cloudCodeBtn) cloudCodeBtn.addEventListener('click', () => { void requestSignInCode(); });
+if (cloudSignInBtn) cloudSignInBtn.addEventListener('click', () => { void exchangeSignInCode(); });
+if (cloudSignOutBtn) cloudSignOutBtn.addEventListener('click', () => { void signOutOfCloud(); });
 
 // ── Session history ────────────────────────────────────────────────────────
 const historyBtn     = document.getElementById('historyBtn');
@@ -1079,7 +1228,13 @@ async function authHeaders() {
 // verify): the settings field is the source of truth, and state.plannerUrl
 // is empty until a task has connected at least once in this panel.
 function serverBase() {
-  return (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
+  const typed = (plannerUrlEl.value || '').trim();
+  // A blank field falls back to localhost, which is right for a self-hoster
+  // and wrong for a cloud user — the server already said it speaks jwt, and
+  // localhost is not it. The constant is a default value, not the mode
+  // test: the mode still comes from /health.
+  if (!typed && state.authMode === 'jwt') return CLOUD_SERVER_URL;
+  return (typed || 'http://localhost:8000').replace(/\/$/, '');
 }
 
 async function mirrorSession(sessionId, { status, steps } = {}) {
@@ -1395,7 +1550,7 @@ if (replaySetupBtn) {
 // are sitting in a local cache against a dead one.
 settingsBtn.addEventListener('click', async () => {
   plannerUrlSetting.value = plannerUrlEl.value || 'http://localhost:8000';
-  applyServerAddressState();
+  await refreshAuthMode();
   await hydrateSettingsPanel();
   settingsOverlay.classList.add('open');
   renderVerifyStatus();
@@ -1655,6 +1810,11 @@ const state = {
   // is the one case where the status bar has something to say and no phase
   // that admits it, so setPhase consults it.
   replaying: false,
+  // 'open' | 'secret' | 'jwt' — whatever the server in `serverBase()` last
+  // said in /health's `auth_mode`. Null means "not asked yet or not
+  // reachable", which is treated as self-host because that is what every
+  // server said before `auth_mode` existed.
+  authMode: null,
 };
 
 let timerInterval = null;
@@ -2652,6 +2812,19 @@ const FAILURE_NOTE = {
   CANCELLED: "You stopped this task.",
   WS_ERROR: "Brotto lost the connection to its server. Check that it's running, then send the task again.",
   CONNECTION_LOST: "Brotto lost the connection to its server and could not get it back. Check that it's running, then send the task again.",
+  // A socket refused for the credential. The bubble below each says which of
+  // the two it was and what to do about it, so these name the state rather
+  // than repeat it — and neither may say "the details are in Brotto's log",
+  // because the cause is a credential, not a crash.
+  credential_missing: "Brotto Cloud needs you signed in, and nothing came with the connection.",
+  credential_rejected: "Brotto Cloud rejected this sign-in.",
+  // Server-side account refusals. Distinct from the two above: those are the
+  // socket, these are the relay answering a request it authenticated. None can
+  // be fixed by retrying the same task.
+  not_invited: "This account isn't on the Brotto Cloud beta list. Ask for an invitation.",
+  revoked: "This account's Brotto Cloud access has been withdrawn.",
+  task_cap_reached: "You've used this week's Brotto Cloud tasks. They reset on Monday.",
+  control_plane_unavailable: "Brotto Cloud couldn't confirm your access, so it stopped rather than run unchecked. Try again in a minute.",
 };
 
 // A fetch to a server that is not there rejects with the same TypeError on
@@ -4778,10 +4951,16 @@ goalEl.focus();
     plannerUrlEl.value = saved;
     plannerUrlSetting.value = saved;
   }
+  applyAuthMode();
   const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
   try {
     const res = await fetch(url + '/health', { method: 'GET' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Read off the probe this path already makes rather than asking twice:
+    // `auth_mode` is what decides the Connection section, and a second
+    // /health would be a second failure to have to reason about.
+    state.authMode = (await readAuthMode(res)) || state.authMode;
+    applyAuthMode();
     // `/health` is unauthenticated, so it says nothing about the key — and a
     // wrong key is a 404 on every gated route. One more request here tells
     // the panel apart from a server that is not running, at the moment the

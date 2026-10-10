@@ -35,11 +35,21 @@ def _offline_auth(monkeypatch):
     auth pair rather than forcing it open — a test that needs auth *on*
     sets both variables itself (test_caller_key.py, test_agent_auth.py),
     and a fixture that pinned them shut would override exactly those.
+
+    The hosted variables are cleared for the same reason and one more:
+    a real SUPABASE_JWT_SECRET in a developer's .env would switch every
+    test that ran before the first setdefault into JWT mode, which fails
+    every self-host assertion in the suite at once.
     """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     monkeypatch.setenv("AGENT_MODEL", "test")  # use pydantic_ai TestModel
     monkeypatch.delenv("AGENT_SECRET", raising=False)
     monkeypatch.delenv("AGENT_AUTH_DISABLED", raising=False)
+    for var in (
+        "SUPABASE_JWT_SECRET", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_ANON_KEY", "BROTTO_BETA_TASK_CAP",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
 
 @pytest.fixture(autouse=True)

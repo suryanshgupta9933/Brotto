@@ -216,13 +216,55 @@ the task text, the action names and the typed input are. So:
   was a log line the user will never read standing in for the truth.
 - The launch gates are partly closed. `/ws/ext` and the session endpoints are
   gated on `AGENT_SECRET`, which is the privacy control — but only when one is
-  set, and "no secret" is a warning rather than a refusal so that loopback dev
-  still works. A file full of someone's browsing behind a server with no secret
-  set is still the thing to avoid.
+  set. On **loopback** "no credential" stays a *warning* so dev still works; on a
+  **non-loopback bind it is a refusal** (`cli.py`, keyed on `auth_mode() ==
+  "open"`, so the hosted relay — which sets no `AGENT_SECRET` — is not refused
+  by the check written to protect it). A file full of someone's browsing behind
+  a reachable server with no credential is still the thing to avoid.
 - Sequence: **auth** (done 2026-10-03), **delete** (done 2026-10-03), then
   **retention**, then local-first. Doing local-first first leaves an open door
   pointed at a directory that no longer has the interesting files — which is
   fine, but the door should be closed either way.
+
+## The hosted relay turns "no operator" into "an operator", in code
+
+3b was a prose failure: `agent.brotto.dev` shipped and **not one line of code
+changed**. The account layer changes that, and it changes the same three things
+3b found false — what we hold, who can read it, and when it is gone.
+
+**We hold a table of who is in the beta, and nothing they said.** `profiles`
+holds an email, a role, a revocation timestamp and a task counter. No column
+holds content, and the relay writes exactly one field from the application —
+the counter — at task start. The email is there so the operator can answer
+*"who is this?"* at 2am, which is a different question from *"what did they do?"*.
+
+**The two sign-in routes are open by definition, so they must not leak.** They
+are how a credential comes into existence; gating them on one is a closed door.
+That makes them the one place a route can become **a directory of the beta**:
+`POST /v1/auth/request-code` returns the same answer for an address that has an
+account, one that does not, and one this project has signups disabled for.
+Supabase's own `create_user: false` is what keeps that true, and every response
+body is swallowed rather than relayed — its text names whether the address
+exists, what the code was worth, and how long the project has been rate limited.
+`/v1/auth/exchange` raises a fixed `"invalid or expired code"` for the same
+reason. Only an **incomplete call** is reported, because that says nothing about
+the address and reporting it is the difference between "check your inbox" and
+"nothing is wrong, wait".
+
+**Revocation is checked once per task, and it fails closed.** The JWT says who
+you are and nothing about whether you are still welcome, so `profiles` is the
+only answer to the second question — and task start is the only moment a
+decision is made. Putting it on the request path would make every step of every
+run depend on Supabase's uptime. **Failing closed is right here and only here**:
+this is the relay where every transcript lands on our disk, and "we could not
+check whether this person was revoked" is not a licence to record one more. A
+self-host relay never reaches the function.
+
+**Retention now has a default, and only here.** `BROTTO_RETENTION_DAYS`
+unset returns 30 on the hosted relay and `None` everywhere else. The reason is
+the same asymmetry as everything above: a self-hoster's disk is their own data,
+an ephemeral dyno is ours, and nobody was deciding the second one. An explicit
+setting still wins, **including `0`**.
 
 ## Writing new code here
 

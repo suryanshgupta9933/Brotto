@@ -9,6 +9,27 @@ Read before touching `clients/brotto-extension/src/{background,debugger}.ts`,
 - `api_key` → `chrome.storage.session` — in-memory only, cleared on browser restart; mirrors the existing pause-state pattern
 - The first read after an extension update runs a one-shot migration that re-saves any legacy `{modelConfig: {model_config, api_key}}` shape into the new layout
 - `deviceId` (one `crypto.randomUUID()`) → `chrome.storage.local`. See below; it is not a credential and nothing authenticates with it.
+- `settings.agentSecret` → `chrome.storage.local`, and on the Brotto Cloud path it holds an **opaque Supabase access token**, not a shared secret. **The extension never parses it.** Not its length, not its prefix, not whether it looks like a JWT. One slot is why an account tier needed no new storage key and no migration, and any code that inspects the value reinstates the coupling the slot exists to remove. Both writers (the wizard, the panel's Settings) and the one reader (`agentSecret()`) treat it as a string.
+
+## Which Brotto is this comes from `/health`, never from the URL
+
+`authedWs` is handed a `secret` and does not know or care what kind it is. The
+panel decides which *UI* to render from `auth_mode` on `GET /health`
+(`open` | `secret` | `jwt`), because that is the only one of the three the
+**server** can answer authoritatively.
+
+**Do not reintroduce a comparison against the server URL.** `HOSTED_SERVER_URL`
+was compared against the address the user typed, so a trailing slash, a typed
+`http://` or a case difference each read as self-host. A string comparison
+against user-entered text is a guess wearing a constant's clothes. The
+remaining `CLOUD_SERVER_URL` is a *default value* — what a blank field resolves
+to once the server has said `jwt` — and not a mode test.
+
+The wizard's first step asks the same question with a radio rather than a
+server, because a radio is a person's answer and `/health` is the machine's.
+Cloud writes the address into a read-only input and requires a sign-in **before
+advancing**: it is the one step in the wizard that can fail, and it fails there
+rather than writing a token nobody holds.
 
 ## The install id is the user; the peer address never was
 
@@ -506,6 +527,59 @@ click it. Two rules follow, and both are load-bearing:
   `(domain, f"{action}:hidden")` for it, so a hidden destructive control cannot
   inherit an existing `(domain, "click")` approval the user gave for visible
   controls. Pinned by `test_a_hidden_destructive_control_is_not_pre_approved`.
+
+## The credential rides the subprotocol, and a refusal is not an outage
+
+`authedWs` capped the subprotocol at **120 characters**. A Supabase access token
+is ~635, and ~1.5 KB with populated `user_metadata`, so it did not fit: the check
+failed, the credential was **dropped rather than sent**, the socket arrived with
+none, and the server refused it. The user was told their key was wrong, and it
+had never been transmitted.
+
+**The bound is measured, not chosen.** RFC 6455 sets no length limit on a
+subprotocol, only the token charset. Real Chrome 154 hands a **60 KB**
+`Sec-WebSocket-Protocol` to the network intact, and through the real production
+stack (uvicorn 0.54 + websockets 16.1 + Starlette, reading `offered[1]` exactly
+as `main.py` does) a **4096**-char credential arrives whole and
+byte-identical — **4096 works, 8192 does not complete**. That ~8 KB edge is where
+this stops being about us: nginx's default `large_client_header_buffers` is 8k,
+so a header past it is refused as an HTTP error and presents as a *network*
+failure — precisely what the drop-instead-of-send behaviour exists to prevent.
+`SUBPROTOCOL_MAX_CHARS` is **4096**: ~2.7x headroom over a JWT, and inside every
+proxy budget in front of this server.
+
+**The character class did not change, and the reason it exists is still true.**
+An odd pasted `AGENT_SECRET` is still dropped rather than sent, because a
+malformed handshake fails as an unexplained network error — a worse sentence
+than the server's own refusal. `hmac.compare_digest` means the server accepts any
+arbitrary secret, so the only question is whether it survives the header.
+
+**A pre-accept close does not reach the client, and that is the finding.** It was
+measured, not assumed: `main.py` rejects **before** accept, which is an
+HTTP-level rejection, and Chrome reports that as **`CloseEvent.code === 1006`,
+not 4001**. A refused key, a missing credential and a server that is not running
+are therefore *the same event in the browser*, and the old handler discarded the
+close event entirely and read all three as "server unreachable". Accept-then-close
+does carry the code (verified: 4001 and 4003 both arrive) — but moving the
+rejection after accept would hand an unauthenticated caller a socket it could
+drive, which is exactly what the pre-accept check is for. **So the split is made
+from evidence the client has:** the close code when it survives, and otherwise
+whether a credential actually reached the wire, cross-checked against `/health`
+(bounded at 1.5 s, and skipped entirely for a socket that reached OPEN, so the
+mid-run reconnect path is untouched).
+
+**Three states, not one boolean** — collapsing two of them is the bug:
+`none` is the self-host with no `AGENT_SECRET` ("no secret means open" is
+deliberate and silent), `sent` is a refused credential (4001), and `dropped` is
+this install holding one it could not present (4003). A first attempt at this
+collapsed `none` into `sent`, which would have told every open self-host
+installation that its sign-in was rejected.
+
+Neither refusal reconnects: the same credential gets the same answer three times,
+and the backoff noise is what the user debugs instead of the cause. The session
+id is kept, so the conversation survives and the task can be sent again once
+signed in — which is what the message asks for. Pinned by
+`scripts/test-credential-transport.test.js`.
 
 ## A dropped terminal frame presents as "server unreachable"
 

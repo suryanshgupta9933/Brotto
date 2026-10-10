@@ -259,5 +259,24 @@ The extension reconnects with full jitter (1s base, ×2, 30s cap, 6 attempts)
 reusing the `session_id`. `stopRelay` and a cancel never reconnect — a
 cancelled task must not resurrect.
 
+**A refused credential is not a reconnectable socket.** 4001 ("credential
+wrong") and 4003 ("a credential was required and none arrived") are answers
+about the credential, so re-running the same handshake gets the same answer;
+reconnecting turns one true cause into three with backoff noise on top. Both
+end the run and keep the `session_id`, so the conversation survives and the task
+can be sent again once the user has signed in.
+
+**Neither code survives the handshake, and that is not fixable client-side.**
+`main.py` rejects **before** accept, which is an HTTP-level rejection, and
+Chrome reports it as `CloseEvent.code === 1006` — measured against real Chrome
+154, not assumed. So on the wire the client cannot tell a refused key from a
+missing credential from a server that is down. Two consequences: accept-then-close
+would carry the code (verified for both 4001 and 4003), but it would hand an
+unauthenticated caller a socket it could drive, which is what the pre-accept
+check exists to prevent — **so the server must keep rejecting before accept, and
+the client must classify from its own evidence** (did a credential reach the
+wire, cross-checked against `/health`). Measured sizes and the subprotocol
+length bound are in `extension.md`.
+
 **Not verified in a browser.** The reconnect path and the offline-history
 fallback are unit-tested logic only.

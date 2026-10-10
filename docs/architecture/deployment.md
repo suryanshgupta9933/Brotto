@@ -118,6 +118,96 @@ outlives its own digests is worse than no retention.
 Age is the document's mtime, which the atomic rewrite bumps on every step, so
 this measures last activity rather than when the session started.
 
+**The hosted relay is the one exception, and it is an exception because the disk
+is ours.** Left unset, `BROTTO_RETENTION_DAYS` returns `HOSTED_RETENTION_DAYS`
+(30) when `auth_mode() == "jwt"` and `None` everywhere else. A self-hoster's disk
+is their own data and nothing expires until they ask; an ephemeral dyno would
+otherwise keep every beta transcript for the life of the filesystem with nobody
+deciding that. **An explicit setting always wins, including `0`.**
+
+## The hosted relay
+
+The same image, the same extension, one build. `agent.brotto.dev` is a Heroku
+dyno running this container with Supabase in front of the credential check.
+
+**A hosted relay is one env var away from a downgrade, and the variable that
+makes it a downgrade is `AGENT_SECRET`.** `SUPABASE_JWT_SECRET` set →
+`auth_mode()` is `jwt` and every `AGENT_SECRET` in the world is ignored. That
+precedence is deliberate: a hosted relay that still accepted `AGENT_SECRET`
+would hand every beta user a shared secret, and it would do so *quietly*,
+because both variables being set looks like a config mistake rather than a
+downgrade. **If a hosted deployment is rejecting valid sign-ins, check for a
+stray `AGENT_SECRET` first.**
+
+| Variable | Required | Holds |
+|---|---|---|
+| `SUPABASE_JWT_SECRET` | hosted | The project's JWT secret. **Its presence is what selects `jwt` mode** — there is no `BROTTO_AUTH_MODE`. |
+| `SUPABASE_URL` | hosted | `https://<project>.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | hosted | Reads `profiles` at task start (revocation + cap) |
+| `SUPABASE_ANON_KEY` | hosted | The two sign-in routes only |
+| `BROTTO_RETENTION_DAYS` | optional | Defaults to **30** on the hosted relay, off elsewhere |
+| `BROTTO_BETA_TASK_CAP` | optional | Weekly per-person task cap; defaults to 10 |
+
+All four Supabase values are in Project Settings → API, and none of them belong
+in `.env.example` — which is why that file ships them **commented out**, which
+also means the file is not a place a hosted operator looks first.
+
+**`SUPABASE_JWT_SECRET` is verified locally, per request, with stdlib `hmac`.**
+Not by calling Supabase. A network hop there would make the liveness of every
+agent loop depend on a third party's uptime, and resolving an opaque token
+against a claims map would be the server-side session state D9 rules out. The
+alg check happens *before* the signature comparison: a token naming `none`, or
+naming RS256 and carrying a public key as HMAC material, must never reach
+`compare_digest`. The secret decides which algorithm is acceptable, not the token.
+
+### Run the migration before the first deploy
+
+The relay reads one table, and it is not created by the application:
+
+```bash
+psql "$SUPABASE_URL" -f services/brotto-orchestrator/migrations/001_profiles.sql
+```
+
+There is no migration runner. `profiles` is the operator's ledger **over**
+`auth.users` — who is in the beta, who has been withdrawn, how much of their
+weekly allowance is gone — and **a row is the invitation**. Absent one, a
+perfectly valid JWT is refused `not_invited`. That is the whole gate, and it is
+one table rather than a users table plus a usage table plus a grants table,
+because invitations are hand-issued SQL and a schema spread across three tables
+is three statements an on-call operator forgets at 2am.
+
+`revoked_at` is a column, not a row delete: *"we removed this person"* is an
+audit question, and `on delete cascade` would take the evidence with it — the
+`auth.users` row *is* the evidence. `tasks_this_week` resets by **comparing
+`week_start` to `current_date` on read**, with no scheduled job: a cron that
+resets a counter ten people move a few hundred times is a cron that quietly
+stops running, and the failure mode is one user's beta ending for no visible
+reason.
+
+### `BROTTO_BETA_TASK_CAP` is a rollout knob, not a policy number
+
+The cap exists because the rollout is **batched off a waitlist**, and the first
+batch is not the last batch. The superseded "start at 10" and the reasoning that
+spent it are in `docs/product/decisions/2026-10-11-waitlist-and-batched-rollout.md`
+(gitignored — a clone has none of this). What must not change is the property
+the cap was protecting: every invited person is a row the operator can see,
+revoke and count, and revoking one is one SQL statement with no UI to rebuild.
+**Watch for "the list grew" becoming the reason to build an admin screen — the
+honest trigger is forgetting twice.**
+
+### A wide bind with no credential is a refusal
+
+`cli.py` refuses to start on a non-loopback `--host` when `auth_mode() ==
+"open"`. This is the pair that makes the startup warning safe to keep as a
+warning, and the check lives there because **it is the only layer that knows the
+bind address** — the server is handed a port, so it can report "no credential"
+but never "no credential AND reachable from the internet". Both shipped launch
+paths (the Dockerfile `CMD`, the `Procfile`) go through this CLI.
+
+It keys on `auth_mode() == "open"`, not on "is `AGENT_SECRET` set", because the
+hosted relay sets no `AGENT_SECRET` at all and the older check refused to boot
+the one deployment that *does* have a credential.
+
 ## `BROTTO_PRO` switches the paid half on; cost is off without it
 
 Per-run cost and the per-task ceiling are paid features. The free build has
