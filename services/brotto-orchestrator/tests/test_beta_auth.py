@@ -8,6 +8,7 @@ being told it sent a wrong one.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import time
 
 import pytest
@@ -212,6 +213,18 @@ def _ws_close(client, session_id, subprotocols):
     return caught.value.code
 
 
+def _mint(client, token: str) -> str:
+    """A session id minted over HTTP by the holder of `token`.
+
+    Ownership is recorded at mint time, so a WS test that skips this is
+    connecting to a session that belongs to nobody — which the relay now
+    refuses, correctly.
+    """
+    resp = client.post("/v1/sessions", headers={"authorization": f"Bearer {token}"})
+    assert resp.status_code == 201
+    return resp.json()["session_id"]
+
+
 def test_no_credential_at_all_closes_4003(client, monkeypatch, hosted, session_id):
     """An extension too old to send a token cannot be told "wrong token".
 
@@ -227,8 +240,9 @@ def test_a_wrong_credential_still_closes_4001(client, monkeypatch, hosted, sessi
 
 
 def test_a_good_credential_connects(client, monkeypatch, hosted, session_id):
+    minted = _mint(client, _token())
     with client.websocket_connect(
-        f"/ws/ext/{session_id('ws-good')}", subprotocols=["brotto-v1", _token()]
+        f"/ws/ext/{minted}", subprotocols=["brotto-v1", _token()]
     ) as ws:
         assert ws.accepted_subprotocol == "brotto-v1"
 
@@ -242,16 +256,16 @@ def test_self_host_keeps_one_answer_for_both_failures(client, monkeypatch, tmp_p
 
 # ── the control plane, at task start only ─────────────────────────────────
 
-def _profiles_stub(monkeypatch, rows, *, patch_status=204, fail_on=()):
+def _profiles_stub(monkeypatch, rows, *, fail_on=()):
     calls = []
 
-    async def fake(method, query, body=None):
+    async def fake(method, query, body=None, *, path="rest/v1/profiles"):
         calls.append((method, query, body))
         if method in fail_on:
             raise jwt_auth.SupabaseUnavailable("boom")
         if method == "GET":
             return 200, json.dumps(rows)
-        return patch_status, ""
+        return 200, "true"
 
     monkeypatch.setattr(jwt_auth, "_profiles", fake)
     return calls
@@ -263,8 +277,8 @@ def test_a_live_user_gets_one_task_and_one_count(hosted, monkeypatch):
 
     asyncio.run(jwt_auth.authorize_task_start(Claims(sub=USER_ID, email="b@example.test")))
     methods = [c[0] for c in calls]
-    assert methods == ["GET", "PATCH"]
-    assert calls[1][2]["tasks_this_week"] == 1
+    # The reservation is one conditional statement, not a read-then-write.
+    assert methods == ["GET", "POST"]
 
 
 def test_a_revoked_user_is_refused(hosted, monkeypatch):
@@ -309,12 +323,13 @@ def test_a_valid_token_with_no_invitation_is_refused(hosted, monkeypatch):
 
 
 def test_a_stale_week_resets_the_counter(hosted, monkeypatch):
-    """The reset is a comparison on read, not a job that can stop running."""
+    """The reset is a comparison inside the reservation, not a job that
+    can stop running — the Postgres function resets in the same UPDATE."""
     calls = _profiles_stub(monkeypatch, [{"revoked_at": None, "week_start": "2000-01-01", "tasks_this_week": 999}])
     import asyncio
 
     asyncio.run(jwt_auth.authorize_task_start(Claims(sub=USER_ID, email="")))
-    assert calls[1][2]["tasks_this_week"] == 1
+    assert calls[1][2]["cap"] == 10
 
 
 def test_an_unreachable_supabase_fails_closed(hosted, monkeypatch):
@@ -368,9 +383,10 @@ def test_a_task_start_from_a_revoked_user_never_reaches_the_agent(client, monkey
     """
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path))
     _profiles_stub(monkeypatch, [{"revoked_at": "2026-10-01T00:00:00Z", "week_start": _today(), "tasks_this_week": 1}])
+    minted = _mint(client, _token())
 
     with client.websocket_connect(
-        f"/ws/ext/{session_id('ws-revoked')}", subprotocols=["brotto-v1", _token()]
+        f"/ws/ext/{minted}", subprotocols=["brotto-v1", _token()]
     ) as ws:
         ws.send_text(json.dumps({"type": "task_start", "task": "read my inbox"}))
         frames = []
@@ -386,7 +402,7 @@ def test_a_task_start_from_a_revoked_user_never_reaches_the_agent(client, monkey
     # point of refusing before the loop starts.
     from brotto_orchestrator.main import registry
 
-    assert registry.get_or_create(session_id("ws-revoked")).current_task is None
+    assert registry.get_or_create(minted).current_task is None
 
 
 def test_a_self_host_task_start_asks_no_control_plane(client, monkeypatch, tmp_path, session_id):
@@ -578,3 +594,359 @@ def test_an_operator_setting_retention_still_wins(monkeypatch, hosted):
     # a hosted operator may have a reason to keep everything.
     monkeypatch.setenv("BROTTO_RETENTION_DAYS", "0")
     assert retention_days() is None
+
+# ── the control plane's own table ─────────────────────────────────────────
+#
+# SUPABASE_ANON_KEY is public — it ships in the extension bundle — so the
+# table holding the beta roster has to deny it explicitly. Nothing in the
+# Python asserts this: a migration file is not imported by anything.
+
+MIGRATION = (
+    Path(__file__).resolve().parents[1] / "migrations" / "001_profiles.sql"
+)
+
+
+def _migration() -> str:
+    return MIGRATION.read_text().lower()
+
+
+def test_profiles_is_closed_to_the_public_key():
+    """RLS with no policy is deny-all; the revokes say so out loud."""
+    sql = _migration()
+    assert "alter table profiles enable row level security" in sql
+    assert "revoke all on profiles from anon" in sql
+    assert "revoke all on profiles from authenticated" in sql
+    # A policy would re-open exactly what the revokes closed, and the
+    # relay needs none — its service role bypasses RLS by design.
+    assert "create policy" not in sql
+
+
+def test_the_weekly_cap_is_reserved_by_one_statement():
+    sql = _migration()
+    assert "create or replace function public.reserve_task_slot" in sql
+    # The predicate is the cap: a caller that loses the race updates zero
+    # rows and is refused, rather than having compared a stale read.
+    assert "tasks_this_week < cap" in sql
+
+
+# ── one account cannot reach another's ────────────────────────────────────
+#
+# With one operator per server, "is this token valid" was the whole
+# question and the answer was always yes. Ten accounts make it the wrong
+# question: a valid token is not ownership.
+
+OTHER_ID = "99999988-7777-6666-5555-444444444444"
+
+
+def _b_token(**overrides) -> str:
+    return _token(sub=OTHER_ID, email="other@example.test", **overrides)
+
+
+def _write_transcript(session_id: str) -> str:
+    """Put a real document on disk for `session_id`."""
+    from brotto_orchestrator.agent.audit import AuditTrail
+
+    trail = AuditTrail(session_id)
+    trail.begin_task("read my inbox")
+    trail.close()
+    return session_id
+
+
+def test_another_account_cannot_see_the_session_in_the_index(client, monkeypatch, hosted, tmp_path):
+    _mint(client, _token())
+    _write_transcript(_mint(client, _b_token()))
+    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path / "sessions"))
+    resp = client.get("/v1/sessions", headers={"authorization": f"Bearer {_token()}"})
+    assert [s["session_id"] for s in resp.json()["sessions"]] == []
+    resp_b = client.get("/v1/sessions", headers={"authorization": f"Bearer {_b_token()}"})
+    assert len(resp_b.json()["sessions"]) == 1
+
+
+def test_another_account_gets_404_not_403_on_the_audit(client, monkeypatch, hosted):
+    mine = _write_transcript(_mint(client, _token()))
+    resp = client.get(
+        f"/v1/sessions/{mine}/audit", headers={"authorization": f"Bearer {_b_token()}"}
+    )
+    # 403 would confirm the id is real, which is the whole of its value.
+    assert resp.status_code == 404
+    # And the answer is the one a nonexistent session gets, byte for byte.
+    absent = client.get(
+        f"/v1/sessions/00000000-0000-4000-8000-000000000000/audit",
+        headers={"authorization": f"Bearer {_b_token()}"},
+    )
+    assert resp.json()["error"] == absent.json()["error"]
+
+
+def test_another_account_cannot_delete_the_session(client, monkeypatch, hosted):
+    mine = _mint(client, _token())
+    resp = client.delete(
+        f"/v1/sessions/{mine}", headers={"authorization": f"Bearer {_b_token()}"}
+    )
+    assert resp.status_code == 404
+    assert not client.get(
+        f"/v1/sessions/{mine}/audit", headers={"authorization": f"Bearer {_token()}"}
+    ).json().get("corrupt")
+
+
+def test_another_account_cannot_connect_to_the_socket(client, monkeypatch, hosted, session_id):
+    """A valid token for the wrong person is not a credential failure.
+
+    4001/4003 say "your credential"; 4004 says "this is not a session you
+    can drive", which is what a session owned by somebody else is.
+    """
+    mine = _mint(client, _token())
+    assert _ws_close(client, mine, ["brotto-v1", _b_token()]) == 4004
+
+
+def test_delete_all_only_reaches_the_callers_own_sessions(client, monkeypatch, hosted, tmp_path):
+    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path / "sessions"))
+    mine = _write_transcript(_mint(client, _token()))
+    theirs = _write_transcript(_mint(client, _b_token()))
+    resp = client.delete("/v1/sessions", headers={"authorization": f"Bearer {_token()}"})
+    body = resp.json()
+    assert body["deleted"] == 1 and body["residue"] == 0
+    assert not (tmp_path / "sessions" / f"{mine}.json").exists()
+    assert (tmp_path / "sessions" / f"{theirs}.json").exists()
+
+
+def test_the_owner_still_reaches_their_own_session(client, monkeypatch, hosted):
+    mine = _write_transcript(_mint(client, _token()))
+    assert client.get(
+        f"/v1/sessions/{mine}/audit", headers={"authorization": f"Bearer {_token()}"}
+    ).status_code == 200
+
+
+def test_a_session_with_no_owner_belongs_to_nobody(client, monkeypatch, hosted, session_id):
+    """Fail closed. A stale id or an evicted registry entry is nobody's."""
+    resp = client.get(
+        f"/v1/sessions/{session_id('ownerless')}/audit",
+        headers={"authorization": f"Bearer {_token()}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_self_host_ownership_is_unchanged(client, monkeypatch, tmp_path):
+    """One shared secret is one shared identity: every route is the same."""
+    monkeypatch.setenv("AGENT_SECRET", "s3cret")
+    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path / "sessions"))
+    first = client.post("/v1/sessions", headers={"authorization": "Bearer s3cret"}).json()
+    _write_transcript(first["session_id"])
+    listing = client.get("/v1/sessions", headers={"authorization": "Bearer s3cret"})
+    assert [s["session_id"] for s in listing.json()["sessions"]] == [first["session_id"]]
+    assert client.get(
+        f"/v1/sessions/{first['session_id']}/audit", headers={"authorization": "Bearer s3cret"}
+    ).status_code == 200
+    assert client.delete(
+        f"/v1/sessions/{first['session_id']}", headers={"authorization": "Bearer s3cret"}
+    ).status_code == 200
+
+
+# ── ?token= is a credential in a url ──────────────────────────────────────
+
+def test_jwt_mode_refuses_the_query_string_credential(client, monkeypatch, hosted):
+    """A URL reaches every access log on the way here, permanently.
+
+    On self-host the token is one secret on the operator's own box. Here it
+    is a person's account, so it does not get written down.
+    """
+    assert client.get(f"/v1/sessions?token={_token()}").status_code == 404
+    # …and not even as a "missing credential" distinction, which would
+    # confirm the token was well-formed enough to be worth noticing.
+    assert authenticate(None, _token()).verdict == "missing"
+
+
+def test_secret_mode_keeps_the_query_string_credential(monkeypatch):
+    monkeypatch.setenv("AGENT_SECRET", "s3cret")
+    assert validate_request(None, "s3cret") is True
+
+
+# ── the cap, under concurrency ────────────────────────────────────────────
+
+def test_concurrent_task_starts_never_grant_more_than_the_cap(hosted, monkeypatch):
+    """Ten simultaneous starts against one account, cap of three.
+
+    The stub models the database, not the caller: `reserve_task_slot` is
+    atomic because it is one UPDATE with the cap in its WHERE clause, so
+    the relay's job is to make exactly one reservation per task and to
+    treat a `false` as a refusal. The old shape — read, compare in
+    Python, PATCH the result — grants every caller whose read happened
+    before any write, which is the whole finding.
+    """
+    import asyncio
+
+    monkeypatch.setenv("BROTTO_BETA_TASK_CAP", "3")
+    state = {"used": 0}
+    lock = asyncio.Lock()
+    reservations = []
+
+    async def fake(method, query, body=None, *, path="rest/v1/profiles"):
+        # The yield is what makes this a race and not ten sequential
+        # calls: every caller finishes its read before any of them writes.
+        await asyncio.sleep(0)
+        if method == "GET":
+            return 200, json.dumps([{"revoked_at": None, "week_start": _today(),
+                                     "tasks_this_week": state["used"]}])
+        async with lock:  # the UPDATE takes the row lock
+            reservations.append(body)
+            if state["used"] >= body["cap"]:
+                return 200, "false"
+            state["used"] += 1
+            return 200, "true"
+
+    monkeypatch.setattr(jwt_auth, "_profiles", fake)
+    claims = Claims(sub=USER_ID, email="beta@example.test")
+
+    async def run():
+        outcomes = await asyncio.gather(
+            *(jwt_auth.authorize_task_start(claims) for _ in range(10)),
+            return_exceptions=True,
+        )
+        return [o for o in outcomes if not isinstance(o, BaseException)], \
+               [o for o in outcomes if isinstance(o, jwt_auth.AccountRefused)]
+
+    granted, refused = asyncio.run(run())
+    assert len(granted) == 3
+    assert len(refused) == 7
+    assert {r.reason for r in refused} == {"task_cap_reached"}
+    # Every caller reached the reservation — none was refused on a stale
+    # read of the counter — and the counter agrees with the grants.
+    assert len(reservations) == 10
+    assert state["used"] == len(granted)
+
+
+def test_a_lost_race_is_refused_as_the_cap_not_an_outage(hosted, monkeypatch):
+    """The false return means "no slot", which is not a control-plane failure."""
+    async def fake(method, query, body=None, *, path="rest/v1/profiles"):
+        if method == "GET":
+            return 200, json.dumps([{"revoked_at": None, "week_start": _today(),
+                                     "tasks_this_week": 9}])
+        return 200, "false"
+
+    monkeypatch.setattr(jwt_auth, "_profiles", fake)
+    import asyncio
+
+    with pytest.raises(jwt_auth.AccountRefused) as caught:
+        asyncio.run(jwt_auth.authorize_task_start(Claims(sub=USER_ID, email="")))
+    assert caught.value.reason == "task_cap_reached"
+
+
+# ── the two open routes are metered ───────────────────────────────────────
+
+def _stub_send(monkeypatch):
+    sent = []
+
+    async def fake(email):
+        sent.append(email)
+
+    monkeypatch.setattr(jwt_auth, "request_login_code", fake)
+    return sent
+
+
+def test_request_code_is_throttled(client, monkeypatch, hosted):
+    sent = _stub_send(monkeypatch)
+    codes = [
+        client.post("/v1/auth/request-code", json={"email": "beta@example.test"}).status_code
+        for _ in range(8)
+    ]
+    assert 429 in codes
+    # Throttled before the call, not after: the point is not spending our
+    # Resend quota or Supabase's rate limit on a hammering caller.
+    assert len(sent) < 8
+
+
+def test_the_limiter_also_follows_the_address(client, monkeypatch, hosted):
+    """Rotating the peer address does not get around the per-address bucket."""
+    from brotto_orchestrator import main
+
+    main._SIGNIN_BUCKETS.clear()
+    for i in range(5):
+        main._signin_allowed(f"peer-{i}", "beta@example.test")
+    assert main._signin_allowed("peer-new", "beta@example.test") is False
+
+
+def test_addresses_are_normalised_before_they_are_counted(client, monkeypatch, hosted):
+    from brotto_orchestrator import main
+
+    main._SIGNIN_BUCKETS.clear()
+    for _ in range(5):
+        main._signin_allowed("peer", "Beta@Example.Test")
+    assert main._signin_allowed("peer", "beta@example.test") is False
+
+
+def test_the_throttle_is_not_an_account_existence_oracle(client, monkeypatch, hosted):
+    """The property the routes were written for has to survive the limiter.
+
+    Two addresses, one on the operator's roster and one not, asked the
+    same number of times from the same peer: the same statuses at every
+    step, and the same body once the limiter starts refusing. It holds
+    because the bucket keys on the peer address and on what the caller
+    typed, and never consults anything that knows who is in the beta —
+    so there is no branch in the limiter that *could* differ. `error_id`
+    is excluded: it is a fresh correlation id on every response and says
+    nothing about the address.
+    """
+    invited = "invited@example.test"
+    stranger = "stranger@example.test"
+    roster = {invited}
+
+    async def fake(email):
+        # The roster exists; nothing downstream is allowed to see it.
+        assert (email in roster) is not None
+
+    monkeypatch.setattr(jwt_auth, "request_login_code", fake)
+    answers = {}
+    from brotto_orchestrator import main
+
+    for addr in (invited, stranger):
+        # Reset between the two, because the peer bucket is shared and a
+        # spent one would throttle the second address for the wrong
+        # reason. Each is measured from a fresh limiter, as two different
+        # peers would be.
+        main._SIGNIN_BUCKETS.clear()
+        main._SIGNIN_SWEEP_AT = 0.0
+        answers[addr] = [
+            client.post("/v1/auth/request-code", json={"email": addr})
+            for _ in range(6)
+        ]
+    assert [r.status_code for r in answers[stranger]] == [r.status_code for r in answers[invited]]
+    assert 429 in [r.status_code for r in answers[invited]]
+    throttled = [
+        {k: v for k, v in r.json().items() if k != "error_id"}
+        for r in answers[invited] if r.status_code == 429
+    ]
+    throttled_other = [
+        {k: v for k, v in r.json().items() if k != "error_id"}
+        for r in answers[stranger] if r.status_code == 429
+    ]
+    assert throttled == throttled_other
+
+
+def test_exchange_is_throttled_too(client, monkeypatch, hosted):
+    async def fake(email, code):
+        return "a.b.c"
+
+    monkeypatch.setattr(jwt_auth, "exchange_login_code", fake)
+    codes = [
+        client.post("/v1/auth/exchange",
+                    json={"email": "beta@example.test", "code": "123456"}).status_code
+        for _ in range(8)
+    ]
+    assert 429 in codes
+
+
+def test_the_sign_in_limiter_sees_through_a_proxy(client, monkeypatch, hosted):
+    """Behind Heroku's router every caller shares one peer address.
+
+    Keying the bucket on `request.client.host` would be five sign-ins per
+    ten minutes for the entire beta, which is a broken product rather than
+    a throttle.
+    """
+    sent = _stub_send(monkeypatch)
+    for i in range(5):
+        resp = client.post(
+            "/v1/auth/request-code",
+            json={"email": f"user{i}@example.test"},
+            headers={"x-forwarded-for": f"203.0.113.{i}"},
+        )
+        assert resp.status_code == 200
+    assert len(sent) == 5

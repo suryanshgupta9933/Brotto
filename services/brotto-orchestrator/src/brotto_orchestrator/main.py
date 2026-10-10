@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -74,7 +75,14 @@ from .model.config import ModelConfig, UserCredentials
 from .model.registry import PROVIDER_REGISTRY
 from .model.resolver import resolve_model_config
 from .model.store import save_user_config
-from .session.auth import auth_enabled, auth_mode, authenticate, is_placeholder, validate_request
+from .session.auth import (
+    AuthResult,
+    auth_enabled,
+    auth_mode,
+    authenticate,
+    is_placeholder,
+    validate_request,
+)
 from .session.observation_validator import validate_observation
 from .session.registry import SessionRegistry
 from .policy import Policy, UserPolicy
@@ -274,6 +282,13 @@ def _prune_sessions() -> int:
     return dropped
 
 
+def _auth(request: Request) -> AuthResult:
+    """The one HTTP credential check, with the identity it resolved to."""
+    return authenticate(
+        request.headers.get("authorization"), request.query_params.get("token")
+    )
+
+
 def _authed(request: Request) -> bool:
     """HTTP flavour of the WebSocket check.
 
@@ -281,9 +296,18 @@ def _authed(request: Request) -> bool:
     the failure mode are worth probing, and this server holds the user's
     own transcripts.
     """
-    return validate_request(
-        request.headers.get("authorization"), request.query_params.get("token")
-    )
+    return _auth(request).ok
+
+
+def _owner(claims: object) -> str | None:
+    """The principal a verified credential acts as, or None on self-host.
+
+    None is not "anonymous" — it is *one shared identity*, which is what
+    `AGENT_SECRET` has always been. Every ownership check below treats
+    None as "everything is yours", so open and secret modes keep the exact
+    behaviour they had before identities existed.
+    """
+    return getattr(claims, "sub", None) if claims is not None else None
 
 
 # Exactly what `crypto.randomUUID()` produces. Not a version check — the
@@ -802,6 +826,62 @@ async def get_effective_policy(request: Request):
 # On a self-host relay they exist and do nothing useful — the extension
 # renders the AGENT_SECRET field it has always rendered, because
 # /health answers auth_mode: "open" or "secret".
+#
+# Open is not unlimited. Unauthenticated, these are a way to drive
+# outbound email to arbitrary third-party addresses through our Resend
+# account and to hammer Supabase's verify endpoint, so both are metered.
+#
+# **The limiter cannot become the account-existence oracle the route went
+# to such lengths not to be.** It keys on what the *caller* sent — the
+# peer address and the address they typed — and never consults anything
+# that knows whether an address is registered, so a throttled address and
+# a registered one are throttled for the same reason and after the same
+# number of attempts. The answer is a fixed 429 with a fixed body; there
+# is no branch anywhere below that consults the beta roster.
+
+_SIGNIN_BUCKET_CAPACITY = 5.0
+_SIGNIN_REFILL_PER_SECOND = 5.0 / 600.0  # five attempts, refilled over ten minutes
+# ponytail: keys are caller-supplied, so the map is swept rather than
+# trusted to be small. Ceiling: a caller who keeps one attempt alive per
+# distinct address pins that many entries until they lapse. Upgrade path:
+# swap the dict for an LRU if that shows up in memory.
+_SIGNIN_BUCKETS: dict[str, tuple[float, float]] = {}
+_SIGNIN_SWEEP_AT = 0.0
+
+
+def _signin_allowed(peer: str, email: str) -> bool:
+    """Token bucket for the sign-in routes, per peer and per address.
+
+    Both keys are charged from the same bucket state, so neither a
+    rotated peer address nor a list of addresses gets around the other.
+    """
+    global _SIGNIN_SWEEP_AT
+    now = time.monotonic()
+    if now >= _SIGNIN_SWEEP_AT:
+        _SIGNIN_SWEEP_AT = now + 60.0
+        for key in [k for k, (_, ts) in _SIGNIN_BUCKETS.items() if now - ts > 600.0]:
+            del _SIGNIN_BUCKETS[key]
+    allowed = True
+    for key in (f"peer:{peer}", f"email:{email}"):
+        tokens, seen = _SIGNIN_BUCKETS.get(key, (_SIGNIN_BUCKET_CAPACITY, now))
+        tokens = min(_SIGNIN_BUCKET_CAPACITY, tokens + (now - seen) * _SIGNIN_REFILL_PER_SECOND)
+        allowed = allowed and tokens >= 1.0
+        _SIGNIN_BUCKETS[key] = (tokens - 1.0, now)
+    return allowed
+
+
+def _signin_peer(request: Request) -> str:
+    """Who to meter this sign-in attempt against.
+
+    The forwarded first hop, because the hosted relay runs behind a proxy
+    and `request.client.host` is then the proxy's address for every caller
+    — one shared bucket, five sign-ins per ten minutes for the whole beta.
+    The header is caller-supplied, so rotating it defeats this half of the
+    limit and only this half: the per-address bucket does not care.
+    """
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return forwarded or _caller_key(request)
+
 
 @app.post("/v1/auth/request-code")
 async def request_login_code(request: Request):
@@ -813,12 +893,19 @@ async def request_login_code(request: Request):
     swallows the rest rather than relaying it. A relay that told the
     caller which addresses exist is a directory of the beta.
     """
-    from .session.jwt_auth import EMAIL_RE, SupabaseUnavailable, request_login_code as _send
+    from .session.jwt_auth import (
+        EMAIL_RE,
+        SupabaseUnavailable,
+        normalize_email,
+        request_login_code as _send,
+    )
 
     body = await _json_body(request)
     email = str(body.get("email", "") or "")
     if not EMAIL_RE.match(email):
         raise _BadRequest("email is required")
+    if not _signin_allowed(_signin_peer(request), normalize_email(email)):
+        return _error(429, "too many attempts — wait a few minutes and try again")
     try:
         await _send(email)
     except SupabaseUnavailable as exc:
@@ -843,6 +930,7 @@ async def exchange_login_code(request: Request):
         EMAIL_RE,
         SupabaseUnavailable,
         exchange_login_code as _exchange,
+        normalize_email,
     )
 
     body = await _json_body(request)
@@ -850,6 +938,8 @@ async def exchange_login_code(request: Request):
     code = str(body.get("code", "") or "").strip()
     if not EMAIL_RE.match(email) or not code:
         raise _BadRequest("email and code are required")
+    if not _signin_allowed(_signin_peer(request), normalize_email(email)):
+        return _error(429, "too many attempts — wait a few minutes and try again")
     try:
         token = await _exchange(email, code)
     except SupabaseUnavailable:
@@ -868,7 +958,8 @@ async def create_session(request: Request):
     # Mints a session and allocates registry state, so it is gated like
     # the reads — otherwise anyone reaching the port can fill the registry
     # up to its 256-entry prune without ever holding the secret.
-    if not _authed(request):
+    auth = _auth(request)
+    if not auth.ok:
         return _error(404, "not found")
 
     session_id = str(uuid.uuid4())
@@ -881,6 +972,10 @@ async def create_session(request: Request):
     if scheme not in ("http", "https"):
         scheme = "http"
     registry.get_or_create(session_id)
+    # The one write to the owner field. On the hosted relay this is what
+    # makes a session id mean "this person's transcript" instead of "some
+    # transcript"; on self-host it stores None and changes nothing.
+    registry.set_owner(session_id, _owner(auth.claims))
     _prune_sessions()
     # Advertise the address the caller actually reached us on, not a fixed
     # one: the extension dials `websocket_url` verbatim when it starts with
@@ -897,18 +992,27 @@ async def create_session(request: Request):
 
 @app.get("/v1/sessions")
 async def list_session_audits(request: Request):
-    """Index of every session on disk, newest first.
+    """Index of sessions, newest first.
 
-    Gated on AGENT_SECRET, which is what closes the enumeration: this
+    Gated on AGENT_SECRET, which is what closed the enumeration: this
     returned every session's task title to any caller that could reach
     the port. On a self-host that caller is the user, but a self-hoster
     who puts Caddy in front of it is publishing their own task history.
+
+    On the hosted relay the index is filtered to the caller's own
+    sessions. A valid token is not enough: with ten accounts behind one
+    relay, the index *is* the directory of whose browsing this is.
     """
     from .agent.audit import list_sessions as _list
 
-    if not _authed(request):
+    auth = _auth(request)
+    if not auth.ok:
         return _error(404, "not found")
-    return JSONResponse(content={"sessions": _list()})
+    sessions = _list()
+    owner = _owner(auth.claims)
+    if owner is not None:
+        sessions = [s for s in sessions if registry.owns(s.get("session_id", ""), owner)]
+    return JSONResponse(content={"sessions": sessions})
 
 
 @app.get("/v1/sessions/{session_id}/audit")
@@ -921,8 +1025,15 @@ async def read_audit(session_id: str, request: Request):
     """
     from .agent.audit import read as _read
 
-    if not _authed(request):
+    auth = _auth(request)
+    if not auth.ok:
         return _error(404, "not found")
+    # Another account's session is a session that does not exist, not one
+    # that is forbidden: a 403 confirms the id is real, and confirming
+    # that is the whole of what the id is worth. Same rule as the bad-key
+    # 404, one layer in.
+    if not registry.owns(session_id, _owner(auth.claims)):
+        return _error(404, "unknown session")
     doc = _read(session_id)
     if not doc.get("found"):
         return _error(404, "unknown session")
@@ -941,23 +1052,39 @@ async def delete_session(session_id: str, request: Request):
 
     Separate from delete-all and behind the same secret: this is the one
     route where a wrong id is the difference between "I erased it" and
-    "I erased the wrong one".
+    "I erased the wrong one". On the hosted relay "the wrong one" means
+    another beta user's, so the owner is checked first and a mismatch
+    answers exactly what a nonexistent id answers.
     """
     from .agent.audit import delete as _delete
 
-    if not _authed(request):
+    auth = _auth(request)
+    if not auth.ok:
         return _error(404, "not found")
+    if not registry.owns(session_id, _owner(auth.claims)):
+        return _error(404, "unknown session")
     return JSONResponse(content={"deleted": _delete(session_id)})
 
 
 @app.delete("/v1/sessions")
 async def delete_all_sessions(request: Request):
-    """Erase every session on this server."""
+    """Erase every session on this server.
+
+    On the hosted relay that means every session *this account* opened.
+    The sweep is scoped rather than merely counted, because the residue
+    pass globs `*<ext>` across the directory — unscoped it would unlink
+    another user's scratchpad while the count described something else.
+    """
     from .agent.audit import delete_all as _delete_all
 
-    if not _authed(request):
+    auth = _auth(request)
+    if not auth.ok:
         return _error(404, "not found")
-    deleted, residue = _delete_all()
+    owner = _owner(auth.claims)
+    deleted, residue = (
+        _delete_all() if owner is None
+        else _delete_all(only=registry.owned_sessions(owner))
+    )
     # `residue` travels back because a file that could not be unlinked is
     # still on disk, and the panel is the only thing that can tell the user
     # their deletion did not finish. Answering `deleted: n` regardless would
@@ -1104,9 +1231,12 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         return
 
     offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
+    # The subprotocol spelling resolves as the *header* transport, because
+    # it is the credential that arrived on the handshake; `?token=` is the
+    # query spelling and jwt mode refuses that one (see `authenticate`).
     auth = authenticate(
-        websocket.headers.get("authorization"),
-        offered[1] if len(offered) > 1 else websocket.query_params.get("token"),
+        websocket.headers.get("authorization") or (offered[1] if len(offered) > 1 else None),
+        websocket.query_params.get("token"),
     )
     if not auth.ok:
         # 4003 is "a credential was required and none arrived", and it is
@@ -1121,6 +1251,17 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
             "no" if auth.verdict == "missing" else "bad",
         )
         await websocket.close(code=4003 if auth.verdict == "missing" else 4001)
+        return
+
+    # Ownership, before accept and with the same close code as an id that
+    # was never a session. A valid token for *another* beta account is not a
+    # credential failure — it authenticated perfectly — so it must not get
+    # the credential answers either, or the difference between 4001/4003
+    # and 4004 tells an attacker which session ids are real. 4004 is
+    # already "this is not a session you can drive".
+    if not registry.owns(session_id, _owner(auth.claims)):
+        log.warning("[%s] extension rejected — not the owner of this session", session_id)
+        await websocket.close(code=4004)
         return
 
     # Select the protocol *name*, never the secret: this goes back in the

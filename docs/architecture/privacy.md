@@ -266,6 +266,52 @@ the same asymmetry as everything above: a self-hoster's disk is their own data,
 an ephemeral dyno is ours, and nobody was deciding the second one. An explicit
 setting still wins, **including `0`**.
 
+## One operator per server was an assumption, and four things were built on it
+
+"Exactly one operator" is why `AGENT_SECRET` was a *credential* and never an
+*identity*. It held the enumeration shut, and it held it shut for free. Ten beta
+accounts broke it, and the breakage is not one bug — it is the same assumption
+showing up in four places that each looked closed on their own.
+
+**Ownership is recorded at mint time and checked everywhere, and a mismatch is
+404.** `POST /v1/sessions` writes the caller's `sub` onto the session; the
+registry is the only place it lives. `GET /v1/sessions` filters to the caller's
+own, the audit read and the delete refuse, the relay closes **4004**, and
+delete-all is scoped to the caller's own ids — the residue sweep globs `*<ext>`,
+so unscoped it would unlink another user's scratchpad while counting something
+else. A session with **no recorded owner belongs to nobody**: fail-closed, so a
+stale id or an evicted registry entry cannot become an open door. The close code
+is 4004 rather than 4001 for the same reason the routes answer 404 rather than
+403: a distinct answer confirms the id is real, and confirming that is the whole
+of what the id is worth. On self-host `owner` is `None`, which means *one
+shared identity*, and every route behaves exactly as it did before.
+
+**`?token=` is refused in jwt mode and nowhere else.** A URL reaches this
+server's access log, every proxy's log ahead of it, and the browser history. A
+self-hoster's `AGENT_SECRET` is one secret on their own box; a hosted JWT is a
+*person's* account, and there the query spelling writes a credential down. The
+WebSocket subprotocol is the header spelling and is what the extension already
+uses.
+
+**The cap is one statement, not a comparison.** `authorize_task_start` used to
+read the row, compare in Python and write the result — two concurrent starts
+both read `used = 9`, both pass, both write 10, one task free. The cap is the
+control that stops a hosted account spending our compute, so the predicate moved
+into the `WHERE` clause of the `UPDATE` (`reserve_task_slot`). The read stays,
+because revocation and invitation are genuinely reads; only the increment had to
+be atomic.
+
+**The two open sign-in routes are metered, and the limiter cannot become the
+oracle the routes were written not to be.** They are unauthenticated by
+definition, so they are a way to drive outbound email to arbitrary third-party
+addresses through our Resend account. The bucket keys on the peer (the forwarded
+hop, because behind a proxy `client.host` is the proxy for everybody and the
+limit would be five sign-ins per ten minutes for the whole beta) and on the
+**normalised** address the caller typed. It never consults anything that knows
+who is in the beta, so there is no branch in it that *could* differ between a
+rostered address and a stranger's — pinned by a test that drives both and
+compares the answers.
+
 ## Writing new code here
 
 Before adding a field, an endpoint or a metric, ask: **is this user content,

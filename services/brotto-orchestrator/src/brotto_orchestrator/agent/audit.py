@@ -29,7 +29,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Container
 
 from .context import MemoryEntry, Scratchpad
 
@@ -903,7 +903,7 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
     return removed
 
 
-def delete_all(*, dir: Path | None = None) -> tuple[int, int]:
+def delete_all(*, dir: Path | None = None, only: Container[str] | None = None) -> tuple[int, int]:
     """Remove every session's files. Returns `(documents, residue_left)`.
 
     The second number is the count of files that could not be removed — held
@@ -911,9 +911,20 @@ def delete_all(*, dir: Path | None = None) -> tuple[int, int]:
     alternative is a caller announcing a complete erasure it did not
     perform, and the only thing standing between that and the user is a log
     line they will not read.
+
+    `only` restricts the sweep to a named set of sessions. The hosted relay
+    needs it: "delete everything" from one account must mean *that
+    account's* everything, and the residue sweep is a `*<ext>` glob — left
+    unscoped it would unlink another beta user's scratchpad while the
+    count said nothing about it. The residue count is scoped identically so
+    the number still describes what was actually left behind.
     """
     d = dir or default_dir()
-    count = sum(1 for p in _session_documents(d) if delete(p.stem, dir=d))
+    keep = None if only is None else set(only)
+    count = sum(
+        1 for p in _session_documents(d)
+        if (keep is None or p.stem in keep) and delete(p.stem, dir=d)
+    )
     # Residue whose document is already gone belongs to no session as far as
     # `_session_documents` is concerned — it globs `*.json` — so the loop
     # above never reaches it. Whatever is left here is a user's own content on
@@ -927,6 +938,8 @@ def delete_all(*, dir: Path | None = None) -> tuple[int, int]:
     residue = 0
     for ext in _SESSION_RESIDUE_EXT:
         for p in d.glob(f"*{ext}"):
+            if keep is not None and p.name[: -len(ext)] not in keep:
+                continue
             try:
                 p.unlink()
             except OSError as exc:

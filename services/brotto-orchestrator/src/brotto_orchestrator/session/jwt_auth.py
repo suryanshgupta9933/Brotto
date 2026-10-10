@@ -186,10 +186,17 @@ async def _supabase_call(
         raise SupabaseUnavailable(type(exc).__name__) from exc
 
 
-def _profiles(method: str, query: str, body: dict | None = None) -> tuple[int, str]:
-    """A `profiles` call bound to the service role. The one seam tests stub."""
+def _profiles(
+    method: str, query: str, body: dict | None = None, *, path: str = "rest/v1/profiles"
+) -> tuple[int, str]:
+    """A PostgREST call bound to the service role. The one seam tests stub.
+
+    `path` is the whole relative path because the cap reservation is an
+    RPC against the same table, not a REST verb on it — both go through
+    here so one stub in a test covers the whole control plane.
+    """
     return _supabase_call(
-        method, f"rest/v1/profiles{query}", json_body=body or {}, api_key=_service_key(), service=True
+        method, f"{path}{query}", json_body=body or {}, api_key=_service_key(), service=True
     )
 
 
@@ -318,14 +325,25 @@ async def authorize_task_start(claims: Claims) -> None:
             "task_cap_reached",
             f"You have used this week's {cap} tasks. They reset on Monday.",
         )
+    # The increment itself is one conditional statement in Postgres
+    # (`reserve_task_slot`, migrations/001_profiles.sql). Comparing here and
+    # PATCHing afterwards is a read-then-write race: two starts for one
+    # account both read `used = 9`, both pass, both write 10, and one task
+    # is granted past the cap. A `false` return means the row did not
+    # match the predicate — someone else took the last slot, or the
+    # account was revoked between the read above and here.
     try:
-        status, _ = await _profiles(
-            "PATCH",
-            f"?id=eq.{claims.sub}",
-            {"tasks_this_week": used + 1, "week_start": today},
+        status, text = await _profiles(
+            "POST", "", {"uid": claims.sub, "cap": cap},
+            path="rest/v1/rpc/reserve_task_slot",
         )
     except Exception as exc:
-        log.warning("task count update failed: %s", type(exc).__name__)
+        log.warning("task reservation failed: %s", type(exc).__name__)
         raise AccountRefused("control_plane_unavailable", "Could not record this task.") from exc
     if status >= 400:
         raise AccountRefused("control_plane_unavailable", "Could not record this task.")
+    if text.strip() != "true":
+        raise AccountRefused(
+            "task_cap_reached",
+            f"You have used this week's {cap} tasks. They reset on Monday.",
+        )

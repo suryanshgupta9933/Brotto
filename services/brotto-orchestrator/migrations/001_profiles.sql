@@ -32,3 +32,63 @@ create table profiles (
 -- The relay reads this table with the service role key at task start
 -- only. There is no write path from this application beyond the task
 -- counter, and no column here holds anything the user said.
+
+-- ── nobody but the service role may touch this table ───────────────────
+--
+-- SUPABASE_ANON_KEY is *public*: it ships to every browser by design and
+-- is in the extension's bundle. So the default grants are not a threat
+-- model — they are the starting state, and without these lines anyone
+-- holding the project URL and that key reads the whole beta roster and,
+-- because the table is writable, sets their own `revoked_at` back to
+-- null or zeroes their own counter. That is the entire control plane,
+-- bypassed without touching the relay at all.
+--
+-- RLS with zero policies is deny-all, which is exactly right: the relay
+-- calls this table with the service role key, which bypasses RLS by
+-- design, so no policy is needed for the one caller that must work.
+-- The revokes are belt and braces — RLS already covers them — and say
+-- the intent out loud for the next reader who wonders whether a table
+-- with no policy can still be reached.
+alter table profiles enable row level security;
+revoke all on profiles from anon;
+revoke all on profiles from authenticated;
+
+-- ── the weekly cap, reserved atomically ─────────────────────────────────
+--
+-- authorize_task_start used to GET the row, compare in Python and PATCH
+-- the result, which is a read-then-write race: two task starts for one
+-- account both read `used = 9`, both pass the check, both write 10, and
+-- one task is granted past the cap. The cap is the control that stops a
+-- hosted account spending our compute, so the increment has to be one
+-- statement, not two round trips and a comparison in between.
+--
+-- The predicate is in the WHERE clause and the reset is in the SET, so
+-- Postgres does both under one row lock. A zero-row result is the cap
+-- (or a revocation that landed between the read and here) and the caller
+-- refuses the task.
+create or replace function public.reserve_task_slot(uid uuid, cap int)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+declare
+  granted boolean;
+begin
+  update profiles
+     set tasks_this_week = case
+           when week_start = current_date then tasks_this_week + 1
+           else 1
+         end,
+         week_start = current_date
+   where id = uid
+     and revoked_at is null
+     and (week_start <> current_date or tasks_this_week < cap)
+  returning true into granted;
+  return coalesce(granted, false);
+end;
+$$;
+
+-- Called by the relay's service role, which bypasses RLS; but a function
+-- executable by `public` would run with the *caller's* privileges by
+-- default, so revoke that explicitly rather than reasoning about it.
+revoke all on function public.reserve_task_slot(uuid, int) from public, anon, authenticated;
