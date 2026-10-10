@@ -74,7 +74,7 @@ from .model.config import ModelConfig, UserCredentials
 from .model.registry import PROVIDER_REGISTRY
 from .model.resolver import resolve_model_config
 from .model.store import save_user_config
-from .session.auth import auth_enabled, is_placeholder, validate_request
+from .session.auth import auth_enabled, auth_mode, authenticate, is_placeholder, validate_request
 from .session.observation_validator import validate_observation
 from .session.registry import SessionRegistry
 from .policy import Policy, UserPolicy
@@ -123,7 +123,9 @@ if os.environ.get("AGENT_SECRET") and is_placeholder(os.environ["AGENT_SECRET"])
         "  python3 -c 'import secrets;print(secrets.token_urlsafe(32))'"
     )
 
-if auth_enabled():
+if auth_mode() == "jwt":
+    log.info("SUPABASE_JWT_SECRET is set — /ws/ext and the session endpoints require a Supabase session token")
+elif auth_enabled():
     log.info("AGENT_SECRET is set — /ws/ext and the session endpoints require it")
 elif os.environ.get("AGENT_SECRET"):
     log.warning("AGENT_AUTH_DISABLED=true — AGENT_SECRET is set but ignored")
@@ -134,7 +136,11 @@ else:
         "Fine on localhost. Before exposing this server, set AGENT_SECRET in "
         "the .env beside docker-compose.yml and paste the same value into "
         "Brotto's Settings — a wrong one is refused as a 404, which reads "
-        "like a missing route if the panel has nothing better to say."
+        "like a missing route if the panel has nothing better to say. "
+        "This is a warning rather than a refusal only because a loopback "
+        "bind is the case it describes; `brotto --host` refuses a "
+        "non-loopback bind with no credential, which is where the refusal "
+        "lives — the server is handed the port, not the address it binds."
     )
 
 # ponytail: match the sidepanel's MAX_TASK_CHARS. Anything over this is
@@ -158,12 +164,18 @@ for _noisy in ("httpx", "httpcore", "websockets", "uvicorn.access"):
 RETENTION_DAYS_ENV = "BROTTO_RETENTION_DAYS"
 RETENTION_SWEEP_SECONDS = 3600
 
+# The hosted relay's default. A self-hoster's disk is their own data and
+# nothing expires until they ask; ours is an ephemeral dyno where every
+# beta transcript would otherwise persist for the life of the filesystem
+# with nobody deciding that. An explicit setting always wins, including 0.
+HOSTED_RETENTION_DAYS = 30.0
+
 
 def retention_days() -> float | None:
     """Configured retention in days, or None when the sweep is off."""
     raw = os.environ.get(RETENTION_DAYS_ENV, "").strip()
     if not raw:
-        return None
+        return HOSTED_RETENTION_DAYS if auth_mode() == "jwt" else None
     try:
         days = float(raw)
     except ValueError:
@@ -288,6 +300,18 @@ _UUID = re.compile(r"\A[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 # self-host. What the filter actually exists to keep out is CR, LF, space and
 # slash, none of which any branch can match.
 _HOST = re.compile(r"\A(?:[A-Za-z0-9.\-]{1,253}|\[?[0-9A-Fa-f:.]+\]?)(:\d{1,5})?\Z")
+
+# AccountRefused reasons, restated as the wire codes the panel looks up.
+# `AccountRefused` already restricts `reason` to these four, so this map is
+# total in practice and exists so a Supabase-side change cannot put free text
+# into `failure_reason`. The sentence belongs in `summary`; see
+# scripts/test-failure-reasons.test.js.
+_REFUSAL_REASON = {
+    "not_invited": "not_invited",
+    "revoked": "revoked",
+    "task_cap_reached": "task_cap_reached",
+    "control_plane_unavailable": "control_plane_unavailable",
+}
 
 
 def _caller_key(transport, explicit: object = None) -> str:
@@ -446,6 +470,11 @@ async def health():
         "service": "brotto-orchestrator",
         "version": "2.0.0",
         "model": _MODEL,
+        # Which credential UI the panel should render. Unauthenticated by
+        # design, and this field is the only thing about it that is: it
+        # names a mode, not a secret, and it is the reason this route
+        # stays reachable without a credential at all.
+        "auth_mode": auth_mode(),
     }
 
 
@@ -764,6 +793,73 @@ async def get_effective_policy(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Sign-in — the hosted relay's credential exchange
+# ---------------------------------------------------------------------------
+#
+# Open by definition: these two routes are how a credential comes into
+# existence, so gating them on one is a closed door. They reach exactly
+# Supabase and nothing else, take no session id, and return no transcript.
+# On a self-host relay they exist and do nothing useful — the extension
+# renders the AGENT_SECRET field it has always rendered, because
+# /health answers auth_mode: "open" or "secret".
+
+@app.post("/v1/auth/request-code")
+async def request_login_code(request: Request):
+    """Mail a 6-digit sign-in code.
+
+    The answer is the same for an address that has an account, one that
+    does not, and one this project has signups disabled for: Supabase's
+    own `create_user: false` is what keeps that true, and this route
+    swallows the rest rather than relaying it. A relay that told the
+    caller which addresses exist is a directory of the beta.
+    """
+    from .session.jwt_auth import EMAIL_RE, SupabaseUnavailable, request_login_code as _send
+
+    body = await _json_body(request)
+    email = str(body.get("email", "") or "")
+    if not EMAIL_RE.match(email):
+        raise _BadRequest("email is required")
+    try:
+        await _send(email)
+    except SupabaseUnavailable as exc:
+        # The call did not complete, which says nothing about the address
+        # — so it is safe to report, and reporting it is the difference
+        # between "check your inbox" and "nothing is wrong, wait".
+        log.warning("sign-in code request unavailable: %s", str(exc)[:40])
+        return _error(502, "could not reach the sign-in service")
+    return JSONResponse(content={"sent": True})
+
+
+@app.post("/v1/auth/exchange")
+async def exchange_login_code(request: Request):
+    """Trade the emailed code for a relay access token.
+
+    Supabase's body names whether the address exists, what the code was
+    worth and how long the project has been rate limited; none of it
+    crosses back. The caller learns that its code did not work, which is
+    all the panel can act on.
+    """
+    from .session.jwt_auth import (
+        EMAIL_RE,
+        SupabaseUnavailable,
+        exchange_login_code as _exchange,
+    )
+
+    body = await _json_body(request)
+    email = str(body.get("email", "") or "")
+    code = str(body.get("code", "") or "").strip()
+    if not EMAIL_RE.match(email) or not code:
+        raise _BadRequest("email and code are required")
+    try:
+        token = await _exchange(email, code)
+    except SupabaseUnavailable:
+        return _error(502, "could not reach the sign-in service")
+    except ValueError:
+        return _error(400, "invalid or expired code")
+    return JSONResponse(content={"access_token": token})
+
+
+# ---------------------------------------------------------------------------
 # Session creation — called by the extension before connecting WS
 # ---------------------------------------------------------------------------
 
@@ -1008,12 +1104,23 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         return
 
     offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
-    if not validate_request(
+    auth = authenticate(
         websocket.headers.get("authorization"),
         offered[1] if len(offered) > 1 else websocket.query_params.get("token"),
-    ):
-        log.warning("[%s] extension rejected — bad token", session_id)
-        await websocket.close(code=4001)
+    )
+    if not auth.ok:
+        # 4003 is "a credential was required and none arrived", and it is
+        # a separate code only because the hosted relay made the two cases
+        # indistinguishable: an extension old enough to predate the token
+        # sends nothing (its own 120-character cap silently drops a JWT),
+        # which used to close 4001 — byte-identical to "wrong secret", so
+        # a beta user could not tell "sign in again" from "your token is
+        # stale". Self-host has one credential and keeps one answer.
+        log.warning(
+            "[%s] extension rejected — %s token", session_id,
+            "no" if auth.verdict == "missing" else "bad",
+        )
+        await websocket.close(code=4003 if auth.verdict == "missing" else 4001)
         return
 
     # Select the protocol *name*, never the secret: this goes back in the
@@ -1122,6 +1229,31 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         await ws_send({"type": "canonical_status", "status": "interrupted"})
         await websocket.close(code=4009)
         return
+
+    # Revocation and the weekly task cap, here and only here. The JWT says
+    # who you are and nothing about whether you are still welcome, so this
+    # is the one place the control plane is asked — a task start is the
+    # only moment a decision is made, and putting it on the request path
+    # would make every step of every run depend on Supabase's uptime.
+    # Self-host has no claims here and never reaches this block.
+    if auth.claims is not None:
+        from .session.jwt_auth import AccountRefused, authorize_task_start
+
+        try:
+            await authorize_task_start(auth.claims)
+        except AccountRefused as exc:
+            log.warning(
+                "[%s] task_start refused  reason=%s", session_id, exc.reason,
+            )
+            await ws_send({
+                "type": "task_failed",
+                "status": "refused",
+                "failure_reason": _REFUSAL_REASON.get(exc.reason, "control_plane_unavailable"),
+                "summary": exc.detail,
+            })
+            await ws_send({"type": "canonical_status", "status": "interrupted"})
+            await websocket.close(code=4005)
+            return
 
     eval_queue: asyncio.Queue = asyncio.Queue()
     relay = ExtensionCDPRelay(ws_send, obs_queue, eval_queue, session_id)

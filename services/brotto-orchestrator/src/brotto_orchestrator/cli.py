@@ -13,20 +13,33 @@ def run_server(host: str, port: int, reload: bool) -> None:
     import uvicorn
 
     from brotto_orchestrator.main import app
-    from brotto_orchestrator.session.auth import auth_enabled
+    from brotto_orchestrator.session.auth import auth_mode
 
     # main.py already refuses a placeholder secret and warns on an unset one.
     # The warning is right for a developer on loopback and wrong everywhere
     # else: this process binds a relay that drives a logged-in browser, so an
     # unset secret plus a non-loopback bind is an open endpoint, not a
     # convenience. Pairing the two mistakes is what this refuses.
-    if host not in _LOOPBACK and not auth_enabled():
+    #
+    # It lives here rather than in main.py because this is the only layer
+    # that knows the bind address — the server is handed a port, so it can
+    # report "no credential" but never "no credential AND reachable from
+    # the internet". Both shipped launch paths (the Dockerfile's CMD and the
+    # Procfile) come through this CLI, which is what makes the refusal
+    # reachable at all.
+    #
+    # `auth_mode()`, not `auth_enabled()`: the hosted relay authenticates
+    # with SUPABASE_JWT_SECRET and sets no AGENT_SECRET, so the older check
+    # refused to boot the one deployment that does have a credential.
+    if host not in _LOOPBACK and auth_mode() == "open":
         raise SystemExit(
-            f"Refusing to bind {host} with no AGENT_SECRET: this relay can drive "
-            "a logged-in browser, and with no secret every caller is trusted.\n"
-            "Set one and start again:\n"
+            f"Refusing to bind {host} with no credential: this relay can drive "
+            "a logged-in browser, and with nothing set every caller is trusted.\n"
+            "Self-host — set one and start again:\n"
             "  export AGENT_SECRET=\"$(python3 -c 'import secrets;"
             "print(secrets.token_urlsafe(32))')\"\n"
+            "Hosted — set SUPABASE_JWT_SECRET, SUPABASE_URL, "
+            "SUPABASE_SERVICE_ROLE_KEY and SUPABASE_ANON_KEY.\n"
             "If you only meant to reach this from this machine, bind 127.0.0.1."
         )
 
