@@ -48,14 +48,12 @@ def load_user_config(client_ip: str) -> ModelConfig | None:
     # `_safe_filename` drops every character that is not alphanumeric, `.` or
     # `-`, so a separator cannot survive into this path — a name built from
     # those can only ever land inside `_user_dir()`. CodeQL models the sink,
-    # not the character filter, and it only reads a `codeql[...]` token on the
-    # line immediately above the alert, so there is one below each sink.
+    # not the character filter. Suppressed in `.github/workflows/codeql.yml`,
+    # not inline: a `# codeql[...]` comment here suppresses nothing.
     path = _user_dir() / _safe_filename(client_ip)
-    # codeql[py/path-injection]
     if not path.exists():
         return None
     try:
-        # codeql[py/path-injection]
         data = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError) as e:
         log.warning("failed to read user config at %s: %s", path, e)
