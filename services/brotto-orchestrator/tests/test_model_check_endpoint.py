@@ -136,6 +136,17 @@ def test_an_empty_provider_is_no_model_not_an_error(client, probe):
     assert r.json()["kind"] == "no_model"
 
 
+def test_the_response_does_not_name_the_servers_environment(client, probe):
+    """`resolve_model_config` raises a ValueError naming the env var it could
+    not find. The panel ignores this field and writes its own copy, so putting
+    `str(exc)` here told the caller about the host's configuration and gave
+    the person reading it nothing. The text is in the log instead."""
+    r = _send(client, model_config={"provider": "", "model": ""}, api_key="sk-ant-x")
+    body = r.json()
+    assert body["kind"] == "no_model"
+    assert "AGENT_MODEL" not in body["error"]
+
+
 def test_an_unknown_model_is_named_back(client, probe):
     r = _send(client,
               model_config={"provider": "anthropic", "model": "gpt-4o"},
