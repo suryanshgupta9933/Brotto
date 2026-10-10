@@ -116,6 +116,30 @@ prose, implemented in one place, with the second place unbuilt. Both are now
 pinned by a test that asserts the secret is absent from the prompt that would be
 sent, not that a function was called.
 
+**3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
+with *"Brotto has one deployment. You run the orchestrator… There is no
+Brotto-operated service, we run no servers"* and closed out each section with a
+claim scoped to that: *"None of this reaches us"*, *"we do not receive your
+data"*, *"the machine holding them is yours"*, *"Deletion is entirely yours, and
+it is immediate"*. Then `agent.brotto.dev` shipped and every one of those became
+false at the same time — **not one line of code changed**. The operator flipped;
+the prose did not follow, because prose is not covered by the scan, the ratchet,
+or any test.
+
+The shape is the same as 3a inverted. 3a is *a control named in prose that the
+code implements once*; 3b is *a fact stated in prose that the code stopped
+obeying*. Neither is a bug in the code, so neither would have been caught by
+anything written against the code. What catches 3b is re-reading the policy
+against the deployment list before a listing ships — and `notifications` is the
+same class one over: a permission in `manifest.json`, on by default in
+`background.ts`, that the Security section never named, so the CWS per-permission
+justification had nothing to answer with.
+
+What 3b is *not*: a reason to weaken the self-host story. Every fix scoped a
+claim to a deployment. "There is no operator between the agent and your
+documents" is still the whole argument on self-host, and it still gets said —
+as a property of that deployment rather than as a universal.
+
 **4. Retention is a feature, not a cleanup task.** `_prune_sessions` evicts
 in-memory state and never touches disk. The user can now delete a session or
 all of them (`DELETE /v1/sessions/{id}`, `DELETE /v1/sessions`, both behind

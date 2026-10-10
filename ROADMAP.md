@@ -157,15 +157,26 @@ the model actually produced.
 
 ## Not planned
 
-**A hosted tier, for now.** There is no operator to protect, no marginal cost
-to defend and no signup to build. Every reason it was deferred still holds
-**while the free tier is self-hosted**, which is the product today.
+**A public hosted tier.** The hosted relay at `agent.brotto.dev` exists and is
+running, but it is a **capped, invite-only beta** and not a tier. Self-host
+remains free, permanent and the product; the relay exists to produce three
+measurements — support tickets per invited user, voluntary returners, and any
+conversion signal — and the kill criterion was written down before it shipped:
+after 8–10 invited users with no returners and no public writeups, it does not
+proceed to a free public beta and the effort goes back into making the six-step
+self-host install a two-step install.
 
-The direction is an ephemeral relay the extension connects to — nothing written
-server-side by default — for cross-device sessions and the Pro surface. It does
-not weaken the self-hosted default, which remains the privacy claim and the free
-product. It does need its own decision record, because the two on disk assume
-no operator; those files are superseded by new ones rather than edited.
+The deferral reasoning was never "no operator exists"; it was "no operator to
+protect until we know whether anyone wants this". The first two records on disk
+assumed no operator and were **superseded by new ones rather than edited** —
+`2026-10-10-hosted-beta-accounts-and-the-secret.md`, then
+`2026-10-10-hosted-beta-accounts-supabase-and-resend.md`, which replaced the
+per-invitation `AGENT_SECRET` with Supabase Auth and Resend. That part is
+accepted and unbuilt; the relay itself is live behind `AGENT_SECRET`.
+
+`docs/architecture/privacy.md` rule 2a and `docs/architecture/deployment.md`
+carry the operational detail, and `PRIVACY.md` discloses the relay in as many
+words as the self-hosted default gets.
 
 Pro sells compounding and performance — routines syncing, throughput, support —
 and **never custody**. The rule that survives: if a Pro feature can be phrased as
@@ -175,9 +186,13 @@ and **never custody**. The rule that survives: if a Pro feature can be phrased a
 a key the user owns, a cap spends the user's tokens for them. It is friction
 without a beneficiary.
 
-**IndexedDB, or relocating history out of `/data/sessions`.** The volume is
-already the user's disk. The whole relocation was justified by a hosted
-operator who could read the files, and there is no operator.
+**Relocating history *out* of `/data/sessions` entirely.** The IndexedDB half of
+this shipped — `session_store.js` mirrors each audit document into the browser
+and answers only when the server cannot, which is what an ephemeral relay disk
+needs. What has not been built is the full local-first move where the server
+holds no session history at all. The volume is still the right default: on
+self-host it is the user's own disk, and nothing about a relay justifies making
+that the exception.
 
 **A second browser.** `chrome.debugger` has no Firefox equivalent, and
 emulating it is a re-implementation of the extension rather than a port of it.
