@@ -363,6 +363,54 @@ copies `woff2` alongside the other asset extensions. They came from
 that Brotto was installed — on every use of a product whose claim is that your
 pages reach only the model you chose. Adding a webfont again reopens it.
 
+## Which Brotto is this? ask the server, not the URL
+
+The panel renders the server address read-only when the user is on Brotto
+Cloud, and hides the `AGENT_SECRET` field in favour of the email + 6-digit code
+sign-in. **That decision comes from `GET /health`'s `auth_mode`, not from
+comparing the address against a constant.** The earlier `HOSTED_SERVER_URL` did
+the comparison, and a comparison against text the user typed is a guess: a
+trailing slash, a typed `http://`, or a case difference each read as self-host
+and each hid the sign-in UI on a server that speaks `jwt`. The server knows
+which one it is, so `applyAuthMode()` renders from `state.authMode`
+(`'open' | 'secret' | 'jwt'`, null = not asked or not reachable, treated as
+self-host because that is what every server said before `auth_mode` existed).
+
+**`CLOUD_SERVER_URL` survives as a default value, never as the mode test.** It
+is what a blank field resolves to when the server has said `jwt`, and what the
+wizard writes into a read-only input. It is not how the panel decides anything.
+
+**The mode is re-derived, not remembered.** The address can change under the
+panel — the user edits the field in Settings — so every `input` clears
+`state.authMode` to `null` and the `blur` handler re-probes. Probing per
+keystroke would be a request per character; not clearing it would leave the
+panel describing the address that *was* there. Until the probe lands the field
+is editable, which is what someone pasting their own localhost must find.
+
+**Nothing downstream branches on which credential is in the slot.** A cloud
+access token is written into `settings.agentSecret` — the same key, the same
+`Bearer` header, the same reader as a self-hoster's `AGENT_SECRET` — and the
+extension never parses it. Signed-in therefore means *the slot is non-empty*,
+read from storage, so there is no second flag that can disagree.
+
+**Signing out is not "clear the field".** A stale token left in the slot is a
+server refusing every call with a 404 — which reads exactly like a wrong
+`AGENT_SECRET`, and sends the user to inspect a `.env` that never existed. So
+the way out is the way in: `signOutOfCloud()` clears the slot and reopens the
+wizard, which asks which Brotto this is.
+
+**Six `FAILURE_NOTE` entries came with the cloud and none of them is a socket
+failure.** `credential_missing` / `credential_rejected` are the client refusing
+to run without a usable credential; `not_invited`, `revoked`,
+`task_cap_reached` and `control_plane_unavailable` are the relay answering a
+request it *did* authenticate. Neither group is fixed by sending the task again.
+Pinned by `scripts/test-failure-reasons.test.js`.
+
+**The status line is `textContent` in both surfaces.** The wizard's
+`setCloudStatus` and the panel's put a typed email address into that line, and
+the no-unescaped-`innerHTML` rule applies to a settings hint exactly as it
+applies to a card.
+
 ## A frame with no case is a run that never ends
 
 The panel's WS message switch is a bare `switch (message.type)` with a

@@ -84,6 +84,12 @@
     .state.live .state-name { color: var(--ok); }
     .state.wait .state-name { color: var(--wait); }
     .state-body { color: var(--ink-2); line-height: 1.45; }
+    /* The two editions, drawn with the same rows the three states use. The
+       radio is the only control on the page, so it gets the ink and nothing
+       else — no accent, no fill. */
+    label.state { cursor: pointer; }
+    label.state > input { margin: 2px 0 0; accent-color: var(--ink); flex-shrink: 0; }
+    label.state > span { display: block; }
 
     /* ── Fields ─────────────────────────────────────────────────────────── */
     fieldset { border: 0; display: block; }
@@ -112,8 +118,12 @@
     select.input { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; }
     textarea.input { resize: vertical; font-family: var(--font-ui); line-height: 1.5; }
     .hint { color: var(--ink-3); font-size: 11.5px; line-height: 1.45; margin-top: 5px; }
+    /* Cloud's address is the one the user cannot change, and says so by
+       looking unlike the others. Same rule as the panel's `.input--readonly`. */
+    .input--readonly { background: var(--paper-3); color: var(--ink-2); cursor: not-allowed; }
 
-    #serverStatus {
+    /* One status line, used by the self-host probe and the cloud sign-in. */
+    .status {
       font-family: var(--font-mono);
       font-size: 10px;
       letter-spacing: 0.1em;
@@ -121,8 +131,8 @@
       margin-top: 8px;
       color: var(--ink-3);
     }
-    #serverStatus.ok { color: var(--ok); }
-    #serverStatus.bad { color: var(--bad); }
+    .status.ok { color: var(--ok); }
+    .status.bad { color: var(--bad); }
 
     /* ── Foot ───────────────────────────────────────────────────────────── */
     #foot {
@@ -167,13 +177,34 @@
       <rect x="3" y="14" width="7" height="7"></rect>
       <rect x="14" y="14" width="7" height="7"></rect>
     </svg>
-    <span id="stepCount">Step 1 of 3</span>
+    <span id="stepCount">Step 1 of 4</span>
   </div>
 
   <div id="steps">
 
     <section class="step active" data-step="1" aria-labelledby="s1h">
-      <h1 id="s1h">Brotto drives this browser</h1>
+      <h1 id="s1h">Which Brotto?</h1>
+      <p>Same extension, same browser either way. The one difference is whose server the tasks go to.</p>
+      <div class="states">
+        <label class="state" for="editionSelf">
+          <input type="radio" name="edition" id="editionSelf" value="self" checked>
+          <span>
+            <span class="state-name">Self-host</span>
+            <span class="state-body">You run the server, with <code>docker compose</code>. Free, permanent, and yours to keep. Brotto needs its address and, if you set one, its key.</span>
+          </span>
+        </label>
+        <label class="state" for="editionCloud">
+          <input type="radio" name="edition" id="editionCloud" value="cloud">
+          <span>
+            <span class="state-name">Brotto Cloud</span>
+            <span class="state-body">We run the server. Sign in with your email — we send you a 6-digit code, no account password and no extra browser permission.</span>
+          </span>
+        </label>
+      </div>
+    </section>
+
+    <section class="step" data-step="2" aria-labelledby="s2h">
+      <h1 id="s2h">Brotto drives this browser</h1>
       <p>Let you ask an AI to perform tasks in your own logged-in browser.</p>
       <p>You describe a task in your own words. Brotto works through it and tells you when it needs a decision from you.</p>
       <div class="states">
@@ -201,24 +232,37 @@
       </div>
     </section>
 
-    <section class="step" data-step="2" aria-labelledby="s2h">
-      <h1 id="s2h">Where should tasks go?</h1>
+    <section class="step" data-step="3" aria-labelledby="s3h">
+      <h1 id="s3h">Where should tasks go?</h1>
       <p>Brotto is model-agnostic. The server you point at decides which model runs.</p>
       <div class="field">
         <label for="serverUrl">Server address</label>
         <input id="serverUrl" class="input" type="url" placeholder="http://localhost:8000" spellcheck="false" />
-        <p class="hint">Leave this as-is if you're using the Brotto service. Change it only if you run your own server.</p>
-        <div id="serverStatus"></div>
+        <p class="hint" id="serverUrlHint">Leave this as-is if you're using the Brotto service. Change it only if you run your own server.</p>
+        <div id="serverStatus" class="status"></div>
       </div>
-      <div class="field">
+      <div class="field" id="selfHostFields">
         <label for="agentSecret">Server key</label>
         <input id="agentSecret" class="input" type="password" placeholder="Only if your server sets one" autocomplete="off" spellcheck="false" />
         <p class="hint">The <code>AGENT_SECRET</code> from the <code>.env</code> beside your <code>docker-compose.yml</code>. A server that sets one turns auth on by itself; leave this blank if yours doesn't.</p>
       </div>
+      <div id="cloudFields" hidden>
+        <div class="field">
+          <label for="cloudEmail">Email</label>
+          <input id="cloudEmail" class="input" type="email" autocomplete="email" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="cloudCode">6-digit code</label>
+          <input id="cloudCode" class="input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" spellcheck="false" />
+          <p class="hint">Press <strong>Send code</strong>, then type what arrives. A code instead of a link, so the extension asks for no extra permission.</p>
+          <div><button id="sendCodeBtn" class="btn" type="button">Send code</button></div>
+        </div>
+        <div id="cloudStatus" class="status"></div>
+      </div>
     </section>
 
-    <section class="step" data-step="3" aria-labelledby="s3h">
-      <h1 id="s3h">Bring your own key</h1>
+    <section class="step" data-step="4" aria-labelledby="s4h">
+      <h1 id="s4h">Bring your own key</h1>
       <p>Brotto needs a key to reach your model provider. It goes to your Brotto server and nowhere else.</p>
       <div class="field">
         <label for="provider">Provider</label>
