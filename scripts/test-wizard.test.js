@@ -163,7 +163,8 @@ check("cloud shows email and code", cloudRun.$cloudFields.hidden === false);
 // absence: nothing here grew a branch, so assert the original check is
 // still the original check.
 check("checkServer still probes /health then /v1/policy",
-  /\/health[\s\S]{0,400}\/v1\/policy/.test(welcome));
+  /\/health[\s\S]{0,1200}\/v1\/policy/.test(welcome),
+  "the origin binding sits between the two probes now; both still have to be there");
 check("and still reads a refused key as the 404 it is",
   /authed\.status === 404/.test(welcome) && /rejected|refused/i.test(welcome),
   "403 would confirm the route; 404 without this check reads as a missing endpoint");

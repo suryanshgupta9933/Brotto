@@ -96,14 +96,24 @@ def authenticate(authorization: str | None, query_token: str | None = None) -> A
     spellings resolve here rather than at each call site, so adding a
     route cannot pick the wrong one — and adding a *credential* cannot
     leave one of the call sites checking only the old one.
+
+    `?token=` is refused in jwt mode and nowhere else. A query string
+    reaches this server's access log, every proxy's log ahead of it, and
+    the browser history; a self-hoster's shared `AGENT_SECRET` is one
+    secret on their own box, while a hosted JWT is a *person's* credential
+    — writing it into a URL hands a beta account to whoever reads a log
+    file. The two spellings exist for the same tests, and those run in
+    secret mode.
     """
-    token = (authorization or "").replace("Bearer ", "", 1).strip()
-    token = token or (query_token or "").strip()
+    header_token = (authorization or "").replace("Bearer ", "", 1).strip()
+    query_token = (query_token or "").strip()
     if auth_mode() == "jwt":
+        token = header_token
         if not token:
             return AuthResult("missing")
         claims = jwt_auth.verify_jwt(token)
         return AuthResult("ok", claims) if claims else AuthResult("bad")
+    token = header_token or query_token
     if validate_token(token):
         return AuthResult("ok")
     # Self-host gets no distinction: one credential has always answered

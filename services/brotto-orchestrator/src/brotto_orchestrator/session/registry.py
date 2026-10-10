@@ -17,6 +17,11 @@ class SessionState:
     # view the user is actually subject to, not just their local cache.
     # Stored as a raw dict; we re-validate with UserPolicy when reading.
     last_user_policy: dict | None = None
+    # The Supabase `sub` that minted this session, on the hosted relay.
+    # None on every self-host: `AGENT_SECRET` is one shared identity by
+    # design, so a self-hoster has no principals to tell apart and must
+    # not be handed the illusion of them. See `SessionRegistry.owns`.
+    owner: str | None = None
 
     def cancel_current_task(self) -> None:
         if self.current_task and not self.current_task.done():
@@ -72,3 +77,36 @@ class SessionRegistry:
         if session := self._sessions.get(user_id):
             session.connected = False
             session.cancel_current_task()
+
+    # ── ownership, hosted relay only ───────────────────────────────────
+    #
+    # A session id was enough to name somebody's transcript while there
+    # was one operator per server. There are ten accounts now, so "is
+    # this token valid" stopped being the question: it is "is this token
+    # the owner of this session". The owner is recorded here at mint time
+    # and nothing else writes it.
+    #
+    # **A session with no recorded owner belongs to nobody.** Fail-closed
+    # on purpose: a stale id, a registry that never saw the mint, an
+    # eviction — each of those reads 404 rather than handing one beta
+    # user another's inbox, which is the whole finding.
+
+    def set_owner(self, session_id: str, owner: str | None) -> None:
+        self.get_or_create(session_id).owner = owner
+
+    def owns(self, session_id: str, owner: str | None) -> bool:
+        """Whether `owner` is the identity this session was minted for.
+
+        `owner is None` means "self-host or open mode": one credential,
+        one person, and every route behaves exactly as it did before
+        identities existed.
+        """
+        if owner is None:
+            return True
+        session = self._sessions.get(session_id)
+        return session is not None and session.owner == owner
+
+    def owned_sessions(self, owner: str | None) -> list[str]:
+        if owner is None:
+            return sorted(self._sessions)
+        return sorted(s for s, st in self._sessions.items() if st.owner == owner)

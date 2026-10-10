@@ -72,6 +72,22 @@ def session_id():
     return _uuid_id
 
 
+@pytest.fixture(autouse=True)
+def _fresh_signin_buckets():
+    """Empty the sign-in rate limiter before every test.
+
+    Same reason as `_offline_auth`: the limiter is process state, and the
+    sign-in tests share one TestClient peer address and several share one
+    email address, so without this the fifth of them gets a 429 that has
+    nothing to do with what it is testing.
+    """
+    from brotto_orchestrator import main
+
+    main._SIGNIN_BUCKETS.clear()
+    main._SIGNIN_SWEEP_AT = 0.0
+    yield
+
+
 def _uuid_id(label: str) -> str:
     """A session id the server would actually mint.
 

@@ -12,7 +12,7 @@ if (existsSync(distDir)) rmSync(distDir, { recursive: true });
 mkdirSync(distDir, { recursive: true });
 
 // Static assets
-for (const name of ['sidepanel.html', 'sidepanel.js', 'session_store.js', 'welcome.html', 'welcome.js', 'model_catalog.js', 'panel-tokens.css']) {
+for (const name of ['sidepanel.html', 'sidepanel.js', 'session_store.js', 'welcome.html', 'welcome.js', 'model_catalog.js', 'credential.js', 'panel-tokens.css']) {
   copyFileSync(join(srcDir, name), join(distDir, name));
 }
 copyFileSync(join(__dirname, 'manifest.json'), join(distDir, 'manifest.json'));

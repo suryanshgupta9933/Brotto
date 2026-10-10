@@ -184,6 +184,28 @@ resets a counter ten people move a few hundred times is a cron that quietly
 stops running, and the failure mode is one user's beta ending for no visible
 reason.
 
+**The same file enables RLS and defines `reserve_task_slot`.** Two things that
+are not optional, both added before any beta database was stood up:
+
+- **`alter table profiles enable row level security` with zero policies, plus
+  revokes on `anon` and `authenticated`.** `SUPABASE_ANON_KEY` is *public* — it
+  ships in the extension bundle — so the default grants are not a threat model,
+  they are the starting state. Without this, the project URL and that key are
+  enough to read the beta roster and write to it: set your own `revoked_at`
+  back to null, or zero your own counter, without touching the relay at all.
+  The relay needs no policy because it reads and writes with the **service role
+  key**, which bypasses RLS by design.
+- **`reserve_task_slot(uid, cap)`** is the weekly cap's only write path, because
+  read-then-write is a race: two task starts for one account both read
+  `used = 9`, both pass, both write 10, and one task is granted past the cap.
+  It is a single conditional `UPDATE … WHERE … tasks_this_week < cap RETURNING`,
+  with the week reset in the `SET`, so Postgres does both under one row lock. A
+  zero-row result is `task_cap_reached`.
+
+**If a database was created from an earlier copy of this file, drop and re-run
+it** — there is no migration runner, so editing `001` in place only reaches a
+database that has not been created yet.
+
 ### `BROTTO_BETA_TASK_CAP` is a rollout knob, not a policy number
 
 The cap exists because the rollout is **batched off a waitlist**, and the first

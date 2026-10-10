@@ -54,6 +54,14 @@ function setCloudStatus(text, tone) {
   $cloudStatus.className = tone ? `status ${tone}` : "status";
 }
 
+// What the address held before the cloud radio overwrote it. One-way was the
+// old comment's claim and it was simply not true of the field: the cloud
+// address is written into a user-editable input, so coming back to self-host
+// left agent.brotto.dev sitting in a form that is about to be saved as
+// `serverUrl` — a self-hoster who glanced at both radios shipped their own
+// install to the cloud address.
+let selfHostServerUrl = "";
+
 function applyEdition() {
   const cloud = edition() === "cloud";
   $selfHostFields.hidden = cloud;
@@ -62,8 +70,14 @@ function applyEdition() {
   $serverUrl.classList.toggle("input--readonly", cloud);
   if ($serverUrlHint) $serverUrlHint.textContent = cloud ? CLOUD_HINT : SELF_HOST_HINT;
   // The cloud address is fixed, so it is written on the way in rather than
-  // typed. Every self-host field keeps whatever the user already had.
-  if (cloud) $serverUrl.value = CLOUD_SERVER_URL;
+  // typed. Every self-host field keeps whatever the user already had — the
+  // address included, which is why it is snapshotted rather than overwritten.
+  if (cloud) {
+    if ($serverUrl.value.trim() !== CLOUD_SERVER_URL) selfHostServerUrl = $serverUrl.value;
+    $serverUrl.value = CLOUD_SERVER_URL;
+  } else if ($serverUrl.value.trim() === CLOUD_SERVER_URL) {
+    $serverUrl.value = selfHostServerUrl;
+  }
   $serverStatus.textContent = "";
   $serverStatus.className = "status";
   setCloudStatus("");
@@ -138,6 +152,19 @@ async function checkServer() {
     const res = await fetch(base + "/health", { method: "GET" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     if (secret) {
+      // The field is pre-filled from storage on load, so a key sitting in it
+      // may be one this browser was issued elsewhere. Bind it to the origin
+      // that issued it, by the same rule the service worker applies — a
+      // self-hoster typing their own key over a LAN address is unaffected,
+      // because that value was typed here and has no recorded issuer.
+      const stored = (await chrome.storage.local.get("settings")).settings || {};
+      const fromStorage = secret === String(stored.agentSecret || "").trim();
+      const { refusal } = brottoCredential.forUrl(stored, base, !fromStorage);
+      if (fromStorage && refusal) {
+        $serverStatus.textContent = refusal;
+        $serverStatus.className = "status bad";
+        return;
+      }
       const authed = await fetch(base + "/v1/policy", {
         method: "GET",
         headers: { Authorization: `Bearer ${secret}` },
@@ -230,6 +257,10 @@ async function finish() {
         ...(saved.settings || {}),
         serverUrl: server,
         agentSecret: $agentSecret.value.trim(),
+        // Which server issued it. On the cloud path that value is a real
+        // account identity, and the service worker now refuses to send it
+        // anywhere else (see credential.js).
+        agentSecretOrigin: server,
         onboarded: true,
       },
       modelConfig: { provider, model, context_window: ctx },
