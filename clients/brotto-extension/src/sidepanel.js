@@ -756,14 +756,50 @@ function panelStatus(status) {
   return SERVER_STATUS[status] || status || 'done';
 }
 
+// Three sources, most authoritative first, deduped by session id. The server
+// wins because it is the only copy with the real elapsed time and the loop's
+// own status vocabulary; the mirror fills in rows a restarted dyno no longer
+// has; `local` is the floor, because rows written before the panel knew any
+// session id live only there.
+//
+// A row with no session_id cannot be deduped against another, and two such
+// rows that share a start time are the same conversation seen twice — the
+// replay in saveSession's comment is exactly that case.
+function mergeHistory(...sources) {
+  const seen = new Set();
+  const out = [];
+  for (const rows of sources) {
+    for (const row of rows || []) {
+      const key = row.session_id || `started:${row.startedAt}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+    }
+  }
+  return out;
+}
+
+async function mirrorRows() {
+  return (await brottoSessionStore.list()).map((r) => ({
+    task: r.task || '(no task text)',
+    status: panelStatus(r.status),
+    steps: r.steps,
+    elapsed: '—',
+    startedAt: r.started_at,
+    session_id: r.session_id,
+    task_count: 1,
+  }));
+}
+
 async function historyEntries() {
   const local = await listSessions();
+  const mirrored = await mirrorRows();
   try {
     const res = await fetch(`${serverBase()}/v1/sessions`, { headers: await authHeaders() });
-    if (!res.ok) return local;
+    if (!res.ok) return mergeHistory(mirrored, local);
     const { sessions } = await res.json();
-    if (!Array.isArray(sessions)) return local;
-    return sessions.map((s) => ({
+    if (!Array.isArray(sessions)) return mergeHistory(mirrored, local);
+    const serverRows = sessions.map((s) => ({
       task: s.task || s.title || '(no task text)',
       status: panelStatus(s.status),
       steps: s.steps,
@@ -773,8 +809,12 @@ async function historyEntries() {
       session_id: s.session_id,
       task_count: s.task_count,
     }));
+    // Union, not either-or: the mirror is what makes the list survive a dyno
+    // restart, and returning only the server's rows would empty the history
+    // every time one happened.
+    return mergeHistory(serverRows, mirrored, local);
   } catch {
-    return local;
+    return mergeHistory(mirrored, local);
   }
 }
 
@@ -798,6 +838,13 @@ async function saveSession({ status, steps, elapsed }) {
   const sid = state.sessionId;
   if (sid) {
     if (await wasDeleted(sid)) return;
+    // Mirror the document once per *real* terminal event — `taskCount` is what
+    // distinguishes a send this panel watched from the replayed terminal event
+    // every panel open re-delivers, so this cannot fire once per open. It sits
+    // above the row bookkeeping because both of those paths `return`, and the
+    // row is the list while the mirror is the transcript; a run whose row
+    // already existed still has a document that grew.
+    if (state.taskCount) void mirrorSession(sid, { status, steps });
     const existing = sessions.find((s) => s.session_id === sid);
     if (existing) {
       if (!state.taskCount) return;
@@ -920,6 +967,10 @@ async function deleteSession(entry) {
   ));
   await saveSessions(remaining);
   if (entry.session_id) await noteDeleted([entry.session_id]);
+  // The mirror is a third copy and it is the only one that survives the
+  // server's disk, so deleting the row and the server file while leaving it
+  // behind would mean "deleted" is the one outcome the user cannot verify.
+  if (entry.session_id) await brottoSessionStore.remove(entry.session_id);
   // The row goes from the panel first. A server that is down, or a secret
   // that is wrong, must not leave the user staring at a button that does
   // nothing — and the row is the half they can see.
@@ -953,6 +1004,7 @@ async function deleteAllSessions() {
   if (!ok) return;
   await saveSessions([]);
   await noteDeleted(sessions.map((s) => s.session_id));
+  await brottoSessionStore.clear();
   await renderHistory();
   try {
     const res = await fetch(`${serverBase()}/v1/sessions`, {
@@ -1030,12 +1082,38 @@ function serverBase() {
   return (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
 }
 
+async function mirrorSession(sessionId, { status, steps } = {}) {
+  try {
+    const doc = await fetchAudit(sessionId);
+    await brottoSessionStore.put(sessionId, doc, {
+      task: (state.lastGoal || '').trim(),
+      status,
+      steps: steps ?? state.stepCount ?? null,
+      startedAt: state.startTime || null,
+    });
+  } catch {
+    // Best-effort by construction: the run is on the server, and the mirror is
+    // only ever consulted when the server cannot answer. Failing here would
+    // turn a bonus into a way for a finished run to look broken.
+  }
+}
+
 async function fetchAudit(sessionId) {
-  const res = await fetch(`${serverBase()}/v1/sessions/${encodeURIComponent(sessionId)}/audit`, {
-    headers: await authHeaders(),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  try {
+    const res = await fetch(`${serverBase()}/v1/sessions/${encodeURIComponent(sessionId)}/audit`, {
+      headers: await authHeaders(),
+    });
+    // `found: false` with a 200 is the server saying it has no document for
+    // this id — which is exactly what a wiped dyno says about every session it
+    // ever ran. It is a miss, not an answer, so the mirror is tried too.
+    if (res.ok) {
+      const doc = await res.json();
+      if (doc && doc.found !== false) return doc;
+    }
+  } catch { /* fall through to the mirror */ }
+  const mirrored = await brottoSessionStore.get(sessionId);
+  if (mirrored) return mirrored;
+  throw new Error(`no copy of session ${sessionId}`);
 }
 
 async function replaySession(entry) {

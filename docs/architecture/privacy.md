@@ -63,6 +63,28 @@ not telemetry, it is not a log, it is not something an endpoint may enumerate.
 that is rule 2 violated in code, and it is closed by the auth work, not by a
 docstring.
 
+**2a. The transcript also lives in the user's browser.** The server's copy is
+the only *complete* one, and on a hosted orchestrator that disk is ephemeral — a
+dyno restart or a deploy wipes every transcript the user has, silently. So
+`session_store.js` mirrors each audit document into IndexedDB, and
+`historyEntries` unions the server's list with the mirror and with the panel's
+own 20-row array. **The mirror lands as a mirror first**: the server stays
+authoritative, the mirror is consulted only when the server cannot answer
+(network failure, 404, or a 200 with `found: false` — which is what a wiped
+dyno says about every session it ever ran). A full local-first move, where the
+operator keeps nothing, is a separate and still-unbuilt change.
+
+Three consequences, all deliberate. A delete calls
+`brottoSessionStore.remove` (and `clear` for delete-all), because a mirror
+left holding the only copy that outlives the server is the one deletion a user
+cannot verify. No manifest permission is added: `chrome.storage.local` caps at
+~10MB and would want `unlimitedStorage`, and OPFS may not be reachable from an
+MV3 service worker at all — if it isn't, every write routes through a side panel
+that is closed most of the time and the mirror stops recording exactly when a
+background run ends. And the document is stored **verbatim**, because the replay
+path wants the server's bytes and re-serialising is one more way for the two
+copies to differ. Pinned by `scripts/test-session-mirror.test.js`.
+
 **3. Redaction is not a privacy boundary.** `is_secret_field` runs at audit-write
 time and catches *typed* secrets. It does not catch the page. What keeps the
 page off disk is not redaction — it is that the write path for page content was

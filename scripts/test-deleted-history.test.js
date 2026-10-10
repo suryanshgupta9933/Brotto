@@ -61,11 +61,22 @@ const sandbox = {
   authHeaders: async () => ({}),
   listSessions: async () => (Array.isArray(store.sessions) ? store.sessions : []),
   renderHistory: async () => {},
+  // saveSession mirrors the finished run, so the sandbox needs the store it
+  // writes to. A no-op is the honest fake: this test is about the deleted
+  // marker, and test-session-mirror.test.js covers what the mirror holds.
+  brottoSessionStore: {
+    list: async () => [],
+    get: async () => null,
+    put: async () => true,
+    remove: async () => true,
+    clear: async () => true,
+  },
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
-for (const fn of ["noteDeleted", "wasDeleted", "saveSession", "saveSessions"]) {
+for (const fn of ["noteDeleted", "wasDeleted", "saveSession", "saveSessions",
+                  "mirrorSession", "fetchAudit"]) {
   vm.runInContext(extract(fn), sandbox);
 }
 

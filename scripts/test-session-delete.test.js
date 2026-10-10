@@ -184,12 +184,24 @@ const sandbox = {
   toast: (text, kind) => calls.push({ toast: text, kind }),
   confirmSettle: null,
   replaySession: async () => {},
+  // historyEntries unions the server's list with the IndexedDB mirror, so
+  // the sandbox needs one. An empty store is the honest default here: this
+  // test is about deletes, and scripts/test-session-mirror.test.js covers
+  // what the mirror contributes.
+  brottoSessionStore: {
+    list: async () => [],
+    get: async () => null,
+    put: async () => true,
+    remove: async () => true,
+    clear: async () => true,
+  },
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
 for (const fn of ["askConfirm", "closeConfirm", "deleteSession", "deleteAllSessions",
                   "serverBase", "authHeaders", "listSessions", "historyEntries",
+                  "mirrorRows", "mergeHistory", "fetchAudit",
                   "renderHistory", "formatSessionTime", "noteDeleted", "wasDeleted", "panelStatus", "saveSessions"]) {
   vm.runInContext(extract(fn), sandbox);
 }
