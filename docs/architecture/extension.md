@@ -142,6 +142,37 @@ the guarantee does not apply to it. It now returns the exception's **type
 only** and points at the server log, which the caller has already been writing
 in full one line above.
 
+### Nine suppressions that suppressed nothing
+
+Every suppression written for this scan said `codeql[js/path-injection]` and
+`codeql[js/stack-trace-exposure]`. The rules are **`py/`**. CodeQL matches a
+suppression on the full rule id, so a wrong language prefix is not an error —
+it is **silently inert**, and the scan still reports the alert.
+
+This passed every check available at the time and still shipped wrong:
+
+- `Analyze` was green, because an open alert does not fail the build.
+- The comments were all present, each with a reason above it.
+- Reading the diff shows nine deliberate suppressions.
+
+It only surfaced on the scan of the **merged** `main`, where the alerts came
+back at their new line numbers — fourteen of them, still open. Two properties
+of suppression make this the default failure: it is invisible to review
+(the text is right there, and looks right), and it is invisible to CI (the
+tool reports the same thing whether or not it honoured the comment).
+
+The rule that follows: **a suppression is not applied until a scan of merged
+`main` reports the alert closed.** Verify in the Security tab, on the merged
+ref. A comment is a claim; the tab is the receipt.
+
+There is a second thing here worth keeping. `append_policy_event` is guarded
+by `_is_document_stem`, and CodeQL still reported four alerts on it — the
+guard is a *predicate whose failure returns from the function*, and the dataflow
+model does not connect the predicate to the return. That is the same modelling
+gap as `read` and `delete`, so all three get the same treatment: the guard is
+the defence, and the comment records that CodeQL is looking at the sink rather
+than the decision above it.
+
 ## Domain blocking — one list, the user's
 
 The blacklist is whatever the user typed in the panel, whole. There is no
