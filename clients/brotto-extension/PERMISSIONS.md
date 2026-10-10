@@ -277,6 +277,11 @@ of the active page, when the panel is idle and suggesting.
 **Transmission:** to the Brotto server you configured, over the relay. No
 third parties. The audit trail (`logs/sessions/`) stays on your own disk.
 
+**Chrome Web Store Limited Use:** "The use of information received from Google
+APIs will adhere to the Chrome Web Store User Data Policy, including the Limited
+Use requirements." Nothing below is collected for any purpose other than the
+task you asked for.
+
 ## User control
 
 1. Chrome shows every permission at install time.

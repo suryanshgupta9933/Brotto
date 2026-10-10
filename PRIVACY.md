@@ -270,6 +270,14 @@ No system is perfect. A browser agent operating with your session has the same a
 compromise of the extension or the server would have the same effect. Do not use it on accounts where
 that risk is unacceptable.
 
+## Chrome Web Store Limited Use
+
+> The use of information received from Google APIs will adhere to the Chrome Web Store User Data
+> Policy, including the Limited Use requirements.
+
+We collect user data only to perform the task you asked for — driving the tab you selected on your
+behalf — and for nothing else. We do not sell it, and we do not use it for advertising or analytics.
+
 ## Children
 
 Brotto is not directed at children under 13.
