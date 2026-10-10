@@ -15,21 +15,22 @@ const vm = require("vm");
 
 const SRC = path.join(__dirname, "..", "clients", "brotto-extension", "src", "sidepanel.js");
 const source = fs.readFileSync(SRC, "utf8");
+const credential = fs.readFileSync(path.join(path.dirname(SRC), "credential.js"), "utf8");
 
-function extract(name) {
-  const start = source.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
+function extract(name, src = source) {
+  const start = src.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
   if (start < 0) throw new Error(`no function ${name} in sidepanel.js — renamed?`);
   let parens = 0;
   let bodyStart = -1;
-  for (let i = source.indexOf("(", start); i < source.length; i++) {
-    if (source[i] === "(") parens++;
-    else if (source[i] === ")" && --parens === 0) { bodyStart = source.indexOf("{", i); break; }
+  for (let i = src.indexOf("(", start); i < src.length; i++) {
+    if (src[i] === "(") parens++;
+    else if (src[i] === ")" && --parens === 0) { bodyStart = src.indexOf("{", i); break; }
   }
   if (bodyStart < 0) throw new Error(`no body for ${name}`);
   let depth = 0;
-  for (let i = bodyStart; i < source.length; i++) {
-    if (source[i] === "{") depth++;
-    else if (source[i] === "}" && --depth === 0) return source.slice(start, i + 1);
+  for (let i = bodyStart; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) return src.slice(start, i + 1);
   }
   throw new Error(`unterminated function ${name}`);
 }
@@ -155,7 +156,7 @@ const byId = {
 
 const docListeners = {};
 const sandbox = {
-  console, Date, Promise,
+  console, Date, Promise, URL,
   setTimeout, clearTimeout,
   document: {
     createElement: (tag) => el({ tagName: String(tag).toUpperCase(), id: `n${++uid}` }),
@@ -198,6 +199,15 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
+
+// The real origin binding, not a stub: `authHeaders()` asks it before every
+// authenticated call, so a fake would leave the rule this test depends on
+// untested everywhere else it ships.
+for (const fn of ["originOf", "isLoopback", "forUrl"]) {
+  vm.runInContext(extract(fn, credential), sandbox);
+}
+sandbox.brottoCredential = { originOf: sandbox.originOf, isLoopback: sandbox.isLoopback, forUrl: sandbox.forUrl };
+sandbox.lastCredentialRefusal = '';
 
 for (const fn of ["askConfirm", "closeConfirm", "deleteSession", "deleteAllSessions",
                   "serverBase", "authHeaders", "listSessions", "historyEntries",

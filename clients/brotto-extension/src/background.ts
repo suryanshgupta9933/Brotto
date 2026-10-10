@@ -56,14 +56,96 @@ async function deviceId(): Promise<string> {
   return id;
 }
 
-async function agentSecret(): Promise<string> {
-  const stored = await chrome.storage.local.get("settings");
-  const s = stored.settings as { agentSecret?: unknown } | undefined;
-  return typeof s?.agentSecret === "string" ? s.agentSecret.trim() : "";
+/** What one reader returns: the credential, or why none may be sent.
+ *
+ * A string cannot carry the second half, and the second half is what the user
+ * needs — a refusal that reports itself as "server unreachable" sends them to
+ * debug the wrong machine.
+ */
+type Credential = { secret: string; refusal: string };
+
+/** The origin `url` names, or null when it is not a usable absolute address.
+ *
+ * Binding is to the origin rather than to the whole string, because the same
+ * server is written at least three ways in this codebase — the wizard's
+ * default, the panel's stripped trailing slash, whatever the user typed — and
+ * a string comparison would read each as a different server, which is the
+ * mistake that removed `HOSTED_SERVER_URL` in the first place.
+ */
+function originOf(url: string): string | null {
+  try { return new URL(url).origin; } catch { return null; }
 }
 
+/** Is this address on this machine?
+ *
+ * The one place a credential with no recorded issuer is still presented,
+ * because nothing it touches crosses the network. Everything else has to be
+ * named, or it is refused.
+ */
+function isLoopback(url: string): boolean {
+  const origin = originOf(url);
+  if (!origin) return false;
+  const host = new URL(origin).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return host === "localhost" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host);
+}
+
+/** The credential this install may present to `url`, or why it may not.
+ *
+ * `settings.agentSecret` holds a value the extension never parses: a
+ * self-hoster's `AGENT_SECRET`, or on the cloud path a Supabase access token
+ * that is a real account identity. One slot, one `Bearer` header, one reader —
+ * which is why adding an account tier needed no storage key and no migration,
+ * and why nothing downstream may branch on which kind it is holding.
+ *
+ * That made the server address the only thing standing between a credential
+ * and every server the user ever points the field at. A mistyped host, an
+ * imported settings blob, a colleague's self-host, and the cloud token goes
+ * with it — and the relay would honour it as that account. The fix is to bind
+ * the credential to the origin that issued it: `agentSecretOrigin` is recorded
+ * alongside it by whoever writes the token, the two writers that know which
+ * server just issued it.
+ *
+ * An install written before that field existed has no issuer. Its credential
+ * is still presented to a loopback address — unchanged behaviour, and nothing
+ * it touches leaves the machine — and refused everywhere else, because "which
+ * server was this for?" has no safe default answer. Re-entering the key in
+ * Settings records the issuer and lifts the refusal.
+ */
+async function credentialFor(url: string): Promise<Credential> {
+  const stored = await chrome.storage.local.get("settings");
+  const s = stored.settings as
+    | { agentSecret?: unknown; agentSecretOrigin?: unknown }
+    | undefined;
+  const secret = typeof s?.agentSecret === "string" ? s.agentSecret.trim() : "";
+  // No credential is not a refusal: "no secret means open" is deliberate, and
+  // every open self-hosted install arrives here.
+  if (secret === "") return { secret: "", refusal: "" };
+  const target = originOf(url);
+  if (!target) {
+    return {
+      secret: "",
+      refusal: `Brotto can't tell which server ${url} is, so it will not send your sign-in there.`
+        + " Set the server address in Settings.",
+    };
+  }
+  const raw = s?.agentSecretOrigin;
+  const issued = typeof raw === "string" && raw.trim() ? originOf(raw.trim()) : null;
+  if (issued === target) return { secret, refusal: "" };
+  if (issued === null && isLoopback(target)) return { secret, refusal: "" };
+  return {
+    secret: "",
+    refusal: `Brotto is holding a sign-in from ${issued ?? "an earlier server address"} and will not send it to ${target}.`
+      + " Sign in again for that server — re-enter the server key in Settings if you run your own.",
+  };
+}
+
+/** Set when the last credential resolution refused. Read by `scheduleReconnect`
+ * so a refusal is not retried three times against an answer that cannot change.
+ */
+let credentialRefusal = "";
+
 async function authHeaders(): Promise<Record<string, string>> {
-  const secret = await agentSecret();
+  const { secret } = await credentialFor(serverUrl);
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
@@ -811,6 +893,10 @@ function cancelReconnect(): void {
  * the resumed run needs all three.
  */
 function scheduleReconnect(): boolean {
+  // A refused credential gets the same answer on attempt 3 as on attempt 1, and
+  // three "server unreachable" toasts send the user to debug a server that is
+  // running fine. Same rule as the 4001/4003 refusals below.
+  if (credentialRefusal) return false;
   if (reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) return false;
   reconnectAttempt += 1;
   const ceiling = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** (reconnectAttempt - 1));
@@ -838,6 +924,16 @@ async function startRelay(
 ): Promise<void> {
   serverUrl = plannerUrl;
   currentGoal = goal;
+
+  // Resolve the credential once, before anything leaves the machine. A refusal
+  // here is the whole reason `credentialFor` exists: the alternative is a
+  // socket that arrives with no credential, a 4003, and a message telling the
+  // user to sign in again — which is wrong, they are signed in, to a different
+  // server. Saying so at this point costs nothing and cannot be mistaken for
+  // an outage, because no connection is attempted at all.
+  const credential = await credentialFor(plannerUrl);
+  credentialRefusal = credential.refusal;
+  if (credential.refusal) throw new Error(credential.refusal);
   let session_id: string;
   let wsUrl: string;
 
@@ -969,7 +1065,10 @@ async function startRelay(
       : session.websocket_url.replace(/^http/, "ws");
   }
 
-  ws = authedWs(wsUrl, await agentSecret());
+  // The already-resolved credential, not a fresh read: `credentialFor` ran at
+  // the top of this function against the same `serverUrl`, and reading the
+  // slot twice would make the two disagree if storage changed in between.
+  ws = authedWs(wsUrl, credential.secret);
 
   ws.onopen = async () => {
     socketOpened = true;

@@ -352,6 +352,55 @@ Note the digest is a *prefix* of the page, not a hash — a short page is its ow
 digest. "Never written to disk" means "never beyond 200 characters per page", and
 a test that asserts on the wrong half of that passes for the wrong reason.
 
+## The credential is bound to the server that issued it
+
+`settings.agentSecret` is one slot holding two things — a self-hoster's
+`AGENT_SECRET` and, on the cloud path, a **Supabase access token** — and both
+readers attached it to whatever `settings.serverUrl` held. One slot is
+deliberate and the extension still never parses the value. What was missing is
+the other half of that: nothing recorded *which server issued it*, so a
+mistyped host, an imported settings blob, or a colleague's self-host received
+the user's cloud token, and the relay would have honoured it as that account.
+
+`agentSecretOrigin` is the binding, written alongside the token by the two
+places that know the issuing server at the moment they get it — the wizard's
+`finish()` and the panel's `storeAgentSecret()`. `credentialFor()` compares it
+to `originOf(serverUrl)` and returns either the credential or a **sentence**,
+because a string cannot carry "why not" and a refusal that reports itself as
+*server unreachable* sends the user to debug the wrong machine.
+
+Three things that are load-bearing:
+
+- **The comparison is on the origin, not the string.** The same server is
+  written at least three ways in this codebase — the wizard's default, the
+  panel's stripped trailing slash, whatever the user typed — and the trailing
+  slash is exactly the mistake that removed `HOSTED_SERVER_URL`. `http://` vs
+  `https://`, a path, and `:8443` all differ; a trailing slash does not.
+- **An install with no recorded origin is still allowed on loopback** and
+  refused everywhere else. Refusing everywhere would lock out every existing
+  self-hoster; loopback is where their credential already went and never
+  crosses the network. There is no safe default for a remote address, so the
+  pre-fix install has to re-enter its key once — which records the origin and
+  lifts the refusal permanently.
+- **The refusal is thrown before any connection.** Not dropped into a socket
+  that then arrives credential-less and reads as 4003, and not retried:
+  `scheduleReconnect()` returns false on `credentialRefusal`, the same rule
+  the 4001/4003 refusals already follow. The user gets the sentence naming
+  both servers, not three toasts about a server that is running fine.
+
+`agentSecret()` is gone. There is one reader, it binds, and both `authHeaders()`
+and `authedWs()` take its answer — a second read of the slot could disagree
+with the first. **Plaintext `http://` to a remote host is authorised by a
+recorded origin and nothing else**: a self-hoster on `http://192.168.x.x` is a
+supported deployment, but the address alone has never been evidence.
+
+**Two forward sites outside `background.ts` carry the same value and are not
+fixed here:** the panel's `authHeaders()` and the wizard's `checkServer()`, each
+of which reads `agentSecret` and sends it to a URL the user typed. Both belong
+to `brotto-panel`. Pinned by `scripts/test-credential-origin.test.js`, which
+asserts the writers too — so the file is red until that work lands, which is
+the honest state for a guard with no writer.
+
 ## Notifications
 
 Two classes, and they gate on **different** things, which is the whole point:

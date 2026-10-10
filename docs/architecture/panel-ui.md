@@ -411,6 +411,47 @@ Pinned by `scripts/test-failure-reasons.test.js`.
 the no-unescaped-`innerHTML` rule applies to a settings hint exactly as it
 applies to a card.
 
+## The credential belongs to the server that issued it
+
+`settings.agentSecret` is one slot holding two things — a self-hoster's
+`AGENT_SECRET` and, on the cloud path, a Supabase access token that is a real
+account identity — and it used to ride to whatever address the settings field
+held. So a mistyped host, an imported settings blob, or a colleague's
+self-host received the user's Brotto Cloud token and the relay honoured it as
+that account. `background.ts` binds it with `settings.agentSecretOrigin`,
+recorded by whoever wrote the token.
+
+**The panel had three more forwarding sites, not zero.** `authHeaders()` sends
+that slot to `serverBase()` on eleven call sites — history, delete, audit,
+policy, suggestions — and `welcome.js`'s `checkServer()` sends it to the same
+user-typed address from the wizard. The wizard is the sharper one: it
+**pre-fills** the stored credential into the field the user is about to be
+asked about, so the key sitting there may be a cloud token they never typed.
+
+- **`credential.js` is the panel's copy of the rule**, and there are two copies
+  because the worker is a TS bundle and the panel is a plain script — they
+  cannot share one function. Two copies drift, so
+  `scripts/test-panel-credential.test.js` extracts *both* (`forUrl` and
+  `credentialFor`) and runs them against one table; the first answer that
+  differs fails the file. Re-implementing the origin comparison inline in
+  `authHeaders` is how they would.
+- **A refusal is surfaced, not swallowed.** A header that is quietly absent
+  reads as a server that is not answering and sends the user to debug the
+  wrong machine, so `authHeaders` toasts the refusal once per address.
+- **The wizard's `typed` case.** A key just typed on the screen asking has no
+  recorded issuer, and binding it would refuse the ordinary self-host case;
+  a value *equal to the stored one* is bound.
+- **Settings Save was a fifth writer nobody named.** That object replaces
+  `settings` wholesale, so an origin it omitted was a credential the service
+  worker then refused everywhere — including for the user who had just pressed
+  Save. It records the address on that screen.
+
+**The cloud address was not one-way.** `applyEdition`'s comment said the cloud
+address is written on the way in and *never restored*, and the second half was
+simply false: it writes into a user-editable input, so coming back to
+self-host left `agent.brotto.dev` in a form about to be saved as `serverUrl`.
+The prior value is snapshotted and put back.
+
 ## A frame with no case is a run that never ends
 
 The panel's WS message switch is a bare `switch (message.type)` with a

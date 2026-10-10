@@ -23,23 +23,24 @@ const vm = require("vm");
 
 const SRC = path.join(__dirname, "..", "clients", "brotto-extension", "src");
 const panel = fs.readFileSync(path.join(SRC, "sidepanel.js"), "utf8");
+const credential = fs.readFileSync(path.join(SRC, "credential.js"), "utf8");
 const mainPy = fs.readFileSync(
   path.join(__dirname, "..", "services", "brotto-orchestrator",
             "src", "brotto_orchestrator", "main.py"), "utf8");
 
-function extract(name) {
-  const start = panel.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
+function extract(name, src = panel) {
+  const start = src.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
   if (start < 0) throw new Error(`no function ${name} in sidepanel.js — renamed?`);
   let parens = 0;
   let bodyStart = -1;
-  for (let i = panel.indexOf("(", start); i < panel.length; i++) {
-    if (panel[i] === "(") parens++;
-    else if (panel[i] === ")" && --parens === 0) { bodyStart = panel.indexOf("{", i); break; }
+  for (let i = src.indexOf("(", start); i < src.length; i++) {
+    if (src[i] === "(") parens++;
+    else if (src[i] === ")" && --parens === 0) { bodyStart = src.indexOf("{", i); break; }
   }
   let depth = 0;
-  for (let i = bodyStart; i < panel.length; i++) {
-    if (panel[i] === "{") depth++;
-    else if (panel[i] === "}" && --depth === 0) return panel.slice(start, i + 1);
+  for (let i = bodyStart; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) return src.slice(start, i + 1);
   }
   throw new Error(`unterminated function ${name}`);
 }
@@ -48,7 +49,7 @@ function extract(name) {
 function panelWith(handler, stored = { modelConfig: { provider: "anthropic", model: "claude-sonnet-5-5", context_window: 1000000 } }, key = "sk-ant-x") {
   const calls = [];
   const sandbox = {
-    console, Date, JSON, Promise,
+    console, Date, JSON, Promise, URL,
     plannerUrlEl: { value: "http://localhost:8000" },
     // deviceId() is real, extracted below: it is what the panel sends as the
     // server's caller key, so a stub here would let a dropped `device_id`
@@ -77,6 +78,17 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
+  // The real origin binding: authHeaders() asks it before every authenticated
+  // call, so a stub would leave the rule untested on the one surface this
+  // file also exercises. These settings have no recorded origin and the
+  // address is loopback, which is the legacy case the rule has to allow.
+  for (const fn of ["originOf", "isLoopback", "forUrl"]) {
+    vm.runInContext(extract(fn, credential), sandbox);
+  }
+  sandbox.brottoCredential = { forUrl: sandbox.forUrl };
+  sandbox.lastCredentialRefusal = '';
+  vm.runInContext(extract("serverBase"), sandbox);
+  sandbox.toast = () => {};
   vm.runInContext(extract("checkModelReady"), sandbox);
   vm.runInContext(extract("deviceId"), sandbox);
   vm.runInContext(extract("authHeaders"), sandbox);

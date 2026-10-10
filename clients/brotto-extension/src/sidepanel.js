@@ -704,8 +704,18 @@ function renderCloudSignInStatus() {
 
 async function storeAgentSecret(value) {
   const stored = await chrome.storage.local.get('settings');
+  // The spread, not explicit keys: `settings` carries fields written elsewhere
+  // (approved_domains, agentSecretOrigin), and an allowlist here would drop
+  // every one of them the moment a user signed in.
+  // agentSecretOrigin is what binds the value to the server that issued it —
+  // on the cloud path that is a real account identity, and the service worker
+  // now refuses to send it anywhere else (see credential.js).
   await chrome.storage.local.set({
-    settings: { ...(stored.settings || {}), agentSecret: value },
+    settings: {
+      ...(stored.settings || {}),
+      agentSecret: value,
+      agentSecretOrigin: serverBase(),
+    },
   });
   if (agentSecretSetting) agentSecretSetting.value = value;
 }
@@ -1216,11 +1226,27 @@ async function deviceId() {
   return id;
 }
 
+let lastCredentialRefusal = '';
+
 async function authHeaders() {
   const stored = await chrome.storage.local.get('settings');
-  const secret = stored.settings && typeof stored.settings.agentSecret === 'string'
-    ? stored.settings.agentSecret.trim()
-    : '';
+  // Bound to the server that issued it, by the same rule the service worker
+  // applies (credential.js is the panel's copy of background.ts's
+  // `credentialFor`) — one rule, two surfaces, and
+  // scripts/test-panel-credential.test.js runs both against one table.
+  // Re-implementing the origin comparison here is how the two drift.
+  const { secret, refusal } = brottoCredential.forUrl(stored.settings, serverBase());
+  if (refusal) {
+    // Say it once per address. A header that is quietly absent reads as a
+    // server that is not answering, and the user goes to debug the wrong
+    // machine.
+    if (refusal !== lastCredentialRefusal) {
+      lastCredentialRefusal = refusal;
+      toast(refusal, 'bad', 5200);
+    }
+    return {};
+  }
+  lastCredentialRefusal = '';
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
@@ -1683,9 +1709,16 @@ if (saveSettingsBtn) {
     // without it silently revoked every standing grant the moment anyone
     // opened Settings and pressed Save.
     const priorSettings = (await chrome.storage.local.get('settings')).settings || {};
+    const serverUrl = plannerUrlSetting.value || 'http://localhost:8000';
     const settings = {
-      serverUrl: plannerUrlSetting.value || 'http://localhost:8000',
+      serverUrl,
       agentSecret: (agentSecretSetting ? agentSecretSetting.value.trim() : ''),
+      // Re-entered on this screen, against this screen's server address, so
+      // that is what issued it. Carrying the old one forward would leave a
+      // cloud token recorded against a self-host address the user just typed —
+      // and omitting the field entirely (this object replaces `settings`
+      // wholesale) would refuse the credential everywhere, including here.
+      agentSecretOrigin: serverUrl,
       blacklist,
       approved_domains: Array.isArray(priorSettings.approved_domains) ? priorSettings.approved_domains : [],
       notifyBlocking: notifyBlockingSetting ? notifyBlockingSetting.checked : true,
