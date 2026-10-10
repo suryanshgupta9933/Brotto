@@ -836,17 +836,29 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
     """
     d = dir or default_dir()
     p = d / f"{session_id}.json" if _is_document_stem(session_id) else None
-    if p is None or not p.exists():
+    # CodeQL cannot see that the ternary above already rejected every name
+    # containing a separator or a dot, which is the whole defence. The three
+    # `codeql[js/path-injection]` comments below mark the sinks it still
+    # reports; they are a record of a decision, not a silence.
+    if p is None or not p.exists():  # codeql[js/path-injection]
         return {"found": False, "session_id": session_id}
     try:
-        doc = json.loads(p.read_text())
+        doc = json.loads(p.read_text())  # codeql[js/path-injection]
         doc.setdefault("found", True)
         return doc
     except (OSError, json.JSONDecodeError) as exc:
         log.warning("audit: %s unreadable: %s", p, exc)
+        # str(OSError) is the absolute path of the file that failed to open,
+        # and this document is served over HTTP by /v1/sessions/{id}/audit —
+        # so it hands the caller the server's directory layout. A parse
+        # failure names a line and column inside the user's own file, helps
+        # them repair it and says nothing about the host, so that one keeps
+        # its text.
+        detail = (str(exc) if isinstance(exc, json.JSONDecodeError)
+                  else "the file could not be read")
         return {"found": True, "corrupt": True, "schema_version": SCHEMA_VERSION,
                 "session_id": session_id, "status": "corrupt", "turns": [],
-                "errors": [{"code": "audit_unreadable", "message": str(exc)}],
+                "errors": [{"code": "audit_unreadable", "message": detail}],
                 "totals": {"turns": 0, "steps": 0, "prompts": 0, "actions": 0,
                            "tokens_in": 0, "tokens_out": 0, "errors": 1}}
 
@@ -874,6 +886,9 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
         # exactly why it has to be named here rather than swept: the user
         # is told the session is erased, and this would be what is left.
         try:
+            # codeql[js/path-injection]
+            # Same guard as `read`, one line above the loop: a session id with
+            # a separator or a dot never reaches here.
             (d / name).unlink()
             removed = True
         except FileNotFoundError:
@@ -1007,7 +1022,14 @@ def append_policy_event(session_id: str, *, step: int | None, kind: str,
                                user_decision=user_decision)
             return
 
-        path = (default_dir() / f"{session_id}.json")
+        # Same guard `read` and `delete` carry, and for the same reason. It
+        # was missing here, which made this the one sink in the module that
+        # would open a caller-supplied name: `exists()` only guards a file
+        # that is already there, so `../../..` read-modify-wrote whatever
+        # JSON happened to sit above the sessions directory.
+        if not _is_document_stem(session_id):
+            return
+        path = default_dir() / f"{session_id}.json"
         if not path.exists():
             log.debug("audit: policy event for unknown session %s ignored",
                       session_id)

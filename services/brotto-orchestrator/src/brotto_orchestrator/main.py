@@ -327,6 +327,15 @@ def _error(status: int, message: str, **extra) -> JSONResponse:
 
     return JSONResponse(
         status_code=status,
+        # codeql[js/stack-trace-exposure]
+        # Reviewed and kept. This is the one envelope every route answers
+        # through, and the message in it is written by the route's own
+        # handler for the caller that already holds AGENT_SECRET. What must
+        # never appear is a credential, and that is pinned by a test rather
+        # than by reading these strings —
+        # test_model_check_endpoint.py asserts a key is absent from the body.
+        # The one flow that was not written by a handler, the provider
+        # probe's raw exception, was fixed rather than suppressed.
         content={"error": message, "error_id": new_error_id(), **extra},
     )
 
@@ -647,7 +656,12 @@ def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
                 "that the machine running it is online.",
             )
         node = node.__cause__ or node.__context__
-    return ("error", str(exc)[:400])
+    # The type, not str(exc). Every other branch above returns a sentence
+    # this function wrote; this one had nothing, and a provider SDK's message
+    # is exactly where the base URL, the resolved hostname and sometimes a
+    # fragment of the key end up. The caller logs the full text either way.
+    return ("error", f"The provider call failed ({type(exc).__name__}). "
+                     "The server log has the detail.")
 
 
 # ponytail: one request to the provider, before the user pays for a run.
@@ -684,6 +698,12 @@ async def check_model(request: Request):
         # the secret. This is the "no model is set anywhere" case, which is
         # the one the panel turns into a prompt to open Settings.
         log.warning("model check: nothing resolved: %s", exc)
+        # codeql[js/stack-trace-exposure]
+        # Reviewed and kept. `resolve_model_config` raises ValueError naming
+        # the *environment variable* that is unset, never the value — the
+        # sentence above this block says so and the line above it already
+        # logs the text. A resolver that grows a new message is the thing to
+        # watch, not this route.
         return JSONResponse(content={"ok": False, "kind": "no_model", "error": str(exc)})
 
     factory = PROVIDER_REGISTRY.get(cfg.provider)

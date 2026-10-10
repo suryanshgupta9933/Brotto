@@ -398,6 +398,33 @@ def test_policy_event_for_an_unknown_session_creates_nothing(tmp_path,
     assert list(tmp_path.glob("*.json")) == []
 
 
+def test_a_traversing_session_id_writes_no_policy_event(tmp_path, monkeypatch):
+    """`read` and `delete` have always refused a `session_id` that is not a
+    bare dot-free token. This sink did not, and nothing tested it, so the gap
+    was invisible: CodeQL found the un-guarded path, not a test.
+
+    It read-modify-writes, and `exists()` only admits a file that is already
+    there — so a caller-supplied `../../..` could open and rewrite whatever
+    JSON sat above the sessions directory. The panel's Save and
+    `/v1/policy_ack` both reach this with a caller-supplied id.
+    """
+    from brotto_orchestrator.agent.audit import append_policy_event
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    outside = tmp_path / "victim.json"
+    original = '{"session_id": "not-yours"}'
+    outside.write_text(original)
+    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(sessions))
+
+    for hostile in ("../victim", "..", "", "a/b"):
+        append_policy_event(hostile, step=0, kind="policy_acknowledged",
+                            domain=None, action=None, decision="mode=secure")
+
+    assert outside.read_text() == original, "a policy event wrote outside the directory"
+    assert list(sessions.glob("*.json")) == []
+
+
 def test_closed_trail_stops_accepting_live_events(tmp_path):
     t = AuditTrail("sealed", dir=tmp_path)
     t.set_goal("g")

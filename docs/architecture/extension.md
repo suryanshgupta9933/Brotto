@@ -95,6 +95,53 @@ because those are two separate bundles (the service worker is bundled by
 esbuild, the panel is copied verbatim). They must read the same storage key,
 and only one of the two ever writes it.
 
+### A semantic scan found the guard nobody was asserting
+
+`read` and `delete` have always rejected a `session_id` that is not a bare,
+dot-free token. **`append_policy_event` did not**, and nothing tested it, so
+the gap was invisible to review — the sibling functions a few lines away all
+guarded, which is exactly what makes an omission read as correct. It was
+CodeQL tracing `session_id` into a filesystem write that named it.
+
+The shape matters more than the bug. It **read-modify-writes**, and its
+`exists()` only admits a file that is *already there* — so it was not a
+write-anywhere primitive, it was a rewrite-whatever-JSON-lives-above-
+`logs/sessions/` one. `../../..` reaches the server root. The panel's Save and
+`POST /v1/policy_ack` both supply the id. It is now closed with the same
+`_is_document_stem` the other two use, asserted by
+`test_a_traversing_session_id_writes_no_policy_event` — a test that writes a
+victim file one level up and asserts it is byte-identical afterwards. Removing
+the guard makes it fail, which is how the guard is known to be load-bearing.
+
+The companion finding was in `read`: the `except` branch returned
+`str(OSError)` as the error `message`, and that string is the **absolute path**
+of the file that failed to open — served over HTTP by
+`GET /v1/sessions/{id}/audit` to whoever holds `AGENT_SECRET`, handing out the
+server's directory layout one failure at a time. A `JSONDecodeError` names a
+line and column *inside the user's own file*, which is what they need to
+repair it and says nothing about the host, so that one keeps its text.
+
+### The deliberate diagnostic surface, and where it stops
+
+CodeQL also reports `py/stack-trace-exposure` on `main.py`'s `_error`
+envelope, and the finding is **kept, reviewed, suppressed** — because the
+alternative is worse. Every route answers through `_error`, the caller already
+holds `AGENT_SECRET`, and an operator debugging their own self-hosted server
+cannot act on `Internal Server Error`. The rule is therefore **not "no message"
+but "no credential"**: a handler writes its own sentence, and
+`test_model_check_endpoint.py` asserts an API key is absent from the body.
+That test is what makes the suppression honest — if someone grows a message
+that quotes the key, a test fails, which is the signal a comment cannot give.
+
+The one exception that was **fixed rather than suppressed** is the tail of
+`_classify_probe_failure`. Every branch above it returns a sentence the
+function itself wrote; the fallback was `str(exc)`, and a provider SDK's
+message is precisely where the base URL, the resolved hostname and sometimes
+a fragment of the key end up. That text is no longer written by a handler, so
+the guarantee does not apply to it. It now returns the exception's **type
+only** and points at the server log, which the caller has already been writing
+in full one line above.
+
 ## Domain blocking — one list, the user's
 
 The blacklist is whatever the user typed in the panel, whole. There is no

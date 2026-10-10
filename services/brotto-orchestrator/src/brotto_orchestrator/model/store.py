@@ -45,11 +45,16 @@ def save_user_config(client_ip: str, config: ModelConfig) -> None:
 
 
 def load_user_config(client_ip: str) -> ModelConfig | None:
+    # codeql[js/path-injection]
+    # `_safe_filename` drops every character that is not alphanumeric, `.` or
+    # `-`, so a separator cannot survive into this path — a name built from
+    # those can only ever land inside `_user_dir()`. CodeQL models the sink,
+    # not the character filter.
     path = _user_dir() / _safe_filename(client_ip)
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text())  # codeql[js/path-injection]
     except (json.JSONDecodeError, OSError) as e:
         log.warning("failed to read user config at %s: %s", path, e)
         return None
