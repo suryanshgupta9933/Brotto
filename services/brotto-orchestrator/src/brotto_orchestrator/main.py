@@ -327,7 +327,6 @@ def _error(status: int, message: str, **extra) -> JSONResponse:
 
     return JSONResponse(
         status_code=status,
-        # codeql[py/stack-trace-exposure]
         # Reviewed and kept. This is the one envelope every route answers
         # through, and the message in it is written by the route's own
         # handler for the caller that already holds AGENT_SECRET. What must
@@ -336,6 +335,11 @@ def _error(status: int, message: str, **extra) -> JSONResponse:
         # test_model_check_endpoint.py asserts a key is absent from the body.
         # The one flow that was not written by a handler, the provider
         # probe's raw exception, was fixed rather than suppressed.
+        #
+        # The token goes on the line immediately above the alert. CodeQL
+        # ignores one that trails the alert line, and `Analyze` stays green
+        # while the alert quietly stays open.
+        # codeql[py/stack-trace-exposure]
         content={"error": message, "error_id": new_error_id(), **extra},
     )
 
@@ -698,12 +702,12 @@ async def check_model(request: Request):
         # the secret. This is the "no model is set anywhere" case, which is
         # the one the panel turns into a prompt to open Settings.
         log.warning("model check: nothing resolved: %s", exc)
-        # codeql[py/stack-trace-exposure]
         # Reviewed and kept. `resolve_model_config` raises ValueError naming
         # the *environment variable* that is unset, never the value — the
         # sentence above this block says so and the line above it already
         # logs the text. A resolver that grows a new message is the thing to
         # watch, not this route.
+        # codeql[py/stack-trace-exposure]
         return JSONResponse(content={"ok": False, "kind": "no_model", "error": str(exc)})
 
     factory = PROVIDER_REGISTRY.get(cfg.provider)
@@ -830,12 +834,12 @@ async def read_audit(session_id: str, request: Request):
     doc = _read(session_id)
     if not doc.get("found"):
         return _error(404, "unknown session")
-    # codeql[py/stack-trace-exposure]
     # This route returns the user's own audit document, which is the whole
     # point of it. `_read` is where a read failure used to be stringified —
     # `str(OSError)` is the server's absolute path — and that was fixed at
     # the source. What reaches here now is either the parsed document or a
     # message `audit.read` wrote itself, never a raw exception.
+    # codeql[py/stack-trace-exposure]
     return JSONResponse(content=doc)
 
 

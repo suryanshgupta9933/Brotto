@@ -837,13 +837,20 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
     d = dir or default_dir()
     p = d / f"{session_id}.json" if _is_document_stem(session_id) else None
     # CodeQL cannot see that the ternary above already rejected every name
-    # containing a separator or a dot, which is the whole defence. The three
-    # `codeql[py/path-injection]` comments below mark the sinks it still
-    # reports; they are a record of a decision, not a silence.
-    if p is None or not p.exists():  # codeql[py/path-injection]
+    # containing a separator or a dot, which is the whole defence — it models
+    # the sink, not the predicate. The two tokens below mark the sinks it
+    # still reports; they are a record of a decision, not a silence.
+    #
+    # Each `codeql[...]` token sits on the line IMMEDIATELY ABOVE its alert
+    # and nothing else. That placement is load-bearing, and it cost two scan
+    # cycles to find out: a token trailing the alert line is silently ignored
+    # and the alert stays open with `Analyze` still green.
+    # codeql[py/path-injection]
+    if p is None or not p.exists():
         return {"found": False, "session_id": session_id}
     try:
-        doc = json.loads(p.read_text())  # codeql[py/path-injection]
+        # codeql[py/path-injection]
+        doc = json.loads(p.read_text())
         doc.setdefault("found", True)
         return doc
     except (OSError, json.JSONDecodeError) as exc:
@@ -886,9 +893,10 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
         # exactly why it has to be named here rather than swept: the user
         # is told the session is erased, and this would be what is left.
         try:
-            # codeql[py/path-injection]
             # Same guard as `read`, one line above the loop: a session id with
-            # a separator or a dot never reaches here.
+            # a separator or a dot never reaches here, so `name` can only
+            # resolve inside `d`.
+            # codeql[py/path-injection]
             (d / name).unlink()
             removed = True
         except FileNotFoundError:
@@ -1029,18 +1037,20 @@ def append_policy_event(session_id: str, *, step: int | None, kind: str,
         # JSON happened to sit above the sessions directory.
         if not _is_document_stem(session_id):
             return
-        # codeql[py/path-injection]
-        # Same guard `read` and `delete` carry, three lines above: it rejects
-        # every name containing a separator or a dot, so a `session_id` that
-        # gets past it can only name a file inside `default_dir()`. CodeQL
-        # sees the sink, not the predicate that decides it — and it does not
-        # model that the predicate's failure returns from the function.
+        # `_is_document_stem` rejects every name containing a separator or a
+        # dot, so a `session_id` that gets past it can only name a file inside
+        # `default_dir()`. CodeQL sees the sink, not the predicate that decides
+        # it — and it does not model that the predicate's failure returns from
+        # the function. Each token below is on the line immediately above its
+        # alert; trailing the alert line does not suppress it.
         path = default_dir() / f"{session_id}.json"
+        # codeql[py/path-injection]
         if not path.exists():
             log.debug("audit: policy event for unknown session %s ignored",
                       session_id)
             return
-        doc = json.loads(path.read_text())  # codeql[py/path-injection]
+        # codeql[py/path-injection]
+        doc = json.loads(path.read_text())
         doc.setdefault("policy_events", []).append({
             "seq": len(doc.get("turns", [])) + len(doc["policy_events"]) + 1,
             "at": _now(),
@@ -1053,9 +1063,11 @@ def append_policy_event(session_id: str, *, step: int | None, kind: str,
         })
         doc["updated_at"] = _now()
         tmp = path.with_suffix(".json.tmp")
+        # codeql[py/path-injection]
         with tmp.open("w") as fp:
-            json.dump(doc, fp, ensure_ascii=False, default=str)  # codeql[py/path-injection]
-        os.replace(tmp, path)  # codeql[py/path-injection]
+            json.dump(doc, fp, ensure_ascii=False, default=str)
+        # codeql[py/path-injection]
+        os.replace(tmp, path)
     except Exception as exc:
         log.warning("audit: policy event for %s dropped: %s",
                     session_id, type(exc).__name__)
