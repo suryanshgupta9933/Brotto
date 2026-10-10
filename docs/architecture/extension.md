@@ -142,36 +142,59 @@ the guarantee does not apply to it. It now returns the exception's **type
 only** and points at the server log, which the caller has already been writing
 in full one line above.
 
-### Nine suppressions that suppressed nothing
+### Nine suppressions that suppressed nothing, and nine more that did the same
 
 Every suppression written for this scan said `codeql[js/path-injection]` and
 `codeql[js/stack-trace-exposure]`. The rules are **`py/`**. CodeQL matches a
 suppression on the full rule id, so a wrong language prefix is not an error —
 it is **silently inert**, and the scan still reports the alert.
 
+Fixing the prefix moved nothing either. CodeQL reads a `codeql[...]` token only
+on the line **immediately above** the alert: nine of ours *trailed* the alert
+line, and three more were separated from it by prose. All thirteen were inert,
+and `Analyze` stayed green through both rounds, because an open alert does not
+fail the build.
+
 This passed every check available at the time and still shipped wrong:
 
 - `Analyze` was green, because an open alert does not fail the build.
 - The comments were all present, each with a reason above it.
-- Reading the diff shows nine deliberate suppressions.
+- Reading the diff shows thirteen deliberate suppressions.
+- The prefix and the prose were both, individually, correct.
 
 It only surfaced on the scan of the **merged** `main`, where the alerts came
-back at their new line numbers — fourteen of them, still open. Two properties
-of suppression make this the default failure: it is invisible to review
-(the text is right there, and looks right), and it is invisible to CI (the
-tool reports the same thing whether or not it honoured the comment).
+back at their new line numbers — still open. Two properties of suppression make
+this the default failure: it is invisible to review (the text is right there, and
+looks right), and it is invisible to CI (the tool reports the same thing whether
+or not it honoured the comment).
 
-The rule that follows: **a suppression is not applied until a scan of merged
-`main` reports the alert closed.** Verify in the Security tab, on the merged
-ref. A comment is a claim; the tab is the receipt.
+**A pull-request check on this repo surfaces no SARIF findings at all.** The
+check run for the PR that merged with thirteen open alerts carries one
+annotation — the ubuntu-latest runner notice — and `?ref=refs/pull/N/merge`
+returns nothing. So a suppression cannot be checked before the merge that
+reports it. The rule that follows is therefore not "be careful": **a suppression
+is not applied until a scan of merged `main` reports the alert closed.** Verify
+in the Security tab, on the merged ref. A comment is a claim; the tab is the
+receipt.
 
-There is a second thing here worth keeping. `append_policy_event` is guarded
-by `_is_document_stem`, and CodeQL still reported four alerts on it — the
-guard is a *predicate whose failure returns from the function*, and the dataflow
-model does not connect the predicate to the return. That is the same modelling
-gap as `read` and `delete`, so all three get the same treatment: the guard is
-the defence, and the comment records that CodeQL is looking at the sink rather
-than the decision above it.
+**The one that should not have been suppressed at all.** `/v1/model/check`
+returned `str(exc)` for the no-model case, putting the server's environment
+variables and its resolution order into an HTTP body. The panel discards that
+field — `sidepanel.js` treats `no_model` as its own case and never reads
+`error` — so the disclosure reached a caller with no use for it and told the
+person reading it nothing. Fixed with a constant string, with
+`test_the_response_does_not_name_the_servers_environment` pinning it. A
+suppression is the last resort, not the first: read the client before you mute
+the scanner.
+
+The remaining twelve are genuine. Ten are sinks behind `_is_document_stem` or
+`_safe_filename` — the guard is a *predicate whose failure returns from the
+function*, and the dataflow model does not connect a predicate to the return, so
+`append_policy_event`, `read` and `delete` are all reported despite being
+guarded. The other two are the deliberate diagnostic surfaces, `_error` and
+`GET /v1/sessions/{id}/audit`, both behind `AGENT_SECRET`, where the rule is
+*no credential* rather than *no message* and a test pins that instead. Each
+comment says which of the three it is.
 
 ## Domain blocking — one list, the user's
 
