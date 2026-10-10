@@ -128,3 +128,11 @@ skills-lock.json
 
 # Rendered videos. The .txt stays — it is a deliverable; the mp4 does not belong in history.
 brag-output/*.mp4
+
+# The panel GIF pipeline. build.mjs renders the shipping side panel into looping
+# GIFs for brotto.dev, and the rendered files live in the website repo — the only
+# place that serves them. What is left here is a local tool: HyperFrames, a
+# vendored copy of gsap, and ~840K of output. Keep it on disk so the next card
+# renders in a minute; keep it out of history so the product repo stays the
+# product. Untracked, not deleted — `git rm --cached`, not `rm`.
+/gifs/
