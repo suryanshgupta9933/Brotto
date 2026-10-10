@@ -48,65 +48,57 @@ jobs and no aggregator, so a required check named `CI` would never report. A PR
 can currently merge with red CI. The real job names are `Orchestrator tests`,
 `Extension build` and `Docker image build`.
 
-**2. ~~`code_coverage: 60` is enforced but nothing uploads coverage.~~
-Fixed 2026-10-10.** `ci.yml`'s `Orchestrator tests` job now writes a Cobertura
-report and uploads it with `actions/upload-code-coverage@v1`, under a job-scoped
-`code-quality: write`. That is GitHub's built-in Code Quality path — no Codecov,
-no Coveralls, no token, no third party. It stays inside the existing job on
-purpose: GitHub wants the status check associated with a coverage upload to be a
-required check, and that job already has to be green.
+**2. `code_coverage: 60` is enforced but nothing uploads coverage — and
+uploading is not available on this plan.**
 
-Two things GitHub's docs call out that are easy to miss:
-
-- **Do not upload coverage from a fork.** The step is guarded with
-  `if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`.
-  Without it, a fork's PR can post a report against this repo.
-- **Checking out the PR head** (`ref: ${{ github.event.pull_request.head.sha || github.sha }}`)
-  makes coverage line numbers map onto the diff. Left as plain `checkout` for
-  now — it is a reporting nicety, not a gate, and changing the checkout for the
-  whole job is a bigger diff than the fix warrants.
-
-### The upload 404s until Code Quality is enabled
-
-**Owner action, and it is UI-only.** Enable **Settings → Security → Code
-quality**. Until then `Orchestrator tests` fails with:
+**Attempted 2026-10-10 and reverted.** The obvious fix is GitHub's built-in
+path: `ci.yml` writes Cobertura and `actions/upload-code-coverage@v1` attaches
+it to the commit. It was implemented, and `Orchestrator tests` failed with:
 
 ```
 Coverage upload failed (HTTP 404): Not Found.
 ```
 
-The 404 is easy to misread as a permissions bug, because the permissions really
-are the first thing anyone checks. They are correct —
-`contents: read` + `code-quality: write` is what
-[actions/upload-code-coverage#16](https://github.com/actions/upload-code-coverage/issues/16)
-confirms is sufficient, confirmed by a maintainer on 2026-09-24. The repo
-setting is what is missing, and a 404 is not the response GitHub documents for a
-missing permission.
-
-The setting is **not reachable over the API**. `PATCH /repos/{owner}/{repo}` with
-`security_and_analysis[code_quality][status]=enabled` returns `200` and silently
-drops the field, so a successful response proves nothing:
+**The cause is a plan restriction, not a config error.** Code Quality is gated
+behind GitHub Team or Enterprise Cloud. The rendered docs page buries this; the
+source does not:
 
 ```bash
-gh api --method PATCH repos/suryanshgupta9933/brotto \
-  -f 'security_and_analysis[code_quality][status]=enabled'
-# 200 OK — and `security_and_analysis` comes back with no code_quality key.
+curl -sL https://raw.githubusercontent.com/github/docs/main/content/code-security/how-tos/maintain-quality-code/set-up-code-coverage.md
+# product: '{% data reusables.gated-features.code-quality-availability %}'
+
+curl -sL https://raw.githubusercontent.com/github/docs/main/data/reusables/gated-features/code-quality-availability.md
+# {% ifversion fpt or ghec %}GitHub Team or GitHub Enterprise Cloud{% endif %}
 ```
 
-Verify the way that actually works:
+So the repo has **no Code quality page in the sidebar at all**, and
+`/code-quality/coverage` 404s because the endpoint does not exist for `free`.
+Both symptoms are the same fact.
 
-```bash
-gh api repos/suryanshgupta9933/brotto/code-quality/coverage   # 404 until enabled
-```
+Three things this cost, recorded so it is not repeated:
 
-This repo is public, so no GitHub Advanced Security purchase is involved —
-confirmed rather than assumed, because the same 404 appears on private repos for
-exactly that reason.
+- **The 404 does not read as a permissions problem,** which is where the first
+  attempt went. `contents: read` + `code-quality: write` is genuinely
+  sufficient — a maintainer confirms exactly that in
+  [actions/upload-code-coverage#16](https://github.com/actions/upload-code-coverage/issues/16).
+- **`fail-on-error: false` is not the fix.** It greens the step while no report
+  reaches the commit, leaving `code_coverage` silently unevaluated — the gate
+  looks present and is not.
+- **There is no API to check or set it.** `PATCH /repos/{owner}/{repo}` with
+  `security_and_analysis[code_quality][status]=enabled` returns `200` and drops
+  the field; `/code-quality/coverage` 404s either way. A green response proves
+  nothing here.
 
-**`fail-on-error: false` is not the fix.** It turns the step green while no
-report reaches the commit, which leaves the `code_coverage` rule silently
-unevaluated — the gate looks present and is not. That is the failure this whole
-change exists to remove, reintroduced one level up.
+**What enforcement actually rests on** is `ci.yml`'s own
+`--cov-fail-under=75`, which has been failing the build on a coverage drop the
+whole time and does not touch this API. The upload bought *visibility* — a
+`github-code-quality[bot]` PR comment with a per-file breakdown — not the gate.
+Trading $4/mo for that is not worth it on this project.
+
+**To restore it:** buy GitHub Team, enable Settings → Security → Code quality,
+then re-add the step with the `--cov-report=xml:coverage.xml` flag and a
+job-scoped `code-quality: write`. The fork guard GitHub's docs call for is
+`if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`.
 
 ### A local coverage number is not the CI number
 
@@ -124,7 +116,7 @@ PYTHONPATH=/Users/apple/Work/code/brotto/services/brotto-orchestrator/src \
   --cov=brotto_orchestrator --cov-fail-under=75
 ```
 
-Enabling the missing status checks, now that coverage is being uploaded:
+Enabling the missing status checks:
 
 ```bash
 gh api --method PUT \

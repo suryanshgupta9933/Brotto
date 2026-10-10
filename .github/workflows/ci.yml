@@ -28,11 +28,9 @@ jobs:
   test-orchestrator:
     name: Orchestrator tests
     runs-on: ubuntu-latest
-    # code-quality: write is what makes the coverage upload below land. Job-level,
-    # not workflow-level, so it grants nothing to the other three jobs.
-    permissions:
-      contents: read
-      code-quality: write
+    # No permissions block: it inherits the workflow default above. The
+    # code-quality: write this job briefly carried went away with the coverage
+    # upload — see docs/branch-protection.md for why that upload is not here.
     steps:
       - uses: actions/checkout@v7
 
@@ -82,31 +80,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/services/brotto-orchestrator/src
         run: |
           pytest services/brotto-orchestrator/tests -v --tb=short \
-            --cov=brotto_orchestrator --cov-report=term --cov-fail-under=75 \
-            --cov-report=xml:coverage.xml
-
-      # The ruleset's code_coverage rule needs a report ATTACHED to the commit —
-      # computing it and printing it to the log satisfies nothing, which is why
-      # that rule was unenforceable until this step existed. Cobertura + the
-      # built-in uploader, so there is no third-party service and no token.
-      #
-      # The `if` is GitHub's: never upload coverage from a fork's PR. Without it a
-      # fork could post a report against this repo.
-      #
-      # Stays in this job on purpose. GitHub wants the status check associated with
-      # a coverage upload to be a required check, and this job is already the one
-      # that must be green — a separate job would be a second thing to name and
-      # keep in sync. `github-code-quality[bot]` comments the summary on the PR.
-      - name: Upload coverage report
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        # Pinned to a SHA, unlike the floating tags elsewhere in this file. It
-        # is the only step that runs with a write-scoped token, so a moved tag
-        # is the one here worth naming exactly. Dependabot opens the bump PR.
-        uses: actions/upload-code-coverage@2b21a77928be8d5168c2b9581a67f2adbebacc52 # v1
-        with:
-          file: coverage.xml
-          language: Python
-          label: code-coverage/pytest
+            --cov=brotto_orchestrator --cov-report=term --cov-fail-under=75
 
   # ─── Extension: type-check + bundle ────────────────────────────────
   build-extension:
