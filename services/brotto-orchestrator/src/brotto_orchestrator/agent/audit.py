@@ -838,12 +838,12 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
     p = d / f"{session_id}.json" if _is_document_stem(session_id) else None
     # CodeQL cannot see that the ternary above already rejected every name
     # containing a separator or a dot, which is the whole defence. The three
-    # `codeql[js/path-injection]` comments below mark the sinks it still
+    # `codeql[py/path-injection]` comments below mark the sinks it still
     # reports; they are a record of a decision, not a silence.
-    if p is None or not p.exists():  # codeql[js/path-injection]
+    if p is None or not p.exists():  # codeql[py/path-injection]
         return {"found": False, "session_id": session_id}
     try:
-        doc = json.loads(p.read_text())  # codeql[js/path-injection]
+        doc = json.loads(p.read_text())  # codeql[py/path-injection]
         doc.setdefault("found", True)
         return doc
     except (OSError, json.JSONDecodeError) as exc:
@@ -886,7 +886,7 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
         # exactly why it has to be named here rather than swept: the user
         # is told the session is erased, and this would be what is left.
         try:
-            # codeql[js/path-injection]
+            # codeql[py/path-injection]
             # Same guard as `read`, one line above the loop: a session id with
             # a separator or a dot never reaches here.
             (d / name).unlink()
@@ -1029,12 +1029,18 @@ def append_policy_event(session_id: str, *, step: int | None, kind: str,
         # JSON happened to sit above the sessions directory.
         if not _is_document_stem(session_id):
             return
+        # codeql[py/path-injection]
+        # Same guard `read` and `delete` carry, three lines above: it rejects
+        # every name containing a separator or a dot, so a `session_id` that
+        # gets past it can only name a file inside `default_dir()`. CodeQL
+        # sees the sink, not the predicate that decides it — and it does not
+        # model that the predicate's failure returns from the function.
         path = default_dir() / f"{session_id}.json"
         if not path.exists():
             log.debug("audit: policy event for unknown session %s ignored",
                       session_id)
             return
-        doc = json.loads(path.read_text())
+        doc = json.loads(path.read_text())  # codeql[py/path-injection]
         doc.setdefault("policy_events", []).append({
             "seq": len(doc.get("turns", [])) + len(doc["policy_events"]) + 1,
             "at": _now(),
@@ -1048,8 +1054,8 @@ def append_policy_event(session_id: str, *, step: int | None, kind: str,
         doc["updated_at"] = _now()
         tmp = path.with_suffix(".json.tmp")
         with tmp.open("w") as fp:
-            json.dump(doc, fp, ensure_ascii=False, default=str)
-        os.replace(tmp, path)
+            json.dump(doc, fp, ensure_ascii=False, default=str)  # codeql[py/path-injection]
+        os.replace(tmp, path)  # codeql[py/path-injection]
     except Exception as exc:
         log.warning("audit: policy event for %s dropped: %s",
                     session_id, type(exc).__name__)

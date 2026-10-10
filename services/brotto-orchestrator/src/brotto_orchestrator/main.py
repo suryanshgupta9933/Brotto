@@ -327,7 +327,7 @@ def _error(status: int, message: str, **extra) -> JSONResponse:
 
     return JSONResponse(
         status_code=status,
-        # codeql[js/stack-trace-exposure]
+        # codeql[py/stack-trace-exposure]
         # Reviewed and kept. This is the one envelope every route answers
         # through, and the message in it is written by the route's own
         # handler for the caller that already holds AGENT_SECRET. What must
@@ -698,7 +698,7 @@ async def check_model(request: Request):
         # the secret. This is the "no model is set anywhere" case, which is
         # the one the panel turns into a prompt to open Settings.
         log.warning("model check: nothing resolved: %s", exc)
-        # codeql[js/stack-trace-exposure]
+        # codeql[py/stack-trace-exposure]
         # Reviewed and kept. `resolve_model_config` raises ValueError naming
         # the *environment variable* that is unset, never the value — the
         # sentence above this block says so and the line above it already
@@ -830,6 +830,12 @@ async def read_audit(session_id: str, request: Request):
     doc = _read(session_id)
     if not doc.get("found"):
         return _error(404, "unknown session")
+    # codeql[py/stack-trace-exposure]
+    # This route returns the user's own audit document, which is the whole
+    # point of it. `_read` is where a read failure used to be stringified —
+    # `str(OSError)` is the server's absolute path — and that was fixed at
+    # the source. What reaches here now is either the parsed document or a
+    # message `audit.read` wrote itself, never a raw exception.
     return JSONResponse(content=doc)
 
 
