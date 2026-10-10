@@ -85,6 +85,12 @@ for this to be forgotten. It is pattern matching, not a guarantee: it will miss 
 occasionally redact an innocuous number that happens to pass a checksum. The agent is told the redaction
 already happened and is instructed not to try to reconstruct a redacted value.
 
+**The accessibility tree is not redacted, and this paragraph does not cover it.**
+The list above runs on the page-text channel only. The tree — the roles, labels, values and references
+listed in the previous section, and the channel the model mostly reads — is passed through as it is. A
+token that appears in a field's label or value rather than in body text will reach your provider
+unredacted.
+
 The orchestrator then sends **the page observations to the model provider you selected**. Brotto ships
 with Anthropic, OpenAI, MiniMax, Gemini, OpenRouter, DeepSeek and Groq, and can be pointed at a
 compatible endpoint of your own. This is the core of what a browser agent does: the model has to see the
