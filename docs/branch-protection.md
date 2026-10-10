@@ -26,6 +26,7 @@ gh api repos/suryanshgupta9933/brotto/rulesets/24720045 \
 |---|---|---|
 | `deletion` | — | deleting the branch |
 | `non_fast_forward` | — | force pushes, i.e. every history rewrite |
+| `required_status_checks` | the three job names, non-strict | **merging with red CI** |
 | `code_scanning` | CodeQL, `alerts_threshold: errors`, `security_alerts_threshold: high_or_higher` | merging with an open high-severity CodeQL alert |
 | `code_coverage` | `minimum_coverage: 60`, `max_coverage_drop: null` | see [the coverage gap](#the-two-gaps) |
 | `pull_request` | see below | direct pushes to `main` |
@@ -43,10 +44,27 @@ The `pull_request` rule allows `merge`, `squash` and `rebase`, and sets:
 
 ## The gaps
 
-**1. There is no `required_status_checks` rule.** The workflow `CI` has three
-jobs and no aggregator, so a required check named `CI` would never report. A PR
-can currently merge with red CI. The real job names are `Orchestrator tests`,
-`Extension build` and `Docker image build`.
+**1. There is no `required_status_checks` rule.** ~~A PR can merge with red CI.~~
+**Fixed 2026-10-10.** The rule now requires the three real job names —
+`Orchestrator tests`, `Extension build`, `Docker image build` — which is why those
+exact strings are load-bearing in `ci.yml`. The workflow has no aggregator, so a
+check named `CI` would never report and the rule would silently never be
+satisfied. Renaming a job in `ci.yml` without editing the ruleset breaks every
+merge with an opaque "expected — waiting for status to be reported".
+
+`strict_required_status_checks_policy` is **`false`**: the checks must have passed
+on the PR's head SHA, but the branch need not first be merged up to date with
+`main`. Strict mode is a branch-hygiene policy, not a CI gate, so it is not
+enabled by default here — turn it on deliberately, not as a side effect.
+
+Two API details the payload in [Enabling the missing status checks](#enabling-the-missing-status-checks)
+now encodes:
+
+- **The PUT replaces the whole ruleset.** Every rule you want to keep must be
+  repeated; there is no partial update.
+- **`"max_coverage_drop": null` returns 422** — `Invalid property /rules/4: data
+  matches no possible input`. The GET returns the field as `null`, so copying the
+  GET output straight back into a PUT fails. Omit the key entirely.
 
 **2. `code_coverage: 60` is enforced but nothing uploads coverage — and
 uploading is not available on this plan.**
@@ -116,7 +134,10 @@ PYTHONPATH=/Users/apple/Work/code/brotto/services/brotto-orchestrator/src \
   --cov=brotto_orchestrator --cov-fail-under=75
 ```
 
-Enabling the missing status checks:
+### The ruleset payload
+
+This is the payload that produced the live ruleset, verbatim. Re-run it to
+restore that state:
 
 ```bash
 gh api --method PUT \
@@ -124,6 +145,8 @@ gh api --method PUT \
   /repos/suryanshgupta9933/brotto/rulesets/24720045 \
   --input - <<'JSON'
 {
+  "name": "Protect main",
+  "target": "branch",
   "bypass_actors": [],
   "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
   "enforcement": "active",
@@ -132,7 +155,7 @@ gh api --method PUT \
     { "type": "non_fast_forward" },
     { "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": true,
+        "strict_required_status_checks_policy": false,
         "required_status_checks": [
           { "context": "Orchestrator tests" },
           { "context": "Extension build" },
@@ -149,16 +172,16 @@ gh api --method PUT \
       }
     },
     { "type": "code_coverage",
-      "parameters": { "minimum_coverage": 60, "max_coverage_drop": null } },
+      "parameters": { "minimum_coverage": 60 } },
     { "type": "pull_request",
       "parameters": {
-        "dismiss_stale_reviews_on_push": true,
-        "require_code_owner_review": true,
-        "require_last_push_approval": true,
-        "required_approving_review_count": 1,
-        "required_review_thread_resolution": true,
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_approving_review_count": 0,
+        "required_review_thread_resolution": false,
         "require_extra_approval_for_unattributed_changes": true,
-        "allowed_merge_methods": ["squash", "merge", "rebase"],
+        "allowed_merge_methods": ["merge", "squash", "rebase"],
         "required_reviewers": []
       }
     }
@@ -167,8 +190,10 @@ gh api --method PUT \
 JSON
 ```
 
-That PUT replaces the whole ruleset, which is why every rule you want to keep is
-repeated above — a partial update is not supported.
+The `pull_request` block is deliberately left loose. Turning it up —
+`required_approving_review_count: 1` with CODEOWNERS set to you — means you
+approve your own PR to merge, which for a solo repo is ceremony, not review. Do
+it if you want the record, not because the docs recommended it.
 
 ## Query the right endpoint
 
