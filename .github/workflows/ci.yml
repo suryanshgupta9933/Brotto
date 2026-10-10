@@ -15,8 +15,7 @@ concurrency:
 
 # Default-deny. Without this, every job inherits the repository default token,
 # and two of these three run npm install and pip install against PR-controlled
-# lockfiles. test-orchestrator widens to code-quality: write for the one upload
-# below — an explicit grant rather than the only declaration in the file.
+# lockfiles.
 #
 # `actions/upload-artifact` and the buildx `type=gha` cache use the Actions
 # runtime token, not GITHUB_TOKEN, so neither needs a scope here.
@@ -29,8 +28,8 @@ jobs:
     name: Orchestrator tests
     runs-on: ubuntu-latest
     # No permissions block: it inherits the workflow default above. The
-    # code-quality: write this job briefly carried went away with the coverage
-    # upload — see docs/branch-protection.md for why that upload is not here.
+    # code-quality: write this job briefly carried went with the coverage
+    # upload — docs/branch-protection.md has why.
     steps:
       - uses: actions/checkout@v7
 
