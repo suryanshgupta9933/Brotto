@@ -47,9 +47,18 @@ jobs:
           # hit in them is noise that trains you to ignore the tool. They
           # were 9 of the first 23 findings. The library code they import is
           # still scanned; only the files that check it are not.
+          #
+          # Both patterns are anchored to where the tests actually live, not a
+          # bare `**/tests/**` that a future directory could match by accident.
+          #
+          # This also un-scans `py/hardcoded-credentials` in those paths, which
+          # is the cost. Secret scanning and push protection are enabled for
+          # this repo and read *this file's* config not at all, so a real key
+          # committed to a fixture still blocks the push — that is the
+          # compensating control, and it is why the blanket is safe here.
           config: |
             paths-ignore:
-              - "**/tests/**"
+              - "services/brotto-orchestrator/tests/**"
               - "scripts/*.test.js"
 
       # Not `continue-on-error`. A new query from upstream that fires on
