@@ -1,0 +1,20 @@
+# One CodeQL config, read by CI (`.github/workflows/codeql.yml`) and by
+# `scripts/codeql-local.sh`. They must not drift: the whole point of the local
+# run is that it is the same analysis CI runs, so a local green is evidence.
+#
+# Test files assert *about* dangerous strings — `assert "evil.com" in url` is
+# the assertion working, not a vulnerability — so every hit in them is noise
+# that trains you to ignore the tool. The library code they import is still
+# scanned; only the files that check it are not.
+#
+# Both patterns are anchored to where the tests actually live, not a bare
+# `**/tests/**` that a future directory could match by accident.
+#
+# This also un-scans `py/hardcoded-credentials` in those paths, which is the
+# cost. Secret scanning and push protection are enabled for this repo and read
+# *this file's* config not at all, so a real key committed to a fixture still
+# blocks the push — that is the compensating control, and it is why the
+# blanket is safe here.
+paths-ignore:
+  - "services/brotto-orchestrator/tests/**"
+  - "scripts/*.test.js"

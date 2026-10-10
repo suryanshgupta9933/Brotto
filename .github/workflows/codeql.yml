@@ -42,24 +42,12 @@ jobs:
         with:
           languages: python,javascript-typescript
           build-mode: none
-          # Test files assert *about* dangerous strings — `assert "evil.com"
-          # in url` is the assertion working, not a vulnerability — so every
-          # hit in them is noise that trains you to ignore the tool. They
-          # were 9 of the first 23 findings. The library code they import is
-          # still scanned; only the files that check it are not.
-          #
-          # Both patterns are anchored to where the tests actually live, not a
-          # bare `**/tests/**` that a future directory could match by accident.
-          #
-          # This also un-scans `py/hardcoded-credentials` in those paths, which
-          # is the cost. Secret scanning and push protection are enabled for
-          # this repo and read *this file's* config not at all, so a real key
-          # committed to a fixture still blocks the push — that is the
-          # compensating control, and it is why the blanket is safe here.
-          config: |
-            paths-ignore:
-              - "services/brotto-orchestrator/tests/**"
-              - "scripts/*.test.js"
+          # The config lives in its own file because `scripts/codeql-local.sh`
+          # reads the same one. A pull-request check on this repo does not
+          # surface SARIF findings at all, so a local run is the only place a
+          # suppression can be checked before the merge that reports it — and
+          # that only holds if both run the identical config.
+          config-file: ./.github/codeql/codeql-config.yml
 
       # Not `continue-on-error`. A new query from upstream that fires on
       # existing code should fail the build — that is the signal this whole
