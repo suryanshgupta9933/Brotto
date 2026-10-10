@@ -51,8 +51,15 @@ Measured off a 6-step Gmail run (session `d141a18f`, 178.10s wall, 6 model turns
 `tokens_in:out` = 39:1 — 161,764 in, 4,167 out, ~27K input tokens per turn.
 
 **The model is not thinking — and that turned out not to be the explanation.**
-`MiniMax-M3` is not in `_THINKING_REQUIRED` (`registry.py`), so
-`anthropic_thinking={"type": "disabled"}` is sent. This section originally
+`MiniMax-M3` is in `_THINKING_DISABLE_OK` under the `minimax` provider key
+(`model/registry.py:46`), so `anthropic_thinking={"type": "disabled"}` is sent.
+The allowlist is keyed by **provider id, not model id**, and it fails
+asymmetrically: sending `disabled` to an always-adaptive model is a 400 on *every*
+call, while omitting it costs only latency, so an unverified id falls on the
+"send nothing" side. (`MiniMax-M3.1-Flash-Preview` is absent for exactly that
+reason — it requires adaptive thinking, and `disabled` is a hard 400.)
+
+This section originally
 concluded from there that `model_plan` was *prefill on a 27K-token prompt* and
 that the per-turn spread (4.5s → 39.3s) tracked prompt size. **That was
 inferred, not measured, and it is wrong.** It is corrected below.

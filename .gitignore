@@ -109,15 +109,19 @@ clients/brotto-extension/crx-signing.pem
 /decisions.md
 /clients/brotto-extension/preview.html
 
-# Local agent config — absolute paths and per-machine permissions.
-.claude/settings.local.json
+# Local AI-assisted development config — settings, specialist agents, vendored
+# skills. All of it is per-machine: the agents under `.claude/agents/` carry
+# local line counts and landmines that go stale the moment the code moves, and
+# the reasoning they point at already ships in docs/architecture/. Tracking
+# them would mean a second home for the same facts, which is the drift this
+# arrangement exists to prevent.
+.claude/
 
 # Third-party agent skills, vendored by `npx skills add <org>/<repo>`. Remotion's
 # is ~19k lines of upstream documentation that we did not write and do not edit;
 # it belongs to whoever installed it, at whatever version they installed. The
 # lockfile goes with them — it pins a tool's install, not a dependency of ours.
 .agents/
-.claude/skills/
 skills-lock.json
 
 # Local scratch previews
