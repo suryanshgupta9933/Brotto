@@ -98,14 +98,134 @@ async function describeAuthFailure(): Promise<string> {
 // the response carries nothing either.
 const RELAY_PROTOCOL = "brotto-v1";
 
+// RFC 6455 restricts a subprotocol to token characters and sets no length
+// limit of its own. Measured, not guessed: Chrome 154 hands a 60 KB
+// `Sec-WebSocket-Protocol` to the network intact, and through the real
+// production stack (uvicorn 0.54 + websockets 16.1 + Starlette, reading
+// `offered[1]` exactly as main.py does) a 4096-char credential arrives
+// whole and byte-identical — 4096 fails, 8192 does not complete.
+//
+// That 8 KB edge is where this stops being about us: nginx's default
+// `large_client_header_buffers` is 8k and Heroku's router is in the same
+// neighbourhood, so a header past it is refused as an HTTP error and
+// presents as a network failure — the exact outcome the drop-and-refuse
+// behaviour below exists to prevent. 4096 leaves ~2.7x headroom over a
+// Supabase JWT with populated `user_metadata` (~1.5 KB) while staying well
+// inside every proxy budget in front of this server. If a token ever
+// outgrows it, `credentialSent` says so out loud instead of the socket
+// quietly arriving without one.
+const SUBPROTOCOL_MAX_CHARS = 4096;
+
+/** Which of the three states the last handshake was in.
+ *
+ * Set by `authedWs` because it is the only place that knows, and read by the
+ * close handler because that is the only place that can act on it. Three
+ * states rather than one boolean, because collapsing two of them is the bug
+ * this replaces: `none` is the self-host install with no AGENT_SECRET — "no
+ * secret means open" is deliberate and silent — and `dropped` is this install
+ * holding a credential it could not present, which is the only one of the
+ * three that is a fault.
+ */
+let credentialState: "none" | "sent" | "dropped" = "none";
+
+/** Can `secret` ride the subprotocol header without breaking the handshake?
+ *
+ * The charset is RFC 6455's token grammar, and a pasted AGENT_SECRET can be
+ * anything at all. One that does not fit is dropped rather than sent: a
+ * malformed handshake fails as an unexplained *network* error, which is a
+ * worse sentence than the server's own refusal. That reasoning is unchanged
+ * from the original cap — only the length moved.
+ */
+function credentialFits(secret: string): boolean {
+  return /^[A-Za-z0-9._~-]+$/.test(secret) && secret.length <= SUBPROTOCOL_MAX_CHARS;
+}
+
 function authedWs(url: string, secret: string): WebSocket {
-  // RFC 6455 subprotocols are restricted to token characters, and a
-  // pasted secret can be anything. One that does not fit is simply not
-  // sent; the server then refuses, which is better than a malformed
-  // handshake that fails as a network error.
-  return /^[A-Za-z0-9._~-]{1,120}$/.test(secret)
-    ? new WebSocket(url, [RELAY_PROTOCOL, secret])
-    : new WebSocket(url);
+  socketOpened = false;
+  if (secret === "") { credentialState = "none"; return new WebSocket(url); }
+  if (!credentialFits(secret)) { credentialState = "dropped"; return new WebSocket(url); }
+  credentialState = "sent";
+  return new WebSocket(url, [RELAY_PROTOCOL, secret]);
+}
+
+/** Whether the current socket ever reached OPEN. Reset per attempt. */
+let socketOpened = false;
+
+/** Which credential refusal a dead socket was, or null to keep the existing
+ * behaviour.
+ *
+ * The server rejects *before* accept, so a new 4003 splits "a credential was
+ * required and none arrived" from 4001's "the credential was wrong" — two
+ * different things for the user to go and fix, which are one answer today.
+ *
+ * A string rather than the `failure_reason` itself, because that has to stay a
+ * literal at the call site: the panel looks the code up in FAILURE_NOTE, and
+ * `scripts/test-failure-reasons.test.js` enforces both halves.
+ */
+type CredentialRefusal = "missing" | "rejected";
+
+function refusalForCloseCode(code: number): CredentialRefusal | null {
+  if (code === 4003) return "missing";
+  if (code === 4001) return "rejected";
+  return null;
+}
+
+/** How long `/health` gets to answer before we call the server unreachable.
+ *
+ * Deliberately short: this runs on the close path, ahead of a reconnect, so
+ * its cost is paid exactly when the server is most likely to be down. An
+ * unbounded fetch here would turn a TCP blackhole into a multi-minute hang
+ * on the path whose whole job is to fail fast.
+ */
+const SERVER_PROBE_MS = 1500;
+
+/** Is the server alive? Bounded, because this runs on the close path.
+ *
+ * Without it the distinction below is a guess: a server that is simply down
+ * and a server that refused us produce the same thing in the browser, and
+ * telling a user their sign-in was rejected when their server is unplugged
+ * sends them to debug the wrong machine. `/health` is unauthenticated by
+ * design and is the same probe `describeAuthFailure` already uses.
+ */
+async function serverIsAlive(): Promise<boolean> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), SERVER_PROBE_MS);
+  try {
+    return (await fetch(`${serverUrl}/health`, { method: "GET", signal: ac.signal })).ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * What a dead socket means, or null for the existing behaviour.
+ *
+ * A close code is the honest answer when there is one, and the server has
+ * always sent 4001 that way — but only after accept. Rejecting the handshake
+ * is an HTTP-level failure, and **Chrome reports that as 1006, not 4001**:
+ * measured against real Chrome 154, not assumed. A refused key, a missing
+ * credential and a server that is not running all arrive here as the same
+ * `code: 1006`, `wasClean: false` — so the code alone cannot tell a user why
+ * their task stopped, and the old handler, which discarded the event entirely,
+ * read all three as "server unreachable".
+ *
+ * So the split is made where the evidence is: the close code when it survives,
+ * and otherwise the one thing the client knows for certain — whether it
+ * actually put a credential on the wire — cross-checked against the server
+ * still being up. Reconnecting would be worse than either: the same credential
+ * gets the same answer three times, and the backoff noise is what the user
+ * debugs instead of the real cause.
+ */
+async function classifySocketDeath(code: number, opened: boolean): Promise<CredentialRefusal | null> {
+  const explicit = refusalForCloseCode(code);
+  if (explicit) return explicit;
+  if (opened) return null; // a socket that opened dying is transport, not auth
+  if (!await serverIsAlive()) return null; // genuinely unreachable: reconnect as before
+  // Server is up and refused us. Something arrived means it read the credential
+  // and said no; nothing arrived means it wanted one it did not get.
+  return credentialState === "sent" ? "rejected" : "missing";
 }
 // The task currently being driven, kept so a reconnect can re-send task_start
 // without the panel having to be open. Module state, not storage.session:
@@ -852,6 +972,7 @@ async function startRelay(
   ws = authedWs(wsUrl, await agentSecret());
 
   ws.onopen = async () => {
+    socketOpened = true;
     startHeartbeat();
     // The socket is back: the backoff cycle is over.
     reconnectAttempt = 0;
@@ -1215,15 +1336,57 @@ async function startRelay(
     }
   };
 
-  ws.onclose = () => {
-    // A run that is still live when its socket dies is the reconnect case,
-    // not a lost task. `taskTerminalEmitted` is set by stopRelay and by the
-    // cancel handler BEFORE either closes the socket, so a stopped or
-    // cancelled task never reaches here — a cancelled task must not come
-    // back, and the backoff is the thing that would bring it back.
-    if (taskInFlight && !taskTerminalEmitted && scheduleReconnect()) return;
-    void cleanup();
+  ws.onclose = (ev: CloseEvent) => {
+    void handleSocketClose(ev);
   };
+}
+
+/** One close, classified: a credential refusal, or the existing behaviour.
+ *
+ * Split out of the handler so the close event's `code` — which the handler
+ * used to discard, along with everything else on it — reaches the decision
+ * that needs it.
+ */
+async function handleSocketClose(ev: CloseEvent): Promise<void> {
+  const refusal = await classifySocketDeath(ev.code, socketOpened);
+  if (refusal) {
+    // Terminal for this run, and deliberately not reconnected: the socket is
+    // refused for the credential, and the credential is not going to change on
+    // a 1s backoff. Marked terminal BEFORE cleanup so it does not also report
+    // CONNECTION_LOST over the same event — the session id is kept, so the
+    // conversation survives and the user can send the task again once signed
+    // in, which is the recovery each message below asks for.
+    cancelReconnect();
+    taskTerminalEmitted = true;
+    taskInFlight = false;
+    if (refusal === "missing") {
+      notifyUi({
+        type: "task_failed",
+        failure_reason: "credential_missing",
+        // The panel's FAILURE_NOTE supplies the sentence; `summary` is the next
+        // step, not a restatement of it.
+        summary: "Sign in again, then send the task again — a sign-in lasts for the browser "
+          + "window, so restarting Chrome or closing the tab clears it.",
+      });
+    } else {
+      notifyUi({
+        type: "task_failed",
+        failure_reason: "credential_rejected",
+        summary: "Sign out and sign in again. On a self-hosted server this is AGENT_SECRET: "
+          + "check it in Settings against the .env beside docker-compose.yml.",
+      });
+    }
+    notifyUi({ type: "canonical_status", status: "failed" });
+    void cleanup();
+    return;
+  }
+  // A run that is still live when its socket dies is the reconnect case,
+  // not a lost task. `taskTerminalEmitted` is set by stopRelay and by the
+  // cancel handler BEFORE either closes the socket, so a stopped or
+  // cancelled task never reaches here — a cancelled task must not come
+  // back, and the backoff is the thing that would bring it back.
+  if (taskInFlight && !taskTerminalEmitted && scheduleReconnect()) return;
+  void cleanup();
 }
 
 async function cleanup(): Promise<void> {
