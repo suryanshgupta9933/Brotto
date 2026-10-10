@@ -18,6 +18,11 @@ jobs:
   test-orchestrator:
     name: Orchestrator tests
     runs-on: ubuntu-latest
+    # code-quality: write is what makes the coverage upload below land. Job-level,
+    # not workflow-level, so it grants nothing to the other three jobs.
+    permissions:
+      contents: read
+      code-quality: write
     steps:
       - uses: actions/checkout@v7
 
@@ -67,7 +72,28 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/services/brotto-orchestrator/src
         run: |
           pytest services/brotto-orchestrator/tests -v --tb=short \
-            --cov=brotto_orchestrator --cov-report=term --cov-fail-under=75
+            --cov=brotto_orchestrator --cov-report=term --cov-fail-under=75 \
+            --cov-report=xml:coverage.xml
+
+      # The ruleset's code_coverage rule needs a report ATTACHED to the commit —
+      # computing it and printing it to the log satisfies nothing, which is why
+      # that rule was unenforceable until this step existed. Cobertura + the
+      # built-in uploader, so there is no third-party service and no token.
+      #
+      # The `if` is GitHub's: never upload coverage from a fork's PR. Without it a
+      # fork could post a report against this repo.
+      #
+      # Stays in this job on purpose. GitHub wants the status check associated with
+      # a coverage upload to be a required check, and this job is already the one
+      # that must be green — a separate job would be a second thing to name and
+      # keep in sync. `github-code-quality[bot]` comments the summary on the PR.
+      - name: Upload coverage report
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-code-coverage@v1
+        with:
+          file: coverage.xml
+          language: Python
+          label: code-coverage/pytest
 
   # ─── Extension: type-check + bundle ────────────────────────────────
   build-extension:
@@ -112,7 +138,7 @@ jobs:
         working-directory: clients/brotto-extension
         run: npm run build
 
-      # The 16 scripts/*.test.js files are the only check for panel
+      # The 26 scripts/*.test.js files are the only check for panel
       # rendering, replay, key dispatch, the model-check gate order and the
       # observation guards — CLAUDE.md names each one. They extract the real
       # functions out of the shipped sources and eval them, so a run here is
