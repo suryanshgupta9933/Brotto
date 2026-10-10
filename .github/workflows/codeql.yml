@@ -57,39 +57,16 @@ jobs:
           # committed to a fixture still blocks the push — that is the
           # compensating control, and it is why the blanket is safe here.
           #
-          # `query-filters` below is the second half, and it is here rather
-          # than in `# codeql[...]` comments in the source for a reason that
-          # cost three branches: **the inline comments do not suppress
-          # anything in this repo.** Three rounds were spent on them — wrong
-          # language prefix, then the prefix alone, then moving each token to
-          # the line immediately above its alert. Every round looked correct in
-          # the diff, `Analyze` stayed green, and all twelve alerts stayed open
-          # through the scan of merged `main`. A filter in this file is applied
-          # to the SARIF by codeql-action itself, which is why the
-          # `paths-ignore` above demonstrably works.
-          #
-          # Each filter is two rules against named files, and every sink it
-          # covers is guarded: `py/path-injection` on the `_is_document_stem`
-          # and `_safe_filename` checks, whose predicate returns from the
-          # function on any separator or dot, and `py/stack-trace-exposure` on
-          # the two deliberate diagnostic surfaces behind `AGENT_SECRET`. The
-          # guards are asserted by tests, not by reading these comments —
-          # `test_a_traversing_session_id_writes_no_policy_event` writes a
-          # victim file one level up and asserts it is byte-identical after.
+          # The second half of that: a `# codeql[<lang>/<rule>]` comment is
+          # not applied here either. `query-filters` was tried in its place
+          # and the action logged it while `results_count` stayed at 12 -
+          # four suppression mechanisms, none of which fired. The review
+          # lives in the Security tab as a dismissal carrying its reason,
+          # and next to each sink in the source.
           config: |
             paths-ignore:
               - "services/brotto-orchestrator/tests/**"
               - "scripts/*.test.js"
-            query-filters:
-              - rules:
-                  - py/path-injection
-                paths:
-                  - "services/brotto-orchestrator/src/brotto_orchestrator/agent/audit.py"
-                  - "services/brotto-orchestrator/src/brotto_orchestrator/model/store.py"
-              - rules:
-                  - py/stack-trace-exposure
-                paths:
-                  - "services/brotto-orchestrator/src/brotto_orchestrator/main.py"
 
       # Not `continue-on-error`. A new query from upstream that fires on
       # existing code should fail the build — that is the signal this whole
