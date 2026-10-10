@@ -1,0 +1,50 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # CodeQL ships new queries continuously. Without a weekly run, a query added
+  # in November never looks at code committed in August, and the Security tab
+  # reads "0 alerts" for a repository that simply has not been re-examined.
+  # The weekly scan is what makes an old finding appear on new code.
+  schedule:
+    - cron: "37 5 * * 1"
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ponytail: the workflow needs to write SARIF to the Security tab and nothing
+# else. Least privilege is two lines and it is the whole difference between a
+# scanning job and a job that could push to the repo.
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # build-mode: none because both languages here are interpreted — there is
+      # no compile step to trace and no autotrace to configure. (The other
+      # values are `autobuild` and `manual`, for compiled languages. `matrix`
+      # is a default-setup concept and is rejected here.) Each language still
+      # gets its own database and its own SARIF category, so a Python finding
+      # and a TypeScript finding are separable in the Security tab instead of
+      # landing in one undifferentiated list.
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: python,javascript-typescript
+          build-mode: none
+
+      # Not `continue-on-error`. A new query from upstream that fires on
+      # existing code should fail the build — that is the signal this whole
+      # workflow exists to produce, and swallowing it is how a repository
+      # ends up "clean" only because nothing looked.
+      - uses: github/codeql-action/analyze@v4
