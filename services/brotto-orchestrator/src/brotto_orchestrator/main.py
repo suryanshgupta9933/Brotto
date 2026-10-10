@@ -334,12 +334,8 @@ def _error(status: int, message: str, **extra) -> JSONResponse:
         # than by reading these strings —
         # test_model_check_endpoint.py asserts a key is absent from the body.
         # The one flow that was not written by a handler, the provider
-        # probe's raw exception, was fixed rather than suppressed.
-        #
-        # The token goes on the line immediately above the alert. CodeQL
-        # ignores one that trails the alert line, and `Analyze` stays green
-        # while the alert quietly stays open.
-        # codeql[py/stack-trace-exposure]
+        # probe's raw exception, was fixed rather than suppressed. The rule is
+        # switched off for this file in `.github/workflows/codeql.yml`.
         content={"error": message, "error_id": new_error_id(), **extra},
     )
 
@@ -838,8 +834,8 @@ async def read_audit(session_id: str, request: Request):
     # point of it. `_read` is where a read failure used to be stringified —
     # `str(OSError)` is the server's absolute path — and that was fixed at
     # the source. What reaches here now is either the parsed document or a
-    # message `audit.read` wrote itself, never a raw exception.
-    # codeql[py/stack-trace-exposure]
+    # message `audit.read` wrote itself, never a raw exception. The rule is
+    # switched off for this file in `.github/workflows/codeql.yml`.
     return JSONResponse(content=doc)
 
 

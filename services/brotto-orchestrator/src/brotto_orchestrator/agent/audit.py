@@ -838,18 +838,12 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
     p = d / f"{session_id}.json" if _is_document_stem(session_id) else None
     # CodeQL cannot see that the ternary above already rejected every name
     # containing a separator or a dot, which is the whole defence — it models
-    # the sink, not the predicate. The two tokens below mark the sinks it
-    # still reports; they are a record of a decision, not a silence.
-    #
-    # Each `codeql[...]` token sits on the line IMMEDIATELY ABOVE its alert
-    # and nothing else. That placement is load-bearing, and it cost two scan
-    # cycles to find out: a token trailing the alert line is silently ignored
-    # and the alert stays open with `Analyze` still green.
-    # codeql[py/path-injection]
+    # the sink, not the predicate. The rule is switched off for this file in
+    # `.github/workflows/codeql.yml`, not suppressed here: an inline
+    # `# codeql[...]` comment suppresses nothing in this repo.
     if p is None or not p.exists():
         return {"found": False, "session_id": session_id}
     try:
-        # codeql[py/path-injection]
         doc = json.loads(p.read_text())
         doc.setdefault("found", True)
         return doc
@@ -895,8 +889,7 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
         try:
             # Same guard as `read`, one line above the loop: a session id with
             # a separator or a dot never reaches here, so `name` can only
-            # resolve inside `d`.
-            # codeql[py/path-injection]
+            # resolve inside `d`. Suppressed in `.github/workflows/codeql.yml`.
             (d / name).unlink()
             removed = True
         except FileNotFoundError:
@@ -1041,15 +1034,12 @@ def append_policy_event(session_id: str, *, step: int | None, kind: str,
         # dot, so a `session_id` that gets past it can only name a file inside
         # `default_dir()`. CodeQL sees the sink, not the predicate that decides
         # it — and it does not model that the predicate's failure returns from
-        # the function. Each token below is on the line immediately above its
-        # alert; trailing the alert line does not suppress it.
+        # the function. Suppressed in `.github/workflows/codeql.yml`.
         path = default_dir() / f"{session_id}.json"
-        # codeql[py/path-injection]
         if not path.exists():
             log.debug("audit: policy event for unknown session %s ignored",
                       session_id)
             return
-        # codeql[py/path-injection]
         doc = json.loads(path.read_text())
         doc.setdefault("policy_events", []).append({
             "seq": len(doc.get("turns", [])) + len(doc["policy_events"]) + 1,
@@ -1063,10 +1053,8 @@ def append_policy_event(session_id: str, *, step: int | None, kind: str,
         })
         doc["updated_at"] = _now()
         tmp = path.with_suffix(".json.tmp")
-        # codeql[py/path-injection]
         with tmp.open("w") as fp:
             json.dump(doc, fp, ensure_ascii=False, default=str)
-        # codeql[py/path-injection]
         os.replace(tmp, path)
     except Exception as exc:
         log.warning("audit: policy event for %s dropped: %s",
