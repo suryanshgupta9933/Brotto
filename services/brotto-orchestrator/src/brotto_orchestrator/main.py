@@ -756,7 +756,8 @@ def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
 
     The `kind` is what the panel branches on; the sentence is what the user
     reads, and it is written for someone who does not know what a provider
-    error is. Every branch names the fix.
+    error is. Every branch names the fix. Kinds: no_model, unknown_model,
+    auth_failed, no_credits, rate_limited, provider_error, unreachable, error.
     """
     from pydantic_ai.exceptions import ModelHTTPError
 
@@ -785,6 +786,17 @@ def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
                 "rate_limited",
                 "The provider is rate-limiting this key (HTTP 429). Wait a "
                 "moment, or switch models in Settings → Model.",
+            )
+        if status >= 500:
+            # The provider is having a bad day, not the user's key. It reached
+            # the model, got past auth, and failed — the generic branch below
+            # answers with a raw body, which is the one place provider text
+            # could carry a hostname or a fragment of the key. Status only.
+            return (
+                "provider_error",
+                "The provider is having trouble (HTTP "
+                f"{status}) — this is not your key. Try again shortly, or "
+                "switch models in Settings → Model.",
             )
         return ("error", f"The provider returned HTTP {status}: {body[:300] or 'no detail'}")
     # pydantic-ai wraps a transport failure in ModelAPIError and hangs the

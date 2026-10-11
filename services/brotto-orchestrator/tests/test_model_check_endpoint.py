@@ -230,6 +230,37 @@ def test_a_400_that_is_not_about_money_stays_an_error(client, probe):
     assert body["kind"] == "error"
 
 
+@pytest.mark.parametrize("status", [500, 502, 503, 529])
+def test_a_provider_that_is_down_is_not_a_bad_key(client, probe, status):
+    """A 5xx got past auth and failed at the provider. Reported as `error` it
+    reads as "your key is wrong", which sends the user to re-paste a key that
+    was fine — the exact case the product owner named: *the model is down,
+    show the error*."""
+    probe["install"](_http_error(status, '{"error":"upstream unavailable"}'))
+    body = _send(client,
+                 model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+                 api_key="sk-ant-valid").json()
+    assert body["ok"] is False
+    assert body["kind"] == "provider_error"
+    # The status is what the user needs; the fix it names is what stops them
+    # doing the wrong thing.
+    assert f"HTTP {status}" in body["error"]
+
+
+def test_a_provider_5xx_never_echoes_the_provider_body(client, probe):
+    """`error` is the one branch that forwards provider text, and a 5xx body
+    is where a gateway echoes the URL it called. This branch must not grow a
+    `body[:300]`."""
+    probe["install"](_http_error(
+        503, '{"error":"upstream http://gpu-box.lan:8000/v1 unavailable"}'))
+    body = _send(client,
+                 model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+                 api_key="sk-ant-secret-value").json()
+    assert body["kind"] == "provider_error"
+    assert "gpu-box.lan" not in body["error"]
+    assert "sk-ant-secret-value" not in body["error"]
+
+
 def test_a_refused_connection_is_unreachable_not_a_bad_key(client, probe):
     """A LAN base URL that is down is the self-hosted user's common failure,
     and `auth_failed` would send them to re-paste a key that was fine.

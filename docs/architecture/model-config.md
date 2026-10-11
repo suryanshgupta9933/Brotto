@@ -312,6 +312,24 @@ than a 402, so `_CREDIT_HINTS` reads the body. The keyword test is deliberately
 narrow: a schema complaint reported as `no_credits` would send someone to top
 up a paid account.
 
+**A 5xx is `provider_error`, not `error`.** `error` is the one branch that
+forwards provider text (`body[:300]`) and it was absorbing three unrelated
+things: a 5xx, a 400 that matched neither hint set, and a non-httpx SDK
+exception. A 5xx means the request got *past* auth and the model itself failed
+— reported as `error` it reads as "your key is wrong" and sends the user to
+re-paste a key that was fine, which is the case the product owner named: *if
+the model is down, show the error*. Its sentence carries the status and nothing
+else, so a gateway that echoes the URL it called (or a key fragment) has no
+route into the response. Pinned by `test_a_provider_5xx_never_echoes_the_provider_body`,
+next to `test_the_response_never_echoes_the_key`.
+
+The kinds are therefore: `no_model`, `unknown_model`, `auth_failed`,
+`no_credits`, `rate_limited`, `provider_error`, `unreachable`, `error`.
+`no_model` is the only one the panel rewrites; the rest render
+`modelCheckTitle(kind)`, which falls back to a generic sentence rather than
+`undefined`, so a kind this build of the panel has not heard of degrades
+instead of rendering nothing.
+
 **Transport failures are found by walking `__cause__`.** pydantic-ai wraps a
 connect failure in `ModelAPIError` and hangs the real error off the cause
 (`raise ModelAPIError(...) from e`), so a `ConnectionRefusedError` never
