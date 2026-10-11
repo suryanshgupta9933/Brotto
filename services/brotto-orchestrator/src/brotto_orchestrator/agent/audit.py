@@ -1059,6 +1059,55 @@ def prune_older_than(days: float, *, dir: Path | None = None) -> int:
             continue
         if delete(p.stem, dir=d):
             pruned += 1
+    pruned += _prune_orphan_owners(d, cutoff, live)
+    return pruned
+
+
+def _prune_orphan_owners(d: Path, cutoff: float, live: set[str]) -> int:
+    """Age out `.owner` sidecars whose document is gone. Returns the count.
+
+    The loop above is document-driven — it globs `*.json` — so a sidecar
+    whose document is missing was invisible to it. That is not hypothetical:
+    a user who deletes the `.json` by hand strands the `.owner` beside it, and
+    on the hosted relay retention is **on by default at 30 days**, which
+    makes "we prune after 30 days" a promise these files did not keep. The
+    account id is not page text, but it is the one file that says whose
+    transcript this was, and it was outliving the retention setting by
+    default.
+
+    **"The document is absent" is the whole condition**, and it is why an
+    age test alone would be wrong: `.owner` is written once at mint and never
+    touched again, so its mtime is the *start* of the run while the document's
+    is the last activity. A month-long session has a fresh document beside a
+    40-day-old sidecar, and sweeping on age would silently drop that session
+    out of a scoped `erase all` — the exact untruthful-erasure failure the
+    sidecar exists to prevent.
+
+    Live sessions are skipped for the same reason the loop above skips them:
+    a run that has been going for a month is not stale.
+    """
+    pruned = 0
+    for ext in (_OWNER_EXT, f"{_OWNER_EXT}.tmp"):
+        try:
+            files = list(d.glob(f"*{ext}"))
+        except OSError:
+            continue
+        for p in files:
+            stem = p.name[: -len(ext)]
+            # `_is_document_stem` on a stem we did not write: a separator or a
+            # dot in it is exactly the shape a traversal attempt takes, and
+            # this stem comes off a filename off the disk.
+            if stem in live or not _is_document_stem(stem):
+                continue
+            if (d / f"{stem}{_DOCUMENT_EXT}").exists():
+                continue
+            try:
+                if p.stat().st_mtime >= cutoff:
+                    continue
+                p.unlink()
+                pruned += 1
+            except OSError as exc:
+                log.warning("audit: could not remove orphan %s: %s", p, exc)
     return pruned
 
 

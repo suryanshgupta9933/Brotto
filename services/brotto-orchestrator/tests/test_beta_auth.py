@@ -462,6 +462,33 @@ def test_a_malformed_address_is_refused_without_calling_supabase(client, monkeyp
     assert called == []
 
 
+@pytest.mark.parametrize("route,body", [
+    ("/v1/auth/request-code", {"email": "beta@example.test\n"}),
+    ("/v1/auth/exchange", {"email": "beta@example.test\n", "code": "123456"}),
+    ("/v1/auth/exchange", {"email": "\nbeta@example.test", "code": "123456"}),
+])
+def test_a_trailing_newline_is_not_an_address(client, monkeypatch, hosted, route, body):
+    """`EMAIL_RE` is anchored `^…$`, and `$` also matches immediately *before* a
+    trailing newline — so `match` accepted `beta@example.test\\n` and
+    `fullmatch` does not.
+
+    These two routes normalise **after** validating, so what the regex saw
+    was the caller's byte-for-byte string, and it went on to Supabase that
+    way. An address is a thing a stranger controls on two routes that exist
+    precisely to be open, and this one sits behind an outbound email send.
+    """
+    async def fake_code(email):
+        pytest.fail(f"a newline-terminated address reached supabase: {email!r}")
+
+    async def fake_exchange(email, code):
+        pytest.fail(f"a newline-terminated address reached supabase: {email!r}")
+
+    monkeypatch.setattr(jwt_auth, "request_login_code", fake_code)
+    monkeypatch.setattr(jwt_auth, "exchange_login_code", fake_exchange)
+    resp = client.post(route, json=body)
+    assert resp.status_code == 400, resp.text
+
+
 def test_exchange_returns_the_access_token(client, monkeypatch, hosted):
     async def fake(email, code):
         return "a.b.c"

@@ -962,7 +962,8 @@ _SIGNIN_BUCKETS: dict[str, tuple[float, float]] = {}
 _SIGNIN_SWEEP_AT = 0.0
 
 
-def _signin_allowed(peer: str, email: str, forwarded: str = "") -> bool:
+def _signin_allowed(peer: str, email: str, forwarded: str = "",
+                    *, prefix: str = "") -> bool:
     """Token bucket for the sign-in routes: per socket peer, per hop, per address.
 
     All three keys are charged from the same state, so neither a rotated
@@ -972,6 +973,12 @@ def _signin_allowed(peer: str, email: str, forwarded: str = "") -> bool:
     `forwarded` is charged at the tight capacity because it is what a
     behind-the-proxy caller is metered on; it is also what an attacker
     controls, so it is deliberately *not* the bound.
+
+    `prefix` is a key **namespace**, not a capacity: the waitlist reuses this
+    limiter because a second bucket would be a second door, and gets its own
+    keys because sharing the peer bucket let an anonymous visitor drain the
+    sign-in routes' allowance for every beta user behind the same router
+    address.
     """
     global _SIGNIN_SWEEP_AT
     now = time.monotonic()
@@ -979,9 +986,10 @@ def _signin_allowed(peer: str, email: str, forwarded: str = "") -> bool:
         _SIGNIN_SWEEP_AT = now + 60.0
         for key in [k for k, (_, ts) in _SIGNIN_BUCKETS.items() if now - ts > 600.0]:
             del _SIGNIN_BUCKETS[key]
-    keys = [(f"peer:{peer}", _SHARED_PEER_CAPACITY), (f"email:{email}", _SIGNIN_BUCKET_CAPACITY)]
+    keys = [(f"{prefix}peer:{peer}", _SHARED_PEER_CAPACITY),
+            (f"{prefix}email:{email}", _SIGNIN_BUCKET_CAPACITY)]
     if forwarded:
-        keys.append((f"hop:{forwarded}", _SIGNIN_BUCKET_CAPACITY))
+        keys.append((f"{prefix}hop:{forwarded}", _SIGNIN_BUCKET_CAPACITY))
     allowed = True
     for key, capacity in keys:
         tokens, seen = _SIGNIN_BUCKETS.get(key, (capacity, now))
@@ -1045,7 +1053,10 @@ async def request_login_code(request: Request):
 
     body = await _json_body(request)
     email = str(body.get("email", "") or "")
-    if not EMAIL_RE.match(email):
+    # `fullmatch`, not `match`: the pattern is anchored with `^…$`, and `$`
+    # also matches immediately before a trailing newline — so an address
+    # ending in `\n` passes a `match` that a `fullmatch` rejects.
+    if not EMAIL_RE.fullmatch(email):
         raise _BadRequest("email is required")
     if not _signin_allowed(_signin_peer(request), normalize_email(email),
                             _forwarded_hop(request)):
@@ -1080,7 +1091,7 @@ async def exchange_login_code(request: Request):
     body = await _json_body(request)
     email = str(body.get("email", "") or "")
     code = str(body.get("code", "") or "").strip()
-    if not EMAIL_RE.match(email) or not code:
+    if not EMAIL_RE.fullmatch(email) or not code:
         raise _BadRequest("email and code are required")
     if not _signin_allowed(_signin_peer(request), normalize_email(email),
                             _forwarded_hop(request)):
@@ -1217,7 +1228,9 @@ async def delete_session(session_id: str, request: Request):
         return _error(404, "not found")
     if not registry.owns(session_id, _owner(auth.claims)):
         return _error(404, "unknown session")
-    return JSONResponse(content={"deleted": _delete(session_id)})
+    deleted = _delete(session_id)
+    registry.forget_owner(session_id)
+    return JSONResponse(content={"deleted": deleted})
 
 
 @app.delete("/v1/sessions")
@@ -1235,10 +1248,16 @@ async def delete_all_sessions(request: Request):
     if not auth.ok:
         return _error(404, "not found")
     owner = _owner(auth.claims)
-    deleted, residue = (
-        _delete_all() if owner is None
-        else _delete_all(only=registry.owned_sessions(owner))
-    )
+    if owner is None:
+        deleted, residue = _delete_all()
+    else:
+        # Snapshot the ids before the sweep: `delete_all` is what removes the
+        # files, and the ownership entries have to follow so a second
+        # "erase all" does not count the same erased session again.
+        mine = registry.owned_sessions(owner)
+        deleted, residue = _delete_all(only=mine)
+        for sid in mine:
+            registry.forget_owner(sid)
     # `residue` travels back because a file that could not be unlinked is
     # still on disk, and the panel is the only thing that can tell the user
     # their deletion did not finish. Answering `deleted: n` regardless would
@@ -2211,31 +2230,45 @@ async def join_waitlist(request: Request):
 
     if not wl.waitlist_enabled():
         return _error(404, "not found")
-    body = await _json_body(request)
+    # Caught rather than allowed to propagate: the `_BadRequest` handler is
+    # registered on `app` and this route is dispatched by the mounted
+    # sub-application, so a raise here comes back as a 500 — on a route whose
+    # every other error path is a 400. Same pattern as `create_reports`.
+    #
+    # Deliberately *after* the meter below's sibling, the email validation:
+    # charging a token for a typo teaches a visitor the site rejects them
+    # (pinned by `test_a_malformed_address_does_not_spend_a_token`). A body
+    # that will not parse is not a typo, and unmetered JSON parsing of a
+    # capped-size body is not the thing the meter exists to bound.
+    try:
+        body = await _json_body(request)
+    except _BadRequest as exc:
+        return _error(400, str(exc))
     # Normalise before validating: a pasted address with a trailing space is
     # the same person as one without, and EMAIL_RE has no reason to know that.
     email = normalize_email(str(body.get("email", "") or ""))
-    if not EMAIL_RE.match(email):
+    if not EMAIL_RE.fullmatch(email):
         # 400, and it says nothing about the address: a malformed address was
         # never written anywhere, so there is no membership to reveal.
         # Explicit rather than a raised `_BadRequest`, because the exception
         # handler for that is registered on `app` and this route is dispatched
         # by the mounted sub-application below.
         return _error(400, "a valid email address is required")
-    # The sign-in limiter, reused rather than a second bucket: it keys on the
-    # socket peer, on the forwarded hop and on the normalised address, and it
-    # consults nothing that knows who is on the list, so a stranger and a beta
-    # user are metered for exactly the same reason after exactly the same
-    # number of attempts.
+    # The sign-in limiter, reused rather than duplicated — with **its own key
+    # namespace**. The two routes key on the same socket peer, and that peer
+    # half is what the anti-spam argument rests on; sharing the *bucket* meant
+    # an anonymous visitor who drained the waitlist's twenty writes also
+    # locked every beta user behind the same router address out of asking for
+    # a login code, which is a denial of service on the one route a paying
+    # user needs. Same limiter, same capacities, same "consults nothing about
+    # the beta roster" property — a separate set of keys.
     #
-    # The peer half is deliberately shared: it is the anti-spam half, and a
-    # second bucket would just be a second door. The address half is namespaced,
-    # because this is an *open* form — sharing it would mean a stranger
-    # submitting somebody else's address five times blocks that person from
-    # asking for their own sign-in code for ten minutes, which is a denial of
-    # service on a list of strangers' addresses.
-    if not _signin_allowed(_signin_peer(request), f"waitlist:{email}",
-                            _forwarded_hop(request)):
+    # The address half is namespaced by the same `prefix`, because this is an
+    # *open* form: sharing that would mean a stranger submitting somebody
+    # else's address five times blocks that person from asking for their own
+    # sign-in code for ten minutes.
+    if not _signin_allowed(_signin_peer(request), email,
+                            _forwarded_hop(request), prefix="waitlist:"):
         return _error(429, "too many attempts — wait a few minutes and try again")
     if not await wl.add(email):
         # Fixed text. The address is not in it, and neither is a PostgREST

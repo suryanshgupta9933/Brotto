@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -152,6 +153,19 @@ COLUMNS = frozenset({
 MAX_EXT_VERSION_CHARS = 32
 MAX_PER_REQUEST = 5
 
+#: A version, in the spelling `manifest.json` and `package.json` actually
+#: use: a leading alphanumeric, then whatever a semver-ish string contains.
+#:
+#: `build_row` used to type-check and truncate, which is not a shape — a
+#: client could put arbitrary text in `ext_version` and it landed in
+#: `failure_reports`, the one table a human reads. Truncating bounds the
+#: *length* and nothing else, and this is a durable operator-read sink: a
+#: column is not content until somebody reads it. A closed alphabet is the
+#: smallest thing that is actually a boundary, and it is what `build_row`'s
+#: other five scalars already are — the same rule as `build_row` having no
+#: parameter for a task or a page.
+_VERSION_RE = re.compile(rf"[0-9A-Za-z][0-9A-Za-z.+-]{{0,{MAX_EXT_VERSION_CHARS - 1}}}")
+
 
 def build_row(
     *,
@@ -196,18 +210,31 @@ def build_row(
         "side": side,
         "code": code,
         "stage": stage,
-        # Version strings are the one free-form value allowed on this table:
-        # they are how an operator knows which build emitted a code, and they
-        # carry nothing about the user. Anything longer than a version is not
-        # a version.
-        "ext_version": (ext_version or "")[:MAX_EXT_VERSION_CHARS],
-        "relay_version": (relay_version or "")[:MAX_EXT_VERSION_CHARS],
+        # Version strings are the one free-form-ish value allowed on this
+        # table: they are how an operator knows which build emitted a code,
+        # and they carry nothing about the user. "Free-form-ish" — both go
+        # through `clean_version`, so both are a closed alphabet rather than
+        # whatever the caller typed. `ext_version` is client-supplied, so it
+        # is the one that has to be; `relay_version` is ours and validates
+        # for free.
+        "ext_version": clean_version(ext_version),
+        "relay_version": clean_version(relay_version),
     }
 
 
 def clean_version(value: object) -> str:
-    """A version string, or "". Anything else is not one."""
-    return value.strip()[:MAX_EXT_VERSION_CHARS] if isinstance(value, str) else ""
+    """A version string, or "". Anything else is not one.
+
+    A closed alphabet rather than a length cap, because this lands in the one
+    table a human reads: truncating a 5KB string leaves 32 characters of it
+    and the *content* is what matters, not the size. Not an attack surface
+    (`build_row` has no parameter for a task or a page) — it is a durable
+    sink that would carry whatever it was handed.
+    """
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    return value if _VERSION_RE.fullmatch(value) else ""
 
 
 # ---------------------------------------------------------------------------

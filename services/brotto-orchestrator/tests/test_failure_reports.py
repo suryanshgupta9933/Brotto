@@ -105,10 +105,6 @@ def test_a_client_code_cannot_ride_the_server_stage():
     assert fr.build_row(code="offline", stage="task_refused", side="server", owner=USER_ID) is None
 
 
-def test_an_overlong_version_is_truncated_not_rejected():
-    row = fr.build_row(code="offline", stage="connect", side="client", owner=USER_ID,
-                       ext_version="v" * 500)
-    assert row["ext_version"] == "v" * fr.MAX_EXT_VERSION_CHARS
 
 
 # ── self-host sends nothing, ever ─────────────────────────────────────────
@@ -232,6 +228,69 @@ def test_the_payload_cannot_carry_a_task_or_a_page(client, hosted):
     # And the identity is the relay's, read off the token — never the
     # `user_id` the body offered.
     assert rows[0]["owner"] == USER_ID
+
+
+def test_ext_version_cannot_be_used_as_a_channel(client, hosted):
+    """The one client-controlled string on the table, and the only place a
+    payload could ride that the shape rules do not otherwise cover.
+
+    `ext_version` is client-supplied by design — it is how an operator knows
+    which build emitted a code — so the alphabet is the boundary rather than
+    the name. Truncating left 32 characters of whatever was sent, in the one
+    column a human reads, and `failure_reports` is a durable sink: a column is
+    not content until somebody reads it.
+    """
+    forbidden = [TASK, PAGE_TEXT, "https://mail.google.com/mail/u/0/#inbox/4471",
+                 "beta@example.test", "hello world",
+                 "1.0.0\r\nX-Injected: 1", "v" * 500, "1/2;3",
+                 "1.0.0 <script>", "{'task': 'x'}", "a" * 200]
+    for value in forbidden:
+        rows, offered = fr.build_client_rows(
+            {"reports": [{"code": "offline", "ext_version": value}]}, USER_ID)
+        assert offered == 1, value
+        # Empty, not truncated: 32 characters of what was sent is still what
+        # was sent, in the one column a human reads.
+        assert rows[0]["ext_version"] == "", f"{value!r} reached the row"
+
+
+def test_the_alphabet_is_a_shape_not_a_vocabulary():
+    """What the guard actually buys, stated so it is not over-sold.
+
+    `[0-9A-Za-z][0-9A-Za-z.+-]{0,31}` removes free text: whitespace, newlines,
+    quotes, URLs with a scheme, braces, and anything over 32 characters. It
+    does not stop a caller writing `sk-ant-whatever` — that is inside the
+    alphabet, and it is the ceiling. It is the right ceiling here: the client
+    is the user's own extension, `code` is the closed set the operator
+    actually reads, and this is a bounded nuisance in a supplementary column
+    rather than a channel. Anything tighter starts guessing which builds exist,
+    which is a filter a later commit widens — the shape this table is built
+    on is `build_row` having no parameter for a task, not how well a string
+    is recognised.
+    """
+    assert fr.clean_version("sk-ant-whatever") == "sk-ant-whatever"
+    assert len(fr.clean_version("a" * 500)) == 0
+    assert fr.clean_version("the operator's notes") == ""
+
+
+def test_a_real_version_still_gets_through():
+    """The closed alphabet is the whole cost; spellings that are actually
+    versions must survive it."""
+    for value in ("1.0.0", "2", "v3", "0.1.2-beta.1", "1.0.0+build.7", "2.0.0",
+                  " 1.0.0 "):
+        assert fr.clean_version(value) == value.strip(), value
+    # Non-strings and empty are absence, not a version.
+    assert fr.clean_version(None) == ""
+    assert fr.clean_version(123) == ""
+    assert fr.clean_version("") == ""
+
+
+def test_the_oversized_version_is_dropped_not_truncated():
+    """It used to truncate; a 500-character version string's first 32
+    characters are not a version either, and keeping the truncation meant the
+    test below asserted the weaker of the two guarantees."""
+    row = fr.build_row(code="offline", stage="connect", side="client", owner=USER_ID,
+                       ext_version="v" * 500)
+    assert row["ext_version"] == ""
 
 
 def test_a_client_cannot_claim_another_account(client, hosted):

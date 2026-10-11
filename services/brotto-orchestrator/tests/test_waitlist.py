@@ -287,10 +287,11 @@ def test_a_malformed_address_does_not_spend_a_token(hosted, client, monkeypatch)
 
 
 def test_a_stranger_cannot_burn_an_addresss_sign_in_budget(hosted, client, monkeypatch):
-    """The open form shares the peer bucket, not the address one.
-
-    Submitting somebody else's address five times must not stop that person
+    """Submitting somebody else's address five times must not stop that person
     asking for their own sign-in code for ten minutes.
+
+    Both halves of the limiter are namespaced to the waitlist now — the peer
+    bucket included, which is the other half of this test below.
     """
     _supabase_stub(monkeypatch)
     from brotto_orchestrator.session import jwt_auth as fresh_jwt
@@ -299,8 +300,6 @@ def test_a_stranger_cannot_burn_an_addresss_sign_in_budget(hosted, client, monke
         return 200, "{}"
 
     monkeypatch.setattr(fresh_jwt, "_supabase_call", otp)
-    # Same address, a *different* peer: the peer half is deliberately shared
-    # (it is the anti-spam half), so only the address half is under test here.
     for i in range(6):
         client.post(
             "/v1/waitlist",
@@ -313,6 +312,74 @@ def test_a_stranger_cannot_burn_an_addresss_sign_in_budget(hosted, client, monke
         headers={"x-forwarded-for": "203.0.113.12"},
     )
     assert resp.status_code != 429, "the waitlist metered somebody else's sign-in budget"
+
+
+def test_the_waitlist_cannot_drain_the_sign_in_peer_bucket(hosted, client, monkeypatch):
+    """The peer bucket used to be shared, and that was a denial of service.
+
+    Behind Heroku every caller shares one router address, so the peer key is
+    one bucket for the whole beta. An anonymous visitor could spend it twenty
+    times on the open form and lock out every beta user asking for a login
+    code — the one route a signed-in person needs and the one route an
+    anonymous stranger can reach. Same limiter, same anti-spam argument, a
+    separate set of keys.
+    """
+    _supabase_stub(monkeypatch)
+    from brotto_orchestrator import main
+    from brotto_orchestrator.session import jwt_auth as fresh_jwt
+
+    async def otp(*a, **kw):
+        return 200, "{}"
+
+    monkeypatch.setattr(fresh_jwt, "_supabase_call", otp)
+
+    def submit(i):
+        return client.post(
+            "/v1/waitlist",
+            json={"email": f"visitor{i}@example.test"},
+            # A fresh address and a fresh header per request: the two halves
+            # a caller controls, so only the shared peer key can stop them.
+            headers={"x-forwarded-for": f"203.0.113.{i}"},
+        ).status_code
+
+    statuses = [submit(i) for i in range(int(main._SHARED_PEER_CAPACITY) + 5)]
+    assert statuses[-1] == 429, "the open form is not metered on its own peer bucket"
+
+    resp = client.post("/v1/auth/request-code", json={"email": "beta@example.test"})
+    assert resp.status_code == 200, "the waitlist spent the sign-in routes' peer budget"
+
+
+def test_the_peer_key_is_the_socket_and_the_namespace_is_not_optional(hosted, client):
+    """Stated against the unit both routes call, so the property does not
+    depend on how many requests a test happens to make."""
+    from brotto_orchestrator import main
+
+    main._SIGNIN_BUCKETS.clear()
+    peer = main._signin_peer(_FakeRequest(host="198.51.100.9"))
+    for i in range(int(main._SHARED_PEER_CAPACITY)):
+        assert main._signin_allowed(peer, f"visitor{i}@example.test", f"203.0.113.{i}",
+                                    prefix="waitlist:")
+    assert not main._signin_allowed(peer, "last@example.test", "203.0.113.250",
+                                    prefix="waitlist:")
+    # The drained bucket is the waitlist's alone.
+    assert main._signin_allowed(peer, "beta@example.test", "203.0.113.250")
+    assert peer == "198.51.100.9", "the peer is still the socket, never the header"
+
+
+def test_a_malformed_body_is_a_400_not_a_500(hosted, client):
+    """The `_BadRequest` handler is registered on `app`; this route is
+    dispatched by the mounted sub-application, so an uncaught raise came back
+    as a 500 on a route whose every other error path is a 400."""
+    resp = client.post("/v1/waitlist", content=b"{not json",
+                       headers={"Content-Type": "application/json"})
+    assert resp.status_code == 400, resp.text
+
+
+def test_a_body_that_is_not_an_object_is_a_400(hosted, client):
+    for payload in (b'["an"]', b'"a string"', b"null", b"3"):
+        resp = client.post("/v1/waitlist", content=payload,
+                           headers={"Content-Type": "application/json"})
+        assert resp.status_code == 400, (payload, resp.status_code, resp.text)
 
 
 # ── what a broken control plane may say ───────────────────────────────────
