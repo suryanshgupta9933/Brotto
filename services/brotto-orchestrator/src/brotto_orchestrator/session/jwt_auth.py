@@ -326,7 +326,7 @@ async def authorize_task_start(claims: Claims) -> None:
             f"You have used this week's {cap} tasks. They reset on Monday.",
         )
     # The increment itself is one conditional statement in Postgres
-    # (`reserve_task_slot`, migrations/001_profiles.sql). Comparing here and
+    # (`reserve_task_slot`, supabase/migrations/001_profiles.sql). Comparing here and
     # PATCHing afterwards is a read-then-write race: two starts for one
     # account both read `used = 9`, both pass, both write 10, and one task
     # is granted past the cap. A `false` return means the row did not

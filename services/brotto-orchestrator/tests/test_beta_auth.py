@@ -597,12 +597,13 @@ def test_an_operator_setting_retention_still_wins(monkeypatch, hosted):
 
 # ── the control plane's own table ─────────────────────────────────────────
 #
-# SUPABASE_ANON_KEY is public — it ships in the extension bundle — so the
-# table holding the beta roster has to deny it explicitly. Nothing in the
-# Python asserts this: a migration file is not imported by anything.
+# SUPABASE_ANON_KEY is public by Supabase's design — it is the key every
+# browser client ships — so the table holding the beta roster has to deny it
+# explicitly. Nothing in the Python asserts this: a migration file is not
+# imported by anything.
 
 MIGRATION = (
-    Path(__file__).resolve().parents[1] / "migrations" / "001_profiles.sql"
+    Path(__file__).resolve().parents[3] / "supabase" / "migrations" / "001_profiles.sql"
 )
 
 
