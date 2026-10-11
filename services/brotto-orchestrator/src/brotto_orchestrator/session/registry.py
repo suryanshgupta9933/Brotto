@@ -31,6 +31,7 @@ class SessionState:
 class SessionRegistry:
     def __init__(self) -> None:
         self._sessions: dict[str, SessionState] = {}
+        self._owners: dict[str, str | None] = {}
 
     def get_or_create(self, user_id: str) -> SessionState:
         if user_id not in self._sessions:
@@ -91,8 +92,50 @@ class SessionRegistry:
     # eviction — each of those reads 404 rather than handing one beta
     # user another's inbox, which is the whole finding.
 
+    # Ownership lives in its own map, **not** in `_sessions`.
+    #
+    # It is not a refactor: `_sessions` is evictable (`_prune_sessions`, cap
+    # `MAX_TRACKED_SESSIONS`) and everything else in a `SessionState` is
+    # per-run runtime — a sequence tracker, a task handle, a cached policy.
+    # Ownership is not. Putting it there meant that at the cap, eviction
+    # dropped entries, `owned_sessions()` shrank, and `DELETE /v1/sessions`
+    # scoped by `only=` reported `{"deleted": 0, "residue": 0}` with every
+    # transcript still on disk — the untruthful erasure the `.owner` sidecar
+    # work existed to close, reopened at a scale threshold where no restart
+    # is involved and nothing looks wrong.
+    #
+    # ponytail: unbounded for the life of the process, one str per session
+    # ever minted. That is the same set `hydrate_owners` already loads in
+    # full at boot, so it is a property of the design rather than a new
+    # leak; the eviction cap exists for the state that *is* per-run.
+    _owners: dict[str, str | None]
+
     def set_owner(self, session_id: str, owner: str | None) -> None:
+        self._owners[session_id] = owner
         self.get_or_create(session_id).owner = owner
+
+    def hydrate_owners(self, owners: dict[str, str]) -> int:
+        """Restore ownership from disk at startup. Returns how many landed.
+
+        The registry is in-memory, so a dyno restart used to empty it and
+        with it every ownership answer: `owned_sessions()` returned nothing,
+        so `DELETE /v1/sessions` reported `{"deleted": 0, "residue": 0}` with
+        every transcript still on disk. Hydrating from the `.owner` sidecars
+        the mint path writes is what makes that answer true after a restart
+        rather than only in the process that happened to serve the run.
+        """
+        for session_id, owner in owners.items():
+            self.set_owner(session_id, owner)
+        return len(owners)
+
+    def forget_owner(self, session_id: str) -> None:
+        """Drop a session's ownership. Called when its files are erased.
+
+        Not a memory optimisation: an erased session left in `_owners` would
+        be reported as the caller's own by a scoped `erase all`, so the
+        count would describe a file that is no longer there.
+        """
+        self._owners.pop(session_id, None)
 
     def owns(self, session_id: str, owner: str | None) -> bool:
         """Whether `owner` is the identity this session was minted for.
@@ -103,10 +146,11 @@ class SessionRegistry:
         """
         if owner is None:
             return True
-        session = self._sessions.get(session_id)
-        return session is not None and session.owner == owner
+        # Not `.get(...) is None`: a session explicitly recorded as owned by
+        # nobody is not owned by the caller. Fail-closed either way.
+        return owner == self._owners.get(session_id)
 
     def owned_sessions(self, owner: str | None) -> list[str]:
         if owner is None:
             return sorted(self._sessions)
-        return sorted(s for s, st in self._sessions.items() if st.owner == owner)
+        return sorted(s for s, o in self._owners.items() if o == owner)

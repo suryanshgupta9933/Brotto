@@ -118,6 +118,19 @@ outlives its own digests is worse than no retention.
 Age is the document's mtime, which the atomic rewrite bumps on every step, so
 this measures last activity rather than when the session started.
 
+**A second pass sweeps the orphaned `*.owner` sidecars** (`_prune_orphan_owners`).
+The pass above is document-driven — it globs `*.json` — so a `<session_id>.owner`
+whose document is gone was invisible to it, and on the hosted relay retention is
+on by default at 30 days, which made the promise a file type it was silently not
+covering. **The condition is "the document is absent", not age**, and that
+distinction is load-bearing: `.owner` is written once at mint and never touched
+again, so its mtime is the *start* of the run while the document's is the last
+activity. A month-long session has a fresh document beside a 40-day-old sidecar,
+and sweeping on age would silently drop a live session out of a scoped *erase
+all*. Live sessions are skipped for the same reason the document loop skips
+them. Operationally: the 30-day promise on the relay now covers the sidecars,
+and it is the sidecar that says whose transcript a file was.
+
 **The hosted relay is the one exception, and it is an exception because the disk
 is ours.** Left unset, `BROTTO_RETENTION_DAYS` returns `HOSTED_RETENTION_DAYS`
 (30) when `auth_mode() == "jwt"` and `None` everywhere else. A self-hoster's disk
@@ -147,6 +160,7 @@ stray `AGENT_SECRET` first.**
 | `SUPABASE_ANON_KEY` | hosted | The two sign-in routes only |
 | `BROTTO_RETENTION_DAYS` | optional | Defaults to **30** on the hosted relay, off elsewhere |
 | `BROTTO_BETA_TASK_CAP` | optional | Weekly per-person task cap; defaults to 10 |
+| `BROTTO_WAITLIST_BATCH` | optional | Label stamped on waitlist signups, so the operator can tell which invite round a row went out in. Empty by default |
 
 All four Supabase values are in Project Settings → API, and none of them belong
 in `.env.example` — which is why that file ships them **commented out**, which
@@ -165,7 +179,7 @@ naming RS256 and carrying a public key as HMAC material, must never reach
 The relay reads one table, and it is not created by the application:
 
 ```bash
-psql "$SUPABASE_URL" -f services/brotto-orchestrator/migrations/001_profiles.sql
+psql "$SUPABASE_URL" -f supabase/migrations/001_profiles.sql
 ```
 
 There is no migration runner. `profiles` is the operator's ledger **over**
@@ -188,9 +202,11 @@ reason.
 are not optional, both added before any beta database was stood up:
 
 - **`alter table profiles enable row level security` with zero policies, plus
-  revokes on `anon` and `authenticated`.** `SUPABASE_ANON_KEY` is *public* — it
-  ships in the extension bundle — so the default grants are not a threat model,
-  they are the starting state. Without this, the project URL and that key are
+  revokes on `anon` and `authenticated`.** `SUPABASE_ANON_KEY` is *public* by
+  Supabase's own design — it is the key every browser client is expected to
+  ship, and the two sign-in routes here read it server-side; **the extension
+  bundle does not contain it** — so the default grants are not a
+  threat model, they are the starting state. Without this, the project URL and that key are
   enough to read the beta roster and write to it: set your own `revoked_at`
   back to null, or zero your own counter, without touching the relay at all.
   The relay needs no policy because it reads and writes with the **service role
@@ -205,6 +221,21 @@ are not optional, both added before any beta database was stood up:
 **If a database was created from an earlier copy of this file, drop and re-run
 it** — there is no migration runner, so editing `001` in place only reaches a
 database that has not been created yet.
+
+### The other two migrations, run by hand the same way
+
+```bash
+psql "$SUPABASE_URL" -f supabase/migrations/002_failure_reports.sql
+psql "$SUPABASE_URL" -f supabase/migrations/003_waitlist.sql
+```
+
+Same posture as `profiles`: no migration runner, RLS with zero policies plus
+revokes on `anon` and `authenticated`, written only by the service role.
+`waitlist` additionally carries a `unique` on `email`, because a double-clicked
+submit must not create two rows and a read-then-insert is a race a double-click
+wins. **Without `003` run, `POST /v1/waitlist` answers 502 on every signup** and
+the log says only that an insert was refused — the marketing page will report a
+success-looking failure. See `docs/architecture/privacy.md`.
 
 ### `BROTTO_BETA_TASK_CAP` is a rollout knob, not a policy number
 

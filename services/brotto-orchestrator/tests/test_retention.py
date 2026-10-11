@@ -159,3 +159,50 @@ def test_startup_sweeps(sessions_dir, monkeypatch):
     with TestClient(app):
         pass
     assert list_sessions(dir=sessions_dir) == []
+
+
+# ── the owner sidecar outlives the document only when nothing is left ──────
+
+def test_an_orphaned_residue_keeps_the_owner_that_can_still_erase_it(sessions_dir):
+    """The document is not the erasure. A hand-deleted `.json` can strand a
+    scratchpad or a `*.pages.json` beside it, and dropping the `.owner` then
+    costs the account the only handle that can reach them — permanently,
+    because `owned_sessions()` is what scopes an erase-all.
+
+    Checked against `_SESSION_RESIDUE_EXT` rather than a second hardcoded
+    list, so a sidecar added to `delete` is covered here by construction.
+    """
+    from brotto_orchestrator.agent import audit as audit_mod
+
+    _seed(sessions_dir, "old", age_days=40)
+    owner = sessions_dir / f"old{audit_mod._OWNER_EXT}"
+    owner.write_text("account-id", encoding="utf-8")
+    (sessions_dir / "old.json").unlink()  # erased by hand; the sidecars stay
+    aged = time.time() - 40 * 86400  # written here, so the sweep must age it too
+    os.utime(owner, (aged, aged))
+    assert (sessions_dir / "old.scratchpad.txt").exists()
+
+    prune_older_than(30, dir=sessions_dir)
+
+    assert (sessions_dir / "old.scratchpad.txt").exists(), "nothing was left to erase"
+    assert owner.exists(), "the account can no longer erase the scratchpad it has"
+
+
+def test_an_owner_with_nothing_left_to_erase_is_still_pruned(sessions_dir):
+    """The other half, or the guard above is just a leak: with the document
+    and every residue sidecar gone, there is nothing to keep an owner for and
+    the account id must age out like everything else."""
+    from brotto_orchestrator.agent import audit as audit_mod
+
+    _seed(sessions_dir, "old", age_days=40)
+    owner = sessions_dir / f"old{audit_mod._OWNER_EXT}"
+    owner.write_text("account-id", encoding="utf-8")
+    for sidecar in sessions_dir.glob("old.*"):
+        if sidecar != owner:
+            sidecar.unlink()
+    aged = time.time() - 40 * 86400  # written here, so the sweep must age it too
+    os.utime(owner, (aged, aged))
+
+    prune_older_than(30, dir=sessions_dir)
+
+    assert not owner.exists()

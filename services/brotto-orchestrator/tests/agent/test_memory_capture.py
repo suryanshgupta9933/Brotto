@@ -295,3 +295,80 @@ def test_a_long_page_that_was_never_truncated_still_reads_as_complete():
     out = _recall(sp)
     assert out == body
     assert "digest" not in out.lower()
+
+
+# ── the tool path is the other way in ────────────────────────────────────
+#
+# `redact_text` ran at exactly one place: the per-step `get_page_text`. The
+# system prompt advertises `read_page_text`, the handler took the CDP text
+# raw, and the whole thing came back verbatim — so the guarantee the public
+# policy makes was bypassable by a model that simply called the tool. Worse,
+# the unredacted text was stored as the memory body, so a *later* step could
+# be handed it through `recall_memory` even with the tool never called twice.
+
+
+def _read_page_text(page_text):
+    """Run the real handler against a fake CDP that returns `page_text`.
+
+    Returns `(deps, entry_id)`. The handler's own return value is a receipt,
+    not the text — it tells the model to `recall_memory` for the body — so
+    the stored body is where the text that reaches the model is decided.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from brotto_orchestrator.agent.context import ActionCall
+    from brotto_orchestrator.agent.harness import _execute_action
+
+    class FakeCDP:
+        async def read_page_text(self, selector, max_chars=2000, around=None):
+            return page_text
+
+    deps = SimpleNamespace(scratchpad=Scratchpad(), user_id="u",
+                           cdp=FakeCDP(), step_number=1)
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(_execute_action(
+        ActionCall(action="read_page_text", action_args={}), deps))
+    return deps, deps.scratchpad.entries[0].id
+
+
+# A card number is the cheapest string in the rule set to assert on and the
+# one whose absence from a provider's logs matters most.
+CARD = "4111 1111 1111 1111"
+
+
+def test_read_page_text_redacts_before_the_text_reaches_the_model():
+    deps, entry_id = _read_page_text(
+        f"Order total, card {CARD}, shipping tomorrow.")
+
+    # The path the model actually receives it on.
+    recalled = _recall(deps.scratchpad, entry_id)
+    assert CARD not in recalled
+    assert "[redacted]" in recalled
+
+
+def test_read_page_text_stores_the_redacted_form_not_the_raw_one():
+    """The return path is only half of it. An unredacted `body` is the raw
+    text sitting in memory, and the manifest digest ships in the prompt every
+    step from there on — so the leak outlives the step that caused it."""
+    deps, entry_id = _read_page_text(
+        f"Order total, card {CARD}, shipping tomorrow.")
+
+    entries = deps.scratchpad.entries
+    assert len(entries) == 1
+    assert CARD not in entries[0].body, "raw text is parked for recall_memory"
+    assert CARD not in entries[0].digest
+
+
+def test_read_page_text_still_reads_the_page_it_was_held_to():
+    """Redaction replaces the secret, not the page. Over-redaction is a
+    known cost of this module, but blanking the read would break the tool's
+    only purpose."""
+    deps, entry_id = _read_page_text(
+        f"Invoice 88213 from Acme Ltd. Card on file: {CARD}. "
+        "Thanks for your business.")
+
+    recalled = _recall(deps.scratchpad, entry_id)
+    assert "Invoice 88213" in recalled
+    assert "Acme Ltd" in recalled
+    assert "Thanks for your business" in recalled

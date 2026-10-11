@@ -193,8 +193,11 @@ const refusalFor = async (settings, url) =>
   check("scheduleReconnect bails on a refused credential",
     /function scheduleReconnect\(\)\s*:\s*boolean \{[\s\S]{0,600}?if \(credentialRefusal\) return false;/
       .test(worker));
+  // The window is 400 because the refusal branch now queues a
+  // `credential_missing` report between the resolve and the throw. Anchored at
+  // both ends, so a wider gap cannot match a different refusal site.
   check("and startRelay throws the refusal instead of opening a socket",
-    /const credential = await credentialFor\(plannerUrl\);[\s\S]{0,200}?throw new Error\(credential\.refusal\);/
+    /const credential = await credentialFor\(plannerUrl\);[\s\S]{0,400}?throw new Error\(credential\.refusal\);/
       .test(worker));
   check("the WebSocket is handed the resolved credential, not a fresh storage read",
     /authedWs\(wsUrl, credential\.secret\)/.test(worker));

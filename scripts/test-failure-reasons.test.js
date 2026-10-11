@@ -147,6 +147,85 @@ check(
     "belonged in `summary`, which is the detail the panel appends under the note",
 );
 
+// ── every code is reportable, or the ledger has a hole in it ──────────────
+//
+// `failure_reports` (session/failure_report.py) answers "did the run happen,
+// and if not which of our fixed codes says why" — which is only answerable if
+// the codes it accepts are the codes we emit. REPORTABLE is a restated list,
+// so this is what keeps it honest: a new `failure_reason` that nobody added
+// there is a failure the operator cannot see, and a missing entry is an
+// *absence*, which reads clean in review.
+console.log("\nevery code is one the failure-report ledger accepts");
+const reportable = new Set();
+{
+  const py = fs.readFileSync(path.join(PY, "session", "failure_report.py"), "utf8");
+  // Both literal sets, and only those: CLIENT_CODES is folded into
+  // REPORTABLE by name, so slicing either one alone reads as the whole
+  // vocabulary and every server code fails.
+  const start = py.indexOf("CLIENT_CODES = frozenset");
+  const end = py.indexOf("COLUMNS = frozenset", start);
+  if (start < 0 || end < 0) throw new Error("no REPORTABLE set in failure_report.py — renamed?");
+  const body = py.slice(start, end);
+  for (const m of body.matchAll(/["']([A-Za-z_]+)["']/g)) reportable.add(m[1]);
+}
+const notReported = new Set();
+{
+  const py = fs.readFileSync(path.join(PY, "session", "failure_report.py"), "utf8");
+  const start = py.indexOf("NOT_REPORTED = frozenset");
+  if (start < 0) throw new Error("no NOT_REPORTED set in failure_report.py — renamed?");
+  for (const m of py.slice(start, py.indexOf("})", start)).matchAll(/["']([A-Za-z_]+)["']/g)) {
+    notReported.add(m[1]);
+  }
+}
+console.log(`reportable codes:     ${[...reportable].sort().join(", ")}\n`);
+for (const [reason, file] of [...reasons].sort()) {
+  check(
+    reportable.has(reason),
+    `${reason} can be recorded`,
+    `emitted by ${file}; without it here the operator sees a run that failed ` +
+      `and no code saying why`,
+  );
+}
+
+console.log("\nevery code the extension writes is recorded or has a reason not to");
+for (const [reason, file] of [...client].sort()) {
+  check(
+    reportable.has(reason) || notReported.has(reason),
+    `${reason} is either reportable or in NOT_REPORTED`,
+    `emitted by ${file}; a client condition with neither a code in the ledger ` +
+      `nor a written reason it is excluded is an operator blind spot`,
+  );
+}
+
+console.log("\nno report can carry anything but a code");
+{
+  // The extension side. `reportBody` is the only thing in the worker that
+  // builds a report payload; enumerating its object keys is the guarantee
+  // that there is nowhere for a page or a task to go.
+  const worker = fs.readFileSync(
+    path.join(ROOT, "clients", "brotto-extension", "src", "background.ts"), "utf8");
+  const start = worker.indexOf("function reportBody(");
+  check(start >= 0, "background.ts still builds its reports through reportBody",
+        "renamed or deleted — the payload shape is now unchecked");
+  // From the return, not from the signature: `codes: string[]` is a
+  // parameter and reading it as a field is the same false positive as a key.
+  const fn = start >= 0 ? worker.slice(start, worker.indexOf("\n}", start)) : "";
+  const body = fn.slice(fn.indexOf("return"));
+  const keys = new Set([...body.matchAll(/([A-Za-z_]+)\s*:/g)].map((m) => m[1]));
+  check(keys.size > 0, "reportBody's returned object was found");
+  for (const key of keys) {
+    check(
+      ["reports", "code", "ext_version"].includes(key),
+      `reportBody emits no \`${key}\``,
+      "a report carries a code and this build's version, nothing else",
+    );
+  }
+  check(/[{(]\s*code\s*[},]/.test(body), "a report still carries its code",
+        "the shorthand `code` disappeared from the payload");
+  check(fn.includes("chrome.runtime.getManifest().version"),
+        "the only free-form value on a report is a version string");
+}
+
 console.log(
   failed === 0 ? "\nall checks passed" : `\n${failed} check(s) failed`,
 );

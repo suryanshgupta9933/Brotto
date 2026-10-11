@@ -23,6 +23,7 @@ import copy
 import datetime as _dt
 import json
 import logging
+import uuid
 import os
 import re
 import secrets
@@ -818,11 +819,90 @@ def _is_document_stem(name: str) -> bool:
 # the shape that bit — 76KB of real Gmail text beside a document someone
 # removed by hand. `*.scratchpad.txt` is the one current builds still write.
 _DOCUMENT_EXT = ".json"
+#: Who a session belongs to, on the hosted relay. Not user content and not a
+#: page: one account id, the same `sub` the `profiles` row already holds, and
+#: the only thing standing between a restarted dyno and a user who is told
+#: their transcripts are erased while every file is still on disk.
+#:
+#: It is a sidecar rather than a field in the document because the document is
+#: written by the harness's `AuditTrail` and this is written at mint time, by
+#: `POST /v1/sessions`, before a run exists and so before any document does.
+#: It is in `_SESSION_RESIDUE_EXT` for the same reason `*.pages.json` is: a
+#: sidecar `delete` does not name is a sidecar `delete_all` does not sweep,
+#: and this one is an account id sitting next to somebody's transcript.
+_OWNER_EXT = ".owner"
 _SESSION_RESIDUE_EXT: tuple[str, ...] = (
     ".json.tmp",
     ".scratchpad.txt",
     ".pages.json",
+    _OWNER_EXT,
+    # An interrupted `record_owner` leaves this one behind, exactly as an
+    # interrupted `_flush` leaves a `.json.tmp`. It carries an account id.
+    f"{_OWNER_EXT}.tmp",
 )
+
+
+def record_owner(session_id: str, owner: str | None, *, dir: Path | None = None) -> bool:
+    """Persist which account a session was minted for. Returns whether it wrote.
+
+    Written only when there *is* an owner: `None` is self-host's one shared
+    identity, which needs no record and would otherwise put a file full of
+    the literal `None` beside every session on a self-hoster's disk.
+
+    Never raises — it runs on the mint path, and a write that fails must leave
+    the session usable rather than take the route down with it. A lost write
+    is fail-closed by design: the session comes back unowned and belongs to
+    nobody.
+    """
+    if owner is None or not _is_document_stem(session_id):
+        return False
+    d = dir or default_dir()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{session_id}{_OWNER_EXT}"
+        # Same two-step as `_flush`: a half-written sidecar is a sidecar that
+        # reads as somebody else's account.
+        tmp = path.with_suffix(f"{_OWNER_EXT}.tmp")
+        tmp.write_text(owner, encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        log.warning("audit: could not record the owner of %s: %s",
+                    session_id, type(exc).__name__)
+        return False
+
+
+def load_owners(*, dir: Path | None = None) -> dict[str, str]:
+    """Every persisted owner, as `{session_id: owner}`, for startup hydration.
+
+    A file whose stem is not a session-id shape is skipped rather than turned
+    into registry state: this walks a directory, and `delete` walks the same
+    one, so a stray `notes.owner` must not become a session nobody can read.
+    """
+    d = dir or default_dir()
+    owners: dict[str, str] = {}
+    try:
+        paths = list(d.glob(f"*{_OWNER_EXT}"))
+    except OSError as exc:
+        log.warning("audit: could not list owners: %s", type(exc).__name__)
+        return owners
+    for p in paths:
+        stem = p.name[: -len(_OWNER_EXT)]
+        # A uuid, not merely a dot-free token: `POST /v1/sessions` mints
+        # exactly this and the relay socket accepts exactly this, so anything
+        # else in the directory is a file somebody left rather than a session,
+        # and `set_owner` would turn it into registry state.
+        try:
+            uuid.UUID(stem)
+        except ValueError:
+            continue
+        try:
+            owner = p.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if owner:
+            owners[stem] = owner
+    return owners
 
 
 def read(session_id: str, *, dir: Path | None = None) -> dict:
@@ -864,7 +944,8 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
                            "tokens_in": 0, "tokens_out": 0, "errors": 1}}
 
 
-def delete(session_id: str, *, dir: Path | None = None) -> bool:
+def delete(session_id: str, *, dir: Path | None = None,
+           leftover: list[str] | None = None) -> bool:
     """Remove one session's files. Returns whether anything was there.
 
     A session is only deleted when *all* of it is gone. Leaving the
@@ -872,30 +953,56 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
     user believes they erased, and leaving the live trail in `_LIVE` is
     worse: the running loop rewrites the whole document on its next
     flush, so the "deleted" session reappears in the history list.
+
+    `leftover` collects the names of files that could **not** be unlinked, so
+    a caller can refuse to record an erasure that did not finish. It is an
+    out-parameter rather than part of the return because two internal callers
+    (`delete_all`, `prune_older_than`) want the boolean and must not have to
+    unpack it — but a caller that promises the user "erased" and passes no
+    list is back to inferring it, which is how this was wrong before.
     """
     if not _is_document_stem(session_id):
         return False
     d = dir or default_dir()
     removed = False
-    for name in (f"{session_id}{ext}" for ext in (_DOCUMENT_EXT, *_SESSION_RESIDUE_EXT)):
-        # pages.json has no writer — page text stopped reaching disk — but
-        # `read` and `list_sessions` already name it, and a sidecar written
-        # by an older build is still on the user's disk.
-        # The .tmp is the atomic write's staging file, so it holds a whole
-        # document whenever a write was interrupted between the two steps.
-        # `list_sessions` globs `*.json` and would never show it, which is
-        # exactly why it has to be named here rather than swept: the user
-        # is told the session is erased, and this would be what is left.
-        try:
-            # Same guard as `read`, one line above the loop: a session id with
-            # a separator or a dot never reaches here, so `name` can only
-            # resolve inside `d`. Suppressed in `.github/workflows/codeql.yml`.
-            (d / name).unlink()
-            removed = True
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            log.warning("audit: could not remove %s/%s: %s", d, name, exc)
+    failed: list[str] = []
+
+    def _unlink(names: list[str]) -> None:
+        nonlocal removed
+        for name in names:
+            # pages.json has no writer — page text stopped reaching disk — but
+            # `read` and `list_sessions` already name it, and a sidecar written
+            # by an older build is still on the user's disk.
+            # The .tmp is the atomic write's staging file, so it holds a whole
+            # document whenever a write was interrupted between the two steps.
+            # `list_sessions` globs `*.json` and would never show it, which is
+            # exactly why it has to be named here rather than swept: the user
+            # is told the session is erased, and this would be what is left.
+            try:
+                # Same guard as `read`, one line above the loop: a session id
+                # with a separator or a dot never reaches here, so `name` can
+                # only resolve inside `d`. Suppressed in codeql.yml.
+                (d / name).unlink()
+                removed = True
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                failed.append(name)
+                log.warning("audit: could not remove %s/%s: %s", d, name, exc)
+
+    names = [f"{session_id}{ext}" for ext in (_DOCUMENT_EXT, *_SESSION_RESIDUE_EXT)]
+    # The owner sidecars go last, and only if everything before them went. An
+    # `.owner` erased beside a scratchpad that survived is the same permanent
+    # unreachability as an orphaned one, one delete earlier: after the next
+    # restart `owned_sessions()` cannot name the file again, and nothing in
+    # the product reaches a file no owner claims.
+    owner_exts = (_OWNER_EXT, f"{_OWNER_EXT}.tmp")
+    owner_names = [n for n in names if n[len(session_id):] in owner_exts]
+    _unlink([n for n in names if n not in owner_names])
+    if not failed:
+        _unlink(owner_names)
+    if leftover is not None:
+        leftover.extend(failed)
     with _LIVE_LOCK:
         live = _LIVE.pop(session_id, None)
     if live is not None:
@@ -936,7 +1043,13 @@ def delete_all(*, dir: Path | None = None, only: Container[str] | None = None) -
     # owned by another user stays put, and the caller answers "everything
     # deleted" — so the user is told their mail is erased and it is not.
     residue = 0
+    owner_exts = (_OWNER_EXT, f"{_OWNER_EXT}.tmp")
+    # Same rule as `delete`: an `.owner` is not swept while anything it is
+    # the only handle to is still on disk. Otherwise the retry that follows
+    # the caller keeping ownership finds no owner to scope it by.
     for ext in _SESSION_RESIDUE_EXT:
+        if ext in owner_exts and residue:
+            continue
         for p in d.glob(f"*{ext}"):
             if keep is not None and p.name[: -len(ext)] not in keep:
                 continue
@@ -979,6 +1092,70 @@ def prune_older_than(days: float, *, dir: Path | None = None) -> int:
             continue
         if delete(p.stem, dir=d):
             pruned += 1
+    pruned += _prune_orphan_owners(d, cutoff, live)
+    return pruned
+
+
+def _prune_orphan_owners(d: Path, cutoff: float, live: set[str]) -> int:
+    """Age out `.owner` sidecars whose document is gone. Returns the count.
+
+    The loop above is document-driven — it globs `*.json` — so a sidecar
+    whose document is missing was invisible to it. That is not hypothetical:
+    a user who deletes the `.json` by hand strands the `.owner` beside it, and
+    on the hosted relay retention is **on by default at 30 days**, which
+    makes "we prune after 30 days" a promise these files did not keep. The
+    account id is not page text, but it is the one file that says whose
+    transcript this was, and it was outliving the retention setting by
+    default.
+
+    **"Nothing is left to erase" is the whole condition** — the document *and*
+    every residue extension `delete` names — and it is why an age test alone
+    would be wrong: `.owner` is written once at mint and never touched again, so
+    its mtime is the *start* of the run while the document's is the last
+    activity. A month-long session has a fresh document beside a 40-day-old
+    sidecar, and sweeping on age would silently drop that session out of a
+    scoped `erase all` — the exact untruthful-erasure failure the sidecar
+    exists to prevent.
+
+    Checking only the document is the same lie one step along: a hand-deleted
+    `.json` leaves a scratchpad, the sweep drops the `.owner`, and the account
+    can never erase the file again — `owned_sessions()` no longer names it.
+
+    Live sessions are skipped for the same reason the loop above skips them:
+    a run that has been going for a month is not stale.
+    """
+    pruned = 0
+    for ext in (_OWNER_EXT, f"{_OWNER_EXT}.tmp"):
+        try:
+            files = list(d.glob(f"*{ext}"))
+        except OSError:
+            continue
+        for p in files:
+            stem = p.name[: -len(ext)]
+            # `_is_document_stem` on a stem we did not write: a separator or a
+            # dot in it is exactly the shape a traversal attempt takes, and
+            # this stem comes off a filename off the disk.
+            if stem in live or not _is_document_stem(stem):
+                continue
+            # "Nothing left to erase" covers every extension `delete` names,
+            # not the document alone. A hand-deleted `.json` can strand a
+            # `.scratchpad.txt` or a `.pages.json`, and dropping the `.owner`
+            # then costs the account the only handle that can reach them —
+            # permanently, because `owned_sessions()` is what scopes an
+            # erasure. Reads `_SESSION_RESIDUE_EXT` rather than a second
+            # hardcoded list, so it cannot drift from `delete`/`delete_all`.
+            # `ext` is the sidecar this iteration is itself looking at, and
+            # it exists by definition — testing it would answer "yes" always.
+            if any((d / f"{stem}{other}").exists()
+                   for other in _SESSION_RESIDUE_EXT if other != ext):
+                continue
+            try:
+                if p.stat().st_mtime >= cutoff:
+                    continue
+                p.unlink()
+                pruned += 1
+            except OSError as exc:
+                log.warning("audit: could not remove orphan %s: %s", p, exc)
     return pruned
 
 

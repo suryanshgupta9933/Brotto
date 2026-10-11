@@ -394,6 +394,13 @@ with the first. **Plaintext `http://` to a remote host is authorised by a
 recorded origin and nothing else**: a self-hoster on `http://192.168.x.x` is a
 supported deployment, but the address alone has never been evidence.
 
+**`serverIsAlive(url = serverUrl)` grew a parameter** when the panel's pre-task
+check started using it (`probe_server`). It could not reuse the module variable:
+`serverUrl` is assigned only inside `startRelay`, so on a worker that has not
+run a task it still holds `DEFAULT_SERVER`, and on one that has it holds the
+*previous* task's address — either way the wrong thing to probe. The bound is
+why there is one probe rather than two.
+
 **Two forward sites outside `background.ts` carry the same value and are not
 fixed here:** the panel's `authHeaders()` and the wizard's `checkServer()`, each
 of which reads `agentSecret` and sends it to a URL the user typed. Both belong

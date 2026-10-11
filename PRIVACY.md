@@ -32,8 +32,10 @@ agent work on pages you would not paste into a chat window, and self-host rather
 
 ## Summary
 
-Brotto is built so that we collect as little as possible. There is no analytics, no telemetry, no
-advertising, no tracking across sites, and we do not sell or share data with anyone for marketing. On
+Brotto is built so that we collect as little as possible. There is no analytics, no advertising, no
+tracking across sites, and we do not sell or share data with anyone for marketing. We do record a
+short failure code when a task does not run — see [When a task does not run](#when-a-task-does-not-run-failure-codes)
+— which says what broke and in which version, and nothing about what you were doing. On
 a self-hosted install we do not operate the server, so we do not receive your data. On the hosted
 relay at `agent.brotto.dev` we do operate it, and choosing that relay means your page observations
 reach us for as long as the task runs; the rest of this policy applies to it unchanged. The data that
@@ -185,10 +187,44 @@ Suggestions made from a page you read are labelled **"Read from the text of this
 suggestions Brotto made from a page's address and title alone are not. The label is part of the
 suggestion, so it comes back with it after you reopen the panel.
 
+## When a task does not run (failure codes)
+
+If a task fails to start, or starts and then fails, Brotto records **why** — as one of a fixed list of
+short codes, such as `offline`, `credential_rejected` or `cannot_complete`. The same code is already
+shown to you in the side panel, in words; this is that code written down so we can find out whether a
+release is broken for everyone or broken for you.
+
+A failure record contains **only** those things:
+
+- the code — one of a fixed list, never a sentence, never free text
+- the stage it happened at (`connect`, `task_refused`, `task_result` or `task_error`)
+- whether it came from your extension or from the relay
+- your extension's version number and the relay's version number
+- which account it was, read from your sign-in — **your browser does not send this**
+
+It contains **no page text, no URL or domain, no accessibility tree, no task or task title, nothing you
+typed, no session id and no model key.** Those are not filtered out on the way in; the code that writes
+a failure record has no field to put them in, so it cannot accept them even by mistake.
+
+Three things about when it happens:
+
+- **Self-hosted installs record nothing at all.** There is no switch to find, because there is no
+  path that writes one. Your server, your records.
+- **It is silent.** Nothing appears in the panel, it never delays or fails a task, and it is rate
+  limited so a laptop waking from sleep cannot flood anything.
+- **You can turn it off.** On the hosted relay, set `BROTTO_FAILURE_REPORTING=off` and the server
+  stops accepting failure records.
+
+Failure records are stored by **Supabase**, the service that hosts the signed-in beta's account
+database. They are kept so we can correlate a failure with a release, and are not used to measure
+what you do or which pages you visit.
+
 ## Third parties
 
 The only third party that receives your page data is **the model provider you selected**. Brotto does
 not share data with analytics providers, advertising networks, data brokers, or social platforms.
+**Supabase** hosts the signed-in beta's account database and its failure-code table; it never receives
+your page data.
 
 The model providers we support — Anthropic, OpenAI, MiniMax, Gemini, OpenRouter, DeepSeek and Groq —
 each have their own privacy policy and terms governing what they receive and how long they keep it.

@@ -35,13 +35,14 @@ create table profiles (
 
 -- ── nobody but the service role may touch this table ───────────────────
 --
--- SUPABASE_ANON_KEY is *public*: it ships to every browser by design and
--- is in the extension's bundle. So the default grants are not a threat
--- model — they are the starting state, and without these lines anyone
--- holding the project URL and that key reads the whole beta roster and,
--- because the table is writable, sets their own `revoked_at` back to
--- null or zeroes their own counter. That is the entire control plane,
--- bypassed without touching the relay at all.
+-- SUPABASE_ANON_KEY is *public*: Supabase designs it to be readable by any
+-- browser client, so it ships in browsers by design — this repo's extension
+-- never uses it. The project URL plus that key is still a pair anyone can
+-- assemble, so the default grants are not a threat model — they are the
+-- starting state, and without these lines a holder of that pair reads the
+-- whole beta roster and, because the table is writable, sets their own
+-- `revoked_at` back to null or zeroes their own counter. That is the entire
+-- control plane, bypassed without touching the relay at all.
 --
 -- RLS with zero policies is deny-all, which is exactly right: the relay
 -- calls this table with the service role key, which bypasses RLS by

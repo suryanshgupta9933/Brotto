@@ -277,6 +277,17 @@ of the active page, when the panel is idle and suggesting.
 **Transmission:** to the Brotto server you configured, over the relay. No
 third parties. The audit trail (`logs/sessions/`) stays on your own disk.
 
+**Failure codes, on the hosted relay only.** When a task fails to start, or
+starts and then fails, the extension sends one short code from a fixed list
+(`offline`, `credential_rejected`, `cannot_complete`, …), the extension version,
+and nothing else. No page text, URL, accessibility tree, task, typed input,
+session id, or API key — the code that writes the record has no field for them.
+The account is read from the sign-in token by the server, not sent by the
+browser. Self-hosted installs send none: the relay reports its auth mode on
+`/health` and anything but `auth_mode: "jwt"` never enables this path. It is
+invisible, never blocks a task, rate limited, and can be switched off server-side
+with `BROTTO_FAILURE_REPORTING=off`.
+
 **Chrome Web Store Limited Use:** "The use of information received from Google
 APIs will adhere to the Chrome Web Store User Data Policy, including the Limited
 Use requirements." Nothing below is collected for any purpose other than the

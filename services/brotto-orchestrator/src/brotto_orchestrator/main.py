@@ -209,8 +209,34 @@ def sweep_retention() -> int:
     return pruned
 
 
+def _restore_ownership() -> int:
+    """Put the persisted owners back in the registry. Returns how many.
+
+    Named rather than inlined in `lifespan` so the test that simulates a dyno
+    restart drives the same line the process does, instead of a copy of it.
+    """
+    from .agent.audit import load_owners
+
+    return registry.hydrate_owners(load_owners())
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Ownership before anything can answer about it. A restarted dyno comes
+    # back with an empty registry, and every route below decides by consulting
+    # it — so a hydrate that did not happen here would make "is this yours"
+    # answer no for everybody, and make erase-all report a clean sweep it did
+    # not perform.
+    try:
+        restored = _restore_ownership()
+        if restored:
+            log.info("ownership restored from disk  sessions=%d", restored)
+    except Exception as exc:
+        # Fail *closed* and say so: an unhydrated registry cannot hand one
+        # beta user another's transcript, it can only tell a beta user their
+        # own session is gone. That is the right way round for this failure.
+        log.error("ownership hydrate failed (%s) — every session reads as unowned",
+                  type(exc).__name__)
     sweep_retention()
     stop = asyncio.Event()
 
@@ -230,17 +256,60 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Brotto Orchestrator", version="2.0.0", lifespan=lifespan)
+
+#: The one path that belongs to another application, and so to another CORS
+#: layer. Read as a constant by the carve-out below and by the mount at the
+#: bottom of this file — the two have to name the same string.
+_WAITLIST_PATH = "/v1/waitlist"
+
+
+class _OwnAppCORSMiddleware(CORSMiddleware):
+    """This app's CORS, minus the path that has an application of its own.
+
+    Starlette has no per-route CORS, and its middleware wraps the whole
+    application — so the parent's layer answers the waitlist's **preflight**
+    before the request ever reaches the sub-app below, and answers it with a
+    400 because the marketing origins are (correctly) not in the parent's
+    allowlist. The form then never submits, in every browser, for a reason
+    that reads like a server fault.
+
+    So this one path skips the parent's layer entirely and is handed straight
+    to the sub-application, which adds the headers its own allowlist says.
+    Everything else is unchanged, and the marketing origins still reach
+    nothing but the waitlist.
+    """
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket") and scope.get("path") == _WAITLIST_PATH:
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 app.add_middleware(
-    CORSMiddleware,
-    # The only legitimate browser client is the extension, whose origin is
-    # chrome-extension://<id> with a Chrome id ([a-p]{32}), plus loopback for
-    # the dev panel. Reflecting any origin — "*" with allow_credentials makes
-    # Starlette echo the caller's Origin — let any page the operator happened
-    # to visit read their transcripts off a secret-less install, and the
-    # "compose binds 127.0.0.1" mitigation does not apply: a browser reaches
-    # loopback fine. Credentials stay off; every call authenticates with the
-    # AGENT_SECRET header, not a cookie, so nothing here needs them.
-    allow_origin_regex=r"^(chrome-extension://[a-p]{32}|https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?)$",
+    _OwnAppCORSMiddleware,
+    # The only legitimate browser clients here are the extension, whose origin
+    # is chrome-extension://<id> with a Chrome id ([a-p]{32}), and loopback,
+    # for the dev panel. Reflecting any origin — "*" with allow_credentials
+    # makes Starlette echo the caller's Origin — let any page the operator
+    # happened to visit read their transcripts off a secret-less install, and
+    # the "compose binds 127.0.0.1" mitigation does not apply: a browser
+    # reaches loopback fine.
+    #
+    # **The marketing origins are deliberately not in here.** They were, for
+    # one route, and the effect was that `brotto.dev` could read
+    # `GET /v1/sessions`, `GET /v1/sessions/{id}/audit` and `DELETE /v1/sessions`
+    # on *every* install — including an open-mode self-host, where the token
+    # check passes for everyone. CORS middleware is per-application, so the
+    # waitlist gets its own sub-app at the bottom of this file with its own,
+    # much smaller allowlist, and this one names only what can already
+    # authenticate — except on that one path, which skips this layer entirely
+    # (`_OwnAppCORSMiddleware`). Credentials stay off throughout: every other
+    # call authenticates with the AGENT_SECRET header or a JWT, not a cookie.
+    allow_origin_regex=(
+        r"^(chrome-extension://[a-p]{32}"
+        r"|https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?)$"
+    ),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -390,6 +459,32 @@ def _error(status: int, message: str, **extra) -> JSONResponse:
 
 class _BadRequest(Exception):
     """A body that arrived and cannot be used. Always a 400."""
+
+
+async def _task_failed(send, code: str, summary: str, claims, status: str | None = None) -> None:
+    """The one place a task the relay refuses becomes a frame — and a report.
+
+    Three sites built this frame by hand (a duplicate start, an unknown
+    provider, and the four account refusals), which is exactly the shape a
+    guard gets missed in: each one would have had to remember to report as
+    well as to refuse, and the answer a future refusal gives is always
+    "yes, that one too". `code` is a `failure_reason` literal, so
+    `scripts/test-failure-reasons.test.js` keeps it translatable and
+    `session/failure_report.py` keeps it reportable.
+
+    Key order is reproduced exactly as each caller had it; the audit
+    document's `model → prompts → actions` rule is about documents, but
+    there is no reason to churn the wire either.
+    """
+    from .session.failure_report import note_failure
+
+    note_failure(code, "task_refused", claims)
+    frame: dict = {"type": "task_failed"}
+    if status:
+        frame["status"] = status
+    frame["failure_reason"] = code
+    frame["summary"] = summary
+    await send(frame)
 
 
 def _inline_model(payload: object) -> ModelConfig | None:
@@ -841,6 +936,24 @@ async def get_effective_policy(request: Request):
 
 _SIGNIN_BUCKET_CAPACITY = 5.0
 _SIGNIN_REFILL_PER_SECOND = 5.0 / 600.0  # five attempts, refilled over ten minutes
+# The socket peer's own bucket, sized for what it actually holds. Behind
+# Heroku `request.client.host` is a router address shared by the whole beta,
+# so a five-token bucket here is five sign-ins per ten minutes *for everyone*
+# — which is why the peer used to be the forwarded hop instead.
+#
+# This is the key that **cannot be forged**, which makes it the only one that
+# can bound a caller who controls everything else they send: on the waitlist
+# the caller picks the address and sets the header, so both of the other two
+# keys are the thing being varied rather than a backstop. It is generous
+# because it is shared and interactive traffic through it is rare.
+#
+# ponytail: ceiling — a caller behind one router address gets 20 writes per
+# ten minutes no matter what they vary, and can therefore still starve other
+# beta users sharing that address for as long as they keep it drained. There
+# is no honest way around that without something the caller has to solve:
+# upgrade path is a bot check in front of the route (an edge challenge, or a
+# proof the header cannot forge), not a bigger bucket.
+_SHARED_PEER_CAPACITY = 20.0
 # ponytail: keys are caller-supplied, so the map is swept rather than
 # trusted to be small. Ceiling: a caller who keeps one attempt alive per
 # distinct address pins that many entries until they lapse. Upgrade path:
@@ -849,11 +962,23 @@ _SIGNIN_BUCKETS: dict[str, tuple[float, float]] = {}
 _SIGNIN_SWEEP_AT = 0.0
 
 
-def _signin_allowed(peer: str, email: str) -> bool:
-    """Token bucket for the sign-in routes, per peer and per address.
+def _signin_allowed(peer: str, email: str, forwarded: str = "",
+                    *, prefix: str = "") -> bool:
+    """Token bucket for the sign-in routes: per socket peer, per hop, per address.
 
-    Both keys are charged from the same bucket state, so neither a
-    rotated peer address nor a list of addresses gets around the other.
+    All three keys are charged from the same state, so neither a rotated
+    address nor a rotated header gets around the peer key, and the peer key
+    is the one they cannot rotate — it comes off the socket.
+
+    `forwarded` is charged at the tight capacity because it is what a
+    behind-the-proxy caller is metered on; it is also what an attacker
+    controls, so it is deliberately *not* the bound.
+
+    `prefix` is a key **namespace**, not a capacity: the waitlist reuses this
+    limiter because a second bucket would be a second door, and gets its own
+    keys because sharing the peer bucket let an anonymous visitor drain the
+    sign-in routes' allowance for every beta user behind the same router
+    address.
     """
     global _SIGNIN_SWEEP_AT
     now = time.monotonic()
@@ -861,26 +986,52 @@ def _signin_allowed(peer: str, email: str) -> bool:
         _SIGNIN_SWEEP_AT = now + 60.0
         for key in [k for k, (_, ts) in _SIGNIN_BUCKETS.items() if now - ts > 600.0]:
             del _SIGNIN_BUCKETS[key]
+    keys = [(f"{prefix}peer:{peer}", _SHARED_PEER_CAPACITY),
+            (f"{prefix}email:{email}", _SIGNIN_BUCKET_CAPACITY)]
+    if forwarded:
+        keys.append((f"{prefix}hop:{forwarded}", _SIGNIN_BUCKET_CAPACITY))
     allowed = True
-    for key in (f"peer:{peer}", f"email:{email}"):
-        tokens, seen = _SIGNIN_BUCKETS.get(key, (_SIGNIN_BUCKET_CAPACITY, now))
-        tokens = min(_SIGNIN_BUCKET_CAPACITY, tokens + (now - seen) * _SIGNIN_REFILL_PER_SECOND)
+    for key, capacity in keys:
+        tokens, seen = _SIGNIN_BUCKETS.get(key, (capacity, now))
+        tokens = min(capacity, tokens + (now - seen) * _SIGNIN_REFILL_PER_SECOND)
         allowed = allowed and tokens >= 1.0
         _SIGNIN_BUCKETS[key] = (tokens - 1.0, now)
     return allowed
 
 
 def _signin_peer(request: Request) -> str:
-    """Who to meter this sign-in attempt against.
+    """Who to meter this sign-in attempt against — the socket, not the header.
 
-    The forwarded first hop, because the hosted relay runs behind a proxy
-    and `request.client.host` is then the proxy's address for every caller
-    — one shared bucket, five sign-ins per ten minutes for the whole beta.
-    The header is caller-supplied, so rotating it defeats this half of the
-    limit and only this half: the per-address bucket does not care.
+    This used to be the forwarded first hop, because behind a proxy
+    `client.host` is the proxy for everybody and the limit would then be five
+    sign-ins per ten minutes for the whole beta. But the header is set by the
+    caller: rotating it gave a fresh bucket on every request, so the half that
+    was supposed to stop bulk writes was the half being varied. `X-Forwarded-
+    For` is only meaningful behind a proxy that **overwrites** it, and
+    assuming otherwise is what made the limit decorative.
+
+    So the socket peer is the key — unforgeable, and therefore the only one
+    that bounds a caller — sized for being shared (`_SHARED_PEER_CAPACITY`),
+    and the forwarded hop is charged alongside it at the tight capacity. NAT
+    collapse and header forgery pull in opposite directions and one bucket
+    cannot serve both; charging both means the unforgeable half is always
+    present, and the honest cost is written down beside it.
     """
-    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    return forwarded or _caller_key(request)
+    return _caller_key(request)
+
+
+def _forwarded_hop(request: Request) -> str:
+    """The forwarded first hop, or "" when the caller sent none.
+
+    Read as a first-class key rather than as a substitute for the peer: it is
+    caller-supplied, so it is a bucket an attacker can rotate, and it is kept
+    because behind a proxy it is the closest thing to a per-caller address
+    there is. A value with no safe alphabet is dropped rather than truncated —
+    it becomes a bucket key, and a bucket key does not need to be a filename
+    but does need to be bounded.
+    """
+    hop = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return hop if _HOST.match(hop) else ""
 
 
 @app.post("/v1/auth/request-code")
@@ -902,9 +1053,13 @@ async def request_login_code(request: Request):
 
     body = await _json_body(request)
     email = str(body.get("email", "") or "")
-    if not EMAIL_RE.match(email):
+    # `fullmatch`, not `match`: the pattern is anchored with `^…$`, and `$`
+    # also matches immediately before a trailing newline — so an address
+    # ending in `\n` passes a `match` that a `fullmatch` rejects.
+    if not EMAIL_RE.fullmatch(email):
         raise _BadRequest("email is required")
-    if not _signin_allowed(_signin_peer(request), normalize_email(email)):
+    if not _signin_allowed(_signin_peer(request), normalize_email(email),
+                            _forwarded_hop(request)):
         return _error(429, "too many attempts — wait a few minutes and try again")
     try:
         await _send(email)
@@ -936,9 +1091,10 @@ async def exchange_login_code(request: Request):
     body = await _json_body(request)
     email = str(body.get("email", "") or "")
     code = str(body.get("code", "") or "").strip()
-    if not EMAIL_RE.match(email) or not code:
+    if not EMAIL_RE.fullmatch(email) or not code:
         raise _BadRequest("email and code are required")
-    if not _signin_allowed(_signin_peer(request), normalize_email(email)):
+    if not _signin_allowed(_signin_peer(request), normalize_email(email),
+                            _forwarded_hop(request)):
         return _error(429, "too many attempts — wait a few minutes and try again")
     try:
         token = await _exchange(email, code)
@@ -972,10 +1128,19 @@ async def create_session(request: Request):
     if scheme not in ("http", "https"):
         scheme = "http"
     registry.get_or_create(session_id)
-    # The one write to the owner field. On the hosted relay this is what
-    # makes a session id mean "this person's transcript" instead of "some
-    # transcript"; on self-host it stores None and changes nothing.
+    # The one write to the owner field, in memory and on disk. On the hosted
+    # relay this is what makes a session id mean "this person's transcript"
+    # instead of "some transcript"; on self-host it stores None, changes
+    # nothing and writes no sidecar.
+    #
+    # The disk half is not a cache of the registry — it is the only copy that
+    # outlives this process. Without it, `DELETE /v1/sessions` answers
+    # `{"deleted": 0}` after every dyno restart while every transcript is
+    # still there, which is the erasure promise stated and not kept.
     registry.set_owner(session_id, _owner(auth.claims))
+    from .agent import audit as _audit
+
+    _audit.record_owner(session_id, _owner(auth.claims))
     _prune_sessions()
     # Advertise the address the caller actually reached us on, not a fixed
     # one: the extension dials `websocket_url` verbatim when it starts with
@@ -1063,7 +1228,20 @@ async def delete_session(session_id: str, request: Request):
         return _error(404, "not found")
     if not registry.owns(session_id, _owner(auth.claims)):
         return _error(404, "unknown session")
-    return JSONResponse(content={"deleted": _delete(session_id)})
+    left: list[str] = []
+    deleted = _delete(session_id, leftover=left)
+    if left:
+        # The erasure did not finish, so the registry keeps claiming the
+        # session: dropping the owner here would make this account unable to
+        # reach the file that survived, permanently, and the next scoped
+        # erase-all would report nothing left to do.
+        log.error(
+            "session %s: %d file(s) could not be erased, ownership retained: %s",
+            session_id, len(left), ",".join(left),
+        )
+    else:
+        registry.forget_owner(session_id)
+    return JSONResponse(content={"deleted": deleted, "residue": len(left)})
 
 
 @app.delete("/v1/sessions")
@@ -1081,10 +1259,22 @@ async def delete_all_sessions(request: Request):
     if not auth.ok:
         return _error(404, "not found")
     owner = _owner(auth.claims)
-    deleted, residue = (
-        _delete_all() if owner is None
-        else _delete_all(only=registry.owned_sessions(owner))
-    )
+    if owner is None:
+        deleted, residue = _delete_all()
+    else:
+        # Snapshot the ids before the sweep: `delete_all` is what removes the
+        # files, and the ownership entries have to follow so a second
+        # "erase all" does not count the same erased session again.
+        mine = registry.owned_sessions(owner)
+        deleted, residue = _delete_all(only=mine)
+        if not residue:
+            # Only a sweep that finished gives up ownership. Files that
+            # stayed put are still on disk and still only reachable by id,
+            # so dropping the entries would strand them and the next
+            # erase-all would answer `{"deleted": 0}` — the untruthful
+            # erasure this scoping exists to prevent.
+            for sid in mine:
+                registry.forget_owner(sid)
     # `residue` travels back because a file that could not be unlinked is
     # still on disk, and the panel is the only thing that can tell the user
     # their deletion did not finish. Answering `deleted: n` regardless would
@@ -1144,6 +1334,60 @@ async def policy_ack(request: Request):
     except Exception as exc:
         log.warning("failed to persist policy_acknowledged: %s", exc)
     return JSONResponse(content={"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Failure reports — the runs that did not happen
+# ---------------------------------------------------------------------------
+#
+# **This route does not exist on a self-hosted install.** Not "does nothing":
+# 404s, so a self-hoster's box holds no report table, no report route and no
+# knowledge that the feature exists. Self-host is the product; its users get
+# a silent build. Gate is `auth_mode() == "jwt"` and nothing else — a
+# self-hoster holding a copy of the cloud env must not switch it on by
+# accident either.
+#
+# HTTP on the same origin as every other extension call, so CORS is
+# unchanged: `allow_origin_regex` above already permits exactly
+# `chrome-extension://<id>` and refuses everything else, and reporting
+# inherits that rather than widening it.
+#
+# The client reaches this route **on a connection that already succeeded**,
+# which is the whole design: a relay that is down cannot receive a report
+# about being down. So the extension queues codes locally and flushes them
+# on the next `ws.onopen`, which is also the moment its credential is known
+# to have been accepted — so a refusal is reported once the user signs in
+# again, which is when the report is worth having.
+@app.post("/v1/reports")
+async def create_reports(request: Request):
+    from .session import failure_report as fr
+
+    if not _authed(request) or not fr.reporting_enabled():
+        return _error(404, "not found")
+    auth = _auth(request)
+    owner = auth.claims.sub if auth.claims is not None else None
+    if not owner:
+        # jwt mode authenticated by something else. Nothing here can name
+        # whose run this was, so there is nothing to write.
+        return _error(404, "not found")
+    if not fr.report_allowed(owner):
+        # 429, not 404: the caller is authenticated and the route exists, and
+        # saying so is what stops a client-side retry from turning one bad
+        # install into a row per reconnect for a day.
+        return _error(429, "too many reports — they will resume shortly")
+    try:
+        body = await _json_body(request)
+    except _BadRequest as exc:
+        return _error(400, str(exc))
+    rows, offered = fr.build_client_rows(body, owner, fr.relay_version())
+    # The answer carries a count, never a code. Echoing codes back would make
+    # this a "which codes does the relay accept" oracle; `offered` vs `kept`
+    # is what an operator actually needs when a build reports something the
+    # relay has not heard of.
+    fr.spawn(fr.record(rows))
+    if offered != len(rows):
+        log.info("failure reports  kept=%d offered=%d  (unknown codes dropped)", len(rows), offered)
+    return JSONResponse(content={"accepted": len(rows)})
 
 
 # ponytail: HTTP, not the WS, for the same reason as /v1/policy_ack above —
@@ -1358,15 +1602,14 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
             domain=None, action=None,
             decision="refused: an agent is already driving this session",
         )
-        await ws_send({
-            "type": "task_failed",
-            "status": "interrupted",
-            "failure_reason": "duplicate_task_start",
-            "summary": (
-                "Refused: this session already has a running agent. "
-                "Starting a second one would put two agents on one browser."
-            ),
-        })
+        await _task_failed(
+            ws_send,
+            "duplicate_task_start",
+            "Refused: this session already has a running agent. "
+            "Starting a second one would put two agents on one browser.",
+            auth.claims,
+            status="interrupted",
+        )
         await ws_send({"type": "canonical_status", "status": "interrupted"})
         await websocket.close(code=4009)
         return
@@ -1386,12 +1629,13 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
             log.warning(
                 "[%s] task_start refused  reason=%s", session_id, exc.reason,
             )
-            await ws_send({
-                "type": "task_failed",
-                "status": "refused",
-                "failure_reason": _REFUSAL_REASON.get(exc.reason, "control_plane_unavailable"),
-                "summary": exc.detail,
-            })
+            await _task_failed(
+                ws_send,
+                _REFUSAL_REASON.get(exc.reason, "control_plane_unavailable"),
+                exc.detail,
+                auth.claims,
+                status="refused",
+            )
             await ws_send({"type": "canonical_status", "status": "interrupted"})
             await websocket.close(code=4005)
             return
@@ -1431,11 +1675,12 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         # which is the only thing that knows about env and per-user configs.
         if provider_name and provider_name not in PROVIDER_REGISTRY:
             log.warning("[%s] unknown provider %r — refusing the task", session_id, provider_name)
-            await ws_send({
-                "type": "task_failed",
-                "failure_reason": "model_not_found",
-                "summary": f"Unknown provider: {provider_name}",
-            })
+            await _task_failed(
+                ws_send,
+                "model_not_found",
+                f"Unknown provider: {provider_name}",
+                auth.claims,
+            )
             await websocket.close(code=4000)
             return
         parsed_model_cfg = _inline_model(model_cfg_payload)
@@ -1703,11 +1948,26 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         try:
             result = await agent_task
             log.info("[%s] task finished  status=%s  summary=%r", session_id, result.status, result.summary[:80])
+            # Only the CODE crosses into the report, never `summary`: the
+            # summary is the agent's own prose about what it tried, and the
+            # agent's prose can quote the page.
+            reason = result.failure_reason
+            if reason:
+                from .session.failure_report import note_failure
+
+                note_failure(reason, "task_result", auth.claims)
             await ws_send({"type": "task_result", "result": result.model_dump()})
         except asyncio.CancelledError:
             log.info("[%s] agent task cancelled", session_id)
         except Exception as exc:
             log.error("[%s] agent task raised: %s", session_id, exc, exc_info=True)
+            from .session.failure_report import note_failure
+
+            # `internal`, not `str(exc)`: the exception text is free prose
+            # and can quote a URL or a field from the page. The code is what
+            # the ledger stores; the detail stays in this log line, which is
+            # ours and expires with the dyno.
+            note_failure("internal", "task_error", auth.claims)
             await ws_send({"type": "task_error", "error": str(exc)})
         log.info("[%s] session closed", session_id)
 
@@ -1914,6 +2174,127 @@ async def run_task(request: Request):
         return _error(500, str(exc))
     finally:
         await browser.close()
+
+
+# ---------------------------------------------------------------------------
+# The waitlist form — its own application, and its own CORS
+# ---------------------------------------------------------------------------
+#
+# **The only route here that answers a caller holding no credential, and the
+# first thing this project stores about someone who is not an account.** It is
+# 404 unless `waitlist_enabled()`, which is `auth_mode() == "jwt"` — so a
+# self-hosted box does not have this feature at all rather than having it
+# quietly switched on by a leftover `SUPABASE_URL`.
+#
+# Unauthenticated by definition: a visitor on a marketing page has no key and
+# cannot be issued one, so gating it would be a closed door in front of the
+# only caller it has. That makes it a way to write to our table and nothing
+# else, which is why the three things below are load-bearing rather than
+# careful:
+#
+#   * the **meter**, so an open form is not a bulk-write button;
+#   * the **one-field row** (`waitlist.build_row`), so nothing a browser can
+#     send — a referrer, a user agent, a URL — has somewhere to land;
+#   * the **same answer either way**, so it cannot be asked who is on the list.
+#
+# **It is its own `FastAPI()` because CORS middleware is per-application.**
+# There is no per-route CORS in Starlette, so the only way to let one page's
+# origin reach one route is to put that route on an application that has its
+# own middleware — and the alternative, which shipped first, was adding the
+# marketing hosts to the allowlist above, which is an allowlist entry that
+# reaches *every* route including the transcript reads. An allowlist entry is
+# not a grant of access to one route; only an application is.
+#
+# Two spellings of one site, listed rather than pattern-matched — a `.*`
+# would be the reflection this whole thing exists to refuse. Only `POST`, and
+# only `Content-Type`, because only those two are what a form submit needs.
+#
+# **The mount is at `/v1`, not at `/v1/waitlist`, and it is here at the end of
+# the file for both reasons.** `app.mount("/v1/waitlist", …)` compiles to
+# `^/v1/waitlist/(?P<path>.*)$`, which `POST /v1/waitlist` does not match —
+# it would fall through to `redirect_slashes` and answer 307, and the
+# marketing form is already written against the exact URL. And Starlette
+# matches routes in registration order, so a mount declared above
+# `/v1/sessions` would swallow it: a `Mount("/v1")` placed last sees only
+# what no other route claimed, which for `/v1/sessions` is nothing.
+waitlist_app = FastAPI()
+waitlist_app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https://(brotto\.dev|suryanshgupta9933\.github\.io)$",
+    allow_methods=["POST"],
+    allow_headers=["Content-Type"],
+)
+
+
+@waitlist_app.exception_handler(StarletteHTTPException)
+async def _waitlist_http_exc(_request: Request, exc: StarletteHTTPException):
+    """The same envelope as every other 404 on this server.
+
+    The sub-app answers its own routing failures, and `app.mount("/v1", …)`
+    means it answers for `/v1/…` too — so without this, a wrong URL under
+    `/v1` came back as `{"detail": "Not Found"}` while every other failure on
+    the server used `_error`. One error shape, and this is the part of it that
+    a mount can quietly undo.
+    """
+    return _error(exc.status_code, str(exc.detail))
+
+
+@waitlist_app.post("/waitlist")
+async def join_waitlist(request: Request):
+    """Take one email address. The reply does not say whether it was new."""
+    from .session import waitlist as wl
+    from .session.jwt_auth import EMAIL_RE, normalize_email
+
+    if not wl.waitlist_enabled():
+        return _error(404, "not found")
+    # Caught rather than allowed to propagate: the `_BadRequest` handler is
+    # registered on `app` and this route is dispatched by the mounted
+    # sub-application, so a raise here comes back as a 500 — on a route whose
+    # every other error path is a 400. Same pattern as `create_reports`.
+    #
+    # Deliberately *after* the meter below's sibling, the email validation:
+    # charging a token for a typo teaches a visitor the site rejects them
+    # (pinned by `test_a_malformed_address_does_not_spend_a_token`). A body
+    # that will not parse is not a typo, and unmetered JSON parsing of a
+    # capped-size body is not the thing the meter exists to bound.
+    try:
+        body = await _json_body(request)
+    except _BadRequest as exc:
+        return _error(400, str(exc))
+    # Normalise before validating: a pasted address with a trailing space is
+    # the same person as one without, and EMAIL_RE has no reason to know that.
+    email = normalize_email(str(body.get("email", "") or ""))
+    if not EMAIL_RE.fullmatch(email):
+        # 400, and it says nothing about the address: a malformed address was
+        # never written anywhere, so there is no membership to reveal.
+        # Explicit rather than a raised `_BadRequest`, because the exception
+        # handler for that is registered on `app` and this route is dispatched
+        # by the mounted sub-application below.
+        return _error(400, "a valid email address is required")
+    # The sign-in limiter, reused rather than duplicated — with **its own key
+    # namespace**. The two routes key on the same socket peer, and that peer
+    # half is what the anti-spam argument rests on; sharing the *bucket* meant
+    # an anonymous visitor who drained the waitlist's twenty writes also
+    # locked every beta user behind the same router address out of asking for
+    # a login code, which is a denial of service on the one route a paying
+    # user needs. Same limiter, same capacities, same "consults nothing about
+    # the beta roster" property — a separate set of keys.
+    #
+    # The address half is namespaced by the same `prefix`, because this is an
+    # *open* form: sharing that would mean a stranger submitting somebody
+    # else's address five times blocks that person from asking for their own
+    # sign-in code for ten minutes.
+    if not _signin_allowed(_signin_peer(request), email,
+                            _forwarded_hop(request), prefix="waitlist:"):
+        return _error(429, "too many attempts — wait a few minutes and try again")
+    if not await wl.add(email):
+        # Fixed text. The address is not in it, and neither is a PostgREST
+        # body — a PostgREST error quotes the row.
+        return _error(502, "could not record that address — try again later")
+    return JSONResponse(content={"ok": True})
+
+
+app.mount("/v1", waitlist_app)
 
 
 if __name__ == "__main__":

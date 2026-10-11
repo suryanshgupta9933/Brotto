@@ -54,6 +54,11 @@ function setCloudStatus(text, tone) {
   $cloudStatus.className = tone ? `status ${tone}` : "status";
 }
 
+function setServerStatus(text, tone) {
+  $serverStatus.textContent = text || "";
+  $serverStatus.className = tone ? `status ${tone}` : "status";
+}
+
 // What the address held before the cloud radio overwrote it. One-way was the
 // old comment's claim and it was simply not true of the field: the cloud
 // address is written into a user-editable input, so coming back to self-host
@@ -143,11 +148,20 @@ catalog.then(populateProviders);
 // server is up. A 404 from an authenticated route is this server's answer to a
 // refused key (403 would confirm the route is worth probing), which without
 // this reads as a missing endpoint and sends them to debug the wrong thing.
+//
+// It returns what it found as well as writing it, because blur alone is a weak
+// signal: a user can leave a dead address in the field and only find out on
+// their first real task. `finish()` asks the same question before it saves.
 async function checkServer() {
   const base = $serverUrl.value.trim() || DEFAULT_SERVER;
   const secret = $agentSecret.value.trim();
-  $serverStatus.textContent = "Checking…";
-  $serverStatus.className = "status";
+  setServerStatus("Checking…");
+  // One write, one return: the status line and the caller's decision can
+  // never disagree about what was found.
+  const say = (text, tone) => {
+    setServerStatus(text, tone);
+    return { ok: tone === "ok", tone, text };
+  };
   try {
     const res = await fetch(base + "/health", { method: "GET" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -160,26 +174,19 @@ async function checkServer() {
       const stored = (await chrome.storage.local.get("settings")).settings || {};
       const fromStorage = secret === String(stored.agentSecret || "").trim();
       const { refusal } = brottoCredential.forUrl(stored, base, !fromStorage);
-      if (fromStorage && refusal) {
-        $serverStatus.textContent = refusal;
-        $serverStatus.className = "status bad";
-        return;
-      }
+      if (fromStorage && refusal) return say(refusal, "bad");
       const authed = await fetch(base + "/v1/policy", {
         method: "GET",
         headers: { Authorization: `Bearer ${secret}` },
       });
+      // Three answers, not one: up, key refused, or nothing there at all.
       if (authed.status === 404) {
-        $serverStatus.textContent = "Reachable, but that key was refused — check it against the AGENT_SECRET on your server";
-        $serverStatus.className = "status bad";
-        return;
+        return say("Reachable, but that key was refused — check it against the AGENT_SECRET on your server", "bad");
       }
     }
-    $serverStatus.textContent = "Reachable";
-    $serverStatus.className = "status ok";
+    return say("Reachable", "ok");
   } catch {
-    $serverStatus.textContent = "No answer — check the address, or continue and set it later in Settings";
-    $serverStatus.className = "status bad";
+    return say("No answer — check the address, or press Skip to save it anyway and fix it in Settings", "bad");
   }
 }
 $serverUrl.addEventListener("blur", checkServer);
@@ -283,23 +290,50 @@ $next.addEventListener("click", async () => {
   }
   if (step < TOTAL_STEPS) { show(step + 1); return; }
   $next.disabled = true;
+  // Verified on save, not on blur. Blur is advice; this is the moment the
+  // address becomes the one every later read trusts, and saving one that does
+  // not answer is the "find out on your first real task" failure this screen
+  // exists to prevent. Back to the step it was typed on, with the sentence.
+  const verified = await checkServer();
+  if (!verified.ok) {
+    $next.disabled = false;
+    show(SERVER_STEP);
+    setServerStatus(verified.text, verified.tone);
+    return;
+  }
   $next.textContent = "Starting…";
   void finish();
 });
+// Skip is a real answer and stays one: it writes the address without asking
+// the server anything. The panel's pre-task probe is what catches a dead one
+// saved this way, and it catches it in one sentence at the first send.
 $skip.addEventListener("click", () => {
   $next.disabled = true;
   void finish();
 });
+
+// The radio that opens the wizard. Cloud is the default and self-host is the
+// deliberate opt-out — but only for a browser that has never answered.
+// A stored address IS an answer: an install that already chose self-host
+// keeps it, and `onboarded` means the wizard is not re-shown on update at all.
+// Re-asking somebody who answered once would be worse than either default.
+function initialEdition(storedServerUrl) {
+  const stored = String(storedServerUrl || "").trim();
+  return !stored || stored === CLOUD_SERVER_URL ? "cloud" : "self";
+}
 
 (async () => {
   const stored = await chrome.storage.local.get("settings");
   $serverUrl.value = stored.settings?.serverUrl || DEFAULT_SERVER;
   $agentSecret.value = stored.settings?.agentSecret || "";
   // Signing out of Brotto Cloud sends the user back here (signOutOfCloud),
-  // so a stored cloud address pre-selects the cloud radio. This is a
-  // pre-fill of a form control, not the panel's mode test — the panel reads
-  // auth_mode off the server, and never compares this string.
-  if (CLOUD_SERVER_URL === $serverUrl.value.trim()) $editionCloud.checked = true;
+  // and a brand-new install has nothing stored at all — both open on the
+  // cloud radio. An install that already stored a self-host address opens on
+  // the radio it chose. This is a pre-fill of a form control, not the panel's
+  // mode test — the panel reads auth_mode off the server, never this string.
+  const opening = initialEdition(stored.settings?.serverUrl);
+  $editionCloud.checked = opening === "cloud";
+  $editionSelf.checked = opening === "self";
   applyEdition();
   populateModels();
   show(1);

@@ -462,6 +462,33 @@ def test_a_malformed_address_is_refused_without_calling_supabase(client, monkeyp
     assert called == []
 
 
+@pytest.mark.parametrize("route,body", [
+    ("/v1/auth/request-code", {"email": "beta@example.test\n"}),
+    ("/v1/auth/exchange", {"email": "beta@example.test\n", "code": "123456"}),
+    ("/v1/auth/exchange", {"email": "\nbeta@example.test", "code": "123456"}),
+])
+def test_a_trailing_newline_is_not_an_address(client, monkeypatch, hosted, route, body):
+    """`EMAIL_RE` is anchored `^…$`, and `$` also matches immediately *before* a
+    trailing newline — so `match` accepted `beta@example.test\\n` and
+    `fullmatch` does not.
+
+    These two routes normalise **after** validating, so what the regex saw
+    was the caller's byte-for-byte string, and it went on to Supabase that
+    way. An address is a thing a stranger controls on two routes that exist
+    precisely to be open, and this one sits behind an outbound email send.
+    """
+    async def fake_code(email):
+        pytest.fail(f"a newline-terminated address reached supabase: {email!r}")
+
+    async def fake_exchange(email, code):
+        pytest.fail(f"a newline-terminated address reached supabase: {email!r}")
+
+    monkeypatch.setattr(jwt_auth, "request_login_code", fake_code)
+    monkeypatch.setattr(jwt_auth, "exchange_login_code", fake_exchange)
+    resp = client.post(route, json=body)
+    assert resp.status_code == 400, resp.text
+
+
 def test_exchange_returns_the_access_token(client, monkeypatch, hosted):
     async def fake(email, code):
         return "a.b.c"
@@ -597,12 +624,13 @@ def test_an_operator_setting_retention_still_wins(monkeypatch, hosted):
 
 # ── the control plane's own table ─────────────────────────────────────────
 #
-# SUPABASE_ANON_KEY is public — it ships in the extension bundle — so the
-# table holding the beta roster has to deny it explicitly. Nothing in the
-# Python asserts this: a migration file is not imported by anything.
+# SUPABASE_ANON_KEY is public by Supabase's design — it is the key every
+# browser client ships — so the table holding the beta roster has to deny it
+# explicitly. Nothing in the Python asserts this: a migration file is not
+# imported by anything.
 
 MIGRATION = (
-    Path(__file__).resolve().parents[1] / "migrations" / "001_profiles.sql"
+    Path(__file__).resolve().parents[3] / "supabase" / "migrations" / "001_profiles.sql"
 )
 
 
@@ -865,12 +893,24 @@ def test_the_limiter_also_follows_the_address(client, monkeypatch, hosted):
 
 
 def test_addresses_are_normalised_before_they_are_counted(client, monkeypatch, hosted):
+    """Both spellings have to land on one bucket.
+
+    It passes the *normalised* address both times, which is what the routes
+    do and what this is about. It used to pass the raw spelling five times and
+    the normalised one next, and was then refused by the peer bucket rather
+    than the address bucket — so it was asserting "five calls exhaust the
+    peer", and only looked like it was about normalisation. Widening the
+    shared peer bucket (so that the key a caller cannot forge is the one
+    doing the bounding) is what stopped this test passing for the wrong
+    reason.
+    """
     from brotto_orchestrator import main
+    from brotto_orchestrator.session.jwt_auth import normalize_email
 
     main._SIGNIN_BUCKETS.clear()
     for _ in range(5):
-        main._signin_allowed("peer", "Beta@Example.Test")
-    assert main._signin_allowed("peer", "beta@example.test") is False
+        main._signin_allowed("peer", normalize_email("Beta@Example.Test"))
+    assert main._signin_allowed("peer", normalize_email("beta@example.test")) is False
 
 
 def test_the_throttle_is_not_an_account_existence_oracle(client, monkeypatch, hosted):
