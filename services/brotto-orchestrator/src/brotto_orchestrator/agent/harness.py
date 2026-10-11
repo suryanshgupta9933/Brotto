@@ -2151,13 +2151,22 @@ class AgentHarness:
             # Redacted here, at the step's own entry of page text, so
             # the prompt, the digest, the sidecar and the audit all carry the
             # same string — redacting at each of those is four sites and one
-            # of them will be missed. The other entry point is the
-            # `read_page_text` handler, which redacts for itself. Unconditional,
-            # not gated on secure mode: a live card number reaching a
-            # provider's logs is not a setting the user should have to know to
-            # turn on. Secure mode governs what else the model may see (see
-            # `page_text_untrusted` in prompt.py), not whether a credential is
-            # a credential.
+            # of them will be missed. The other page-text entry point is the
+            # `read_page_text` handler, which redacts for itself.
+            #
+            # Both are page-text paths. The accessibility tree is a third
+            # channel and is NOT redacted: `filter_ax_targets` and
+            # `compute_ax_diff` render `value` verbatim, so a credential
+            # sitting in a form field reaches the provider this way. That is a
+            # known, disclosed gap rather than an oversight — the published
+            # privacy policy says so in those words — and closing it is its own
+            # change, not a filter bolted on here.
+            #
+            # Unconditional, not gated on secure mode: a live card number
+            # reaching a provider's logs is not a setting the user should have
+            # to know to turn on. Secure mode governs what else the model may
+            # see (see `page_text_untrusted` in prompt.py), not whether a
+            # credential is a credential.
             page_text, redactions = redact_text(page_text)
             if redactions:
                 log.info("page text: redacted %s", ", ".join(
