@@ -64,6 +64,7 @@ if not _is_prod():
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.background import BackgroundTasks
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .agent.context import AgentDeps
@@ -2335,7 +2336,7 @@ async def _waitlist_http_exc(_request: Request, exc: StarletteHTTPException):
 
 
 @waitlist_app.post("/waitlist")
-async def join_waitlist(request: Request):
+async def join_waitlist(request: Request, background: BackgroundTasks):
     """Take one email address. The reply does not say whether it was new."""
     from .session import waitlist as wl
     from .session.jwt_auth import EMAIL_RE, normalize_email
@@ -2382,10 +2383,22 @@ async def join_waitlist(request: Request):
     if not _signin_allowed(_signin_peer(request), email,
                             _forwarded_hop(request), prefix="waitlist:"):
         return _error(429, "too many attempts — wait a few minutes and try again")
-    if not await wl.add(email):
+    signup = await wl.add(email)
+    if not signup.ok:
         # Fixed text. The address is not in it, and neither is a PostgREST
         # body — a PostgREST error quotes the row.
         return _error(502, "could not record that address — try again later")
+    # The confirmation goes to a **first** signup only, and it is handed to a
+    # background task rather than awaited. Both halves are the same guard: if
+    # this call waited on Resend, a duplicate would answer in 10ms and a new
+    # address in the time it takes to fetch a blog index — a membership oracle
+    # with a stopwatch attached. Starlette sends this response first and runs
+    # the task after it, so the answer the visitor sees cannot depend on the
+    # send, on Resend existing, or on the fetch.
+    if signup is wl.Signup.CREATED:
+        from .session.waitlist_email import send_confirmation
+
+        background.add_task(send_confirmation, email)
     return JSONResponse(content={"ok": True})
 
 

@@ -31,11 +31,29 @@ So the privacy posture is not "we do not collect your data". It is:
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
 | Waitlist signup (an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |
+| Waitlist confirmation (the address, in transit and in Resend's request logs) | `api.resend.com` | theirs, not ours |
 | Audit request bodies | whatever the model provider logs | theirs, not ours |
 
 The waitlist is the one row in that table that came from **a stranger** rather
 than from an account, and it is covered by "Writing new code here" below —
 see *The waitlist is the first data from someone who is not an account*.
+
+**Resend is a third party for waitlist addresses and for nothing else here.**
+An account's identity is Supabase's, and Supabase's own mail (the sign-in code)
+is configured as a custom SMTP provider — that is a second, unbuilt use of
+Resend and it is not this one. This one is `session/waitlist_email.py`: our own
+HTTP call to `api.resend.com` carrying a stranger's address, because a signup is
+confirmed by an email we send. So the address crosses **two** processors rather
+than one, and the difference is worth stating rather than folding into the
+Supabase line above: it is the only field in the project that is handed to a
+party that has no table of ours to look it up in. Two consequences, both
+deliberate. **The address is never written to a log line here**, on any path,
+including the failure paths — a transport exception quotes the request body, and
+the request body is the address, so only the exception's TYPE crosses into a
+log. And **the idempotency key is a hash of the address, not the address**: it
+is still a field on a request Resend keeps for 24 hours. There is no way to make
+a third-party mail API not see the recipient; there is a way to stop it being
+the thing we paste into their logs ourselves.
 
 Page text itself is **not** written to disk, and neither is the AX diff that
 used to quote it. The `.pages.json` sidecar that was meant to hold page bodies
@@ -542,6 +560,32 @@ route reads as success. A read-then-insert would be a race a double-clicked
 submit wins, and — the reason this is worth stating — a route that answered
 differently for the two outcomes is a route anyone with a public URL can ask
 *"is this address on your list?"*.
+
+**The confirmation made that guard load-bearing rather than tidy, and it is the
+one place where the distinction exists internally.** A signup is confirmed by
+mail, and the mail belongs to a *first* signup — a second submit is a no-op on
+the table and must not be a second email to a stranger. So `add` returns
+`Signup.CREATED` / `DUPLICATE` / `REFUSED` rather than a bare bool, and the
+route maps the first two onto one identical `200 {"ok": true}`. The distinction
+is real, it is internal, and nothing outside this process can read it: not the
+body, not a header, not a status code.
+
+**The send is a background task, and that is the same guard rather than a
+performance choice.** Awaiting it inside the route would answer a duplicate in
+ten milliseconds and a new address in however long Resend and a page fetch
+take — the same oracle, delivered through a stopwatch instead of a string, and
+the one a caller can measure without being told anything. Starlette sends the
+response first and runs the task after it, so the visitor's answer cannot
+depend on Resend existing, being reachable, or being configured at all.
+Pinned by `test_the_response_is_sent_before_the_mail_is_attempted`, which holds
+Resend open on a gate and waits for the 200 to reach the wire, and by
+`test_a_duplicate_is_answered_identically_and_sends_nothing`.
+
+**A mail failure is not a signup failure, and there is no rollback to reach
+for.** The row is written before the mail is attempted, so a Resend 500, a
+timeout, or a dead writing page changes nothing the visitor can see and nothing
+the table holds. Every failure path ends in a log line carrying a type and
+nothing else.
 
 **Nothing about the address is logged, ever.** Not on success, and not on
 failure: a PostgREST insert error quotes the row, and the row is the entire

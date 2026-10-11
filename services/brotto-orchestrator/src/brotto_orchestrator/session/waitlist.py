@@ -22,6 +22,19 @@ wins, and a route that answers differently for two outcomes is a route that can
 be asked *"is this person on the list?"* — which is a directory of strangers'
 inbox membership, offered to anyone who can reach a public URL.
 
+**`add` therefore reports which one happened, and the route still does not.**
+This is the oracle guard, and it is the whole reason `add` returns a `Signup`
+rather than a bare `True`: a confirmation email must go to an address that was
+*just* added and not to one that was already here, so the distinction has to
+exist somewhere — and it is made here, **internally**, where only this process
+can read it. The route maps both `CREATED` and `DUPLICATE` to the same
+`200 {"ok": true}`, and the send is a background task hanging off that same
+answer, so neither the body nor the time-to-first-byte carries the fact. Widening
+the response to distinguish them (or waiting on the send before answering, which
+is the same leak through a stopwatch) hands a public URL a membership oracle
+with a slow path on it. `test_a_duplicate_is_answered_identically_and_sends_nothing`
+is the pin.
+
 **Nothing is logged.** Not the address, not the body, not a PostgREST error
 text — a Supabase insert error quotes the row, and the row is the entire
 payload. Only the status code crosses into a log line, which is what an
@@ -30,6 +43,7 @@ operator needs and is not what the table holds.
 
 from __future__ import annotations
 
+import enum
 import logging
 import os
 
@@ -46,6 +60,24 @@ COLUMNS = frozenset({"email", "batch"})
 #: from this variable, which the operator sets when they send a batch. Empty
 #: by default, because an install that never sets it must still accept a signup.
 BATCH_ENV = "BROTTO_WAITLIST_BATCH"
+
+
+class Signup(enum.Enum):
+    """What `add` did — and what it must never tell a caller.
+
+    `CREATED` and `DUPLICATE` are both successes, and the route answers both
+    with one identical response. Only `REFUSED` is an error. The distinction
+    exists because the confirmation email belongs to a first signup alone; it
+    is an internal signal, not a status code.
+    """
+
+    CREATED = "created"
+    DUPLICATE = "duplicate"
+    REFUSED = "refused"
+
+    @property
+    def ok(self) -> bool:
+        return self is not Signup.REFUSED
 
 
 def batch() -> str:
@@ -84,12 +116,13 @@ def waitlist_enabled() -> bool:
     return bool(_supabase_url() and _service_key())
 
 
-async def add(email: str) -> bool:
+async def add(email: str) -> "Signup":
     """Write one row through the same PostgREST seam as the other two tables.
 
-    True when the row is there — newly written or already present. False when
-    Supabase did not take it. Never raises, and never returns anything about
-    the address.
+    Which of the three happened — written, already there, or refused. Never
+    raises, and never returns anything about the address. The caller decides
+    what a `Signup` means to the outside world; see the module docstring for
+    why the one thing it must not mean is "this address was new".
     """
     from .jwt_auth import SupabaseUnavailable, _profiles
 
@@ -98,17 +131,17 @@ async def add(email: str) -> bool:
         status, _ = await _profiles("POST", "", row, path="rest/v1/waitlist")
     except SupabaseUnavailable:
         log.warning("waitlist insert: control plane unavailable")
-        return False
+        return Signup.REFUSED
     except Exception as exc:
         # The TYPE, never the message: a PostgREST body quotes the row, and the
         # row is the one field this whole module exists to keep small.
         log.warning("waitlist insert failed: %s", type(exc).__name__)
-        return False
+        return Signup.REFUSED
     if status == 409:
         # Already on the list. Answered exactly as a first submit is — the
         # duplicate is a success for the caller and a no-op for the table.
-        return True
+        return Signup.DUPLICATE
     if status >= 400:
         log.warning("waitlist insert answered %d", status)
-        return False
-    return True
+        return Signup.REFUSED
+    return Signup.CREATED
