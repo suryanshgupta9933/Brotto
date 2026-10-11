@@ -235,6 +235,49 @@ def test_the_owner_sidecar_is_erased_with_the_session(client, hosted, clean_regi
     assert not (d / f"{sid}{audit_mod._OWNER_EXT}").exists()
 
 
+def test_ownership_survives_eviction_at_the_tracking_cap(client, hosted, clean_registry, monkeypatch):
+    """The same lie, without the restart: the cap, not the process.
+
+    `_prune_sessions` evicts from `_sessions` on a scale threshold, with
+    nothing red and no process dying. When ownership lived in the
+    `SessionState` that eviction drops, `owned_sessions()` shrank with it and
+    a scoped `DELETE /v1/sessions` answered `{"deleted": 0, "residue": 0}`
+    while every transcript was still on disk. `.owner` survives a restart;
+    this asserts it survives eviction, which is the other way that map was
+    emptied.
+
+    The eviction is asserted, not assumed: a test that only checked
+    ownership survived would pass against the old code too, and prove
+    nothing.
+    """
+    from brotto_orchestrator import main
+
+    cap = 3
+    monkeypatch.setattr(main, "MAX_TRACKED_SESSIONS", cap)
+    minted = [_open_as(client, ALICE) for _ in range(6)]
+    for sid in minted:
+        _seed_run(sid)
+
+    evicted = [s for s in minted if s not in main.registry._sessions]
+    assert len(main.registry._sessions) <= cap
+    assert len(evicted) >= 3, "nothing was evicted, so this test proves nothing"
+
+    # Ownership is not per-run state. It answers for every session ever
+    # minted, evicted or not.
+    assert set(main.registry.owned_sessions(ALICE)) == set(minted)
+    for sid in minted:
+        assert main.registry.owns(sid, ALICE), f"{sid} stopped being hers at the cap"
+    assert not main.registry.owns(minted[0], BOB)
+
+    # And the promise is the truth: the count describes files that are gone.
+    d = Path(audit_mod.default_dir())
+    resp = client.delete("/v1/sessions", headers={"authorization": f"Bearer {_token(ALICE)}"})
+    body = resp.json()
+    assert body == {"deleted": len(minted), "residue": 0}, \
+        f"erase-all reported {body} with {len(minted)} transcripts on disk"
+    assert not [p for p in d.glob("*.json")], "erased transcripts are still on disk"
+
+
 def test_a_scoped_erase_all_leaves_an_unowned_orphan_alone(client, hosted, clean_registry):
     """Fail-closed in the sweep as well as in the read: residue that belongs
     to no account is nobody's to delete, so a scoped sweep must skip it rather

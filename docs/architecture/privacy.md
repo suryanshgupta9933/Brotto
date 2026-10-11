@@ -355,10 +355,14 @@ is written by the harness's `AuditTrail` while this is written at mint time —
 before a run exists, and so before any document does. Self-host writes nothing:
 `None` is one shared identity and needs no record. Pinned by
 `tests/test_session_ownership.py` (first coverage this guard ever had), which
-covers the restart half and the sidecar's life. **The eviction half is not yet
-covered by a test** — the separation is structural (`_owners` is not a dict
-anything prunes), and the test that should exist is one that drives
-`MAX_TRACKED_SESSIONS` down and asserts `owned_sessions()` is unchanged.
+covers the restart half and the sidecar's life.
+`test_ownership_survives_eviction_at_the_tracking_cap` covers the eviction
+half: it mints six sessions for one owner with `MAX_TRACKED_SESSIONS` at 3,
+**asserts the eviction actually happened** (without that the test would pass
+against the old code and prove nothing), then asserts `owned_sessions()` still
+returns all six, `owns()` answers for each, and a scoped `DELETE /v1/sessions`
+reports `deleted: 6` with every document gone from disk. Against ownership read
+back out of `_sessions` it goes red on exactly that count.
 
 **`?token=` is refused in jwt mode and nowhere else.** A URL reaches this
 server's access log, every proxy's log ahead of it, and the browser history. A
