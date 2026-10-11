@@ -144,7 +144,7 @@ def test_delete_route_erases_the_session(client, auth, sessions_dir):
     _seed(sessions_dir, "abc")
     r = client.delete("/v1/sessions/abc", headers=auth)
     assert r.status_code == 200
-    assert r.json() == {"deleted": True}
+    assert r.json() == {"deleted": True, "residue": 0}
     assert not (sessions_dir / "abc.json").exists()
 
 
@@ -153,7 +153,7 @@ def test_delete_route_on_a_missing_session_is_not_an_error(client, auth):
     # understand. `deleted: false` says it was already gone.
     r = client.delete("/v1/sessions/ghost", headers=auth)
     assert r.status_code == 200
-    assert r.json() == {"deleted": False}
+    assert r.json() == {"deleted": False, "residue": 0}
 
 
 def test_delete_all_route_requires_the_secret(client, sessions_dir):

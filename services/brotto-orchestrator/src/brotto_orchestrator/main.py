@@ -1228,9 +1228,20 @@ async def delete_session(session_id: str, request: Request):
         return _error(404, "not found")
     if not registry.owns(session_id, _owner(auth.claims)):
         return _error(404, "unknown session")
-    deleted = _delete(session_id)
-    registry.forget_owner(session_id)
-    return JSONResponse(content={"deleted": deleted})
+    left: list[str] = []
+    deleted = _delete(session_id, leftover=left)
+    if left:
+        # The erasure did not finish, so the registry keeps claiming the
+        # session: dropping the owner here would make this account unable to
+        # reach the file that survived, permanently, and the next scoped
+        # erase-all would report nothing left to do.
+        log.error(
+            "session %s: %d file(s) could not be erased, ownership retained: %s",
+            session_id, len(left), ",".join(left),
+        )
+    else:
+        registry.forget_owner(session_id)
+    return JSONResponse(content={"deleted": deleted, "residue": len(left)})
 
 
 @app.delete("/v1/sessions")
@@ -1256,8 +1267,14 @@ async def delete_all_sessions(request: Request):
         # "erase all" does not count the same erased session again.
         mine = registry.owned_sessions(owner)
         deleted, residue = _delete_all(only=mine)
-        for sid in mine:
-            registry.forget_owner(sid)
+        if not residue:
+            # Only a sweep that finished gives up ownership. Files that
+            # stayed put are still on disk and still only reachable by id,
+            # so dropping the entries would strand them and the next
+            # erase-all would answer `{"deleted": 0}` — the untruthful
+            # erasure this scoping exists to prevent.
+            for sid in mine:
+                registry.forget_owner(sid)
     # `residue` travels back because a file that could not be unlinked is
     # still on disk, and the panel is the only thing that can tell the user
     # their deletion did not finish. Answering `deleted: n` regardless would

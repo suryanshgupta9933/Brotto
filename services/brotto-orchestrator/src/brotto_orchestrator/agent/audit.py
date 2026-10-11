@@ -944,7 +944,8 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
                            "tokens_in": 0, "tokens_out": 0, "errors": 1}}
 
 
-def delete(session_id: str, *, dir: Path | None = None) -> bool:
+def delete(session_id: str, *, dir: Path | None = None,
+           leftover: list[str] | None = None) -> bool:
     """Remove one session's files. Returns whether anything was there.
 
     A session is only deleted when *all* of it is gone. Leaving the
@@ -952,30 +953,56 @@ def delete(session_id: str, *, dir: Path | None = None) -> bool:
     user believes they erased, and leaving the live trail in `_LIVE` is
     worse: the running loop rewrites the whole document on its next
     flush, so the "deleted" session reappears in the history list.
+
+    `leftover` collects the names of files that could **not** be unlinked, so
+    a caller can refuse to record an erasure that did not finish. It is an
+    out-parameter rather than part of the return because two internal callers
+    (`delete_all`, `prune_older_than`) want the boolean and must not have to
+    unpack it — but a caller that promises the user "erased" and passes no
+    list is back to inferring it, which is how this was wrong before.
     """
     if not _is_document_stem(session_id):
         return False
     d = dir or default_dir()
     removed = False
-    for name in (f"{session_id}{ext}" for ext in (_DOCUMENT_EXT, *_SESSION_RESIDUE_EXT)):
-        # pages.json has no writer — page text stopped reaching disk — but
-        # `read` and `list_sessions` already name it, and a sidecar written
-        # by an older build is still on the user's disk.
-        # The .tmp is the atomic write's staging file, so it holds a whole
-        # document whenever a write was interrupted between the two steps.
-        # `list_sessions` globs `*.json` and would never show it, which is
-        # exactly why it has to be named here rather than swept: the user
-        # is told the session is erased, and this would be what is left.
-        try:
-            # Same guard as `read`, one line above the loop: a session id with
-            # a separator or a dot never reaches here, so `name` can only
-            # resolve inside `d`. Suppressed in `.github/workflows/codeql.yml`.
-            (d / name).unlink()
-            removed = True
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            log.warning("audit: could not remove %s/%s: %s", d, name, exc)
+    failed: list[str] = []
+
+    def _unlink(names: list[str]) -> None:
+        nonlocal removed
+        for name in names:
+            # pages.json has no writer — page text stopped reaching disk — but
+            # `read` and `list_sessions` already name it, and a sidecar written
+            # by an older build is still on the user's disk.
+            # The .tmp is the atomic write's staging file, so it holds a whole
+            # document whenever a write was interrupted between the two steps.
+            # `list_sessions` globs `*.json` and would never show it, which is
+            # exactly why it has to be named here rather than swept: the user
+            # is told the session is erased, and this would be what is left.
+            try:
+                # Same guard as `read`, one line above the loop: a session id
+                # with a separator or a dot never reaches here, so `name` can
+                # only resolve inside `d`. Suppressed in codeql.yml.
+                (d / name).unlink()
+                removed = True
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                failed.append(name)
+                log.warning("audit: could not remove %s/%s: %s", d, name, exc)
+
+    names = [f"{session_id}{ext}" for ext in (_DOCUMENT_EXT, *_SESSION_RESIDUE_EXT)]
+    # The owner sidecars go last, and only if everything before them went. An
+    # `.owner` erased beside a scratchpad that survived is the same permanent
+    # unreachability as an orphaned one, one delete earlier: after the next
+    # restart `owned_sessions()` cannot name the file again, and nothing in
+    # the product reaches a file no owner claims.
+    owner_exts = (_OWNER_EXT, f"{_OWNER_EXT}.tmp")
+    owner_names = [n for n in names if n[len(session_id):] in owner_exts]
+    _unlink([n for n in names if n not in owner_names])
+    if not failed:
+        _unlink(owner_names)
+    if leftover is not None:
+        leftover.extend(failed)
     with _LIVE_LOCK:
         live = _LIVE.pop(session_id, None)
     if live is not None:
@@ -1016,7 +1043,13 @@ def delete_all(*, dir: Path | None = None, only: Container[str] | None = None) -
     # owned by another user stays put, and the caller answers "everything
     # deleted" — so the user is told their mail is erased and it is not.
     residue = 0
+    owner_exts = (_OWNER_EXT, f"{_OWNER_EXT}.tmp")
+    # Same rule as `delete`: an `.owner` is not swept while anything it is
+    # the only handle to is still on disk. Otherwise the retry that follows
+    # the caller keeping ownership finds no owner to scope it by.
     for ext in _SESSION_RESIDUE_EXT:
+        if ext in owner_exts and residue:
+            continue
         for p in d.glob(f"*{ext}"):
             if keep is not None and p.name[: -len(ext)] not in keep:
                 continue
@@ -1075,13 +1108,18 @@ def _prune_orphan_owners(d: Path, cutoff: float, live: set[str]) -> int:
     transcript this was, and it was outliving the retention setting by
     default.
 
-    **"The document is absent" is the whole condition**, and it is why an
-    age test alone would be wrong: `.owner` is written once at mint and never
-    touched again, so its mtime is the *start* of the run while the document's
-    is the last activity. A month-long session has a fresh document beside a
-    40-day-old sidecar, and sweeping on age would silently drop that session
-    out of a scoped `erase all` — the exact untruthful-erasure failure the
-    sidecar exists to prevent.
+    **"Nothing is left to erase" is the whole condition** — the document *and*
+    every residue extension `delete` names — and it is why an age test alone
+    would be wrong: `.owner` is written once at mint and never touched again, so
+    its mtime is the *start* of the run while the document's is the last
+    activity. A month-long session has a fresh document beside a 40-day-old
+    sidecar, and sweeping on age would silently drop that session out of a
+    scoped `erase all` — the exact untruthful-erasure failure the sidecar
+    exists to prevent.
+
+    Checking only the document is the same lie one step along: a hand-deleted
+    `.json` leaves a scratchpad, the sweep drops the `.owner`, and the account
+    can never erase the file again — `owned_sessions()` no longer names it.
 
     Live sessions are skipped for the same reason the loop above skips them:
     a run that has been going for a month is not stale.
@@ -1099,7 +1137,17 @@ def _prune_orphan_owners(d: Path, cutoff: float, live: set[str]) -> int:
             # this stem comes off a filename off the disk.
             if stem in live or not _is_document_stem(stem):
                 continue
-            if (d / f"{stem}{_DOCUMENT_EXT}").exists():
+            # "Nothing left to erase" covers every extension `delete` names,
+            # not the document alone. A hand-deleted `.json` can strand a
+            # `.scratchpad.txt` or a `.pages.json`, and dropping the `.owner`
+            # then costs the account the only handle that can reach them —
+            # permanently, because `owned_sessions()` is what scopes an
+            # erasure. Reads `_SESSION_RESIDUE_EXT` rather than a second
+            # hardcoded list, so it cannot drift from `delete`/`delete_all`.
+            # `ext` is the sidecar this iteration is itself looking at, and
+            # it exists by definition — testing it would answer "yes" always.
+            if any((d / f"{stem}{other}").exists()
+                   for other in _SESSION_RESIDUE_EXT if other != ext):
                 continue
             try:
                 if p.stat().st_mtime >= cutoff:

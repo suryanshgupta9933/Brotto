@@ -317,3 +317,65 @@ def test_a_stray_owner_file_does_not_become_a_session():
     d.mkdir(parents=True, exist_ok=True)
     (d / "notes.owner").write_text(BOB)
     assert "notes" not in load_owners()
+
+# ── ownership is only given up when the erasure finished ───────────────────
+
+def _wedge_a_sidecar(d: Path, session_id: str) -> Path:
+    """Make one of a session's files impossible to unlink.
+
+    A directory where a file is expected: `unlink` raises
+    `IsADirectoryError`, which is an `OSError`, so this exercises the real
+    failure path rather than monkeypatching `audit.delete` into reporting
+    something it does not report.
+    """
+    d.mkdir(parents=True, exist_ok=True)
+    blocked = d / f"{session_id}.scratchpad.txt"
+    if blocked.exists():
+        blocked.unlink()
+    blocked.mkdir()
+    return blocked
+
+
+def test_a_delete_that_could_not_finish_keeps_the_ownership(client, hosted, clean_registry):
+    """`audit.delete` names every file a session owns, and one of them can
+    stay put. Forgetting the owner anyway is the untruthful erasure in
+    miniature: the registry stops claiming a file that is still on disk, so
+    the next scoped erase-all cannot reach it and reports nothing left.
+    """
+    from brotto_orchestrator import main
+
+    sid = _open_as(client, ALICE)
+    _seed_run(sid)
+    d = Path(audit_mod.default_dir())
+    blocked = _wedge_a_sidecar(d, sid)
+
+    body = client.delete(f"/v1/sessions/{sid}",
+                         headers={"authorization": f"Bearer {_token(ALICE)}"}).json()
+
+    assert body["residue"] == 1, f"an unfinished erasure answered {body}"
+    assert blocked.exists()
+    assert main.registry.owns(sid, ALICE), "nobody can reach that file again"
+    assert (d / f"{sid}{audit_mod._OWNER_EXT}").exists(), \
+        "the sidecar has to survive the restart too, not just the registry entry"
+    assert sid in main.registry.owned_sessions(ALICE)
+
+
+def test_erase_all_that_left_residue_keeps_the_ownership(client, hosted, clean_registry):
+    """Same promise at the scope the hosted relay actually uses. The ownership
+    entries are dropped as a batch, so an unguarded loop strands every file
+    the sweep could not remove in one go."""
+    from brotto_orchestrator import main
+
+    sid = _open_as(client, ALICE)
+    _seed_run(sid)
+    d = Path(audit_mod.default_dir())
+    blocked = _wedge_a_sidecar(d, sid)
+
+    body = client.delete("/v1/sessions",
+                         headers={"authorization": f"Bearer {_token(ALICE)}"}).json()
+
+    assert body["residue"] == 1, f"erase-all answered {body} with a file on disk"
+    assert blocked.exists()
+    assert sid in main.registry.owned_sessions(ALICE), \
+        "a retry of erase-all can no longer be scoped to this session"
+    assert (d / f"{sid}{audit_mod._OWNER_EXT}").exists()

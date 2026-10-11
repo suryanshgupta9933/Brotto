@@ -364,6 +364,32 @@ returns all six, `owns()` answers for each, and a scoped `DELETE /v1/sessions`
 reports `deleted: 6` with every document gone from disk. Against ownership read
 back out of `_sessions` it goes red on exactly that count.
 
+**Ownership is released only by a finished erasure.** Every way of losing an
+`.owner` while one of its files is still on disk ends the same way: the file
+outlives the handle, `owned_sessions()` cannot name it, and no account can ever
+erase it again. So there is one rule in three places, and each of them is a
+place that already existed:
+
+- `DELETE /v1/sessions/{id}` keeps the registry entry when `audit.delete`
+  reports a file it could not unlink. `delete` gained a `leftover` out-param
+  for exactly this — it knows which unlinks raised, and the route was
+  throwing that away by forgetting unconditionally.
+- `DELETE /v1/sessions` skips `forget_owner` entirely when `residue` is
+  non-zero. The entries go as a batch, so an unguarded loop strands every
+  unremovable file at once.
+- `delete` and `delete_all` unlink the owner sidecars **last**, and only if
+  nothing before them failed — otherwise the retry the kept ownership exists
+  to enable would find no sidecar to scope itself by.
+
+The retention sweep is the fourth door and works the other way: it ages out an
+`.owner` only when the document **and every extension in `_SESSION_RESIDUE_EXT`**
+are gone, not when the document is. Checking the document alone is what let a
+hand-deleted `.json` strand a scratchpad and take the account's ability to erase
+it with it. Pinned by `test_an_orphaned_residue_keeps_the_owner_that_can_still_erase_it`,
+`test_an_owner_with_nothing_left_to_erase_is_still_pruned`,
+`test_a_delete_that_could_not_finish_keeps_the_ownership` and
+`test_erase_all_that_left_residue_keeps_the_ownership`.
+
 **`?token=` is refused in jwt mode and nowhere else.** A URL reaches this
 server's access log, every proxy's log ahead of it, and the browser history. A
 self-hoster's `AGENT_SECRET` is one secret on their own box; a hosted JWT is a
