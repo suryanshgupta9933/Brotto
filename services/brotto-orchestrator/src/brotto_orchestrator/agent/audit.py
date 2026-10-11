@@ -840,6 +840,21 @@ _SESSION_RESIDUE_EXT: tuple[str, ...] = (
     # interrupted `_flush` leaves a `.json.tmp`. It carries an account id.
     f"{_OWNER_EXT}.tmp",
 )
+#: Every file a session owns: the document plus the sidecars. `delete` names
+#: them, `delete_all`'s residue sweep counts them, and `_prune_orphan_owners`
+#: refuses to drop an `.owner` while any of them survives. **One list.**
+#:
+#: There were two, and the document was in the wrong one. `_SESSION_RESIDUE_EXT`
+#: is the sidecars *only* — `delete` spelled out both halves and got it right,
+#: while the sweep and the prune each read the sidecars and so never tested the
+#: `.json`. A transcript that would not unlink was counted by nobody, and a
+#: fresh document beside an aged `.owner` let the prune drop the only handle
+#: that can erase it. `_SESSION_RESIDUE_EXT` is still the right name for what it
+#: is — residue is by definition what is left when the document is gone.
+_SESSION_EXT: tuple[str, ...] = (_DOCUMENT_EXT, *_SESSION_RESIDUE_EXT)
+#: The two files that carry ownership. They are removed together or not at
+#: all, and neither is content — see `_still_owns`.
+_OWNER_EXTS: tuple[str, ...] = (_OWNER_EXT, f"{_OWNER_EXT}.tmp")
 
 
 def record_owner(session_id: str, owner: str | None, *, dir: Path | None = None) -> bool:
@@ -990,13 +1005,13 @@ def delete(session_id: str, *, dir: Path | None = None,
                 failed.append(name)
                 log.warning("audit: could not remove %s/%s: %s", d, name, exc)
 
-    names = [f"{session_id}{ext}" for ext in (_DOCUMENT_EXT, *_SESSION_RESIDUE_EXT)]
+    names = [f"{session_id}{ext}" for ext in _SESSION_EXT]
     # The owner sidecars go last, and only if everything before them went. An
     # `.owner` erased beside a scratchpad that survived is the same permanent
     # unreachability as an orphaned one, one delete earlier: after the next
     # restart `owned_sessions()` cannot name the file again, and nothing in
     # the product reaches a file no owner claims.
-    owner_exts = (_OWNER_EXT, f"{_OWNER_EXT}.tmp")
+    owner_exts = _OWNER_EXTS
     owner_names = [n for n in names if n[len(session_id):] in owner_exts]
     _unlink([n for n in names if n not in owner_names])
     if not failed:
@@ -1028,30 +1043,44 @@ def delete_all(*, dir: Path | None = None, only: Container[str] | None = None) -
     """
     d = dir or default_dir()
     keep = None if only is None else set(only)
+    # The boolean is enough here even though `delete` reports failures through
+    # `leftover`, because the sweep below is a strict superset of this loop:
+    # it globs the same `_SESSION_EXT`, in the same directory, and runs after.
+    # Counting in both places counted every file on a read-only mount twice —
+    # and dropping `leftover` here is only safe *because* `.json` joined that
+    # glob. With the document missing from it, nothing counted a `.json` that
+    # would not unlink, and `residue == 0` released the account's only handle
+    # to a transcript that was still on disk.
     count = sum(
         1 for p in _session_documents(d)
         if (keep is None or p.stem in keep) and delete(p.stem, dir=d)
     )
-    # Residue whose document is already gone belongs to no session as far as
-    # `_session_documents` is concerned — it globs `*.json` — so the loop
-    # above never reaches it. Whatever is left here is a user's own content on
-    # their disk that nothing in the product will ever list or remove: the
-    # residue of an interrupted write, or a sidecar whose document someone
-    # deleted by hand.
+    # The sweep is a second pass, not the only one: it covers what the loop
+    # above never reached — residue whose document is already gone, which
+    # `_session_documents` cannot see because it globs `*.json` — and what the
+    # loop above reached and failed to remove. The document is in the glob for
+    # the second reason: a `.json` that stayed put is precisely the file that
+    # must be counted, and it was counted by nobody while it was not in here.
     #
     # Failures are counted and returned, not swallowed. A file held open or
     # owned by another user stays put, and the caller answers "everything
     # deleted" — so the user is told their mail is erased and it is not.
     residue = 0
-    owner_exts = (_OWNER_EXT, f"{_OWNER_EXT}.tmp")
-    # Same rule as `delete`: an `.owner` is not swept while anything it is
-    # the only handle to is still on disk. Otherwise the retry that follows
-    # the caller keeping ownership finds no owner to scope it by.
-    for ext in _SESSION_RESIDUE_EXT:
-        if ext in owner_exts and residue:
-            continue
+    owner_exts = _OWNER_EXTS
+    # Same rule as `delete`, and the same reason it is **per-stem**: an `.owner`
+    # is not swept while anything it is the only handle to is still on disk.
+    # The gate used to be `if ext in owner_exts and residue`, a process-global
+    # counter — so one session's stuck scratchpad suppressed the `.owner` sweep
+    # for *every other* session in the directory, each of them losing its
+    # handle to files that were about to be removed perfectly well. The
+    # condition is about one file belonging to one stem, so it is tested that
+    # way, and `ext` itself is excluded because it exists by definition.
+    for ext in _SESSION_EXT:
         for p in d.glob(f"*{ext}"):
-            if keep is not None and p.name[: -len(ext)] not in keep:
+            stem = p.name[: -len(ext)]
+            if keep is not None and stem not in keep:
+                continue
+            if ext in owner_exts and _still_owns(d, stem, ext):
                 continue
             try:
                 p.unlink()
@@ -1096,6 +1125,29 @@ def prune_older_than(days: float, *, dir: Path | None = None) -> int:
     return pruned
 
 
+def _still_owns(d: Path, stem: str, ext: str) -> bool:
+    """Whether anything else a session *still needs erasing* survives beside
+    `ext`. Only meaningful for the owner extensions.
+
+    The one test behind "there is nothing left to erase", so it reads
+    `_SESSION_EXT` — the document included — rather than a list written next
+    to the caller. Two call sites already disagreed about what that list was,
+    and the disagreement was always in the direction of dropping the document.
+
+    The other owner extension is excluded along with `ext` itself, and that is
+    load-bearing rather than tidy: `.owner` and `.owner.tmp` would otherwise
+    certify each other. Both are account ids, both are erased together, and
+    neither is content — so a pair left with nothing else to hold them is an
+    orphan, not a handle worth keeping. Left in the list, the sweep and the
+    prune both leave the pair immortal forever.
+    """
+    if ext not in _OWNER_EXTS:
+        return False
+    return any((d / f"{stem}{other}").exists()
+               for other in _SESSION_EXT
+               if other != ext and other not in _OWNER_EXTS)
+
+
 def _prune_orphan_owners(d: Path, cutoff: float, live: set[str]) -> int:
     """Age out `.owner` sidecars whose document is gone. Returns the count.
 
@@ -1125,7 +1177,7 @@ def _prune_orphan_owners(d: Path, cutoff: float, live: set[str]) -> int:
     a run that has been going for a month is not stale.
     """
     pruned = 0
-    for ext in (_OWNER_EXT, f"{_OWNER_EXT}.tmp"):
+    for ext in _OWNER_EXTS:
         try:
             files = list(d.glob(f"*{ext}"))
         except OSError:
@@ -1137,17 +1189,17 @@ def _prune_orphan_owners(d: Path, cutoff: float, live: set[str]) -> int:
             # this stem comes off a filename off the disk.
             if stem in live or not _is_document_stem(stem):
                 continue
-            # "Nothing left to erase" covers every extension `delete` names,
-            # not the document alone. A hand-deleted `.json` can strand a
+            # "Nothing left to erase" covers every extension `delete` names —
+            # the document first of all. A hand-deleted `.json` can strand a
             # `.scratchpad.txt` or a `.pages.json`, and dropping the `.owner`
             # then costs the account the only handle that can reach them —
             # permanently, because `owned_sessions()` is what scopes an
-            # erasure. Reads `_SESSION_RESIDUE_EXT` rather than a second
-            # hardcoded list, so it cannot drift from `delete`/`delete_all`.
-            # `ext` is the sidecar this iteration is itself looking at, and
-            # it exists by definition — testing it would answer "yes" always.
-            if any((d / f"{stem}{other}").exists()
-                   for other in _SESSION_RESIDUE_EXT if other != ext):
+            # erasure. So can a `.json` that is merely *fresh* beside an aged
+            # sidecar: `.owner` is written once at mint and never touched, so
+            # its mtime is the start of the run while the document's is the
+            # last activity. Checking the residue extensions only is how that
+            # transcript became permanently unreachable.
+            if _still_owns(d, stem, ext):
                 continue
             try:
                 if p.stat().st_mtime >= cutoff:

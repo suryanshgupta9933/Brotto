@@ -246,13 +246,19 @@ the task text, the action names and the typed input are. So:
 - The README's Privacy section describes the *current* state honestly, and the deletion path
   is real: `DELETE /v1/sessions/{id}` takes the document, the scratchpad and
   the pages sidecar together, so there is no "part of it survived".
-- `delete` and `delete_all` read **one** list, `_SESSION_RESIDUE_EXT`
-  (`audit.py`). They used to hold separate hand-written ones, and a sidecar
-  named in one but not the other was stranded by the one that swept less —
-  a `.pages.json` beside a document someone deleted by hand, 76KB of Gmail,
-  reported as erased. `delete_all` also returns how many files it could not
-  remove, because a file on a read-only mount stays put and the alternative
-  was a log line the user will never read standing in for the truth.
+- `delete` and `delete_all` read **one** list, `_SESSION_EXT` (`audit.py`) —
+  and there used to be two, which is the same bug twice. First they held
+  separate hand-written lists and a sidecar named in one but not the other was
+  stranded by the one that swept less: a `.pages.json` beside a document
+  someone deleted by hand, 76KB of Gmail, reported as erased. Then, after that
+  was fixed, the list was still read *differently* by different callers —
+  `delete` read "the document plus the sidecars" and got it right, while the
+  residue sweep and the retention prune read `_SESSION_RESIDUE_EXT`, which is
+  the **sidecars only**, and so never tested the `.json` at all. One list,
+  read three ways, is not one list. `delete_all` also returns how many files
+  it could not remove, because a file on a read-only mount stays put and the
+  alternative was a log line the user will never read standing in for the
+  truth.
 - The launch gates are partly closed. `/ws/ext` and the session endpoints are
   gated on `AGENT_SECRET`, which is the privacy control — but only when one is
   set. On **loopback** "no credential" stays a *warning* so dev still works; on a
@@ -367,8 +373,10 @@ back out of `_sessions` it goes red on exactly that count.
 **Ownership is released only by a finished erasure.** Every way of losing an
 `.owner` while one of its files is still on disk ends the same way: the file
 outlives the handle, `owned_sessions()` cannot name it, and no account can ever
-erase it again. So there is one rule in three places, and each of them is a
-place that already existed:
+erase it again. So there is one rule in four places, and each of them is a
+place that already existed. Three of them were live and wrong for a week on
+the relay before anyone looked; what they shared was a second, narrower
+reading of "the files a session owns".
 
 - `DELETE /v1/sessions/{id}` keeps the registry entry when `audit.delete`
   reports a file it could not unlink. `delete` gained a `leftover` out-param
@@ -382,13 +390,56 @@ place that already existed:
   to enable would find no sidecar to scope itself by.
 
 The retention sweep is the fourth door and works the other way: it ages out an
-`.owner` only when the document **and every extension in `_SESSION_RESIDUE_EXT`**
-are gone, not when the document is. Checking the document alone is what let a
-hand-deleted `.json` strand a scratchpad and take the account's ability to erase
-it with it. Pinned by `test_an_orphaned_residue_keeps_the_owner_that_can_still_erase_it`,
-`test_an_owner_with_nothing_left_to_erase_is_still_pruned`,
-`test_a_delete_that_could_not_finish_keeps_the_ownership` and
-`test_erase_all_that_left_residue_keeps_the_ownership`.
+`.owner` only when **every file in `_SESSION_EXT` is gone** — the document
+first, not merely the sidecars. Both narrower readings were wrong, and they
+were wrong in the direction that strands files:
+
+- Checking the document *alone* let a hand-deleted `.json` strand a scratchpad
+  and take the account's ability to erase it with it.
+- Checking `_SESSION_RESIDUE_EXT` alone — the sidecars, which is what this
+  sweep originally did — is the same lie with the sides flipped. It strands the
+  commonest shape of all: a `.json` that is **fresh** (an active or
+  recently-closed run) beside an `.owner` written 40 days ago at mint time and
+  never touched since. `.owner` is written once and never updated, so its
+  mtime is the *start* of the run while the document's is the last activity.
+  The sweep dropped the owner, `owned_sessions()` stopped naming the session,
+  and the transcript became permanently unreachable — the file most worth
+  deleting, the one the erasure machinery exists to delete.
+
+Both halves are pinned: `test_an_orphaned_residue_keeps_the_owner_that_can_still_erase_it`
+(hand-deleted document, stranded sidecar) and
+`test_a_surviving_document_keeps_the_owner_that_can_still_erase_it` (fresh
+document, aged owner) — the second went green only when the sweep started
+reading the document, and its two guards above it were passing the whole time.
+
+The sweep's own gate went with it. It read `if ext in owner_exts and residue`
+— a **process-global** counter, so one session's stuck scratchpad suppressed
+the `.owner` sweep for every *other* session in the directory, each of them
+losing a handle to files the sweep was about to remove perfectly well. The
+condition is about one file belonging to one stem, so it is tested that way
+(`_still_owns`), and the check excludes the other owner extension: `.owner` and
+`.owner.tmp` are the same account id, erased together or not at all, so left in
+the list they certify each other and an interrupted `record_owner` makes both
+of them immortal. Pinned by
+`test_an_owner_and_its_staging_file_do_not_keep_each_other_alive`.
+
+**And `delete_all` reported the erasure finished when it had not.** The
+document loop was a `sum(...)` over `delete()`'s boolean, so it discarded the
+`leftover` out-param that already listed which unlinks raised — and the residue
+sweep, globbing the sidecars only, never saw the `.json` either. A transcript
+that would not unlink (held open, read-only mount) was counted by nobody, so
+the route answered `{"deleted": 0, "residue": 0}`, dropped ownership, and told
+the user their mail was erased. `residue` counts from the sweep alone, which
+is a strict superset of the document loop — it globs the same `_SESSION_EXT`
+in the same directory and runs after — so adding `.json` to that glob is what
+closes it. Counting in both places counted every file on a read-only mount
+twice. Pinned by
+`test_a_document_that_would_not_unlink_is_counted_as_residue` and
+`test_erase_all_keeps_the_ownership_when_the_document_would_not_unlink`.
+
+The remaining pins are `test_an_owner_with_nothing_left_to_erase_is_still_pruned`
+(the guard is not a leak in the other direction), `test_a_delete_that_could_not_finish_keeps_the_ownership`
+and `test_erase_all_that_left_residue_keeps_the_ownership`.
 
 **`?token=` is refused in jwt mode and nowhere else.** A URL reaches this
 server's access log, every proxy's log ahead of it, and the browser history. A

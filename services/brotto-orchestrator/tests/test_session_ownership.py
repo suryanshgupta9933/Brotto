@@ -336,6 +336,50 @@ def _wedge_a_sidecar(d: Path, session_id: str) -> Path:
     return blocked
 
 
+def _wedge_the_document(d: Path, session_id: str) -> Path:
+    """Make the audit document itself impossible to unlink.
+
+    A directory where the file is expected: `unlink` raises
+    `IsADirectoryError`, an `OSError`, so this is the real failure path.
+
+    Wedge the sidecar instead and the residue sweep still catches it — the
+    `.scratchpad.txt` glob sees it. The document is not in the residue
+    extensions, so before the fix a stuck `.json` was counted by nobody.
+    """
+    d.mkdir(parents=True, exist_ok=True)
+    blocked = d / f"{session_id}.json"
+    if blocked.exists():
+        blocked.unlink()
+    blocked.mkdir()
+    return blocked
+
+
+def test_a_document_that_would_not_unlink_is_counted_as_residue(tmp_path):
+    """`delete_all` must report the file it could not remove, whatever that
+    file is.
+
+    `delete` already collects unlink failures into `leftover`; the document
+    loop was a `sum(...)` that threw the list away, so a `.json` that stayed
+    put simply did not increment the count — and because the residue sweep
+    globbed only the sidecar extensions, it did not catch the `.json` either.
+    The function answered `(n, 0)` with the transcript still on disk, and
+    `residue == 0` is exactly what tells the caller to release ownership.
+    """
+    from brotto_orchestrator.agent.audit import AuditTrail as _AuditTrail
+
+    sid = "aaaaaaaa-1111-2222-3333-444444444444"
+    trail = _AuditTrail(sid, dir=tmp_path)
+    trail.begin_task("find the cheapest flight")
+    trail.close()
+    blocked = _wedge_the_document(tmp_path, sid)
+
+    deleted, residue = audit_mod.delete_all(dir=tmp_path)
+
+    assert deleted == 0
+    assert residue == 1, f"a transcript survived the sweep and was reported as {residue}"
+    assert blocked.exists()
+
+
 def test_a_delete_that_could_not_finish_keeps_the_ownership(client, hosted, clean_registry):
     """`audit.delete` names every file a session owns, and one of them can
     stay put. Forgetting the owner anyway is the untruthful erasure in
@@ -375,6 +419,32 @@ def test_erase_all_that_left_residue_keeps_the_ownership(client, hosted, clean_r
                          headers={"authorization": f"Bearer {_token(ALICE)}"}).json()
 
     assert body["residue"] == 1, f"erase-all answered {body} with a file on disk"
+    assert blocked.exists()
+    assert sid in main.registry.owned_sessions(ALICE), \
+        "a retry of erase-all can no longer be scoped to this session"
+    assert (d / f"{sid}{audit_mod._OWNER_EXT}").exists()
+
+
+def test_erase_all_keeps_the_ownership_when_the_document_would_not_unlink(
+        client, hosted, clean_registry):
+    """The user-visible half of the previous test: what the route answers, and
+    whether the account keeps the handle that can still finish the job.
+
+    This is the exact shape the untruthful erasure takes — transcript on disk,
+    ownership dropped, `{"deleted": 0, "residue": 0}` returned — and it is why
+    `residue` is part of `delete_all`'s return rather than a log line.
+    """
+    from brotto_orchestrator import main
+
+    sid = _open_as(client, ALICE)
+    _seed_run(sid)
+    d = Path(audit_mod.default_dir())
+    blocked = _wedge_the_document(d, sid)
+
+    body = client.delete("/v1/sessions",
+                         headers={"authorization": f"Bearer {_token(ALICE)}"}).json()
+
+    assert body["residue"] == 1, f"erase-all answered {body} with a transcript on disk"
     assert blocked.exists()
     assert sid in main.registry.owned_sessions(ALICE), \
         "a retry of erase-all can no longer be scoped to this session"

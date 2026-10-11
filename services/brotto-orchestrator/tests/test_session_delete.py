@@ -291,7 +291,11 @@ def test_residue_is_reported_when_a_file_cannot_be_removed(sessions_dir, monkeyp
     monkeypatch.setattr(Path, "unlink", _refuse)
     deleted, residue = delete_all(dir=sessions_dir)
     assert deleted == 0, "nothing could be removed, so nothing was deleted"
-    assert residue == 1, "the one seeded scratchpad, reported"
+    # Two files are on disk — the document and its scratchpad — so the number
+    # is two. It was `1` until `.json` joined the sweep's glob, and that `1`
+    # was the bug: the document was the one file nobody counted, on the one
+    # mount where the user is told their mail is erased and it is not.
+    assert residue == 2, "the document and the one seeded scratchpad, reported"
     assert (sessions_dir / "live-one.json").exists()
 
 
