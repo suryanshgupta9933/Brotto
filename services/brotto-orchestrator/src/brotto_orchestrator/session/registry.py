@@ -94,6 +94,20 @@ class SessionRegistry:
     def set_owner(self, session_id: str, owner: str | None) -> None:
         self.get_or_create(session_id).owner = owner
 
+    def hydrate_owners(self, owners: dict[str, str]) -> int:
+        """Restore ownership from disk at startup. Returns how many landed.
+
+        The registry is in-memory, so a dyno restart used to empty it and
+        with it every ownership answer: `owned_sessions()` returned nothing,
+        so `DELETE /v1/sessions` reported `{"deleted": 0, "residue": 0}` with
+        every transcript still on disk. Hydrating from the `.owner` sidecars
+        the mint path writes is what makes that answer true after a restart
+        rather than only in the process that happened to serve the run.
+        """
+        for session_id, owner in owners.items():
+            self.set_owner(session_id, owner)
+        return len(owners)
+
     def owns(self, session_id: str, owner: str | None) -> bool:
         """Whether `owner` is the identity this session was minted for.
 

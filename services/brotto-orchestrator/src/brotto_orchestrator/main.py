@@ -209,8 +209,34 @@ def sweep_retention() -> int:
     return pruned
 
 
+def _restore_ownership() -> int:
+    """Put the persisted owners back in the registry. Returns how many.
+
+    Named rather than inlined in `lifespan` so the test that simulates a dyno
+    restart drives the same line the process does, instead of a copy of it.
+    """
+    from .agent.audit import load_owners
+
+    return registry.hydrate_owners(load_owners())
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Ownership before anything can answer about it. A restarted dyno comes
+    # back with an empty registry, and every route below decides by consulting
+    # it — so a hydrate that did not happen here would make "is this yours"
+    # answer no for everybody, and make erase-all report a clean sweep it did
+    # not perform.
+    try:
+        restored = _restore_ownership()
+        if restored:
+            log.info("ownership restored from disk  sessions=%d", restored)
+    except Exception as exc:
+        # Fail *closed* and say so: an unhydrated registry cannot hand one
+        # beta user another's transcript, it can only tell a beta user their
+        # own session is gone. That is the right way round for this failure.
+        log.error("ownership hydrate failed (%s) — every session reads as unowned",
+                  type(exc).__name__)
     sweep_retention()
     stop = asyncio.Event()
 
@@ -972,10 +998,19 @@ async def create_session(request: Request):
     if scheme not in ("http", "https"):
         scheme = "http"
     registry.get_or_create(session_id)
-    # The one write to the owner field. On the hosted relay this is what
-    # makes a session id mean "this person's transcript" instead of "some
-    # transcript"; on self-host it stores None and changes nothing.
+    # The one write to the owner field, in memory and on disk. On the hosted
+    # relay this is what makes a session id mean "this person's transcript"
+    # instead of "some transcript"; on self-host it stores None, changes
+    # nothing and writes no sidecar.
+    #
+    # The disk half is not a cache of the registry — it is the only copy that
+    # outlives this process. Without it, `DELETE /v1/sessions` answers
+    # `{"deleted": 0}` after every dyno restart while every transcript is
+    # still there, which is the erasure promise stated and not kept.
     registry.set_owner(session_id, _owner(auth.claims))
+    from .agent import audit as _audit
+
+    _audit.record_owner(session_id, _owner(auth.claims))
     _prune_sessions()
     # Advertise the address the caller actually reached us on, not a fixed
     # one: the extension dials `websocket_url` verbatim when it starts with

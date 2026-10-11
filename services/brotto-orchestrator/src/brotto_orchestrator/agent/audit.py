@@ -23,6 +23,7 @@ import copy
 import datetime as _dt
 import json
 import logging
+import uuid
 import os
 import re
 import secrets
@@ -818,11 +819,90 @@ def _is_document_stem(name: str) -> bool:
 # the shape that bit — 76KB of real Gmail text beside a document someone
 # removed by hand. `*.scratchpad.txt` is the one current builds still write.
 _DOCUMENT_EXT = ".json"
+#: Who a session belongs to, on the hosted relay. Not user content and not a
+#: page: one account id, the same `sub` the `profiles` row already holds, and
+#: the only thing standing between a restarted dyno and a user who is told
+#: their transcripts are erased while every file is still on disk.
+#:
+#: It is a sidecar rather than a field in the document because the document is
+#: written by the harness's `AuditTrail` and this is written at mint time, by
+#: `POST /v1/sessions`, before a run exists and so before any document does.
+#: It is in `_SESSION_RESIDUE_EXT` for the same reason `*.pages.json` is: a
+#: sidecar `delete` does not name is a sidecar `delete_all` does not sweep,
+#: and this one is an account id sitting next to somebody's transcript.
+_OWNER_EXT = ".owner"
 _SESSION_RESIDUE_EXT: tuple[str, ...] = (
     ".json.tmp",
     ".scratchpad.txt",
     ".pages.json",
+    _OWNER_EXT,
+    # An interrupted `record_owner` leaves this one behind, exactly as an
+    # interrupted `_flush` leaves a `.json.tmp`. It carries an account id.
+    f"{_OWNER_EXT}.tmp",
 )
+
+
+def record_owner(session_id: str, owner: str | None, *, dir: Path | None = None) -> bool:
+    """Persist which account a session was minted for. Returns whether it wrote.
+
+    Written only when there *is* an owner: `None` is self-host's one shared
+    identity, which needs no record and would otherwise put a file full of
+    the literal `None` beside every session on a self-hoster's disk.
+
+    Never raises — it runs on the mint path, and a write that fails must leave
+    the session usable rather than take the route down with it. A lost write
+    is fail-closed by design: the session comes back unowned and belongs to
+    nobody.
+    """
+    if owner is None or not _is_document_stem(session_id):
+        return False
+    d = dir or default_dir()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{session_id}{_OWNER_EXT}"
+        # Same two-step as `_flush`: a half-written sidecar is a sidecar that
+        # reads as somebody else's account.
+        tmp = path.with_suffix(f"{_OWNER_EXT}.tmp")
+        tmp.write_text(owner, encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        log.warning("audit: could not record the owner of %s: %s",
+                    session_id, type(exc).__name__)
+        return False
+
+
+def load_owners(*, dir: Path | None = None) -> dict[str, str]:
+    """Every persisted owner, as `{session_id: owner}`, for startup hydration.
+
+    A file whose stem is not a session-id shape is skipped rather than turned
+    into registry state: this walks a directory, and `delete` walks the same
+    one, so a stray `notes.owner` must not become a session nobody can read.
+    """
+    d = dir or default_dir()
+    owners: dict[str, str] = {}
+    try:
+        paths = list(d.glob(f"*{_OWNER_EXT}"))
+    except OSError as exc:
+        log.warning("audit: could not list owners: %s", type(exc).__name__)
+        return owners
+    for p in paths:
+        stem = p.name[: -len(_OWNER_EXT)]
+        # A uuid, not merely a dot-free token: `POST /v1/sessions` mints
+        # exactly this and the relay socket accepts exactly this, so anything
+        # else in the directory is a file somebody left rather than a session,
+        # and `set_owner` would turn it into registry state.
+        try:
+            uuid.UUID(stem)
+        except ValueError:
+            continue
+        try:
+            owner = p.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if owner:
+            owners[stem] = owner
+    return owners
 
 
 def read(session_id: str, *, dir: Path | None = None) -> dict:
