@@ -124,7 +124,7 @@ jobs:
         working-directory: clients/brotto-extension
         run: npm run build
 
-      # The 26 scripts/*.test.js files are the only check for panel
+      # The 32 scripts/*.test.js files are the only check for panel
       # rendering, replay, key dispatch, the model-check gate order and the
       # observation guards — CLAUDE.md names each one. They extract the real
       # functions out of the shipped sources and eval them, so a run here is

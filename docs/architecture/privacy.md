@@ -325,21 +325,40 @@ is 4004 rather than 4001 for the same reason the routes answer 404 rather than
 of what the id is worth. On self-host `owner` is `None`, which means *one
 shared identity*, and every route behaves exactly as it did before.
 
-**Ownership had to leave the process, because erase-all was lying in one.**
-The registry is in-memory, Heroku restarts the dyno daily, and after a restart
+**Ownership had to leave the process, and it had to leave `_sessions`, because
+erase-all was lying in two ways.** A restart was the visible one: the registry
+is in-memory, Heroku restarts the dyno daily, and after a restart
 `owned_sessions()` returned nothing — so `DELETE /v1/sessions` answered
-`{"deleted": 0, "residue": 0}` with every transcript still on disk. A user who
-clicked "erase all" was told nothing remained while everything remained, which
-is the erasure promise stated and not kept. So the mint path writes
-`<session_id>.owner` beside the session (`audit.record_owner`), `lifespan`
-hydrates the registry from those files before anything can answer about
+`{"deleted": 0, "residue": 0}` with every transcript still on disk. But
+**restart was not the only way in, and the other way had no restart in it.**
+Ownership had been stored in `_sessions`, which `_prune_sessions` evicts at
+`MAX_TRACKED_SESSIONS` (256). Everything else in a `SessionState` is per-run
+runtime — a sequence tracker, a task handle, a cached policy — and ownership is
+not. So at the cap, eviction dropped entries, `owned_sessions()` shrank, and a
+scoped `DELETE /v1/sessions` gave the identical untruthful answer, at a scale
+threshold where nothing looks wrong and no operator is watching a restart. That
+is why the fix is not only durability.
+
+So: ownership lives in its own **non-evictable** `_owners` dict. The mint path
+writes `<session_id>.owner` beside the session (`audit.record_owner`),
+`lifespan` hydrates `_owners` from those files before anything can answer about
 ownership, and the sidecar is in `_SESSION_RESIDUE_EXT` so `delete` takes it
-and `delete_all` sweeps it. It is a sidecar rather than a field in the audit
-document because the document is written by the harness's `AuditTrail` while
-this is written at mint time — before a run exists, and so before any document
-does. Self-host writes nothing: `None` is one shared identity and needs no
-record. Pinned by `tests/test_session_ownership.py`, which is also the first
-test coverage this guard has ever had.
+and `delete_all` sweeps it. `forget_owner` drops the entry when the files are
+erased — not a memory optimisation, because an erased session left in `_owners`
+would be reported as the caller's own by a scoped *erase all*, and the count
+would describe a file that is no longer there. **A restart and an eviction are
+now the same class of failure and neither one reaches the answer**, because the
+only thing that can empty `_owners` is erasure.
+
+It is a sidecar rather than a field in the audit document because the document
+is written by the harness's `AuditTrail` while this is written at mint time —
+before a run exists, and so before any document does. Self-host writes nothing:
+`None` is one shared identity and needs no record. Pinned by
+`tests/test_session_ownership.py` (first coverage this guard ever had), which
+covers the restart half and the sidecar's life. **The eviction half is not yet
+covered by a test** — the separation is structural (`_owners` is not a dict
+anything prunes), and the test that should exist is one that drives
+`MAX_TRACKED_SESSIONS` down and asserts `owned_sessions()` is unchanged.
 
 **`?token=` is refused in jwt mode and nowhere else.** A URL reaches this
 server's access log, every proxy's log ahead of it, and the browser history. A

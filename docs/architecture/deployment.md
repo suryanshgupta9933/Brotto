@@ -118,6 +118,19 @@ outlives its own digests is worse than no retention.
 Age is the document's mtime, which the atomic rewrite bumps on every step, so
 this measures last activity rather than when the session started.
 
+**A second pass sweeps the orphaned `*.owner` sidecars** (`_prune_orphan_owners`).
+The pass above is document-driven — it globs `*.json` — so a `<session_id>.owner`
+whose document is gone was invisible to it, and on the hosted relay retention is
+on by default at 30 days, which made the promise a file type it was silently not
+covering. **The condition is "the document is absent", not age**, and that
+distinction is load-bearing: `.owner` is written once at mint and never touched
+again, so its mtime is the *start* of the run while the document's is the last
+activity. A month-long session has a fresh document beside a 40-day-old sidecar,
+and sweeping on age would silently drop a live session out of a scoped *erase
+all*. Live sessions are skipped for the same reason the document loop skips
+them. Operationally: the 30-day promise on the relay now covers the sidecars,
+and it is the sidecar that says whose transcript a file was.
+
 **The hosted relay is the one exception, and it is an exception because the disk
 is ours.** Left unset, `BROTTO_RETENTION_DAYS` returns `HOSTED_RETENTION_DAYS`
 (30) when `auth_mode() == "jwt"` and `None` everywhere else. A self-hoster's disk
