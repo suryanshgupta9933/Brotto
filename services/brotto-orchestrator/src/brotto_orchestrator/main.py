@@ -763,7 +763,15 @@ def _one_line(text: str) -> str:
     return "".join(ch if ch.isprintable() else " " for ch in text)
 
 
-def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
+# How much of a provider's error body reaches the log. One log line, one
+# screenful; an operator diagnosing a misbehaving gateway needs the head of the
+# response, not the rest of it.
+PROBE_BODY_LOG_CHARS = 500
+
+
+def _classify_probe_failure(
+    exc: BaseException, secrets: tuple[str, ...] = ()
+) -> tuple[str, str]:
     """(kind, sentence) for a failed pre-flight probe.
 
     The `kind` is what the panel branches on; the sentence is what the user
@@ -845,12 +853,24 @@ def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
         # `warning`, not `debug`: an operator debugging a misbehaving provider
         # needs the body, and production is where that debugging happens. It
         # is safe at warning *because* of the two transforms above.
-        raw_body = str(getattr(exc, "body", "") or "")
+        # Bound derived from what is emitted, not chosen: `_one_line` only ever
+        # shrinks text, so a credential past the emitted window cannot reach the
+        # log, and one straddling the edge needs at most one window of slack to
+        # be caught whole. Two windows is that. A rounder number would be
+        # scanning regexes over input no reader ever sees.
+        raw_body = str(getattr(exc, "body", "") or "")[: 2 * PROBE_BODY_LOG_CHARS]
+        # Literal before pattern. `redact_text` matches credential *shapes*, so
+        # it misses a key in a form it does not know, and a provider echoing
+        # the caller's own key back is not hypothetical. The exact secret is
+        # in hand, so it is replaced by equality first — exact beats clever.
+        for secret in secrets:
+            if secret:
+                raw_body = raw_body.replace(secret, "[redacted]")
         safe_body, withheld = redact_text(raw_body)
         log.warning(
             "model check: provider HTTP %s, body: %s%s",
             status,
-            _one_line(safe_body)[:500] or "(empty)",
+            _one_line(safe_body)[:PROBE_BODY_LOG_CHARS] or "(empty)",
             f"  [withheld: {withheld}]" if withheld else "",
         )
         return (
@@ -944,7 +964,9 @@ async def check_model(request: Request):
             model_request_parameters=ModelRequestParameters(),
         )
     except Exception as exc:
-        kind, message = _classify_probe_failure(exc)
+        kind, message = _classify_probe_failure(
+            exc, (creds.api_key,) if creds else ()
+        )
         log.warning("model check failed for %s/%s: %s (%s)",
                     cfg.provider, cfg.model, kind, type(exc).__name__)
         return JSONResponse(content={

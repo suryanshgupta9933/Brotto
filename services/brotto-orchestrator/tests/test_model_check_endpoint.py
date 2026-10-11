@@ -387,3 +387,44 @@ def test_the_base_url_scheme_is_still_enforced(client, probe):
     # Rejected by ModelConfig, so it falls through to the resolver rather than
     # pointing the server at a local file.
     assert r.json()["kind"] in {"no_model", "unreachable"}
+
+
+def test_a_provider_body_echoing_the_callers_own_key_is_scrubbed_by_equality(
+        client, probe, caplog):
+    """A gateway that reflects the caller's key answers in a shape
+    `redact_text` does not know — the rule matches key *formats*, and BYOK keys
+    are only nominally `sk-ant-*`. The exact secret is in hand at the call site,
+    so it is replaced by equality before the pattern pass. Exact beats clever.
+    """
+    opaque = "ZZq7-not-a-shape-any-rule-knows-4f2b"
+    probe["install"](_http_error(
+        404, f'{{"error":"rejected","echo":"token={opaque} (revoked)"}}'))
+    with caplog.at_level("WARNING"):
+        body = _send(client,
+                     model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+                     api_key=opaque).json()
+    assert body["kind"] == "error"
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert opaque not in logged
+    assert "[redacted]" in logged
+    # Redaction is not a mute — the operator still sees what failed.
+    assert "rejected" in logged
+
+
+def test_a_body_far_longer_than_the_log_window_is_still_bounded(client, probe, caplog):
+    """The scan window is derived from the emitted one, not chosen: `_one_line`
+    only shrinks text, so nothing past the log window could reach the file and
+    nothing inside it is cut off. Pin the relationship, not the constant.
+    """
+    opaque = "QQz1-also-opaque-and-not-rule-shaped-9c3e"
+    probe["install"](_http_error(
+        404, '{"pad":"' + "a" * 20_000 + f'","echo":"{opaque}"}}'))
+    with caplog.at_level("WARNING"):
+        _send(client,
+              model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+              api_key=opaque)
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert opaque not in logged
+    # And the window holds: the log line stays one screenful, not the body.
+    body_lines = [ln for ln in logged.splitlines() if "model check:" in ln]
+    assert body_lines and len(max(body_lines, key=len)) < 2_000

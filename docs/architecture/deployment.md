@@ -436,7 +436,7 @@ would change on every container restart and force a re-paste each time, which
 is a worse failure than the one it removes. The wizard collects it once and
 stores it in `settings.agentSecret` — `storage.local`, not `storage.session`,
 because it is a property of the server the user chose rather than of the
-session. (The *model* key stays in `storage.session` and is a different key.)
+session. (The *model* key is a different key, also in `storage.local`.)
 
 ### A custom domain does not get a certificate on its own
 

@@ -242,7 +242,7 @@ Set `BROTTO_ENV=prod` to opt out — server then uses whatever operator configur
 
 **`BROTTO_FORCE_ENV_MODEL=1`** — ignore the extension's model *and* key entirely, run on `.env`. Set it in `.env` and you never type a key into the side panel again. Also set in `tests/conftest.py`-neutralised scope so it can't leak into the suite.
 
-**The key must be in `.env` itself, not in the shell.** Reloading the extension clears `chrome.storage.session`, so the key it sends disappears on every reload — which is what produced the recurring `AnthropicProvider(api_key=...)` error. With `BROTTO_FORCE_ENV_MODEL=1` the extension's key is never consulted, so the only thing that matters is `ANTHROPIC_AUTH_TOKEN` being in `.env`. A shell-exported token is not enough: it isn't inherited by a server started from Finder, a launch agent, or a fresh terminal. Verify with the key scrubbed from the environment entirely:
+**The key must be in `.env` itself, not in the shell.** While the model key lived in `chrome.storage.session`, reloading the extension dropped the key it sends — which is what produced the recurring `AnthropicProvider(api_key=...)` error. With `BROTTO_FORCE_ENV_MODEL=1` the extension's key is never consulted, so the only thing that matters is `ANTHROPIC_AUTH_TOKEN` being in `.env`. A shell-exported token is not enough: it isn't inherited by a server started from Finder, a launch agent, or a fresh terminal. Verify with the key scrubbed from the environment entirely:
 
 ```bash
 env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
@@ -261,9 +261,8 @@ auth env at startup: ANTHROPIC_API_KEY=set (len=125)  ANTHROPIC_AUTH_TOKEN=set (
 Tiers: inline (extension) → per-user file → env. Two rules that aren't obvious:
 
 - An inline config **without** a key is ignored and falls through, for every
-  provider without exception. The extension stores `model_config` in `chrome.storage.local` (survives restart)
-  but the key in `chrome.storage.session` (does not), so every browser restart
-  it sends a config and no key. Honoring that gave a keyless provider and "Set
+  provider without exception. While the key lived in `chrome.storage.session`,
+  the extension sent a config and no key after every browser restart. Honoring that gave a keyless provider and "Set
   `ANTHROPIC_API_KEY`" while shadowing a working `.env`.
 - A per-user config persists the *model* only, never a key — so after a browser
   restart it is unusable on its own and the resolver says so explicitly. It
