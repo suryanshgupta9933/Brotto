@@ -418,6 +418,32 @@ class _BadRequest(Exception):
     """A body that arrived and cannot be used. Always a 400."""
 
 
+async def _task_failed(send, code: str, summary: str, claims, status: str | None = None) -> None:
+    """The one place a task the relay refuses becomes a frame — and a report.
+
+    Three sites built this frame by hand (a duplicate start, an unknown
+    provider, and the four account refusals), which is exactly the shape a
+    guard gets missed in: each one would have had to remember to report as
+    well as to refuse, and the answer a future refusal gives is always
+    "yes, that one too". `code` is a `failure_reason` literal, so
+    `scripts/test-failure-reasons.test.js` keeps it translatable and
+    `session/failure_report.py` keeps it reportable.
+
+    Key order is reproduced exactly as each caller had it; the audit
+    document's `model → prompts → actions` rule is about documents, but
+    there is no reason to churn the wire either.
+    """
+    from .session.failure_report import note_failure
+
+    note_failure(code, "task_refused", claims)
+    frame: dict = {"type": "task_failed"}
+    if status:
+        frame["status"] = status
+    frame["failure_reason"] = code
+    frame["summary"] = summary
+    await send(frame)
+
+
 def _inline_model(payload: object) -> ModelConfig | None:
     """The extension's `model_config` frame as a `ModelConfig`, or None.
 
@@ -1231,6 +1257,60 @@ async def policy_ack(request: Request):
     return JSONResponse(content={"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# Failure reports — the runs that did not happen
+# ---------------------------------------------------------------------------
+#
+# **This route does not exist on a self-hosted install.** Not "does nothing":
+# 404s, so a self-hoster's box holds no report table, no report route and no
+# knowledge that the feature exists. Self-host is the product; its users get
+# a silent build. Gate is `auth_mode() == "jwt"` and nothing else — a
+# self-hoster holding a copy of the cloud env must not switch it on by
+# accident either.
+#
+# HTTP on the same origin as every other extension call, so CORS is
+# unchanged: `allow_origin_regex` above already permits exactly
+# `chrome-extension://<id>` and refuses everything else, and reporting
+# inherits that rather than widening it.
+#
+# The client reaches this route **on a connection that already succeeded**,
+# which is the whole design: a relay that is down cannot receive a report
+# about being down. So the extension queues codes locally and flushes them
+# on the next `ws.onopen`, which is also the moment its credential is known
+# to have been accepted — so a refusal is reported once the user signs in
+# again, which is when the report is worth having.
+@app.post("/v1/reports")
+async def create_reports(request: Request):
+    from .session import failure_report as fr
+
+    if not _authed(request) or not fr.reporting_enabled():
+        return _error(404, "not found")
+    auth = _auth(request)
+    owner = auth.claims.sub if auth.claims is not None else None
+    if not owner:
+        # jwt mode authenticated by something else. Nothing here can name
+        # whose run this was, so there is nothing to write.
+        return _error(404, "not found")
+    if not fr.report_allowed(owner):
+        # 429, not 404: the caller is authenticated and the route exists, and
+        # saying so is what stops a client-side retry from turning one bad
+        # install into a row per reconnect for a day.
+        return _error(429, "too many reports — they will resume shortly")
+    try:
+        body = await _json_body(request)
+    except _BadRequest as exc:
+        return _error(400, str(exc))
+    rows, offered = fr.build_client_rows(body, owner, fr.relay_version())
+    # The answer carries a count, never a code. Echoing codes back would make
+    # this a "which codes does the relay accept" oracle; `offered` vs `kept`
+    # is what an operator actually needs when a build reports something the
+    # relay has not heard of.
+    fr.spawn(fr.record(rows))
+    if offered != len(rows):
+        log.info("failure reports  kept=%d offered=%d  (unknown codes dropped)", len(rows), offered)
+    return JSONResponse(content={"accepted": len(rows)})
+
+
 # ponytail: HTTP, not the WS, for the same reason as /v1/policy_ack above —
 # the socket only exists while a task is in flight, and the panel needs
 # suggestions precisely when no task is running.
@@ -1443,15 +1523,14 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
             domain=None, action=None,
             decision="refused: an agent is already driving this session",
         )
-        await ws_send({
-            "type": "task_failed",
-            "status": "interrupted",
-            "failure_reason": "duplicate_task_start",
-            "summary": (
-                "Refused: this session already has a running agent. "
-                "Starting a second one would put two agents on one browser."
-            ),
-        })
+        await _task_failed(
+            ws_send,
+            "duplicate_task_start",
+            "Refused: this session already has a running agent. "
+            "Starting a second one would put two agents on one browser.",
+            auth.claims,
+            status="interrupted",
+        )
         await ws_send({"type": "canonical_status", "status": "interrupted"})
         await websocket.close(code=4009)
         return
@@ -1471,12 +1550,13 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
             log.warning(
                 "[%s] task_start refused  reason=%s", session_id, exc.reason,
             )
-            await ws_send({
-                "type": "task_failed",
-                "status": "refused",
-                "failure_reason": _REFUSAL_REASON.get(exc.reason, "control_plane_unavailable"),
-                "summary": exc.detail,
-            })
+            await _task_failed(
+                ws_send,
+                _REFUSAL_REASON.get(exc.reason, "control_plane_unavailable"),
+                exc.detail,
+                auth.claims,
+                status="refused",
+            )
             await ws_send({"type": "canonical_status", "status": "interrupted"})
             await websocket.close(code=4005)
             return
@@ -1516,11 +1596,12 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         # which is the only thing that knows about env and per-user configs.
         if provider_name and provider_name not in PROVIDER_REGISTRY:
             log.warning("[%s] unknown provider %r — refusing the task", session_id, provider_name)
-            await ws_send({
-                "type": "task_failed",
-                "failure_reason": "model_not_found",
-                "summary": f"Unknown provider: {provider_name}",
-            })
+            await _task_failed(
+                ws_send,
+                "model_not_found",
+                f"Unknown provider: {provider_name}",
+                auth.claims,
+            )
             await websocket.close(code=4000)
             return
         parsed_model_cfg = _inline_model(model_cfg_payload)
@@ -1788,11 +1869,26 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
         try:
             result = await agent_task
             log.info("[%s] task finished  status=%s  summary=%r", session_id, result.status, result.summary[:80])
+            # Only the CODE crosses into the report, never `summary`: the
+            # summary is the agent's own prose about what it tried, and the
+            # agent's prose can quote the page.
+            reason = result.failure_reason
+            if reason:
+                from .session.failure_report import note_failure
+
+                note_failure(reason, "task_result", auth.claims)
             await ws_send({"type": "task_result", "result": result.model_dump()})
         except asyncio.CancelledError:
             log.info("[%s] agent task cancelled", session_id)
         except Exception as exc:
             log.error("[%s] agent task raised: %s", session_id, exc, exc_info=True)
+            from .session.failure_report import note_failure
+
+            # `internal`, not `str(exc)`: the exception text is free prose
+            # and can quote a URL or a field from the page. The code is what
+            # the ledger stores; the detail stays in this log line, which is
+            # ours and expires with the dyno.
+            note_failure("internal", "task_error", auth.claims)
             await ws_send({"type": "task_error", "error": str(exc)})
         log.info("[%s] session closed", session_id)
 
