@@ -27,7 +27,7 @@ So the privacy posture is not "we do not collect your data". It is:
 | AX-tree sizes, page-text chars, changed-element chars | inside the audit document, server | until deleted |
 | Task title, action names, URLs, typed input | inside the audit document, server | until deleted |
 | Model config, `base_url` | `chrome.storage.local`, user | until cleared |
-| API key | `chrome.storage.session`, user | until browser restart |
+| API key | `chrome.storage.local`, user | until the user clears it |
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
 | Waitlist signup (an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |

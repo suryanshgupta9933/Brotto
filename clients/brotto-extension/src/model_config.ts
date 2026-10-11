@@ -1,8 +1,11 @@
-// Storage split for model config + API key.
-// - model_config: chrome.storage.local — persists across browser restarts (not sensitive).
-// - api_key:      chrome.storage.session — in-memory only, cleared on browser restart.
-//                  Mirrors the existing pause-state pattern (background.ts:97).
-//                  Disk leak avoided; UX unchanged (auto-sent per task_start).
+// Storage for model config + API key. Both in chrome.storage.local.
+//
+// The key used to live in chrome.storage.session, which cleared it on browser
+// restart — that made "browser restart" the only way to lose it, and every
+// restart cost the user a re-paste for no benefit: the key never leaves the
+// device (it is sent per task_start to the relay, which is the only
+// destination), and chrome.storage.local is already where the non-secret half
+// sits. Persistence is the user's call — clear it, or change it.
 //
 // Migration: the pre-security-fix layout stored everything under one key
 // `modelConfig = { model_config: {...}, api_key: "..." }`. Reads transparently
@@ -35,12 +38,9 @@ function isModelConfig(v: unknown): v is ModelConfig {
 }
 
 export async function getStoredModelConfig(): Promise<StoredModelConfig> {
-  const [local, session] = await Promise.all([
-    chrome.storage.local.get(MODEL_KEY),
-    chrome.storage.session.get(API_KEY_KEY),
-  ]);
-  const m = local[MODEL_KEY] as unknown;
-  const k = session[API_KEY_KEY];
+  const stored = await chrome.storage.local.get([MODEL_KEY, API_KEY_KEY]);
+  const m = stored[MODEL_KEY] as unknown;
+  const k = stored[API_KEY_KEY];
 
   // Migration: old shape is `{ model_config: {...}, api_key: "..." }`.
   if (m && typeof m === "object" && !isModelConfig(m)) {
@@ -53,8 +53,8 @@ export async function getStoredModelConfig(): Promise<StoredModelConfig> {
         ? chrome.storage.local.set({ [MODEL_KEY]: migrated })
         : chrome.storage.local.remove(MODEL_KEY),
       oldKey
-        ? chrome.storage.session.set({ [API_KEY_KEY]: oldKey })
-        : chrome.storage.session.remove(API_KEY_KEY),
+        ? chrome.storage.local.set({ [API_KEY_KEY]: oldKey })
+        : chrome.storage.local.remove(API_KEY_KEY),
     ]);
     return { model_config: migrated, api_key: oldKey };
   }
@@ -69,7 +69,7 @@ export async function setStoredModelConfig(value: StoredModelConfig): Promise<vo
   await Promise.all([
     chrome.storage.local.set({ [MODEL_KEY]: value.model_config }),
     value.api_key
-      ? chrome.storage.session.set({ [API_KEY_KEY]: value.api_key })
-      : chrome.storage.session.remove(API_KEY_KEY),
+      ? chrome.storage.local.set({ [API_KEY_KEY]: value.api_key })
+      : chrome.storage.local.remove(API_KEY_KEY),
   ]);
 }

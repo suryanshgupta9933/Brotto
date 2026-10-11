@@ -6,7 +6,7 @@ Read before touching `clients/brotto-extension/src/{background,debugger}.ts`,
 ## Extension storage
 
 - `model_config` (provider, model, context_window) → `chrome.storage.local` — persists across browser restarts (not sensitive)
-- `api_key` → `chrome.storage.session` — in-memory only, cleared on browser restart; mirrors the existing pause-state pattern
+- `api_key` → `chrome.storage.local` — persists across restarts by choice. It was `storage.session` (cleared on browser restart) and every restart cost the user a re-paste for no benefit: the key never leaves the device. Clearing is the user's call, from Settings.
 - The first read after an extension update runs a one-shot migration that re-saves any legacy `{modelConfig: {model_config, api_key}}` shape into the new layout
 - `deviceId` (one `crypto.randomUUID()`) → `chrome.storage.local`. See below; it is not a credential and nothing authenticates with it.
 - `settings.agentSecret` → `chrome.storage.local`, and on the Brotto Cloud path it holds an **opaque Supabase access token**, not a shared secret. **The extension never parses it.** Not its length, not its prefix, not whether it looks like a JWT. One slot is why an account tier needed no new storage key and no migration, and any code that inspects the value reinstates the coupling the slot exists to remove. Both writers (the wizard, the panel's Settings) and the one reader (`agentSecret()`) treat it as a string.
