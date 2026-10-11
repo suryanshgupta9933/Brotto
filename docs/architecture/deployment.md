@@ -50,6 +50,13 @@ docker build -t brotto .
 docker run -p 127.0.0.1:8000:8000 -e AGENT_SECRET="$AGENT_SECRET" brotto
 ```
 
+Both refuse to start without `AGENT_SECRET`, and refusing is the point:
+`${AGENT_SECRET:?…}` in `docker-compose.yml` is a readable error rather than a
+bare `stat .env: no such file`, and the CLI refuses a non-loopback `--host`
+with no credential at all. It will not generate a secret for you, because one
+that changed on every container restart would force a re-paste into the
+extension each time — a worse failure than the one it removes.
+
 State lives on a named volume at `/data`. All three directories must be on it
 or session history and security policy are lost on every restart:
 
@@ -64,6 +71,46 @@ default. Compose otherwise namespaces it as `<project>_brotto-data`, where the
 project is **the checkout directory's name** — so cloning into `~/brotto`
 instead of `~/work/brotto` starts a fresh, empty `/data`, and every session
 document reads as gone with nothing anywhere saying why.
+
+## Running it from source is a *development* server
+
+The README offers a from-source path next to `docker compose up`, and it is the
+one most likely to be followed by someone working on Brotto rather than
+deploying it. Run exactly as that path used to read and you get a dev server,
+because `BROTTO_ENV` is unset and unset means dev:
+
+```bash
+BROTTO_ENV=prod \
+AGENT_SECRET="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')" \
+  PYTHONPATH=services/brotto-orchestrator/src \
+  .venv/bin/python -m brotto_orchestrator.cli --port 8000
+```
+
+Measured, not inferred — booting the old form and reading `/health` back:
+
+```json
+{"status":"ok","service":"brotto-orchestrator","version":"2.0.0",
+ "model":"minimax:MiniMax-M3","auth_mode":"open"}
+```
+
+`auth_mode: open` is the dev default rather than a bug, and `model` naming
+`minimax:MiniMax-M3` is the dev pre-seed — a model nobody on this install chose,
+pointed at whatever `ANTHROPIC_AUTH_TOKEN` the developer's shell happens to
+carry, because dev propagates it into `ANTHROPIC_API_KEY`. **A self-hoster
+reading that field would think they had configured something.** The container
+sets `BROTTO_ENV=prod` in `ENV` and again in compose's `environment:`; nothing
+sets it on this path.
+
+The second difference is where state lands. With no volume, the three
+directories fall back to `logs/sessions`, `logs/user_policies` and
+`logs/user_models` **relative to the working directory**, so they are inside
+the checkout — and `rm -rf` on a re-clone takes the user's session history with
+it. The container's named volume is what makes the state survive a directory
+being deleted.
+
+This is why the two paths are not interchangeable in the docs, and why the
+one-command installer being planned is a *shortening* of the container path and
+not a replacement for it. See the README's Self-host section.
 
 ## Moving from `python main.py` to the container
 
@@ -142,6 +189,12 @@ deciding that. **An explicit setting always wins, including `0`.**
 
 The same image, the same extension, one build. `agent.brotto.dev` is a Heroku
 dyno running this container with Supabase in front of the credential check.
+
+**The relay is the alternative, not the successor.** Self-hosting — everything
+above — stays free, needs no account, carries no cap, and puts no operator
+between the agent and the user's documents; the relay trades that last property
+for reach. Anything describing this file as a migration toward the relay has
+that backwards.
 
 **A hosted relay is one env var away from a downgrade, and the variable that
 makes it a downgrade is `AGENT_SECRET`.** `SUPABASE_JWT_SECRET` set →

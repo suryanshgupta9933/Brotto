@@ -27,11 +27,11 @@ https://github.com/user-attachments/assets/1f6d0aca-5206-4e68-8f26-72d586323108
 
 > **One step too many, and we know it.** The extension is on the Chrome Web
 > Store, under review — one click to install as soon as it clears. The agent
-> loop runs in a small container you start yourself, and that is the only thing
-> standing between someone who does not write code and using Brotto.
-> **Removing it is the top priority** — not a someday item. Everything else in
-> this README works around that one step; see [Self-host](#self-host) for what
-> it takes today.
+> loop is a server, so there are two ways in: run it yourself, which is a
+> handful of commands and stays free with no account and no cap, or use the
+> hosted beta, which is a sign-in and a weekly allowance. Running it yourself is
+> not a stepping stone to the other one — it stays the whole product, and it is
+> the one with no operator in it. See [Self-host](#self-host).
 
 ---
 
@@ -159,19 +159,36 @@ lands in `logs/sessions/` beside the rest of your files.
 Brotto is one container and one Chrome extension. The container holds the agent loop; it never
 launches a browser.
 
-**This step is on its way out.** It exists so the agent loop survives Chrome
-suspending the extension mid-task, and so each run has a real place to write its
-record. A one-command installer is next, and a hosted option after that, at which
-point there is nothing left to run yourself. The steps below are the whole of it
-until then.
+**This is a permanent option, not a waiting room.** The container exists so the
+agent loop survives Chrome suspending the extension mid-task, and so each run
+has a real place to write its record. A one-command installer is on its way,
+which shortens the below to one line — it does not replace it. Self-hosted stays
+free, needs no account, has no task cap and no operator between the agent and
+your documents, and it is the version the privacy claim is about. If you would
+rather not run a container at all, there is a hosted beta at
+[agent.brotto.dev](https://agent.brotto.dev) — it is invite-only and capped, and
+choosing it means choosing a server we operate. [Privacy](PRIVACY.md) says what
+that changes.
 
 ```bash
 git clone https://github.com/suryanshgupta9933/brotto.git
 cd brotto
 
-cp .env.example .env      # set AGENT_SECRET to any long random string
-docker compose up -d
+cp .env.example .env
 ```
+
+Open `.env` and put a long random string on the `AGENT_SECRET=` line — this
+prints one:
+
+```bash
+python3 -c 'import secrets;print(secrets.token_urlsafe(32))'
+```
+
+Then `docker compose up -d`. It refuses to start while that line is empty, and
+tells you so. It will not invent a secret for you, because one that changed on
+every restart would cost you a re-paste each time — so the value you paste here
+is the one that has to reach the extension too, and that is the only thing
+connecting the two halves.
 
 That is a ~510 MB image with **no browser in it**, listening on `:8000` — most of the weight is the
 model provider SDKs, not Chromium. Everything it keeps (session history, your blocklist, your
@@ -187,19 +204,43 @@ npm ci && npm run build
 In Chrome: open `chrome://extensions`, turn on **Developer mode**, and **Load unpacked** →
 `clients/brotto-extension/dist`.
 
-Open the Brotto side panel, set the server address to `http://127.0.0.1:8000`, and paste
-`AGENT_SECRET` into **Settings → Connection**. Then pick a provider and paste your key under
-**Settings → Model**. The key is held in memory for the run and never written to disk.
+Open the Brotto side panel. The first-run wizard opens on the hosted option — pick
+**Self-host**, or your server address and the secret go into **Settings →
+Connection** instead. The default address is `http://localhost:8000`; paste the
+`AGENT_SECRET` you generated above into the same screen.
+
+Then pick a provider and paste your key under **Settings → Model**. Brotto calls
+the provider with that key the moment you save, so a wrong one fails there, in
+Settings, with the reason — not on your first task. A run is checked too, so a
+key that goes bad later is normally caught before the task starts rather than
+halfway through it. The key is held in memory for the browser session and never
+written to disk, which means you paste it again after you restart Chrome.
 
 <details>
 <summary>Running it from source instead</summary>
 
+This path is for working on Brotto, not for leaving it running unattended: run
+exactly as written and you get a **development** server, not a self-hosted one.
+`BROTTO_ENV` unset means dev, and dev requires no secret and pre-selects a model
+you never chose — `/health` will answer `auth_mode: open` and name
+`minimax:MiniMax-M3`. The container sets `BROTTO_ENV=prod` for you; this does not.
+
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
-PYTHONPATH=services/brotto-orchestrator/src \
+
+BROTTO_ENV=prod \
+AGENT_SECRET="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')" \
+  PYTHONPATH=services/brotto-orchestrator/src \
   .venv/bin/python -m brotto_orchestrator.cli --port 8000
 ```
+
+Two things the container does that this does not. It keeps session history, your
+blocklist and your remembered model on a named volume; run from source they land
+in `logs/` **inside your checkout**, so deleting or re-cloning the directory
+deletes them. And the secret above is per-invocation — if you do not put it in
+`.env`, you will be pasting a new one into the extension every time you start
+this.
 
 Playwright is a test-only dependency and is not needed to run the server.
 
@@ -214,15 +255,22 @@ migrating from `python main.py`.
 
 ## Where your data goes
 
-- **The browser runs on your machine.** The agent loop runs on a server *you* run, so page
-  observations transit it — that is inherent to the design. What you choose is that there is no
-  operator between the agent and your documents, because there is no operator.
+Everything in this section is about the server *you* run.
+
+- **The browser runs on your machine.** The agent loop runs on a server you run, so page
+  observations transit it — that is inherent to the design. What you choose by self-hosting is
+  that there is no operator between the agent and your documents, because there is no operator.
 - **Page text is redacted before it leaves**, and a run leaves a 200-character digest of each page
   on disk rather than a copy of the page. The text you type and the model's own prose about the
   page do persist in the audit record — [Privacy](PRIVACY.md) says so plainly.
 - **Your model key is never written to disk**, by Brotto, anywhere.
 - **Deletion is yours.** Every session has a delete button with a confirmation, and
   `DELETE /v1/sessions` takes the lot.
+
+On the hosted beta the orchestrator is ours instead of yours, which makes us a party to your
+observations and puts your data in someone else's hands for the life of the task — that is why
+it is capped and invite-only. [Privacy](PRIVACY.md) covers that path separately, and it is
+the reason self-host is the default here.
 
 **The long versions are separate documents, and putting detail there is the
 right call rather than a sign this README is hiding something:**
@@ -257,9 +305,10 @@ Ordered by what unblocks the most people, not by what is most interesting.
 
 - **The store listing is under review.** The extension becomes one click to
   install the moment it clears. That takes the install from six steps to one.
-- **Remove the last one.** A one-command installer for the container, then a
-  hosted option. Everything above is one step too many for anyone who doesn't
-  write code, and that is the constraint on everything else here.
+- **A one-command installer for the container.** It exists to collapse
+  [Self-host](#self-host) into a single command, and to stop being the thing
+  that stops people. Self-hosting itself stays — it is the free, no-account,
+  no-operator version, and it is not being replaced.
 - **Google Docs and Sheets.** Canvas-rendered surfaces are the one place Brotto is
   blind. Worth checking separately — Docs renders a real DOM and may largely
   already work, while Sheets genuinely draws to canvas.
@@ -269,8 +318,11 @@ Ordered by what unblocks the most people, not by what is most interesting.
   is a guess — including ours.
 - **Routines.** Saved, reusable tasks — *every weekday, summarise these* — and
   re-running or resuming from the record.
-- **Cloud, and Pro on top of it.** A hosted relay so a session can be picked up
-  on a second device, and a paid tier built on that — see
+- **Cloud, and Pro on top of it.** The hosted relay is running — an invite-only
+  beta at `agent.brotto.dev`, capped per person per week and with an operator
+  behind it, which is the trade [Self-host](#self-host) does not ask you to make.
+  What is still missing from it is the reason you might want one: picking a
+  session up on a second device. That, and the paid tier built on it — see
   [Pro](#pro-planned-not-released) for what that would and would not be. The
   self-hosted build stays free and stays the privacy claim. What the cloud adds
   is reach and cross-device, never custody of anything you can reach it with.
