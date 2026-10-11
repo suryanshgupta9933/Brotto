@@ -1204,6 +1204,16 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             max_chars = _as_int(args.get("max_chars"), 2000)
             around = args.get("around")
             text = await cdp.read_page_text(selector, max_chars=max_chars, around=around)
+            # Same call the per-step path makes, and for the same reason: this
+            # text goes back to the model and then sits in memory to be
+            # handed back again by `recall_memory`, so redacting only what the
+            # prompt already carried left the policy's promise bypassable by
+            # one tool call. Unconditional, like that path — redaction is not
+            # a secure-mode setting.
+            text, redactions = redact_text(text)
+            if redactions:
+                log.info("read_page_text: redacted %s", ", ".join(
+                    f"{n} {k}" for k, n in sorted(redactions.items())))
             # Heuristic: if the returned text is near the cap, the page was
             # bigger than we saw. The agent can use this to decide whether
             # to read again with `around` set.
@@ -2138,14 +2148,16 @@ class AgentHarness:
                 self._close(audit, a_turn, deps.result, cumulative_snapshots,
                             timings, task_index=deps.task_index, cost=cost)
                 return deps.result
-            # Redacted here, at the one place page text enters the loop, so
+            # Redacted here, at the step's own entry of page text, so
             # the prompt, the digest, the sidecar and the audit all carry the
             # same string — redacting at each of those is four sites and one
-            # of them will be missed. Unconditional, not gated on secure
-            # mode: a live card number reaching a provider's logs is not a
-            # setting the user should have to know to turn on. Secure mode
-            # governs what else the model may see (see `page_text_untrusted`
-            # in prompt.py), not whether a credential is a credential.
+            # of them will be missed. The other entry point is the
+            # `read_page_text` handler, which redacts for itself. Unconditional,
+            # not gated on secure mode: a live card number reaching a
+            # provider's logs is not a setting the user should have to know to
+            # turn on. Secure mode governs what else the model may see (see
+            # `page_text_untrusted` in prompt.py), not whether a credential is
+            # a credential.
             page_text, redactions = redact_text(page_text)
             if redactions:
                 log.info("page text: redacted %s", ", ".join(

@@ -116,6 +116,39 @@ prose, implemented in one place, with the second place unbuilt. Both are now
 pinned by a test that asserts the secret is absent from the prompt that would be
 sent, not that a function was called.
 
+**3c. And the tool path was a third, with a second step to reach it.** Fixing
+3a made `grep -rn redact_text src/` return two hits, and both were step-shaped:
+the per-step `get_page_text` and `suggest.py`. Neither is the whole set of paths
+page text takes, and the missing one was the one the **system prompt itself
+advertises** — `prompt.py` tells the model to call `read_page_text`. That handler
+took the CDP text raw, stored it raw as the memory body, and `recall_memory`
+handed the raw body back on any later step. `guardrails.py` exempts
+`read_page_text` from the sensitive-action gate, so the model could reach it
+without approval.
+
+The guarantee was bypassable by a model that simply called the tool on a second
+step — which the prompt tells it to do. The handler now calls the same
+`redact_text` the step path does, and **the redacted form is what is stored**, so
+the recall path is covered by construction rather than by a second call site.
+That is the part worth keeping: redacting on the way out but storing the raw
+string would have left the text sitting in memory for a later step to fetch.
+
+Two things did *not* change, deliberately. There is still no setting — the
+per-step path's comment about secure mode applies identically here, and a
+credential is a credential whether the page arrived in the prompt or through a
+tool. And redaction is still **best-effort pattern matching**, not a guarantee
+that no sensitive string reached the provider; it misses a novel identifier
+format and occasionally eats an order number. The policy page says "best-effort"
+for that reason, and nothing here moves it toward "guaranteed".
+
+The lesson is 3a's again, one level on: **grep found every call site of the
+function and none of the paths**, because the two are not the same list. The
+question is never "where is this called" but "every way does this text get
+here" — and for page text that is per-step observation, the tool, the recall,
+and the suggestions path. Pinned by three tests in `test_memory_capture.py`
+asserting a known card number is absent from the recalled body, from the stored
+body and from the digest.
+
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
 Brotto-operated service, we run no servers"* and closed out each section with a
