@@ -120,6 +120,12 @@ function attachDropdown({ root, trigger, list, getOptions, getValue, setValue, e
     } finally {
       dropdownWriting = false;
     }
+    // The trigger's label was last painted by open() — from the value *before*
+    // this choice. Nothing between here and the next open re-reads it, so the
+    // box kept naming the provider the user had just replaced. One sync per
+    // component covers every host, which is why it lives here and not in the
+    // caller's change handler.
+    sync();
   }
 
   trigger.addEventListener('click', () => (list.hidden ? open() : close()));
@@ -156,10 +162,23 @@ function attachDropdown({ root, trigger, list, getOptions, getValue, setValue, e
   return api;
 }
 
-// The catalogue comes from GET /v1/models (see model_catalog.js). It is null
-// until the first load resolves, which is why the provider <select> ships
-// empty rather than with hardcoded options.
-let modelCatalog = null;
+// The catalogue comes from GET /v1/models (see model_catalog.js), but it is
+// SEEDED with that file's offline FALLBACK rather than left null until the
+// fetch resolves. Null-for-the-fetch left the provider <select> with zero
+// options for the length of that request, and a provider picked in that window
+// was written to a <select> that had nowhere to put it — it silently became
+// "" and the next repaint replaced it with the config from storage. The
+// fetched copy replaces this one, so this is the same trade model_catalog.js
+// already makes when the server is down, just for the wait rather than the
+// failure.
+let modelCatalog = brottoModelCatalog.FALLBACK;
+
+// True once the user has touched the provider or the model box. A hydration
+// that resolves *after* that must not write the stored config over their
+// choice — and the DOM cannot tell us, because a value the user typed and a
+// value storage restored look identical once written. The two handlers below
+// are the only writers; both are user actions.
+let modelSettingsEdited = false;
 
 function currentProvider() {
   return modelCatalog ? brottoModelCatalog.provider(modelCatalog, $modelProvider.value) : null;
@@ -203,6 +222,12 @@ function populateProviders() {
   }
 }
 
+// Populated before any request resolves, so the stored provider id has an
+// option to land on. Left to the first `initModelSettings`, the value hydrate
+// wrote sat in a <select> with no options — discarded the moment the real
+// catalogue arrived.
+populateProviders();
+
 // ── What the model can do: a vision badge and a context window, read from
 // the same catalogue entry the save handler prices its budget against.
 function renderModelFacts() {
@@ -236,6 +261,7 @@ function renderModelFacts() {
 
 if ($modelProvider) {
   $modelProvider.addEventListener('change', () => {
+    modelSettingsEdited = true;
     populateModelOptions();
     renderModelFacts();
   });
@@ -243,6 +269,7 @@ if ($modelProvider) {
 
 if ($modelName) {
   $modelName.addEventListener('input', () => {
+    modelSettingsEdited = true;
     renderModelFacts();
     // Typing into the model box IS the request for suggestions. Escape or a
     // click away dismisses them; nothing here forces the list open on focus,
@@ -265,6 +292,14 @@ async function initModelSettings(base) {
     populateModelOptions();
   }
   await hydrateModelSettings();
+  // The module-scope `.then()` used to be the only thing that repainted these,
+  // and the /health path awaits initModelSettings with no `.then` at all — so a
+  // second server's catalogue replaced the provider list and the model list and
+  // left the context window, the vision badge and the provider trigger all
+  // describing the old one. Repainting here rather than at the call sites is
+  // what makes the third caller — the one nobody remembered — get it too.
+  providerDd?.sync();
+  renderModelFacts();
 }
 
 if ($modelSave) {
@@ -361,17 +396,24 @@ async function hydrateModelSettings() {
   // the pill read "Default" and re-saving the API key reverted the model.
   const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
   if (cfg) {
-    if ($modelProvider) $modelProvider.value = cfg.provider;
-    populateModelOptions();
-    // Never overwrite a field the user is mid-edit in. initModelSettings runs
-    // twice (once on load, once after /health names the real server) and
-    // someone typing a custom model id in that window would otherwise watch
-    // it get reverted from storage under them.
-    if ($modelName && document.activeElement !== $modelName) $modelName.value = cfg.model;
-    // Only refill when the stored config has one: a config saved before the
-    // field existed should land on the provider's default, not on a stale
-    // value the user typed for a different provider.
-    if ($modelBaseUrl && cfg.base_url) $modelBaseUrl.value = cfg.base_url;
+    // Storage is older than the user. `initModelSettings` runs three times —
+    // at load, once the fallback catalogue is swapped for the fetched one, and
+    // again after /health names the real server — and every one of them ends in
+    // a fresh read of storage. A provider or model picked between two of them
+    // is younger than all three, and without this the last one to land won:
+    // the previous provider's list and model name came straight back, and it
+    // took a second change to clear. One guard here covers all three callers.
+    if (!modelSettingsEdited) {
+      if ($modelProvider) $modelProvider.value = cfg.provider;
+      populateModelOptions();
+      if ($modelName) $modelName.value = cfg.model;
+      // Only refill when the stored config has one: a config saved before the
+      // field existed should land on the provider's default, not on a stale
+      // value the user typed for a different provider.
+      if ($modelBaseUrl && cfg.base_url) $modelBaseUrl.value = cfg.base_url;
+    }
+    // The pill stays outside the guard on purpose: it names the model this
+    // browser last *saved*, which is storage's answer whatever is on screen.
     setModelPill(cfg.model);
   } else {
     setModelPill(null);
@@ -497,12 +539,11 @@ const modelDd = $modelName && attachDropdown({
 
 // Called twice on purpose: once now so the header pill names the model
 // immediately, and again from initModelSettings once the catalogue has landed
-// and the provider select can actually hold the id this config names. Both
-// repaint the triggers and the facts on the way out, because a value written
-// straight to a host never tells anyone it changed.
+// and the provider select can actually hold the id this config names. The
+// second one repaints for itself now; the first still needs the facts, because
+// a value written straight to a host never tells anyone it changed.
 hydrateModelSettings().then(() => { providerDd?.sync(); renderModelFacts(); });
-initModelSettings(document.getElementById('plannerUrl')?.value || '')
-  .then(() => { providerDd?.sync(); renderModelFacts(); });
+initModelSettings(document.getElementById('plannerUrl')?.value || '');
 
 const messagesEl  = document.getElementById('messages');
 const emptyState   = document.getElementById('emptyState');
