@@ -71,7 +71,10 @@ FETCH_TIMEOUT_SECONDS = 3
 MARK_CID = "brotto-mark"
 _MARK_PATH = Path(__file__).with_name("brotto-mark.png")
 
-SUBJECT = "You are on the Brotto list"
+#: Approved copy, signed off as a whole. "Cloud" is what tells this mail apart
+#: from anything else Brotto might send later — it is not decoration, and it is
+#: not the eyebrow.
+SUBJECT = "You're on the Brotto Cloud list"
 
 _FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif"
 
@@ -183,14 +186,13 @@ async def latest_post() -> dict | None:
     }
 
 
-def render(email: str, post: dict | None) -> tuple[str, str]:
+def render(post: dict | None) -> tuple[str, str]:
     """The HTML and the plain text. Both say the same thing.
 
-    `email` is threaded in for the boundary, and is deliberately not printed:
-    the approved design names nobody's address, and adding one would be copy
-    nobody wrote.
+    No address argument, because the approved design names nobody's address: the
+    wordmark is the name, and adding a greeting would be copy nobody wrote. The
+    address reaches Resend in `to` and nowhere else.
     """
-    del email  # see docstring — no address is rendered into either body
     mark = _mark()
     masthead = (
         f'<td style="vertical-align:middle;"><img src="cid:{MARK_CID}" width="22" '
@@ -316,7 +318,7 @@ def payload(email: str, post: dict | None) -> dict:
     """
     sender = from_address()
     address = mailbox(sender)
-    body, plain = render(email, post)
+    body, plain = render(post)
     mark = _mark()
     return {
         "from": sender,
@@ -366,22 +368,20 @@ async def send_confirmation(email: str) -> None:
 
     Everything below this line is best effort by construction: the row is
     already written, and no outcome here is worth an error response or a
-    rollback.
+    rollback. That holds *by construction* because one `try` spans the whole
+    body — an exception type nobody enumerated is exactly the case this rule is
+    about, and it arrives in a background task whose response is already on the
+    wire.
     """
     if not enabled():
         return
-    # Before the transport and outside its try: `latest_post` swallows its own
-    # failures, and a card that arrives is not allowed to be worth a retry.
-    post = await latest_post()
     try:
+        post = await latest_post()
         status = await _deliver(email, post)
-    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+    except Exception as exc:  # a bug here must not take the signup with it
         # TYPE only. A transport exception can quote the request body, and the
         # body holds the address.
         log.warning("waitlist confirmation not sent: %s", type(exc).__name__)
-        return
-    except Exception as exc:  # a bug here must not take the signup with it
-        log.warning("waitlist confirmation failed: %s", type(exc).__name__)
         return
     if status >= 400:
         log.warning("waitlist confirmation answered %d", status)

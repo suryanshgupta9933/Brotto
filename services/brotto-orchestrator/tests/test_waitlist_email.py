@@ -284,6 +284,31 @@ def test_a_transport_exception_is_swallowed(hosted, client, supabase, monkeypatc
     assert [r["body"] for r in supabase.rows] == [{"email": VISITOR, "batch": ""}]
 
 
+async def test_an_exception_the_enumeration_never_imagined_is_swallowed_too(
+    monkeypatch, caplog
+):
+    """The pin on the whole-body `try`, not just on the transport's.
+
+    `latest_post` catches three types it thought of. Anything else — a resolver
+    error, an `AttributeError` in the parsing, a `CancelledError` from a client
+    teardown — used to escape into a background task whose response is already
+    on the wire. Red the moment the `try` stops spanning the fetch, which is
+    where it used to start.
+    """
+    from brotto_orchestrator.session import waitlist_email as we
+
+    async def exotic():
+        raise ValueError(f"no resolver for brotto.dev ({VISITOR})")
+
+    monkeypatch.setenv("RESEND_API_KEY", KEY)
+    monkeypatch.setattr(we, "latest_post", exotic)
+    with caplog.at_level("WARNING"):
+        await we.send_confirmation(VISITOR)  # returns; does not raise
+
+    assert "ValueError" in caplog.text, "the type is what crosses into the log"
+    assert VISITOR not in caplog.text
+
+
 def test_a_transport_exception_never_writes_the_address_to_the_log(
     hosted, client, supabase, monkeypatch, caplog
 ):
@@ -381,14 +406,36 @@ def test_markup_in_the_blog_title_never_reaches_the_body_as_markup():
 
 
 def test_the_address_is_never_interpolated_into_a_body():
-    """The approved design names nobody's address; only `to` carries it."""
+    """The approved design names nobody's address; only `to` carries it.
+
+    `render` takes no address at all — a dead `del email` parameter is a
+    signature that lies about what it reads, and this is the assertion that
+    keeps the copy honest: the greeting can only be added by widening the
+    signature, and the signature is what this pins.
+    """
+    import inspect
+
     from brotto_orchestrator.session import waitlist_email as we
+
+    assert list(inspect.signature(we.render).parameters) == ["post"]
+    html, text = we.render(None)
+    assert VISITOR not in html
+    assert VISITOR not in text
 
     hostile = '"><script>alert(1)</script>@example.test'
     body = we.payload(hostile, None)
+    assert body["to"] == [hostile], "the address reaches Resend in `to`"
     assert VISITOR not in body["html"]
     assert hostile not in body["html"]
     assert hostile not in body["text"]
+
+
+def test_the_subject_is_the_approved_line():
+    """Signed off as a whole; `Cloud` is what tells it apart from other mail."""
+    from brotto_orchestrator.session import waitlist_email as we
+
+    assert we.SUBJECT == "You're on the Brotto Cloud list"
+    assert we.payload(VISITOR, None)["subject"] == we.SUBJECT
 
 
 def test_an_idempotency_key_is_stable_and_carries_no_address():
