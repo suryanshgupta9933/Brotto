@@ -430,6 +430,20 @@ def test_the_address_is_never_interpolated_into_a_body():
     assert hostile not in body["text"]
 
 
+def test_the_check_mark_is_a_character_and_not_an_entity():
+    """Gmail does not know `&check;`, so it escapes the `&` and the reader sees
+    the characters. The document declares utf-8 and Resend sends utf-8, so the
+    mark ships as U+2713. Asserted on the output we generate, which is why
+    `&check;` is a valid substring check here — nothing escapes it on the way
+    out, and `&amp;check;` would still fail the `in` half below.
+    """
+    from brotto_orchestrator.session import waitlist_email as we
+
+    html, _ = we.render(None)
+    assert "✓" in html, "the mark must be the character, not markup"
+    assert "&check;" not in html
+
+
 def test_the_subject_is_the_approved_line():
     """Signed off as a whole; `Cloud` is what tells it apart from other mail."""
     from brotto_orchestrator.session import waitlist_email as we
