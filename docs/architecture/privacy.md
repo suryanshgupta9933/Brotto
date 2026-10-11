@@ -29,7 +29,13 @@ So the privacy posture is not "we do not collect your data". It is:
 | Model config, `base_url` | `chrome.storage.local`, user | until cleared |
 | API key | `chrome.storage.session`, user | until browser restart |
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
+| Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
+| Waitlist signup (an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |
 | Audit request bodies | whatever the model provider logs | theirs, not ours |
+
+The waitlist is the one row in that table that came from **a stranger** rather
+than from an account, and it is covered by "Writing new code here" below —
+see *The waitlist is the first data from someone who is not an account*.
 
 Page text itself is **not** written to disk, and neither is the AX diff that
 used to quote it. The `.pages.json` sidecar that was meant to hold page bodies
@@ -319,6 +325,22 @@ is 4004 rather than 4001 for the same reason the routes answer 404 rather than
 of what the id is worth. On self-host `owner` is `None`, which means *one
 shared identity*, and every route behaves exactly as it did before.
 
+**Ownership had to leave the process, because erase-all was lying in one.**
+The registry is in-memory, Heroku restarts the dyno daily, and after a restart
+`owned_sessions()` returned nothing — so `DELETE /v1/sessions` answered
+`{"deleted": 0, "residue": 0}` with every transcript still on disk. A user who
+clicked "erase all" was told nothing remained while everything remained, which
+is the erasure promise stated and not kept. So the mint path writes
+`<session_id>.owner` beside the session (`audit.record_owner`), `lifespan`
+hydrates the registry from those files before anything can answer about
+ownership, and the sidecar is in `_SESSION_RESIDUE_EXT` so `delete` takes it
+and `delete_all` sweeps it. It is a sidecar rather than a field in the audit
+document because the document is written by the harness's `AuditTrail` while
+this is written at mint time — before a run exists, and so before any document
+does. Self-host writes nothing: `None` is one shared identity and needs no
+record. Pinned by `tests/test_session_ownership.py`, which is also the first
+test coverage this guard has ever had.
+
 **`?token=` is refused in jwt mode and nowhere else.** A URL reaches this
 server's access log, every proxy's log ahead of it, and the browser history. A
 self-hoster's `AGENT_SECRET` is one secret on their own box; a hosted JWT is a
@@ -344,6 +366,130 @@ limit would be five sign-ins per ten minutes for the whole beta) and on the
 who is in the beta, so there is no branch in it that *could* differ between a
 rostered address and a stranger's — pinned by a test that drives both and
 compares the answers.
+
+## Failure reports are the operator's question, asked without a page
+
+The operator needs to answer one thing: *did the run happen, and if not, which
+of our fixed codes says why?* That is not analytics — analytics answers *what
+did the user do*, which is the posture rule 1 forbids — and the difference is
+entirely in whether the vocabulary is closed. `failure_reason` already is: the
+relay writes it, the panel turns it into a sentence (`FAILURE_NOTE`). So the
+report is the same code, and nothing else.
+
+**`build_row` is the boundary, and it raises.** It takes named scalars and
+`**extra` is a `ValueError`, not a filter — a filter is something a later commit
+widens with a reason that reads well. This is the same decision as
+`begin_turn(ax_diff_chars: int)`, and `test_failure_reports.py` posts a body
+carrying a task, a URL, page text, typed input, an email, a user id and a model
+key, then asserts none of them appear in the built row. It passes because
+`build_client_rows` has *no parameter* for them. The test failing is the
+guarantee; the test passing is only evidence.
+
+**The client never sends who it is.** `owner` is read off the verified token by
+the relay, the same identity `profiles` already holds. So no user id is on the
+wire — only in a table we already had a row for.
+
+**A relay that is down cannot receive a report about being down.** So the codes
+queue in `chrome.storage.local` and flush on the next `ws.onopen`: the first
+moment the relay is answering *and* the credential has been accepted. Three
+things fall out of that one choice. A refused sign-in still gets reported, once
+the user signs in again — which is when it is worth having. Self-host is
+structurally excluded twice over, because `/health` says `open` or `secret` and
+never sets `relayIsCloud`, and because the route answers 404 unless
+`reporting_enabled()`. And **no CORS change was needed at all**: the extension
+already POSTs to the same relay origin, and `allow_origin_regex` already permits
+exactly `chrome-extension://<id>`.
+
+**Five codes are deliberately not reported, and the reason is written next to
+each.** `CANCELLED` is the user pressing stop — counting it counts what the user
+chose to do. `TASK_ERROR` and `WS_ERROR` are already counted from the relay as
+`internal` and `CONNECTION_LOST`, so counting them from both ends makes one
+outage look like two. `scripts/test-failure-reasons.test.js` requires every code
+the extension writes to be either in `CLIENT_CODES` or in `NOT_REPORTED`, because
+an omission is an *absence* and an absence reads clean in review.
+
+**What the operator must do by hand:** run
+`supabase/migrations/002_failure_reports.sql` on the Supabase
+project, or `/v1/reports` answers 500 on every insert and the code says only that
+a PostgREST call failed.
+
+## The waitlist is the first data from someone who is not an account
+
+Every row above belongs to a person who installed the extension and pointed it
+at their own browser. `POST /v1/waitlist` is the exception: a visitor on a
+public marketing page, no credential, no account, and an address they typed
+into a form. That makes it the one place the operator holds data about someone
+who has not decided to give us anything — and it applies exactly the same
+discipline the rest of this file applies.
+
+**The route does not exist on a self-hosted box.** `waitlist_enabled()` is
+`auth_mode() == "jwt"` *and* a configured service key, and the answer is 404 —
+not "does nothing". The gate is `auth_mode()` rather than "is a Supabase
+configured" for the reason `failure_report.reporting_enabled()` is: a self-hoster
+with a stray `SUPABASE_URL` pasted out of the cloud env must not start
+collecting strangers' addresses because they copied it.
+
+**The row is one field, and the shape is what enforces it.** `build_row(email)`
+has no parameter for a referrer, a user agent, a page URL or an IP, and
+`**extra` **raises** rather than filtering. `batch` is the one addition and it
+is not user content: the operator stamps it from `BROTTO_WAITLIST_BATCH` when
+they send an invite round. This is `begin_turn(ax_diff_chars: int)` and
+`failure_report.build_row` again — the boundary is a signature, not a habit.
+
+**The answer is the same whether the address is new.** The uniqueness
+constraint lives in the migration and a duplicate arrives as a 409, which the
+route reads as success. A read-then-insert would be a race a double-clicked
+submit wins, and — the reason this is worth stating — a route that answered
+differently for the two outcomes is a route anyone with a public URL can ask
+*"is this address on your list?"*.
+
+**Nothing about the address is logged, ever.** Not on success, and not on
+failure: a PostgREST insert error quotes the row, and the row is the entire
+payload. Only a status code crosses into a log line. The response on a broken
+control plane is a fixed 502 — see 3b's lesson that a promise made in a
+published policy is an invariant with one call site per code path.
+
+**It is metered on the sign-in limiter**, reused rather than duplicated: the
+socket peer, the forwarded hop and the normalised address, and it consults
+nothing that knows who is on the list, so a stranger and a beta user are
+metered for the same reason after the same number of attempts. The form is
+open by definition and there is no key to put in front of it.
+
+**The peer key is the socket, not the header — and the header was the whole
+bug.** It used to be the first hop of `X-Forwarded-For`, which the caller
+sets: rotating it minted a fresh bucket per request, and on an open form the
+submitted address is chosen by the attacker too, so both halves of the limit
+were the thing being varied rather than a backstop. CORS does not help — a
+cross-origin POST is still sent, it just cannot be read back. Trusting the
+header is only correct behind a proxy that *overwrites* it; trusting the
+socket alone collapses every visitor behind one NAT (and every beta user
+behind one Heroku router) into a single bucket. So both are charged, at
+different capacities, and the socket one is the bound because it is the one
+the caller cannot forge. `ponytail:` the honest ceiling is written beside it
+in `main.py` — 20 writes per ten minutes per router address, and an attacker
+who keeps that bucket drained starves whoever shares the address. The upgrade
+is a bot check in front of the route, not a bigger bucket.
+
+**CORS is scoped to a sub-application, because an allowlist entry is not a
+grant of access to one route.** `https://brotto.dev` and its GitHub Pages
+host used to sit in the *global* `allow_origin_regex`, added so the marketing
+form could reach `/v1/waitlist`. The effect was that those two origins could
+read every CORS-protected route on every install — `GET /v1/sessions`,
+`GET /v1/sessions/{id}/audit`, `DELETE /v1/sessions` — including an
+open-mode self-host, where `validate_token` passes for everyone. Chrome's
+Private Network Access hid part of it and Firefox and Safari implement
+neither, so what stood between the entry and a transcript was a browser
+mitigation rather than a guard.
+
+Starlette has no per-route CORS; middleware is per-application. So the
+waitlist is its own `FastAPI()` mounted at `/v1`, carrying its own allowlist,
+and the global one names only `chrome-extension://<id>` and loopback. Two
+consequences that are not obvious and are both pinned by tests in
+`test_cors_scope.py`: the mount is at `/v1` and **not** at `/v1/waitlist`,
+because the latter compiles to a regex the form's exact URL does not match
+and answers 307; and the global middleware answers the sub-app's **preflight**
+before the sub-app ever sees it, so it skips that one path entirely rather
+than refusing the form's preflight with a 400.
 
 ## Writing new code here
 

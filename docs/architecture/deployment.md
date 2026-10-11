@@ -147,6 +147,7 @@ stray `AGENT_SECRET` first.**
 | `SUPABASE_ANON_KEY` | hosted | The two sign-in routes only |
 | `BROTTO_RETENTION_DAYS` | optional | Defaults to **30** on the hosted relay, off elsewhere |
 | `BROTTO_BETA_TASK_CAP` | optional | Weekly per-person task cap; defaults to 10 |
+| `BROTTO_WAITLIST_BATCH` | optional | Label stamped on waitlist signups, so the operator can tell which invite round a row went out in. Empty by default |
 
 All four Supabase values are in Project Settings → API, and none of them belong
 in `.env.example` — which is why that file ships them **commented out**, which
@@ -165,7 +166,7 @@ naming RS256 and carrying a public key as HMAC material, must never reach
 The relay reads one table, and it is not created by the application:
 
 ```bash
-psql "$SUPABASE_URL" -f services/brotto-orchestrator/migrations/001_profiles.sql
+psql "$SUPABASE_URL" -f supabase/migrations/001_profiles.sql
 ```
 
 There is no migration runner. `profiles` is the operator's ledger **over**
@@ -188,9 +189,11 @@ reason.
 are not optional, both added before any beta database was stood up:
 
 - **`alter table profiles enable row level security` with zero policies, plus
-  revokes on `anon` and `authenticated`.** `SUPABASE_ANON_KEY` is *public* — it
-  ships in the extension bundle — so the default grants are not a threat model,
-  they are the starting state. Without this, the project URL and that key are
+  revokes on `anon` and `authenticated`.** `SUPABASE_ANON_KEY` is *public* by
+  Supabase's own design — it is the key every browser client is expected to
+  ship, and the two sign-in routes here read it server-side; **the extension
+  bundle does not contain it** — so the default grants are not a
+  threat model, they are the starting state. Without this, the project URL and that key are
   enough to read the beta roster and write to it: set your own `revoked_at`
   back to null, or zero your own counter, without touching the relay at all.
   The relay needs no policy because it reads and writes with the **service role
@@ -205,6 +208,21 @@ are not optional, both added before any beta database was stood up:
 **If a database was created from an earlier copy of this file, drop and re-run
 it** — there is no migration runner, so editing `001` in place only reaches a
 database that has not been created yet.
+
+### The other two migrations, run by hand the same way
+
+```bash
+psql "$SUPABASE_URL" -f supabase/migrations/002_failure_reports.sql
+psql "$SUPABASE_URL" -f supabase/migrations/003_waitlist.sql
+```
+
+Same posture as `profiles`: no migration runner, RLS with zero policies plus
+revokes on `anon` and `authenticated`, written only by the service role.
+`waitlist` additionally carries a `unique` on `email`, because a double-clicked
+submit must not create two rows and a read-then-insert is a race a double-click
+wins. **Without `003` run, `POST /v1/waitlist` answers 502 on every signup** and
+the log says only that an insert was refused — the marketing page will report a
+success-looking failure. See `docs/architecture/privacy.md`.
 
 ### `BROTTO_BETA_TASK_CAP` is a rollout knob, not a policy number
 

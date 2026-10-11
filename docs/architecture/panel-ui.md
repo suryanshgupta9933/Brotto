@@ -411,6 +411,60 @@ Pinned by `scripts/test-failure-reasons.test.js`.
 the no-unescaped-`innerHTML` rule applies to a settings hint exactly as it
 applies to a card.
 
+## Cloud is the default; the address is proved before it is trusted
+
+The wizard's first step is a radio, and **cloud is the one pre-selected** —
+self-host is the deliberate opt-out. `initialEdition(storedServerUrl)` decides
+what it opens on, and it decides on **the stored address**, which is the only
+evidence there is: no stored address is a new install (cloud), the cloud
+address is a signed-out cloud user (cloud), anything else is somebody who has
+already answered and keeps their answer. **An existing self-host install is not
+migrated, and is not re-asked** — `settings.onboarded`, written by `finish()`
+on the Start button *and* on Skip, is what keeps the wizard off a panel that has
+finished it. Inverting a default is only safe because that gate exists; a
+default that re-asks somebody who answered once is worse than either default.
+The cloud address is still written in from `CLOUD_SERVER_URL` and appears in no
+markup.
+
+**Blur is advice; save is the moment the address becomes true.** `checkServer()`
+runs on blur *and* is called by Start before `finish()` writes anything,
+because a dead address saved is the "find out on your first real task" failure
+this screen exists to prevent. It returns what it found as well as writing it,
+through one `setServerStatus`, so the line and the decision cannot disagree.
+
+**Three answers, not one.** Reachable / reachable-but-the-key-was-refused (the
+404 from an authenticated route) / no answer at all are three different things
+to go and fix, and collapsing them is what sends people to debug the wrong
+machine. A fourth — the origin refusal from `credentialFor` — arrives through
+the same return.
+
+**A failing save does not save; Skip still does.** The wizard is not a gate, so
+Skip is unchanged: it writes the address without asking the server anything.
+That is deliberate, and it is covered by the check below.
+
+## A task is sent after the server has answered, once per address
+
+`ensureConnected()` used to `fetch('/health')` itself, **unbounded**, on every
+send. Two problems: a TCP blackhole hung the composer forever with no way out,
+and a happy-path send paid for a request it did not need. It now asks the
+service worker (`probe_server`), which runs the existing `serverIsAlive()` and
+its `SERVER_PROBE_MS` — the bound is the reason there is one probe and not two,
+and `serverIsAlive(url)` takes the address because the worker's module variable
+is only assigned inside `startRelay`.
+
+**The result is cached against the address, and that is the whole cost
+argument.** First task on an address probes it; later tasks on the *same*
+address make no request, so a transient blip during task 7 cannot refuse task
+8. A failure is not cached, so the next send asks again. Editing the address in
+Settings re-arms it, which is exactly the case the check is for.
+
+**The credential check comes first and reuses the sentence.** `forUrl` is asked
+before the probe, so a self-host address that does not match the credential's
+recorded origin is caught with the *existing* refusal rather than a new one, and
+the probe never runs. `ensureConnected` therefore returns a sentence instead of
+throwing: a refusal dressed as a network error sends the user to debug the
+wrong machine, which is the whole reason the two copies of `forUrl` exist.
+
 ## The credential belongs to the server that issued it
 
 `settings.agentSecret` is one slot holding two things — a self-hoster's
