@@ -125,7 +125,7 @@ def test_the_waitlist_origin_is_allowed_to_post_the_form(client, monkeypatch):
 
     async def fake_add(email):
         seen.append(email)
-        return True
+        return wl.Signup.CREATED
 
     monkeypatch.setattr(wl, "add", fake_add)
     resp = client.post(
@@ -167,18 +167,22 @@ def test_the_waitlist_sub_app_does_not_lend_its_cors_to_anything_else(client):
 
 def test_the_waitlist_still_answers_the_same_everyway(client, monkeypatch):
     """Kept by the move: a duplicate is a 409 the route reads as success, so
-    the two outcomes cannot be told apart by anyone with the URL."""
+    the two outcomes cannot be told apart by anyone with the URL.
+
+    The stubs differ now, which is the point — `add` reports which one happened
+    so the confirmation mail goes to a first signup only, and the route maps
+    both onto one answer."""
     from brotto_orchestrator.session import waitlist as wl
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "jwt-secret-for-tests")
     monkeypatch.setenv("SUPABASE_URL", "https://project.test")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-key")
     monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key")
-    monkeypatch.setattr(wl, "add", _always(wl, True))
+    monkeypatch.setattr(wl, "add", _always(wl, wl.Signup.CREATED))
     first = client.post("/v1/waitlist", json={"email": "visitor@example.test"})
-    monkeypatch.setattr(wl, "add", _always(wl, True))
+    monkeypatch.setattr(wl, "add", _always(wl, wl.Signup.DUPLICATE))
     second = client.post("/v1/waitlist", json={"email": "visitor@example.test"})
-    assert (first.status_code, first.json()) == (second.status_code, second.json())
+    assert (first.status_code, first.content) == (second.status_code, second.content)
 
 
 def _always(wl, value):

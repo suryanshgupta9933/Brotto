@@ -64,6 +64,14 @@ Security = "https://github.com/suryanshgupta9933/brotto/blob/main/SECURITY.md"
 [tool.setuptools.packages.find]
 where = ["services/brotto-orchestrator/src"]
 
+# ponytail: one binary — the mark the waitlist confirmation embeds as a CID
+# attachment. Without this the wheel builds clean and the image ships without
+# it, so the email renders its wordmark and no logo: an absence that reads
+# clean in review. The extension's own icons cannot serve here, because
+# `dist/` is a gitignored build artifact and the Dockerfile copies `src` only.
+[tool.setuptools.package-data]
+"*" = ["*.png"]
+
 # ponytail: mirrors requirements-dev.txt, which is what CI installs.
 [dependency-groups]
 dev = [

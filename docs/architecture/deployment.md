@@ -214,6 +214,8 @@ stray `AGENT_SECRET` first.**
 | `BROTTO_RETENTION_DAYS` | optional | Defaults to **30** on the hosted relay, off elsewhere |
 | `BROTTO_BETA_TASK_CAP` | optional | Weekly per-person task cap; defaults to 10 |
 | `BROTTO_WAITLIST_BATCH` | optional | Label stamped on waitlist signups, so the operator can tell which invite round a row went out in. Empty by default |
+| `RESEND_API_KEY` | optional | Sends the waitlist confirmation. **Unset means no mail is ever sent**, and the route behaves exactly as it did before the feature existed |
+| `RESEND_FROM` | optional | Defaults to `Brotto <hello@brotto.dev>`. Also supplies `reply_to` and `List-Unsubscribe` |
 
 All four Supabase values are in Project Settings → API, and none of them belong
 in `.env.example` — which is why that file ships them **commented out**, which
@@ -289,6 +291,45 @@ submit must not create two rows and a read-then-insert is a race a double-click
 wins. **Without `003` run, `POST /v1/waitlist` answers 502 on every signup** and
 the log says only that an insert was refused — the marketing page will report a
 success-looking failure. See `docs/architecture/privacy.md`.
+
+### The confirmation email, and the two variables that switch it on
+
+A signup is confirmed by an email we send ourselves, through Resend's HTTP API
+(`session/waitlist_email.py`). It is **not** Supabase's mail — Supabase's own
+email caps at 2/hour and is scoped separately as an Auth SMTP provider, which is
+unbuilt and is a different change.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `RESEND_API_KEY` | unset | **Unset is the whole off switch.** No key, no socket opened, no attempt made — a self-hosted box must not send anything at all, so this is not a degraded mode, it is the mode it is always in |
+| `RESEND_FROM` | `Brotto <hello@brotto.dev>` | The `From` header, and the source of both `reply_to` and `List-Unsubscribe`. `brotto.dev` is verified on Resend |
+
+Both are read at call time, not at import, for the same reason `AGENT_SECRET` is
+— `load_dotenv()` runs during startup and several tests set the environment
+after import.
+
+**Nothing about the confirmation can fail a signup.** The row is written first,
+so a Resend 500, a timeout, or a dead writing page leaves the response and the
+table exactly as they were. `POST /v1/waitlist` still answers `200 {"ok": true}`
+and the send hangs off a background task that runs after the response is on the
+wire — which is also what keeps the two possible answers (new address or
+duplicate) identical in time as well as in body. Neither the visitor's answer nor
+a log line reveals which one happened; see the oracle rule in `privacy.md`.
+
+**A mail is confirmed to nobody twice**: `List-Unsubscribe` is a
+`mailto:` header, and there is deliberately **no `List-Unsubscribe-Post`** —
+there is no one-click endpoint, and advertising one that 404s is worse than not
+having it. The footer carries the same `mailto:` as a one-word link.
+
+**The mark is an inline CID attachment, not a remote `<img>`.** Gmail blocks
+remote images until a human clicks, which would put a broken-image box in the
+masthead, so `brotto-mark.png` is attached with a `content_id` the HTML
+references as `cid:brotto-mark`. The file lives in the package
+(`brotto_orchestrator/session/`) and `pyproject.toml` ships it as package data —
+**the extension's `dist/icons/` cannot serve here**, because `dist/` is a
+gitignored build artifact and the Dockerfile copies `src` only. Verified by
+building the wheel; if it is ever missing the mail still sends, with the
+wordmark and a gap where the mark was.
 
 ### `BROTTO_BETA_TASK_CAP` is a rollout knob, not a policy number
 
