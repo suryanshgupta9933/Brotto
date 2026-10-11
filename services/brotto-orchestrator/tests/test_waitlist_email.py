@@ -195,6 +195,35 @@ def test_a_duplicate_is_answered_identically_and_sends_nothing(hosted, client, s
     assert repeat.content == fresh.content == b'{"ok":true}'
     assert len(sent) == 1, "a repeat submit must not mail the same person again"
     assert sent[0]["email"] == VISITOR
+    # Both attempts reached the table and the *schema* stopped the second one —
+    # not this module, and not a header at the mail API. The 409 the stub
+    # returns is what `email unique` produces, so the guarantee being relied on
+    # is the constraint, and it is visible here in the write that was refused.
+    assert [r["method"] for r in supabase.rows] == ["POST", "POST"]
+    assert [r["body"]["email"] for r in supabase.rows] == [VISITOR, VISITOR]
+
+
+def test_a_deleted_row_that_comes_back_is_mailed_again(hosted, client, supabase, sent):
+    """The regression the header caused, measured on the wire.
+
+    An operator who clears a row and re-adds the same address is doing a
+    **new** signup: a new row, a send that is owed. Under the old
+    `Idempotency-Key` — hashed from the address, and Resend holds one for 24
+    hours — Resend answered `409 invalid_idempotent_request` and the mail was
+    silently dropped while the signup returned `200 {"ok":true}`.
+
+    Nothing here can distinguish that from the shape above except the insert, so
+    this is the same path with a different database history: no unique-constraint
+    refusal between the two submissions, therefore two sends.
+    """
+    supabase.status = 201
+    assert client.post("/v1/waitlist", json={"email": VISITOR}).status_code == 200
+    assert len(sent) == 1
+
+    # The row is gone. Same address, same route, no 409 in between.
+    assert client.post("/v1/waitlist", json={"email": VISITOR}).status_code == 200
+    assert len(sent) == 2, "a genuinely new row must still get its confirmation"
+    assert [s["email"] for s in sent] == [VISITOR, VISITOR]
 
 
 async def test_the_response_is_sent_before_the_mail_is_attempted(hosted, supabase, monkeypatch):
@@ -452,16 +481,51 @@ def test_the_subject_is_the_approved_line():
     assert we.payload(VISITOR, None)["subject"] == we.SUBJECT
 
 
-def test_an_idempotency_key_is_stable_and_carries_no_address():
+async def test_the_request_carries_no_idempotency_key(monkeypatch):
+    """The header is gone, and this is what stops it coming back.
+
+    There used to be an `Idempotency-Key` hashed from the address, which made a
+    *legitimately* new signup for someone mailed in the last 24 hours fail
+    silently as a `409 invalid_idempotent_request` — a second row, a second send
+    that was owed, and no mail. It protected against nothing: `waitlist.email` is
+    `UNIQUE`, so one address is one row is one send. Asserted on the headers
+    `_deliver` actually puts on the wire, not on the absence of a function.
+    """
     from brotto_orchestrator.session import waitlist_email as we
 
-    first = we.idempotency_key(VISITOR)
-    assert first == we.idempotency_key("  Visitor@Example.TEST ")
-    assert first.startswith("waitlist-confirm/")
-    assert VISITOR not in first
-    assert "@" not in first
-    assert len(first) == len("waitlist-confirm/") + 32
-    assert first != we.idempotency_key("someone-else@example.test")
+    captured = {}
+
+    class _Session:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def post(self, url, **kw):
+            captured.update(kw.get("headers") or {})
+            raise _Sent()
+
+    class _Sent(Exception):
+        pass
+
+    async def no_post():
+        return None
+
+    monkeypatch.setenv("RESEND_API_KEY", KEY)
+    monkeypatch.setattr(we, "latest_post", no_post)
+    monkeypatch.setattr(we.aiohttp, "ClientSession", _Session)
+
+    with pytest.raises(_Sent):
+        await we._deliver(VISITOR, None)
+
+    assert captured, "the POST must still carry its auth and content type"
+    assert captured["Authorization"] == f"Bearer {KEY}"
+    assert "Idempotency-Key" not in captured
+    assert not hasattr(we, "idempotency_key"), "the key builder goes with the header"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────

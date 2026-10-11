@@ -3,10 +3,12 @@
 **Resend is a third party in the data path for waitlist addresses, and for
 nothing else in this project.** An account's identity is Supabase's; a
 waitlist address additionally crosses Resend's API and lands in its logs, which
-is why the address is never written to a log line here and never appears in an
-idempotency key — only a hash of it does.
+is why the address reaches that request in **exactly one field — `to`** — and
+nowhere else. Not in a header, not in a tag, not in a log line. The address is
+necessary to the request; every *other* place it could have been repeated is a
+place somebody reading their request logs can now correlate on.
 
-Three rules hold this module together, and each one is a way the feature can
+Four rules hold this module together, and each one is a way the feature can
 quietly become a liability:
 
 - **A send failure never fails the signup.** The row is written before this is
@@ -19,6 +21,14 @@ quietly become a liability:
   before this module existed.
 - **Only a first signup sends** (`waitlist.Signup.CREATED`), and the caller
   answers the visitor before this runs.
+- **No `Idempotency-Key` header.** There is one send per insert and the insert is
+  what makes a row, so a key derived from the *address* protects against nothing
+  the unique constraint has already made impossible — while refusing, for 24
+  hours after any mail, a genuinely new row for that address. Resend holds a key
+  for 24h and answers a repeat whose payload differs with `409`. Keying on the
+  inserted row's `id` would be the correct shape if a key were ever needed; it
+  is not needed, so the header is gone rather than rekeyed. Pinned by
+  `test_the_request_carries_no_idempotency_key`.
 
 **The blog card is fetched at send time and is optional in the strict sense** —
 a timeout, a non-200, a page that no longer has the shape below, all mean the
@@ -41,7 +51,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import functools
-import hashlib
 import html as html_lib
 import logging
 import os
@@ -104,18 +113,6 @@ def mailbox(value: str) -> str:
     """The bare address inside `Brotto <hello@brotto.dev>`."""
     found = _ADDRESS_RE.search(value)
     return (found.group(1) if found else value).strip()
-
-
-def idempotency_key(email: str) -> str:
-    """A stable key per address, and **not** the address.
-
-    Resend keeps the key for 24 hours, so a retried send of the same signup
-    does not mail twice. It is a hash because a key is still a request field on
-    their side, and the address is the one field this project does not hand to
-    anyone but Supabase.
-    """
-    digest = hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()
-    return f"waitlist-confirm/{digest[:32]}"
 
 
 def _esc(value: str) -> str:
@@ -354,7 +351,6 @@ async def _deliver(email: str, post: dict | None) -> int:
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        "Idempotency-Key": idempotency_key(email),
     }
     timeout = aiohttp.ClientTimeout(total=SEND_TIMEOUT_SECONDS)
     async with aiohttp.ClientSession(timeout=timeout) as session:
