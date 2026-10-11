@@ -46,15 +46,16 @@ and the model provider you chose.
 opening the side panel contacts nothing. The only network traffic the extension starts is to the server
 address you configured, and from there to the model provider you configured.
 
-**Your model API key is never written to disk by Brotto.** It is held in memory and used to call your
-model provider.
+**Brotto never writes your model API key to disk.** The extension stores it in your browser's local
+extension storage on your own machine, and the orchestrator holds it in memory only for the duration of
+a call to your model provider.
 
 ## What the extension stores on your device
 
 | Data | Where | Lifetime |
 |---|---|---|
 | Model configuration (provider, model name, context window) | `chrome.storage.local` | Until you clear it |
-| **Your model API key** | `chrome.storage.session` | **Memory only.** Cleared when the browser closes. Never written to disk by the extension. |
+| **Your model API key** | `chrome.storage.local` | **On your disk, until you clear it.** Chrome writes extension storage to your browser profile. It is never sent to us or to your server for storage. |
 | **Your server secret** (`AGENT_SECRET`) | `chrome.storage.local` | Until you clear it. It authorizes reading every transcript on your server, so treat it like a password. |
 | An install id — a random identifier generated once, with no relationship to you, your machine, or your network | `chrome.storage.local` | Until you clear it |
 | Your policy (blocked domains, sensitive-action list) | `chrome.storage.local` | Until you clear it |
@@ -63,8 +64,10 @@ model provider.
 | The last page URL the agent saw | `chrome.storage.session` | Cleared when the browser closes |
 | A running transcript of the current task — your messages, the cards Brotto is showing you | `chrome.storage.session` | Cleared when the browser closes |
 
-Because the key lives in `chrome.storage.session`, it is not written to disk by Chrome and is gone when
-the browser exits. You will be asked for it again next session.
+Because the key lives in `chrome.storage.local`, Chrome writes it to your browser profile's disk like any
+other extension setting. It survives a restart and goes only when you clear the extension's storage or
+uninstall it. Your server never stores it — the orchestrator holds it in memory for the duration of a
+call.
 
 The server address and the last page URL are the two rows worth a second look: both name a page you
 were on, and the server address names the machine that ran your agent.
@@ -261,8 +264,9 @@ on a self-hosted install:
   your install id, and survive. If you want the approved-sites list gone — which is the one that records
   which domains you have let an agent work on — delete that file by hand, or clear the approved list
   inside the panel's policy screen.
-- **Your API key** is not retained by Brotto anywhere. It is held in the orchestrator's memory for the
-  duration of a task and not written to disk. On the hosted relay that memory belongs to a machine we
+- **Your API key** is not stored by the orchestrator or the relay anywhere. It is held in the
+  orchestrator's memory for the duration of a task and not written to disk; the copy the extension keeps
+  is on your own disk, as the table above says. On the hosted relay that memory belongs to a machine we
   operate, for the duration of the task.
 
 **The two deployments differ in who has to be trusted, not in what is written.** On the relay the disk

@@ -56,6 +56,7 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
   const local = {
     modelConfig: stored.modelConfig,
   };
+  if (key) local.modelApiKey = key;   // chrome.storage.local since #27
   if (stored.modelCheckFailure) local.modelCheckFailure = stored.modelCheckFailure;
   const sandbox = {
     console, Date, JSON, Promise, URL,
@@ -79,7 +80,7 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
           set: async (obj) => { writes.push(obj); Object.assign(local, obj); },
           remove: async (k) => { writes.push({ [k]: undefined }); delete local[k]; },
         },
-        session: { get: async () => ({ modelApiKey: key }) },
+        session: { get: async () => ({}) },
       },
     },
     fetch: async (url, init) => {
@@ -275,11 +276,11 @@ async function main() {
   }
   {
     // The other half: a user who *fixed* the key must not still be blocked.
-    // The key is gone from the slot on a browser restart, so the sig flips to
-    // `nokey` and the standing record no longer describes this browser.
-    const { calls, sandbox, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }));
+    // A user who clears the key must not be judged by a record that was
+    // raised against the old one: the sig flips to `nokey`.
+    const { calls, local, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }));
     await run();
-    sandbox.chrome.storage.session.get = async () => ({});   // key cleared — a restart
+    delete local.modelApiKey;   // the user cleared the key
     await run();
     check("a fixed key re-probes instead of serving the old refusal",
       calls.length === 2, `${calls.length} fetches`);
@@ -582,16 +583,15 @@ async function main() {
 
   // ── The restart trap ─────────────────────────────────────────────────────
   //
-  // The API key lives in chrome.storage.session on purpose — see
-  // docs/architecture/extension.md — so a browser restart empties it. A record
-  // that survived without re-deriving its sig would leave "your API key was
-  // rejected" standing on a browser that no longer has a key. That is worse
-  // than saying nothing, so the sig is compared on every render.
+  // The API key's presence is part of the sig. A record raised against a key
+  // the user has since cleared would leave "your API key was rejected"
+  // standing over a panel that no longer has one — worse than saying nothing,
+  // so the sig is compared on every render.
   {
     panelWith(() => jsonResponse({ ok: true }), {
       modelConfig: CFG,
       modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_K },
-    }, null);   // no key in session — the browser restarted
+    }, null);   // no key stored — the user cleared it
     check("the sig counts the presence of a key, not the key",
       /apiKey \? 'k' : 'nokey'/.test(extract("modelCheckSig")), extract("modelCheckSig"));
     check("the key is not in the sig itself",

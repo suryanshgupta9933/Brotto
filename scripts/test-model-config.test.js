@@ -345,8 +345,11 @@ async function main() {
     await els["model-save"].handlers.click();
     check("a provider with no base-URL field stores null, not the leftover box value",
       store.local.modelConfig.base_url === null, JSON.stringify(store.local.modelConfig));
-    check("the key goes to session storage, not local",
-      store.session.modelApiKey === "sk-secret" && !("modelApiKey" in store.local));
+    // The key was cleared on browser restart while it lived in session
+    // storage, so every restart cost a re-paste for no benefit: it never leaves
+    // the device. It persists now, and this assertion is what says so.
+    check("the key persists in local storage",
+      store.local.modelApiKey === "sk-secret" && !("modelApiKey" in store.session));
   }
 
   {
