@@ -322,8 +322,8 @@ if ($modelSave) {
         modelConfig: { provider, model, context_window: ctx, base_url: baseUrl },
       }),
       $modelKey.value.trim()
-        ? chrome.storage.session.set({ modelApiKey: $modelKey.value.trim() })
-        : chrome.storage.session.remove('modelApiKey'),
+        ? chrome.storage.local.set({ modelApiKey: $modelKey.value.trim() })
+        : chrome.storage.local.remove('modelApiKey'),
     ]);
     setModelPill(model);
     // A re-pasted key is usually a *different* key, and the pre-flight cache
@@ -581,7 +581,7 @@ async function refreshModelCheckBanner() {
   if (rec) {
     const [local, session_] = await Promise.all([
       chrome.storage.local.get('modelConfig'),
-      chrome.storage.session.get('modelApiKey'),
+      chrome.storage.local.get('modelApiKey'),
     ]);
     const raw = local.modelConfig;
     const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
@@ -603,7 +603,7 @@ async function refreshModelCheckBanner() {
 async function checkModelReady() {
   const [local, session_] = await Promise.all([
     chrome.storage.local.get(['modelConfig', 'modelCheckFailure']),
-    chrome.storage.session.get('modelApiKey'),
+    chrome.storage.local.get('modelApiKey'),
   ]);
   const raw = local.modelConfig;
   const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
@@ -3648,7 +3648,7 @@ async function fetchSuggestions(url, title, pageText = '') {
     const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
     const [local, key_] = await Promise.all([
       chrome.storage.local.get('modelConfig'),
-      chrome.storage.session.get('modelApiKey'),
+      chrome.storage.local.get('modelApiKey'),
     ]);
     const response = await fetch(`${base}/v1/suggestions`, {
       method: 'POST',

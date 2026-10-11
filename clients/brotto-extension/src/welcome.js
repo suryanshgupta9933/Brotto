@@ -272,7 +272,7 @@ async function finish() {
       },
       modelConfig: { provider, model, context_window: ctx },
     }),
-    key ? chrome.storage.session.set({ modelApiKey: key }) : Promise.resolve(),
+    key ? chrome.storage.local.set({ modelApiKey: key }) : Promise.resolve(),
   ]);
 
   // setOptions has no gesture requirement (open() does), which is the only

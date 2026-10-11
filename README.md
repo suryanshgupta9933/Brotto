@@ -213,8 +213,9 @@ Then pick a provider and paste your key under **Settings → Model**. Brotto cal
 the provider with that key the moment you save, so a wrong one fails there, in
 Settings, with the reason — not on your first task. A run is checked too, so a
 key that goes bad later is normally caught before the task starts rather than
-halfway through it. The key is held in memory for the browser session and never
-written to disk, which means you paste it again after you restart Chrome.
+halfway through it. The key is kept in your
+browser's local extension storage, so it survives a restart — clearing the extension's
+storage or uninstalling removes it.
 
 <details>
 <summary>Running it from source instead</summary>
@@ -263,7 +264,8 @@ Everything in this section is about the server *you* run.
 - **Page text is redacted before it leaves**, and a run leaves a 200-character digest of each page
   on disk rather than a copy of the page. The text you type and the model's own prose about the
   page do persist in the audit record — [Privacy](PRIVACY.md) says so plainly.
-- **Your model key is never written to disk**, by Brotto, anywhere.
+- **Your model key is stored by the extension, not by Brotto** — in your browser's local extension
+  storage on your own machine, and never sent to your server or to us for storage.
 - **Deletion is yours.** Every session has a delete button with a confirmation, and
   `DELETE /v1/sessions` takes the lot.
 
