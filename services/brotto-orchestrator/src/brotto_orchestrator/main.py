@@ -256,17 +256,60 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Brotto Orchestrator", version="2.0.0", lifespan=lifespan)
+
+#: The one path that belongs to another application, and so to another CORS
+#: layer. Read as a constant by the carve-out below and by the mount at the
+#: bottom of this file — the two have to name the same string.
+_WAITLIST_PATH = "/v1/waitlist"
+
+
+class _OwnAppCORSMiddleware(CORSMiddleware):
+    """This app's CORS, minus the path that has an application of its own.
+
+    Starlette has no per-route CORS, and its middleware wraps the whole
+    application — so the parent's layer answers the waitlist's **preflight**
+    before the request ever reaches the sub-app below, and answers it with a
+    400 because the marketing origins are (correctly) not in the parent's
+    allowlist. The form then never submits, in every browser, for a reason
+    that reads like a server fault.
+
+    So this one path skips the parent's layer entirely and is handed straight
+    to the sub-application, which adds the headers its own allowlist says.
+    Everything else is unchanged, and the marketing origins still reach
+    nothing but the waitlist.
+    """
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket") and scope.get("path") == _WAITLIST_PATH:
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 app.add_middleware(
-    CORSMiddleware,
-    # The only legitimate browser client is the extension, whose origin is
-    # chrome-extension://<id> with a Chrome id ([a-p]{32}), plus loopback for
-    # the dev panel. Reflecting any origin — "*" with allow_credentials makes
-    # Starlette echo the caller's Origin — let any page the operator happened
-    # to visit read their transcripts off a secret-less install, and the
-    # "compose binds 127.0.0.1" mitigation does not apply: a browser reaches
-    # loopback fine. Credentials stay off; every call authenticates with the
-    # AGENT_SECRET header, not a cookie, so nothing here needs them.
-    allow_origin_regex=r"^(chrome-extension://[a-p]{32}|https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?)$",
+    _OwnAppCORSMiddleware,
+    # The only legitimate browser clients here are the extension, whose origin
+    # is chrome-extension://<id> with a Chrome id ([a-p]{32}), and loopback,
+    # for the dev panel. Reflecting any origin — "*" with allow_credentials
+    # makes Starlette echo the caller's Origin — let any page the operator
+    # happened to visit read their transcripts off a secret-less install, and
+    # the "compose binds 127.0.0.1" mitigation does not apply: a browser
+    # reaches loopback fine.
+    #
+    # **The marketing origins are deliberately not in here.** They were, for
+    # one route, and the effect was that `brotto.dev` could read
+    # `GET /v1/sessions`, `GET /v1/sessions/{id}/audit` and `DELETE /v1/sessions`
+    # on *every* install — including an open-mode self-host, where the token
+    # check passes for everyone. CORS middleware is per-application, so the
+    # waitlist gets its own sub-app at the bottom of this file with its own,
+    # much smaller allowlist, and this one names only what can already
+    # authenticate — except on that one path, which skips this layer entirely
+    # (`_OwnAppCORSMiddleware`). Credentials stay off throughout: every other
+    # call authenticates with the AGENT_SECRET header or a JWT, not a cookie.
+    allow_origin_regex=(
+        r"^(chrome-extension://[a-p]{32}"
+        r"|https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?)$"
+    ),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2095,6 +2138,113 @@ async def run_task(request: Request):
         return _error(500, str(exc))
     finally:
         await browser.close()
+
+
+# ---------------------------------------------------------------------------
+# The waitlist form — its own application, and its own CORS
+# ---------------------------------------------------------------------------
+#
+# **The only route here that answers a caller holding no credential, and the
+# first thing this project stores about someone who is not an account.** It is
+# 404 unless `waitlist_enabled()`, which is `auth_mode() == "jwt"` — so a
+# self-hosted box does not have this feature at all rather than having it
+# quietly switched on by a leftover `SUPABASE_URL`.
+#
+# Unauthenticated by definition: a visitor on a marketing page has no key and
+# cannot be issued one, so gating it would be a closed door in front of the
+# only caller it has. That makes it a way to write to our table and nothing
+# else, which is why the three things below are load-bearing rather than
+# careful:
+#
+#   * the **meter**, so an open form is not a bulk-write button;
+#   * the **one-field row** (`waitlist.build_row`), so nothing a browser can
+#     send — a referrer, a user agent, a URL — has somewhere to land;
+#   * the **same answer either way**, so it cannot be asked who is on the list.
+#
+# **It is its own `FastAPI()` because CORS middleware is per-application.**
+# There is no per-route CORS in Starlette, so the only way to let one page's
+# origin reach one route is to put that route on an application that has its
+# own middleware — and the alternative, which shipped first, was adding the
+# marketing hosts to the allowlist above, which is an allowlist entry that
+# reaches *every* route including the transcript reads. An allowlist entry is
+# not a grant of access to one route; only an application is.
+#
+# Two spellings of one site, listed rather than pattern-matched — a `.*`
+# would be the reflection this whole thing exists to refuse. Only `POST`, and
+# only `Content-Type`, because only those two are what a form submit needs.
+#
+# **The mount is at `/v1`, not at `/v1/waitlist`, and it is here at the end of
+# the file for both reasons.** `app.mount("/v1/waitlist", …)` compiles to
+# `^/v1/waitlist/(?P<path>.*)$`, which `POST /v1/waitlist` does not match —
+# it would fall through to `redirect_slashes` and answer 307, and the
+# marketing form is already written against the exact URL. And Starlette
+# matches routes in registration order, so a mount declared above
+# `/v1/sessions` would swallow it: a `Mount("/v1")` placed last sees only
+# what no other route claimed, which for `/v1/sessions` is nothing.
+waitlist_app = FastAPI()
+waitlist_app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https://(brotto\.dev|suryanshgupta9933\.github\.io)$",
+    allow_methods=["POST"],
+    allow_headers=["Content-Type"],
+)
+
+
+@waitlist_app.exception_handler(StarletteHTTPException)
+async def _waitlist_http_exc(_request: Request, exc: StarletteHTTPException):
+    """The same envelope as every other 404 on this server.
+
+    The sub-app answers its own routing failures, and `app.mount("/v1", …)`
+    means it answers for `/v1/…` too — so without this, a wrong URL under
+    `/v1` came back as `{"detail": "Not Found"}` while every other failure on
+    the server used `_error`. One error shape, and this is the part of it that
+    a mount can quietly undo.
+    """
+    return _error(exc.status_code, str(exc.detail))
+
+
+@waitlist_app.post("/waitlist")
+async def join_waitlist(request: Request):
+    """Take one email address. The reply does not say whether it was new."""
+    from .session import waitlist as wl
+    from .session.jwt_auth import EMAIL_RE, normalize_email
+
+    if not wl.waitlist_enabled():
+        return _error(404, "not found")
+    body = await _json_body(request)
+    # Normalise before validating: a pasted address with a trailing space is
+    # the same person as one without, and EMAIL_RE has no reason to know that.
+    email = normalize_email(str(body.get("email", "") or ""))
+    if not EMAIL_RE.match(email):
+        # 400, and it says nothing about the address: a malformed address was
+        # never written anywhere, so there is no membership to reveal.
+        # Explicit rather than a raised `_BadRequest`, because the exception
+        # handler for that is registered on `app` and this route is dispatched
+        # by the mounted sub-application below.
+        return _error(400, "a valid email address is required")
+    # The sign-in limiter, reused rather than a second bucket: it keys on the
+    # socket peer, on the forwarded hop and on the normalised address, and it
+    # consults nothing that knows who is on the list, so a stranger and a beta
+    # user are metered for exactly the same reason after exactly the same
+    # number of attempts.
+    #
+    # The peer half is deliberately shared: it is the anti-spam half, and a
+    # second bucket would just be a second door. The address half is namespaced,
+    # because this is an *open* form — sharing it would mean a stranger
+    # submitting somebody else's address five times blocks that person from
+    # asking for their own sign-in code for ten minutes, which is a denial of
+    # service on a list of strangers' addresses.
+    if not _signin_allowed(_signin_peer(request), f"waitlist:{email}",
+                            _forwarded_hop(request)):
+        return _error(429, "too many attempts — wait a few minutes and try again")
+    if not await wl.add(email):
+        # Fixed text. The address is not in it, and neither is a PostgREST
+        # body — a PostgREST error quotes the row.
+        return _error(502, "could not record that address — try again later")
+    return JSONResponse(content={"ok": True})
+
+
+app.mount("/v1", waitlist_app)
 
 
 if __name__ == "__main__":
