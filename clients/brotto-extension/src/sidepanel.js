@@ -331,9 +331,25 @@ if ($modelSave) {
     // without hashing a secret to find out. Dropping the pass here is exact,
     // and costs one probe on the next send.
     modelCheckPass = null;
+    // …and the standing failure has to go with it. The gate below short-circuits
+    // a stored refusal so a send costs no round-trip, which would otherwise make
+    // a standing refusal unfalsifiable: the save could never probe, so a user
+    // who pasted a corrected key would stay blocked forever. Saving *is* the
+    // user saying something changed — which is also why a re-pasted key needs
+    // no new signature: the sig deliberately cannot see the key's value, and
+    // this is where that gap is paid for.
+    await setModelCheckFailure(null);
+    // Save is the last moment the user is looking at the model screen, and the
+    // only moment a bad config is still one click from being fixed. Probing
+    // here is what turns "it saved and then failed on my first task" into a
+    // sentence in the place that can fix it. checkModelReady re-reads storage
+    // itself, so it is looking at the values just written, not the ones the
+    // form held a moment ago.
+    if ($modelStatus) $modelStatus.textContent = 'Checking…';
+    const check = await checkModelReady();
     if ($modelStatus) {
-      $modelStatus.textContent = 'Saved.';
-      setTimeout(() => { $modelStatus.textContent = ''; }, 2000);
+      $modelStatus.textContent = check.ok ? 'Saved.' : '✗ Saved — the model could not be used.';
+      setTimeout(() => { $modelStatus.textContent = ''; }, 5000);
     }
   });
 }
@@ -441,7 +457,18 @@ const MODEL_CHECK_TITLE = {
   rate_limited: 'The provider is rate-limiting this key',
   unknown_model: 'That model is not available',
   unreachable: 'Cannot reach the model provider',
+  // A 5xx from the provider itself, as distinct from the two transport kinds
+  // around it: the account is fine and the vendor is down. Added ahead of the
+  // server's own kind rather than after it — an unknown kind still renders,
+  // through the fallback below, but it renders as the generic sentence.
+  provider_error: 'The model provider is having trouble',
 };
+// An unknown kind is the server shipping a kind this build predates. It must
+// still produce a sentence: `MODEL_CHECK_TITLE[kind] || …` is read in two
+// places and neither of them is a place that may be undefined.
+function modelCheckTitle(kind) {
+  return MODEL_CHECK_TITLE[kind] || 'The model could not be used';
+}
 
 // Only a pass is cached. Caching a failure would leave a user who fixes the
 // key still blocked until the TTL expired, which is the one outcome worse than
@@ -453,17 +480,104 @@ const MODEL_CHECK_TITLE = {
 const MODEL_CHECK_TTL_MS = 10 * 60 * 1000;
 let modelCheckPass = null;
 
+// ── The failure that outlives the panel ───────────────────────────────────
+//
+// A pass is cached in memory for ten minutes. A *failure* is written to
+// chrome.storage.local instead, because the moment it is worth knowing about
+// is the moment the panel is not open: the user saved a config, saw it saved,
+// closed the panel and typed a task. Storage is the only thing that
+// remembers. It is local, not session, for the same reason — a session-scoped
+// record dies with the panel, which is exactly the window this is for.
+//
+// The record carries the sig it was raised under, and that is not bookkeeping:
+// chrome.storage.session holds the API key and a browser restart empties it, so
+// `…|k` becomes `…|nokey`. A record outliving that would stand "your API key
+// was rejected" on a browser that no longer has a key to reject — the one
+// place a stale answer is worse than no answer. So the sig is re-derived on
+// every render and a mismatch clears it.
+let modelCheckFailure = null;
+const $modelCheckBanner = document.getElementById('modelCheckBanner');
+
+function modelCheckSig(cfg, apiKey) {
+  // The key is the provider, the model and whether a key was pasted — never
+  // the key itself. Changing any of those has to re-run the probe.
+  return `${cfg ? `${cfg.provider}:${cfg.model}` : ''}|${apiKey ? 'k' : 'nokey'}`;
+}
+
+/** The one writer. null clears; anything else records and repaints. */
+async function setModelCheckFailure(rec) {
+  modelCheckFailure = rec || null;
+  renderModelCheckBanner();
+  if (rec) await chrome.storage.local.set({ modelCheckFailure: rec });
+  else await chrome.storage.local.remove('modelCheckFailure');
+}
+
+// Pure render, from the record already in memory. No storage reads here: a
+// banner that paints from storage is a banner that paints a different answer
+// than the gate on the next click.
+function renderModelCheckBanner() {
+  if (!$modelCheckBanner) return;
+  $modelCheckBanner.textContent = '';
+  if (!modelCheckFailure) { $modelCheckBanner.hidden = true; return; }
+  $modelCheckBanner.hidden = false;
+  const title = document.createElement('div');
+  title.className = 'model-check-banner-title';
+  title.textContent = modelCheckTitle(modelCheckFailure.kind);
+  const body = document.createElement('div');
+  body.className = 'model-check-banner-body md';
+  // The server's sentence, which is the provider's or the harness's own words.
+  // renderMarkdown is escape-first, the same path appendFailureBubble uses for
+  // this exact text.
+  body.innerHTML = renderMarkdown(modelCheckFailure.body || '');
+  const fix = document.createElement('button');
+  fix.type = 'button';
+  fix.className = 'btn model-check-banner-fix';
+  fix.textContent = 'Settings → Model';
+  fix.addEventListener('click', () => settingsBtn.click());
+  $modelCheckBanner.append(title, body, fix);
+}
+
+/** Read the record back and repaint — panel open, and after a save. */
+async function refreshModelCheckBanner() {
+  const stored = await chrome.storage.local.get('modelCheckFailure');
+  const rec = stored.modelCheckFailure || null;
+  if (rec) {
+    const [local, session_] = await Promise.all([
+      chrome.storage.local.get('modelConfig'),
+      chrome.storage.session.get('modelApiKey'),
+    ]);
+    const raw = local.modelConfig;
+    const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
+    const now = modelCheckSig(cfg, session_.modelApiKey || undefined);
+    // The restart trap. A record raised under a key this browser no longer
+    // holds is describing a browser that does not exist.
+    if (rec.sig !== now) { await setModelCheckFailure(null); return; }
+  }
+  modelCheckFailure = rec;
+  renderModelCheckBanner();
+}
+
 async function checkModelReady() {
   const [local, session_] = await Promise.all([
-    chrome.storage.local.get('modelConfig'),
+    chrome.storage.local.get(['modelConfig', 'modelCheckFailure']),
     chrome.storage.session.get('modelApiKey'),
   ]);
   const raw = local.modelConfig;
   const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
   const apiKey = session_.modelApiKey || undefined;
-  // The key is the provider, the model and whether a key was pasted — never
-  // the key itself. Changing any of those has to re-run the probe.
-  const sig = `${cfg ? `${cfg.provider}:${cfg.model}` : ''}|${apiKey ? 'k' : 'nokey'}`;
+  const sig = modelCheckSig(cfg, apiKey);
+  // A stored failure for *this* config is an answer already paid for. The gate
+  // is short-circuited here rather than at the call site so that every caller
+  // gets it, and so the sig comparison happens against the same read the probe
+  // would have used.
+  if (local.modelCheckFailure && local.modelCheckFailure.sig === sig) {
+    return {
+      ok: false,
+      kind: local.modelCheckFailure.kind,
+      body: local.modelCheckFailure.body,
+      cached: true,
+    };
+  }
   if (modelCheckPass && modelCheckPass.sig === sig
       && Date.now() - modelCheckPass.at < MODEL_CHECK_TTL_MS) {
     return { ok: true, model: modelCheckPass.model };
@@ -484,22 +598,35 @@ async function checkModelReady() {
   }
   if (!body || body.ok !== false) {
     modelCheckPass = { sig, at: Date.now(), model: body && body.model };
+    // A pass is the only thing that clears a standing failure, and the record
+    // in storage — not the copy in this panel's memory — is what says whether
+    // there is one: this check can run in a panel that never rendered a banner
+    // for it. Fire-and-forget; the run is already unblocked and must not wait
+    // on a storage write.
+    if (local.modelCheckFailure) void setModelCheckFailure(null);
     return { ok: true, model: body && body.model };
   }
   // The resolver's own "no model configuration available" names env vars and
   // frame fields — accurate for an operator, useless to the person reading
   // the panel, and they can only act on the settings screen anyway.
   if (body.kind === 'no_model') {
-    return {
-      ok: false,
-      kind: 'no_model',
-      body: 'Brotto has no model to run on: this browser has none saved, and '
-          + 'your server has none configured. Open **Settings → Model** to '
-          + 'choose a provider and model — Brotto will check the key before '
-          + 'it starts anything.',
-    };
+    return failModelCheck(sig, 'no_model',
+      'Brotto has no model to run on: this browser has none saved, and '
+      + 'your server has none configured. Open **Settings → Model** to '
+      + 'choose a provider and model — Brotto will check the key before '
+      + 'it starts anything.');
   }
-  return { ok: false, kind: body.kind, body: body.error || 'The model could not be used.' };
+  return failModelCheck(sig, body.kind, body.error || 'The model could not be used.');
+}
+
+/**
+ * Record a failure and answer with it. One writer, so the banner and the gate
+ * can never hold two different failures for the same config.
+ */
+function failModelCheck(sig, kind, body) {
+  const rec = { kind, body, sig, at: Date.now() };
+  void setModelCheckFailure(rec);
+  return { ok: false, kind, body, sig, at: rec.at };
 }
 
 // ── Wire the dropdowns to the value hosts the rest of this file uses.
@@ -544,6 +671,10 @@ const modelDd = $modelName && attachDropdown({
 // a value written straight to a host never tells anyone it changed.
 hydrateModelSettings().then(() => { providerDd?.sync(); renderModelFacts(); });
 initModelSettings(document.getElementById('plannerUrl')?.value || '');
+// A failure saved yesterday is a failure today. Read it back before anything
+// can be sent, so the banner is standing before the user's first keystroke
+// rather than appearing after their first refusal.
+void refreshModelCheckBanner();
 
 const messagesEl  = document.getElementById('messages');
 const emptyState   = document.getElementById('emptyState');
@@ -2388,11 +2519,14 @@ async function sendUserMessage() {
   setPhase('connecting', 'Checking your model…');
   const check = await checkModelReady();
   if (!check.ok) {
-    setPhase('error', MODEL_CHECK_TITLE[check.kind] || 'The model is not usable');
+    const title = modelCheckTitle(check.kind);
+    setPhase('error', title);
     appendFailureBubble({
-      title: MODEL_CHECK_TITLE[check.kind] || 'The model is not usable',
+      title,
       body: check.body,
-      footer: 'Your task is still in the box.',
+      footer: check.cached
+        ? 'Still broken since you saved it — your task is still in the box.'
+        : 'Your task is still in the box.',
     });
     return;
   }
