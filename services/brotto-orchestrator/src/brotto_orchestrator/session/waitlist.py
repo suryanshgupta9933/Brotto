@@ -35,6 +35,20 @@ is the same leak through a stopwatch) hands a public URL a membership oracle
 with a slow path on it. `test_a_duplicate_is_answered_identically_and_sends_nothing`
 is the pin.
 
+**What the waitlist table guarantees, and why nothing downstream re-checks
+it.** `email` is `unique`, so an address is one row for the life of the table,
+and `CREATED` is returned only on a 2xx — a second submission can therefore
+only ever be a `DUPLICATE`, which by design never sends. That is the whole
+argument for the mail API sending **no idempotency key**: there is no retry
+loop, no queue re-drive and no second caller (`send_confirmation` has exactly
+one, on the request that performed the insert), so there is no path on which
+one address produces two mails. An `Idempotency-Key` derived from the address
+protected against nothing the constraint had not already made impossible, and
+Resend holds one for 24 hours — so it silently refused a *legitimately new*
+signup for anyone mailed the day before. If a re-drive path is ever added, it
+needs a key keyed on the inserted row's `id`, not the address, and that is the
+moment this argument stops holding.
+
 **Nothing is logged.** Not the address, not the body, not a PostgREST error
 text — a Supabase insert error quotes the row, and the row is the entire
 payload. Only the status code crosses into a log line, which is what an

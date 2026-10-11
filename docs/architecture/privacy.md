@@ -50,10 +50,14 @@ party that has no table of ours to look it up in. Two consequences, both
 deliberate. **The address is never written to a log line here**, on any path,
 including the failure paths — a transport exception quotes the request body, and
 the request body is the address, so only the exception's TYPE crosses into a
-log. And **the idempotency key is a hash of the address, not the address**: it
-is still a field on a request Resend keeps for 24 hours. There is no way to make
-a third-party mail API not see the recipient; there is a way to stop it being
-the thing we paste into their logs ourselves.
+log. And **the address appears in exactly one field of the request we send**,
+`to`: no header, no tag, no `List-Unsubscribe` value carries it. There is no way
+to make a third-party mail API not see the recipient; there is a way to stop it
+being the thing we paste into their logs ourselves. (There *was* a third copy,
+in an `Idempotency-Key` hashed from the address — removed 2026-10-12 because
+that header refused a legitimately new signup as a `409`, which is a delivery
+failure bought for a duplicate-send guarantee the unique constraint already
+gave. See "What the waitlist table guarantees" in `waitlist.py`.)
 
 Page text itself is **not** written to disk, and neither is the AX diff that
 used to quote it. The `.pages.json` sidecar that was meant to hold page bodies
