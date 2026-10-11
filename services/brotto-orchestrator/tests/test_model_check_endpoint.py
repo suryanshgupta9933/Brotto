@@ -261,6 +261,31 @@ def test_a_provider_5xx_never_echoes_the_provider_body(client, probe):
     assert "sk-ant-secret-value" not in body["error"]
 
 
+def test_the_generic_error_branch_never_echoes_the_provider_body(client, probe):
+    """The other half of the same guard, on the branch that did the echoing.
+
+    `error` used to return `body[:300]`, and the panel persists the sentence
+    to `chrome.storage.local` to survive a close — so a third party's HTTP
+    response landed on the user's disk, indefinitely. A body that does not
+    name the key is still a body: the panel only ever needed a kind.
+    """
+    probe["install"](_http_error(
+        404, '{"error":"unknown model, called http://gpu-box.lan:8000/v1"}'))
+    body = _send(client,
+                 model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+                 api_key="sk-ant-secret-value").json()
+    assert body["kind"] == "error"
+    # The status is still there — it is the one part of the response the user
+    # can quote to whoever they ask for help.
+    assert "HTTP 404" in body["error"]
+    # And the fix is named, like every other branch.
+    assert "Settings" in body["error"]
+    # The provider's own text is not, in whole or in part.
+    assert "gpu-box.lan" not in body["error"]
+    assert "unknown model" not in body["error"]
+    assert "sk-ant-secret-value" not in body["error"]
+
+
 def test_a_refused_connection_is_unreachable_not_a_bad_key(client, probe):
     """A LAN base URL that is down is the self-hosted user's common failure,
     and `auth_failed` would send them to re-paste a key that was fine.

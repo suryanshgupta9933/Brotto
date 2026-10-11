@@ -758,6 +758,13 @@ def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
     reads, and it is written for someone who does not know what a provider
     error is. Every branch names the fix. Kinds: no_model, unknown_model,
     auth_failed, no_credits, rate_limited, provider_error, unreachable, error.
+
+    **Every returned sentence is one this file wrote.** No branch forwards
+    provider text, `str(exc)`, or anything else the far end chose. Not because
+    most branches happen to be safe — because the panel persists the sentence
+    to `chrome.storage.local`, so anything returned here is written to the
+    user's disk and stays there. Provider text goes to the log; a kind goes to
+    the client, and a kind is the only part a client can act on.
     """
     from pydantic_ai.exceptions import ModelHTTPError
 
@@ -789,16 +796,37 @@ def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
             )
         if status >= 500:
             # The provider is having a bad day, not the user's key. It reached
-            # the model, got past auth, and failed — the generic branch below
-            # answers with a raw body, which is the one place provider text
-            # could carry a hostname or a fragment of the key. Status only.
+            # the model, got past auth, and failed. Distinguished from `error`
+            # by *meaning*, not by what it may forward — nothing below
+            # forwards anything.
             return (
                 "provider_error",
                 "The provider is having trouble (HTTP "
                 f"{status}) — this is not your key. Try again shortly, or "
                 "switch models in Settings → Model.",
             )
-        return ("error", f"The provider returned HTTP {status}: {body[:300] or 'no detail'}")
+        # **No branch in this function returns provider text.** It used to:
+        # this one returned `body[:300]`, and the panel persists whatever it
+        # gets into `chrome.storage.local` to survive a close — so up to 300
+        # characters of a third party's HTTP response landed on the user's
+        # disk indefinitely, against "transit, never persist". A provider body
+        # is where a gateway echoes the URL it dialled, a fragment of the key,
+        # and whatever else the far end felt like saying.
+        #
+        # The body is not lost: it goes to the log, where an operator can read
+        # it and nobody else can. The only thing a client can *act* on is a
+        # kind, and every kind here is one this file wrote.
+        log.warning(
+            "model check: provider HTTP %s, body: %s",
+            status, str(getattr(exc, "body", "") or "")[:500] or "(empty)",
+        )
+        return (
+            "error",
+            f"The provider rejected the request (HTTP {status}). The model id "
+            "in Settings → Model is the usual cause — check it against the "
+            "provider's list, or try a different model. The full provider "
+            "response is in the server log.",
+        )
     # pydantic-ai wraps a transport failure in ModelAPIError and hangs the
     # real error off `__cause__` (`raise ModelAPIError(...) from e`). Every
     # provider SDK it ships sits on httpx, so TransportError covers refused

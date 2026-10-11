@@ -325,16 +325,36 @@ than a 402, so `_CREDIT_HINTS` reads the body. The keyword test is deliberately
 narrow: a schema complaint reported as `no_credits` would send someone to top
 up a paid account.
 
-**A 5xx is `provider_error`, not `error`.** `error` is the one branch that
-forwards provider text (`body[:300]`) and it was absorbing three unrelated
-things: a 5xx, a 400 that matched neither hint set, and a non-httpx SDK
-exception. A 5xx means the request got *past* auth and the model itself failed
-— reported as `error` it reads as "your key is wrong" and sends the user to
-re-paste a key that was fine, which is the case the product owner named: *if
-the model is down, show the error*. Its sentence carries the status and nothing
-else, so a gateway that echoes the URL it called (or a key fragment) has no
-route into the response. Pinned by `test_a_provider_5xx_never_echoes_the_provider_body`,
-next to `test_the_response_never_echoes_the_key`.
+**No branch forwards provider text — that is a property of every branch, not
+of the 5xx one.** It started as a fix to one branch and it is the general rule:
+`_classify_probe_failure` returns sentences *this file wrote*, and a kind, and
+nothing else. Provider text goes to `log.warning` where an operator can read
+it; a kind goes to the client, because a kind is the only part a client can
+*act* on.
+
+The rule is load-bearing because of what the panel does with the sentence: it
+persists it to `chrome.storage.local` to survive a close. So a forwarded
+`body[:300]` is not a response field, it is up to 300 characters of a third
+party's HTTP response written to the user's disk indefinitely — against
+"transit, never persist", and carrying whatever the far end felt like saying:
+the URL it dialled, a fragment of the key, an internal hostname. `error` did
+exactly that until this rule existed. Two tests hold it in place, one per
+branch that has ever been caught doing it:
+`test_the_response_never_echoes_the_key` (the invariant — the key is the one
+thing that must never come back) and
+`test_a_provider_5xx_never_echoes_the_provider_body` /
+`test_the_generic_error_branch_never_echoes_the_provider_body` (the guard
+against re-adding it "helpfully" — they assert the provider's own words are
+absent, not just the key).
+
+**A 5xx is `provider_error`, not `error` — for what it means, not what it may
+forward.** `error` was absorbing three unrelated things: a 5xx, a 400 that
+matched neither hint set, and a non-httpx SDK exception. A 5xx means the
+request got *past* auth and the model itself failed — reported as `error` it
+reads as "your key is wrong" and sends the user to re-paste a key that was
+fine, which is the case the product owner named: *if the model is down, show
+the error*. The split is therefore about diagnosis, and adding it was what
+exposed the echo in its neighbour.
 
 The kinds are therefore: `no_model`, `unknown_model`, `auth_failed`,
 `no_credits`, `rate_limited`, `provider_error`, `unreachable`, `error`.
