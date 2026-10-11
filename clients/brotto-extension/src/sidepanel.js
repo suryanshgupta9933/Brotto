@@ -2396,13 +2396,12 @@ async function sendUserMessage() {
   // until then reads as "nothing is happening" — which is the one thing the
   // user is watching for at that moment.
   setOutcome('running');
-  try {
-    await ensureConnected();
-  } catch (err) {
-    const note = failureNote(isOffline(err) ? 'offline' : 'connect_failed', err);
-    setPhase('error', note);
-    setOutcome('failed', note, 'connect_failed');
-    appendMessage({ role: 'error', text: note });
+  const serverProblem = await ensureConnected()
+    .catch((err) => failureNote(isOffline(err) ? 'offline' : 'connect_failed', err));
+  if (serverProblem) {
+    setPhase('error', serverProblem);
+    setOutcome('failed', serverProblem, 'connect_failed');
+    appendMessage({ role: 'error', text: serverProblem });
     return;
   }
 
@@ -2435,17 +2434,46 @@ async function sendUserMessage() {
   }
 }
 
+// The address this panel has already proved answers /health. Module state, not
+// storage: it is a cache of one fact about this panel's lifetime, and the URL
+// is the whole key — the address is the only thing that can have changed since
+// the last time we asked.
+let probedServerUrl = '';
+
 async function ensureConnected() {
-  // ponytail: reuses the plannerUrl from settings (default :3001). Probes
-  // /health; sets phase to 'connected' on success. Throws on failure.
+  // ponytail: reuses the plannerUrl from settings (default :3001).
+  // Returns a sentence to refuse with, or '' to send. Not a throw: the
+  // credential refusal below reports itself as "server unreachable" the
+  // moment it is dressed as a network error, and the user debugs the wrong
+  // machine.
   const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
   state.plannerUrl = url;
   plannerUrlEl.value = url;
-  const response = await fetch(url + '/health', { method: 'GET' });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  // A credential one server issued must not ride another address. The same
+  // rule and the same sentence `authHeaders` uses, asked here so the answer
+  // lands before a task is committed rather than after a connection that
+  // would have carried it.
+  const stored = (await chrome.storage.local.get('settings')).settings || {};
+  const { refusal } = brottoCredential.forUrl(stored, url);
+  if (refusal) return refusal;
+  // Probed once per address, not per send. That is the whole cost argument:
+  // the happy path after the first task makes no request at all, and a
+  // transient blip during task 7 cannot refuse task 8 — there is nothing to
+  // probe. A *changed* address is the only thing that re-arms it, because
+  // that is the case this exists for.
+  if (probedServerUrl !== url) {
+    // The worker's own bounded probe. Unbounded here it would hang the
+    // composer forever against a TCP blackhole, which is the run this check
+    // is meant to prevent.
+    const res = await chrome.runtime.sendMessage({ type: 'probe_server', plannerUrl: url })
+      .catch(() => null);
+    if (!res || res.alive !== true) return FAILURE_NOTE.connect_failed;
+    probedServerUrl = url;
+  }
   setPhase('connected', null);
   // Status pill in the header already conveys connection state; no
   // separate chat-line clutter.
+  return '';
 }
 
 async function resetForNewTask() {

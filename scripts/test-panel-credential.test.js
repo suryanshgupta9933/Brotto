@@ -138,6 +138,9 @@ function wizardCheckServer({ stored, serverUrl, typedKey, respond }) {
     },
   };
   vm.createContext(sandbox);
+  // checkServer writes through the wizard's one status setter, so the
+  // harness supplies the same one — the wording under test is checkServer's.
+  vm.runInContext("function setServerStatus(t, tone) { $serverStatus.textContent = t || ''; $serverStatus.className = tone ? `status ${tone}` : 'status'; }", sandbox);
   vm.runInContext(extract(welcome, "checkServer", { async: true }), sandbox);
   return {
     calls,

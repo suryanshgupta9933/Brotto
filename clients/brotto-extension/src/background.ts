@@ -149,6 +149,122 @@ async function authHeaders(): Promise<Record<string, string>> {
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
+// ── Failure reports (Brotto Cloud only) ──────────────────────────────────
+//
+// Which run did not happen, and which of our fixed codes says why. This is
+// not analytics and never becomes it: there is no page, no URL, no task, no
+// title and no session id in anything below. `reportBody` builds the payload
+// from two scalars and the relay's `build_row` refuses to persist a third —
+// the same shape decision as `begin_turn(ax_diff_chars: int)`, on this side.
+//
+// **A relay that is down cannot receive a report about being down.** So the
+// codes are queued in `chrome.storage.local` and flushed on the next
+// `ws.onopen`, which is the first moment the relay is answering *and* this
+// install's credential has been accepted. That is also why a refused
+// sign-in gets reported at all: the queue survives until the user signs in
+// again, which is the moment the operator can do something about it.
+//
+// Self-host sends nothing, ever: `relayIsCloud` is only ever set by a
+// `/health` that says `auth_mode: "jwt"`, and it is persisted so a relay
+// that goes down is still recognised as the hosted one afterwards. Nothing
+// here can block a task, throw, or retry on a timer — every call is voided
+// and the flush is one attempt per flush window.
+const REPORTS_KEY = "brottoFailureReports";
+const REPORTS_MAX = 5;
+const REPORTS_FLUSH_MS = 15 * 60_000;
+let relayIsCloud = false;
+let lastReportFlush = 0;
+
+/** Record that this install talks to the hosted relay. One-way, never cleared.
+ *
+ * A self-hoster never reaches this — `/health` says `open` or `secret` — so
+ * the flag cannot be set by accident on their box. Persisted rather than held
+ * in memory because the case that matters most is a relay that is *down*, and
+ * an in-memory flag would already have been false by then.
+ *
+ * Takes the *response*, not the body, and parses it in its own `try`: a
+ * `/health` that answers 200 with a body that is not JSON — a captive portal,
+ * a proxy, a future relay shape — must not be able to reach the caller and
+ * turn a live server into a dead one.
+ */
+async function noteRelayMode(resp: { json?: () => Promise<unknown> } | null): Promise<void> {
+  let mode: unknown = null;
+  try {
+    const body = await resp?.json?.();
+    mode = body && typeof body === "object" ? (body as { auth_mode?: unknown }).auth_mode : null;
+  } catch { return; }
+  if (mode !== "jwt" || relayIsCloud) return;
+  relayIsCloud = true;
+  try {
+    await chrome.storage.local.set({ cloudRelay: true });
+  } catch { /* a report feature that cannot record a flag is not worth failing */ }
+}
+
+/** Restore the flag at worker start, where every other setting is restored. */
+async function restoreRelayMode(): Promise<void> {
+  try {
+    const s = await chrome.storage.local.get("cloudRelay");
+    relayIsCloud = s.cloudRelay === true;
+  } catch { relayIsCloud = false; }
+}
+
+/** The one body this feature ever sends.
+ *
+ * Two fields: a code from the closed set, and this build's version. The
+ * version is the only free-form value allowed on the table — it says which
+ * build emitted a code and carries nothing about the user. There is
+ * deliberately no parameter for anything the user did or read, so the
+ * caller cannot pass one even by accident.
+ */
+function reportBody(codes: string[]): string {
+  const version = String(chrome.runtime.getManifest().version || "");
+  return JSON.stringify({
+    reports: codes.map((code) => ({ code, ext_version: version })),
+  });
+}
+
+/** Queue one code. Never throws, never blocks, never reported to the user. */
+function queueReport(code: string): void {
+  if (!relayIsCloud) return;
+  void (async () => {
+    try {
+      const stored = await chrome.storage.local.get(REPORTS_KEY);
+      const list: string[] = Array.isArray(stored[REPORTS_KEY]) ? stored[REPORTS_KEY] : [];
+      // Bounded and drop-oldest: a laptop that sleeps through a weekend of
+      // reconnect attempts must not fill storage with six copies of `offline`.
+      list.push(code);
+      await chrome.storage.local.set({ [REPORTS_KEY]: list.slice(-REPORTS_MAX) });
+    } catch { /* the queue is best-effort by construction */ }
+  })();
+}
+
+/** Send whatever is queued, on a connection that already worked. */
+function flushReports(): void {
+  if (!relayIsCloud) return;
+  if (Date.now() - lastReportFlush < REPORTS_FLUSH_MS) return;
+  lastReportFlush = Date.now();
+  void (async () => {
+    try {
+      const stored = await chrome.storage.local.get(REPORTS_KEY);
+      const list: string[] = Array.isArray(stored[REPORTS_KEY]) ? stored[REPORTS_KEY] : [];
+      if (!list.length) return;
+      const resp = await fetch(`${serverUrl}/v1/reports`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+        body: reportBody(list),
+      });
+      // Cleared on any answered request, including a 429: the relay has the
+      // codes or has refused them on purpose, and keeping them would make
+      // every subsequent task carry them again. Not cleared on a thrown
+      // fetch — that is a relay that stopped answering, and the queue is
+      // exactly what is supposed to survive that.
+      if (resp.ok || resp.status === 429) {
+        await chrome.storage.local.remove(REPORTS_KEY);
+      }
+    } catch { /* a report that fails to send is not a user-visible problem */ }
+  })();
+}
+
 /** Why the server turned an authenticated call away, in words the user can act on.
  *
  * A wrong `AGENT_SECRET` gets **404, not 403** — 403 would confirm the route
@@ -268,12 +384,22 @@ const SERVER_PROBE_MS = 1500;
  * telling a user their sign-in was rejected when their server is unplugged
  * sends them to debug the wrong machine. `/health` is unauthenticated by
  * design and is the same probe `describeAuthFailure` already uses.
+ *
+ * `url` defaults to the address this worker is configured with. The panel's
+ * pre-task check passes the one it is about to use, because the module
+ * variable is only assigned inside `startRelay` and so can still hold the
+ * previous task's address — or the default, on a worker that has never run
+ * one. One probe, two callers; the bound is what makes sharing it safe.
  */
-async function serverIsAlive(): Promise<boolean> {
+async function serverIsAlive(url: string = serverUrl): Promise<boolean> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), SERVER_PROBE_MS);
   try {
-    return (await fetch(`${serverUrl}/health`, { method: "GET", signal: ac.signal })).ok;
+    const resp = await fetch(`${url}/health`, { method: "GET", signal: ac.signal });
+    // Not awaited: liveness is this function's only job, and a report flag
+    // must not be able to change its answer.
+    if (resp.ok) void noteRelayMode(resp);
+    return resp.ok;
   } catch {
     return false;
   } finally {
@@ -933,7 +1059,12 @@ async function startRelay(
   // an outage, because no connection is attempted at all.
   const credential = await credentialFor(plannerUrl);
   credentialRefusal = credential.refusal;
-  if (credential.refusal) throw new Error(credential.refusal);
+  if (credential.refusal) {
+    // A credential this install may not present — no cloud token for this
+    // origin, or none at all. The relay refused nothing; we never got there.
+    queueReport("credential_missing");
+    throw new Error(credential.refusal);
+  }
   let session_id: string;
   let wsUrl: string;
 
@@ -1049,7 +1180,14 @@ async function startRelay(
           console.warn(`[brotto] session create attempt ${attempt}/${SESSION_ATTEMPTS} failed:`, err);
         }
       }
-      if (!session) throw new Error(giveUp || `Can't reach ${serverUrl} after ${SESSION_ATTEMPTS} attempts. Is the server running?`);
+      if (!session) {
+        // `giveUp` is already the distinction: a 404 from /v1/sessions is a
+        // refused key, and three failed attempts against no answer at all is
+        // a relay that was not there. Both are codes the panel already
+        // renders; neither is anything the server could have recorded.
+        queueReport(giveUp ? "credential_rejected" : "offline");
+        throw new Error(giveUp || `Can't reach ${serverUrl} after ${SESSION_ATTEMPTS} attempts. Is the server running?`);
+      }
       session_id = session.session_id;
       sessionId = session_id;
     }
@@ -1075,6 +1213,11 @@ async function startRelay(
     startHeartbeat();
     // The socket is back: the backoff cycle is over.
     reconnectAttempt = 0;
+    // The relay is answering and this install's credential was accepted —
+    // the first moment since the failure that a report could reach it. The
+    // only place reports are sent from, and the reason a dead relay's
+    // failures are not lost.
+    flushReports();
     // Without this the socket is open, nothing is sent, and the run is
     // invisible: the server never receives a task_start, so it never asks for
     // an observation, so the panel shows a spinner with no task under it.
@@ -1458,6 +1601,7 @@ async function handleSocketClose(ev: CloseEvent): Promise<void> {
     cancelReconnect();
     taskTerminalEmitted = true;
     taskInFlight = false;
+    queueReport(refusal === "missing" ? "credential_missing" : "credential_rejected");
     if (refusal === "missing") {
       notifyUi({
         type: "task_failed",
@@ -1502,6 +1646,10 @@ async function cleanup(): Promise<void> {
   if (lost) {
     taskTerminalEmitted = true;
     taskInFlight = false;
+    // The one client-side failure the relay also cannot see: the socket died
+    // with a run in flight, so there is a task the operator will never find
+    // in a document and no `task_result` will ever arrive to explain it.
+    queueReport("CONNECTION_LOST");
     void setBadge("idle");
     notifyUi({
       type: "task_failed",
@@ -1559,6 +1707,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   void (async () => {
     try {
       switch (message.type) {
+
+        // Is the configured server there? The panel asks once before the
+        // first task on an address, so a dead one is one sentence at the
+        // start rather than a run that dies mid-flight. It lives here
+        // because `serverIsAlive` — and its bound — already do, and a second
+        // probe in the panel is the second place the timeout would be wrong.
+        case "probe_server": {
+          const stored = await chrome.storage.local.get("settings");
+          const url = (message.plannerUrl as string | undefined)
+            || (stored.settings as any)?.serverUrl
+            || serverUrl;
+          sendResponse({ success: true, alive: await serverIsAlive(url) });
+          break;
+        }
 
         case "run_local_task": {
           if (ws !== null && ws.readyState === WebSocket.OPEN) {
@@ -1953,6 +2115,10 @@ async function initialize(): Promise<void> {
   // before restoreSession would otherwise ship empty task_start
   // metadata.
   await hydrateUserPolicy();
+  // Whether this install ever talked to the hosted relay. Read before any
+  // failure can be queued — a worker restart is exactly when the in-memory
+  // flag is empty and the queue is not.
+  await restoreRelayMode();
 
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== "brotto-sidepanel") return;

@@ -186,18 +186,18 @@
       <h1 id="s1h">Which Brotto?</h1>
       <p>Same extension, same browser either way. The one difference is whose server the tasks go to.</p>
       <div class="states">
-        <label class="state" for="editionSelf">
-          <input type="radio" name="edition" id="editionSelf" value="self" checked>
-          <span>
-            <span class="state-name">Self-host</span>
-            <span class="state-body">You run the server, with <code>docker compose</code>. Free, permanent, and yours to keep. Brotto needs its address and, if you set one, its key.</span>
-          </span>
-        </label>
         <label class="state" for="editionCloud">
-          <input type="radio" name="edition" id="editionCloud" value="cloud">
+          <input type="radio" name="edition" id="editionCloud" value="cloud" checked>
           <span>
             <span class="state-name">Brotto Cloud</span>
             <span class="state-body">We run the server. Sign in with your email — we send you a 6-digit code, no account password and no extra browser permission.</span>
+          </span>
+        </label>
+        <label class="state" for="editionSelf">
+          <input type="radio" name="edition" id="editionSelf" value="self">
+          <span>
+            <span class="state-name">Self-host</span>
+            <span class="state-body">You run the server, with <code>docker compose</code>. Free, permanent, and yours to keep. Brotto needs its address and, if you set one, its key.</span>
           </span>
         </label>
       </div>

@@ -147,7 +147,7 @@ const MAX = Number((extract("SUBPROTOCOL_MAX_CHARS").match(/=\s*(\d+)/) || [])[1
    * @param opened   whether the socket ever reached OPEN
    * @param health   null = /health threw (server not running)
    */
-  async function classify({ secret, code, opened, health }) {
+  async function classify({ secret, code, opened, health, noteThrows = false }) {
     const probes = [];
     const sandbox = {
       serverUrl: "http://localhost:8000",
@@ -156,6 +156,13 @@ const MAX = Number((extract("SUBPROTOCOL_MAX_CHARS").match(/=\s*(\d+)/) || [])[1
         if (!url.endsWith("/health")) return { ok: true };
         if (health === null) throw new Error("Failed to fetch");
         return { ok: health < 400 };
+      },
+      // `serverIsAlive` notes the relay's auth mode off this same response.
+      // The stub can be made to throw so the check below proves a failure to
+      // *record* the mode cannot become a failure to *reach* the relay.
+      noteRelayMode: async () => {
+        sandbox.modeNoted = true;
+        if (noteThrows) throw new Error("body is not JSON");
       },
       setTimeout: (fn, ms) => setTimeout(fn, ms),
       clearTimeout,
@@ -187,6 +194,7 @@ const MAX = Number((extract("SUBPROTOCOL_MAX_CHARS").match(/=\s*(\d+)/) || [])[1
       state: vm.runInContext("credentialState", sandbox),
       protocols: sandbox.socket.protocols,
       probes,
+      modeNoted: sandbox.modeNoted === true,
     };
   }
 
@@ -264,6 +272,18 @@ const MAX = Number((extract("SUBPROTOCOL_MAX_CHARS").match(/=\s*(\d+)/) || [])[1
   const ms = Number((extract("SERVER_PROBE_MS").match(/=\s*(\d+)/) || [])[1]);
   check("and is short enough not to delay a reconnect",
     ms > 0 && ms <= 5000, `${ms}ms`);
+
+  // A `/health` that answers 200 with a body that is not JSON — a captive
+  // portal, a proxy, a future relay shape — is a LIVE relay. Reading the auth
+  // mode off that response must not be able to flip the answer: it did once,
+  // and the failure mode was every self-hoster's relay reading as dead.
+  console.log("\nnoting the relay's auth mode cannot change liveness");
+  const healthy = await classify({ secret: "k", code: 1006, opened: false, health: 200 });
+  check("the mode is noted off the /health already being fetched", healthy.modeNoted);
+  const badBody = await classify({ secret: "k", code: 1006, opened: false, health: 200, noteThrows: true });
+  check("a 200 whose body will not parse answers exactly as a 200 that does",
+    badBody.verdict === healthy.verdict && badBody.probes.length === 1,
+    `${healthy.verdict} vs ${badBody.verdict}`);
 
   console.log(`\n${failures === 0 ? "all checks passed" : `${failures} check(s) failed`}`);
   process.exit(failures === 0 ? 0 : 1);

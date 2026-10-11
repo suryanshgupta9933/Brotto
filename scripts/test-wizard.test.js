@@ -117,9 +117,12 @@ check("the count in the markup agrees with the constant",
   /Step 1 of 4/.test(welcomeHtml) && /const TOTAL_STEPS = 4;/.test(welcome));
 check("the edition choice is the FIRST step",
   /data-step="1"[\s\S]{0,120}Which Brotto\?/.test(welcomeHtml));
-check("it is a radio pair, and self-host is the default",
-  /name="edition"/.test(welcomeHtml) && /id="editionSelf"[^>]*value="self"[^>]*checked|value="self"[^>]*checked/.test(welcomeHtml),
-  "skipping the wizard must land on today's behaviour, which is self-host");
+check("it is a radio pair, and CLOUD is the default",
+  /name="edition"/.test(welcomeHtml) && /id="editionCloud"[^>]*value="cloud"[^>]*checked|value="cloud"[^>]*checked/.test(welcomeHtml),
+  "self-host is the deliberate opt-out; a new install opens on the cloud");
+check("and self-host is not pre-selected",
+  !/id="editionSelf"[^>]*checked/.test(welcomeHtml),
+  "two checked radios in one group resolve to whichever is last in the markup, which is how a default quietly lies");
 check("both editions exist by name",
   /Brotto Cloud/.test(welcomeHtml) && /Self-host/.test(welcomeHtml));
 
@@ -205,9 +208,9 @@ const SIGNOUT = extract(sidepanel, "signOutOfCloud");
 check("signing out clears the slot", /storeAgentSecret\(''\)/.test(SIGNOUT));
 check("and lands back on the wizard, not on a dead token",
   /setOptions\(\{ path: 'welcome\.html' \}\)/.test(SIGNOUT));
-check("the wizard pre-selects cloud from the stored address",
-  /CLOUD_SERVER_URL === \$serverUrl\.value\.trim\(\)\)/.test(welcome),
-  "otherwise a signed-out cloud user lands on the self-host form with their address already filled in");
+check("the wizard picks its opening radio from the stored address",
+  /initialEdition\(stored\.settings\?\.serverUrl\)/.test(welcome),
+  "otherwise a signed-out cloud user lands on the self-host form, and an existing self-hoster lands on a sign-in they never asked for");
 
 console.log(failures ? `\n${failures} failed` : "\nall passed");
 process.exit(failures ? 1 : 0);
