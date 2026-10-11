@@ -261,7 +261,7 @@ def render(post: dict | None) -> tuple[str, str]:
         '<tr><td style="padding:32px 0 0;">\n'
         '  <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>\n'
         f'    <td style="font-family:{_FONT};font-size:26px;line-height:1;color:#15803D;">'
-        "&check;</td>\n"
+        "✓</td>\n"
         f'    <td style="padding-left:14px;font-family:{_FONT};font-size:13px;line-height:1.2;'
         'color:#6E6E6E;letter-spacing:0.06em;text-transform:uppercase;">On the list</td>\n'
         "  </tr></table>\n</td></tr>\n\n"
