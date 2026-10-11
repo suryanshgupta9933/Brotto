@@ -866,12 +866,24 @@ def test_the_limiter_also_follows_the_address(client, monkeypatch, hosted):
 
 
 def test_addresses_are_normalised_before_they_are_counted(client, monkeypatch, hosted):
+    """Both spellings have to land on one bucket.
+
+    It passes the *normalised* address both times, which is what the routes
+    do and what this is about. It used to pass the raw spelling five times and
+    the normalised one next, and was then refused by the peer bucket rather
+    than the address bucket — so it was asserting "five calls exhaust the
+    peer", and only looked like it was about normalisation. Widening the
+    shared peer bucket (so that the key a caller cannot forge is the one
+    doing the bounding) is what stopped this test passing for the wrong
+    reason.
+    """
     from brotto_orchestrator import main
+    from brotto_orchestrator.session.jwt_auth import normalize_email
 
     main._SIGNIN_BUCKETS.clear()
     for _ in range(5):
-        main._signin_allowed("peer", "Beta@Example.Test")
-    assert main._signin_allowed("peer", "beta@example.test") is False
+        main._signin_allowed("peer", normalize_email("Beta@Example.Test"))
+    assert main._signin_allowed("peer", normalize_email("beta@example.test")) is False
 
 
 def test_the_throttle_is_not_an_account_existence_oracle(client, monkeypatch, hosted):

@@ -867,6 +867,24 @@ async def get_effective_policy(request: Request):
 
 _SIGNIN_BUCKET_CAPACITY = 5.0
 _SIGNIN_REFILL_PER_SECOND = 5.0 / 600.0  # five attempts, refilled over ten minutes
+# The socket peer's own bucket, sized for what it actually holds. Behind
+# Heroku `request.client.host` is a router address shared by the whole beta,
+# so a five-token bucket here is five sign-ins per ten minutes *for everyone*
+# — which is why the peer used to be the forwarded hop instead.
+#
+# This is the key that **cannot be forged**, which makes it the only one that
+# can bound a caller who controls everything else they send: on the waitlist
+# the caller picks the address and sets the header, so both of the other two
+# keys are the thing being varied rather than a backstop. It is generous
+# because it is shared and interactive traffic through it is rare.
+#
+# ponytail: ceiling — a caller behind one router address gets 20 writes per
+# ten minutes no matter what they vary, and can therefore still starve other
+# beta users sharing that address for as long as they keep it drained. There
+# is no honest way around that without something the caller has to solve:
+# upgrade path is a bot check in front of the route (an edge challenge, or a
+# proof the header cannot forge), not a bigger bucket.
+_SHARED_PEER_CAPACITY = 20.0
 # ponytail: keys are caller-supplied, so the map is swept rather than
 # trusted to be small. Ceiling: a caller who keeps one attempt alive per
 # distinct address pins that many entries until they lapse. Upgrade path:
@@ -875,11 +893,16 @@ _SIGNIN_BUCKETS: dict[str, tuple[float, float]] = {}
 _SIGNIN_SWEEP_AT = 0.0
 
 
-def _signin_allowed(peer: str, email: str) -> bool:
-    """Token bucket for the sign-in routes, per peer and per address.
+def _signin_allowed(peer: str, email: str, forwarded: str = "") -> bool:
+    """Token bucket for the sign-in routes: per socket peer, per hop, per address.
 
-    Both keys are charged from the same bucket state, so neither a
-    rotated peer address nor a list of addresses gets around the other.
+    All three keys are charged from the same state, so neither a rotated
+    address nor a rotated header gets around the peer key, and the peer key
+    is the one they cannot rotate — it comes off the socket.
+
+    `forwarded` is charged at the tight capacity because it is what a
+    behind-the-proxy caller is metered on; it is also what an attacker
+    controls, so it is deliberately *not* the bound.
     """
     global _SIGNIN_SWEEP_AT
     now = time.monotonic()
@@ -887,26 +910,51 @@ def _signin_allowed(peer: str, email: str) -> bool:
         _SIGNIN_SWEEP_AT = now + 60.0
         for key in [k for k, (_, ts) in _SIGNIN_BUCKETS.items() if now - ts > 600.0]:
             del _SIGNIN_BUCKETS[key]
+    keys = [(f"peer:{peer}", _SHARED_PEER_CAPACITY), (f"email:{email}", _SIGNIN_BUCKET_CAPACITY)]
+    if forwarded:
+        keys.append((f"hop:{forwarded}", _SIGNIN_BUCKET_CAPACITY))
     allowed = True
-    for key in (f"peer:{peer}", f"email:{email}"):
-        tokens, seen = _SIGNIN_BUCKETS.get(key, (_SIGNIN_BUCKET_CAPACITY, now))
-        tokens = min(_SIGNIN_BUCKET_CAPACITY, tokens + (now - seen) * _SIGNIN_REFILL_PER_SECOND)
+    for key, capacity in keys:
+        tokens, seen = _SIGNIN_BUCKETS.get(key, (capacity, now))
+        tokens = min(capacity, tokens + (now - seen) * _SIGNIN_REFILL_PER_SECOND)
         allowed = allowed and tokens >= 1.0
         _SIGNIN_BUCKETS[key] = (tokens - 1.0, now)
     return allowed
 
 
 def _signin_peer(request: Request) -> str:
-    """Who to meter this sign-in attempt against.
+    """Who to meter this sign-in attempt against — the socket, not the header.
 
-    The forwarded first hop, because the hosted relay runs behind a proxy
-    and `request.client.host` is then the proxy's address for every caller
-    — one shared bucket, five sign-ins per ten minutes for the whole beta.
-    The header is caller-supplied, so rotating it defeats this half of the
-    limit and only this half: the per-address bucket does not care.
+    This used to be the forwarded first hop, because behind a proxy
+    `client.host` is the proxy for everybody and the limit would then be five
+    sign-ins per ten minutes for the whole beta. But the header is set by the
+    caller: rotating it gave a fresh bucket on every request, so the half that
+    was supposed to stop bulk writes was the half being varied. `X-Forwarded-
+    For` is only meaningful behind a proxy that **overwrites** it, and
+    assuming otherwise is what made the limit decorative.
+
+    So the socket peer is the key — unforgeable, and therefore the only one
+    that bounds a caller — sized for being shared (`_SHARED_PEER_CAPACITY`),
+    and the forwarded hop is charged alongside it at the tight capacity. NAT
+    collapse and header forgery pull in opposite directions and one bucket
+    cannot serve both; charging both means the unforgeable half is always
+    present, and the honest cost is written down beside it.
     """
-    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    return forwarded or _caller_key(request)
+    return _caller_key(request)
+
+
+def _forwarded_hop(request: Request) -> str:
+    """The forwarded first hop, or "" when the caller sent none.
+
+    Read as a first-class key rather than as a substitute for the peer: it is
+    caller-supplied, so it is a bucket an attacker can rotate, and it is kept
+    because behind a proxy it is the closest thing to a per-caller address
+    there is. A value with no safe alphabet is dropped rather than truncated —
+    it becomes a bucket key, and a bucket key does not need to be a filename
+    but does need to be bounded.
+    """
+    hop = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return hop if _HOST.match(hop) else ""
 
 
 @app.post("/v1/auth/request-code")
@@ -930,7 +978,8 @@ async def request_login_code(request: Request):
     email = str(body.get("email", "") or "")
     if not EMAIL_RE.match(email):
         raise _BadRequest("email is required")
-    if not _signin_allowed(_signin_peer(request), normalize_email(email)):
+    if not _signin_allowed(_signin_peer(request), normalize_email(email),
+                            _forwarded_hop(request)):
         return _error(429, "too many attempts — wait a few minutes and try again")
     try:
         await _send(email)
@@ -964,7 +1013,8 @@ async def exchange_login_code(request: Request):
     code = str(body.get("code", "") or "").strip()
     if not EMAIL_RE.match(email) or not code:
         raise _BadRequest("email and code are required")
-    if not _signin_allowed(_signin_peer(request), normalize_email(email)):
+    if not _signin_allowed(_signin_peer(request), normalize_email(email),
+                            _forwarded_hop(request)):
         return _error(429, "too many attempts — wait a few minutes and try again")
     try:
         token = await _exchange(email, code)
