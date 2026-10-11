@@ -122,6 +122,13 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
   if (!titles) throw new Error("no MODEL_CHECK_TITLE in sidepanel.js — renamed?");
   sandbox.MODEL_CHECK_TITLE = vm.runInContext(`(${titles[1]})`, sandbox);
   vm.runInContext(extract("modelCheckTitle"), sandbox);
+  // The kind taxonomy *is* the record's lifetime, so it is read out of the
+  // source rather than restated here — a fixture that drifted from the shipped
+  // list would test a classification the panel does not use.
+  const kinds = panel.match(/const TRANSIENT_CHECK_KINDS = new Set\(\[([\s\S]*?)\]\);/);
+  if (!kinds) throw new Error("no TRANSIENT_CHECK_KINDS in sidepanel.js — renamed?");
+  sandbox.TRANSIENT_CHECK_KINDS = vm.runInContext(`new Set([${kinds[1]}])`, sandbox);
+  vm.runInContext(extract("modelCheckFailureStale"), sandbox);
   vm.runInContext(extract("modelCheckSig"), sandbox);
   vm.runInContext(extract("renderModelCheckBanner"), sandbox);
   vm.runInContext(extract("setModelCheckFailure"), sandbox);
@@ -162,6 +169,15 @@ function check(name, cond, detail) {
 }
 
 async function main() {
+  // The sig the shipped modelCheckSig produces for this sandbox: no base_url,
+  // the server the fake panel points at, and a key present in session storage.
+  // Written out rather than computed by calling modelCheckSig, because a
+  // fixture built from the function under test cannot fail when that function
+  // stops covering a field.
+  const CFG = { provider: "anthropic", model: "claude-sonnet-5-5" };
+  const SIG_K = "anthropic:claude-sonnet-5-5||http://localhost:8000|k";
+  const SIG_NOKEY = "anthropic:claude-sonnet-5-5||http://localhost:8000|nokey";
+
   // ── Failures that must stop the task ──────────────────────────────────────
   {
     const { run } = panelWith(() => jsonResponse(
@@ -276,6 +292,116 @@ async function main() {
     check("a different config is a different check", (await run()).model === "anthropic:claude-sonnet-5-5");
   }
 
+  // ── A stored failure has a lifetime; a standing one does not ──────────────
+  //
+  // The record used to be forever. One 5xx from a provider at save time left
+  // the user unable to send a task at all — the only exit was re-saving, which
+  // is not something anyone knows to try. The split is the taxonomy the probe
+  // already draws: a kind a retry fixes expires on the same TTL as the pass
+  // cache, and a kind only the user can fix keeps standing, because that is
+  // the thing the banner is asking them to do.
+  {
+    for (const kind of ["rate_limited", "provider_error", "unreachable", "error"]) {
+      const { calls, run } = panelWith(() => jsonResponse({ ok: true }),
+        { modelConfig: CFG, modelCheckFailure: { kind, body: "blip", sig: SIG_K, at: Date.now() } });
+      const r = await run();
+      check(`a fresh ${kind} still blocks the run`, r.ok === false && r.kind === kind, JSON.stringify(r));
+      check("…without re-probing", calls.length === 0, `${calls.length} fetches`);
+    }
+  }
+  {
+    for (const kind of ["rate_limited", "provider_error", "unreachable", "error"]) {
+      const { calls, local, run } = panelWith(() => jsonResponse({ ok: true, model: "anthropic:claude-sonnet-5-5" }),
+        { modelConfig: CFG, modelCheckFailure: { kind, body: "blip", sig: SIG_K, at: Date.now() - 600001 } });
+      const r = await run();
+      check(`a ${kind} past the TTL re-probes instead of blocking`,
+        calls.length === 1 && r.ok === true, `${calls.length} fetches ${JSON.stringify(r)}`);
+      // The clear is fire-and-forget inside checkModelReady; await a turn so
+      // this asserts the write rather than racing it.
+      await new Promise((res) => setImmediate(res));
+      check("…and the spent record is cleared", !local.modelCheckFailure,
+        JSON.stringify(local.modelCheckFailure));
+    }
+  }
+  {
+    // One second inside the TTL is still an answer. A TTL that expired at the
+    // first send would just be "never cache a failure", which the standing
+    // kinds below are the whole reason not to do.
+    const { calls, run } = panelWith(() => jsonResponse({ ok: true }),
+      { modelConfig: CFG, modelCheckFailure: { kind: "rate_limited", body: "blip", sig: SIG_K, at: Date.now() - 599000 } });
+    check("a transient failure inside its TTL still blocks", (await run()).ok === false);
+    check("…with no probe", calls.length === 0, `${calls.length} fetches`);
+  }
+  {
+    // The standing half: these do not expire, and that is the feature. A
+    // rejected key stays rejected until the user pastes a working one, and a
+    // retry cannot change that.
+    for (const kind of ["auth_failed", "no_credits", "no_model", "unknown_model",
+                        "a_kind_this_build_predates"]) {
+      const { calls, run } = panelWith(() => jsonResponse({ ok: true }),
+        { modelConfig: CFG, modelCheckFailure: { kind, body: "no", sig: SIG_K, at: Date.now() - 86400000 } });
+      const r = await run();
+      check(`${kind} still blocks a day later`, r.ok === false && r.kind === kind, JSON.stringify(r));
+      check("…with no probe", calls.length === 0, `${calls.length} fetches`);
+    }
+  }
+  {
+    // A record from before this field existed: transient by kind, unmeasured
+    // by age. Re-probed rather than trusted — standing kinds are unaffected
+    // because they never consult `at`.
+    const { calls, run } = panelWith(() => jsonResponse({ ok: true }),
+      { modelConfig: CFG, modelCheckFailure: { kind: "unreachable", body: "blip", sig: SIG_K } });
+    check("an unmeasured transient record is re-probed", (await run()).ok === true && calls.length === 1);
+    const held = panelWith(() => jsonResponse({ ok: true }),
+      { modelConfig: CFG, modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_K } });
+    check("…while an unmeasured standing one still holds", (await held.run()).ok === false);
+  }
+  {
+    const { sandbox } = panelWith(() => jsonResponse({ ok: true }));
+    check("the transient list is the four retryable kinds and nothing else",
+      [...sandbox.TRANSIENT_CHECK_KINDS].sort().join(",")
+        === "error,provider_error,rate_limited,unreachable",
+      [...sandbox.TRANSIENT_CHECK_KINDS].join(","));
+  }
+
+  // ── The sig covers the two things a changed answer rides on ───────────────
+  {
+    const src = extract("modelCheckSig");
+    check("the sig carries the base URL", /cfg\.base_url/.test(src), src);
+    check("…and the server the probe is sent to", /plannerUrlEl/.test(src), src);
+  }
+  {
+    // A self-hoster re-pointing an OpenAI-compatible endpoint is asking a
+    // different question with the same provider and model.
+    const at_a = { provider: "openai", model: "local", base_url: "http://a.example/v1" };
+    const at_b = { provider: "openai", model: "local", base_url: "http://b.example/v1" };
+    const { calls, local, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }),
+      { modelConfig: at_a });
+    await run();
+    check("…and a re-pointed base URL re-arms the check", (await run()).ok === false && calls.length === 1);
+    local.modelConfig = at_b;
+    await run();
+    check("…changing it probes again instead of serving the old answer",
+      calls.length === 2, `${calls.length} fetches`);
+  }
+  {
+    // Which server you ask is part of the question too — a different relay
+    // may resolve a different model or refuse a different credential.
+    const { calls, sandbox, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }));
+    await run();
+    sandbox.plannerUrlEl.value = "http://elsewhere:9000";
+    await run();
+    check("…and a changed server URL re-arms the check", calls.length === 2, `${calls.length} fetches`);
+  }
+  {
+    // A trailing slash is the same address, not a new one.
+    const { calls, sandbox, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }));
+    await run();
+    sandbox.plannerUrlEl.value = "http://localhost:8000/";
+    await run();
+    check("a trailing slash is not a different server", calls.length === 1, `${calls.length} fetches`);
+  }
+
   // ── What goes over the wire ───────────────────────────────────────────────
   {
     const { calls, run } = panelWith(() => jsonResponse({ ok: true }));
@@ -366,8 +492,10 @@ async function main() {
     check("…with the kind the banner titles itself from",
       local.modelCheckFailure.kind === "auth_failed");
     check("…the provider's own sentence", /HTTP 401/.test(local.modelCheckFailure.body));
+    // The full sig, written out: provider, model, base URL, server, key
+    // presence. A sig that quietly dropped a field would still end in `|k`.
     check("…and the sig it was raised under, so a changed config is a different failure",
-      local.modelCheckFailure.sig === r.sig && /anthropic:claude-sonnet-5-5\|k$/.test(r.sig), r.sig);
+      local.modelCheckFailure.sig === r.sig && r.sig === SIG_K, r.sig);
     check("…into local, not session — it has to outlive the panel",
       /modelCheckFailure/.test(JSON.stringify(writes)));
   }
@@ -386,8 +514,8 @@ async function main() {
     check("the failure is standing", !!local.modelCheckFailure);
     answer = { ok: true, model: "anthropic:claude-sonnet-5-5" };
     const { local: l2, run: r2 } = panelWith(() => jsonResponse(answer),
-      { modelConfig: { provider: "anthropic", model: "claude-sonnet-5-5" },
-        modelCheckFailure: { kind: "auth_failed", body: "no", sig: "anthropic:claude-sonnet-5-5|k" } },
+      { modelConfig: CFG,
+        modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_K } },
       null);   // the record was raised under a key this browser no longer
               // holds — `null`, not `undefined`, which a default parameter
               // would silently swap back for the key
@@ -438,6 +566,19 @@ async function main() {
     check("there is a title for a provider 5xx",
       /provider_error:\s*'/.test(panel));
   }
+  {
+    // The generic `error` kind stops echoing raw provider text, so the record
+    // can legitimately arrive with no body at all. The title is already a
+    // complete sentence; what must not happen is the word "undefined".
+    const { sandbox, showBanner } = panelWith(() => jsonResponse({ ok: false, kind: "error", error: "x" }));
+    sandbox.modelCheckFailure = { kind: "error", sig: SIG_K, at: Date.now() };   // no body
+    const host = showBanner();
+    const text = host.children.map((c) => c.textContent || c.innerHTML).join(" | ");
+    check("a record with no body renders nothing undefined", !/undefined/.test(text), text);
+    check("…the title alone still says what happened",
+      /The model could not be used/.test(text), text);
+    check("…and no empty body line is left standing", host.children.length === 2, text);
+  }
 
   // ── The restart trap ─────────────────────────────────────────────────────
   //
@@ -448,8 +589,8 @@ async function main() {
   // than saying nothing, so the sig is compared on every render.
   {
     panelWith(() => jsonResponse({ ok: true }), {
-      modelConfig: { provider: "anthropic", model: "claude-sonnet-5-5" },
-      modelCheckFailure: { kind: "auth_failed", body: "no", sig: "anthropic:claude-sonnet-5-5|k" },
+      modelConfig: CFG,
+      modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_K },
     }, null);   // no key in session — the browser restarted
     check("the sig counts the presence of a key, not the key",
       /apiKey \? 'k' : 'nokey'/.test(extract("modelCheckSig")), extract("modelCheckSig"));
@@ -458,8 +599,8 @@ async function main() {
   }
   {
     const { calls, run } = panelWith(() => jsonResponse({ ok: true }), {
-      modelConfig: { provider: "anthropic", model: "claude-sonnet-5-5" },
-      modelCheckFailure: { kind: "auth_failed", body: "no", sig: "anthropic:claude-sonnet-5-5|nokey" },
+      modelConfig: CFG,
+      modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_NOKEY },
     }, null);   // no key — and the record already says nokey
     check("a record that still matches its browser still blocks",
       (await run()).ok === false);
@@ -469,8 +610,8 @@ async function main() {
     // refreshModelCheckBanner is what runs on open; it must clear a record
     // whose sig no longer describes this browser.
     const p = panelWith(() => jsonResponse({ ok: true }), {
-      modelConfig: { provider: "anthropic", model: "claude-sonnet-5-5" },
-      modelCheckFailure: { kind: "auth_failed", body: "no", sig: "anthropic:claude-sonnet-5-5|k" },
+      modelConfig: CFG,
+      modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_K },
     }, null);
     p.sandbox.$modelCheckBanner = bannerHost();
     vm.runInContext(extract("refreshModelCheckBanner"), p.sandbox);

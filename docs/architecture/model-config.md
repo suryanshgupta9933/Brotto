@@ -290,12 +290,25 @@ than only checking the response shape.
   already works; routing it through this gate would replace "Server
   unreachable, retrying" with "your API key was rejected", sending the user to
   fix something that isn't broken.
-- **A pass is cached for 10 minutes in the panel, a failure never is.** Only a
-  pass is cached because caching a failure leaves a user who has just fixed
-  the key still blocked for the TTL — worse than not caching at all. The
-  cache is keyed on provider, model and *whether* a key was present, never on
-  the key itself; a re-paste in Settings clears it outright, since two keys of
-  the same length are indistinguishable without hashing a secret to find out.
+- **A pass is cached for 10 minutes in the panel; a failure is cached in
+  storage, and only some kinds expire.** A pass is cached because paying for
+  the probe on every send is a tax, and caching a *standing* failure would
+  leave a user who has just fixed the key still blocked for the TTL — worse
+  than not caching at all. The record itself is written to
+  `chrome.storage.local` because the moment it matters is the moment the panel
+  is closed. Its **lifetime follows the taxonomy above**:
+  `TRANSIENT_CHECK_KINDS` (`rate_limited`, `provider_error`, `unreachable`,
+  and the catch-all `error`) expire on the same 10-minute TTL as the pass
+  cache and re-probe on the next send; every other kind stands until the user
+  changes something, which is exactly what the banner asks them to do. A kind
+  in neither list counts as **standing**, so one a future server ships cannot
+  become a permanent block for every user it reaches. The record predates the
+  TTL only in the transient direction — a standing failure never consults
+  `at`.
+  The cache is keyed on provider, model, base URL, the **server the probe is
+  sent to**, and *whether* a key was present, never on the key itself; a
+  re-paste in Settings clears it outright, since two keys of the same length
+  are indistinguishable without hashing a secret to find out.
 - **`_inline_model()` is one parser for three call sites** (this, `task_start`,
   `/v1/suggestions`). They were three separate literal parses, which is how a
   check ends up answering `ok` for a config the run would refuse.

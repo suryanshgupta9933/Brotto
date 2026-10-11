@@ -498,10 +498,40 @@ let modelCheckPass = null;
 let modelCheckFailure = null;
 const $modelCheckBanner = document.getElementById('modelCheckBanner');
 
+// Kinds a retry can genuinely fix, against kinds only the user can. The list
+// is the lifetime of the record: a standing kind blocks until they change
+// something — which is exactly what the banner asks them to do — while a
+// transient one expires with the same TTL as the pass cache, so a 5xx blip
+// while saving is not a panel that can never send again.
+//
+// An unlisted kind counts as *standing*, which is the direction that fails
+// loudly rather than quietly: a kind a future server ships must not become a
+// permanent block with no way out, and its owner will add it here.
+const TRANSIENT_CHECK_KINDS = new Set([
+  'rate_limited', 'provider_error', 'unreachable',
+  // `error` is the server's catch-all. It is mostly a vendor blip or a
+  // request shape the provider rejected and may accept later, so it expires
+  // rather than standing.
+  'error',
+]);
+
+/** A recorded failure is spent: absent, or transient and past its TTL. */
+function modelCheckFailureStale(rec) {
+  if (!rec) return true;
+  if (!TRANSIENT_CHECK_KINDS.has(rec.kind)) return false;
+  // A record with no `at` predates this build and is re-probed rather than
+  // trusted: it is transient by kind and unmeasured by age.
+  return Date.now() - (rec.at || 0) >= MODEL_CHECK_TTL_MS;
+}
+
 function modelCheckSig(cfg, apiKey) {
-  // The key is the provider, the model and whether a key was pasted — never
-  // the key itself. Changing any of those has to re-run the probe.
-  return `${cfg ? `${cfg.provider}:${cfg.model}` : ''}|${apiKey ? 'k' : 'nokey'}`;
+  // Everything the answer depends on, and never the key itself. The endpoint
+  // rides on modelConfig, so a self-hoster re-pointing an OpenAI-compatible
+  // base URL is asking a different question; so is asking a different Brotto
+  // server, which may resolve the model or the credential differently.
+  const base = cfg && cfg.base_url ? cfg.base_url : '';
+  const server = plannerUrlEl ? (plannerUrlEl.value || '').replace(/\/$/, '') : '';
+  return `${cfg ? `${cfg.provider}:${cfg.model}` : ''}|${base}|${server}|${apiKey ? 'k' : 'nokey'}`;
 }
 
 /** The one writer. null clears; anything else records and repaints. */
@@ -523,18 +553,25 @@ function renderModelCheckBanner() {
   const title = document.createElement('div');
   title.className = 'model-check-banner-title';
   title.textContent = modelCheckTitle(modelCheckFailure.kind);
-  const body = document.createElement('div');
-  body.className = 'model-check-banner-body md';
-  // The server's sentence, which is the provider's or the harness's own words.
-  // renderMarkdown is escape-first, the same path appendFailureBubble uses for
-  // this exact text.
-  body.innerHTML = renderMarkdown(modelCheckFailure.body || '');
+  $modelCheckBanner.append(title);
+  // The body is the server's sentence, which is the provider's or the harness's
+  // own words. It is optional: a kind the server sends no text for renders the
+  // title alone, which is a complete sentence — an empty line reads as a bug,
+  // and a rendered "undefined" reads as one.
+  if (modelCheckFailure.body) {
+    const body = document.createElement('div');
+    body.className = 'model-check-banner-body md';
+    // renderMarkdown is escape-first, the same path appendFailureBubble uses
+    // for this exact text.
+    body.innerHTML = renderMarkdown(modelCheckFailure.body);
+    $modelCheckBanner.append(body);
+  }
   const fix = document.createElement('button');
   fix.type = 'button';
   fix.className = 'btn model-check-banner-fix';
   fix.textContent = 'Settings → Model';
   fix.addEventListener('click', () => settingsBtn.click());
-  $modelCheckBanner.append(title, body, fix);
+  $modelCheckBanner.append(fix);
 }
 
 /** Read the record back and repaint — panel open, and after a save. */
@@ -550,8 +587,14 @@ async function refreshModelCheckBanner() {
     const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
     const now = modelCheckSig(cfg, session_.modelApiKey || undefined);
     // The restart trap. A record raised under a key this browser no longer
-    // holds is describing a browser that does not exist.
-    if (rec.sig !== now) { await setModelCheckFailure(null); return; }
+    // holds is describing a browser that does not exist. Same for one whose
+    // transient kind has aged out: the gate below would no longer honour it,
+    // and a banner that stands where the gate lets the run through is the
+    // disagreement this file is not allowed to have.
+    if (rec.sig !== now || modelCheckFailureStale(rec)) {
+      await setModelCheckFailure(null);
+      return;
+    }
   }
   modelCheckFailure = rec;
   renderModelCheckBanner();
@@ -566,17 +609,20 @@ async function checkModelReady() {
   const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
   const apiKey = session_.modelApiKey || undefined;
   const sig = modelCheckSig(cfg, apiKey);
+  const rec = local.modelCheckFailure;
   // A stored failure for *this* config is an answer already paid for. The gate
   // is short-circuited here rather than at the call site so that every caller
   // gets it, and so the sig comparison happens against the same read the probe
   // would have used.
-  if (local.modelCheckFailure && local.modelCheckFailure.sig === sig) {
-    return {
-      ok: false,
-      kind: local.modelCheckFailure.kind,
-      body: local.modelCheckFailure.body,
-      cached: true,
-    };
+  //
+  // …unless the kind is one a retry fixes and the TTL has run out. Then it is
+  // dropped and the probe below runs: a 5xx while saving must not leave a
+  // panel that refuses every task until the browser is restarted.
+  if (rec && rec.sig === sig) {
+    if (!modelCheckFailureStale(rec)) {
+      return { ok: false, kind: rec.kind, body: rec.body, cached: true };
+    }
+    void setModelCheckFailure(null);
   }
   if (modelCheckPass && modelCheckPass.sig === sig
       && Date.now() - modelCheckPass.at < MODEL_CHECK_TTL_MS) {
@@ -671,10 +717,6 @@ const modelDd = $modelName && attachDropdown({
 // a value written straight to a host never tells anyone it changed.
 hydrateModelSettings().then(() => { providerDd?.sync(); renderModelFacts(); });
 initModelSettings(document.getElementById('plannerUrl')?.value || '');
-// A failure saved yesterday is a failure today. Read it back before anything
-// can be sent, so the banner is standing before the user's first keystroke
-// rather than appearing after their first refusal.
-void refreshModelCheckBanner();
 
 const messagesEl  = document.getElementById('messages');
 const emptyState   = document.getElementById('emptyState');
@@ -707,6 +749,15 @@ const outcomeCell     = document.getElementById('outcomeCell');
 const connectionMeta  = document.getElementById('connectionMeta');
 const statusPill      = document.getElementById('statusPill');
 const connLabelEl     = document.getElementById('connLabel');
+
+// A failure saved yesterday is a failure today. Read it back before anything
+// can be sent, so the banner is standing before the user's first keystroke
+// rather than appearing after their first refusal.
+//
+// This sits below `plannerUrlEl` on purpose: modelCheckSig reads it, and a
+// call above the declaration is one await away from being a TDZ ReferenceError
+// that `void` swallows — a banner that silently never loads.
+void refreshModelCheckBanner();
 
 // ponytail: soft length cap on user task input. Tasks over this many chars
 // trigger a confirm() before send; matching server warning at the same
