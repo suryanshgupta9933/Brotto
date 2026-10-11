@@ -219,6 +219,11 @@ async function main() {
       "model-api-key": el(),
       "model-save": el(),
       "model-save-status": el(),
+      // initModelSettings repaints the context window and the vision badge
+      // itself, so the /health path — which awaits it with no .then — stops
+      // leaving them describing the previous provider's catalogue.
+      modelContextWindow: el({ title: "" }),
+      modelVisionBadge: el({ hidden: true, dataset: {} }),
     };
     const store = storage();
     if (stored) store.local.modelConfig = stored;
@@ -233,6 +238,17 @@ async function main() {
       },
       chrome: store.chrome, fetch: fetchImpl,
       setModelPill() {}, brottoModelCatalog: null, setTimeout,
+      // The one guard hydrateModelSettings reads. Left undefined it throws, and
+      // a throwing guard would make every hydration below look like a no-op.
+      modelSettingsEdited: false,
+      // initModelSettings repaints the provider trigger too, so the /health
+      // path cannot leave the box naming the previous server's provider.
+      providerDd: null,
+      // The save handler now probes what it saved. Its own behaviour is pinned
+      // in test-model-check.test.js; here it only has to not throw.
+      modelCheckPass: null,
+      checkModelReady: async () => ({ ok: true, model: 'qwen2.5-coder:7b' }),
+      setModelCheckFailure: async () => {},
       globalThis: null,
     };
     sandbox.globalThis = sandbox;
@@ -248,6 +264,8 @@ async function main() {
       $modelKey: els["model-api-key"],
       $modelSave: els["model-save"],
       $modelStatus: els["model-save-status"],
+      $modelContextWindow: els.modelContextWindow,
+      $modelVisionBadge: els.modelVisionBadge,
     });
     return { els, store, sandbox };
   }
@@ -258,7 +276,7 @@ async function main() {
     const { els, store, sandbox } = panel(fetchImpl, stored);
     vm.runInContext(catalogSrc, sandbox);
     for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
-                      "initModelSettings", "hydrateModelSettings"]) {
+                      "renderModelFacts", "initModelSettings", "hydrateModelSettings"]) {
       vm.runInContext(extract(fn), sandbox);
     }
     // The click handler, registered the way the file registers it.

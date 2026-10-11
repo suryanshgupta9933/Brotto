@@ -1100,6 +1100,33 @@
       padding-top: 6px;
     }
 
+    /* ─── Model-check banner ────────────────────────────────────────────
+       The failure card's vocabulary, without the card: same border, same
+       title treatment, same ink. It is a permanent strip rather than a
+       message, so it sits between the transcript and the composer and does
+       not scroll away with the conversation. */
+    .model-check-banner {
+      border-top: 1px solid var(--bad);
+      background: var(--paper);
+      padding: 10px 14px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      align-items: flex-start;
+    }
+    .model-check-banner-title {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--bad);
+    }
+    .model-check-banner-body { font-size: 13px; line-height: 1.5; color: var(--ink); }
+    .model-check-banner-body p { margin: 0 0 5px 0; }
+    .model-check-banner-body p:last-child { margin-bottom: 0; }
+    .model-check-banner-fix { padding: 7px 12px; }
+
     /* ─── Plan / approval / clarify cards ───────────────────────────────
        One card primitive, three jobs. Distinguished by the 3px left rule,
        not by a different radius, a different shadow, or a different hue. */
@@ -1754,6 +1781,13 @@
 <button class="new-task-btn" id="newTaskBtn" title="Start a new chat">
   + New chat
 </button>
+
+<!-- ── Model-check banner ──────────────────────────────────────────
+     Drawn above the composer, not in the transcript: it is not part of what
+     happened, it is a standing condition that outlives the panel and outranks
+     everything below it. Populated by renderModelCheckBanner() from the
+     record in chrome.storage.local, so it is here on first paint. -->
+<div id="modelCheckBanner" class="model-check-banner" role="status" hidden></div>
 
 <!-- ── Input area ────────────────────────────────────────────────── -->
 <section id="inputArea">

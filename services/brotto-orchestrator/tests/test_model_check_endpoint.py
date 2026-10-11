@@ -230,6 +230,62 @@ def test_a_400_that_is_not_about_money_stays_an_error(client, probe):
     assert body["kind"] == "error"
 
 
+@pytest.mark.parametrize("status", [500, 502, 503, 529])
+def test_a_provider_that_is_down_is_not_a_bad_key(client, probe, status):
+    """A 5xx got past auth and failed at the provider. Reported as `error` it
+    reads as "your key is wrong", which sends the user to re-paste a key that
+    was fine — the exact case the product owner named: *the model is down,
+    show the error*."""
+    probe["install"](_http_error(status, '{"error":"upstream unavailable"}'))
+    body = _send(client,
+                 model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+                 api_key="sk-ant-valid").json()
+    assert body["ok"] is False
+    assert body["kind"] == "provider_error"
+    # The status is what the user needs; the fix it names is what stops them
+    # doing the wrong thing.
+    assert f"HTTP {status}" in body["error"]
+
+
+def test_a_provider_5xx_never_echoes_the_provider_body(client, probe):
+    """`error` is the one branch that forwards provider text, and a 5xx body
+    is where a gateway echoes the URL it called. This branch must not grow a
+    `body[:300]`."""
+    probe["install"](_http_error(
+        503, '{"error":"upstream http://gpu-box.lan:8000/v1 unavailable"}'))
+    body = _send(client,
+                 model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+                 api_key="sk-ant-secret-value").json()
+    assert body["kind"] == "provider_error"
+    assert "gpu-box.lan" not in body["error"]
+    assert "sk-ant-secret-value" not in body["error"]
+
+
+def test_the_generic_error_branch_never_echoes_the_provider_body(client, probe):
+    """The other half of the same guard, on the branch that did the echoing.
+
+    `error` used to return `body[:300]`, and the panel persists the sentence
+    to `chrome.storage.local` to survive a close — so a third party's HTTP
+    response landed on the user's disk, indefinitely. A body that does not
+    name the key is still a body: the panel only ever needed a kind.
+    """
+    probe["install"](_http_error(
+        404, '{"error":"unknown model, called http://gpu-box.lan:8000/v1"}'))
+    body = _send(client,
+                 model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+                 api_key="sk-ant-secret-value").json()
+    assert body["kind"] == "error"
+    # The status is still there — it is the one part of the response the user
+    # can quote to whoever they ask for help.
+    assert "HTTP 404" in body["error"]
+    # And the fix is named, like every other branch.
+    assert "Settings" in body["error"]
+    # The provider's own text is not, in whole or in part.
+    assert "gpu-box.lan" not in body["error"]
+    assert "unknown model" not in body["error"]
+    assert "sk-ant-secret-value" not in body["error"]
+
+
 def test_a_refused_connection_is_unreachable_not_a_bad_key(client, probe):
     """A LAN base URL that is down is the self-hosted user's common failure,
     and `auth_failed` would send them to re-paste a key that was fine.
@@ -249,6 +305,63 @@ def test_a_refused_connection_is_unreachable_not_a_bad_key(client, probe):
                                "base_url": "http://gpu-box.lan:8000/v1"},
                  api_key="sk-local").json()
     assert body["kind"] == "unreachable"
+
+
+# ── What the log keeps ──────────────────────────────────────────────────────
+
+def test_a_hostile_provider_body_is_redacted_and_flattened_in_the_log(
+        client, probe, caplog):
+    """The log is the one place provider text still goes, and a log file keeps
+    text indefinitely — so "moved it to the log" is not by itself safe.
+
+    A self-hoster who typed their own `base_url` is dialling a host that is not
+    necessarily a model provider at all, so the body is attacker-supplied on
+    every install. Two things must not survive into the file:
+
+    - the secret. `redact_text` runs first and only the per-kind *counts* are
+      logged beside it — the operator still learns something happened.
+    - the newline. A raw LF in the body forges a log line the application never
+      wrote (CWE-117), so the reader sees an entry that did not happen.
+    """
+    injected = (
+        'WARNING:root:model check: forger: key sk-ant-injected000000000000 accepted\n'
+        'ERROR:root:model check: forged entry that never happened'
+    )
+    probe["install"](_http_error(
+        404,
+        '{"error":"unknown model","key":"sk-ant-leaked0123456789ab",'
+        f'"note":"{injected}"}}',
+    ))
+    with caplog.at_level("WARNING"):
+        body = _send(client,
+                     model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+                     api_key="sk-ant-secret-value").json()
+    assert body["kind"] == "error"
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    # The body is still logged — dropping it would make this branch invisible
+    # in production, which is where the operator needs it.
+    assert "unknown model" in logged
+    # ...but not the key, and not the forged line.
+    assert "sk-ant-leaked0123456789ab" not in logged
+    assert "key sk-ant-injected000000000000 accepted" not in logged
+    # One record, one line: the record's own text has no embedded newline.
+    record = [r for r in caplog.records if "unknown model" in r.getMessage()]
+    assert len(record) == 1
+    assert "\n" not in record[0].getMessage()
+    # The count is what replaces the secret.
+    assert "api-key" in record[0].getMessage()
+
+
+def test_a_body_with_nothing_sensitive_still_reaches_the_log(client, probe, caplog):
+    """Redaction must not become a mute — the counts are a *disclosure*, not
+    the only reason to log."""
+    probe["install"](_http_error(404, '{"error":"unknown model: v9"}'))
+    with caplog.at_level("WARNING"):
+        _send(client,
+              model_config={"provider": "anthropic", "model": "claude-sonnet-5-5"},
+              api_key="sk-ant-secret-value")
+    assert "unknown model: v9" in "\n".join(r.getMessage() for r in caplog.records)
 
 
 # ── The key must not come back out ──────────────────────────────────────────

@@ -68,6 +68,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .agent.context import AgentDeps
 from .agent.harness import AgentHarness, mark_cancelled
+from .agent.redact import redact_text
 from .cdp.relay import CDPRelay
 from .cdp.extension_relay import ExtensionCDPRelay
 from .cdp.watchdog import CDPWatchdog
@@ -751,12 +752,33 @@ _AUTH_HINTS = (
 )
 
 
+def _one_line(text: str) -> str:
+    """`text` with every control character replaced by a space.
+
+    CWE-117. A provider body is attacker-supplied whenever the self-hoster
+    typed their own `base_url`, and a newline in it would forge a log line —
+    the reader sees an entry the application never wrote. `str.isprintable`
+    covers CR, LF, TAB, escape codes and the C1 range in one call.
+    """
+    return "".join(ch if ch.isprintable() else " " for ch in text)
+
+
 def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
     """(kind, sentence) for a failed pre-flight probe.
 
     The `kind` is what the panel branches on; the sentence is what the user
     reads, and it is written for someone who does not know what a provider
-    error is. Every branch names the fix.
+    error is. Every branch names the fix. Kinds: no_model, unknown_model,
+    auth_failed, no_credits, rate_limited, provider_error, unreachable, error.
+
+    **Every returned sentence is one this file wrote.** No branch forwards
+    provider text, `str(exc)`, or anything else the far end chose. Not because
+    most branches happen to be safe — because the panel persists the sentence
+    to `chrome.storage.local`, so anything returned here is written to the
+    user's disk and stays there. Provider text goes to the log — redacted and
+    flattened to one line first, since the log keeps it indefinitely and is
+    read by whoever can read the file; a kind goes to the client, and a kind
+    is the only part a client can act on.
     """
     from pydantic_ai.exceptions import ModelHTTPError
 
@@ -786,7 +808,58 @@ def _classify_probe_failure(exc: BaseException) -> tuple[str, str]:
                 "The provider is rate-limiting this key (HTTP 429). Wait a "
                 "moment, or switch models in Settings → Model.",
             )
-        return ("error", f"The provider returned HTTP {status}: {body[:300] or 'no detail'}")
+        if status >= 500:
+            # The provider is having a bad day, not the user's key. It reached
+            # the model, got past auth, and failed. Distinguished from `error`
+            # by *meaning*, not by what it may forward — nothing below
+            # forwards anything.
+            return (
+                "provider_error",
+                "The provider is having trouble (HTTP "
+                f"{status}) — this is not your key. Try again shortly, or "
+                "switch models in Settings → Model.",
+            )
+        # **No branch in this function returns provider text.** It used to:
+        # this one returned `body[:300]`, and the panel persists whatever it
+        # gets into `chrome.storage.local` to survive a close — so up to 300
+        # characters of a third party's HTTP response landed on the user's
+        # disk indefinitely, against "transit, never persist". A provider body
+        # is where a gateway echoes the URL it dialled, a fragment of the key,
+        # and whatever else the far end felt like saying.
+        #
+        # The body is not lost: it goes to the log, where an operator can read
+        # it and nobody else can. The only thing a client can *act* on is a
+        # kind, and every kind here is one this file wrote.
+        #
+        # **Redacted on the way in.** Moving a body out of the response and
+        # into a log file is not by itself a fix: the file keeps the text
+        # indefinitely, and the body is whatever answered — on a self-hosted
+        # install with a user-supplied `base_url` that host is not necessarily
+        # a model provider at all. So `redact_text` runs first and only the
+        # per-kind *counts* are logged beside it; `_one_line` then flattens
+        # control characters so a newline in the body cannot forge a log line.
+        # Both are applied to the body, not to the sentence below: the
+        # sentence is fixed text written here, and there is nothing in it to
+        # redact or to inject.
+        #
+        # `warning`, not `debug`: an operator debugging a misbehaving provider
+        # needs the body, and production is where that debugging happens. It
+        # is safe at warning *because* of the two transforms above.
+        raw_body = str(getattr(exc, "body", "") or "")
+        safe_body, withheld = redact_text(raw_body)
+        log.warning(
+            "model check: provider HTTP %s, body: %s%s",
+            status,
+            _one_line(safe_body)[:500] or "(empty)",
+            f"  [withheld: {withheld}]" if withheld else "",
+        )
+        return (
+            "error",
+            f"The provider rejected the request (HTTP {status}). The model id "
+            "in Settings → Model is the usual cause — check it against the "
+            "provider's list, or try a different model. The server log has the "
+            "response, with anything key-shaped withheld.",
+        )
     # pydantic-ai wraps a transport failure in ModelAPIError and hangs the
     # real error off `__cause__` (`raise ModelAPIError(...) from e`). Every
     # provider SDK it ships sits on httpx, so TransportError covers refused

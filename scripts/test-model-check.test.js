@@ -48,6 +48,15 @@ function extract(name, src = panel) {
 /** A panel whose fetch answers with whatever the test hands it. */
 function panelWith(handler, stored = { modelConfig: { provider: "anthropic", model: "claude-sonnet-5-5", context_window: 1000000 } }, key = "sk-ant-x") {
   const calls = [];
+  const writes = [];
+  // A real storage, not a stub that answers every key with the same object:
+  // the failure record is read and written by key, and a `get` that ignored
+  // its argument would answer "no failure recorded" to a panel that had just
+  // recorded one — which is the whole bug.
+  const local = {
+    modelConfig: stored.modelConfig,
+  };
+  if (stored.modelCheckFailure) local.modelCheckFailure = stored.modelCheckFailure;
   const sandbox = {
     console, Date, JSON, Promise, URL,
     plannerUrlEl: { value: "http://localhost:8000" },
@@ -58,12 +67,17 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
     chrome: {
       storage: {
         local: {
-          get: async (key_) => {
-            if (key_ === "deviceId") return {};
-            if (key_ === "settings") return { settings: { agentSecret: "s3cret-for-the-test" } };
-            return stored;
+          get: async (keys) => {
+            const want = Array.isArray(keys) ? keys : [keys];
+            const out = {};
+            for (const k of want) {
+              if (k === "settings") out.settings = { agentSecret: "s3cret-for-the-test" };
+              else if (k in local) out[k] = local[k];
+            }
+            return out;
           },
-          set: async () => {},
+          set: async (obj) => { writes.push(obj); Object.assign(local, obj); },
+          remove: async (k) => { writes.push({ [k]: undefined }); delete local[k]; },
         },
         session: { get: async () => ({ modelApiKey: key }) },
       },
@@ -75,6 +89,19 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
     MODEL_CHECK_TITLE: {},
     MODEL_CHECK_TTL_MS: 600000,
     modelCheckPass: null,
+    modelCheckFailure: null,
+    // No banner element in this sandbox, so the renderer is inert — its
+    // behaviour is pinned separately, against a real node.
+    $modelCheckBanner: null,
+    document: {
+      createElement: () => ({
+        className: "", textContent: "", innerHTML: "", type: "",
+        listeners: {},
+        addEventListener(t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); },
+      }),
+    },
+    renderMarkdown: (s) => s,
+    settingsBtn: null,
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
@@ -89,13 +116,50 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
   sandbox.lastCredentialRefusal = '';
   vm.runInContext(extract("serverBase"), sandbox);
   sandbox.toast = () => {};
+  // The real title table, so the banner tests read the strings that ship and
+  // not a fixture that can drift from them.
+  const titles = panel.match(/const MODEL_CHECK_TITLE = (\{[\s\S]*?\n\});/);
+  if (!titles) throw new Error("no MODEL_CHECK_TITLE in sidepanel.js — renamed?");
+  sandbox.MODEL_CHECK_TITLE = vm.runInContext(`(${titles[1]})`, sandbox);
+  vm.runInContext(extract("modelCheckTitle"), sandbox);
+  // The kind taxonomy *is* the record's lifetime, so it is read out of the
+  // source rather than restated here — a fixture that drifted from the shipped
+  // list would test a classification the panel does not use.
+  const kinds = panel.match(/const TRANSIENT_CHECK_KINDS = new Set\(\[([\s\S]*?)\]\);/);
+  if (!kinds) throw new Error("no TRANSIENT_CHECK_KINDS in sidepanel.js — renamed?");
+  sandbox.TRANSIENT_CHECK_KINDS = vm.runInContext(`new Set([${kinds[1]}])`, sandbox);
+  vm.runInContext(extract("modelCheckFailureStale"), sandbox);
+  vm.runInContext(extract("modelCheckSig"), sandbox);
+  vm.runInContext(extract("renderModelCheckBanner"), sandbox);
+  vm.runInContext(extract("setModelCheckFailure"), sandbox);
+  vm.runInContext(extract("failModelCheck"), sandbox);
   vm.runInContext(extract("checkModelReady"), sandbox);
   vm.runInContext(extract("deviceId"), sandbox);
   vm.runInContext(extract("authHeaders"), sandbox);
-  return { calls, sandbox, run: () => vm.runInContext("checkModelReady()", sandbox) };
+  return {
+    calls, writes, sandbox, local,
+    run: () => vm.runInContext("checkModelReady()", sandbox),
+    /** Render the banner from the record, against a fake node. */
+    showBanner() {
+      const host = bannerHost();
+      sandbox.$modelCheckBanner = host;
+      vm.runInContext("renderModelCheckBanner()", sandbox);
+      return host;
+    },
+  };
 }
 
 const jsonResponse = (content) => ({ ok: true, json: async () => content });
+
+/** A stand-in for #modelCheckBanner, with the three append paths render uses. */
+function bannerHost() {
+  const host = {
+    hidden: true, children: [], textContent: "",
+    appendChild(c) { this.children.push(c); return c; },
+    append(...cs) { cs.forEach((c) => this.children.push(c)); },
+  };
+  return host;
+}
 
 let failures = 0;
 function check(name, cond, detail) {
@@ -105,6 +169,15 @@ function check(name, cond, detail) {
 }
 
 async function main() {
+  // The sig the shipped modelCheckSig produces for this sandbox: no base_url,
+  // the server the fake panel points at, and a key present in session storage.
+  // Written out rather than computed by calling modelCheckSig, because a
+  // fixture built from the function under test cannot fail when that function
+  // stops covering a field.
+  const CFG = { provider: "anthropic", model: "claude-sonnet-5-5" };
+  const SIG_K = "anthropic:claude-sonnet-5-5||http://localhost:8000|k";
+  const SIG_NOKEY = "anthropic:claude-sonnet-5-5||http://localhost:8000|nokey";
+
   // ── Failures that must stop the task ──────────────────────────────────────
   {
     const { run } = panelWith(() => jsonResponse(
@@ -191,11 +264,25 @@ async function main() {
     check("three sends in a row make one probe", calls.length === 1, `${calls.length} fetches`);
   }
   {
+    // A failure is remembered, but not as a *cache*: it is a standing refusal
+    // that the user has to clear by fixing something. Same config, so no
+    // round-trip — and no way for the model to become usable by being quiet.
     const { calls, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }));
-    await run(); await run();
-    // Caching a failure would leave a user who just fixed the key still
-    // blocked for the length of the TTL — worse than not caching at all.
-    check("a failure is re-probed, never cached", calls.length === 2, `${calls.length} fetches`);
+    await run();
+    const second = await run();
+    check("a recorded failure blocks without another probe", calls.length === 1, `${calls.length} fetches`);
+    check("…with the same answer", second.ok === false && second.kind === "auth_failed");
+  }
+  {
+    // The other half: a user who *fixed* the key must not still be blocked.
+    // The key is gone from the slot on a browser restart, so the sig flips to
+    // `nokey` and the standing record no longer describes this browser.
+    const { calls, sandbox, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }));
+    await run();
+    sandbox.chrome.storage.session.get = async () => ({});   // key cleared — a restart
+    await run();
+    check("a fixed key re-probes instead of serving the old refusal",
+      calls.length === 2, `${calls.length} fetches`);
   }
   {
     // A user who swaps providers must not be let through on the old answer.
@@ -203,6 +290,116 @@ async function main() {
     await run();
     sandbox.modelCheckPass.sig = "openai:gpt-5.6-sol|k";
     check("a different config is a different check", (await run()).model === "anthropic:claude-sonnet-5-5");
+  }
+
+  // ── A stored failure has a lifetime; a standing one does not ──────────────
+  //
+  // The record used to be forever. One 5xx from a provider at save time left
+  // the user unable to send a task at all — the only exit was re-saving, which
+  // is not something anyone knows to try. The split is the taxonomy the probe
+  // already draws: a kind a retry fixes expires on the same TTL as the pass
+  // cache, and a kind only the user can fix keeps standing, because that is
+  // the thing the banner is asking them to do.
+  {
+    for (const kind of ["rate_limited", "provider_error", "unreachable", "error"]) {
+      const { calls, run } = panelWith(() => jsonResponse({ ok: true }),
+        { modelConfig: CFG, modelCheckFailure: { kind, body: "blip", sig: SIG_K, at: Date.now() } });
+      const r = await run();
+      check(`a fresh ${kind} still blocks the run`, r.ok === false && r.kind === kind, JSON.stringify(r));
+      check("…without re-probing", calls.length === 0, `${calls.length} fetches`);
+    }
+  }
+  {
+    for (const kind of ["rate_limited", "provider_error", "unreachable", "error"]) {
+      const { calls, local, run } = panelWith(() => jsonResponse({ ok: true, model: "anthropic:claude-sonnet-5-5" }),
+        { modelConfig: CFG, modelCheckFailure: { kind, body: "blip", sig: SIG_K, at: Date.now() - 600001 } });
+      const r = await run();
+      check(`a ${kind} past the TTL re-probes instead of blocking`,
+        calls.length === 1 && r.ok === true, `${calls.length} fetches ${JSON.stringify(r)}`);
+      // The clear is fire-and-forget inside checkModelReady; await a turn so
+      // this asserts the write rather than racing it.
+      await new Promise((res) => setImmediate(res));
+      check("…and the spent record is cleared", !local.modelCheckFailure,
+        JSON.stringify(local.modelCheckFailure));
+    }
+  }
+  {
+    // One second inside the TTL is still an answer. A TTL that expired at the
+    // first send would just be "never cache a failure", which the standing
+    // kinds below are the whole reason not to do.
+    const { calls, run } = panelWith(() => jsonResponse({ ok: true }),
+      { modelConfig: CFG, modelCheckFailure: { kind: "rate_limited", body: "blip", sig: SIG_K, at: Date.now() - 599000 } });
+    check("a transient failure inside its TTL still blocks", (await run()).ok === false);
+    check("…with no probe", calls.length === 0, `${calls.length} fetches`);
+  }
+  {
+    // The standing half: these do not expire, and that is the feature. A
+    // rejected key stays rejected until the user pastes a working one, and a
+    // retry cannot change that.
+    for (const kind of ["auth_failed", "no_credits", "no_model", "unknown_model",
+                        "a_kind_this_build_predates"]) {
+      const { calls, run } = panelWith(() => jsonResponse({ ok: true }),
+        { modelConfig: CFG, modelCheckFailure: { kind, body: "no", sig: SIG_K, at: Date.now() - 86400000 } });
+      const r = await run();
+      check(`${kind} still blocks a day later`, r.ok === false && r.kind === kind, JSON.stringify(r));
+      check("…with no probe", calls.length === 0, `${calls.length} fetches`);
+    }
+  }
+  {
+    // A record from before this field existed: transient by kind, unmeasured
+    // by age. Re-probed rather than trusted — standing kinds are unaffected
+    // because they never consult `at`.
+    const { calls, run } = panelWith(() => jsonResponse({ ok: true }),
+      { modelConfig: CFG, modelCheckFailure: { kind: "unreachable", body: "blip", sig: SIG_K } });
+    check("an unmeasured transient record is re-probed", (await run()).ok === true && calls.length === 1);
+    const held = panelWith(() => jsonResponse({ ok: true }),
+      { modelConfig: CFG, modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_K } });
+    check("…while an unmeasured standing one still holds", (await held.run()).ok === false);
+  }
+  {
+    const { sandbox } = panelWith(() => jsonResponse({ ok: true }));
+    check("the transient list is the four retryable kinds and nothing else",
+      [...sandbox.TRANSIENT_CHECK_KINDS].sort().join(",")
+        === "error,provider_error,rate_limited,unreachable",
+      [...sandbox.TRANSIENT_CHECK_KINDS].join(","));
+  }
+
+  // ── The sig covers the two things a changed answer rides on ───────────────
+  {
+    const src = extract("modelCheckSig");
+    check("the sig carries the base URL", /cfg\.base_url/.test(src), src);
+    check("…and the server the probe is sent to", /plannerUrlEl/.test(src), src);
+  }
+  {
+    // A self-hoster re-pointing an OpenAI-compatible endpoint is asking a
+    // different question with the same provider and model.
+    const at_a = { provider: "openai", model: "local", base_url: "http://a.example/v1" };
+    const at_b = { provider: "openai", model: "local", base_url: "http://b.example/v1" };
+    const { calls, local, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }),
+      { modelConfig: at_a });
+    await run();
+    check("…and a re-pointed base URL re-arms the check", (await run()).ok === false && calls.length === 1);
+    local.modelConfig = at_b;
+    await run();
+    check("…changing it probes again instead of serving the old answer",
+      calls.length === 2, `${calls.length} fetches`);
+  }
+  {
+    // Which server you ask is part of the question too — a different relay
+    // may resolve a different model or refuse a different credential.
+    const { calls, sandbox, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }));
+    await run();
+    sandbox.plannerUrlEl.value = "http://elsewhere:9000";
+    await run();
+    check("…and a changed server URL re-arms the check", calls.length === 2, `${calls.length} fetches`);
+  }
+  {
+    // A trailing slash is the same address, not a new one.
+    const { calls, sandbox, run } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "no" }));
+    await run();
+    sandbox.plannerUrlEl.value = "http://localhost:8000/";
+    await run();
+    check("a trailing slash is not a different server", calls.length === 1, `${calls.length} fetches`);
   }
 
   // ── What goes over the wire ───────────────────────────────────────────────
@@ -278,6 +475,185 @@ async function main() {
       /_CREDIT_HINTS/.test(mainPy) && /"no_credits"/.test(mainPy));
     check("a transport failure is unreachable, not a bad key",
       /httpx\.TransportError/.test(mainPy));
+  }
+
+  // ── The failure outlives the panel ───────────────────────────────────────
+  //
+  // The moment a bad model matters is the moment the panel is *closed*: the
+  // user saved a config, saw it save, typed a task in a panel they had closed
+  // and reopened. An in-memory record is gone by then, and the whole feature
+  // is the gap between "saved" and "first task".
+  {
+    const { local, writes, run } = panelWith(() => jsonResponse(
+      { ok: false, kind: "auth_failed", error: "Your API key was rejected by the provider (HTTP 401)." }));
+    const r = await run();
+    check("a failure is written to storage", !!local.modelCheckFailure,
+      JSON.stringify(local.modelCheckFailure));
+    check("…with the kind the banner titles itself from",
+      local.modelCheckFailure.kind === "auth_failed");
+    check("…the provider's own sentence", /HTTP 401/.test(local.modelCheckFailure.body));
+    // The full sig, written out: provider, model, base URL, server, key
+    // presence. A sig that quietly dropped a field would still end in `|k`.
+    check("…and the sig it was raised under, so a changed config is a different failure",
+      local.modelCheckFailure.sig === r.sig && r.sig === SIG_K, r.sig);
+    check("…into local, not session — it has to outlive the panel",
+      /modelCheckFailure/.test(JSON.stringify(writes)));
+  }
+  {
+    // session storage is emptied by a browser restart; a refusal has to
+    // survive that, because the restart is usually what the user did to try
+    // to fix it.
+    check("the record is not written to chrome.storage.session",
+      !/session\.set\(\{\s*modelCheckFailure/.test(panel));
+  }
+  {
+    // A pass is the only thing that clears a standing refusal.
+    let answer = { ok: false, kind: "auth_failed", error: "no" };
+    const { local, run } = panelWith(() => jsonResponse(answer));
+    await run();
+    check("the failure is standing", !!local.modelCheckFailure);
+    answer = { ok: true, model: "anthropic:claude-sonnet-5-5" };
+    const { local: l2, run: r2 } = panelWith(() => jsonResponse(answer),
+      { modelConfig: CFG,
+        modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_K } },
+      null);   // the record was raised under a key this browser no longer
+              // holds — `null`, not `undefined`, which a default parameter
+              // would silently swap back for the key
+    const fixed = await r2();
+    check("a passing check lets the run start", fixed.ok === true);
+    // The write is fire-and-forget inside checkModelReady; await a turn so it
+    // is not racing the assertion rather than absent.
+    await new Promise((res) => setImmediate(res));
+    check("…and clears the standing failure", !l2.modelCheckFailure,
+      JSON.stringify(l2.modelCheckFailure));
+  }
+
+  // ── The banner ───────────────────────────────────────────────────────────
+  {
+    const { sandbox, showBanner } = panelWith(() => jsonResponse({ ok: false, kind: "auth_failed", error: "HTTP 401" }));
+    await vm.runInContext("checkModelReady()", sandbox);
+    const host = showBanner();
+    const text = host.children.map((c) => c.textContent || c.innerHTML).join(" | ");
+    check("the banner shows for a stored failure", host.hidden === false);
+    check("…the title for the kind", /Your API key was rejected/.test(text), text);
+    check("…the provider's sentence beneath it", /HTTP 401/.test(text), text);
+    check("…and the place it can be fixed",
+      host.children.some((c) => c.textContent === "Settings → Model"), text);
+  }
+  {
+    const { showBanner } = panelWith(() => jsonResponse({ ok: true }));
+    const host = showBanner();
+    check("no failure, no banner", host.hidden === true);
+  }
+  {
+    // A kind the server ships ahead of this build. An unknown kind must still
+    // produce a sentence — `MODEL_CHECK_TITLE[kind] || …` appears in two places
+    // and neither may be undefined.
+    const { sandbox, showBanner } = panelWith(() => jsonResponse(
+      { ok: false, kind: "something_new", error: "the provider is down" }));
+    sandbox.MODEL_CHECK_TITLE = {};
+    vm.runInContext(extract("modelCheckTitle"), sandbox);
+    await vm.runInContext("checkModelReady()", sandbox);
+    const host = showBanner();
+    const text = host.children.map((c) => c.textContent || c.innerHTML).join(" | ");
+    check("an unknown kind still renders a sentence",
+      /The model could not be used/.test(text), text);
+    check("…and the server's body still reaches the user", /the provider is down/.test(text), text);
+  }
+  {
+    // The kind the sibling server change adds, pinned here so the title
+    // exists the moment it ships rather than after.
+    check("there is a title for a provider 5xx",
+      /provider_error:\s*'/.test(panel));
+  }
+  {
+    // The generic `error` kind stops echoing raw provider text, so the record
+    // can legitimately arrive with no body at all. The title is already a
+    // complete sentence; what must not happen is the word "undefined".
+    const { sandbox, showBanner } = panelWith(() => jsonResponse({ ok: false, kind: "error", error: "x" }));
+    sandbox.modelCheckFailure = { kind: "error", sig: SIG_K, at: Date.now() };   // no body
+    const host = showBanner();
+    const text = host.children.map((c) => c.textContent || c.innerHTML).join(" | ");
+    check("a record with no body renders nothing undefined", !/undefined/.test(text), text);
+    check("…the title alone still says what happened",
+      /The model could not be used/.test(text), text);
+    check("…and no empty body line is left standing", host.children.length === 2, text);
+  }
+
+  // ── The restart trap ─────────────────────────────────────────────────────
+  //
+  // The API key lives in chrome.storage.session on purpose — see
+  // docs/architecture/extension.md — so a browser restart empties it. A record
+  // that survived without re-deriving its sig would leave "your API key was
+  // rejected" standing on a browser that no longer has a key. That is worse
+  // than saying nothing, so the sig is compared on every render.
+  {
+    panelWith(() => jsonResponse({ ok: true }), {
+      modelConfig: CFG,
+      modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_K },
+    }, null);   // no key in session — the browser restarted
+    check("the sig counts the presence of a key, not the key",
+      /apiKey \? 'k' : 'nokey'/.test(extract("modelCheckSig")), extract("modelCheckSig"));
+    check("the key is not in the sig itself",
+      !/sk-ant-x/.test(extract("modelCheckSig")));
+  }
+  {
+    const { calls, run } = panelWith(() => jsonResponse({ ok: true }), {
+      modelConfig: CFG,
+      modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_NOKEY },
+    }, null);   // no key — and the record already says nokey
+    check("a record that still matches its browser still blocks",
+      (await run()).ok === false);
+    check("…without a probe", calls.length === 0, `${calls.length} fetches`);
+  }
+  {
+    // refreshModelCheckBanner is what runs on open; it must clear a record
+    // whose sig no longer describes this browser.
+    const p = panelWith(() => jsonResponse({ ok: true }), {
+      modelConfig: CFG,
+      modelCheckFailure: { kind: "auth_failed", body: "no", sig: SIG_K },
+    }, null);
+    p.sandbox.$modelCheckBanner = bannerHost();
+    vm.runInContext(extract("refreshModelCheckBanner"), p.sandbox);
+    await vm.runInContext("refreshModelCheckBanner()", p.sandbox);
+    check("a browser restart clears the banner rather than leaving it standing",
+      !p.local.modelCheckFailure && p.sandbox.modelCheckFailure === null,
+      JSON.stringify(p.local.modelCheckFailure));
+    check("…and hides the strip", p.sandbox.$modelCheckBanner.hidden === true);
+  }
+
+  // ── Save probes ──────────────────────────────────────────────────────────
+  //
+  // A save that cannot check what it just saved is a save that fails on the
+  // user's first task, with the reason a screen away from where they were
+  // looking. Asserted on the source because the ordering is the point and
+  // ordering is invisible in a return value.
+  {
+    const saveStart = panel.indexOf("if ($modelSave) {");
+    const saveBody = panel.slice(saveStart, panel.indexOf("\n}", saveStart));
+    const at = (n) => saveBody.indexOf(n);
+    check("save writes the config before it probes",
+      at("modelConfig:") > 0 && at("modelCheckPass = null") > at("modelConfig:"));
+    check("…drops the cached pass before probing",
+      at("modelCheckPass = null") < at("await checkModelReady()"));
+    // The deadlock this closes: the gate short-circuits a stored refusal so a
+    // send costs no round-trip, so without this the save's own probe would read
+    // the refusal it is meant to replace and a user who pasted a corrected key
+    // would never be unblocked. The sig cannot see the key's value, so the save
+    // is the only place that re-arms.
+    check("…and clears the standing failure, or the save probes its own refusal",
+      at("await setModelCheckFailure(null)") > 0
+      && at("await setModelCheckFailure(null)") < at("await checkModelReady()"), saveBody);
+    check("save says it is checking", /Checking…/.test(saveBody), saveBody);
+    check("…and says what happened",
+      /'✗ Saved — the model could not be used\.'/.test(saveBody), saveBody);
+    check("a failing save does not claim Saved.",
+      /check\.ok \? 'Saved\.' : /.test(saveBody), saveBody);
+  }
+  {
+    check("the send gate is the only call site that blocks a task on the model",
+      (panel.match(/await checkModelReady\(\)/g) || []).length === 2,
+      "one in the save handler, one in sendUserMessage");
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

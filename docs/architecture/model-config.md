@@ -290,12 +290,25 @@ than only checking the response shape.
   already works; routing it through this gate would replace "Server
   unreachable, retrying" with "your API key was rejected", sending the user to
   fix something that isn't broken.
-- **A pass is cached for 10 minutes in the panel, a failure never is.** Only a
-  pass is cached because caching a failure leaves a user who has just fixed
-  the key still blocked for the TTL — worse than not caching at all. The
-  cache is keyed on provider, model and *whether* a key was present, never on
-  the key itself; a re-paste in Settings clears it outright, since two keys of
-  the same length are indistinguishable without hashing a secret to find out.
+- **A pass is cached for 10 minutes in the panel; a failure is cached in
+  storage, and only some kinds expire.** A pass is cached because paying for
+  the probe on every send is a tax, and caching a *standing* failure would
+  leave a user who has just fixed the key still blocked for the TTL — worse
+  than not caching at all. The record itself is written to
+  `chrome.storage.local` because the moment it matters is the moment the panel
+  is closed. Its **lifetime follows the taxonomy above**:
+  `TRANSIENT_CHECK_KINDS` (`rate_limited`, `provider_error`, `unreachable`,
+  and the catch-all `error`) expire on the same 10-minute TTL as the pass
+  cache and re-probe on the next send; every other kind stands until the user
+  changes something, which is exactly what the banner asks them to do. A kind
+  in neither list counts as **standing**, so one a future server ships cannot
+  become a permanent block for every user it reaches. The record predates the
+  TTL only in the transient direction — a standing failure never consults
+  `at`.
+  The cache is keyed on provider, model, base URL, the **server the probe is
+  sent to**, and *whether* a key was present, never on the key itself; a
+  re-paste in Settings clears it outright, since two keys of the same length
+  are indistinguishable without hashing a secret to find out.
 - **`_inline_model()` is one parser for three call sites** (this, `task_start`,
   `/v1/suggestions`). They were three separate literal parses, which is how a
   check ends up answering `ok` for a config the run would refuse.
@@ -311,6 +324,44 @@ exhausted balance with a 400 and a sentence — "insufficient balance" — rathe
 than a 402, so `_CREDIT_HINTS` reads the body. The keyword test is deliberately
 narrow: a schema complaint reported as `no_credits` would send someone to top
 up a paid account.
+
+**No branch forwards provider text — that is a property of every branch, not
+of the 5xx one.** It started as a fix to one branch and it is the general rule:
+`_classify_probe_failure` returns sentences *this file wrote*, and a kind, and
+nothing else. Provider text goes to `log.warning` where an operator can read
+it; a kind goes to the client, because a kind is the only part a client can
+*act* on.
+
+The rule is load-bearing because of what the panel does with the sentence: it
+persists it to `chrome.storage.local` to survive a close. So a forwarded
+`body[:300]` is not a response field, it is up to 300 characters of a third
+party's HTTP response written to the user's disk indefinitely — against
+"transit, never persist", and carrying whatever the far end felt like saying:
+the URL it dialled, a fragment of the key, an internal hostname. `error` did
+exactly that until this rule existed. Two tests hold it in place, one per
+branch that has ever been caught doing it:
+`test_the_response_never_echoes_the_key` (the invariant — the key is the one
+thing that must never come back) and
+`test_a_provider_5xx_never_echoes_the_provider_body` /
+`test_the_generic_error_branch_never_echoes_the_provider_body` (the guard
+against re-adding it "helpfully" — they assert the provider's own words are
+absent, not just the key).
+
+**A 5xx is `provider_error`, not `error` — for what it means, not what it may
+forward.** `error` was absorbing three unrelated things: a 5xx, a 400 that
+matched neither hint set, and a non-httpx SDK exception. A 5xx means the
+request got *past* auth and the model itself failed — reported as `error` it
+reads as "your key is wrong" and sends the user to re-paste a key that was
+fine, which is the case the product owner named: *if the model is down, show
+the error*. The split is therefore about diagnosis, and adding it was what
+exposed the echo in its neighbour.
+
+The kinds are therefore: `no_model`, `unknown_model`, `auth_failed`,
+`no_credits`, `rate_limited`, `provider_error`, `unreachable`, `error`.
+`no_model` is the only one the panel rewrites; the rest render
+`modelCheckTitle(kind)`, which falls back to a generic sentence rather than
+`undefined`, so a kind this build of the panel has not heard of degrades
+instead of rendering nothing.
 
 **Transport failures are found by walking `__cause__`.** pydantic-ai wraps a
 connect failure in `ModelAPIError` and hangs the real error off the cause

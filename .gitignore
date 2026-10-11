@@ -127,6 +127,12 @@ skills-lock.json
 # Local scratch previews
 .preview/
 
+# Supabase CLI local state. `supabase/.temp/` is written by `supabase link` and
+# holds the linked project ref, the pooler URL and a linked-project.json —
+# per-machine connection state pointing at one developer's database. The
+# migrations it reads are tracked; this is not a migration.
+supabase/.temp/
+
 # Visual brainstorming companion
 .superpowers/
 
