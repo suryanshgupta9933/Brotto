@@ -188,6 +188,40 @@ def test_an_orphaned_residue_keeps_the_owner_that_can_still_erase_it(sessions_di
     assert owner.exists(), "the account can no longer erase the scratchpad it has"
 
 
+def test_a_surviving_document_keeps_the_owner_that_can_still_erase_it(sessions_dir):
+    """The document is in `_SESSION_RESIDUE_EXT`'s absence, and that absence is
+    the bug this pins.
+
+    The two guards above cover the two shapes that could strand a *sidecar* —
+    a hand-deleted `.json`, and an owner with nothing beside it at all. Neither
+    reaches this one: a `.json` that is fresh (an active or recently-closed
+    run) beside an `.owner` written 40 days ago at mint time and never touched
+    since. `.owner` is written once and never updated, so its mtime is the
+    *start* of the run; the document's is the last activity. Dropping the
+    owner there is permanent — `owned_sessions()` is what scopes an erasure, so
+    the account can never delete that transcript again, and nothing in the
+    product reaches a file no owner claims.
+
+    No scratchpad, no `.pages.json`, no `.json.tmp`: the residue extensions
+    are all absent, which is exactly why the old list found "nothing left".
+    """
+    from brotto_orchestrator.agent import audit as audit_mod
+
+    trail = AuditTrail("old", dir=sessions_dir)
+    trail.begin_task("a long-running task")
+    trail.close()
+    owner = sessions_dir / f"old{audit_mod._OWNER_EXT}"
+    owner.write_text("account-id", encoding="utf-8")
+    aged = time.time() - 40 * 86400
+    os.utime(owner, (aged, aged))
+    os.utime(sessions_dir / "old.json", None)  # touched yesterday
+
+    prune_older_than(30, dir=sessions_dir)
+
+    assert (sessions_dir / "old.json").exists(), "a fresh document is not stale"
+    assert owner.exists(), "the account can no longer erase its own transcript"
+
+
 def test_an_owner_with_nothing_left_to_erase_is_still_pruned(sessions_dir):
     """The other half, or the guard above is just a leak: with the document
     and every residue sidecar gone, there is nothing to keep an owner for and
@@ -206,3 +240,24 @@ def test_an_owner_with_nothing_left_to_erase_is_still_pruned(sessions_dir):
     prune_older_than(30, dir=sessions_dir)
 
     assert not owner.exists()
+
+
+def test_an_owner_and_its_staging_file_do_not_keep_each_other_alive(sessions_dir):
+    """The other half of the same pair, and it is a leak: `.owner` and
+    `.owner.tmp` are each other's reason to stay, so an interrupted
+    `record_owner` left behind a `.tmp` made both of them immortal. Neither is
+    content — both are the same account id, erased together or not at all."""
+    from brotto_orchestrator.agent import audit as audit_mod
+
+    aged = time.time() - 40 * 86400
+    owner = sessions_dir / "old.owner"
+    owner.write_text("account-id", encoding="utf-8")
+    staging = sessions_dir / f"old{audit_mod._OWNER_EXT}.tmp"
+    staging.write_text("account")
+    for p in (owner, staging):
+        os.utime(p, (aged, aged))
+
+    prune_older_than(30, dir=sessions_dir)
+
+    assert not owner.exists(), "an orphaned account id must age out"
+    assert not staging.exists()
