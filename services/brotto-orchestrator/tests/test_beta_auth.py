@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1124,24 +1124,26 @@ def _parse_postgrest(query):
 def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=(), waitlisted=()):
     """The control plane as the approval path uses it.
 
-    Models the three tables rather than answering the same thing to every
-    query: `beta_access` and `waitlist` filter by the address asked for (so
-    a claim that is *not* the one the caller typed finds nothing), and
-    `profiles` hands back whatever rows it was seeded with. Returns the
-    calls.
+    Models the tables rather than answering the same thing to every
+    query: `beta_access` filters by the address asked for (so a claim that is
+    *not* the one the caller typed finds nothing), and `profiles` hands back
+    whatever rows it was seeded with. Returns the calls.
 
-    The `beta_access`/`waitlist` branches go through `_parse_postgrest`, so
+    One table, three columns — `010` merged the waitlist in. `listed` are
+    **granted** rows (`approved_at` set); `waitlisted` are requests the
+    operator never answered (`asked_at` only), which is the difference
+    between a beta account and a stranger. `revoked` are addresses on the
+    roster *and* withdrawn. The branch goes through `_parse_postgrest`, so
     the stub agrees with the server about where the filter ends — stubbing
     the raw string would make any encoding look correct, because the test
-    would be the only parser in the room. `revoked` are addresses that are
-    on the roster *and* withdrawn.
+    would be the only parser in the room.
     """
     calls = []
 
     async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
         calls.append({"method": method, "query": query, "body": body,
                       "path": path, "prefer": prefer})
-        if path == jwt_auth.BETA_ACCESS_PATH or path == jwt_auth.WAITLIST_PATH:
+        if path == jwt_auth.BETA_ACCESS_PATH:
             parsed = [f for f in _parse_postgrest(query) if f["column"] == "email"]
             # A filter that does not resolve to exactly one address is not a
             # lookup for anybody, which is the outcome a parser differential
@@ -1149,12 +1151,18 @@ def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=(), waitlisted=
             want = parsed[0]["values"][0] if (
                 len(parsed) == 1 and len(parsed[0]["values"]) == 1 and not parsed[0]["trailing"]
             ) else None
-            if path == jwt_auth.WAITLIST_PATH:
-                return 200, json.dumps([{"email": r} for r in waitlisted if r == want])
-            return 200, json.dumps([
-                {"email": r, "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None}
-                for r in listed if r == want
-            ])
+            rows = []
+            for r in waitlisted:
+                if r == want:
+                    rows.append({"email": r, "asked_at": "2026-10-01T00:00:00Z",
+                                 "approved_at": None,
+                                 "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None})
+            for r in listed:
+                if r == want:
+                    rows.append({"email": r, "asked_at": None,
+                                 "approved_at": "2026-10-01T00:00:00Z",
+                                 "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None})
+            return 200, json.dumps(rows)
         if method == "POST":
             return 201, ""
         return 200, json.dumps(list(profiles))
@@ -1200,7 +1208,9 @@ def test_the_account_is_created_at_exchange_and_supabase_mails_nothing(
         # `startwith`, not `==`: `_profiles` concatenates the query onto the
         # path, so the lookup arrives as `rest/v1/beta_access?email=...`.
         if path.startswith(jwt_auth.BETA_ACCESS_PATH):
-            return 200, json.dumps([{"email": "beta@example.test", "revoked_at": None}])
+            return 200, json.dumps([{"email": "beta@example.test", "revoked_at": None,
+                                     "approved_at": "2026-10-01T00:00:00Z",
+                                     "asked_at": None}])
         if path == "rest/v1/sign_in_codes":
             return 201, ""
         if path == "auth/v1/admin/users":
@@ -1273,6 +1283,20 @@ def test_the_reply_names_the_roster_state_it_actually_read(client, monkeypatch, 
     assert minted == [admitted], "a code was minted for a state that should not get one"
 
 
+def test_a_waitlist_signup_is_not_an_admission(hosted, monkeypatch):
+    """The property `010` exists for.
+
+    A row with only `asked_at` is a request the operator never answered.
+    Reading "a row exists" as "admitted" hands every waitlist signup a beta
+    account — silent, and one migration away from looking right in review.
+    """
+    import asyncio
+
+    _roster_stub(monkeypatch, waitlisted=[LISTED])
+    assert asyncio.run(jwt_auth._beta_status(LISTED)) == "pending"
+    assert asyncio.run(jwt_auth._listed_for_beta(LISTED)) is False
+
+
 def test_a_failed_mint_for_an_admitted_address_says_try_again(client, monkeypatch, hosted):
     """The one outcome that is not a roster state, and the one that must not
     be a 502.
@@ -1289,7 +1313,9 @@ def test_a_failed_mint_for_an_admitted_address_says_try_again(client, monkeypatc
     # The roster must still answer; only the insert fails.
     async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
         if path == jwt_auth.BETA_ACCESS_PATH:
-            return 200, json.dumps([{"email": admitted, "revoked_at": None}])
+            return 200, json.dumps([{"email": admitted, "revoked_at": None,
+                                     "approved_at": "2026-10-01T00:00:00Z",
+                                     "asked_at": None}])
         if path == "rest/v1/sign_in_codes":
             return 500, '{"message":"nope"}'
         return 200, "[]"
@@ -1344,33 +1370,58 @@ def test_a_listed_address_approves_itself_at_exchange(client, monkeypatch, hoste
     assert insert["prefer"] == "resolution=ignore-duplicates"
 
 
+def test_the_filter_is_a_bare_literal_not_a_quoted_identifier():
+    """`eq."addr"` matches no row — this is the bug that hid a rostered address.
+
+    PostgREST treats `"…"` as a value delimiter only inside `in.(…)` and
+    `or=(…)`. Standalone, the quote characters travel with the value and
+    the lookup finds nothing. Measured against a live PostgREST: bare
+    `eq.suryanshgupta9933%40gmail.com` returns the row, quoted
+    `eq."suryanshgupta9933%40gmail.com"` returns `[]`. A round-trip test
+    cannot see this — only the wire shape can.
+    """
+    got = jwt_auth._filter_value("someone@example.test")
+    assert not got.startswith('"') and not got.endswith('"'), got
+    assert "%22" not in got
+    assert got == quote("someone@example.test", safe="")
+
+
+def test_a_comma_in_an_address_is_refused_rather_than_split(
+    client, monkeypatch, hosted
+):
+    """The comma is the list separator; refusing it is the guard.
+
+    `EMAIL_RE`'s local part admits a comma, and PostgREST URL-decodes
+    *before* it parses the filter grammar — so `quote()` turning `,` into
+    `%2C` buys nothing, the parser still sees a comma and reads two
+    values. `in.("…")` is PostgREST's documented escape for this; refused
+    here rather than guessed at, same as `"` and `\\`.
+    """
+    nasty = "a,b(c)@example.test"
+    calls = _roster_stub(monkeypatch, listed=[nasty])
+    _stub_verify(monkeypatch, email=nasty)
+    resp = client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
+    assert resp.json()["approved"] is False
+    assert [c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH] == []
+    with pytest.raises(ValueError):
+        jwt_auth._filter_value(nasty)
+
+
 def test_the_roster_filter_survives_a_postgrest_parser(client, monkeypatch, hosted):
     """The address comes back out of the filter parser exactly as typed.
 
-    `EMAIL_RE`'s local part admits a comma, and in PostgREST a comma
-    separates values in a list — so an address this code accepts and a
-    parser reading the same string can place the end of the filter in
-    different spots. The address here is otherwise entirely legitimate,
-    which is the point: nothing about the alphabet changed, only how it
-    reaches the query.
-
-    **This asserts against a parser, not against a round trip.** The test
-    that preceded it compared the decoded query string with the address it
-    started from, and it passed under both the broken and the fixed
-    implementation — because a round trip through *this* decoder always
-    gets the value back, whatever PostgREST then does with it. PostgREST
-    URL-decodes **before** it parses the filter grammar, so a
-    percent-encoded comma is a comma to the thing that matters;
-    `_parse_postgrest` does it in that order, and the assertion is on the
-    structure that comes back.
+    **This asserts against a parser, not against a round trip.** A round
+    trip through *this* decoder always gets the value back, whatever
+    PostgREST then does with it. PostgREST URL-decodes **before** it parses
+    the filter grammar; `_parse_postgrest` does it in that order, and the
+    assertion is on the structure that comes back. Parens and a plus are
+    in this address on purpose — legal in a local part, and not the
+    characters the grammar reserves.
     """
-    nasty = "a,b(c)@example.test"
-    calls = _roster_stub(monkeypatch, listed=[nasty], profiles=[{"revoked_at": None}])
-    _stub_verify(monkeypatch, email=nasty)
-    resp = client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
-    # The parser is the stub's own, so this is the end-to-end consequence:
-    # a filter the parser cannot resolve to one address finds nobody, and
-    # a listed member is refused at sign-in.
+    addr = "a(b)+c@example.test"
+    calls = _roster_stub(monkeypatch, listed=[addr], profiles=[{"revoked_at": None}])
+    _stub_verify(monkeypatch, email=addr)
+    resp = client.post("/v1/auth/exchange", json={"email": addr, "code": "123456"})
     assert resp.json()["approved"] is True
 
     roster = next(c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH)
@@ -1379,20 +1430,18 @@ def test_the_roster_filter_survives_a_postgrest_parser(client, monkeypatch, host
     got = parsed[0]
     assert got["column"] == "email"
     assert got["op"] == "eq"
-    # One value, and it is the address — not a list, and not a prefix of it.
-    assert got["values"] == [nasty]
+    assert got["values"] == [addr]
     assert not got["trailing"]
 
 
 def test_a_quote_in_an_address_is_refused_rather_than_quoted(client, monkeypatch, hosted):
-    """A value must not be able to close its own quoting.
+    """A value must not be able to open its own quoting.
 
-    `quote()` percent-encodes `"`, so inside the literal a quote would be
-    invisible on the wire and reappear at the grammar layer exactly where
-    it ends the string. There is no escape sequence defined here that has
-    been checked against PostgREST, so the value is rejected — and it is
-    rejected *loudly enough to tell it from a miss*, because a rejection
-    here otherwise reads as "not in the beta".
+    `"` is what opens a PostgREST value literal, and a value carrying one
+    can reshape the filter. `quote()` percent-encodes it, which buys
+    nothing — PostgREST decodes before it parses. There is no escape
+    sequence used here that has been checked against PostgREST, so the
+    value is rejected.
     """
     nasty = 'a"b@example.test'
     calls = _roster_stub(monkeypatch, listed=[nasty])
@@ -1406,12 +1455,9 @@ def test_a_backslash_in_an_address_is_refused_rather_than_quoted(client, monkeyp
     """The escape character is the other half of the same hole.
 
     Inside a PostgREST literal `\\` is the escape character, so a value
-    carrying one can terminate or reshape the literal even though it never
-    contains a `"`. `EMAIL_RE`'s local part is `[^@\\s]{1,64}` and accepts a
-    backslash, so this is reachable from a real address typed on a form —
-    the same trade already accepted for `"` and rejected for the same
-    reason: no escape rule here has been checked against a real PostgREST,
-    so the value is refused instead of guessed at.
+    carrying one can reshape the filter even though it never contains a
+    `"`. `EMAIL_RE`'s local part is `[^@\\s]{1,64}` and accepts a
+    backslash, so this is reachable from a real address typed on a form.
 
     The guard is deny-by-default on what the grammar *reserves*, not
     allow-by-default on what it does not; an allow-list of safe characters

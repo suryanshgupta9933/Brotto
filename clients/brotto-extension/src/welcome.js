@@ -57,7 +57,9 @@ function edition() {
 // strand the toast on screen.
 let toastTimer = null;
 let toastGoneTimer = null;
-function toast(text, kind, ms = 2600) {
+// Errors hold longer than facts — 5200, the side panel's own bad-toast
+// budget — so the sentence can be read before it leaves.
+function toast(text, kind, ms = kind === "bad" ? 5200 : 2600) {
   clearTimeout(toastTimer);
   clearTimeout(toastGoneTimer);
   const old = document.querySelector(".toast");

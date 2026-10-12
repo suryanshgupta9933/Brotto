@@ -61,19 +61,56 @@ def test_a_row_is_an_email_and_nothing_else():
     assert "create function" not in sql
 
 
-def test_the_allowlist_and_the_waitlist_stay_separate_tables():
-    """The oracle. Auto-copying a waitlist row here would let anyone ask
-    `POST /v1/waitlist` "is this address in the beta?" — the one route that is
-    reachable with no credential at all.
+def test_the_waitlist_write_path_cannot_grant_the_beta():
+    """The oracle, and `010` moved it from a table rule to a column rule.
+
+    `004` kept `beta_access` and `waitlist` disjoint so that nothing could turn
+    a `POST /v1/waitlist` submission — the one route reachable with no
+    credential at all — into an admission without a human deciding. `010` merged
+    the two tables, so the boundary is now which columns the unauthenticated
+    write path may name: `asked_at`, `name`, `batch`, and never `approved_at` or
+    `revoked_at`. Two properties make that safe and both are asserted here:
+    `approved_at` carries **no default** (an insert that omits it writes a
+    request, not a grant) and the row is allowed to record only a request.
+
+    A default back on `approved_at` is the whole attack: the waitlist insert
+    omits the column, so every stranger who asked would be admitted.
     """
-    beta = _sql("004_beta_access.sql")
-    # A submission arriving by itself: a batch label and a creation time are
-    # how a waitlist row carries itself, and neither belongs on an allowlist
-    # row a human wrote.
-    assert "batch" not in beta
-    assert "created_at" not in beta
-    # And no second table: this file creates one table and only one.
-    assert beta.count("create table") == 1
+    sql = _sql("010_merge_waitlist.sql")
+    assert "alter column approved_at drop not null" in sql
+    assert "alter column approved_at drop default" in sql
+    # A row that is neither a request nor a grant nor a withdrawal is refused.
+    assert "beta_access_says_something" in sql
+    assert "asked_at is not null" in sql
+
+
+def test_the_merge_leaves_the_decision_columns_alone():
+    """A row already on the roster must keep its grant and its withdrawal.
+
+    The copy fills the request columns and touches nothing else, so an address
+    in both tables — a member who also asked — is one row that is still
+    `revoked` or still `admitted`, and never a row the merge re-admitted.
+    """
+    sql = _sql("010_merge_waitlist.sql")
+    assert "drop table waitlist" in sql
+    # The upsert's SET list is the whole of what it may write.
+    upsert = sql.split("on conflict (email) do update")[1].split("drop table")[0]
+    for forbidden in ("approved_at", "revoked_at"):
+        assert f"set {forbidden}" not in upsert
+        assert f"{forbidden} = " not in upsert
+
+
+def test_the_formula_guards_followed_the_columns():
+    """`005` and `006` guarded `waitlist`; the merge must not drop them.
+
+    Same rules, renamed for the table they now protect. A guard that exists in
+    only one of two places is a guard one rename removes.
+    """
+    sql = _sql("010_merge_waitlist.sql")
+    assert "beta_access_name_no_formula" in sql
+    assert "beta_access_email_no_formula" in sql
+    assert "check (name is null or name !~ '^[=+\\-@\\t\\r]')" in sql
+    assert "check (email !~ '^[=+\\-@\\t\\r]')" in sql
 
 
 # ── the waitlist name column ──────────────────────────────────────────────

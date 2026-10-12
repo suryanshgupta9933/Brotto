@@ -289,7 +289,8 @@ psql "$SUPABASE_URL" -f supabase/migrations/002_failure_reports.sql
 psql "$SUPABASE_URL" -f supabase/migrations/003_waitlist.sql
 ```
 
-**All six are applied by hand, before the deploy.** There is no migration
+**Every migration is applied by hand, before the deploy — `001` through `010`.**
+There is no migration
 runner and no GitHub integration that applies them on merge — `scripts/test-migrations.sh`
 runs them against a throwaway local Supabase in CI to prove they parse, and
 nothing applies them to the real project. That is the whole reason the "edit
@@ -298,11 +299,14 @@ names is the ordering you type.
 
 Same posture as `profiles`: no migration runner, RLS with zero policies plus
 revokes on `anon` and `authenticated`, written only by the service role.
-`waitlist` additionally carries a `unique` on `email`, because a double-clicked
-submit must not create two rows and a read-then-insert is a race a double-click
-wins. **Without `003` run, `POST /v1/waitlist` answers 502 on every signup** and
-the log says only that an insert was refused — the marketing page will report a
-success-looking failure. See `docs/architecture/privacy.md`.
+`003` created a `waitlist` table with a `unique` on `email`, because a
+double-clicked submit must not create two rows and a read-then-insert is a race
+a double-click wins. **`010` later dropped `waitlist` and merged it into
+`beta_access`** — see the last section of this runbook — so on a database that
+has run `010` there is no `waitlist` table and the unique is the `beta_access`
+primary key. **Without `003` (or `010`) run, `POST /v1/waitlist` answers 502 on
+every signup** and the log says only that an insert was refused — the marketing
+page will report a success-looking failure. See `docs/architecture/privacy.md`.
 
 ### The allowlist, and the waitlist's name column
 
@@ -322,10 +326,11 @@ account id, so the operator bulk-pastes a list instead of minting one
 `auth.users` row per person. `email text primary key`, already normalised by the
 caller — no normalisation function in SQL, so there is one rule to keep in step,
 not two. It carries **no `owner` column**: the address is matched against the
-`email` claim on a verified JWT, never against a body field. Only `email` and
-`revoked_at` are ever read (`select=email,revoked_at`); `approved_at` is filled by
-its column default. (`added_by` was a fourth column and is gone as of `009` —
-only `beta-roster.sh` ever wrote it, and nobody read it.)
+`email` claim on a verified JWT, never against a body field. `approved_at` was
+filled by a column default in `004` and is written by `beta-roster.sh` alone as
+of `010`, which also dropped that default — a default is a grant. (`added_by` was
+a fourth column and is gone as of `009` — only `beta-roster.sh` ever wrote it,
+and nobody read it.)
 
 **Admitting and withdrawing a member is `scripts/beta-roster.sh`, and it is
 deliberately not an HTTP route.** An admin route that appends addresses is an
@@ -400,16 +405,20 @@ the script reports which of the two rows the statement matched. Silence would be
 the bug; the raise was not the fix.
 
 **A duplicate paste answers 409, and that no longer means "admitted".** Since
-`revoked_at` exists, already-there means *granted* or *withdrawn*, and both
+`010`, already-there means *asked* (`asked_at` only — a waitlist signup),
+*granted* (`approved_at` set, `revoked_at` null) or *withdrawn*, and all three
 return the same 409. One line tells them apart:
 
 ```sql
-select email, revoked_at from beta_access where email = lower(btrim('x@example.com'));
+select email, asked_at, approved_at, revoked_at from beta_access
+ where email = lower(btrim('x@example.com'));
 ```
 
-`null` is a live grant and needs no action; a timestamp is a withdrawal already
-on record, and pasting the address again changes nothing — `_listed_for_beta`
-refuses a row whose `revoked_at` is set, and `add` refuses to clear it for you
+Only `approved_at` set with `revoked_at` null is a live grant; a waitlist row
+needs `beta-roster.sh add` to become one, and a timestamp on `revoked_at` is a
+withdrawal already on record, pasting which changes nothing —
+`_listed_for_beta` refuses a row whose `revoked_at` is set or whose `approved_at`
+is null, and `add` refuses to clear `revoked_at` for you
 and points at `unrevoke` rather than reinstating somebody on purpose.
 **Re-admission is `beta-roster.sh unrevoke`** — the same two writes with the
 values nulled, roster first, same two-lookup order, because
@@ -424,12 +433,15 @@ nobody on its own; do it before the `revoked_at` update and you have closed a
 door that was never locked. See `docs/architecture/privacy.md` § *The roster
 admits; `revoked_at` withdraws*.
 
-**The two tables must never be joined by a pipeline.** `POST /v1/waitlist` is
-reachable with no credential at all, so copying a stranger's submission into
-`beta_access` makes it answer "is this address in the beta?". See
-`docs/architecture/privacy.md`.
+**A pipeline must never turn a waitlist signup into a grant.** `POST /v1/waitlist`
+is reachable with no credential at all; it may set `asked_at`, `name` and
+`batch` and never `approved_at` or `revoked_at`, which `beta-roster.sh` alone
+writes. That used to be "the two tables must never be joined"; `010` made them
+one table, so the boundary is the columns the unauthenticated path may name.
+A stranger's row becoming an invitation by pipeline is still the membership
+oracle. See `docs/architecture/privacy.md`.
 
-`005` adds `waitlist.name`, nullable and with no default, so a blank field
+`005` adds a `name`, nullable and with no default, so a blank field
 stays absent rather than becoming a string the visitor never sent.
 
 `006` is the same spreadsheet guard `005` gave `name`, applied to the column
@@ -441,6 +453,33 @@ identifier that has to round-trip, and a stored `'+tag@example.test` is no
 longer the mailbox that person signs in with. Nothing is lost by the refusal —
 a `+tag` address and the base address are the same mailbox, so the visitor
 submits the plain one. See `docs/architecture/privacy.md`.
+(`005`/`006` guarded the old `waitlist` table; `010` carried both formula
+CHECKs onto `beta_access`, renamed for the table they now protect.)
+
+### `010` merges `waitlist` into `beta_access` — one list, one row per address
+
+```bash
+psql "$SUPABASE_URL" -f supabase/migrations/010_merge_waitlist.sql
+```
+
+**`waitlist` is gone; run this after `003`–`006` on an existing project, or
+just in order on a fresh one.** The two tables had the same key and answered one
+question between them, with the join done twice — in `beta_status`'s `case` and
+again in the relay's sign-in lookup. One table now, and the row carries
+`asked_at` (they asked), `approved_at` (we granted), `revoked_at` (we withdrew),
+plus `name` and `batch`. `public.beta_status(addr)` keeps its signature and
+derives the same four answers from one row — `revoked` beats `admitted` beats
+`pending` beats `none`, which is `009`'s arm order and is the policy, not a
+detail.
+
+**Two things in it are load-bearing and easy to miss.** `approved_at` has **no
+default** — a default is a grant, and the waitlist write path inserts a row
+without naming the column, so a default would hand every stranger who asked the
+beta. And the readers ask for `approved_at`, not for row existence: since a row
+can be a mere request, "a row is the invitation" stopped being true in `010` and
+**a lookup that still treats existence as admission hands every waitlist signup
+a beta account**. The header of the migration is the design record. See
+`docs/architecture/privacy.md`.
 
 ### The confirmation email, and the two variables that switch it on
 

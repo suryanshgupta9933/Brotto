@@ -30,43 +30,56 @@ So the privacy posture is not "we do not collect your data". It is:
 | API key | `chrome.storage.local`, user | until the user clears it |
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
-| Waitlist signup (a name, an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |
-| Beta allowlist (an email, the row's insert timestamp, and a withdrawal timestamp once one is set) | `beta_access` table in Supabase, server | until the operator drops it |
+| Waitlist signup and the beta roster — one row per address in `beta_access`: `asked_at` + name + batch (they asked), `approved_at` (we granted), `revoked_at` (we withdrew) | `beta_access` table in Supabase, server | until the operator drops it |
 | Waitlist confirmation (the address, in transit and in Resend's request logs) | `api.resend.com` | theirs, not ours |
 | Sign-in code (a keyed digest of a six-digit code) | `sign_in_codes` table in Supabase, server | ~10 minutes, then useless |
 | Sign-in event (an account id, a /24 or /48 network, a browser/OS string) | `sign_in_events` table in Supabase, server | until the operator drops it |
 | Sign-in code mail (the code, in transit and in Resend's request logs) | `api.resend.com` | theirs, not ours |
 | Audit request bodies | whatever the model provider logs | theirs, not ours |
 
-The waitlist is the one row in that table that came from **a stranger** rather
+A waitlist signup is the one row here that came from **a stranger** rather
 than from an account, and it is covered by "Writing new code here" below —
 see *The waitlist is the first data from someone who is not an account*.
 
-**`beta_access` and `waitlist` must stay disjoint.** The allowlist
-(`supabase/migrations/004_beta_access.sql`) is the same *admission decision* a
-`profiles` row records, entered by address so the operator can bulk-paste a list —
-and it stays a table the operator writes by hand, through `scripts/beta-roster.sh`.
-**That script is the only way an address enters or leaves the roster**, and
-deliberately not an HTTP route: an admin route that appends addresses is a
+**`waitlist` no longer exists — `010` merged it into `beta_access`.** One
+table, keyed by normalised email, answering one question: where does this
+address stand in the beta. A row carries `asked_at` (they asked), `approved_at`
+(we granted), `revoked_at` (we withdrew), plus `name` and `batch` — the two
+fields the waitlist form actually asked for. `public.beta_status(addr)` derives
+its same four answers from that one row: `revoked` beats `admitted` beats
+`pending` beats `none`. Reordering those arms reorders the policy; see
+`supabase/migrations/010_merge_waitlist.sql`.
+
+**The waitlist write path may set `asked_at`, `name` and `batch` — never
+`approved_at` or `revoked_at`.** Those two are written by
+`scripts/beta-roster.sh` alone. That boundary used to be "the two tables must
+stay disjoint"; it is now the columns the unauthenticated path is allowed to
+name, and the reason is unchanged. The roster is the same *admission decision*
+a `profiles` row records, entered by address so the operator can bulk-paste a
+list, and it stays something the operator writes by hand.
+**That script is the only way an address is granted or withdrawn**, and
+deliberately not an HTTP route: an admin route that grants the beta is a
 weakly-authenticated write into the front door of the hosted beta, whereas the
 script runs on the operator's own machine over the Supabase CLI's linked-project
 credentials, so there is nothing remote to compromise. **Removing a row from the
 table does not revoke anyone** — see *The roster admits; `revoked_at` withdraws*
-below.
-**Of its three columns only `email` and `revoked_at` are ever read**:
-`_listed_for_beta` / `beta_status` select `email,revoked_at`, and the second is
-the withdrawal — see *The roster admits; `revoked_at` withdraws* below.
-`approved_at` exists because the table is a
-ledger someone will ask "when", and it is filled by the column default rather
-than by any path here. (`added_by` was a fourth column and is gone as of `009`:
-the relay never wrote it, only `beta-roster.sh` stamped `whoami` on `add`, and
-nobody ever read it.) The moment
-anything copies a
-waitlist submission into it without a human deciding, `POST /v1/waitlist` — the
-one route reachable with **no credential at all** — answers "is this person in
-the beta?" to anyone who posts an address. A stranger's row becoming an
-invitation by pipeline is that route turned into a membership oracle; the same
-reason the waitlist answers a duplicate exactly as it answers a first submit.
+below. The moment anything turns a waitlist submission into a grant without a
+human deciding, `POST /v1/waitlist` — the one route reachable with **no
+credential at all** — answers "is this person in the beta?" to anyone who posts
+an address. A stranger's row becoming an invitation by pipeline is that route
+turned into a membership oracle; the same reason the waitlist answers a
+duplicate exactly as it answers a first submit.
+
+**A row is no longer the invitation; `approved_at` is.** `004` said "a row IS
+the invitation", and that was true while a row could only come from an operator
+paste. A waitlist signup is now a row with `asked_at` and no `approved_at`, and
+it must not sign anybody in — so `_listed_for_beta` and `beta_status` ask for
+`approved_at`, not for existence. **A lookup that still treats "row exists" as
+"admitted" hands every waitlist signup a beta account.** And `approved_at` has
+**no default**, which is the same guard seen from the schema: `POST /v1/waitlist`
+inserts a row and does not name the column, so a default would grant the beta to
+every stranger who asked for it. A default is a grant; the absence of one is the
+refusal. (`added_by` was a column and is gone as of `009`.)
 
 **Resend is a third party for waitlist addresses and for sign-in codes.**
 An account's identity is Supabase's, but Supabase no longer mails anything: the
@@ -85,8 +98,8 @@ to stop it being the thing we paste into their logs ourselves. (There *was* a
 third copy, in an `Idempotency-Key` hashed from the address — removed
 2026-10-12 because that header refused a legitimately new signup as a `409`,
 which is a delivery failure bought for a duplicate-send guarantee the unique
-constraint already gave. See "What the waitlist table guarantees" in
-`waitlist.py`.)
+constraint already gave. See "What the table guarantees, and why nothing
+downstream re-checks it" in `waitlist.py`.)
 
 Page text itself is **not** written to disk, and neither is the AX diff that
 used to quote it. The `.pages.json` sidecar that was meant to hold page bodies
@@ -366,8 +379,11 @@ is read back rather than failing the sign-in.
 
 ## The roster admits; `revoked_at` withdraws
 
-`beta_access` is read in **exactly one place** — `_listed_for_beta`, called from
-`approve_at_exchange` — and only to decide whether to *create* a `profiles` row.
+`beta_access` is read in two places — `_listed_for_beta`, called from
+`approve_at_exchange`, which asks only whether `approved_at` is set and
+`revoked_at` is not (row existence is no longer the invitation — see above);
+and `_beta_status`, which the sign-in code path consults for the four-state
+answer. Neither decides an already-signed-in member's fate:
 `ensure_on_roster`, the gate every use path and task start now shares, reads
 `profiles` and never consults the roster again. So the absence of a roster row
 is a refusal **only for somebody who has not been admitted yet**. Deleting one
@@ -437,12 +453,14 @@ roster, and `approve_at_exchange` inserts a fresh, unrevoked profile.
 insert-if-absent that exists precisely to stop a withdrawn member reinstating
 themselves. The evidence has to outlive the account it was recorded against, so
 `beta_access.revoked_at` is **not a foreign key and must never become one**, and
-`_listed_for_beta` refuses an address whose `revoked_at` is set.
+`_listed_for_beta` refuses an address whose `revoked_at` is set, and one whose
+`approved_at` is null.
 
-**A 409 on a paste says "already there", not "admitted".** With `revoked_at`
-in play, already-there is either **granted** (`revoked_at is null`) or
-**withdrawn** (set), and the primary key answers identically for both. One line
-separates them — `select email, revoked_at from beta_access where email =
+**A 409 on a paste says "already there", not "admitted".** Since `010`,
+already-there is **asked** (`asked_at` only), **granted** (`approved_at` set,
+`revoked_at` null) or **withdrawn** (`revoked_at` set), and the primary key
+answers identically for all three. One line separates them — `select email,
+asked_at, approved_at, revoked_at from beta_access where email =
 lower(btrim('…'))` — and the operator has to read it; no code path may infer
 which from the response. `beta-roster.sh add` reads it for you and refuses to
 undo a withdrawal, pointing at `unrevoke` instead, because an `add` that cleared
@@ -556,8 +574,8 @@ Pinned by `test_a_successful_exchange_records_one_sign_in_event`,
 
 ## Self-approval is an insert, never an upsert
 
-The invitation is now a pre-loaded row in `beta_access`, and the `profiles` row
-is written by the relay at exchange. That puts the whole risk onto one
+The invitation is now `approved_at` on a pre-loaded `beta_access` row, and the
+`profiles` row is written by the relay at exchange. That puts the whole risk onto one
 statement, because the natural way to write "this account is approved" against
 a table with a primary key is an **upsert** — and an upsert on this path is a
 revocation erased from the record. A member the operator deliberately withdrew
@@ -582,8 +600,9 @@ the approval path answers `false` rather than raising: the credential is real
 either way, and failing the whole exchange would sign a valid person out
 because Supabase's REST side blinked.
 
-**A waitlist row is now an email, a bounded name, and the operator's batch.**
-The name is the one field the visitor typed that is not an address, and it is
+**A waitlist row is now an email, a bounded name, the operator's batch, and
+`asked_at` — written into `beta_access`, and nothing else.** The name is the one
+field the visitor typed that is not an address, and it is
 there for one reason: the operator is about to send these people an invite and
 cannot say their name without it. `build_row`'s named-argument shape is
 unchanged, so there is still nowhere for a referrer, a user agent, a URL or a
@@ -899,12 +918,15 @@ configured" for the reason `failure_report.reporting_enabled()` is: a self-hoste
 with a stray `SUPABASE_URL` pasted out of the cloud env must not start
 collecting strangers' addresses because they copied it.
 
-**The row is one field, and the shape is what enforces it.** `build_row(email)`
-has no parameter for a referrer, a user agent, a page URL or an IP, and
-`**extra` **raises** rather than filtering. `batch` is the one addition and it
-is not user content: the operator stamps it from `BROTTO_WAITLIST_BATCH` when
-they send an invite round. This is `begin_turn(ax_diff_chars: int)` and
-`failure_report.build_row` again — the boundary is a signature, not a habit.
+**The row is four columns, and the shape is what enforces it.** `build_row`
+takes `email`, `name` and nothing else user-supplied — no referrer, no user
+agent, no page URL, no IP — and `**extra` **raises** rather than filtering.
+`batch` is the one addition that is not user content: the operator stamps it
+from `BROTTO_WAITLIST_BATCH` when they send an invite round. `asked_at` is
+stamped here. `approved_at` and `revoked_at` are deliberately **not** in
+`COLUMNS`: a row this path can produce is a request, never an admission. This
+is `begin_turn(ax_diff_chars: int)` and `failure_report.build_row` again — the
+boundary is a signature, not a habit.
 
 **The answer is the same whether the address is new.** The uniqueness
 constraint lives in the migration and a duplicate arrives as a 409, which the

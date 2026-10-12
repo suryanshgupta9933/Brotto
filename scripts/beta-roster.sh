@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # The closed-beta roster: add, list, withdraw, re-admit, drop addresses.
 #
-# A row in `beta_access` IS the authorisation. Until one exists, sign-in mints
-# a valid token but `approve_at_exchange` refuses, and `POST /v1/auth/exchange`
-# answers `approved: false` — the panel offers the waitlist and `task_start`
-# refuses. `add` also *mails* the invitation (Resend, via
+# `beta_access.approved_at` IS the authorisation. Until it is set, sign-in
+# mints a valid token but `approve_at_exchange` refuses, and
+# `POST /v1/auth/exchange` answers `approved: false` — the panel offers the
+# waitlist and `task_start` refuses. A row with only `asked_at` is a request
+# from the waitlist (`010` merged the two tables) and admits nobody.
+# `add` also *mails* the invitation (Resend, via
 # `session.beta_invite`), but the mail is only the announcement: a send that
-# fails leaves the admission standing, because the row is what admits them.
+# fails leaves the admission standing, because the grant is what admits them.
 #
 #   ./scripts/beta-roster.sh add you@example.com
 #   (RESEND_API_KEY lives in services/brotto-orchestrator/.env, or export it)
@@ -101,12 +103,21 @@ esac
 if [ "$cmd" = "list" ]; then
   # Left-padded by hand rather than with \x1b: piping this somewhere should not
   # drag escape codes along with it.
+  #
+  # Three states, not two: `010` merged the waitlist in, so a row can be a
+  # request that was never granted. Reading "row exists" as "admitted" is the
+  # mistake that hands every stranger on the waitlist a beta account, so the
+  # grant is `approved_at` and not the row.
   q <<'SQL'
-select case when revoked_at is null then 'admitted' else 'withdrawn' end as state,
+select case
+         when revoked_at  is not null then 'withdrawn'
+         when approved_at is not null then 'admitted'
+         else 'pending'
+       end as state,
        email,
        approved_at::date as approved
   from beta_access
- order by approved_at desc, email;
+ order by approved_at desc, asked_at desc, email;
 SQL
   exit 0
 fi
@@ -119,14 +130,26 @@ case "$cmd" in
     admitted=()
     for addr in "$@"; do
       n="$(norm_sql "$addr")"
-      # `do nothing`, never `do update`: an `add` that cleared `revoked_at`
-      # would override a withdrawal the operator may have made deliberately,
-      # which is the same half-procedure trap `drop` is guarded against. A
-      # withdrawn address has to be re-admitted with `unrevoke`, on purpose.
+      # `approved_at` is filled **here**, not by a column default: `010` took
+      # the default away so the waitlist write path, which inserts a row and
+      # does not name the column, cannot grant the beta by accident. That makes
+      # this insert the grant, which is exactly what it is.
+      #
+      # The `do update` is scoped to a clean request and nothing else. `do
+      # nothing` was right when a row *was* the invitation; it is wrong now,
+      # because `add` on a pending address is the ordinary "invite someone from
+      # the waitlist" and has to fill `approved_at`. The WHERE is what `do
+      # nothing` used to guard: it never touches `revoked_at` (so it cannot
+      # undo a withdrawal — that stays `unrevoke`'s job) and it never rewrites
+      # a grant that is already there, so the recorded grant date means what it
+      # says. An update with no WHERE would do both.
       state="$(q <<SQL | last
-insert into beta_access (email, revoked_at)
-values ($n, null)
-on conflict (email) do nothing
+insert into beta_access (email, approved_at, revoked_at)
+values ($n, now(), null)
+on conflict (email) do update
+  set approved_at = now()
+  where beta_access.approved_at is null
+    and beta_access.revoked_at is null
 returning 'admitted';
 SQL
 )"
@@ -137,12 +160,19 @@ SQL
           ;;
         *)
           prior="$(q <<SQL | last
-select case when revoked_at is null then 'admitted' else 'withdrawn' end
+select case
+         when revoked_at  is not null then 'withdrawn'
+         when approved_at is not null then 'admitted'
+         else 'pending'
+       end
   from beta_access where email = $n;
 SQL
 )"
           if [ "$prior" = "withdrawn" ]; then
             die "$addr is WITHDRAWN and add will not undo that. To re-admit: ./scripts/beta-roster.sh unrevoke $addr"
+          fi
+          if [ "$prior" = "pending" ]; then
+            die "$addr is a request that was never granted, and add did not grant it. This is a bug in add — report it."
           fi
           say "= $addr  already admitted, unchanged"
           ;;

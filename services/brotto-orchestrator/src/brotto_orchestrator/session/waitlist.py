@@ -36,7 +36,7 @@ is the same leak through a stopwatch) hands a public URL a membership oracle
 with a slow path on it. `test_a_duplicate_is_answered_identically_and_sends_nothing`
 is the pin.
 
-**What the waitlist table guarantees, and why nothing downstream re-checks
+**What the table guarantees, and why nothing downstream re-checks
 it.** `email` is `unique`, so an address is one row for the life of the table,
 and `CREATED` is returned only on a 2xx — a second submission can therefore
 only ever be a `DUPLICATE`, which by design never sends. That is the whole
@@ -62,6 +62,7 @@ import enum
 import logging
 import os
 import re
+from datetime import datetime, timezone
 
 from .auth import auth_mode
 
@@ -69,8 +70,10 @@ log = logging.getLogger("brotto.waitlist")
 
 #: The columns, and the only keys `build_row` will ever produce. A test asserts
 #: a built row has exactly this key set, so a column added without a reason
-#: written down fails the build.
-COLUMNS = frozenset({"email", "name", "batch"})
+#: written down fails the build. `approved_at` and `revoked_at` are deliberately
+#: not here: those are the grant and the withdrawal, and `beta-roster.sh` writes
+#: them alone. A row this path can produce is a request, never an admission.
+COLUMNS = frozenset({"email", "name", "batch", "asked_at"})
 
 #: How much of a typed name is kept. 64 characters is a person; a paragraph is
 #: the form being used as storage. Truncated rather than rejected, the same way
@@ -196,13 +199,14 @@ def build_row(*, email: str, name: str = "", **extra) -> dict:
         # corruption of an identifier is worse than a loud rejection — and here
         # the rejection is free, because a `+tag` address and the plain one are
         # the same mailbox. Nothing is lost by refusing: the visitor submits the
-        # base address, or the operator adds the tagged spelling straight to
-        # `beta_access`, which this module does not touch.
+        # base address, or the operator adds the tagged spelling straight to the
+        # roster with `beta-roster.sh`.
         raise ValueError(EMAIL_FORMULA_REFUSAL)
     return {
         "email": email,
         "name": _safe_name(name),
         "batch": batch(),
+        "asked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
 
@@ -224,7 +228,7 @@ def waitlist_enabled() -> bool:
 
 
 async def add(email: str, name: str = "") -> "Signup":
-    """Write one row through the same PostgREST seam as the other two tables.
+    """Write one row through the same PostgREST seam as the rest of the control plane.
 
     Which of the three happened — written, already there, or refused. Never
     returns anything about the address. The caller decides what a `Signup` means
@@ -241,7 +245,7 @@ async def add(email: str, name: str = "") -> "Signup":
 
     row = build_row(email=email, name=name)
     try:
-        status, _ = await _profiles("POST", "", row, path="rest/v1/waitlist")
+        status, _ = await _profiles("POST", "", row, path="rest/v1/beta_access")
     except SupabaseUnavailable:
         log.warning("waitlist insert: control plane unavailable")
         return Signup.REFUSED

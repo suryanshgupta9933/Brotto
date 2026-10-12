@@ -98,3 +98,22 @@ def test_a_send_failure_never_raises(monkeypatch):
     monkeypatch.setattr(sign_in_code_email, "enabled", lambda: True)
     monkeypatch.setattr(sign_in_code_email, "_deliver", boom)
     asyncio.run(sign_in_code_email.send_code(ADDR, CODE))  # must not raise
+
+
+def test_no_test_can_open_a_real_socket(monkeypatch):
+    """The wall in `conftest._no_real_http`, pinned.
+
+    A real `RESEND_API_KEY` in the developer's `.env` reached this suite
+    through `main.py`'s `load_dotenv()` and every unstubbed send in the run
+    posted to Resend for real. Clearing the key is the root cause; this is
+    what stops a test that sets its own key and forgets to stub `_deliver`.
+    """
+    import aiohttp
+
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+    try:
+        aiohttp.ClientSession()
+    except AssertionError as exc:
+        assert "stub the seam" in str(exc)
+    else:
+        raise AssertionError("the suite opened a real HTTP session")
