@@ -38,6 +38,7 @@ const $cloudCodeField = document.getElementById("cloudCodeField");
 const $sendCodeBtn = document.getElementById("sendCodeBtn");
 const $resendCodeBtn = document.getElementById("resendCodeBtn");
 const $serverUrlHint = document.getElementById("serverUrlHint");
+const $waitlistBlock = document.getElementById("waitlistBlock");
 const $waitlistEmail = document.getElementById("waitlistEmail");
 const $waitlistName = document.getElementById("waitlistName");
 const $waitlistJoinBtn = document.getElementById("waitlistJoinBtn");
@@ -397,8 +398,10 @@ async function exchangeCode() {
 function setWaitlistStatus(text, tone) { toast(text, tone); }
 
 // Never overwrites an address already typed — the prefill is the refusal's
-// convenience, not the form's default.
+// convenience, not the form's default. It opens the toggle too: a form the
+// user is told to leave an address in has to be one they can see.
 function prefillWaitlist(email) {
+  if ($waitlistBlock) $waitlistBlock.open = true;
   if (email && $waitlistEmail && !$waitlistEmail.value.trim()) $waitlistEmail.value = email;
 }
 
