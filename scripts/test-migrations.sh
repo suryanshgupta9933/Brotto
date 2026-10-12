@@ -41,12 +41,16 @@ docker run -d --rm --name "$CONTAINER" \
   -p "127.0.0.1:$PORT:5432" \
   "$PG_IMAGE" >/dev/null
 
+# Not `pg_isready`: it answers on the temporary init server that
+# postgres-alpine runs before restarting into the real one, so the first
+# bootstrap connection gets "terminating connection due to administrator
+# command". A real query is the only probe that means *this* server is up.
+ready() { docker exec "$CONTAINER" psql -U postgres -d postgres -c 'select 1' >/dev/null 2>&1; }
 for _ in $(seq 1 60); do
-  docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
+  ready && break
   sleep 0.5
 done
-docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
-  || fail "postgres never became ready"
+ready || fail "postgres never became ready"
 
 run() { docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -q "$@"; }
 
