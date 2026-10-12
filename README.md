@@ -25,8 +25,9 @@ https://github.com/user-attachments/assets/1f6d0aca-5206-4e68-8f26-72d586323108
 
 ---
 
-> **One step too many, and we know it.** The extension is on the Chrome Web
-> Store, under review — one click to install as soon as it clears. The agent
+> **One step too many, and we know it.** The extension is on the
+> [Chrome Web Store](https://chromewebstore.google.com/detail/brotto/mahkomofcmohephggjlfgocopgfhkggb)
+> — one click to install. The agent
 > loop is a server, so there are two ways in: run it yourself, which is a
 > handful of commands and stays free with no account and no cap, or use the
 > hosted beta, which is a sign-in and a weekly allowance. Running it yourself is
@@ -305,8 +306,6 @@ This is a working system, not a finished product.
 
 Ordered by what unblocks the most people, not by what is most interesting.
 
-- **The store listing is under review.** The extension becomes one click to
-  install the moment it clears. That takes the install from six steps to one.
 - **A one-command installer for the container.** It exists to collapse
   [Self-host](#self-host) into a single command, and to stop being the thing
   that stops people. Self-hosting itself stays — it is the free, no-account,

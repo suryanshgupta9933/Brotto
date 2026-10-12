@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # The closed-beta roster: add, list, withdraw, re-admit, drop addresses.
 #
-# A row in `beta_access` IS the invitation. Until one exists, sign-in mints a
-# valid token but `approve_at_exchange` refuses, and `POST /v1/auth/exchange`
+# A row in `beta_access` IS the authorisation. Until one exists, sign-in mints
+# a valid token but `approve_at_exchange` refuses, and `POST /v1/auth/exchange`
 # answers `approved: false` — the panel offers the waitlist and `task_start`
-# refuses. So adding an address is the entire act of inviting somebody.
+# refuses. `add` also *mails* the invitation (Resend, via
+# `session.beta_invite`), but the mail is only the announcement: a send that
+# fails leaves the admission standing, because the row is what admits them.
 #
-#   ./scripts/beta-roster.sh add you@example.com them@example.com
+#   RESEND_API_KEY=…  ./scripts/beta-roster.sh add you@example.com
 #   ./scripts/beta-roster.sh list
 #   ./scripts/beta-roster.sh revoke someone@example.com
 #   ./scripts/beta-roster.sh unrevoke someone@example.com
@@ -114,6 +116,7 @@ for addr in "$@"; do check_email "$addr"; done
 
 case "$cmd" in
   add)
+    admitted=()
     for addr in "$@"; do
       n="$(norm_sql "$addr")"
       # `do nothing`, never `do update`: an `add` that cleared `revoked_at`
@@ -128,7 +131,10 @@ returning 'admitted';
 SQL
 )"
       case "$state" in
-        *admitted*) say "+ $addr  admitted" ;;
+        *admitted*)
+          say "+ $addr  admitted"
+          admitted+=("$addr")
+          ;;
         *)
           prior="$(q <<SQL | last
 select case when revoked_at is null then 'admitted' else 'withdrawn' end
@@ -142,9 +148,34 @@ SQL
           ;;
       esac
     done
+
     say ""
-    say "They can now sign up with that address. No email is sent — the panel"
-    say "offers the waitlist to anyone the roster does not list."
+    # Nobody new: say so and stop, rather than mailing a second invitation to
+    # somebody who already has one.
+    [ "${#admitted[@]}" -eq 0 ] && exit 0
+
+    # **The roster row is the authorisation; the mail is only the
+    # announcement.** That ordering is why a send failure below is reported
+    # and never rolled back — withdrawing the admission to punish a transport
+    # error would take access away from somebody we already decided to give
+    # it to. Re-send by hand with the module directly.
+    if [ -x "$ROOT/.venv/bin/python" ]; then
+      py="$ROOT/.venv/bin/python"
+    else
+      py="python3"
+    fi
+    say "Sending the invitation…"
+    for addr in "${admitted[@]}"; do
+      if PYTHONPATH="$ROOT/services/brotto-orchestrator/src" "$py" \
+           -m brotto_orchestrator.session.beta_invite "$addr"; then
+        say "  invited $addr"
+      else
+        say "  ! no invitation sent to $addr — they are admitted all the same."
+        say "    RESEND_API_KEY unset? Re-send by hand:"
+        say "    PYTHONPATH=$ROOT/services/brotto-orchestrator/src \\"
+        say "      $py -m brotto_orchestrator.session.beta_invite $addr"
+      fi
+    done
     ;;
 
   revoke)
