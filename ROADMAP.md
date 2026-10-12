@@ -133,21 +133,18 @@ is the fix, and it is not cheap: about thirty call sites construct an
 
 ### The Chrome Web Store listing
 
-**Rejected once, corrected, awaiting resubmission.** The 2026-10-10 rejection
-cited excessive keywords in the description — the provider list, where the policy
-allows five brands and the copy named seven, one of which was not even in the
-catalogue. The description was rewritten 2026-10-11 with every brand name
-removed, and nothing else about it needed to change.
+**Published 2026-10-12.** <https://chromewebstore.google.com/detail/brotto/mahkomofcmohephggjlfgocopgfhkggb>
 
-Icons, screenshots, the permission justifications and the category are done.
-`debugger` plus `<all_urls>` is the combination reviewers slow down on, so
-budget one to two weeks from submission, not days — which is why the server
-installer above is the thing being built in parallel, not after it.
+Rejected once before this, on 2026-10-10, for excessive keywords in the
+description — the provider list, where the policy allows five brands and the
+copy named seven, one of which was not even in the catalogue. The description was
+rewritten 2026-10-11 with every brand name removed, and that is what shipped.
 
-Two things the resubmission has to carry that are newer than the copy: the
-**failure-reporting** path and the **waitlist** path. The disclosure must also
-agree with `PRIVACY.md` and the live privacy page in as many words, or it is
-rejected again for the same class of reason.
+**What is now outstanding is the listing's own copy and images, not its
+existence.** The approved description and screenshot set were written for the
+submission and have not been revised since; they do not yet describe the closed
+beta, the sign-in flow, or anything else landed since. That pass is the next
+thing here.
 
 No code change was needed to submit: the origin allow-list matches any valid
 extension id, so the store-assigned id is allowed automatically.
@@ -240,8 +237,6 @@ document would be a second memory that disagrees with the first.
 
 Not roadmap — just not done, so nobody rediscovers them from memory.
 
-- **The Chrome Web Store listing has not been resubmitted.** Corrected copy
-  exists; the paste is the user's, from their own account.
 - **The data-usage disclosure predates the waitlist and the failure reports.**
   It has to name both, and agree with `PRIVACY.md` and the live privacy page.
 - **Five live secrets need rotating** — four Supabase/orchestrator keys plus
