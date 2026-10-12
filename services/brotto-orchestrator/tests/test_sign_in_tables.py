@@ -1,8 +1,10 @@
-"""The relay's own sign-in code (`007`) and the sign-in log (`008`).
+"""The relay's own sign-in code (`007`), the sign-in log (`008`), and `009`.
 
-Two migrations, one change: Supabase used to mail the code and hold the
-account, and now the relay mails it, so there is somewhere to put a code and
-somewhere to record that somebody signed in.
+Three migrations around one change: Supabase used to mail the code and hold
+the account, and now the relay mails it, so there is somewhere to put a code
+and somewhere to record that somebody signed in. `009` adds the single lookup
+that classifies an address into the four answers the sign-in screen gives, and
+drops `added_by` from `beta_access`.
 
 A migration file is imported by nothing, so nothing in the Python asserts
 these lines — the same reasoning as `test_the_waitlist_is_closed_to_the_public_key`
@@ -18,6 +20,10 @@ are shaped this way:
   column that could;
 * **sign-in history is not a cascade**, so deleting an account does not erase
   the record that it was ever used.
+
+`009` contributes a third: **`beta_status` is not executable by a caller**,
+because it is the whole answer to "is this address in the beta" and an
+executable one hands that to the public anon key.
 """
 from __future__ import annotations
 
@@ -28,6 +34,7 @@ from brotto_orchestrator.session.jwt_auth import normalize_email
 MIGRATIONS = Path(__file__).resolve().parents[3] / "supabase" / "migrations"
 CODES = "007_sign_in_codes.sql"
 EVENTS = "008_sign_in_events.sql"
+STATUS = "009_beta_status.sql"
 
 
 def _sql(name: str) -> str:
@@ -230,3 +237,87 @@ def test_the_file_says_why_the_rows_outlive_the_account():
     prose = _raw(EVENTS)
     assert "not a foreign key" in prose
     assert "erasure request" in prose
+
+
+# ── 009: the classification ──────────────────────────────────────────────
+
+def test_beta_status_is_not_executable_by_a_caller():
+    """A function `PUBLIC` can execute runs with the *caller's* privileges.
+
+    Sharper here than on `redeem_sign_in_code`: that one burns an attempt
+    budget, and this one **is** the answer to "is this address in the beta" —
+    the oracle the uniform sign-in reply exists to prevent, restored as a
+    SELECT. The relay calls it with the service role and nothing else may.
+    """
+    sql = _sql(STATUS)
+    assert "revoke all on function public.beta_status(text)" in sql
+    assert "from public, anon, authenticated" in sql
+
+
+def test_beta_status_has_exactly_four_answers():
+    """The screen says one of four things, so the schema offers one of four.
+
+    Asserted as the literals rather than as a type: a fifth arm, or one of
+    these renamed, is what the panel will render and what a caller switch will
+    match on.
+    """
+    sql = _sql(STATUS)
+    for answer in ("'admitted'", "'revoked'", "'pending'", "'none'"):
+        assert answer in sql, f"beta_status lost the answer {answer}"
+
+
+def test_a_revocation_is_not_spoken_over_by_the_waitlist():
+    """`beta_access` wins over `waitlist`, in the order of the `case` arms.
+
+    A revoked member who is also on the waitlist is `revoked`, not `pending`:
+    the revocation is the last thing *we* said about them, and a waitlist row
+    they submitted themselves cannot speak over a decision the operator made.
+    Asserted as ordering, because a `case` reordered to put the waitlist arm
+    first passes every single-table assertion and still answers wrong here.
+    """
+    body = _sql(STATUS)
+    admitted = body.index("'admitted'")
+    revoked = body.index("'revoked'")
+    pending = body.index("'pending'")
+    assert admitted < revoked < pending
+
+
+def test_the_classification_does_not_normalise():
+    """The caller normalises, same as every other write path.
+
+    The columns compared here are stored already normalised (`lower(btrim())`
+    at the write paths — `004`'s header), so this is a string equality. A
+    normalisation function in SQL would be a second implementation of the
+    caller's rule and a second thing to keep in step with the first; `004`
+    refuses one and so does this.
+    """
+    sql = _sql(STATUS)
+    assert "lower(" not in sql
+    assert "btrim(" not in sql
+
+
+def test_the_classification_is_a_read():
+    """`language sql`, and nothing that writes.
+
+    No write means no race, which is why this is not the `reserve_task_slot`
+    shape from `001`: two callers asking what an address is cannot interfere,
+    and a function that looked like it might write would be a function a
+    reviewer has to reason about for no benefit.
+    """
+    sql = _sql(STATUS)
+    assert "language sql" in sql
+    for forbidden in ("insert", "update", "delete"):
+        assert forbidden not in sql, f"{forbidden!r} in a function that only classifies"
+
+
+def test_added_by_is_dropped():
+    """An operator identity nothing writes is a column the table editor shows
+    and a reader believes.
+
+    `004` made it nullable because a bulk paste has no single author, which
+    was already the answer: there is no honest value for it. Dropped in a new
+    migration rather than by editing `004`, which merged databases already
+    have.
+    """
+    sql = _sql(STATUS)
+    assert "alter table beta_access drop column added_by" in sql

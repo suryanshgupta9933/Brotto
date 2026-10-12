@@ -41,11 +41,16 @@ def test_the_allowlist_is_closed_to_the_public_key():
 
 
 def test_a_row_is_an_email_and_nothing_else():
-    """A second paste is a no-op, so the key is the address itself."""
+    """A second paste is a no-op, so the key is the address itself.
+
+    `added_by` once sat beside `approved_at` here and is gone — `009` drops it,
+    and that migration is what pins the absence. What remains is the address,
+    when it was approved, and when it was withdrawn.
+    """
     sql = _sql("004_beta_access.sql")
     assert "email" in sql
     assert "primary key" in sql
-    assert "approved_at" in sql and "added_by" in sql
+    assert "approved_at" in sql
     # No identity column to forge: the match is the JWT claim, not a row that
     # says who somebody is.
     assert "owner" not in sql
