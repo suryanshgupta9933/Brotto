@@ -140,8 +140,9 @@ def render() -> tuple[str, str]:
         + row(
             "Tell us what breaks",
             "When a run fails the panel offers to send us the reason code and your "
-            "account id. That is the only telemetry in the product, and it is all "
-            "we ask for.",
+            "account id. We also keep one record per sign-in — your account id, "
+            "the network you came from, and the browser — so we can tell a new "
+            "laptop from somebody else holding the account.",
         )
     )
 
@@ -233,7 +234,9 @@ def render() -> tuple[str, str]:
         "cut a task short than have you watching it wait.\n\n"
         "TELL US WHAT BREAKS\n"
         "When a run fails the panel offers to send us the reason code and your account id. "
-        "That is the only telemetry in the product, and it is all we ask for.\n\n"
+        "We also keep one record per sign-in — your account id, the network you came from, "
+        "and the browser — so we can tell a new laptop from somebody else holding the "
+        "account.\n\n"
         f"What the beta involves, and exactly what we can see while it runs: {BETA_URL}\n\n"
         f"Remove from the beta: mailto:{mailbox(from_address())}?subject=unsubscribe\n"
         f"Privacy: {SITE}/privacy\n"

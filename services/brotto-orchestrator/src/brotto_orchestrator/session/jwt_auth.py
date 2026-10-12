@@ -20,13 +20,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
+import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import aiohttp
@@ -175,7 +177,14 @@ def verify_jwt(token: str) -> Claims | None:
 
 
 def make_jwt(payload: dict, secret: str) -> str:
-    """Sign a token. Test-only — nothing in the server issues one."""
+    """Sign an HS256 token. The relay's own access token.
+
+    `exchange_login_code` is now the one production caller: after the emailed
+    code has proved inbox control, the relay signs the token itself against
+    `SUPABASE_JWT_SECRET`, which is the same secret `verify_jwt` checks. That
+    is why nothing about the verifier changes — one key, one algorithm, and
+    the only thing that moved is who mints.
+    """
     header = _seg({"alg": "HS256", "typ": "JWT"})
     body = _seg(payload)
     signing_input = f"{header}.{body}"
@@ -202,10 +211,6 @@ def _supabase_url() -> str:
 
 def _service_key() -> str:
     return os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-
-
-def _anon_key() -> str:
-    return os.getenv("SUPABASE_ANON_KEY", "").strip()
 
 
 async def _supabase_call(
@@ -271,76 +276,247 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
-async def request_login_code(email: str) -> None:
-    """Ask Supabase to mail a 6-digit sign-in code.
+# ---------------------------------------------------------------------------
+# The sign-in code: ours, not Supabase's
+# ---------------------------------------------------------------------------
 
-    Raises SupabaseUnavailable only when the call did not complete. A
-    Supabase *answer* is swallowed whatever it says, because "user not
-    found" and a rate-limit refusal are exactly the two responses that
-    turn this route into an account-existence oracle.
+#: Domain separation for the code digest. A prefix means a digest computed for
+#: one purpose cannot be replayed as one for another under the same key.
+_CODE_DIGEST_PREFIX = "brotto.sign-in-code:"
 
-    **`create_user` is unconditionally `True`, and it is not allowed to
-    become anything else.** This used to be `False`, which — while
-    invitations were hand-issued — meant a brand-new address could obtain
-    no credential at all. It could not simply be flipped back on
-    membership, either: `profiles.id` is an FK into `auth.users`, so no
-    profile can be seeded for an address with no auth account, and the
-    gate would have to live here to have any effect. This route is
-    unauthenticated, so a conditional here is a branch that answers
-    differently for a listed address and a stranger's — a directory of
-    the beta, handed to anyone who can reach a public URL. **The
-    allowlist is consulted at `exchange`, after the caller has proved
-    inbox control, which is the gate that makes that answer safe.**
-    Pinned by `test_request_code_consults_no_allowlist`.
+#: How long a mailed code stays useful. Supplied at mint and nowhere else —
+#: `007` deliberately gives `expires_at` no default so the TTL cannot live in
+#: two places that would disagree.
+CODE_TTL_MINUTES = 10
+
+#: The redemption budget, matched to `_SIGNIN_BUCKET_CAPACITY` in `main.py`.
+#: Two limits that agree are one limit described twice; the interesting case
+#: would be this one being *looser* than the route's.
+SIGN_IN_MAX_ATTEMPTS = 5
+
+#: Lifetime of the access token `exchange_login_code` signs. One hour, which
+#: is what Supabase issued and what everything downstream already assumed.
+TOKEN_TTL_SECONDS = 3600
+
+#: The user agent is a browser identifying itself or it is not kept. The table
+#: refuses anything past 512 (`sign_in_events_agent_bounded`); `clean_version`
+#: in `failure_report` makes the same call and for the same reason — truncating
+#: leaves 512 characters of it in the one column a human reads.
+MAX_USER_AGENT_CHARS = 512
+
+
+def hash_sign_in_code(code: str) -> str:
+    """The keyed digest `sign_in_codes.code_hash` stores. 64 lowercase hex.
+
+    **HMAC-SHA256 keyed on `SUPABASE_JWT_SECRET`, not a bare `sha256`.** The
+    space is 10^6, so an unkeyed digest is a rainbow table of one line: a dump
+    of the table would be a list of live codes whether or not the column is
+    called "hash". This secret is already in the relay's environment and
+    leaking it is already total compromise — it signs every JWT — so the
+    digest adds no new failure mode and no new deployment variable.
     """
-    key = _anon_key()
-    if not _supabase_url() or not key:
+    key = jwt_secret().encode("utf-8")
+    return hmac.new(key, (_CODE_DIGEST_PREFIX + code).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def mint_sign_in_code() -> str:
+    """A six-digit code, zero-padded. `secrets`, not `random`."""
+    return f"{secrets.randbelow(10**6):06d}"
+
+
+async def request_login_code(email: str) -> None:
+    """Mint, store and mail a 6-digit code — for an admitted address only.
+
+    **The HTTP reply is byte-identical whether or not a code was minted, and
+    that is the one property this route may not lose.** This used to consult
+    nothing at all (Supabase minted for anyone), which kept the answer uniform
+    by never asking the question. It now consults `beta_access`, because a
+    code is the raw material for signing in and minting one for a stranger
+    mails a live credential to an address nobody chose — but a *conditional
+    reply* on this unauthenticated route is a directory of the beta, handed to
+    anyone who can reach a public URL. So the roster decides what we **do**,
+    never what we **say**: a listed address gets a code and a mail, a stranger
+    gets the same `{"sent": true}` and an inbox that stays empty.
+
+    Everything after the roster check is therefore swallowed rather than
+    reported. A mint that fails is logged and returns, for the same reason a
+    Supabase 429 used to be: a 502 here would be "you are on the list, and our
+    database blinked" while a stranger got a 200. Raises `SupabaseUnavailable`
+    only for "this relay has no control plane at all", which is a property of
+    the deployment and says nothing about the address.
+
+    Pinned by `test_the_reply_cannot_tell_a_member_from_a_stranger`.
+    """
+    addr = normalize_email(email)
+    if not _supabase_url() or not _service_key() or not jwt_secret():
         raise SupabaseUnavailable("not configured")
-    try:
-        status, _ = await _supabase_call(
-            "POST",
-            "auth/v1/otp",
-            json_body={"email": normalize_email(email), "create_user": True},
-            api_key=key,
-        )
-    except SupabaseUnavailable:
-        raise
-    except Exception as exc:
-        log.warning("sign-in code request failed: %s", type(exc).__name__)
+    if not await _listed_for_beta(addr):
+        # Miss and unreadable roster are both here, and both log differently
+        # (see `_control_plane_failed`). Neither may change the reply.
         return
-    if status >= 400:
-        log.warning("sign-in code request answered %d", status)
+    code = mint_sign_in_code()
+    expires = datetime.now(timezone.utc) + timedelta(minutes=CODE_TTL_MINUTES)
+    try:
+        status, _ = await _profiles(
+            "POST", "",
+            {"email": addr, "code_hash": hash_sign_in_code(code),
+             "expires_at": expires.isoformat(timespec="seconds")},
+            path="rest/v1/sign_in_codes",
+        )
+        if status >= 400:
+            log.warning("sign-in code insert answered %d", status)
+            return
+    except Exception as exc:  # TYPE only — a PostgREST body can echo the row
+        log.warning("sign-in code insert failed: %s", type(exc).__name__)
+        return
+    from .sign_in_code_email import send_code
+
+    await send_code(addr, code)
+
+
+async def _ensure_auth_user(email: str) -> str:
+    """The `auth.users` id this address signs in as. Creates it, with no mail.
+
+    Supabase Auth still owns the account row — `profiles.id` is an FK into
+    `auth.users` and the whole control plane depends on it — but the create
+    goes through the service-role admin API with `email_confirm: true`, so
+    **Supabase sends no mail, ever**. That is the other half of taking the
+    code over: the branded template and its localhost link are gone because
+    nothing on this path asks Supabase to write to anybody.
+
+    Called at **exchange**, not at mint. A code row needs no account (pinned
+    by `test_a_code_is_issued_to_an_address_that_need_not_have_an_account`),
+    and creating at mint time would mint an auth account for someone who never
+    redeemed — the thing this function exists to avoid doing to strangers.
+
+    **If the user already exists, get their id rather than failing.** The
+    create answers `422` for an address that is already registered and the
+    body names no id, so the id comes from the admin list. `ponytail:` the
+    list is paged at 200 a page and this walks up to five pages — fine for a
+    beta of tens, and the upgrade is a table of our own mapping address to id
+    the moment the roster is large enough to page past.
+    """
+    status, text = await _profiles(
+        "POST", "",
+        {"email": email, "email_confirm": True},
+        path="auth/v1/admin/users",
+    )
+    if 200 <= status < 300:
+        try:
+            uid = json.loads(text).get("id")
+        except Exception as exc:
+            raise SupabaseUnavailable("unreadable user") from exc
+        if isinstance(uid, str) and uid:
+            return uid
+        raise SupabaseUnavailable("no user id")
+    if status >= 500:
+        raise SupabaseUnavailable(f"admin users answered {status}")
+    # 4xx: already there (or refused). Either way the create did not give us
+    # an id, and a wrong code never reaches this line — so this is not a place
+    # where a refusal can become an account-existence answer.
+    for page in range(1, 6):
+        status, text = await _profiles(
+            "GET", f"?page={page}&per_page=200", path="auth/v1/admin/users",
+        )
+        if status >= 400:
+            raise SupabaseUnavailable(f"admin users list answered {status}")
+        try:
+            users = json.loads(text).get("users") or []
+        except Exception as exc:
+            raise SupabaseUnavailable("unreadable user list") from exc
+        for user in users:
+            if isinstance(user, dict) and normalize_email(str(user.get("email") or "")) == email:
+                uid = user.get("id")
+                if isinstance(uid, str) and uid:
+                    return uid
+        if not isinstance(users, list) or len(users) < 200:
+            break
+    raise SupabaseUnavailable("no user id")
 
 
 async def exchange_login_code(email: str, code: str) -> str:
     """Verify the emailed code. The relay's access token, or raise ValueError.
 
-    ValueError carries no Supabase text — the body names whether the
-    address exists, what the code was worth, and how long the project has
-    been rate limited.
+    Every failure is one opaque `ValueError("invalid or expired code")` — a
+    wrong code, an expired one, one whose budget is spent and one with no row
+    at all are the same sentence, because saying which half was wrong is the
+    account-existence oracle `request-code` refuses to be. A control plane
+    that cannot answer is `SupabaseUnavailable`, which is a different thing:
+    it says nothing about the address and reporting it is the difference
+    between "check your inbox" and "nothing is wrong, wait".
     """
-    key = _anon_key()
-    if not _supabase_url() or not key:
+    addr = normalize_email(email)
+    if not _supabase_url() or not _service_key() or not jwt_secret():
         raise SupabaseUnavailable("not configured")
-    status, text = await _supabase_call(
-        "POST",
-        "auth/v1/verify",
-        json_body={
-            "email": normalize_email(email),
-            "token": code.strip(),
-            "type": "email",
-        },
-        api_key=key,
-    )
-    if status >= 400:
-        raise ValueError("invalid or expired code")
+    # The attempt is charged inside `redeem_sign_in_code` before the digest is
+    # judged — see `007`. A read-then-write here would be five guesses billed
+    # as one.
     try:
-        token = json.loads(text).get("access_token")
+        status, text = await _profiles(
+            "POST", "",
+            {"addr": addr, "supplied_hash": hash_sign_in_code(code.strip()),
+             "max_attempts": SIGN_IN_MAX_ATTEMPTS},
+            path="rest/v1/rpc/redeem_sign_in_code",
+        )
+    except SupabaseUnavailable:
+        raise
     except Exception as exc:
-        raise ValueError("invalid or expired code") from exc
-    if not isinstance(token, str) or not token:
+        raise SupabaseUnavailable(type(exc).__name__) from exc
+    if status >= 400 or text.strip() != "true":
         raise ValueError("invalid or expired code")
-    return token
+    uid = await _ensure_auth_user(addr)
+    return make_jwt(
+        {"sub": uid, "email": addr, "role": "authenticated",
+         "exp": int(time.time()) + TOKEN_TTL_SECONDS},
+        jwt_secret(),
+    )
+
+
+def _mask_peer(peer: str) -> str | None:
+    """The peer, truncated to a **network**. `None` when there is no peer.
+
+    `/24` on IPv4 and `/48` on IPv6 — a real allocation, and the finest
+    granularity that still answers "is this somewhere new?". The table's
+    CHECK pins the same two masks, so a half-masked value has nowhere to
+    land. `None` rather than an empty string: an honest absence is not
+    "somewhere".
+    """
+    try:
+        ip = ipaddress.ip_address(peer.strip())
+    except ValueError:
+        return None
+    bits = 24 if ip.version == 4 else 48
+    return str(ipaddress.ip_network(f"{ip}/{bits}", strict=False))
+
+
+async def record_sign_in_event(token: str, peer: str, user_agent: str) -> None:
+    """One `sign_in_events` row. Never raises.
+
+    Called as a **background task**, after the exchange has answered, so the
+    endpoint never waits on this write and a control-plane failure cannot turn
+    a successful sign-in into an error. A failed exchange never reaches it:
+    one row per *successful* `POST /v1/auth/exchange`, and a wrong guess is
+    not a sign-in.
+
+    The owner is read off the verified token and never off the body — the body
+    is caller-supplied, exactly as `failure_reports.owner` refuses to be.
+    """
+    claims = verify_jwt(token)
+    if claims is None:
+        return
+    agent = user_agent.strip()
+    if len(agent) > MAX_USER_AGENT_CHARS:
+        agent = ""
+    try:
+        status, _ = await _profiles(
+            "POST", "",
+            {"owner": claims.sub, "ip": _mask_peer(peer), "user_agent": agent},
+            path="rest/v1/sign_in_events",
+        )
+        if status >= 400:
+            log.warning("sign-in event answered %d", status)
+    except Exception as exc:  # TYPE only — a PostgREST body can echo the row
+        log.warning("sign-in event not recorded: %s", type(exc).__name__)
 
 
 #: The pre-loaded roster. One row per approved address, normalised on the way

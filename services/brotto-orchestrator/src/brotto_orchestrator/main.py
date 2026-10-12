@@ -1191,18 +1191,17 @@ async def request_login_code(request: Request):
     """Mail a 6-digit sign-in code.
 
     The answer is the same for an address that has an account, one that
-    does not, and one on the beta roster: this route consults nothing
-    that knows who is in the beta and swallows Supabase's answer rather
-    than relaying it. A relay that told the caller which addresses exist
-    is a directory of the beta.
+    does not, and one on the beta roster. The relay now consults the
+    roster — so a code is minted and mailed only for an address somebody
+    deliberately admitted — but **what we do must never become what we
+    say**: a reply that branched on membership is a directory of the
+    beta, and that argument does not weaken just because the check moved
+    in-house. Every failure after the check is swallowed, so a stranger
+    gets the same `{"sent": true}` a member does.
 
-    Signups are **on**, because there is otherwise no way for a brand-new
-    person to obtain a credential at all — `profiles.id` is an FK into
-    `auth.users`, so no row can be seeded for an address with no auth
-    account. That is exactly why the value may not become conditional on
-    the roster: it is the one branch on this route that would hand an
-    unauthenticated caller a membership oracle. Approval happens at
-    `exchange`, where the emailed code has already proved inbox control.
+    Signups are **on**, but they happen at `exchange`, not here. A code
+    row needs no account; the `auth.users` row is created once the code
+    has proved inbox control.
     """
     from .session.jwt_auth import (
         EMAIL_RE,
@@ -1233,14 +1232,13 @@ async def request_login_code(request: Request):
 
 
 @app.post("/v1/auth/exchange")
-async def exchange_login_code(request: Request):
+async def exchange_login_code(request: Request, background: BackgroundTasks):
     """Trade the emailed code for a relay access token, and say whether
     this identity is on the beta roster.
 
-    Supabase's body names whether the address exists, what the code was
-    worth and how long the project has been rate limited; none of it
-    crosses back. The caller learns that its code did not work, which is
-    all the panel can act on.
+    Every failure is one fixed `"invalid or expired code"` — a wrong code,
+    a spent one and one with no row are the same sentence. The caller
+    learns that its code did not work, which is all the panel can act on.
 
     **Reporting `approved` here is not the account-existence oracle
     `request-code` is not allowed to become**, and the difference is the
@@ -1248,6 +1246,11 @@ async def exchange_login_code(request: Request):
     inbox it controls, which `request-code` cannot verify. `approved` is
     also only a report — `authorize_task_start` asks the same question
     again at task start, so this is a UI state and not the decision.
+
+    The sign-in event is a **background** task, added only on the success
+    path and only after the token exists: one row per successful exchange,
+    written after the response is on the wire so the endpoint never waits
+    on it and a control-plane failure cannot turn a sign-in into an error.
     """
     from .session.jwt_auth import (
         EMAIL_RE,
@@ -1255,6 +1258,7 @@ async def exchange_login_code(request: Request):
         approve_at_exchange,
         exchange_login_code as _exchange,
         normalize_email,
+        record_sign_in_event,
     )
 
     body = await _json_body(request)
@@ -1274,6 +1278,10 @@ async def exchange_login_code(request: Request):
     # Never raises: a control plane that cannot answer this still leaves the
     # caller signed in, and the second wall decides at task start.
     approved = await approve_at_exchange(token)
+    background.add_task(
+        record_sign_in_event, token, _signin_peer(request),
+        request.headers.get("user-agent") or "",
+    )
     return JSONResponse(content={"access_token": token, "approved": approved})
 
 

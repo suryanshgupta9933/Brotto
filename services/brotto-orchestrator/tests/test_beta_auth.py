@@ -450,8 +450,10 @@ def test_a_code_request_is_open(client, monkeypatch, hosted):
 def test_an_unregistered_address_answers_exactly_as_a_registered_one(client, monkeypatch, hosted):
     """An account-existence oracle is the failure mode here, not the transport.
 
-    Supabase's own `create_user: false` is what makes this true; this
-    test is what stops somebody deleting it.
+    The route layer stays uniform even though the relay now consults the
+    roster before minting — see
+    `test_the_reply_cannot_tell_a_member_from_a_stranger` for the mint half.
+    This pins the reply half: one sentence, whatever the address is.
     """
     sent = []
 
@@ -1151,39 +1153,93 @@ def _stub_verify(monkeypatch, email=LISTED):
     monkeypatch.setattr(jwt_auth, "exchange_login_code", fake)
 
 
-def test_signups_are_on_so_a_new_person_can_get_a_credential(hosted, monkeypatch):
-    """There is no other signup path, so `create_user: false` closed the door
-    on everybody who was not already a row."""
-    sent = []
+def test_the_account_is_created_at_exchange_and_supabase_mails_nothing(
+    hosted, monkeypatch,
+):
+    """Superseded: this used to pin `POST auth/v1/otp` with `create_user: True`.
+
+    That call is what made Supabase send its own branded "Confirm your email
+    address" template — with a localhost link in it — so the relay took the
+    code over and the account is now created at **exchange**, through the
+    service-role admin API with `email_confirm: true`. A code is minted for
+    an address with no account (pinned by
+    `test_a_code_is_issued_to_an_address_that_need_not_have_an_account`), so
+    creating at mint time would mint an auth account for someone who never
+    redeemed.
+    """
+    import asyncio
+
+    minted = []
+    created = []
 
     async def fake(method, path, *, json_body, api_key, service=False, prefer=""):
-        sent.append((path, json_body))
+        minted.append((method, path, json_body))
+        # `startwith`, not `==`: `_profiles` concatenates the query onto the
+        # path, so the lookup arrives as `rest/v1/beta_access?email=...`.
+        if path.startswith(jwt_auth.BETA_ACCESS_PATH):
+            return 200, json.dumps([{"email": "beta@example.test", "revoked_at": None}])
+        if path == "rest/v1/sign_in_codes":
+            return 201, ""
+        if path == "auth/v1/admin/users":
+            created.append((method, json_body))
+            return 200, json.dumps({"id": USER_ID})
         return 200, "{}"
 
     monkeypatch.setattr(jwt_auth, "_supabase_call", fake)
-    import asyncio
-
+    monkeypatch.setattr("brotto_orchestrator.session.sign_in_code_email.send_code",
+                        _noop_send)
     asyncio.run(jwt_auth.request_login_code("  Beta@Example.TEST "))
-    assert sent[0] == ("auth/v1/otp", {"email": "beta@example.test", "create_user": True})
+    assert any(p == "rest/v1/sign_in_codes" for _, p, _ in minted), (
+        "no code was minted — the assertion below would pass vacuously"
+    )
+    assert created == [], "minting a code must not create an auth account"
+    assert not any(p == "auth/v1/otp" for _, p, _ in minted), (
+        "Supabase's otp endpoint is what sent the branded mail — it is gone"
+    )
+
+    async def redeem(method, path, *, json_body, api_key, service=False, prefer=""):
+        created.append((path, json_body))
+        if path == "rest/v1/rpc/redeem_sign_in_code":
+            return 200, "true"
+        if path == "auth/v1/admin/users":
+            return 200, json.dumps({"id": USER_ID})
+        return 200, "{}"
+
+    monkeypatch.setattr(jwt_auth, "_supabase_call", redeem)
+    token = asyncio.run(jwt_auth.exchange_login_code("beta@example.test", "123456"))
+    assert jwt_auth.verify_jwt(token).sub == USER_ID
+    admin = next(c for c in created if c[0] == "auth/v1/admin/users")
+    # `email_confirm: true` is what stops Supabase mailing a confirmation of
+    # its own — the whole reason this path exists rather than `auth/v1/otp`.
+    assert admin[1] == {"email": "beta@example.test", "email_confirm": True}
 
 
-def test_request_code_consults_no_allowlist(client, monkeypatch, hosted):
-    """The branch that would turn an open route into a directory of the beta.
+def test_the_reply_cannot_tell_a_member_from_a_stranger(client, monkeypatch, hosted):
+    """Rewritten from `test_request_code_consults_no_allowlist`.
 
-    `profiles.id` is an FK into `auth.users`, so no row can be seeded for an
-    address with no auth account — which means the roster check *could* only
-    ever land on this route, the one with no credential. It does not land
-    here: an unlisted stranger and a listed member are the same request.
+    The old assertion ("consults nothing") is no longer the invariant and
+    was never the point: the relay now reads `beta_access` so a code is
+    minted only for an admitted address, because minting one for a stranger
+    mails a live credential to an address nobody chose. What must not change
+    is the **reply**. A conditional answer on this unauthenticated route is
+    a directory of the beta — same reason, same cost, whichever side of the
+    process the roster check lives on.
+
+    So: the two addresses get byte-identical bodies, and only the listed one
+    is minted. The second half is what stops this becoming a no-op that
+    mails anybody.
     """
-    def explode(*a, **k):
-        raise AssertionError("request-code consulted the roster")
-
-    monkeypatch.setattr(jwt_auth, "_profiles", explode)
-    monkeypatch.setattr(jwt_auth, "_listed_for_beta", explode)
-    _stub_send(monkeypatch)
-    assert client.post(
-        "/v1/auth/request-code", json={"email": "stranger@example.test"}
-    ).json() == {"sent": True}
+    listed, stranger = "listed@example.test", "stranger@example.test"
+    calls = _roster_stub(monkeypatch, listed=[listed])
+    monkeypatch.setattr("brotto_orchestrator.session.sign_in_code_email.send_code",
+                        _noop_send)
+    bodies = []
+    for addr in (listed, stranger):
+        resp = client.post("/v1/auth/request-code", json={"email": addr})
+        bodies.append((resp.status_code, resp.content))
+    assert bodies[0] == bodies[1], "the reply named the roster"
+    minted = [c["body"]["email"] for c in calls if c["path"] == "rest/v1/sign_in_codes"]
+    assert minted == [listed], "a code was minted for somebody nobody admitted"
 
 
 def test_a_listed_address_approves_itself_at_exchange(client, monkeypatch, hosted):
@@ -1526,11 +1582,10 @@ def test_an_unapproved_token_is_refused_on_every_use_path(
 ):
     """The signature is not the invitation.
 
-    `create_user` is unconditionally true on the sign-in route, so every
-    person who signs up holds a token that verifies — a signature proves
-    an account exists, and these six routes were answering on that alone.
-    Two of them spend the operator's model credits, which is the cost this
-    is really about.
+    A successful exchange hands anybody who proved inbox control a token
+    that verifies — a signature proves an account exists, and these six
+    routes were answering on that alone. Two of them spend the operator's
+    model credits, which is the cost this is really about.
     """
     _profiles_stub(monkeypatch, [])  # a valid JWT with no profile row
     headers = {"Authorization": f"Bearer {_token()}"}
@@ -1590,3 +1645,193 @@ def test_self_host_answers_every_use_path_unchanged(client, monkeypatch):
     headers = {"Authorization": "Bearer s3cret"}
     assert client.get("/v1/policy", headers=headers).status_code == 200
     assert client.post("/v1/sessions", json={}, headers=headers).status_code == 201
+
+
+# ── the code is ours: digest, mint, and the one sign-in row ────────────────
+
+
+def test_the_stored_code_is_a_digest_and_never_the_code(hosted, monkeypatch):
+    """`code_hash` is 64 lowercase hex, and the code itself is not on the row.
+
+    A table dump is the threat this shapes: a six-digit code stored in the
+    clear is a list of live credentials, and a column named `code_hash` that
+    *holds* the code is the same list with a reassuring name. The SQL CHECK
+    refuses a plaintext row (`test_the_column_cannot_hold_a_code`); this pins
+    what the relay actually writes.
+    """
+    import asyncio
+    import re
+
+    calls = _roster_stub(monkeypatch, listed=["beta@example.test"])
+    monkeypatch.setattr("brotto_orchestrator.session.sign_in_code_email.send_code",
+                        _noop_send)
+    asyncio.run(jwt_auth.request_login_code("beta@example.test"))
+    sent = [c["body"] for c in calls if c["path"] == "rest/v1/sign_in_codes"]
+    assert len(sent) == 1
+    body = sent[0]
+    assert set(body) == {"email", "code_hash", "expires_at"}
+    assert re.fullmatch(r"[0-9a-f]{64}", body["code_hash"]), body["code_hash"]
+    assert not re.fullmatch(r"\d{6}", body["code_hash"])
+
+
+async def _noop_send(email, code):
+    return None
+
+
+def test_the_digest_is_keyed_so_a_dump_is_not_a_list_of_codes(hosted):
+    """Unkeyed `sha256` of a 10^6 space is a rainbow table of one line.
+
+    Whoever holds the table could recompute every digest offline in under a
+    second. HMAC keyed on `SUPABASE_JWT_SECRET` is the difference, and the
+    domain prefix keeps a digest minted for one purpose from replaying as
+    one for another under the same key.
+    """
+    import hashlib
+    import hmac as hmac_mod
+
+    code = "123456"
+    digest = jwt_auth.hash_sign_in_code(code)
+    assert digest != hashlib.sha256(code.encode()).hexdigest()
+    assert digest != hashlib.sha256(f"brotto.sign-in-code:{code}".encode()).hexdigest()
+    keyed = hmac_mod.new(
+        JWT_SECRET.encode(), f"brotto.sign-in-code:{code}".encode(), hashlib.sha256
+    ).hexdigest()
+    assert digest == keyed
+
+
+def test_the_mint_is_six_digits_from_secrets(hosted):
+    codes = {jwt_auth.mint_sign_in_code() for _ in range(50)}
+    assert all(c.isdigit() and len(c) == 6 for c in codes)
+    assert len(codes) > 1, "a constant mint is not a code"
+
+
+def test_make_jwt_and_verify_jwt_are_one_key_one_algorithm(hosted):
+    """`make_jwt` is no longer a test helper — `exchange_login_code` signs
+    the production access token with it, against the same secret
+    `verify_jwt` checks. A round trip is the whole contract; anything the
+    verifier refuses here is a beta member who cannot sign in.
+    """
+    token = make_jwt(
+        {"sub": USER_ID, "email": "beta@example.test", "role": "authenticated",
+         "exp": int(time.time()) + jwt_auth.TOKEN_TTL_SECONDS},
+        JWT_SECRET,
+    )
+    claims = jwt_auth.verify_jwt(token)
+    assert claims is not None
+    assert claims.sub == USER_ID
+    assert jwt_auth.verify_jwt(make_jwt(
+        {"sub": USER_ID, "exp": int(time.time()) + 60}, "other-secret"
+    )) is None
+
+
+def test_every_failure_is_one_opaque_sentence(hosted, monkeypatch):
+    """Wrong, expired, spent and never-issued are the same words.
+
+    Distinguishing them would name whether an address has a live code, which
+    is the account-existence oracle `request-code` refuses to be. Asserted at
+    the function, because the HTTP layer already maps `ValueError` to one
+    fixed body.
+    """
+    import asyncio
+
+    async def no_row(method, path, *, json_body, api_key, service=False, prefer=""):
+        return 200, "false"
+
+    async def error(method, path, *, json_body, api_key, service=False, prefer=""):
+        return 404, '{"message":"whatever the database said"}'
+
+    for fake in (no_row, error):
+        monkeypatch.setattr(jwt_auth, "_supabase_call", fake)
+        with pytest.raises(ValueError) as exc:
+            asyncio.run(jwt_auth.exchange_login_code("beta@example.test", "000000"))
+        assert str(exc.value) == "invalid or expired code"
+
+
+def test_a_successful_exchange_records_one_sign_in_event(client, monkeypatch, hosted):
+    """One row per successful exchange, owner from the verified token, the
+    peer as a **network**.
+
+    The peer is `_signin_peer` — the socket identity, not a forwarded header
+    a caller can rewrite — so the test pins that seam rather than
+    `x-forwarded-for`. `test_the_peer_is_stored_as_a_network_and_never_as_a_host`
+    owns the masking itself.
+
+    The background task is the whole reason a control-plane hiccup cannot
+    turn a finished sign-in into an error — and it is why a failed exchange
+    must write nothing at all.
+    """
+    rows = []
+
+    async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        if path == "rest/v1/sign_in_events":
+            rows.append(body)
+            return 201, ""
+        return 200, "{}"
+
+    monkeypatch.setattr(jwt_auth, "_profiles", fake)
+    monkeypatch.setattr(jwt_auth, "exchange_login_code",
+                        lambda e, c: _ok_token())
+    monkeypatch.setattr(jwt_auth, "approve_at_exchange", _no_approval)
+    monkeypatch.setattr("brotto_orchestrator.main._signin_peer",
+                        lambda request: "203.0.113.42")
+    resp = client.post(
+        "/v1/auth/exchange",
+        json={"email": "beta@example.test", "code": "123456"},
+        headers={"user-agent": "Mozilla/5.0 (test)", "x-forwarded-for": "203.0.113.42"},
+    )
+    assert resp.status_code == 200
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["owner"] == USER_ID
+    assert row["ip"] == "203.0.113.0/24"
+    assert row["user_agent"] == "Mozilla/5.0 (test)"
+
+
+async def _ok_token():
+    return _token()
+
+
+def test_a_failed_exchange_records_no_sign_in_event(client, monkeypatch, hosted):
+    rows = []
+
+    async def fake(method, path, *, json_body, api_key, service=False, prefer=""):
+        if path == "rest/v1/sign_in_events":
+            rows.append(json_body)
+        return 200, "{}"
+
+    async def boom(email, code):
+        raise ValueError("invalid or expired code")
+
+    monkeypatch.setattr(jwt_auth, "_supabase_call", fake)
+    monkeypatch.setattr(jwt_auth, "exchange_login_code", boom)
+    resp = client.post(
+        "/v1/auth/exchange", json={"email": "beta@example.test", "code": "000000"}
+    )
+    assert resp.status_code == 400
+    assert rows == [], "a wrong guess is not a sign-in"
+
+
+def test_the_peer_is_stored_as_a_network_and_never_as_a_host(hosted):
+    assert jwt_auth._mask_peer("203.0.113.42") == "203.0.113.0/24"
+    assert jwt_auth._mask_peer("2001:db8:abcd:1234::1") == "2001:db8:abcd::/48"
+    assert jwt_auth._mask_peer("not-an-address") is None
+    assert jwt_auth._mask_peer("") is None
+
+
+def test_an_oversized_user_agent_is_dropped_rather_than_truncated(hosted, monkeypatch):
+    """Same call `clean_version` makes: truncating leaves 512 characters of a
+    hostile string in the one column a human reads. The table's CHECK is the
+    backstop; this is the relay not walking up to it."""
+    rows = []
+
+    async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        if path == "rest/v1/sign_in_events":
+            rows.append(body)
+        return 201, ""
+
+    monkeypatch.setattr(jwt_auth, "_profiles", fake)
+    import asyncio
+    asyncio.run(jwt_auth.record_sign_in_event(
+        _token(), "203.0.113.42", "x" * (jwt_auth.MAX_USER_AGENT_CHARS + 1)
+    ))
+    assert rows and rows[0]["user_agent"] == ""
