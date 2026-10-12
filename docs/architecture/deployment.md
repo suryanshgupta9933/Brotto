@@ -247,7 +247,12 @@ is three statements an on-call operator forgets at 2am.
 
 `revoked_at` is a column, not a row delete: *"we removed this person"* is an
 audit question, and `on delete cascade` would take the evidence with it — the
-`auth.users` row *is* the evidence. `tasks_this_week` resets by **comparing
+`auth.users` row *is* the evidence. **But the column is not itself durable**:
+because `profiles.id` cascades from `auth.users`, deleting the auth account
+deletes this `revoked_at` too, and a re-signup on the same address is admitted
+fresh. That is why the withdrawal also lands on `beta_access.revoked_at`, which
+is not a foreign key — see *The roster admits; `revoked_at` withdraws*.
+`tasks_this_week` resets by **comparing
 `week_start` to `current_date` on read**, with no scheduled job: a cron that
 resets a counter ten people move a few hundred times is a cron that quietly
 stops running, and the failure mode is one user's beta ending for no visible
@@ -309,18 +314,30 @@ account id, so the operator bulk-pastes a list instead of minting one
 caller — no normalisation function in SQL, so there is one rule to keep in step,
 not two. It carries **no `owner` column**: the address is matched against the
 `email` claim on a verified JWT, never against a body field. Only `email` is
-ever read (`select=email`); `approved_at` is filled by its column default and
+ever read (`select=email,revoked_at`); `approved_at` is filled by its column default and
 **`added_by` is written by no code path**, so it is empty for every row that
 exists — set it by hand if you ever need it.
 
-**To withdraw a member, set `profiles.revoked_at` — do not delete the roster
-row.** The roster is consulted once, at `/v1/auth/exchange`, and only to decide
-whether to create a `profiles` row; after that every check is `profiles`
-existence plus `revoked_at`. Deleting a `beta_access` row for somebody already
-approved leaves them with working beta access. `revoked_at` is set by hand and
-applies at their next task start; deleting the roster row afterwards is
-optional housekeeping. See `docs/architecture/privacy.md` § *The roster admits;
-`revoked_at` withdraws*.
+**To withdraw a member, set `beta_access.revoked_at`.** That one statement *is*
+the withdrawal:
+
+```sql
+update beta_access set revoked_at = now() where email = 'x@example.com';
+```
+
+It takes effect at their next sign-in, and it is the only one of the two writes
+that **survives the auth account being deleted** — `profiles.id` is
+`on delete cascade` from `auth.users`, so deleting the account deletes the
+profile *and* its `revoked_at`, and a re-signup on the same address would
+otherwise be re-admitted fresh. Set `profiles.revoked_at` alongside it as well:
+that is what `authorize_task_start` reads at task start, so without it an
+already-signed-in member keeps working until their next sign-in. Necessary and
+not sufficient — a cascade erases only the second one.
+
+Deleting the roster row afterwards is optional housekeeping and withdraws
+nobody on its own; do it before the `revoked_at` update and you have closed a
+door that was never locked. See `docs/architecture/privacy.md` § *The roster
+admits; `revoked_at` withdraws*.
 
 **The two tables must never be joined by a pipeline.** `POST /v1/waitlist` is
 reachable with no credential at all, so copying a stranger's submission into

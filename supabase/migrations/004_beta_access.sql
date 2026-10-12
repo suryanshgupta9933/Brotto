@@ -5,33 +5,44 @@
 -- entered by the address rather than by the account id, so an operator can
 -- bulk-paste a list instead of minting one `auth.users` row per person by hand.
 --
--- ── removal is NOT revocation, and this is the second step to get wrong ──
+-- ── the withdrawal, and the step that used to be half of it ──────────────
 --
--- **Absence of a row is the refusal for somebody who has not been admitted
--- yet. It is not a refusal for somebody who already has.** `beta_access` is
--- read in exactly one place, `approve_at_exchange`, and only to decide whether
--- to *create* a `profiles` row. Once that row exists, `authorize_task_start`
--- enforces `profiles` — existence and `revoked_at` — and never consults this
--- table again.
+-- **To withdraw a member, run one statement:**
 --
--- So **deleting a row here does not withdraw an approved member.** They keep
--- working beta access until `profiles.revoked_at` is set, which is by hand and
--- is the deliberate mechanism. An operator who deletes the roster row believing
--- it revoked them has removed a person who can still run tasks and believes
--- they cannot.
+--   update beta_access set revoked_at = now() where email = '<address>';
 --
--- The two steps, in the order to do them:
---   1. `update profiles set revoked_at = now() where email = '<address>'`
---      — this is the withdrawal, and it takes effect at the next `task_start`.
---   2. delete from `beta_access where email = '<address>'` — optional, and only
---      to keep the roster honest; it stops them being re-created if the
---      `profiles` row is ever deleted.
+-- That is the withdrawal. It is one statement, it takes effect at their next
+-- sign-in, and **it survives the auth account being deleted** — which is why
+-- it is here and not only on `profiles`.
 --
--- Doing 2 alone is a no-op for access. Doing 1 alone fully withdraws them.
--- No `AFTER DELETE` trigger ties the two: revocation belongs to `profiles`,
--- where the evidence is, and a trigger would couple this table's rollback to
--- another table's for a withdrawal that is rare enough during a beta to be a
--- two-step.
+-- **Why it cannot live on `profiles` alone.** `profiles.id` references
+-- `auth.users` on delete cascade, so deleting the auth account deletes the
+-- profile *and its `revoked_at` with it*. They sign up again, the roster still
+-- holds the address, and `approve_at_exchange` inserts a fresh, unrevoked
+-- `profiles` row. Revocation was never durable, and the cascade walks straight
+-- around the insert-if-absent that exists to stop a withdrawn member
+-- reinstating themselves. The evidence has to outlive the account it was
+-- recorded against, so `revoked_at` here is **not a foreign key and must never
+-- become one.**
+--
+-- **Absence of a row is still the refusal for somebody not admitted yet.**
+-- `_listed_for_beta` refuses an address that is absent *or* that has
+-- `revoked_at` set, so deleting the roster row after withdrawing closes the
+-- door for good rather than re-opening it — the difference is that deleting
+-- alone withdraws nobody. Withdraw first; deleting the row is optional
+-- housekeeping.
+--
+-- **Do the `profiles` write alongside it, and it is not sufficient on its
+-- own.** `update profiles set revoked_at = now() where email = '<address>'` is
+-- what `authorize_task_start` actually reads at task start, so without it a
+-- member who is already signed in keeps working until their next sign-in. It
+-- is also **the only one of the two writes a cascade can erase**, which is
+-- exactly why it cannot be the whole procedure. Two statements, in this order:
+--   1. update beta_access  set revoked_at = now() where email = '<address>'
+--   2. update profiles     set revoked_at = now() where email = '<address>'
+--
+-- No `AFTER DELETE` trigger ties them: a trigger fires on a *delete*, and a
+-- withdrawal is an `UPDATE` that deliberately leaves its evidence in place.
 --
 -- `email` is the primary key, which is what makes a second paste a no-op: a
 -- duplicate arrives as a 409 and is the operator's confirmation that the
@@ -65,7 +76,16 @@ create table beta_access (
   -- Who put it there. Nullable, because a bulk paste arrives with no single
   -- author and an empty string is a worse answer than an absent one. It is
   -- the operator's identifier — never the address's.
-  added_by    text
+  added_by    text,
+  -- The withdrawal, and the only durable record of one. Nullable with no
+  -- default because a new row is always a *grant*: there is nothing to
+  -- backfill, and a `default now()` would revoke every roster row on the day
+  -- the column was added. null = never withdrawn.
+  --
+  -- Deliberately **not** a foreign key and never to become one — `profiles`
+  -- is `on delete cascade` from `auth.users`, and a revocation that a deleted
+  -- account takes with it is not a revocation. See the header.
+  revoked_at  timestamptz
 );
 
 -- ── nobody but the service role may touch this table ───────────────────

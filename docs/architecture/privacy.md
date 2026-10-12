@@ -31,7 +31,7 @@ So the privacy posture is not "we do not collect your data". It is:
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
 | Waitlist signup (a name, an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |
-| Beta allowlist (an email, and the row's insert timestamp) | `beta_access` table in Supabase, server | until the operator drops it |
+| Beta allowlist (an email, the row's insert timestamp, and a withdrawal timestamp once one is set) | `beta_access` table in Supabase, server | until the operator drops it |
 | Waitlist confirmation (the address, in transit and in Resend's request logs) | `api.resend.com` | theirs, not ours |
 | Audit request bodies | whatever the model provider logs | theirs, not ours |
 
@@ -44,8 +44,10 @@ see *The waitlist is the first data from someone who is not an account*.
 `profiles` row records, entered by address so the operator can bulk-paste a list —
 and it stays a table the operator writes by hand. **Removing a row from it does
 not revoke anyone** — see *The roster admits; `revoked_at` withdraws* below.
-**Of its three columns only `email` is ever read**: `_listed_for_beta` selects
-`select=email` and nothing else. `approved_at` exists because the table is a
+**Of its four columns only `email` and `revoked_at` are ever read**:
+`_listed_for_beta` selects `select=email,revoked_at`, and the second is the
+withdrawal — see *The roster admits; `revoked_at` withdraws* below.
+`approved_at` exists because the table is a
 ledger someone will ask "when", and it is filled by the column default rather
 than by any path here; **`added_by` is written by nobody** — no code path
 supplies it, so the column that looks like an author field is empty for every
@@ -357,13 +359,32 @@ the gate `request-code` cannot verify. Pinned by
 is a refusal **only for somebody who has not been admitted yet**. Deleting one
 for an already-approved member changes nothing they can observe.
 
-Withdrawal is `update profiles set revoked_at = now() where email = '…'`, set
-by hand, and it takes effect at that member's next `task_start`. Deleting the
-roster row is a second, optional step that only keeps the paste-list honest.
-There is no `AFTER DELETE` trigger joining the two, and that is the decision
-rather than an omission: revocation belongs to `profiles`, where the `auth.users`
-row *is* the evidence, and a trigger would couple this table's rollback to
-another table's for a withdrawal rare enough in a beta to be a two-step.
+**The withdrawal is `update beta_access set revoked_at = now() where email =
+'…'`,** set by hand, and it takes effect at that member's next sign-in.
+
+That column is not a second copy of `profiles.revoked_at` for tidiness; it is
+the only one of the two a cascade cannot erase. `profiles.id` references
+`auth.users` **on delete cascade**, so when the auth account goes — the person
+deletes it, Supabase purges it, a test fires the cascade — the `profiles` row
+and its `revoked_at` go with it. They sign up again, the address is still on the
+roster, and `approve_at_exchange` inserts a fresh, unrevoked profile.
+**Revocation was not durable**, and the cascade walked straight around the
+insert-if-absent that exists precisely to stop a withdrawn member reinstating
+themselves. The evidence has to outlive the account it was recorded against, so
+`beta_access.revoked_at` is **not a foreign key and must never become one**, and
+`_listed_for_beta` refuses an address whose `revoked_at` is set.
+
+**Do the `profiles` write alongside it.** `update profiles set revoked_at = now()
+where email = '…'` is what `authorize_task_start` actually reads at task start,
+so without it a member who is already signed in keeps working until they next
+sign in. It is necessary and not sufficient, and the distinction is not
+stylistic: it is the one a cascade erases.
+
+Deleting the roster row afterwards remains optional housekeeping — now it
+*closes* the door rather than re-opening it, and it withdraws nobody on its own.
+There is no `AFTER DELETE` trigger joining anything: a trigger fires on a
+*delete*, and a withdrawal is an `UPDATE` that deliberately leaves its evidence
+in place.
 
 The operational consequence is the whole point: **an operator who removes a
 roster row instead of setting `revoked_at` has handed someone a working beta
