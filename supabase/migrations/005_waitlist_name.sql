@@ -35,7 +35,7 @@ alter table waitlist add column name text;
 -- existed would otherwise fail the ADD and take the migration with it. A name
 -- that begins with one of these four characters is not a name anybody is going
 -- to recognise as their own, so there is nothing to salvage here.
-update waitlist set name = ''' || name where name ~ '^[=+\-@\t\r]';
+update waitlist set name = '''' || name where name ~ '^[=+\-@\t\r]';
 
 alter table waitlist
   add constraint waitlist_name_no_formula
