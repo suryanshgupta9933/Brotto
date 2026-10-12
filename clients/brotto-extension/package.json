@@ -7,7 +7,8 @@
     "build": "node build.mjs",
     "build:tsc": "tsc --noEmit",
     "watch": "tsc --watch",
-    "test": "npm run build:tsc && npm run build && node --test ../../scripts/*.test.js",
+    "check:syntax": "for f in src/*.js; do node --check \"$f\" || exit 1; done",
+    "test": "npm run build:tsc && npm run build && npm run check:syntax && node --test ../../scripts/*.test.js",
     "clean": "rm -rf dist"
   },
   "keywords": [

@@ -124,6 +124,17 @@ jobs:
         working-directory: clients/brotto-extension
         run: npm run build
 
+      # Parse every shipped JS file. `tsc --noEmit` only sees background.ts,
+      # the build only bundles background.ts, and the extraction tests below
+      # eval one function at a time — so a syntax error anywhere else in
+      # sidepanel.js or welcome.js was invisible to all three. It shipped:
+      # `renderCloudSignInStatus` bound `(in) =>`, and `in` is a reserved
+      # word, so the panel threw before it rendered anything. `node --check`
+      # is a whole-file parse in milliseconds, which is what was missing.
+      - name: Syntax-check shipped JS
+        working-directory: clients/brotto-extension
+        run: npm run check:syntax
+
       # Every scripts/*.test.js file is the only check for panel
       # rendering, replay, key dispatch, the model-check gate order and the
       # observation guards — CLAUDE.md names each one. They extract the real
