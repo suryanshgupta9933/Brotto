@@ -53,15 +53,14 @@ script runs on the operator's own machine over the Supabase CLI's linked-project
 credentials, so there is nothing remote to compromise. **Removing a row from the
 table does not revoke anyone** — see *The roster admits; `revoked_at` withdraws*
 below.
-**Of its four columns only `email` and `revoked_at` are ever read**:
-`_listed_for_beta` selects `select=email,revoked_at`, and the second is the
-withdrawal — see *The roster admits; `revoked_at` withdraws* below.
+**Of its three columns only `email` and `revoked_at` are ever read**:
+`_listed_for_beta` / `beta_status` select `email,revoked_at`, and the second is
+the withdrawal — see *The roster admits; `revoked_at` withdraws* below.
 `approved_at` exists because the table is a
 ledger someone will ask "when", and it is filled by the column default rather
-than by any path here. `added_by` is written by **no code path on the server** —
-the relay never writes this table — and by exactly one client of it,
-`beta-roster.sh`, which stamps `whoami` on `add`; a row created any other way
-carries an empty author rather than a wrong one. The moment
+than by any path here. (`added_by` was a fourth column and is gone as of `009`:
+the relay never wrote it, only `beta-roster.sh` stamped `whoami` on `add`, and
+nobody ever read it.) The moment
 anything copies a
 waitlist submission into it without a human deciding, `POST /v1/waitlist` — the
 one route reachable with **no credential at all** — answers "is this person in
@@ -784,16 +783,59 @@ into the `WHERE` clause of the `UPDATE` (`reserve_task_slot`). The read stays,
 because revocation and invitation are genuinely reads; only the increment had to
 be atomic.
 
-**The two open sign-in routes are metered, and the limiter cannot become the
-oracle the routes were written not to be.** They are unauthenticated by
-definition, so they are a way to drive outbound email to arbitrary third-party
-addresses through our Resend account. The bucket keys on the peer (the forwarded
-hop, because behind a proxy `client.host` is the proxy for everybody and the
-limit would be five sign-ins per ten minutes for the whole beta) and on the
-**normalised** address the caller typed. It never consults anything that knows
-who is in the beta, so there is no branch in it that *could* differ between a
-rostered address and a stranger's — pinned by a test that drives both and
-compares the answers.
+**The two open sign-in routes are metered, and the limiter itself is not the
+oracle.** They are unauthenticated by definition, so they are a way to drive
+outbound email to arbitrary third-party addresses through our Resend account.
+The bucket keys on the peer (the forwarded hop, because behind a proxy
+`client.host` is the proxy for everybody and the limit would be five sign-ins
+per ten minutes for the whole beta) and on the **normalised** address the
+caller typed. It never consults anything that knows who is in the beta.
+
+**`request-code` itself DOES now name the roster state** — see
+*The sign-in reply is a deliberate oracle* below. That is a product decision
+the owner made against the earlier uniform reply; it does not extend to the
+limiter, which still branches on neither address.
+
+## The sign-in reply is a deliberate oracle
+
+`POST /v1/auth/request-code` answers `{"sent": true}` or
+`{"sent": false, "reason": "not_on_list" | "pending" | "revoked" | "try_again"}`.
+A stranger who types an address learns whether it is on the waitlist, whether
+it has been admitted, and whether it was withdrawn. **That is an
+account-existence oracle on an unauthenticated route, and it is on purpose.**
+
+The earlier design refused this: the reply was byte-identical whether or not a
+code was minted, on the reasoning that a conditional answer is a directory of
+the beta handed to anyone who can reach a public URL. The comment in
+`jwt_auth.py` and `test_the_reply_cannot_tell_a_member_from_a_stranger` existed
+to hold that line.
+
+**The owner reversed it**, because the uniform reply produced the sentence "if
+this address is in the beta, a code is on its way" — a system that does not
+know what it just did — and left a non-member waiting for a mail that was
+never coming. Four distinguishable answers produce four honest sentences and
+an immediate offer of the waitlist. The decision is recorded in
+`docs/product/decisions/2026-10-12-sign-in-reply-names-the-roster.md`.
+
+What the trade buys and what it costs, stated once so nobody rediscovers it:
+
+- **Cost:** anyone who can reach `POST /v1/auth/request-code` can enumerate
+  the waitlist, the roster, and the withdrawals, one address at a time. The
+  rate limiter bounds the speed but not the fact.
+- **Buy:** a person who is not in the beta is told so, immediately, and can
+  join the waitlist from the same screen. A person who is waiting is told
+  they are waiting. A person who was withdrawn is told that too.
+- **What did NOT change:** `POST /v1/auth/exchange` still answers one opaque
+  `"invalid or expired code"` for every failure. The code space is 10^6 and
+  that route is the one an attacker would grind; it stays non-oracular. The
+  rate limiter still branches on neither address. `sign_in_events` is still
+  one row per successful exchange.
+
+**Revisit when the roster stops being ~ten people.** The original decision
+said the check moves to a capability the user has already paid for rather than
+to a bare address. That is still the upgrade path: the oracle is tolerable
+while the directory is small and the product is invite-only, and it is not
+tolerable once membership is worth knowing.
 
 ## Failure reports are the operator's question, asked without a page
 

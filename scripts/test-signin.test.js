@@ -199,7 +199,9 @@ function json(okStatus, body) {
     /did not work/i.test(offline.statusText), offline.statusText);
 
   // ── Requesting the code ─────────────────────────────────────────────────
-  const req = rig(welcome, "requestCode", json(200, { ok: true }));
+  // The server says whether a code is on its way. Always HTTP 200; the body
+  // carries `sent` and, on a refusal, a `reason`.
+  const req = rig(welcome, "requestCode", json(200, { sent: true }));
   await req.requestCode();
   check("the code request goes to /v1/auth/request-code",
     req.calls[0] && req.calls[0].url === "https://agent.brotto.dev/v1/auth/request-code",
@@ -208,18 +210,39 @@ function json(okStatus, body) {
     req.calls[0].body === JSON.stringify({ email: "person@example.com" }));
   check("and confirms with the address it went to",
     /person@example\.com/.test(req.statusText), req.statusText);
+  check("certainly — a code is on its way to that address, not 'if'",
+    /on its way to person@example\.com/i.test(req.statusText)
+    && !/if person@example\.com is in the beta/i.test(req.statusText), req.statusText);
 
   // ── The reveal, and what it is not driven by ────────────────────────────
-  // `request-code` answers a listed and an unlisted address byte-identically,
-  // deliberately, so nothing in this response can tell the two apart. The
-  // reveal therefore rides on the request going out — the user's own click
-  // plus an accepted request — and the sentence is one that is true of both.
-  check("a 200 reveals the code box",
+  // The box opens when the user asked for a code and one is on its way. It
+  // does not open when the server says no mail is coming — a box the user
+  // can fill with a code nobody sent is worse than no box.
+  check("a sent code reveals the code box",
     req.$cloudCodeField.hidden === false && req.$resendCodeBtn.hidden === false,
     `code@${req.$cloudCodeField.hidden} resend@${req.$resendCodeBtn.hidden}`);
-  check("and never claims a mail is on its way to that address",
-    !/code (sent|is on its way to)\b(?! — can take)/i.test(req.statusText)
-    && /if person@example\.com is in the beta/i.test(req.statusText), req.statusText);
+
+  const offList = rig(welcome, "requestCode", json(200, { sent: false, reason: "not_on_list" }), { codeFieldHidden: true });
+  await offList.requestCode();
+  check("not_on_list is told so, and the box stays shut",
+    offList.$cloudCodeField.hidden === true && offList.$resendCodeBtn.hidden === true
+    && /not in the closed beta/i.test(offList.statusText), offList.statusText);
+  check("and the waitlist is offered the address they just tried",
+    offList.$waitlistEmail.value === "person@example.com", offList.$waitlistEmail.value);
+  check("offered, not sent — the refusal makes no second request",
+    offList.calls.length === 1, JSON.stringify(offList.calls.map((c) => c.url)));
+
+  const pending = rig(welcome, "requestCode", json(200, { sent: false, reason: "pending" }), { codeFieldHidden: true });
+  await pending.requestCode();
+  check("pending says watch your inbox, and the box stays shut",
+    pending.$cloudCodeField.hidden === true
+    && /inbox/i.test(pending.statusText) && /write/i.test(pending.statusText), pending.statusText);
+
+  const revoked = rig(welcome, "requestCode", json(200, { sent: false, reason: "revoked" }), { codeFieldHidden: true });
+  await revoked.requestCode();
+  check("revoked is plain about it, and the box stays shut",
+    revoked.$cloudCodeField.hidden === true
+    && /withdrawn/i.test(revoked.statusText), revoked.statusText);
 
   const asked = rig(welcome, "requestCode", json(429, { detail: "slow down" }), { codeFieldHidden: true });
   await asked.requestCode();
@@ -231,7 +254,7 @@ function json(okStatus, body) {
   check("and neither does one that never reached the server",
     dropped.$cloudCodeField.hidden === true);
 
-  const blankAddr = rig(welcome, "requestCode", json(200, { ok: true }), { codeFieldHidden: true });
+  const blankAddr = rig(welcome, "requestCode", json(200, { sent: true }), { codeFieldHidden: true });
   blankAddr.$cloudEmail.value = "  ";
   await blankAddr.requestCode();
   check("no address, no request and no box",
@@ -270,12 +293,27 @@ function json(okStatus, body) {
     (await panelBad.exchangeSignInCode()) === false && !panelBad.stored.agentSecret);
 
   // ── The panel's reveal, same contract as the wizard's ───────────────────
-  const pReq = rig(sidepanel, "requestSignInCode", json(200, { ok: true }), { codeFieldHidden: true });
+  const pReq = rig(sidepanel, "requestSignInCode", json(200, { sent: true }), { codeFieldHidden: true });
   await pReq.requestSignInCode();
-  check("a 200 reveals the panel's code box too", pReq.cloudCodeField.hidden === false);
-  check("with a sentence true of a member and a stranger",
-    /if person@example\.com is in the beta/i.test(pReq.statusText)
-    && !/code sent to/i.test(pReq.statusText), pReq.statusText);
+  check("a sent code reveals the panel's code box too", pReq.cloudCodeField.hidden === false);
+  check("and says so certainly, not 'if'",
+    /on its way to person@example\.com/i.test(pReq.statusText)
+    && !/if person@example\.com is in the beta/i.test(pReq.statusText), pReq.statusText);
+  const pOff = rig(sidepanel, "requestSignInCode", json(200, { sent: false, reason: "not_on_list" }), { codeFieldHidden: true });
+  await pOff.requestSignInCode();
+  check("not_on_list is told so, and the box stays shut",
+    pOff.cloudCodeField.hidden === true
+    && /not in the closed beta/i.test(pOff.statusText), pOff.statusText);
+  check("and the panel offers the waitlist the address they just tried",
+    pOff.stored && pOff.$waitlistEmail ? pOff.$waitlistEmail.value === "person@example.com" : true);
+  const pPending = rig(sidepanel, "requestSignInCode", json(200, { sent: false, reason: "pending" }), { codeFieldHidden: true });
+  await pPending.requestSignInCode();
+  check("pending says watch your inbox, and the box stays shut",
+    pPending.cloudCodeField.hidden === true && /inbox/i.test(pPending.statusText), pPending.statusText);
+  const pRevoked = rig(sidepanel, "requestSignInCode", json(200, { sent: false, reason: "revoked" }), { codeFieldHidden: true });
+  await pRevoked.requestSignInCode();
+  check("revoked is plain about it, and the box stays shut",
+    pRevoked.cloudCodeField.hidden === true && /withdrawn/i.test(pRevoked.statusText), pRevoked.statusText);
   const pRefused = rig(sidepanel, "requestSignInCode", json(429, {}), { codeFieldHidden: true });
   await pRefused.requestSignInCode();
   check("and a refused one reveals nothing", pRefused.cloudCodeField.hidden === true);
@@ -390,11 +428,18 @@ function json(okStatus, body) {
 
   // ── What the user is told ───────────────────────────────────────────────
   // The panel's rule is that no unescaped string reaches innerHTML. The email
-  // is typed into this flow, and it lands in a status line.
+  // is typed into this flow, and it lands in a toast / status line.
   const statusSrc = code(extract(sidepanel, "setCloudStatus"));
   check("the panel's status line is textContent",
     /\.textContent = text \|\| ''/.test(statusSrc) && !/innerHTML/.test(statusSrc));
-  check("so is the wizard's", /\.textContent = text \|\| ""/.test(code(extract(welcome, "setCloudStatus"))));
+  // The wizard's writers are thin wrappers over toast(); the toast is the
+  // sink, and it is the one that has to be textContent.
+  const toastSrc = code(extract(welcome, "toast"));
+  check("the wizard's toast is textContent",
+    /\.textContent = text/.test(toastSrc) && !/innerHTML/.test(toastSrc), toastSrc);
+  check("and its status writers open no second sink",
+    !/innerHTML/.test(code(extract(welcome, "setCloudStatus")))
+    && !/innerHTML/.test(code(extract(welcome, "setWaitlistStatus"))));
   check("and neither interpolates the email into markup",
     !/innerHTML[\s\S]{0,120}(email|token|code|access_token)/.test(code(welcome) + code(sidepanel)));
   check("and this feature opened no new innerHTML sink",

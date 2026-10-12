@@ -444,7 +444,7 @@ def test_a_self_host_task_start_asks_no_control_plane(client, monkeypatch, tmp_p
 
 def test_a_code_request_is_open(client, monkeypatch, hosted):
     async def fake(email):
-        return None
+        return "sent"
 
     monkeypatch.setattr(jwt_auth, "request_login_code", fake)
     resp = client.post("/v1/auth/request-code", json={"email": "beta@example.test"})
@@ -452,22 +452,27 @@ def test_a_code_request_is_open(client, monkeypatch, hosted):
     assert resp.json() == {"sent": True}
 
 
-def test_an_unregistered_address_answers_exactly_as_a_registered_one(client, monkeypatch, hosted):
-    """An account-existence oracle is the failure mode here, not the transport.
+def test_an_unregistered_address_is_told_so(client, monkeypatch, hosted):
+    """The reversal, at the route: a stranger no longer gets `sent: true`.
 
-    The route layer stays uniform even though the relay now consults the
-    roster before minting — see
-    `test_the_reply_cannot_tell_a_member_from_a_stranger` for the mint half.
-    This pins the reply half: one sentence, whatever the address is.
+    This used to assert the opposite — byte-identical bodies — because a
+    reply that branched on membership is a directory of the beta. The owner
+    traded that away so a person outside the closed beta learns it
+    immediately; see the docstring on the route. What must *not* happen is
+    the reason being wrong for the state: pinned by
+    `test_the_reply_names_the_roster_state_it_actually_read`.
     """
     sent = []
 
     async def fake(email):
         sent.append(email)
+        return "not_on_list"
 
     monkeypatch.setattr(jwt_auth, "request_login_code", fake)
     body = {"email": "nobody@example.test"}
-    assert client.post("/v1/auth/request-code", json=body).json() == {"sent": True}
+    assert client.post("/v1/auth/request-code", json=body).json() == {
+        "sent": False, "reason": "not_on_list",
+    }
     assert sent == ["nobody@example.test"]
 
 
@@ -543,12 +548,20 @@ def test_a_wrong_code_answers_400_and_leaks_nothing(client, monkeypatch, hosted)
 
 
 def test_supabase_error_text_never_reaches_the_caller(client, monkeypatch, hosted):
+    """Status only, never the body — a PostgREST error can echo the filter.
+
+    An unreadable roster is a 502 and not one of the roster reasons: it
+    says nothing about the address, and `not_on_list` here would be an
+    unapplied migration presenting as a product decision.
+    """
     async def fake(method, path, *, json_body, api_key, service=False):
         return 429, '{"message":"Email rate limit exceeded. Try again in 60s.","error_code":429}'
 
     monkeypatch.setattr(jwt_auth, "_supabase_call", fake)
     resp = client.post("/v1/auth/request-code", json={"email": "beta@example.test"})
-    assert resp.status_code == 200
+    assert resp.status_code == 502
+    assert "rate limit" not in resp.text
+    assert "Email rate limit" not in resp.text
 
 
 def test_a_sign_in_service_that_is_down_is_reported_as_down(client, monkeypatch, hosted):
@@ -899,6 +912,7 @@ def _stub_send(monkeypatch):
 
     async def fake(email):
         sent.append(email)
+        return "sent"
 
     monkeypatch.setattr(jwt_auth, "request_login_code", fake)
     return sent
@@ -966,6 +980,7 @@ def test_the_throttle_is_not_an_account_existence_oracle(client, monkeypatch, ho
     async def fake(email):
         # The roster exists; nothing downstream is allowed to see it.
         assert (email in roster) is not None
+        return "sent"
 
     monkeypatch.setattr(jwt_auth, "request_login_code", fake)
     answers = {}
@@ -1106,26 +1121,27 @@ def _parse_postgrest(query):
     return filters
 
 
-def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=()):
+def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=(), waitlisted=()):
     """The control plane as the approval path uses it.
 
-    Models the two tables rather than answering the same thing to every
-    query: `beta_access` filters by the address asked for (so a claim that
-    is *not* the one the caller typed finds nothing), and `profiles` hands
-    back whatever rows it was seeded with. Returns the calls.
+    Models the three tables rather than answering the same thing to every
+    query: `beta_access` and `waitlist` filter by the address asked for (so
+    a claim that is *not* the one the caller typed finds nothing), and
+    `profiles` hands back whatever rows it was seeded with. Returns the
+    calls.
 
-    The `beta_access` branch goes through `_parse_postgrest`, so the stub
-    agrees with the server about where the filter ends — stubbing the raw
-    string would make any encoding look correct, because the test would be
-    the only parser in the room. `revoked` are addresses that are on the
-    roster *and* withdrawn.
+    The `beta_access`/`waitlist` branches go through `_parse_postgrest`, so
+    the stub agrees with the server about where the filter ends — stubbing
+    the raw string would make any encoding look correct, because the test
+    would be the only parser in the room. `revoked` are addresses that are
+    on the roster *and* withdrawn.
     """
     calls = []
 
     async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
         calls.append({"method": method, "query": query, "body": body,
                       "path": path, "prefer": prefer})
-        if path == jwt_auth.BETA_ACCESS_PATH:
+        if path == jwt_auth.BETA_ACCESS_PATH or path == jwt_auth.WAITLIST_PATH:
             parsed = [f for f in _parse_postgrest(query) if f["column"] == "email"]
             # A filter that does not resolve to exactly one address is not a
             # lookup for anybody, which is the outcome a parser differential
@@ -1133,6 +1149,8 @@ def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=()):
             want = parsed[0]["values"][0] if (
                 len(parsed) == 1 and len(parsed[0]["values"]) == 1 and not parsed[0]["trailing"]
             ) else None
+            if path == jwt_auth.WAITLIST_PATH:
+                return 200, json.dumps([{"email": r} for r in waitlisted if r == want])
             return 200, json.dumps([
                 {"email": r, "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None}
                 for r in listed if r == want
@@ -1219,32 +1237,95 @@ def test_the_account_is_created_at_exchange_and_supabase_mails_nothing(
     assert admin[1] == {"email": "beta@example.test", "email_confirm": True}
 
 
-def test_the_reply_cannot_tell_a_member_from_a_stranger(client, monkeypatch, hosted):
-    """Rewritten from `test_request_code_consults_no_allowlist`.
+def test_the_reply_names_the_roster_state_it_actually_read(client, monkeypatch, hosted):
+    """Replaces `test_the_reply_cannot_tell_a_member_from_a_stranger`.
 
-    The old assertion ("consults nothing") is no longer the invariant and
-    was never the point: the relay now reads `beta_access` so a code is
-    minted only for an admitted address, because minting one for a stranger
-    mails a live credential to an address nobody chose. What must not change
-    is the **reply**. A conditional answer on this unauthenticated route is
-    a directory of the beta — same reason, same cost, whichever side of the
-    process the roster check lives on.
-
-    So: the two addresses get byte-identical bodies, and only the listed one
-    is minted. The second half is what stops this becoming a no-op that
-    mails anybody.
+    That test pinned byte-identical replies, which was the property this
+    route was written to hold: a conditional answer on an unauthenticated
+    route is a directory of the beta. The product owner traded it away so a
+    stranger is told immediately that they are not in the closed beta. The
+    new property is the opposite shape and the same discipline — **the
+    right reason for the right roster state**, never a reason that belongs
+    to a different state, and a code minted only for the one that should
+    get one.
     """
-    listed, stranger = "listed@example.test", "stranger@example.test"
-    calls = _roster_stub(monkeypatch, listed=[listed])
+    admitted = "admitted@example.test"
+    withdrawn = "withdrawn@example.test"
+    waiting = "waiting@example.test"
+    stranger = "stranger@example.test"
+    calls = _roster_stub(
+        monkeypatch,
+        listed=[admitted, withdrawn], revoked=[withdrawn], waitlisted=[waiting],
+    )
     monkeypatch.setattr("brotto_orchestrator.session.sign_in_code_email.send_code",
                         _noop_send)
-    bodies = []
-    for addr in (listed, stranger):
+    expected = {
+        admitted: {"sent": True},
+        withdrawn: {"sent": False, "reason": "revoked"},
+        waiting: {"sent": False, "reason": "pending"},
+        stranger: {"sent": False, "reason": "not_on_list"},
+    }
+    for addr, want in expected.items():
         resp = client.post("/v1/auth/request-code", json={"email": addr})
-        bodies.append((resp.status_code, resp.content))
-    assert bodies[0] == bodies[1], "the reply named the roster"
+        assert resp.status_code == 200, addr
+        assert resp.json() == want, addr
     minted = [c["body"]["email"] for c in calls if c["path"] == "rest/v1/sign_in_codes"]
-    assert minted == [listed], "a code was minted for somebody nobody admitted"
+    assert minted == [admitted], "a code was minted for a state that should not get one"
+
+
+def test_a_failed_mint_for_an_admitted_address_says_try_again(client, monkeypatch, hosted):
+    """The one outcome that is not a roster state, and the one that must not
+    be a 502.
+
+    The address *is* admitted, so telling them `not_on_list` is a lie and
+    a 502 is the oracle this reply is now allowed to be, only in a status
+    code. The person needs to know to retry; the panel already has copy for
+    a reason it does not recognise.
+    """
+    admitted = "admitted@example.test"
+    monkeypatch.setattr("brotto_orchestrator.session.sign_in_code_email.send_code",
+                        _noop_send)
+
+    # The roster must still answer; only the insert fails.
+    async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        if path == jwt_auth.BETA_ACCESS_PATH:
+            return 200, json.dumps([{"email": admitted, "revoked_at": None}])
+        if path == "rest/v1/sign_in_codes":
+            return 500, '{"message":"nope"}'
+        return 200, "[]"
+
+    monkeypatch.setattr(jwt_auth, "_profiles", fake)
+    resp = client.post("/v1/auth/request-code", json={"email": admitted})
+    assert resp.status_code == 200
+    assert resp.json() == {"sent": False, "reason": "try_again"}
+    assert "nope" not in resp.text
+
+
+def test_a_roster_we_cannot_read_is_not_told_as_a_roster_answer(
+    client, monkeypatch, hosted, caplog,
+):
+    """A miss and an unreadable roster were the same answer to `_listed_for_beta`
+    because that caller had already proved inbox control. This one has not,
+    and its reply is now the product's public face — so a control-plane
+    failure is 502, never `not_on_list`. Otherwise an unapplied migration
+    presents as "you are not in the beta".
+    """
+    import asyncio
+    import logging
+
+    async def broken(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        raise TimeoutError("upstream connect timeout")
+
+    monkeypatch.setattr(jwt_auth, "_profiles", broken)
+    with caplog.at_level(logging.ERROR, logger="brotto.jwt_auth"):
+        with pytest.raises(jwt_auth.SupabaseUnavailable):
+            asyncio.run(jwt_auth.request_login_code("beta@example.test"))
+    assert "TimeoutError" in caplog.text
+
+    caplog.clear()
+    resp = client.post("/v1/auth/request-code", json={"email": "beta@example.test"})
+    assert resp.status_code == 502
+    assert "not_on_list" not in resp.text
 
 
 def test_a_listed_address_approves_itself_at_exchange(client, monkeypatch, hosted):

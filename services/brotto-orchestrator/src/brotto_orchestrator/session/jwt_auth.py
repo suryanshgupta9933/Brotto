@@ -324,36 +324,99 @@ def mint_sign_in_code() -> str:
     return f"{secrets.randbelow(10**6):06d}"
 
 
-async def request_login_code(email: str) -> None:
+#: The waitlist, the "asked and not yet admitted" half of the two-table
+#: status lookup. Same shape as `BETA_ACCESS_PATH` and for the same reason:
+#: one stub in a test covers the whole control plane.
+WAITLIST_PATH = "rest/v1/waitlist"
+
+
+async def _beta_status(email: str) -> str:
+    """`admitted` | `none` | `pending` | `revoked` for this normalised address.
+
+    ponytail: two-table lookup — collapse onto the `public.beta_status(addr)`
+    RPC once 009 lands, keeping this vocabulary (`none`, not `not_on_list`).
+
+    Raises `SupabaseUnavailable` when either table cannot be read. That is
+    deliberately not one of the four: an unapplied migration answering
+    `not_on_list` is a deployment mistake presenting as a product decision,
+    which is the whole reason `_control_plane_failed` exists. A miss and an
+    unreadable roster are the same answer at `_listed_for_beta` because that
+    caller has already proved inbox control; this one has not, and its reply
+    is now the product's public face.
+
+    A filter value carrying a `"` or `\` is a **miss** (`none`), same as
+    `_listed_for_beta` → `False`: no escape rule here has been checked
+    against PostgREST, so the address is refused rather than guessed at, and
+    refusing is "we will not mint for you" either way.
+    """
+    try:
+        filt = f"?email=eq.{_filter_value(email)}"
+    except ValueError:
+        return "none"
+    for what, path, select in (
+        ("the beta_access lookup", BETA_ACCESS_PATH, "revoked_at"),
+        ("the waitlist lookup", WAITLIST_PATH, "email"),
+    ):
+        try:
+            status, text = await _profiles("GET", f"{filt}&select={select}", path=path)
+        except Exception as exc:
+            _control_plane_failed(what, exc_type=type(exc).__name__)
+            raise SupabaseUnavailable("roster unreadable") from exc
+        if status >= 400:
+            _control_plane_failed(what, status)
+            raise SupabaseUnavailable("roster unreadable")
+        try:
+            rows = json.loads(text)
+        except Exception as exc:
+            _control_plane_failed(f"{what} (unparseable body)", exc_type=type(exc).__name__)
+            raise SupabaseUnavailable("roster unreadable") from exc
+        if isinstance(rows, list) and rows:
+            if path != BETA_ACCESS_PATH:
+                return "pending"
+            row = rows[0] if isinstance(rows[0], dict) else {}
+            return "revoked" if row.get("revoked_at") else "admitted"
+    return "none"
+
+
+async def request_login_code(email: str) -> str:
     """Mint, store and mail a 6-digit code — for an admitted address only.
 
-    **The HTTP reply is byte-identical whether or not a code was minted, and
-    that is the one property this route may not lose.** This used to consult
-    nothing at all (Supabase minted for anyone), which kept the answer uniform
-    by never asking the question. It now consults `beta_access`, because a
-    code is the raw material for signing in and minting one for a stranger
-    mails a live credential to an address nobody chose — but a *conditional
-    reply* on this unauthenticated route is a directory of the beta, handed to
-    anyone who can reach a public URL. So the roster decides what we **do**,
-    never what we **say**: a listed address gets a code and a mail, a stranger
-    gets the same `{"sent": true}` and an inbox that stays empty.
+    Returns `"sent"`, or one of `"not_on_list" | "pending" | "revoked" |
+    "try_again"`.
 
-    Everything after the roster check is therefore swallowed rather than
-    reported. A mint that fails is logged and returns, for the same reason a
-    Supabase 429 used to be: a 502 here would be "you are on the list, and our
-    database blinked" while a stranger got a 200. Raises `SupabaseUnavailable`
-    only for "this relay has no control plane at all", which is a property of
-    the deployment and says nothing about the address.
+    **This reply is now conditional, and that is a deliberate reversal of
+    the property this route used to hold.** The HTTP answer was byte-
+    identical whether or not a code was minted — the roster decided what we
+    *did*, never what we *said* — because a conditional reply on an
+    unauthenticated route is a directory of the beta, handed to anyone who
+    can reach a public URL. The product owner traded that away: a stranger
+    left with "if this address is in the beta, a code is on its way" has no
+    way to learn they are not in the beta, and telling them is worth more
+    to that person than the oracle costs. The exchange route is unchanged
+    and stays non-oracular; this one is now a directory, on purpose. The
+    old reasoning is kept here rather than deleted so the next reader sees
+    a trade and not an oversight.
 
-    Pinned by `test_the_reply_cannot_tell_a_member_from_a_stranger`.
+    `"try_again"` is the one outcome that is not a roster state: the address
+    *is* admitted and the code could not be stored, so the person should
+    retry rather than be handed any of the three roster answers. It is a
+    200 with a reason and not a 502 — a status code that only ever appears
+    for an admitted address is the same oracle in a different spelling, and
+    the reply is already allowed to say which state you are in.
+
+    Raises `SupabaseUnavailable` when the roster cannot be read or the
+    deployment has no control plane at all. Both say nothing about the
+    address, which is exactly why they are the one case that must not
+    become any of the four reasons above.
+
+    Pinned by `test_the_reply_names_the_roster_state_it_actually_read`.
     """
     addr = normalize_email(email)
     if not _supabase_url() or not _service_key() or not jwt_secret():
         raise SupabaseUnavailable("not configured")
-    if not await _listed_for_beta(addr):
-        # Miss and unreadable roster are both here, and both log differently
-        # (see `_control_plane_failed`). Neither may change the reply.
-        return
+    state = await _beta_status(addr)
+    if state != "admitted":
+        return "not_on_list" if state == "none" else state
     code = mint_sign_in_code()
     expires = datetime.now(timezone.utc) + timedelta(minutes=CODE_TTL_MINUTES)
     try:
@@ -365,13 +428,14 @@ async def request_login_code(email: str) -> None:
         )
         if status >= 400:
             log.warning("sign-in code insert answered %d", status)
-            return
+            return "try_again"
     except Exception as exc:  # TYPE only — a PostgREST body can echo the row
         log.warning("sign-in code insert failed: %s", type(exc).__name__)
-        return
+        return "try_again"
     from .sign_in_code_email import send_code
 
     await send_code(addr, code)
+    return "sent"
 
 
 async def _ensure_auth_user(email: str) -> str:

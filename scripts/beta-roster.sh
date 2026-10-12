@@ -104,7 +104,6 @@ if [ "$cmd" = "list" ]; then
   q <<'SQL'
 select case when revoked_at is null then 'admitted' else 'withdrawn' end as state,
        email,
-       coalesce(added_by, '') as added_by,
        approved_at::date as approved
   from beta_access
  order by approved_at desc, email;
@@ -125,8 +124,8 @@ case "$cmd" in
       # which is the same half-procedure trap `drop` is guarded against. A
       # withdrawn address has to be re-admitted with `unrevoke`, on purpose.
       state="$(q <<SQL | last
-insert into beta_access (email, added_by, revoked_at)
-values ($n, '$(whoami)', null)
+insert into beta_access (email, revoked_at)
+values ($n, null)
 on conflict (email) do nothing
 returning 'admitted';
 SQL

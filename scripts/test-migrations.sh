@@ -126,7 +126,18 @@ out="$(run -tA -d postgres -c "
     and has_function_privilege('public',
           'public.redeem_sign_in_code(text,text,int)','EXECUTE') = false
     and has_function_privilege('anon',
-          'public.redeem_sign_in_code(text,text,int)','EXECUTE') = false;" | tr -d '[:space:]')"
+          'public.redeem_sign_in_code(text,text,int)','EXECUTE') = false
+    -- beta_status answers the oracle question outright, so the same rule and
+    -- a sharper reason: executable, it hands "is this address in the beta" to
+    -- anybody with the public anon key.
+    and has_function_privilege('public',
+          'public.beta_status(text)','EXECUTE') = false
+    and has_function_privilege('anon',
+          'public.beta_status(text)','EXECUTE') = false
+    -- 009 drops it: an operator identifier nothing writes is a column the
+    -- table editor shows and a reader believes.
+    and (select count(*) from information_schema.columns
+          where table_name='beta_access' and column_name='added_by') = 0;" | tr -d '[:space:]')"
 
 [ "$out" = "t" ] || fail "schema check failed (got '$out') — a column or grant is missing"
 
@@ -333,5 +344,34 @@ say "sign-in history outlives the account"
 expect "select count(*) from pg_constraint
          where conrelid = 'sign_in_events'::regclass and contype = 'f'" \
   "0" "sign_in_events has a foreign key — account deletion would erase it"
+
+# ── `009`: one lookup, four answers ───────────────────────────────────────
+#
+# The classification is the whole of what the sign-in screen will say, so each
+# of the four arms is asserted rather than the one this address happens to be
+# in. The precedence case is the one that rots silently: a revoked member who
+# is also on the waitlist must read `revoked`, and a `case` reordered to put
+# `pending` first changes that without breaking any single-table test.
+say "an address is classified into exactly one of the four answers"
+run -d postgres >/dev/null <<'SQL'
+insert into beta_access (email, revoked_at) values ('admitted@example.test', null);
+insert into beta_access (email, revoked_at) values ('revoked@example.test', now());
+insert into waitlist (email, batch) values ('pending@example.test', 'test');
+-- Both tables, and the reason the `case` arms are ordered: the roster is the
+-- last thing we said about them, so a revocation is not spoken over by a
+-- waitlist row they submitted themselves.
+insert into beta_access (email, revoked_at) values ('both@example.test', now());
+insert into waitlist (email, batch) values ('both@example.test', 'test');
+SQL
+expect "select beta_status('admitted@example.test')" \
+  "admitted" "an un-withdrawn roster row was not 'admitted'"
+expect "select beta_status('revoked@example.test')" \
+  "revoked" "a withdrawn roster row was not 'revoked'"
+expect "select beta_status('pending@example.test')" \
+  "pending" "a waitlist-only address was not 'pending'"
+expect "select beta_status('nobody@example.test')" \
+  "none" "an address in neither table was not 'none'"
+expect "select beta_status('both@example.test')" \
+  "revoked" "the waitlist spoke over a revocation — that arm is out of order"
 
 printf '\033[32mall passed\033[0m\n'

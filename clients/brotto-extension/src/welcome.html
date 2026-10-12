@@ -51,7 +51,7 @@
 
     /* ── Steps ──────────────────────────────────────────────────────────── */
     #steps { flex: 1; min-height: 0; overflow-y: auto; }
-    .step { display: none; padding: 22px 18px 26px; }
+    .step { display: none; padding: 28px 18px 32px; }
     .step.active { display: block; animation: step-in 160ms ease-out; }
     /* A step arrives rather than blinks. 4px of travel, no scale — a panel
        is 320px wide and anything larger reads as a transition the UI
@@ -65,9 +65,17 @@
       font-size: 18px;
       font-weight: 600;
       letter-spacing: -0.01em;
-      margin-bottom: 8px;
+      margin-bottom: 10px;
     }
-    .step > p { color: var(--ink-2); margin-bottom: 20px; }
+    /* An intro is an intro wherever it sits. `.step > p` only reached the
+       steps that put one directly under the section, so the sign-in and
+       self-host screens — whose lede lives inside their own block — got no
+       air and no ink-2, and read as a dense slab under the heading. */
+    .lede {
+      color: var(--ink-2);
+      margin-bottom: 28px;
+    }
+    .lede + .lede { margin-top: -18px; }
 
     /* The three states, drawn in the system rather than described in prose:
        a rule-weight sample per state, so the shape is recognisable before
@@ -75,9 +83,9 @@
     .states { border: 1px solid var(--rule-2); }
     .state {
       display: flex;
-      gap: 11px;
+      gap: 12px;
       align-items: flex-start;
-      padding: 13px;
+      padding: 15px 14px;
     }
     .state + .state { border-top: 1px solid var(--rule); }
     .state-mark {
@@ -104,8 +112,16 @@
        radio is the only control on the page, so it gets the ink and nothing
        else — no accent, no fill. The picked row carries the weight instead:
        two rows of identical weight read as a coin flip, and cloud is the one
-       we mean to be chosen. */
-    label.state { cursor: pointer; transition: background var(--t); }
+       we mean to be chosen. Its left mark is the one the three states below
+       already use, there meaning "picked". */
+    label.state {
+      cursor: pointer;
+      transition: background var(--t);
+      padding: 16px 14px;
+      gap: 12px;
+    }
+    label.state > .state-mark { background: transparent; width: 3px; }
+    label.state:has(input:checked) > .state-mark { background: var(--ink); }
     label.state > input { margin: 2px 0 0; accent-color: var(--ink); flex-shrink: 0; }
     label.state > span { display: block; }
     label.state:has(input:checked) { background: var(--paper-3); }
@@ -128,7 +144,7 @@
 
     /* ── Fields ─────────────────────────────────────────────────────────── */
     fieldset { border: 0; display: block; }
-    .field { margin-bottom: 18px; }
+    .field { margin-bottom: 22px; }
     .field > label, .lbl {
       display: block;
       font-family: var(--font-mono);
@@ -158,31 +174,61 @@
     textarea.input { resize: vertical; font-family: var(--font-ui); line-height: 1.5; }
     .hint { color: var(--ink-3); font-size: 12px; line-height: 1.5; margin-top: 6px; }
     .hint.bad { color: var(--bad); }
-
-    /* One status line, used by the self-host probe and the cloud sign-in. */
-    .status {
+    code {
       font-family: var(--font-mono);
-      font-size: 10px;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      margin-top: 8px;
-      color: var(--ink-3);
+      font-size: 0.92em;
     }
-    .status.ok { color: var(--ok); }
-    .status.bad { color: var(--bad); }
 
     /* The waitlist sits below the sign-in in the same step, so it is cut off
-       by the same hairline the head uses. Two fields, one status line, one
-       button — no box. */
+       by the same hairline the head uses. Two fields, one button — no box. */
     .waitlist-block {
       display: flex;
       flex-direction: column;
       gap: 12px;
-      margin-top: 20px;
-      padding-top: 18px;
+      margin-top: 28px;
+      padding-top: 22px;
       border-top: 1px solid var(--rule);
     }
     .waitlist-block > .lbl { margin-bottom: 0; }
+    .actions { margin-bottom: 8px; }
+
+    /* ── Toast ───────────────────────────────────────────────────────────────
+       Same shape as the side panel's: one fact, square, 1px ink border and a
+       3px left rule for the kind. Errors and notifications here used to sit
+       in a mono status line slammed against the next label — the kind is
+       carried by the rule, never by a radius. */
+    .toast {
+      position: fixed;
+      left: 14px;
+      right: 14px;
+      z-index: 90;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 11px;
+      background: var(--paper);
+      border: 1px solid var(--ink);
+      border-left: 3px solid var(--ink);
+      color: var(--ink);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      line-height: 1.5;
+      animation: toast-enter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .toast.bad { border-left-color: var(--bad); color: var(--bad); }
+    .toast.ok { border-left-color: var(--ok); color: var(--ok); }
+    .toast.leaving { animation: toast-leave 0.18s ease forwards; }
+    @keyframes toast-enter {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes toast-leave {
+      from { opacity: 1; transform: translateY(0); }
+      to   { opacity: 0; transform: translateY(-4px); }
+    }
 
     /* ── Foot ───────────────────────────────────────────────────────────── */
     #foot {
@@ -237,9 +283,10 @@
 
     <section class="step active" data-step="1" aria-labelledby="s1h">
       <h1 id="s1h">Which Brotto?</h1>
-      <p>Same extension, same browser either way. The difference is who runs the server.</p>
+      <p class="lede">Same extension, same browser either way. The difference is who runs the server.</p>
       <div class="states">
         <label class="state" for="editionCloud">
+          <span class="state-mark"></span>
           <input type="radio" name="edition" id="editionCloud" value="cloud" checked>
           <span>
             <span class="state-name">Brotto Cloud<span class="tag">Beta</span></span>
@@ -247,6 +294,7 @@
           </span>
         </label>
         <label class="state" for="editionSelf">
+          <span class="state-mark"></span>
           <input type="radio" name="edition" id="editionSelf" value="self">
           <span>
             <span class="state-name">Self-host</span>
@@ -258,7 +306,7 @@
 
     <section class="step" data-step="2" aria-labelledby="s2h">
       <h1 id="s2h">Brotto drives this browser</h1>
-      <p>Ask for a task in your own words. Brotto works through it in this browser, on your logged-in session.</p>
+      <p class="lede">Ask for a task in your own words. Brotto works through it in this browser, on your logged-in session.</p>
       <div class="states">
         <div class="state live">
           <span class="state-mark"></span>
@@ -290,16 +338,18 @@
          user to choose, and a read-only field named "where your tasks go"
          answers a question the cloud does not have. -->
     <section class="step" data-step="3">
+      <!-- The whole self-host screen — heading, lede, address, key — is one
+           block, because it is one question. Hiding only the fields left
+           "Your Brotto server" stacked above the cloud sign-in. -->
       <div id="selfHostBlock">
         <h1 id="s3h">Your Brotto server</h1>
-        <p>Brotto is model-agnostic. The server you point at decides which model runs.</p>
-        <div class="field" id="serverAddressField">
+        <p class="lede">Brotto is model-agnostic. The server you point at decides which model runs.</p>
+        <div class="field">
           <label for="serverUrl">Server address</label>
           <input id="serverUrl" class="input" type="url" placeholder="http://localhost:8000" spellcheck="false" />
           <p class="hint" id="serverUrlHint">Where your tasks go. Leave it alone unless you run your own server.</p>
-          <div id="serverStatus" class="status"></div>
         </div>
-        <div class="field" id="selfHostFields">
+        <div class="field">
           <label for="agentSecret">Server key</label>
           <input id="agentSecret" class="input" type="password" placeholder="Only if your server sets one" autocomplete="off" spellcheck="false" />
           <p class="hint">The <code>AGENT_SECRET</code> from the <code>.env</code> beside your <code>docker-compose.yml</code>. A server that sets one turns auth on by itself; leave this blank if yours doesn't.</p>
@@ -308,19 +358,17 @@
 
       <div id="cloudFields" hidden>
         <h1 id="s3cloudh">Sign in to Brotto Cloud</h1>
-        <p>We email you a 6-digit code instead of a link, so the extension asks for no extra permission.</p>
+        <p class="lede">Brotto Cloud is in closed beta — handed out to a small group for now, with a wider rollout planned.</p>
+        <p class="lede">If you've received a confirmation, sign in with your email.</p>
         <div class="field">
           <label for="cloudEmail">Email</label>
           <input id="cloudEmail" class="input" type="email" autocomplete="email" spellcheck="false" />
         </div>
-        <div><button id="sendCodeBtn" class="btn" type="button">Send code</button></div>
-        <div id="cloudStatus" class="status"></div>
+        <div class="actions"><button id="sendCodeBtn" class="btn" type="button">Send code</button></div>
 
-        <!-- The code box appears only once a request has gone out, and never
-             because the server said this address is on the list: it answers
-             a listed and an unlisted address identically, by design, so
-             there is nothing in the response to reveal on. What reveals it
-             is the user's own click. -->
+        <!-- The code box appears only after the user has asked for a code and
+             the server says one is on its way. Not on typing an email, and
+             not left open when the answer is that no mail is coming. -->
         <div id="cloudCodeField" hidden>
           <div class="field">
             <label for="cloudCode">6-digit code</label>
@@ -348,15 +396,14 @@
             <label for="waitlistEmail">Email</label>
             <input id="waitlistEmail" class="input" type="email" autocomplete="email" spellcheck="false" />
           </div>
-          <div id="waitlistStatus" class="status"></div>
-          <div><button id="waitlistJoinBtn" class="btn" type="button">Join the waitlist</button></div>
+          <div class="actions"><button id="waitlistJoinBtn" class="btn btn-primary" type="button">Join the waitlist</button></div>
         </div>
       </div>
     </section>
 
     <section class="step" data-step="4" aria-labelledby="s4h">
       <h1 id="s4h">Bring your own key</h1>
-      <p>Brotto needs a key to reach your model provider. It goes to your Brotto server and nowhere else.</p>
+      <p class="lede">Brotto needs a key to reach your model provider. It goes to your Brotto server and nowhere else.</p>
       <div class="field">
         <label for="provider">Provider</label>
         <!-- A bare <select> with no loading, empty or error state cannot

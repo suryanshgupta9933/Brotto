@@ -23,7 +23,6 @@ const $next = document.getElementById("nextBtn");
 const $skip = document.getElementById("skipBtn");
 const $serverUrl = document.getElementById("serverUrl");
 const $agentSecret = document.getElementById("agentSecret");
-const $serverStatus = document.getElementById("serverStatus");
 const $provider = document.getElementById("provider");
 const $providerStatus = document.getElementById("providerStatus");
 const $providerRetryBtn = document.getElementById("providerRetryBtn");
@@ -31,13 +30,11 @@ const $model = document.getElementById("model");
 const $apiKey = document.getElementById("apiKey");
 const $editionSelf = document.getElementById("editionSelf");
 const $editionCloud = document.getElementById("editionCloud");
-const $selfHostFields = document.getElementById("selfHostFields");
-const $serverAddressField = document.getElementById("serverAddressField");
+const $selfHostBlock = document.getElementById("selfHostBlock");
 const $cloudFields = document.getElementById("cloudFields");
 const $cloudEmail = document.getElementById("cloudEmail");
 const $cloudCode = document.getElementById("cloudCode");
 const $cloudCodeField = document.getElementById("cloudCodeField");
-const $cloudStatus = document.getElementById("cloudStatus");
 const $sendCodeBtn = document.getElementById("sendCodeBtn");
 const $resendCodeBtn = document.getElementById("resendCodeBtn");
 const $serverUrlHint = document.getElementById("serverUrlHint");
@@ -53,18 +50,42 @@ function edition() {
   return $editionCloud.checked ? "cloud" : "self";
 }
 
-function setCloudStatus(text, tone) {
-  if (!$cloudStatus) return;
+// One transient notice, same shape as the side panel's toast: a fact that
+// leaves no other trace. One at a time — a second replaces the first.
+// Removal runs on its own timer instead of `animationend`, which never fires
+// under prefers-reduced-motion (the animation is set to `none`) and would
+// strand the toast on screen.
+let toastTimer = null;
+let toastGoneTimer = null;
+function toast(text, kind, ms = 2600) {
+  clearTimeout(toastTimer);
+  clearTimeout(toastGoneTimer);
+  const old = document.querySelector(".toast");
+  if (old) old.remove();
+  if (!text) return;
   // textContent, not innerHTML: the address in this line is typed text, and
   // this wizard holds the same rule the panel does.
-  $cloudStatus.textContent = text || "";
-  $cloudStatus.className = tone ? `status ${tone}` : "status";
+  const el = document.createElement("div");
+  el.className = "toast" + (kind ? " " + kind : "");
+  el.setAttribute("role", "status");
+  el.textContent = text;
+  // Sit above whatever is actually at the bottom of the window — the foot
+  // bar carries Skip/Next and a fixed offset would land on top of it.
+  const foot = document.getElementById("foot");
+  const top = foot && foot.offsetParent !== null
+    ? foot.getBoundingClientRect().top
+    : window.innerHeight;
+  el.style.bottom = `${Math.round(window.innerHeight - top + 8)}px`;
+  document.body.appendChild(el);
+  toastTimer = setTimeout(() => el.classList.add("leaving"), ms);
+  // 200ms covers the 180ms leave animation with a little slack.
+  toastGoneTimer = setTimeout(() => el.remove(), ms + 200);
 }
 
-function setServerStatus(text, tone) {
-  $serverStatus.textContent = text || "";
-  $serverStatus.className = tone ? `status ${tone}` : "status";
-}
+// The three writers are one writer. They stay named because every call site
+// and every extraction test talks to them; the popup is underneath.
+function setCloudStatus(text, tone) { toast(text, tone); }
+function setServerStatus(text, tone) { toast(text, tone); }
 
 // What the address held before the cloud radio overwrote it. One-way was the
 // old comment's claim and it was simply not true of the field: the cloud
@@ -76,13 +97,10 @@ let selfHostServerUrl = "";
 
 function applyEdition() {
   const cloud = edition() === "cloud";
-  $selfHostFields.hidden = cloud;
-  // The address is not shown at all on the cloud path, not dimmed and not
-  // read-only: there is nothing on that side for the user to choose, and a
-  // field called "where your tasks go" invites them to edit a value that
-  // cannot be edited. `hidden` takes it out of the tab order and out of the
-  // accessibility tree with it, so it is absent rather than merely unseen.
-  $serverAddressField.hidden = cloud;
+  // The whole self-host screen is one question and one block: heading, lede,
+  // address, key. Hiding only the fields left "Your Brotto server" and the
+  // model-agnostic line stacked above the cloud sign-in.
+  $selfHostBlock.hidden = cloud;
   $cloudFields.hidden = !cloud;
   if ($serverUrlHint) $serverUrlHint.textContent = SELF_HOST_HINT;
   // The value is still written on the way in, because `finish()` and
@@ -95,8 +113,6 @@ function applyEdition() {
   } else if ($serverUrl.value.trim() === CLOUD_SERVER_URL) {
     $serverUrl.value = selfHostServerUrl;
   }
-  $serverStatus.textContent = "";
-  $serverStatus.className = "status";
   setCloudStatus("");
   hideCodeEntry();
 }
@@ -118,8 +134,6 @@ function show(n) {
   // "Skip" is meaningless once there is nothing left to skip past.
   $skip.hidden = n === TOTAL_STEPS;
   $next.textContent = n === TOTAL_STEPS ? "Start" : "Next";
-  $serverStatus.textContent = "";
-  $serverStatus.className = "status";
   // The catalogue belongs to the address it was fetched from, and the address
   // can change two steps after the fetch.
   if (n === TOTAL_STEPS) {
@@ -287,26 +301,46 @@ function hideCodeEntry() {
   $cloudCode.value = "";
 }
 
+// `POST /v1/auth/request-code` answers `{"sent": true}` or
+// `{"sent": false, "reason": "not_on_list" | "pending" | "revoked"}` — always
+// HTTP 200. The server says which; this maps it to one sentence and decides
+// whether a code box is any use.
 async function requestCode() {
   const email = $cloudEmail.value.trim();
   if (!email) { setCloudStatus("Enter the email you signed up with", "bad"); return; }
   setCloudStatus("Sending");
+  let body = null;
+  let ok = false;
   try {
-    const { ok } = await postAuth("/v1/auth/request-code", { email });
-    if (!ok) {
-      setCloudStatus("That address could not be sent a code", "bad");
-      return;
-    }
+    const res = await postAuth("/v1/auth/request-code", { email });
+    ok = res.ok;
+    body = res.body;
   } catch {
     setCloudStatus("Could not reach the server", "bad");
     return;
   }
-  // Revealed because a request went out, and for no other reason. The reply
-  // is byte-identical for an address on the beta and one that is not — the
-  // route cannot be asked who is in — so the sentence below is true of both,
-  // and a stranger is not told a mail is on its way to them.
-  showCodeEntry();
-  setCloudStatus(`If ${email} is in the beta, a code is on its way — it can take a minute`, "ok");
+  // Revealed because the user asked for a code and one is on its way — not
+  // by typing an address, and never when the answer is that no mail is coming.
+  if (ok && body && body.sent === true) {
+    showCodeEntry();
+    setCloudStatus(`A code is on its way to ${email} — it can take a minute`, "ok");
+    return;
+  }
+  hideCodeEntry();
+  if (ok && body && body.reason === "not_on_list") {
+    prefillWaitlist(email);
+    setCloudStatus("That address is not in the closed beta yet — leave it below and we'll write if a place opens");
+    return;
+  }
+  if (ok && body && body.reason === "pending") {
+    setCloudStatus("You're on the list but not admitted yet — watch your inbox, we'll write");
+    return;
+  }
+  if (ok && body && body.reason === "revoked") {
+    setCloudStatus("That address was withdrawn from the beta", "bad");
+    return;
+  }
+  setCloudStatus("That address could not be sent a code", "bad");
 }
 
 // Returns whether there is now a token, because the step it guards only
@@ -358,14 +392,7 @@ async function exchangeCode() {
 // address and for one already on the list alike, deliberately, so the route
 // cannot be asked who is on it — which is why the sentence after a 200 is the
 // same one for both.
-function setWaitlistStatus(text, tone) {
-  const el = document.getElementById("waitlistStatus");
-  if (!el) return;
-  // textContent, not innerHTML: the address here is typed text, and this
-  // wizard holds the same rule the panel does.
-  el.textContent = text || "";
-  el.className = tone ? `status ${tone}` : "status";
-}
+function setWaitlistStatus(text, tone) { toast(text, tone); }
 
 // Never overwrites an address already typed — the prefill is the refusal's
 // convenience, not the form's default.

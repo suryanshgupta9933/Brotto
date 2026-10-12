@@ -131,16 +131,13 @@ const APPLY = extract(welcome, "applyEdition");
 
 function applyEditionTo(selfChecked, cloudChecked, serverUrl) {
   const sandbox = {
-    $selfHostFields: { hidden: false },
-    $serverAddressField: { hidden: false },
+    $selfHostBlock: { hidden: false },
     $cloudFields: { hidden: false },
     $cloudCodeField: { hidden: false },
     $cloudCode: { value: "123456" },
     $resendCodeBtn: { hidden: false },
     $serverUrl: { ...serverUrl, classList: { toggle() {} } },
     $serverUrlHint: { textContent: "" },
-    $serverStatus: { textContent: "", className: "" },
-    $cloudStatus: { textContent: "", className: "" },
     edition() { return cloudChecked ? "cloud" : "self"; },
     setCloudStatus() {},
     CLOUD_SERVER_URL: "https://agent.brotto.dev",
@@ -155,18 +152,21 @@ function applyEditionTo(selfChecked, cloudChecked, serverUrl) {
 
 const selfRun = applyEditionTo(true, false, { value: "http://localhost:8000", readOnly: false });
 check("self-host keeps the address the user has", selfRun.$serverUrl.value === "http://localhost:8000");
-check("self-host shows the address field", selfRun.$serverAddressField.hidden === false);
-check("self-host shows the key field", selfRun.$selfHostFields.hidden === false);
+check("self-host shows the whole server block", selfRun.$selfHostBlock.hidden === false);
 check("self-host hides the sign-in block", selfRun.$cloudFields.hidden === true);
+
+// Hiding only the address field left the "Your Brotto server" heading and its
+// model-agnostic line stacked above the cloud sign-in. The block is one
+// question, and the heading lives inside the block that gets hidden.
+check("the self-host heading and lede live inside the block",
+  /id="selfHostBlock"[\s\S]*?Your Brotto server/.test(welcomeHtml)
+  && /id="selfHostBlock"[\s\S]*?model-agnostic/.test(welcomeHtml));
 
 const cloudRun = applyEditionTo(false, true, { value: "", readOnly: false });
 check("cloud prefills the address rather than leaving it blank", cloudRun.$serverUrl.value === "https://agent.brotto.dev");
-// The address is not presented at all on the cloud path — there is nothing on
-// that side for the user to choose, and a field called "where your tasks go"
-// invites an edit that cannot be made. `hidden` is what takes it out of the
-// tab order and the accessibility tree as well as off the screen.
-check("cloud does not present the address field at all", cloudRun.$serverAddressField.hidden === true);
-check("cloud hides the AGENT_SECRET field", cloudRun.$selfHostFields.hidden === true);
+// The whole self-host screen is gone, not dimmed: `hidden` takes it out of
+// the tab order and out of the accessibility tree with it.
+check("cloud hides the entire self-host block", cloudRun.$selfHostBlock.hidden === true);
 check("cloud shows email and code", cloudRun.$cloudFields.hidden === false);
 // The value is still written, because `finish()` and `postAuth` read the
 // field and neither knows which edition this is. A cloud user has to end up
