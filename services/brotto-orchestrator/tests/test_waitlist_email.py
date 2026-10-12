@@ -296,7 +296,7 @@ def test_a_resend_error_leaves_the_response_and_the_row_alone(hosted, client, su
     resp = client.post("/v1/waitlist", json={"email": VISITOR})
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
-    assert [r["body"] for r in supabase.rows] == [{"email": VISITOR, "batch": ""}]
+    assert [r["body"] for r in supabase.rows] == [{"email": VISITOR, "name": "", "batch": ""}]
 
 
 def test_a_transport_exception_is_swallowed(hosted, client, supabase, monkeypatch):
@@ -310,7 +310,7 @@ def test_a_transport_exception_is_swallowed(hosted, client, supabase, monkeypatc
     monkeypatch.setattr(we, "_deliver", boom)
 
     assert client.post("/v1/waitlist", json={"email": VISITOR}).status_code == 200
-    assert [r["body"] for r in supabase.rows] == [{"email": VISITOR, "batch": ""}]
+    assert [r["body"] for r in supabase.rows] == [{"email": VISITOR, "name": "", "batch": ""}]
 
 
 async def test_an_exception_the_enumeration_never_imagined_is_swallowed_too(

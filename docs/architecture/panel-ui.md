@@ -411,6 +411,43 @@ Pinned by `scripts/test-failure-reasons.test.js`.
 the no-unescaped-`innerHTML` rule applies to a settings hint exactly as it
 applies to a card.
 
+## `approved` is a report, and the token is stored either way
+
+`POST /v1/auth/exchange` answers `{access_token, approved}`. Both surfaces read
+the field the same way — `sidepanel.js:992` and `welcome.js:246` — and every
+part of that is load-bearing.
+
+**It is additive, so it is compared against `false`, never by truthiness.** A
+relay too old to send the field omits it, and an omitted field is *not* a
+refusal. Reading it as truthy would tell every user on an older relay they are
+"not on the list", which is a sentence about a table they have never heard of.
+
+**`approved: false` arrives with a valid token and a 200.** It means *we could
+not confirm you are on the list*, which includes `beta_access` being
+unreachable — an unreachable control plane and an absent row are the same
+answer upstream, deliberately. So it is a **report, not a gate**: the real gate
+is `not_invited` at task start, and a wrong answer here costs one confusing
+sentence rather than an unauthorised run.
+
+**The token is stored regardless, and there is no second flag.** `false` sets a
+local variable that changes only the status sentence and prefills the waitlist
+box; it never reaches `storeAgentSecret` (or `$agentSecret.value`). So
+`cloudSignedIn()` stays *"the `settings.agentSecret` slot is non-empty"* —
+adding an `approved` flag beside it would be a second source of truth that
+could disagree with the first. **Someone approved later must start working
+without signing in again**, and that is the whole reason the refusal is not
+stored.
+
+**Consequence: the refusal state is not persisted.** Reopening Settings says
+"Signed in to Brotto Cloud" for an address that was refused. That is correct,
+not a bug: the token really is there and really works. The beta state surfaces
+where it is actually decided — **at the first task, as `not_invited`**, whose
+copy was repointed at this block instead of at sign-in.
+
+`prefillWaitlist(email)` is **offered, never sent**, in both surfaces. The user
+has just read a code out of the inbox it prefills, which is why offering here
+is consented rather than a capture.
+
 ## Cloud is the default; the address is proved before it is trusted
 
 The wizard's first step is a radio, and **cloud is the one pre-selected** —

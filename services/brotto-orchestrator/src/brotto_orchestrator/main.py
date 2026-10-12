@@ -2309,8 +2309,9 @@ async def run_task(request: Request):
 # careful:
 #
 #   * the **meter**, so an open form is not a bulk-write button;
-#   * the **one-field row** (`waitlist.build_row`), so nothing a browser can
-#     send — a referrer, a user agent, a URL — has somewhere to land;
+#   * the **narrow row** (`waitlist.build_row` — an email, a bounded display
+#     name, and the operator's batch), so nothing a browser can send — a
+#     referrer, a user agent, a URL, a free-text note — has somewhere to land;
 #   * the **same answer either way**, so it cannot be asked who is on the list.
 #
 # **It is its own `FastAPI()` because CORS middleware is per-application.**
@@ -2357,7 +2358,8 @@ async def _waitlist_http_exc(_request: Request, exc: StarletteHTTPException):
 
 @waitlist_app.post("/waitlist")
 async def join_waitlist(request: Request, background: BackgroundTasks):
-    """Take one email address. The reply does not say whether it was new."""
+    """Take one email address and, optionally, the name to address the invite
+    to. The reply does not say whether it was new."""
     from .session import waitlist as wl
     from .session.jwt_auth import EMAIL_RE, normalize_email
 
@@ -2403,7 +2405,12 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
     if not _signin_allowed(_signin_peer(request), email,
                             _forwarded_hop(request), prefix="waitlist:"):
         return _error(429, "too many attempts — wait a few minutes and try again")
-    signup = await wl.add(email)
+    # The one field the visitor typed that is not an address, so the operator
+    # can address the invite they are about to send. Bounded at
+    # `NAME_MAX_CHARS` inside `build_row`, stripped here, and absent from the
+    # answer either way — a signup is `{"ok": true}` whatever the body said.
+    name = str(body.get("name", "") or "").strip()
+    signup = await wl.add(email, name)
     if not signup.ok:
         # Fixed text. The address is not in it, and neither is a PostgREST
         # body — a PostgREST error quotes the row.

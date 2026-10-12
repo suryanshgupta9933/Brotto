@@ -69,3 +69,21 @@ def test_the_allowlist_and_the_waitlist_stay_separate_tables():
     assert "created_at" not in beta
     # And no second table: this file creates one table and only one.
     assert beta.count("create table") == 1
+
+
+# ── the waitlist name column ──────────────────────────────────────────────
+
+def test_the_waitlist_gains_a_name_and_nothing_else():
+    """Nullable, so a blank field stays absent rather than becoming a string
+    the visitor never sent."""
+    sql = _sql("005_waitlist_name.sql")
+    assert "alter table waitlist add column name text" in sql
+    assert "not null" not in sql
+    assert "default" not in sql
+
+
+def test_the_waitlist_name_is_a_new_file_and_not_an_edit_to_003():
+    """Migrations are immutable once merged; a database already built from
+    `003` is what `005` has to reach."""
+    assert "add column" not in _sql("003_waitlist.sql")
+    assert "name" not in _sql("003_waitlist.sql")

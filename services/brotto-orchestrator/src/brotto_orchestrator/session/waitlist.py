@@ -6,12 +6,13 @@ and pointed it at their own browser; this is a stranger who filled in a form on
 a marketing page. That difference is the whole design constraint, and it is the
 same constraint as everywhere else here, applied to a new category:
 
-> Store the one field that was asked for, and nothing derived from it.
+> Store the fields that were asked for, and nothing derived from them.
 
-So `build_row` takes an email and nothing else. No referrer, no user agent, no
-page URL, no IP — not because they are filtered out, but because there is no
-parameter to put them in. `**extra` raises rather than filtering, for the same
-reason `failure_report.build_row` does: a filter is something a later commit
+So `build_row` takes an email, a bounded display name, and nothing else. No
+referrer, no user agent, no page URL, no IP, no free-text note — not because
+they are filtered out, but because there is no parameter to put them in.
+`**extra` raises rather than filtering, for the same reason
+`failure_report.build_row` does: a filter is something a later commit
 widens with a reason that reads well.
 
 **The answer is the same for an address that is new and one that is already
@@ -68,7 +69,12 @@ log = logging.getLogger("brotto.waitlist")
 #: The columns, and the only keys `build_row` will ever produce. A test asserts
 #: a built row has exactly this key set, so a column added without a reason
 #: written down fails the build.
-COLUMNS = frozenset({"email", "batch"})
+COLUMNS = frozenset({"email", "name", "batch"})
+
+#: How much of a typed name is kept. 64 characters is a person; a paragraph is
+#: the form being used as storage. Truncated rather than rejected, the same way
+#: `batch` is — a long name is not a reason to lose the signup.
+NAME_MAX_CHARS = 64
 
 #: Which invite round this row went out in. Not user content — it is stamped
 #: from this variable, which the operator sets when they send a batch. Empty
@@ -98,19 +104,26 @@ def batch() -> str:
     return os.getenv(BATCH_ENV, "").strip()[:64]
 
 
-def build_row(*, email: str, **extra) -> dict:
+def build_row(*, email: str, name: str = "", **extra) -> dict:
     """The row for one signup. Raises on anything it was not asked to store.
 
-    **The boundary.** One named argument, so widening the payload is a code
-    change a test fails on rather than a dict comprehension somebody widens with
-    the body of the request. The same shape decision as
+    **The boundary.** Named arguments, so widening the payload is a code change
+    a test fails on rather than a dict comprehension somebody widens with the
+    body of the request. The same shape decision as
     `begin_turn(ax_diff_chars: int)`.
+
+    `name` is the one field the visitor typed that is not an address, and it is
+    here for one reason: the operator invites these people by mail and cannot
+    say their name without it. It is a display name, bounded at
+    `NAME_MAX_CHARS`, and there is still no parameter for a referrer, a user
+    agent, a URL or a note — which is the guarantee that matters, and which
+    `test_the_row_cannot_carry_a_referrer_a_url_or_a_typed_field` holds.
     """
     if extra:
         raise ValueError(
             f"a waitlist row takes only {sorted(COLUMNS)}; got extra {sorted(extra)}"
         )
-    return {"email": email, "batch": batch()}
+    return {"email": email, "name": name[:NAME_MAX_CHARS], "batch": batch()}
 
 
 def waitlist_enabled() -> bool:
@@ -130,7 +143,7 @@ def waitlist_enabled() -> bool:
     return bool(_supabase_url() and _service_key())
 
 
-async def add(email: str) -> "Signup":
+async def add(email: str, name: str = "") -> "Signup":
     """Write one row through the same PostgREST seam as the other two tables.
 
     Which of the three happened — written, already there, or refused. Never
@@ -140,7 +153,7 @@ async def add(email: str) -> "Signup":
     """
     from .jwt_auth import SupabaseUnavailable, _profiles
 
-    row = build_row(email=email)
+    row = build_row(email=email, name=name)
     try:
         status, _ = await _profiles("POST", "", row, path="rest/v1/waitlist")
     except SupabaseUnavailable:

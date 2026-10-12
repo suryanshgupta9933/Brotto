@@ -292,6 +292,35 @@ wins. **Without `003` run, `POST /v1/waitlist` answers 502 on every signup** and
 the log says only that an insert was refused — the marketing page will report a
 success-looking failure. See `docs/architecture/privacy.md`.
 
+### The allowlist, and the waitlist's name column
+
+```bash
+psql "$SUPABASE_URL" -f supabase/migrations/004_beta_access.sql
+psql "$SUPABASE_URL" -f supabase/migrations/005_waitlist_name.sql
+```
+
+Two files rather than one `004`, because they are unrelated: `004` creates a
+table, `005` alters an existing one, and lumping them couples two changes whose
+rollback should not be coupled. Both are additive and neither touches a row.
+
+`004` is `profiles`' invitation expressed as an **address** instead of an
+account id, so the operator bulk-pastes a list instead of minting one
+`auth.users` row per person. `email text primary key`, already normalised by the
+caller — no normalisation function in SQL, so there is one rule to keep in step,
+not two. It carries **no `owner` column**: the address is matched against the
+`email` claim on a verified JWT, never against a body field. Only `email` is
+ever read (`select=email`); `approved_at` is filled by its column default and
+**`added_by` is written by no code path**, so it is empty for every row that
+exists — set it by hand if you ever need it.
+
+**The two tables must never be joined by a pipeline.** `POST /v1/waitlist` is
+reachable with no credential at all, so copying a stranger's submission into
+`beta_access` makes it answer "is this address in the beta?". See
+`docs/architecture/privacy.md`.
+
+`005` adds `waitlist.name`, nullable and with no default, so a blank field
+stays absent rather than becoming a string the visitor never sent.
+
 ### The confirmation email, and the two variables that switch it on
 
 A signup is confirmed by an email we send ourselves, through Resend's HTTP API
