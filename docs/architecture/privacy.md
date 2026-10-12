@@ -371,10 +371,22 @@ once, by `approve_at_exchange`, from the verified JWT claim at first sign-in,
 and is never updated afterwards — a member who changes their Supabase email
 leaves the old spelling on the row permanently, so an address-keyed update
 matches zero rows, reports success, and withdraws nobody. So the procedure
-resolves the rostered address to its `auth.users` row and updates by
-`profiles.id`, which is the stable key. The `if found` is not a swallowed
-error: a rostered address that never signed up has no `auth.users` row and no
-profile, so there is nothing to withdraw.
+resolves the address to an id and updates by `profiles.id`, which is the stable
+key: **`profiles` first**, because that is the spelling the address was admitted
+under and so the spelling on the operator's own list, then **`auth.users`**,
+whose `email` is written by Supabase's signup path and is the only one of the
+three not stored normalised, hence the `lower(btrim(...))` on that comparison
+alone.
+
+**An address that resolves to neither account raises rather than skipping the
+second write.** A rostered address that never signed in has no account and no
+profile, so there is genuinely nothing to withdraw — but it yields the same zero
+rows as a mistyped address, and the operator cannot distinguish them. Skipping
+silently is the failure this file exists to prevent (an update that matches
+nothing and reports success), one statement after the roster guard was added to
+prevent it. The raise names both causes; it also aborts the block, so the roster
+write rolls back with it and the operator ends with no state changed and a
+reason, which is the honest outcome.
 
 The first refuses *re-admission* at sign-in; the second is what
 `authorize_task_start` reads at task start, and **that function never consults
@@ -403,8 +415,8 @@ separates them — `select email, revoked_at from beta_access where email =
 lower(btrim('…'))` — and the operator has to read it; no code path may infer
 which from the response. **Re-admission is its own two-statement step**, the
 same pair with the values nulled and the roster write first, resolving the
-`profiles` half through `auth.users` to `profiles.id` in the same way, because
-`authorize_task_start` reads only `profiles`.
+`profiles` half in the same two-lookup order and raising on the same third
+case, because `authorize_task_start` reads only `profiles`.
 
 Deleting the roster row afterwards remains optional housekeeping — now it
 *closes* the door rather than re-opening it, and it withdraws nobody on its own.

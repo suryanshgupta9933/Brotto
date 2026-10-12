@@ -332,10 +332,15 @@ begin
       using hint = 'addresses are stored normalised as lower(btrim(address))';
   end if;
   update beta_access set revoked_at = now() where email = v;
-  select id into u from auth.users where email = v;
-  if found then
-    update profiles set revoked_at = now() where id = u;
+  select id into u from profiles where email = v;
+  if u is null then
+    select id into u from auth.users where lower(btrim(email)) = v;
   end if;
+  if u is null then
+    raise exception 'no account for %', v
+      using hint = 'admitted under a different spelling, or never signed in';
+  end if;
+  update profiles set revoked_at = now() where id = u;
 end $$;
 ```
 
@@ -364,11 +369,21 @@ because only the roster is where a wrong address is still wrong.
 JWT claim at first sign-in, and is never updated afterwards — if the member
 changes their Supabase email that column keeps the old spelling for good, and
 `update profiles … where email = v` silently matches nothing. So the procedure
-resolves the rostered address to its `auth.users` row and updates by
-`profiles.id`, which is the stable key. The `if found` is the honest answer
-rather than a swallow: a rostered address that never signed up has no
-`auth.users` row and no profile either, so there is genuinely nothing to
-withdraw.
+resolves the address to an id and updates by `profiles.id`, which is the stable
+key, in **two lookups in order**: `profiles` first, because that is the spelling
+the address was *admitted* under and therefore the spelling on your own list;
+then `auth.users`, whose `email` is written by Supabase's signup path rather than
+by us and so is the only one of the three not stored normalised, which is why it
+alone carries the `lower(btrim(...))`.
+
+**Neither resolving raises, and that is deliberate.** A rostered address that
+never signed in has no account and no profile, so there is genuinely nothing to
+withdraw — but it produces exactly the same zero rows as an address you
+mistyped, and you cannot tell them apart. The `if found` this replaced skipped
+the second write and reported success, so a withdrawal that withdrew nobody was
+indistinguishable from one that worked. The raise names both causes instead, and
+because it aborts the block the roster write does not survive it either: nothing
+changed, and you are told why.
 
 **A duplicate paste answers 409, and that no longer means "admitted".** Since
 `revoked_at` exists, already-there means *granted* or *withdrawn*, and both
@@ -382,9 +397,9 @@ select email, revoked_at from beta_access where email = lower(btrim('x@example.c
 on record, and pasting the address again changes nothing — `_listed_for_beta`
 refuses a row whose `revoked_at` is set. **Re-admission is the same two
 statements with the values nulled, roster first then `profiles`**, resolving the
-`profiles` half through `auth.users` to `profiles.id` in exactly the same way,
-because `authorize_task_start` reads only the second. Both are in `004`'s
-header.
+`profiles` half in exactly the same two-lookup order and raising on the same
+third case, because `authorize_task_start` reads only the second. Both are in
+`004`'s header.
 
 Deleting the roster row afterwards is optional housekeeping and withdraws
 nobody on its own; do it before the `revoked_at` update and you have closed a

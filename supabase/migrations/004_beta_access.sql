@@ -21,10 +21,15 @@
 --         using hint = 'addresses are stored normalised as lower(btrim(address))';
 --     end if;
 --     update beta_access set revoked_at = now() where email = v;
---     select id into u from auth.users where email = v;
---     if found then
---       update profiles set revoked_at = now() where id = u;
+--     select id into u from profiles where email = v;
+--     if u is null then
+--       select id into u from auth.users where lower(btrim(email)) = v;
 --     end if;
+--     if u is null then
+--       raise exception 'no account for %', v
+--         using hint = 'admitted under a different spelling, or never signed in';
+--     end if;
+--     update profiles set revoked_at = now() where id = u;
 --   end $$;
 --
 -- **The failure mode, stated plainly: the `beta_access` write alone withdraws
@@ -64,14 +69,27 @@
 -- changes their Supabase email, that column keeps the old spelling for good —
 -- so `update profiles … where email = v` matches zero rows, reports success,
 -- and withdraws nobody. `profiles.id` is the stable key (`references auth.users
--- on delete cascade`), so the procedure resolves the rostered address to the
--- `auth.users` row and updates by id.
+-- on delete cascade`), so the procedure resolves the address to an id and
+-- updates by that.
 --
--- **The `if found` guard is the honest answer, not a swallow.** A rostered
--- address that has never signed up has no `auth.users` row and therefore no
--- `profiles` row either; there is genuinely nothing to withdraw. That is
--- correct, not a mistyped address, which is why only the *roster* lookup is
--- guarded — the roster is where a wrong address is still a wrong address.
+-- **Two lookups, in order, and then a raise.** The *snapshot* comes first —
+-- `profiles`, where the address is spelled the way it was admitted, which is
+-- the spelling on the operator's own list. Only when that misses does it fall
+-- back to the live row in `auth.users`, whose `email` is written by Supabase's
+-- own signup path rather than by us and so carries neither of the normalisations
+-- `beta_access.email` and `profiles.email` are stored with; that is why it alone
+-- needs the `lower(btrim(...))` in the comparison.
+--
+-- **Neither lookup resolving raises, because the operator cannot tell why.**
+-- A rostered address that has never signed in has no account at all, and there is
+-- genuinely nothing to withdraw — but that produces exactly the same zero rows
+-- as an address they mistyped. So the procedure says so rather than returning
+-- success, and the message names both causes. The alternative — an `if found`
+-- that skips the second write — reports
+-- a withdrawal that withdrew nobody, which is the exact failure the roster
+-- `exists` guard above exists to prevent, reintroduced one statement later. A
+-- raise also aborts the block, so the roster write does **not** survive it:
+-- the honest outcome is no state changed and the operator told why.
 --
 -- **Absence of a row is still the refusal for somebody not admitted yet.**
 -- `_listed_for_beta` refuses an address that is absent *or* that has
@@ -119,20 +137,28 @@
 --         using hint = 'a withdrawn address keeps its row; do not paste to re-admit';
 --     end if;
 --     update beta_access set revoked_at = null where email = v;
---     select id into u from auth.users where email = v;
---     if found then
---       update profiles set revoked_at = null where id = u;
+--     select id into u from profiles where email = v;
+--     if u is null then
+--       select id into u from auth.users where lower(btrim(email)) = v;
 --     end if;
+--     if u is null then
+--       raise exception 'no account for %', v
+--         using hint = 'admitted under a different spelling, or never signed in';
+--     end if;
+--     update profiles set revoked_at = null where id = u;
 --   end $$;
 --
 -- Both are required again, and for the same reason in reverse: nulling only
 -- `profiles` re-opens task start for somebody the roster still refuses at
 -- sign-in, and nulling only the roster un-revokes nothing that
 -- `authorize_task_start` — which reads `profiles` only — will honour. The
--- `profiles` half resolves the address through `auth.users` and updates by
--- `profiles.id`, for the reason above. An account deleted since the withdrawal
--- has no `auth.users` row, so `found` is false and the re-admission is the
--- roster write alone, which is correct: the fresh profile is created unrevoked.
+-- `profiles` half resolves the address exactly as the withdrawal does — the
+-- snapshot first, the live `auth.users` row second, and a raise when neither
+-- resolves — and updates by `profiles.id`. It raises for the same reason: an
+-- account deleted since the withdrawal is indistinguishable from a mistyped
+-- address, and reporting success would leave the operator believing a profile
+-- was un-revoked when none was. The fresh profile, if they sign up afterwards,
+-- is created unrevoked either way.
 --
 -- The address is matched against the **`email` claim on a verified JWT**, never
 -- against a body field, a query parameter or anything else a caller sent — the
