@@ -317,19 +317,14 @@ def mint_sign_in_code() -> str:
     return f"{secrets.randbelow(10**6):06d}"
 
 
-#: The waitlist, the "asked and not yet admitted" half of the two-table
-#: status lookup. Same shape as `BETA_ACCESS_PATH` and for the same reason:
-#: one stub in a test covers the whole control plane.
-WAITLIST_PATH = "rest/v1/waitlist"
-
-
 async def _beta_status(email: str) -> str:
     """`admitted` | `none` | `pending` | `revoked` for this normalised address.
 
-    ponytail: two-table lookup — collapse onto the `public.beta_status(addr)`
-    RPC once 009 lands, keeping this vocabulary (`none`, not `not_on_list`).
+    One row on `beta_access` and three columns — `010` merged the waitlist in,
+    so the arms below are the precedence policy rather than a join of two
+    rows: revoked first, because it is the last thing *we* said.
 
-    Raises `SupabaseUnavailable` when either table cannot be read. That is
+    Raises `SupabaseUnavailable` when the table cannot be read. That is
     deliberately not one of the four: an unapplied migration answering
     `not_on_list` is a deployment mistake presenting as a product decision,
     which is the whole reason `_control_plane_failed` exists. A miss and an
@@ -337,37 +332,39 @@ async def _beta_status(email: str) -> str:
     caller has already proved inbox control; this one has not, and its reply
     is now the product's public face.
 
-    A filter value carrying a `"` or `\` is a **miss** (`none`), same as
-    `_listed_for_beta` → `False`: no escape rule here has been checked
-    against PostgREST, so the address is refused rather than guessed at, and
-    refusing is "we will not mint for you" either way.
+    A filter value carrying `"`, `\\` or `,` is a **miss** (`none`), same
+    as `_listed_for_beta` → `False`: the address is refused rather than
+    guessed at, and refusing is "we will not mint for you" either way.
     """
     try:
         filt = f"?email=eq.{_filter_value(email)}"
     except ValueError:
         return "none"
-    for what, path, select in (
-        ("the beta_access lookup", BETA_ACCESS_PATH, "revoked_at"),
-        ("the waitlist lookup", WAITLIST_PATH, "email"),
-    ):
-        try:
-            status, text = await _profiles("GET", f"{filt}&select={select}", path=path)
-        except Exception as exc:
-            _control_plane_failed(what, exc_type=type(exc).__name__)
-            raise SupabaseUnavailable("roster unreadable") from exc
-        if status >= 400:
-            _control_plane_failed(what, status)
-            raise SupabaseUnavailable("roster unreadable")
-        try:
-            rows = json.loads(text)
-        except Exception as exc:
-            _control_plane_failed(f"{what} (unparseable body)", exc_type=type(exc).__name__)
-            raise SupabaseUnavailable("roster unreadable") from exc
-        if isinstance(rows, list) and rows:
-            if path != BETA_ACCESS_PATH:
-                return "pending"
-            row = rows[0] if isinstance(rows[0], dict) else {}
-            return "revoked" if row.get("revoked_at") else "admitted"
+    what = "the beta_access lookup"
+    try:
+        status, text = await _profiles(
+            "GET", f"{filt}&select=revoked_at,approved_at,asked_at", path=BETA_ACCESS_PATH,
+        )
+    except Exception as exc:
+        _control_plane_failed(what, exc_type=type(exc).__name__)
+        raise SupabaseUnavailable("roster unreadable") from exc
+    if status >= 400:
+        _control_plane_failed(what, status)
+        raise SupabaseUnavailable("roster unreadable")
+    try:
+        rows = json.loads(text)
+    except Exception as exc:
+        _control_plane_failed(f"{what} (unparseable body)", exc_type=type(exc).__name__)
+        raise SupabaseUnavailable("roster unreadable") from exc
+    if not isinstance(rows, list) or not rows:
+        return "none"
+    row = rows[0] if isinstance(rows[0], dict) else {}
+    if row.get("revoked_at"):
+        return "revoked"
+    if row.get("approved_at"):
+        return "admitted"
+    if row.get("asked_at"):
+        return "pending"
     return "none"
 
 
@@ -626,7 +623,11 @@ def _control_plane_failed(
 
 
 async def _listed_for_beta(email: str) -> bool:
-    """Whether `beta_access` carries this normalised address, un-withdrawn.
+    """Whether `beta_access` **granted** this normalised address, un-withdrawn.
+
+    `approved_at`, not row existence: `010` merged the waitlist in, so a
+    signup is a row with `asked_at` and no grant, and reading that as
+    admitted hands every waitlist signup a beta account.
 
     Never raises and never reports *why* — a miss and an unreachable
     control plane are both False here, because a caller who has already
@@ -647,7 +648,7 @@ async def _listed_for_beta(email: str) -> bool:
     try:
         status, text = await _profiles(
             "GET",
-            f"?email=eq.{_filter_value(email)}&select=email,revoked_at",
+            f"?email=eq.{_filter_value(email)}&select=email,revoked_at,approved_at",
             path=BETA_ACCESS_PATH,
         )
     except Exception as exc:
@@ -669,7 +670,7 @@ async def _listed_for_beta(email: str) -> bool:
     if not isinstance(rows, list) or not rows:
         return False
     row = rows[0] if isinstance(rows[0], dict) else {}
-    return not row.get("revoked_at")
+    return bool(row.get("approved_at")) and not row.get("revoked_at")
 
 
 async def approve_at_exchange(token: str) -> bool:

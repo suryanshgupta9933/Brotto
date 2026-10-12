@@ -1,6 +1,6 @@
 """The waitlist: one field in, one field on disk, and nothing to ask about it.
 
-The load-bearing test is `test_a_waitlist_row_is_exactly_the_email_a_name_and_a_batch`.
+The load-bearing test is `test_a_waitlist_row_is_exactly_the_form_fields_and_the_ask`.
 This is the first thing the project holds about someone who is *not* an
 account — a stranger who filled in a form — and the guarantee that matters is
 that there is nowhere to put a referrer, a user agent, a URL or a note. `build_row`
@@ -87,11 +87,15 @@ def _supabase_stub(monkeypatch, *, status=201, raises=None):
 
 # ── the boundary ──────────────────────────────────────────────────────────
 
-def test_a_waitlist_row_is_exactly_the_email_a_name_and_a_batch(monkeypatch):
+def test_a_waitlist_row_is_exactly_the_form_fields_and_the_ask(monkeypatch):
     row = wl.build_row(email=VISITOR)
     assert set(row) == set(wl.COLUMNS), "a column nobody wrote a reason for"
     assert row["email"] == VISITOR
     assert row["batch"] == ""
+    assert row["asked_at"]
+    # The oracle guard: a row this path can build is a request, never a grant
+    # or a withdrawal. `beta-roster.sh` writes those two columns alone.
+    assert "approved_at" not in wl.COLUMNS and "revoked_at" not in wl.COLUMNS
 
 
 def test_the_row_cannot_carry_a_referrer_a_url_or_a_typed_field():
@@ -239,7 +243,9 @@ def test_a_name_is_not_a_back_door_for_the_fields_that_are_refused(hosted, clien
         "email": VISITOR, "name": "Ada",
         "referrer": "https://example.test/pricing", "note": "the Gmail one",
     })
-    assert seen[0]["body"] == {"email": VISITOR, "name": "Ada", "batch": ""}
+    body = seen[0]["body"]
+    assert set(body) == set(wl.COLUMNS)
+    assert body["email"] == VISITOR and body["name"] == "Ada" and body["batch"] == ""
     with pytest.raises(ValueError):
         wl.build_row(email=VISITOR, note="the Gmail one")
 
@@ -305,8 +311,12 @@ def test_a_valid_email_is_accepted(hosted, client, monkeypatch):
     resp = client.post("/v1/waitlist", json={"email": VISITOR})
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
-    assert [c["path"] for c in seen] == ["rest/v1/waitlist"]
-    assert seen[0]["body"] == {"email": VISITOR, "name": "", "batch": ""}
+    # `beta_access` now — `010` merged the waitlist in, and the row this
+    # writes is a request (`asked_at`) on that one table.
+    assert [c["path"] for c in seen] == ["rest/v1/beta_access"]
+    body = seen[0]["body"]
+    assert set(body) == set(wl.COLUMNS)
+    assert body["email"] == VISITOR and body["name"] == "" and body["batch"] == ""
 
 
 def test_the_address_is_normalised_before_it_is_written(hosted, client, monkeypatch):
@@ -326,7 +336,9 @@ def test_the_body_carries_nothing_else(hosted, client, monkeypatch):
         "utm_source": "twitter",
     })
     assert resp.status_code == 200
-    assert seen[0]["body"] == {"email": VISITOR, "name": "", "batch": ""}
+    body = seen[0]["body"]
+    assert set(body) == set(wl.COLUMNS)
+    assert body["email"] == VISITOR and body["name"] == "" and body["batch"] == ""
 
 
 @pytest.mark.parametrize("bad", ["", "not-an-email", "a@b", "@example.test", "a b@example.test", None])

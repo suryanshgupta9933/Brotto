@@ -104,8 +104,22 @@ out="$(run -tA -d postgres -c "
   select
     (select count(*) from information_schema.columns
       where table_name='beta_access' and column_name='revoked_at') = 1
+    -- 010 merges the waitlist in: the request columns sit beside the decision
+    -- ones, and the old table is gone rather than left beside the new one.
     and (select count(*) from information_schema.columns
-      where table_name='waitlist' and column_name='name') = 1
+      where table_name='beta_access' and column_name='asked_at') = 1
+    and (select count(*) from information_schema.columns
+      where table_name='beta_access' and column_name='name') = 1
+    and (select count(*) from information_schema.columns
+      where table_name='waitlist') = 0
+    -- The invitation is `approved_at`, and it must carry no default: the
+    -- waitlist write path omits the column, so a default would grant the beta
+    -- to every stranger who asked for it. The column has to be nullable, or a
+    -- request could not be a row at all.
+    and (select column_default is null from information_schema.columns
+          where table_name='beta_access' and column_name='approved_at') = true
+    and (select is_nullable = 'YES' from information_schema.columns
+          where table_name='beta_access' and column_name='approved_at') = true
     and (select relrowsecurity from pg_class where relname='beta_access') = true
     and has_table_privilege('anon','beta_access','INSERT') = false
     and has_table_privilege('anon','beta_access','SELECT') = false
@@ -146,8 +160,23 @@ out="$(run -tA -d postgres -c "
 # copy of it, so fixing the file fixes this and nothing else has to be kept in
 # step. The constraint comes off first, because its whole job is to be the
 # thing the backfill exists to satisfy.
+#
+# `010` dropped `waitlist`, so the replay rebuilds a scratch one of the `003` +
+# `005` + `006` shape and drops it again afterwards: the statement in `005`
+# says `update waitlist`, and renaming it to run would stop testing the line
+# that ships. This is a property of a *historical* file, not of the live
+# schema — which is why the scratch goes away before anything else is asserted.
 say "replaying the backfill against a hostile row"
 run -d postgres >/dev/null <<'SQL'
+create table waitlist (
+  email      text not null unique,
+  batch      text not null default '',
+  name       text,
+  constraint waitlist_name_no_formula
+    check (name is null or name !~ '^[=+\-@\t\r]'),
+  constraint waitlist_email_no_formula
+    check (email !~ '^[=+\-@\t\r]')
+);
 alter table waitlist drop constraint waitlist_name_no_formula;
 insert into waitlist (email, batch, name) values
   ('hostile@example.test','test','=cmd|...'),
@@ -209,6 +238,14 @@ say "re-adding the email constraint"
 run -d postgres >/dev/null <<'SQL'
 alter table waitlist add constraint waitlist_email_no_formula
   check (email !~ '^[=+\-@\t\r]');
+SQL
+
+# The scratch table has done its job. From here on every assertion is about
+# the schema `001`–`010` actually built, and a leftover `waitlist` would make
+# the two-table questions below answer about the wrong thing.
+say "dropping the scratch waitlist"
+run -d postgres >/dev/null <<'SQL'
+drop table waitlist;
 SQL
 
 # ── `007`: a code that cannot be stored, guessed, or reused ───────────────
@@ -345,33 +382,77 @@ expect "select count(*) from pg_constraint
          where conrelid = 'sign_in_events'::regclass and contype = 'f'" \
   "0" "sign_in_events has a foreign key — account deletion would erase it"
 
-# ── `009`: one lookup, four answers ───────────────────────────────────────
+# ── `009`/`010`: one lookup, four answers ─────────────────────────────────
 #
 # The classification is the whole of what the sign-in screen will say, so each
 # of the four arms is asserted rather than the one this address happens to be
-# in. The precedence case is the one that rots silently: a revoked member who
-# is also on the waitlist must read `revoked`, and a `case` reordered to put
-# `pending` first changes that without breaking any single-table test.
+# in. The precedence case is the one that rots silently: a revoked address that
+# also asked must read `revoked`, and a `case` reordered to put `pending` first
+# changes that without breaking any single-address test. `010` folded the two
+# tables into one row, so the precedence is now the order of three `when` arms
+# rather than the order of two `exists` branches — the policy is the same and
+# the trap is the same.
 say "an address is classified into exactly one of the four answers"
 run -d postgres >/dev/null <<'SQL'
-insert into beta_access (email, revoked_at) values ('admitted@example.test', null);
-insert into beta_access (email, revoked_at) values ('revoked@example.test', now());
-insert into waitlist (email, batch) values ('pending@example.test', 'test');
--- Both tables, and the reason the `case` arms are ordered: the roster is the
--- last thing we said about them, so a revocation is not spoken over by a
--- waitlist row they submitted themselves.
-insert into beta_access (email, revoked_at) values ('both@example.test', now());
-insert into waitlist (email, batch) values ('both@example.test', 'test');
+insert into beta_access (email, approved_at, revoked_at)
+  values ('admitted@example.test', now(), null);
+insert into beta_access (email, approved_at, revoked_at)
+  values ('revoked@example.test', now(), now());
+insert into beta_access (email, batch, asked_at)
+  values ('pending@example.test', 'test', now());
+-- One row carrying both a request and a withdrawal: the reason the `when`
+-- arms are ordered. The revocation is the last thing we said about them, so
+-- a request they submitted themselves does not speak over it.
+insert into beta_access (email, batch, asked_at, approved_at, revoked_at)
+  values ('both@example.test', 'test', now(), now(), now());
 SQL
 expect "select beta_status('admitted@example.test')" \
-  "admitted" "an un-withdrawn roster row was not 'admitted'"
+  "admitted" "an un-withdrawn grant was not 'admitted'"
 expect "select beta_status('revoked@example.test')" \
-  "revoked" "a withdrawn roster row was not 'revoked'"
+  "revoked" "a withdrawn grant was not 'revoked'"
 expect "select beta_status('pending@example.test')" \
-  "pending" "a waitlist-only address was not 'pending'"
+  "pending" "a request that was never granted was not 'pending'"
 expect "select beta_status('nobody@example.test')" \
-  "none" "an address in neither table was not 'none'"
+  "none" "an address with no row was not 'none'"
 expect "select beta_status('both@example.test')" \
-  "revoked" "the waitlist spoke over a revocation — that arm is out of order"
+  "revoked" "the request spoke over a revocation — that arm is out of order"
+
+# ── `010`: the invitation is a column, and it has no default ──────────────
+#
+# The merge is only safe if a waitlist write cannot grant. `004`'s
+# `default now()` on `approved_at` would have done exactly that the moment the
+# two tables became one, because the waitlist path inserts a row and does not
+# name the column. So this is the guard the whole migration rests on, and it is
+# asserted as behaviour rather than as a clause.
+say "a request cannot become a grant by accident"
+run -d postgres >/dev/null <<'SQL'
+insert into beta_access (email, batch, asked_at)
+  values ('asked@example.test', 'test', now());
+SQL
+expect "select approved_at is null from beta_access where email='asked@example.test'" \
+  "t" "inserting a request filled approved_at — the column has a default again"
+expect "select beta_status('asked@example.test')" \
+  "pending" "a request read as something other than 'pending'"
+
+say "a row that is neither a request nor a grant nor a withdrawal is refused"
+refuses "an empty row was stored" <<'SQL'
+insert into beta_access (email) values ('bare@example.test');
+SQL
+
+say "the formula guards followed the columns onto the merged table"
+refuses "a name a spreadsheet would run was stored" <<'SQL'
+insert into beta_access (email, name, asked_at)
+  values ('named@example.test', '=cmd|.../c calc', now());
+SQL
+refuses "an email a spreadsheet would run was stored" <<'SQL'
+insert into beta_access (email, asked_at)
+  values ('=cmd|...@example.test', now());
+SQL
+
+say "no foreign key reaches the roster from the transient tables"
+expect "select count(*) from pg_constraint
+         where conrelid in ('sign_in_codes'::regclass, 'sign_in_events'::regclass)
+           and contype = 'f'" \
+  "0" "a transient or audit table grew a foreign key — a delete would follow it"
 
 printf '\033[32mall passed\033[0m\n'

@@ -1124,24 +1124,26 @@ def _parse_postgrest(query):
 def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=(), waitlisted=()):
     """The control plane as the approval path uses it.
 
-    Models the three tables rather than answering the same thing to every
-    query: `beta_access` and `waitlist` filter by the address asked for (so
-    a claim that is *not* the one the caller typed finds nothing), and
-    `profiles` hands back whatever rows it was seeded with. Returns the
-    calls.
+    Models the tables rather than answering the same thing to every
+    query: `beta_access` filters by the address asked for (so a claim that is
+    *not* the one the caller typed finds nothing), and `profiles` hands back
+    whatever rows it was seeded with. Returns the calls.
 
-    The `beta_access`/`waitlist` branches go through `_parse_postgrest`, so
+    One table, three columns — `010` merged the waitlist in. `listed` are
+    **granted** rows (`approved_at` set); `waitlisted` are requests the
+    operator never answered (`asked_at` only), which is the difference
+    between a beta account and a stranger. `revoked` are addresses on the
+    roster *and* withdrawn. The branch goes through `_parse_postgrest`, so
     the stub agrees with the server about where the filter ends — stubbing
     the raw string would make any encoding look correct, because the test
-    would be the only parser in the room. `revoked` are addresses that are
-    on the roster *and* withdrawn.
+    would be the only parser in the room.
     """
     calls = []
 
     async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
         calls.append({"method": method, "query": query, "body": body,
                       "path": path, "prefer": prefer})
-        if path == jwt_auth.BETA_ACCESS_PATH or path == jwt_auth.WAITLIST_PATH:
+        if path == jwt_auth.BETA_ACCESS_PATH:
             parsed = [f for f in _parse_postgrest(query) if f["column"] == "email"]
             # A filter that does not resolve to exactly one address is not a
             # lookup for anybody, which is the outcome a parser differential
@@ -1149,12 +1151,18 @@ def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=(), waitlisted=
             want = parsed[0]["values"][0] if (
                 len(parsed) == 1 and len(parsed[0]["values"]) == 1 and not parsed[0]["trailing"]
             ) else None
-            if path == jwt_auth.WAITLIST_PATH:
-                return 200, json.dumps([{"email": r} for r in waitlisted if r == want])
-            return 200, json.dumps([
-                {"email": r, "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None}
-                for r in listed if r == want
-            ])
+            rows = []
+            for r in waitlisted:
+                if r == want:
+                    rows.append({"email": r, "asked_at": "2026-10-01T00:00:00Z",
+                                 "approved_at": None,
+                                 "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None})
+            for r in listed:
+                if r == want:
+                    rows.append({"email": r, "asked_at": None,
+                                 "approved_at": "2026-10-01T00:00:00Z",
+                                 "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None})
+            return 200, json.dumps(rows)
         if method == "POST":
             return 201, ""
         return 200, json.dumps(list(profiles))
@@ -1200,7 +1208,9 @@ def test_the_account_is_created_at_exchange_and_supabase_mails_nothing(
         # `startwith`, not `==`: `_profiles` concatenates the query onto the
         # path, so the lookup arrives as `rest/v1/beta_access?email=...`.
         if path.startswith(jwt_auth.BETA_ACCESS_PATH):
-            return 200, json.dumps([{"email": "beta@example.test", "revoked_at": None}])
+            return 200, json.dumps([{"email": "beta@example.test", "revoked_at": None,
+                                     "approved_at": "2026-10-01T00:00:00Z",
+                                     "asked_at": None}])
         if path == "rest/v1/sign_in_codes":
             return 201, ""
         if path == "auth/v1/admin/users":
@@ -1273,6 +1283,20 @@ def test_the_reply_names_the_roster_state_it_actually_read(client, monkeypatch, 
     assert minted == [admitted], "a code was minted for a state that should not get one"
 
 
+def test_a_waitlist_signup_is_not_an_admission(hosted, monkeypatch):
+    """The property `010` exists for.
+
+    A row with only `asked_at` is a request the operator never answered.
+    Reading "a row exists" as "admitted" hands every waitlist signup a beta
+    account — silent, and one migration away from looking right in review.
+    """
+    import asyncio
+
+    _roster_stub(monkeypatch, waitlisted=[LISTED])
+    assert asyncio.run(jwt_auth._beta_status(LISTED)) == "pending"
+    assert asyncio.run(jwt_auth._listed_for_beta(LISTED)) is False
+
+
 def test_a_failed_mint_for_an_admitted_address_says_try_again(client, monkeypatch, hosted):
     """The one outcome that is not a roster state, and the one that must not
     be a 502.
@@ -1289,7 +1313,9 @@ def test_a_failed_mint_for_an_admitted_address_says_try_again(client, monkeypatc
     # The roster must still answer; only the insert fails.
     async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
         if path == jwt_auth.BETA_ACCESS_PATH:
-            return 200, json.dumps([{"email": admitted, "revoked_at": None}])
+            return 200, json.dumps([{"email": admitted, "revoked_at": None,
+                                     "approved_at": "2026-10-01T00:00:00Z",
+                                     "asked_at": None}])
         if path == "rest/v1/sign_in_codes":
             return 500, '{"message":"nope"}'
         return 200, "[]"
