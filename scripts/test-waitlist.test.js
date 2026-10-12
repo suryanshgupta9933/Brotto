@@ -67,8 +67,14 @@ function rig(src, respond) {
     email: { value: "person@example.com" },
     name: { value: "Ada Lovelace" },
     $serverUrl: { value: "https://agent.brotto.dev" },
-    // The one element `setWaitlistStatus` looks up.
+    // The panel's writer looks up this element; the wizard's hands off to
+    // `toast`. Both land in the same shape so the assertions below read
+    // either surface the same way.
     document: { getElementById: (id) => (id === "waitlistStatus" ? status : null) },
+    toast(text, kind) {
+      status.textContent = text || "";
+      status.className = kind ? `status ${kind}` : "status";
+    },
     fetch: async (url, opts) => {
       calls.push({ url, method: opts.method, headers: opts.headers, body: opts.body });
       return respond(url, opts);
@@ -164,10 +170,16 @@ async function runSurface(label, src) {
     offline.status.textContent);
 
   // The status line carries a typed address, so this is the panel's rule and
-  // not a convenience: textContent, never innerHTML.
+  // not a convenience: textContent, never innerHTML. The wizard's writer is a
+  // thin handoff to `toast`, so the sink is whichever one actually holds the
+  // text.
   const writer = code(extract(src, "setWaitlistStatus"));
-  check(`${label}: the status line is textContent, never innerHTML`,
-    /\.textContent = text \|\| ['"]/.test(writer) && !/innerHTML/.test(writer), writer);
+  let toastSrc = "";
+  try { toastSrc = code(extract(src, "toast")); } catch { /* older shape */ }
+  check(`${label}: the status line is textContent or toast, never innerHTML`,
+    !/innerHTML/.test(writer) && (/\.textContent = text/.test(writer) || /toast\(/.test(writer))
+    && (!toastSrc || (/\.textContent = text/.test(toastSrc) && !/innerHTML/.test(toastSrc))),
+    writer);
 
   // The prefill is the refusal's convenience, not the form's default — an
   // address already typed is the user's own answer.

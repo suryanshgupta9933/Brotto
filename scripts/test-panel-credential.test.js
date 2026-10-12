@@ -278,12 +278,10 @@ const alive = async () => ({ ok: true, status: 200 });
     setCloudStatus() {},
     hideCodeEntry() {},
     $editionCloud: { checked: false },
-    $selfHostFields: { hidden: false },
-    $serverAddressField: { hidden: false },
+    $selfHostBlock: { hidden: false },
     $cloudFields: { hidden: true },
     $serverUrl: { value: "http://myserver.lan:8000", readOnly: false, classList: { toggle() {} } },
     $serverUrlHint: { textContent: "" },
-    $serverStatus: { textContent: "", className: "status" },
   };
   vm.createContext(wizardSandbox);
   vm.runInContext(extract(welcome, "applyEdition"), wizardSandbox);

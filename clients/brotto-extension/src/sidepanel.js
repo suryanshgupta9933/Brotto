@@ -966,11 +966,8 @@ async function postAuth(path, payload) {
 }
 
 // The code box is revealed by the user's own click and by nothing else.
-// `request-code` answers a listed and an unlisted address byte-identically,
-// deliberately, because a conditional answer on an unauthenticated route is
-// a directory of the beta — so there is no field in the response that could
-// be revealed on, and a screen that waited for one would wait forever. What
-// the reveal is *not* is a membership test.
+// Revealed because the user asked for a code and one is on its way — not by
+// typing an address, and never when the answer is that no mail is coming.
 function showCloudCodeEntry() {
   if (cloudCodeField) cloudCodeField.hidden = false;
   if (cloudCode) cloudCode.focus();
@@ -981,21 +978,44 @@ function hideCloudCodeEntry() {
   if (cloudCode) cloudCode.value = '';
 }
 
+// `POST /v1/auth/request-code` answers `{"sent": true}` or
+// `{"sent": false, "reason": "not_on_list" | "pending" | "revoked" | "try_again"}`
+// — always HTTP 200. The server says which; this maps it to one sentence and
+// decides whether a code box is any use.
 async function requestSignInCode() {
   const email = cloudEmail.value.trim();
   if (!email) { setCloudStatus('Enter the email you signed up with.', 'bad'); return; }
   setCloudStatus('Sending…');
+  let body = null;
+  let ok = false;
   try {
-    const { ok } = await postAuth('/v1/auth/request-code', { email });
-    if (!ok) { setCloudStatus('That address could not be sent a code.', 'bad'); return; }
+    const res = await postAuth('/v1/auth/request-code', { email });
+    ok = res.ok;
+    body = res.body;
   } catch {
     setCloudStatus('Could not reach the server.', 'bad');
     return;
   }
-  showCloudCodeEntry();
-  // True of a member and a stranger alike, because the server will only have
-  // mailed one to the first of them and we are not told which.
-  setCloudStatus(`If ${email} is in the beta, a code is on its way — it can take a minute.`, 'ok');
+  if (ok && body && body.sent === true) {
+    showCloudCodeEntry();
+    setCloudStatus(`A code is on its way to ${email} — it can take a minute.`, 'ok');
+    return;
+  }
+  hideCloudCodeEntry();
+  if (ok && body && body.reason === 'not_on_list') {
+    prefillWaitlist(email);
+    setCloudStatus('That address is not in the closed beta yet — leave it below and we\'ll write if a place opens.');
+    return;
+  }
+  if (ok && body && body.reason === 'pending') {
+    setCloudStatus('You\'re on the list but not admitted yet — watch your inbox, we\'ll write.');
+    return;
+  }
+  if (ok && body && body.reason === 'revoked') {
+    setCloudStatus('That address was withdrawn from the beta.', 'bad');
+    return;
+  }
+  setCloudStatus('That address could not be sent a code.', 'bad');
 }
 
 async function exchangeSignInCode() {
