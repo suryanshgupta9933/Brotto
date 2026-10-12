@@ -922,9 +922,9 @@ async function cloudSignedIn() {
 
 function renderCloudSignInStatus() {
   if (!cloudSignIn || state.authMode !== 'jwt') return;
-  void cloudSignedIn().then((in) => {
+  void cloudSignedIn().then((signedIn) => {
     if (state.authMode !== 'jwt') return;
-    setCloudStatus(in ? 'Signed in to Brotto Cloud.' : 'Signed out — send yourself a code to sign in.', in ? 'ok' : '');
+    setCloudStatus(signedIn ? 'Signed in to Brotto Cloud.' : 'Signed out — send yourself a code to sign in.', signedIn ? 'ok' : '');
   });
 }
 
