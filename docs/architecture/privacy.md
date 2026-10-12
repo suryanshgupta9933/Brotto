@@ -42,16 +42,23 @@ see *The waitlist is the first data from someone who is not an account*.
 **`beta_access` and `waitlist` must stay disjoint.** The allowlist
 (`supabase/migrations/004_beta_access.sql`) is the same *admission decision* a
 `profiles` row records, entered by address so the operator can bulk-paste a list —
-and it stays a table the operator writes by hand. **Removing a row from it does
-not revoke anyone** — see *The roster admits; `revoked_at` withdraws* below.
+and it stays a table the operator writes by hand, through `scripts/beta-roster.sh`.
+**That script is the only way an address enters or leaves the roster**, and
+deliberately not an HTTP route: an admin route that appends addresses is a
+weakly-authenticated write into the front door of the hosted beta, whereas the
+script runs on the operator's own machine over the Supabase CLI's linked-project
+credentials, so there is nothing remote to compromise. **Removing a row from the
+table does not revoke anyone** — see *The roster admits; `revoked_at` withdraws*
+below.
 **Of its four columns only `email` and `revoked_at` are ever read**:
 `_listed_for_beta` selects `select=email,revoked_at`, and the second is the
 withdrawal — see *The roster admits; `revoked_at` withdraws* below.
 `approved_at` exists because the table is a
 ledger someone will ask "when", and it is filled by the column default rather
-than by any path here; **`added_by` is written by nobody** — no code path
-supplies it, so the column that looks like an author field is empty for every
-row that exists. The moment
+than by any path here. `added_by` is written by **no code path on the server** —
+the relay never writes this table — and by exactly one client of it,
+`beta-roster.sh`, which stamps `whoami` on `add`; a row created any other way
+carries an empty author rather than a wrong one. The moment
 anything copies a
 waitlist submission into it without a human deciding, `POST /v1/waitlist` — the
 one route reachable with **no credential at all** — answers "is this person in
@@ -360,11 +367,12 @@ is a refusal **only for somebody who has not been admitted yet**. Deleting one
 for an already-approved member changes nothing they can observe.
 
 **The withdrawal is two writes, and neither is sufficient alone.** Set
-`beta_access.revoked_at` *and* `profiles.revoked_at`, in one transaction, with
-the address passed through `lower(btrim(...))` — both tables store email already
-normalised, so an un-normalised `where email = '…'` matches zero rows, reports
-success, and withdraws nobody. The runnable form, guard and all, is at the top
-of `004`.
+`beta_access.revoked_at` *and* `profiles.revoked_at`, with the address passed
+through `lower(btrim(...))` — both tables store email already normalised, so an
+un-normalised `where email = '…'` matches zero rows, reports success, and
+withdraws nobody. The runnable form, guard and all, is
+`./scripts/beta-roster.sh revoke <address>`; `004`'s header carries the same
+reasoning in full, because that is where an operator pasting a list will read it.
 
 **The `profiles` half is keyed on the account id.** `profiles.email` is written
 once, by `approve_at_exchange`, from the verified JWT claim at first sign-in,
@@ -378,15 +386,31 @@ whose `email` is written by Supabase's signup path and is the only one of the
 three not stored normalised, hence the `lower(btrim(...))` on that comparison
 alone.
 
-**An address that resolves to neither account raises rather than skipping the
-second write.** A rostered address that never signed in has no account and no
-profile, so there is genuinely nothing to withdraw — but it yields the same zero
-rows as a mistyped address, and the operator cannot distinguish them. Skipping
-silently is the failure this file exists to prevent (an update that matches
-nothing and reports success), one statement after the roster guard was added to
-prevent it. The raise names both causes; it also aborts the block, so the roster
-write rolls back with it and the operator ends with no state changed and a
-reason, which is the honest outcome.
+**An address that resolves to neither account writes and warns rather than
+raising.** This is a correction, and the earlier design here was wrong. A
+rostered address that never signed in has no account and no profile, so there is
+genuinely nothing to withdraw — but it yields the same zero rows as a mistyped
+address, and the procedure this used to describe could not tell them apart. So it
+raised `no account for <address>`, and the raise threw away the half that
+matters: `beta_access.revoked_at` is the only part of a withdrawal that outlives
+the auth account, and a raise aborts the transaction, so aborting rolled back
+the roster write too — the one write that would still have been standing had the
+account been deleted a month later — while keeping the one the `auth.users`
+cascade would recreate unrevoked. **Every exit from that branch left the member
+*less* withdrawn than the operator asked, while looking like a loud, correct
+refusal.**
+
+So the refusal moved to where the ambiguity actually is. **An address not on
+the roster at all dies loudly**, because a mistyped address withdrawing nobody is
+the one failure the command exists to prevent, and there is nothing to undo. An
+address that *is* on the roster and resolves to no account is a real withdrawal
+of the roster half, so that write always lands and the script says which half it
+skipped and what to type to re-admit. One statement is what makes skipping the
+`profiles` half safe: the roster write is never in doubt, so a withdrawal that
+missed a profile cannot leave a torn pair behind. The failure the raise was
+trying to prevent — reporting a withdrawal that withdrew nobody — is still
+prevented, and more cheaply: the script reports which of the two rows the
+statement matched. Silence would be the bug; the raise was not the fix.
 
 The first refuses *re-admission* at sign-in; the second is what
 `authorize_task_start` reads at task start, and **that function never consults
@@ -413,10 +437,20 @@ in play, already-there is either **granted** (`revoked_at is null`) or
 **withdrawn** (set), and the primary key answers identically for both. One line
 separates them — `select email, revoked_at from beta_access where email =
 lower(btrim('…'))` — and the operator has to read it; no code path may infer
-which from the response. **Re-admission is its own two-statement step**, the
-same pair with the values nulled and the roster write first, resolving the
-`profiles` half in the same two-lookup order and raising on the same third
-case, because `authorize_task_start` reads only `profiles`.
+which from the response. `beta-roster.sh add` reads it for you and refuses to
+undo a withdrawal, pointing at `unrevoke` instead, because an `add` that cleared
+`revoked_at` would reinstate somebody on purpose.
+
+**Re-admission is `./scripts/beta-roster.sh unrevoke <address>`** — the same
+pair with the values nulled, the roster write first, the `profiles` half
+resolving in the same two-lookup order, because `authorize_task_start` reads
+only `profiles`. **It skips the raise for the same reason the withdrawal does,
+and here skipping is the whole point**: the account is frequently *gone* by the
+time anybody re-admits — never signed in, or deleted their account and the
+cascade took the profile — and raising would abort the transaction and leave
+them **withdrawn**, the one state the operator asked to leave. The refusal that
+is kept is the one that can be acted on: an address that is not on the roster at
+all, where there is no row to null.
 
 Deleting the roster row afterwards remains optional housekeeping — now it
 *closes* the door rather than re-opening it, and it withdraws nobody on its own.
@@ -427,7 +461,7 @@ in place.
 The operational consequence is the whole point: **an operator who removes a
 roster row instead of setting `revoked_at` has handed someone a working beta
 account while believing they took it away.** The migration file states this at
-the top of `004`, where an operator pasting a list will read it.
+the top of `004`, and `beta-roster.sh` is what the operator actually runs.
 
 ## A valid signature is not a place in the beta
 

@@ -289,6 +289,13 @@ psql "$SUPABASE_URL" -f supabase/migrations/002_failure_reports.sql
 psql "$SUPABASE_URL" -f supabase/migrations/003_waitlist.sql
 ```
 
+**All five are applied by hand, before the deploy.** There is no migration
+runner and no GitHub integration that applies them on merge — `scripts/test-migrations.sh`
+runs them against a throwaway local Supabase in CI to prove they parse, and
+nothing applies them to the real project. That is the whole reason the "edit
+`001` in place" warning above is there, and it is why the ordering in the file
+names is the ordering you type.
+
 Same posture as `profiles`: no migration runner, RLS with zero policies plus
 revokes on `anon` and `authenticated`, written only by the service role.
 `waitlist` additionally carries a `unique` on `email`, because a double-clicked
@@ -313,56 +320,58 @@ account id, so the operator bulk-pastes a list instead of minting one
 `auth.users` row per person. `email text primary key`, already normalised by the
 caller — no normalisation function in SQL, so there is one rule to keep in step,
 not two. It carries **no `owner` column**: the address is matched against the
-`email` claim on a verified JWT, never against a body field. Only `email` is
-ever read (`select=email,revoked_at`); `approved_at` is filled by its column default and
-**`added_by` is written by no code path**, so it is empty for every row that
-exists — set it by hand if you ever need it.
+`email` claim on a verified JWT, never against a body field. Only `email` and
+`revoked_at` are ever read (`select=email,revoked_at`); `approved_at` is filled by
+its column default, and `added_by` is written by **no server code path** — the
+relay never writes this table — but by exactly one client of it,
+`scripts/beta-roster.sh`, which stamps `whoami` on `add`. A row created any
+other way carries an empty author rather than a wrong one, and it is nullable for
+the same reason: a bulk paste arrives with no single author.
 
-**To withdraw a member, set `revoked_at` on *both* tables, in one transaction.**
-Neither write is sufficient alone:
+**Admitting and withdrawing a member is `scripts/beta-roster.sh`, and it is
+deliberately not an HTTP route.** An admin route that appends addresses is an
+unauthenticated or weakly-authenticated write into the front door of the hosted
+beta, and no amount of "it's behind a token" makes that the same thing; the
+script runs on your own machine over the Supabase CLI's linked-project
+credentials, so there is nothing remote to compromise. It is also the *only*
+way an address enters or leaves the roster:
 
-```sql
-do $$
-declare
-  v text := lower(btrim('x@example.com'));
-  u uuid;
-begin
-  if not exists (select 1 from beta_access where email = v) then
-    raise exception 'no beta_access row for %', v
-      using hint = 'addresses are stored normalised as lower(btrim(address))';
-  end if;
-  update beta_access set revoked_at = now() where email = v;
-  select id into u from profiles where email = v;
-  if u is null then
-    select id into u from auth.users where lower(btrim(email)) = v;
-  end if;
-  if u is null then
-    raise exception 'no account for %', v
-      using hint = 'admitted under a different spelling, or never signed in';
-  end if;
-  update profiles set revoked_at = now() where id = u;
-end $$;
+```bash
+./scripts/beta-roster.sh add you@example.com them@example.com
+./scripts/beta-roster.sh list
+./scripts/beta-roster.sh revoke someone@example.com
+./scripts/beta-roster.sh unrevoke someone@example.com
+./scripts/beta-roster.sh drop someone@example.com
 ```
 
-**The failure mode if you run only one.** The `beta_access` write refuses
-*re-admission* at sign-in — a different job from stopping a working member.
-`authorize_task_start` is the thing that actually stops a working member at
-every step, and it reads `profiles.revoked_at` and **never consults the
-roster**, so the first statement alone withdraws nobody who is already signed
-in, and leaves a withdrawal on record that says otherwise. The second is the
-only one of the two that **survives the auth account being deleted**:
-`profiles.id` is `on delete cascade` from `auth.users`, so deleting the account
-deletes the profile *and* its `revoked_at`, and a re-signup on the same address
-would otherwise be re-admitted fresh. A cascade erases only the second, which is
-why it cannot be the whole procedure.
+**A withdrawal sets `revoked_at` on *both* tables, as one SQL statement.**
+Neither write is sufficient alone:
 
-**The `exists` guard is load-bearing, not ceremony.** Both tables store email
-already normalised — the caller strips and lower-cases before writing — so a
-bare `where email = 'Foo@Bar.com'` matches **zero rows, reports success, and
-withdraws nobody**, with nothing in any log to say so. `lower(btrim(...))` is
-written into the procedure rather than left as prose, and the guard turns a
-mistyped address into a loud failure. Only the *roster* lookup is guarded
-because only the roster is where a wrong address is still wrong.
+- The `beta_access` write refuses *re-admission* at sign-in — a different job
+  from stopping a working member. `authorize_task_start` is the thing that
+  actually stops a working member at every step, and it reads
+  `profiles.revoked_at` and **never consults the roster**, so the roster write
+  alone withdraws nobody who is already signed in, and leaves a withdrawal on
+  record that says otherwise.
+- The `profiles` write is the only one of the two that **survives the auth
+  account being deleted**: `profiles.id` is `on delete cascade` from
+  `auth.users`, so deleting the account deletes the profile *and* its
+  `revoked_at`, and a re-signup on the same address would otherwise be
+  re-admitted fresh. A cascade erases only the second, which is why it cannot be
+  the whole procedure.
+
+One statement rather than a transaction with a guard, because that is what makes
+skipping the `profiles` half safe: the roster write is never in doubt, so a
+withdrawal that missed a profile cannot leave a torn pair behind.
+
+**The refusal is on the roster lookup, and only the roster lookup.** Both tables
+store email already normalised — the caller strips and lower-cases before
+writing — so a bare `where email = 'Foo@Bar.com'` matches **zero rows, reports
+success, and withdraws nobody**, with nothing in any log to say so.
+`lower(btrim(...))` is written into the SQL rather than left as prose, and an
+address that is **not on the roster at all** dies there with nothing to undo,
+because a mistyped address withdrawing nobody is the one failure the command
+exists to prevent. Only the roster is where a wrong address is still wrong.
 
 **The `profiles` half is keyed on the account id, not on the address.**
 `profiles.email` is written once, by `approve_at_exchange`, from the verified
@@ -376,14 +385,20 @@ then `auth.users`, whose `email` is written by Supabase's signup path rather tha
 by us and so is the only one of the three not stored normalised, which is why it
 alone carries the `lower(btrim(...))`.
 
-**Neither resolving raises, and that is deliberate.** A rostered address that
-never signed in has no account and no profile, so there is genuinely nothing to
-withdraw — but it produces exactly the same zero rows as an address you
-mistyped, and you cannot tell them apart. The `if found` this replaced skipped
-the second write and reported success, so a withdrawal that withdrew nobody was
-indistinguishable from one that worked. The raise names both causes instead, and
-because it aborts the block the roster write does not survive it either: nothing
-changed, and you are told why.
+**Neither resolving warns rather than raising, and that is a correction.** The
+procedure this replaced raised `no account for <address>` whenever the two
+lookups both came back empty, on the reasoning that a rostered address which
+never signed in is indistinguishable from a mistyped one. **The raise threw away
+the half that matters.** `beta_access.revoked_at` is the only part of a
+withdrawal that outlives the auth account, so a raise — which aborts the
+transaction — rolled back the roster write, the one write that would still have
+been standing had the account been deleted a month later, and kept the one the
+cascade recreates unrevoked. Every exit from that branch left the member *less*
+withdrawn than you asked, while looking like a loud, correct refusal. So the
+roster write now always lands and the script names which half it skipped. The
+failure the raise was trying to prevent is still prevented, and more cheaply:
+the script reports which of the two rows the statement matched. Silence would be
+the bug; the raise was not the fix.
 
 **A duplicate paste answers 409, and that no longer means "admitted".** Since
 `revoked_at` exists, already-there means *granted* or *withdrawn*, and both
@@ -395,11 +410,15 @@ select email, revoked_at from beta_access where email = lower(btrim('x@example.c
 
 `null` is a live grant and needs no action; a timestamp is a withdrawal already
 on record, and pasting the address again changes nothing — `_listed_for_beta`
-refuses a row whose `revoked_at` is set. **Re-admission is the same two
-statements with the values nulled, roster first then `profiles`**, resolving the
-`profiles` half in exactly the same two-lookup order and raising on the same
-third case, because `authorize_task_start` reads only the second. Both are in
-`004`'s header.
+refuses a row whose `revoked_at` is set, and `add` refuses to clear it for you
+and points at `unrevoke` rather than reinstating somebody on purpose.
+**Re-admission is `beta-roster.sh unrevoke`** — the same two writes with the
+values nulled, roster first, same two-lookup order, because
+`authorize_task_start` reads only `profiles`. **It skips the raise for the same
+reason the withdrawal does, and here skipping is the whole point**: the account
+is frequently *gone* by the time anybody re-admits, and raising would abort the
+transaction and leave them **withdrawn**, the one state you asked to leave.
+`004`'s header carries all of this in full.
 
 Deleting the roster row afterwards is optional housekeeping and withdraws
 nobody on its own; do it before the `revoked_at` update and you have closed a
@@ -460,7 +479,7 @@ batch is not the last batch. The superseded "start at 10" and the reasoning that
 spent it are in `docs/product/decisions/2026-10-11-waitlist-and-batched-rollout.md`
 (gitignored — a clone has none of this). What must not change is the property
 the cap was protecting: every invited person is a row the operator can see,
-revoke and count, and revoking one is one SQL statement with no UI to rebuild.
+revoke and count, and revoking one is one command with no UI to rebuild.
 **Watch for "the list grew" becoming the reason to build an admin screen — the
 honest trigger is forgetting twice.**
 
