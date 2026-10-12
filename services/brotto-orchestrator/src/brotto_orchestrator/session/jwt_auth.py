@@ -35,22 +35,40 @@ log = logging.getLogger("brotto.jwt_auth")
 
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s.]+(\.[^@\s.]+)+$")
 
-#: PostgREST's own `eq.` value, encoded. **Every filter value spliced into a
-#: query goes through this**, never the raw string.
+#: PostgREST's own `eq.` value, quoted *in the grammar* and then encoded.
+#: **Every filter value spliced into a query goes through this**, never the
+#: raw string.
 #:
 #: `EMAIL_RE` above is not a filter-safety guard and cannot be one — its local
 #: part is "anything but `@` and whitespace", which includes `,`, and in
 #: PostgREST's syntax a comma separates values in a list. So a string this
 #: regex accepts and the consumer's parser can disagree about where the
-#: filter ends. The regex's job is "looks like an email"; the encoding's job
-#: is "is safe to splice into a query language", and only the second one
+#: filter ends. The regex's job is "looks like an email"; this one's job is
+#: "is safe to splice into a query language", and only the second one
 #: closes it. Widening the regex's job — restricting the local part to
 #: `A-Za-z0-9._%+-` — was considered and rejected: it would reject
 #: `o'brien@example.com` and every other RFC 5322 `atext` address a stranger
 #: can legitimately type on the waitlist form, and it would buy nothing once
 #: the value is quoted.
+#:
+#: **The double quotes are load-bearing and `quote()` alone is not a guard.**
+#: PostgREST URL-decodes a filter *before* it parses the filter grammar, so
+#: percent-encoding alone changes the bytes on the wire without changing the
+#: meaning: `a,b@example.com` arrives as `eq.a,b@example.com` and the comma is
+#: still a list separator to the parser that reads it. `quote()` is still
+#: there, but only for what survives *after* the grammar layer has decided
+#: the value is one string — it keeps `@` and spaces from being reinterpreted
+#: at the HTTP layer, not commas from being reinterpreted at the filter layer.
+#: Inside the literal a `"` would close it early and everything after it
+#: would be parsed as grammar, so a value carrying one is **rejected rather
+#: than escaped**: no escaping is defined here that has been checked against
+#: PostgREST, and a caller reaching this with a `"` is a caller whose claim is
+#: not the shape a claim is supposed to be. Pinned by
+#: `test_the_roster_filter_survives_a_postgrest_parser`.
 def _filter_value(value: str) -> str:
-    return quote(value, safe="")
+    if '"' in value:
+        raise ValueError("filter value contains a double quote")
+    return '"' + quote(value, safe="") + '"'
 
 # The relay's own timeouts. Supabase answering slowly must not become a
 # hung agent loop, and a control plane that cannot be reached is a
@@ -330,13 +348,42 @@ BETA_ACCESS_PATH = "rest/v1/beta_access"
 _IGNORE_DUPLICATES = "resolution=ignore-duplicates"
 
 
+def _control_plane_failed(what: str, status: int | None = None) -> None:
+    """Say loudly that an answer is about *our* database, not about the caller.
+
+    Every consumer of these two lookups turns a control-plane failure into
+    the same answer it gives a genuine miss — `False` at exchange, a refusal
+    at task start — because that is the right direction to fail. The cost is
+    that "no such row" and "the database cannot be read" are the same
+    answer, and the interesting case is the second one: an operator who
+    never applied the `beta_access.revoked_at` migration gets PostgREST
+    `PGRST204` on that column, and **every approved member is refused while
+    the log says they are not in the beta**. That is a deployment mistake
+    presenting as a product decision, and it is invisible unless the log
+    says which of the two it was.
+
+    Status only, and `None` for a call that never came back. The body names
+    columns and on some errors echoes the filter, which is somebody's email
+    address — `_error` in `main.py` set the precedent that the type is fine
+    and a Supabase body is not.
+    """
+    log.error(
+        "%s did not answer%s — the roster could not be read, so every identity "
+        "looks absent. Check the deployed migrations under supabase/migrations/ "
+        "before reading any of these answers as a real refusal.",
+        what, f" (status {status})" if status is not None else " at all",
+    )
+
+
 async def _listed_for_beta(email: str) -> bool:
     """Whether `beta_access` carries this normalised address, un-withdrawn.
 
     Never raises and never reports *why* — a miss and an unreachable
     control plane are both False here, because a caller who has already
     proved inbox control gets the same answer either way and the second
-    wall (`authorize_task_start`) is what actually decides.
+    wall (`authorize_task_start`) is what actually decides. **The log is
+    where the distinction is kept**, because to the caller the two answers
+    must be identical; see `_control_plane_failed`.
 
     **A row with `revoked_at` set is a refusal, not a hit.** That column
     is the durable withdrawal on the roster, and this is what stops a
@@ -354,14 +401,19 @@ async def _listed_for_beta(email: str) -> bool:
             path=BETA_ACCESS_PATH,
         )
     except Exception as exc:
-        log.warning("beta_access lookup failed: %s", type(exc).__name__)
+        log.error("beta_access lookup raised %s", type(exc).__name__)
+        _control_plane_failed("the beta_access lookup")
         return False
     if status >= 400:
-        log.warning("beta_access lookup answered %d", status)
+        _control_plane_failed("the beta_access lookup", status)
         return False
     try:
         rows = json.loads(text)
-    except Exception:
+    except Exception as exc:
+        # A body that does not parse is not a roster answer either, and it
+        # is the shape a proxy error page takes.
+        log.error("beta_access lookup returned an unparseable body: %s", type(exc).__name__)
+        _control_plane_failed("the beta_access lookup")
         return False
     if not isinstance(rows, list) or not rows:
         return False
@@ -400,7 +452,7 @@ async def approve_at_exchange(token: str) -> bool:
     # Also a plausibility check, not the injection guard — this string goes
     # into a PostgREST filter, and what keeps a comma (a filter separator) or
     # a paren out of it is `_filter_value` below. Pinned by
-    # `test_the_roster_filter_is_percent_encoded`.
+    # `test_the_roster_filter_survives_a_postgrest_parser`.
     if not EMAIL_RE.fullmatch(email):
         return False
     if not await _listed_for_beta(email):
@@ -474,12 +526,19 @@ async def ensure_on_roster(claims: Claims) -> dict:
                    f"&select=revoked_at,week_start,tasks_this_week"
         )
         if status >= 400:
+            # Refused above with a reason the user can be shown, and logged
+            # here because that reason is what an operator will be told:
+            # a missing column reads as "your access could not be
+            # confirmed", which looks like our outage and is a migration
+            # nobody applied.
+            _control_plane_failed("the profiles lookup", status)
             raise AccountRefused("control_plane_unavailable", "Could not confirm your access.")
         rows = json.loads(text)
     except AccountRefused:
         raise
     except Exception as exc:
-        log.warning("profile lookup failed: %s", type(exc).__name__)
+        log.error("profiles lookup raised %s", type(exc).__name__)
+        _control_plane_failed("the profiles lookup")
         raise AccountRefused("control_plane_unavailable", "Could not confirm your access.") from exc
 
     if not isinstance(rows, list) or not rows:

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from brotto_orchestrator.session import jwt_auth
 from brotto_orchestrator.session.auth import auth_mode, authenticate, validate_request
-from brotto_orchestrator.session.jwt_auth import Claims, make_jwt
+from brotto_orchestrator.session.jwt_auth import AccountRefused, Claims, make_jwt
 
 JWT_SECRET = "jwt-secret-for-tests"
 USER_ID = "11111111-2222-3333-4444-555555555555"
@@ -1030,6 +1030,48 @@ def test_the_sign_in_limiter_sees_through_a_proxy(client, monkeypatch, hosted):
 LISTED = "listed@example.test"
 
 
+def _parse_postgrest(query):
+    """Parse a PostgREST query the way PostgREST does.
+
+    Two steps, **in this order**, and the order is the whole point of
+    this helper: every value is URL-decoded first, and only then handed to
+    the filter grammar. Percent-encoding a comma therefore does not stop
+    it being a comma — it is a comma by the time anything reads it, which
+    is why a test that compares the decoded string back against the input
+    proves nothing about the parser that will actually see it.
+
+    The grammar: `column.op.value`, where an unquoted `value` is a
+    comma-separated *list* and a `"…"` literal is one value. Anything
+    after a literal's closing quote is grammar again, so it is reported
+    separately rather than being silently dropped — a value that closes
+    its own quoting and then appends a second column is exactly the bug.
+    Returns one dict per filter.
+    """
+    filters = []
+    for part in query.lstrip("?").split("&"):
+        # Decode the whole `name=value` and only then split it: the column
+        # and the operator are part of the grammar, so taking them off
+        # before the decode would be parsing something PostgREST never
+        # sees.
+        decoded = unquote(part)
+        name, sep, rest = decoded.partition("=")
+        if name in ("select", "on_conflict", "order", "limit"):
+            continue
+        assert sep, f"filter has no value: {decoded!r}"
+        op, sep, value = rest.partition(".")
+        assert sep, f"filter {name} has no operator: {decoded!r}"
+        column = name
+        trailing = ""
+        if value.startswith('"'):
+            end = value.find('"', 1)
+            assert end > 0, f"unterminated string literal on {column}: {decoded!r}"
+            values, trailing = [value[1:end]], value[end + 1:]
+        else:
+            values = value.split(",")
+        filters.append({"column": column, "op": op, "values": values, "trailing": trailing})
+    return filters
+
+
 def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=()):
     """The control plane as the approval path uses it.
 
@@ -1038,10 +1080,11 @@ def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=()):
     is *not* the one the caller typed finds nothing), and `profiles` hands
     back whatever rows it was seeded with. Returns the calls.
 
-    The `email=eq.` value is unquoted before comparison, because PostgREST
-    sees a percent-decoded path segment — stubbing the raw string instead
-    would make the encoder look like a bug the moment it encoded an `@`.
-    `revoked` are addresses that are on the roster *and* withdrawn.
+    The `beta_access` branch goes through `_parse_postgrest`, so the stub
+    agrees with the server about where the filter ends — stubbing the raw
+    string would make any encoding look correct, because the test would be
+    the only parser in the room. `revoked` are addresses that are on the
+    roster *and* withdrawn.
     """
     calls = []
 
@@ -1049,7 +1092,13 @@ def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=()):
         calls.append({"method": method, "query": query, "body": body,
                       "path": path, "prefer": prefer})
         if path == jwt_auth.BETA_ACCESS_PATH:
-            want = unquote(query.split("email=eq.", 1)[1].split("&", 1)[0])
+            parsed = [f for f in _parse_postgrest(query) if f["column"] == "email"]
+            # A filter that does not resolve to exactly one address is not a
+            # lookup for anybody, which is the outcome a parser differential
+            # produces and the one this stub has to be able to produce.
+            want = parsed[0]["values"][0] if (
+                len(parsed) == 1 and len(parsed[0]["values"]) == 1 and not parsed[0]["trailing"]
+            ) else None
             return 200, json.dumps([
                 {"email": r, "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None}
                 for r in listed if r == want
@@ -1126,25 +1175,118 @@ def test_a_listed_address_approves_itself_at_exchange(client, monkeypatch, hoste
     assert insert["prefer"] == "resolution=ignore-duplicates"
 
 
-def test_the_roster_filter_is_percent_encoded(client, monkeypatch, hosted):
-    """The filter value is encoded, so the regex and PostgREST cannot disagree.
+def test_the_roster_filter_survives_a_postgrest_parser(client, monkeypatch, hosted):
+    """The address comes back out of the filter parser exactly as typed.
 
     `EMAIL_RE`'s local part admits a comma, and in PostgREST a comma
     separates values in a list — so an address this code accepts and a
     parser reading the same string can place the end of the filter in
-    different spots. Encoding is what makes that impossible; the regex is
-    only ever "looks like an email". The address here is otherwise
-    entirely legitimate, which is the point: nothing about the alphabet
-    changed, only how it reaches the query.
+    different spots. The address here is otherwise entirely legitimate,
+    which is the point: nothing about the alphabet changed, only how it
+    reaches the query.
+
+    **This asserts against a parser, not against a round trip.** The test
+    that preceded it compared the decoded query string with the address it
+    started from, and it passed under both the broken and the fixed
+    implementation — because a round trip through *this* decoder always
+    gets the value back, whatever PostgREST then does with it. PostgREST
+    URL-decodes **before** it parses the filter grammar, so a
+    percent-encoded comma is a comma to the thing that matters;
+    `_parse_postgrest` does it in that order, and the assertion is on the
+    structure that comes back.
     """
     nasty = "a,b(c)@example.test"
+    calls = _roster_stub(monkeypatch, listed=[nasty], profiles=[{"revoked_at": None}])
+    _stub_verify(monkeypatch, email=nasty)
+    resp = client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
+    # The parser is the stub's own, so this is the end-to-end consequence:
+    # a filter the parser cannot resolve to one address finds nobody, and
+    # a listed member is refused at sign-in.
+    assert resp.json()["approved"] is True
+
+    roster = next(c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH)
+    parsed = _parse_postgrest(roster["query"])
+    assert len(parsed) == 1, f"one filter in, {len(parsed)} out: {roster['query']}"
+    got = parsed[0]
+    assert got["column"] == "email"
+    assert got["op"] == "eq"
+    # One value, and it is the address — not a list, and not a prefix of it.
+    assert got["values"] == [nasty]
+    assert not got["trailing"]
+
+
+def test_a_quote_in_an_address_is_refused_rather_than_quoted(client, monkeypatch, hosted):
+    """A value must not be able to close its own quoting.
+
+    `quote()` percent-encodes `"`, so inside the literal a quote would be
+    invisible on the wire and reappear at the grammar layer exactly where
+    it ends the string. There is no escape sequence defined here that has
+    been checked against PostgREST, so the value is rejected — and it is
+    rejected *loudly enough to tell it from a miss*, because a rejection
+    here otherwise reads as "not in the beta".
+    """
+    nasty = 'a"b@example.test'
     calls = _roster_stub(monkeypatch, listed=[nasty])
     _stub_verify(monkeypatch, email=nasty)
-    client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
-    roster = next(c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH)
-    # Decodes back to the address, and carries no raw separator.
-    assert unquote(roster["query"]) == f"?email=eq.{nasty}&select=email,revoked_at"
-    assert "," not in roster["query"].split("&")[0].split("eq.", 1)[1]
+    resp = client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
+    assert resp.json()["approved"] is False
+    assert [c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH] == []
+
+
+def test_an_unreadable_roster_is_loud_where_a_genuine_miss_is_not(monkeypatch, hosted, caplog):
+    """`PGRST204` must not be able to pass for "not in the beta".
+
+    Both call sites deliberately answer a control-plane failure the way they
+    answer a genuine miss — that is the right direction to fail, and a
+    caller who has already proved inbox control gets the same answer
+    either way. So the log is the *only* place the two can be told apart,
+    and it is the only thing between an unapplied migration and every
+    approved member being refused while the log says they were never
+    listed. The status goes in; the body does not, because on some errors
+    PostgREST echoes the filter, and the filter is somebody's address.
+    """
+    import asyncio
+    import logging
+
+    missing_column = json.dumps(
+        {"code": "PGRST204", "details": "Could not find the 'revoked_at' column"}
+    )
+
+    async def broken(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        return 400, missing_column
+
+    monkeypatch.setattr(jwt_auth, "_profiles", broken)
+
+    with caplog.at_level(logging.ERROR, logger="brotto.jwt_auth"):
+        assert asyncio.run(jwt_auth._listed_for_beta(LISTED)) is False
+    assert "400" in caplog.text
+    assert "migrations" in caplog.text
+    assert "PGRST204" not in caplog.text and "revoked_at" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="brotto.jwt_auth"):
+        with pytest.raises(AccountRefused) as caught:
+            asyncio.run(jwt_auth.ensure_on_roster(Claims(sub=USER_ID, email=LISTED)))
+    # The refusal the user sees is unchanged — it is a control-plane
+    # problem, not "this account is not part of the beta" — but it is now
+    # an answer the operator can trace.
+    assert caught.value.reason == "control_plane_unavailable"
+    assert "400" in caplog.text
+    assert "PGRST204" not in caplog.text
+
+
+def test_an_unlisted_address_says_nothing_at_all(monkeypatch, hosted, caplog):
+    """The other half of the distinction: a real miss is not an incident."""
+    import asyncio
+    import logging
+
+    async def empty(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        return 200, "[]"
+
+    monkeypatch.setattr(jwt_auth, "_profiles", empty)
+    with caplog.at_level(logging.ERROR, logger="brotto.jwt_auth"):
+        assert asyncio.run(jwt_auth._listed_for_beta(LISTED)) is False
+    assert caplog.text == ""
 
 
 def test_a_withdrawn_roster_row_is_refused_even_though_it_is_still_listed(client, monkeypatch, hosted):
