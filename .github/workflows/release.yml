@@ -42,9 +42,9 @@ jobs:
       - name: Zip the store package
         run: |
           cd clients/brotto-extension/dist
-          zip -r "../../brotto-extension-${GITHUB_REF_NAME}.zip" . -x '*.map'
-          unzip -l "../../brotto-extension-${GITHUB_REF_NAME}.zip" | grep -q ' manifest.json$'
-          unzip -l "../../brotto-extension-${GITHUB_REF_NAME}.zip" | grep -q ' background.js$'
+          zip -r "$GITHUB_WORKSPACE/brotto-extension-${GITHUB_REF_NAME}.zip" . -x '*.map'
+          unzip -l "$GITHUB_WORKSPACE/brotto-extension-${GITHUB_REF_NAME}.zip" | grep -q ' manifest.json$'
+          unzip -l "$GITHUB_WORKSPACE/brotto-extension-${GITHUB_REF_NAME}.zip" | grep -q ' background.js$'
 
       - name: Create the GitHub Release
         env:
