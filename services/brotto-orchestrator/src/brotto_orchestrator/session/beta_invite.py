@@ -28,10 +28,11 @@ from .waitlist_email import (
     SEND_TIMEOUT_SECONDS,
     SITE,
     _FONT,
-    _mark,
     enabled,
     from_address,
     mailbox,
+    mark_attachment,
+    unsubscribe_header,
 )
 
 log = logging.getLogger(__name__)
@@ -56,12 +57,18 @@ def _esc(value: str) -> str:
 
 
 def _masthead() -> str:
-    """The wordmark. Identical to the confirmation's, mark or no mark."""
+    """The wordmark. Identical to the confirmation's, mark or no mark.
+
+    Asks `mark_attachment()` rather than `_mark()` for the same yes/no the
+    payload asks. Two lookups of one condition is how the markup grows a
+    `cid:` that the attachment list does not have bytes for — the mail sends,
+    the logo does not, and nothing in the response says why.
+    """
     word = (
         f'<td style="vertical-align:middle;font-family:{_FONT};font-size:24px;'
         'font-weight:600;letter-spacing:-0.03em;color:#000000;">Brotto</td>'
     )
-    if not _mark():
+    if not mark_attachment():
         return word
     return (
         f'<td style="vertical-align:middle;"><img src="cid:{MARK_CID}" width="22" '
@@ -246,7 +253,14 @@ def payload(email: str) -> dict:
         "html": html,
         "text": text,
         "reply_to": from_address(),
-        "headers": {"List-Unsubscribe": f"<mailto:{mailbox(from_address())}?subject=unsubscribe>"},
+        # Shared with `waitlist_email` rather than written here: this file's
+        # first draft used an *object* for `headers` and omitted
+        # `attachments` entirely, so the mail that ships an unsubscribe offer
+        # and a logo in its HTML carried neither. Both are silent — Resend
+        # accepts the body and drops what it does not recognise.
+        "headers": unsubscribe_header(),
+        "tags": [{"name": "kind", "value": "beta-invite"}],
+        "attachments": mark_attachment(),
     }
 
 

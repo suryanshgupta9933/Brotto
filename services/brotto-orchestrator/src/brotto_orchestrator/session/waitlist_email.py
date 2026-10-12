@@ -305,40 +305,61 @@ def render(post: dict | None) -> tuple[str, str]:
     return body, plain
 
 
-def payload(email: str, post: dict | None) -> dict:
-    """The exact JSON body posted to Resend.
+def unsubscribe_header() -> list[dict]:
+    """The `List-Unsubscribe` header, as Resend wants it.
 
-    **`headers` is an array of `{name, value}`**, not an object — the mistake
-    that sends the mail with no `List-Unsubscribe` on it and no error to notice.
-    There is no `List-Unsubscribe-Post`: there is no one-click endpoint, and
-    advertising one that 404s is worse than not having it.
+    **An array of `{name, value}`, not an object.** The object form is the
+    mistake that sends the mail with no `List-Unsubscribe` on it and no error
+    to notice. There is no `List-Unsubscribe-Post`: there is no one-click
+    endpoint, and advertising one that 404s is worse than not having it.
+
+    Shared rather than written twice. `beta_invite` grew its own copy of this
+    line as an object, and the drift is invisible until somebody reads the
+    raw JSON — so the two mails now ask this function instead.
     """
-    sender = from_address()
-    address = mailbox(sender)
-    body, plain = render(post)
+    return [
+        {
+            "name": "List-Unsubscribe",
+            "value": f"<mailto:{mailbox(from_address())}?subject=unsubscribe>",
+        }
+    ]
+
+
+def mark_attachment() -> list[dict]:
+    """The inline mark, or nothing at all.
+
+    An empty list rather than a `content: None` entry, because the HTML only
+    emits `<img src="cid:…">` when `_mark()` is truthy — an attachment entry
+    with no bytes behind it is how a mail ships with a logo that never renders
+    and nothing in the response to say so.
+    """
     mark = _mark()
+    if not mark:
+        return []
+    return [
+        {
+            "filename": f"{MARK_CID}.png",
+            "content": mark,
+            "content_id": MARK_CID,
+            "content_type": "image/png",
+        }
+    ]
+
+
+def payload(email: str, post: dict | None) -> dict:
+    """The exact JSON body posted to Resend."""
+    sender = from_address()
+    body, plain = render(post)
     return {
         "from": sender,
         "to": [email],
         "subject": SUBJECT,
         "html": body,
         "text": plain,
-        "reply_to": address,
-        "headers": [
-            {
-                "name": "List-Unsubscribe",
-                "value": f"<mailto:{address}?subject=unsubscribe>",
-            }
-        ],
+        "reply_to": mailbox(sender),
+        "headers": unsubscribe_header(),
         "tags": [{"name": "kind", "value": "waitlist-confirm"}],
-        "attachments": [
-            {
-                "filename": f"{MARK_CID}.png",
-                "content": mark,
-                "content_id": MARK_CID,
-                "content_type": "image/png",
-            }
-        ] if mark else [],
+        "attachments": mark_attachment(),
     }
 
 
