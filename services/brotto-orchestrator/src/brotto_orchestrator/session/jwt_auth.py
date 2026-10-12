@@ -27,12 +27,30 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import aiohttp
 
 log = logging.getLogger("brotto.jwt_auth")
 
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s.]+(\.[^@\s.]+)+$")
+
+#: PostgREST's own `eq.` value, encoded. **Every filter value spliced into a
+#: query goes through this**, never the raw string.
+#:
+#: `EMAIL_RE` above is not a filter-safety guard and cannot be one — its local
+#: part is "anything but `@` and whitespace", which includes `,`, and in
+#: PostgREST's syntax a comma separates values in a list. So a string this
+#: regex accepts and the consumer's parser can disagree about where the
+#: filter ends. The regex's job is "looks like an email"; the encoding's job
+#: is "is safe to splice into a query language", and only the second one
+#: closes it. Widening the regex's job — restricting the local part to
+#: `A-Za-z0-9._%+-` — was considered and rejected: it would reject
+#: `o'brien@example.com` and every other RFC 5322 `atext` address a stranger
+#: can legitimately type on the waitlist form, and it would buy nothing once
+#: the value is quoted.
+def _filter_value(value: str) -> str:
+    return quote(value, safe="")
 
 # The relay's own timeouts. Supabase answering slowly must not become a
 # hung agent loop, and a control plane that cannot be reached is a
@@ -313,16 +331,27 @@ _IGNORE_DUPLICATES = "resolution=ignore-duplicates"
 
 
 async def _listed_for_beta(email: str) -> bool:
-    """Whether `beta_access` carries this normalised address.
+    """Whether `beta_access` carries this normalised address, un-withdrawn.
 
     Never raises and never reports *why* — a miss and an unreachable
     control plane are both False here, because a caller who has already
     proved inbox control gets the same answer either way and the second
     wall (`authorize_task_start`) is what actually decides.
+
+    **A row with `revoked_at` set is a refusal, not a hit.** That column
+    is the durable withdrawal on the roster, and this is what stops a
+    deleted auth account from cascading its `profiles` row — and with it
+    the `profiles.revoked_at` that `authorize_task_start` reads — away,
+    leaving the member free to re-admit themselves at the next exchange.
+    A row deleted from `beta_access` reads False too, but only by
+    accident of being absent; this is the case where the row is right
+    there and the answer is still no.
     """
     try:
         status, text = await _profiles(
-            "GET", f"?email=eq.{email}&select=email", path=BETA_ACCESS_PATH
+            "GET",
+            f"?email=eq.{_filter_value(email)}&select=email,revoked_at",
+            path=BETA_ACCESS_PATH,
         )
     except Exception as exc:
         log.warning("beta_access lookup failed: %s", type(exc).__name__)
@@ -334,7 +363,10 @@ async def _listed_for_beta(email: str) -> bool:
         rows = json.loads(text)
     except Exception:
         return False
-    return isinstance(rows, list) and bool(rows)
+    if not isinstance(rows, list) or not rows:
+        return False
+    row = rows[0] if isinstance(rows[0], dict) else {}
+    return not row.get("revoked_at")
 
 
 async def approve_at_exchange(token: str) -> bool:
@@ -365,8 +397,10 @@ async def approve_at_exchange(token: str) -> bool:
     if claims is None:
         return False
     email = normalize_email(claims.email)
-    # Also the injection guard: this string goes into a PostgREST filter, and
-    # a comma in an `eq.` value is a filter separator.
+    # Also a plausibility check, not the injection guard — this string goes
+    # into a PostgREST filter, and what keeps a comma (a filter separator) or
+    # a paren out of it is `_filter_value` below. Pinned by
+    # `test_the_roster_filter_is_percent_encoded`.
     if not EMAIL_RE.fullmatch(email):
         return False
     if not await _listed_for_beta(email):
@@ -381,7 +415,9 @@ async def approve_at_exchange(token: str) -> bool:
             return False
         # Read it back rather than trusting the insert: the row may have been
         # there already, and "there already" is the revoked case.
-        status, text = await _profiles("GET", f"?id=eq.{claims.sub}&select=revoked_at")
+        status, text = await _profiles(
+            "GET", f"?id=eq.{_filter_value(claims.sub)}&select=revoked_at"
+        )
     except Exception as exc:
         log.warning("profile approval failed: %s", type(exc).__name__)
         return False
@@ -421,7 +457,8 @@ async def ensure_on_roster(claims: Claims) -> dict:
         )
     try:
         status, text = await _profiles(
-            "GET", f"?id=eq.{claims.sub}&select=revoked_at,week_start,tasks_this_week"
+            "GET", f"?id=eq.{_filter_value(claims.sub)}"
+                   f"&select=revoked_at,week_start,tasks_this_week"
         )
         if status >= 400:
             raise AccountRefused("control_plane_unavailable", "Could not confirm your access.")

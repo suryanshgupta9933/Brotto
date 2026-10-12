@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
+from urllib.parse import unquote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1029,13 +1030,18 @@ def test_the_sign_in_limiter_sees_through_a_proxy(client, monkeypatch, hosted):
 LISTED = "listed@example.test"
 
 
-def _roster_stub(monkeypatch, *, listed=(), profiles=()):
+def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=()):
     """The control plane as the approval path uses it.
 
     Models the two tables rather than answering the same thing to every
     query: `beta_access` filters by the address asked for (so a claim that
     is *not* the one the caller typed finds nothing), and `profiles` hands
     back whatever rows it was seeded with. Returns the calls.
+
+    The `email=eq.` value is unquoted before comparison, because PostgREST
+    sees a percent-decoded path segment — stubbing the raw string instead
+    would make the encoder look like a bug the moment it encoded an `@`.
+    `revoked` are addresses that are on the roster *and* withdrawn.
     """
     calls = []
 
@@ -1043,8 +1049,11 @@ def _roster_stub(monkeypatch, *, listed=(), profiles=()):
         calls.append({"method": method, "query": query, "body": body,
                       "path": path, "prefer": prefer})
         if path == jwt_auth.BETA_ACCESS_PATH:
-            want = query.split("email=eq.", 1)[1].split("&", 1)[0]
-            return 200, json.dumps([{"email": r} for r in listed if r == want])
+            want = unquote(query.split("email=eq.", 1)[1].split("&", 1)[0])
+            return 200, json.dumps([
+                {"email": r, "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None}
+                for r in listed if r == want
+            ])
         if method == "POST":
             return 201, ""
         return 200, json.dumps(list(profiles))
@@ -1053,15 +1062,15 @@ def _roster_stub(monkeypatch, *, listed=(), profiles=()):
     return calls
 
 
-def _stub_verify(monkeypatch):
+def _stub_verify(monkeypatch, email=LISTED):
     """Supabase hands back a token whose claims name the listed address.
 
     The claims — not the body — are what the approval reads, so the stub
     has to agree with the roster or every happy-path test is really
     testing the miss.
     """
-    async def fake(email, code):
-        return _token(email=LISTED)
+    async def fake(_email, _code):
+        return _token(email=email)
 
     monkeypatch.setattr(jwt_auth, "exchange_login_code", fake)
 
@@ -1115,6 +1124,49 @@ def test_a_listed_address_approves_itself_at_exchange(client, monkeypatch, hoste
     # that costs.
     assert insert["query"] == "?on_conflict=id"
     assert insert["prefer"] == "resolution=ignore-duplicates"
+
+
+def test_the_roster_filter_is_percent_encoded(client, monkeypatch, hosted):
+    """The filter value is encoded, so the regex and PostgREST cannot disagree.
+
+    `EMAIL_RE`'s local part admits a comma, and in PostgREST a comma
+    separates values in a list — so an address this code accepts and a
+    parser reading the same string can place the end of the filter in
+    different spots. Encoding is what makes that impossible; the regex is
+    only ever "looks like an email". The address here is otherwise
+    entirely legitimate, which is the point: nothing about the alphabet
+    changed, only how it reaches the query.
+    """
+    nasty = "a,b(c)@example.test"
+    calls = _roster_stub(monkeypatch, listed=[nasty])
+    _stub_verify(monkeypatch, email=nasty)
+    client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
+    roster = next(c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH)
+    # Decodes back to the address, and carries no raw separator.
+    assert unquote(roster["query"]) == f"?email=eq.{nasty}&select=email,revoked_at"
+    assert "," not in roster["query"].split("&")[0].split("eq.", 1)[1]
+
+
+def test_a_withdrawn_roster_row_is_refused_even_though_it_is_still_listed(client, monkeypatch, hosted):
+    """`revoked_at` on `beta_access` is the withdrawal; the row is still there.
+
+    The row surviving is what makes this the trap. `profiles.id` is an FK
+    into `auth.users`, so deleting the auth account cascades the
+    `profiles` row away and takes `profiles.revoked_at` — the thing
+    `authorize_task_start` reads — with it. A member in that state who
+    signs back in would otherwise find the roster row still present,
+    write a fresh `profiles` row, and re-admit themselves. Withdrawn
+    here means no row is written at all.
+    """
+    calls = _roster_stub(
+        monkeypatch, listed=[LISTED], profiles=[{"revoked_at": None}], revoked=[LISTED]
+    )
+    _stub_verify(monkeypatch)
+    resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
+    assert resp.status_code == 200
+    assert resp.json()["approved"] is False
+    # Sign-in still succeeded — the credential is real — and nothing was written.
+    assert [c["method"] for c in calls if c["path"] == "rest/v1/profiles"] == []
 
 
 def test_an_unlisted_address_is_approved_by_nobody_and_writes_nothing(client, monkeypatch, hosted):
