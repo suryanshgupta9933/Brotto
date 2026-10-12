@@ -37,48 +37,41 @@ log = logging.getLogger("brotto.jwt_auth")
 
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s.]+(\.[^@\s.]+)+$")
 
-#: PostgREST's own `eq.` value, quoted *in the grammar* and then encoded.
+#: PostgREST's own `eq.` value, percent-encoded and **bare** — never quoted.
 #: **Every filter value spliced into a query goes through this**, never the
 #: raw string.
 #:
-#: `EMAIL_RE` above is not a filter-safety guard and cannot be one — its local
-#: part is "anything but `@` and whitespace", which includes `,`, and in
-#: PostgREST's syntax a comma separates values in a list. So a string this
-#: regex accepts and the consumer's parser can disagree about where the
-#: filter ends. The regex's job is "looks like an email"; this one's job is
-#: "is safe to splice into a query language", and only the second one
-#: closes it. Widening the regex's job — restricting the local part to
-#: `A-Za-z0-9._%+-` — was considered and rejected: it would reject
-#: `o'brien@example.com` and every other RFC 5322 `atext` address a stranger
-#: can legitimately type on the waitlist form, and it would buy nothing once
-#: the value is quoted.
+#: `EMAIL_RE` above is not a filter-safety guard: its local part accepts `,`,
+#: and in PostgREST a comma separates values in a list, so the regex and the
+#: parser can disagree about where the filter ends. The regex's job is
+#: "looks like an email"; this one's job is "is safe to splice into a query
+#: language".
 #:
-#: **The double quotes are load-bearing and `quote()` alone is not a guard.**
-#: PostgREST URL-decodes a filter *before* it parses the filter grammar, so
-#: percent-encoding alone changes the bytes on the wire without changing the
-#: meaning: `a,b@example.com` arrives as `eq.a,b@example.com` and the comma is
-#: still a list separator to the parser that reads it. `quote()` is still
-#: there, but only for what survives *after* the grammar layer has decided
-#: the value is one string — it keeps `@` and spaces from being reinterpreted
-#: at the HTTP layer, not commas from being reinterpreted at the filter layer.
-#: Inside the literal `"` closes it and `\` is the escape character, so a
-#: value carrying either can terminate or reshape the literal — and
-#: `quote()` percent-encodes both, which buys nothing, because the decode
-#: above happens before the grammar layer ever sees either byte. The check
-#: is therefore **deny-by-default on the characters the grammar reserves**,
-#: not allow-by-default on the ones it does not: `EMAIL_RE`'s local part
-#: (`[^@\s]{1,64}`) accepts a backslash, so the address is reachable. Both
-#: are **rejected rather than escaped** — no escaping is defined here that
-#: has been checked against PostgREST, and rejecting is the honest
-#: alternative to guessing. It fails closed at all three call sites
+#: **Wrapping the value in `"` is the bug this function used to have.**
+#: PostgREST treats `"…"` as a value delimiter only *inside* `in.(…)` and
+#: `or=(…)`; standalone, `eq."addr"` sends the quote characters along with
+#: the address and matches no row. Measured against a live PostgREST:
+#: `eq.suryanshgupta9933%40gmail.com` returns the row,
+#: `eq."suryanshgupta9933%40gmail.com"` returns `[]`. That is why a rostered
+#: address read as "not in the beta".
+#:
+#: `quote()` is only for the HTTP layer. PostgREST URL-decodes a filter
+#: *before* it parses the grammar, so a percent-encoded comma is still a
+#: comma at the parser. `,` is therefore refused along with `"` (opens a
+#: literal) and `\` (the escape character inside one) — deny-by-default on
+#: what the grammar reserves. It fails closed at all three call sites
 #: (`_listed_for_beta` → `False`, `approve_at_exchange` → `False`,
-#: `ensure_on_roster` → a refusal). Pinned by
-#: `test_the_roster_filter_survives_a_postgrest_parser` and
-#: `test_a_backslash_in_an_address_is_refused_rather_than_quoted`.
+#: `ensure_on_roster` → a refusal).
+#:
+#: `in.("…")` with `\"` / `\\` escapes is PostgREST's documented way to carry
+#: a comma (URL Grammar → Reserved characters); refused until a roster
+#: address actually needs one. Pinned by
+#: `test_the_filter_is_a_bare_literal_not_a_quoted_identifier` and
+#: `test_a_comma_in_an_address_is_refused_rather_than_split`.
 def _filter_value(value: str) -> str:
-    if any(c in value for c in ('"', "\\")):
+    if any(c in value for c in ('"', "\\", ",")):
         raise ValueError("filter value contains a grammar-reserved character")
-    return '"' + quote(value, safe="") + '"'
+    return quote(value, safe="")
 
 # The relay's own timeouts. Supabase answering slowly must not become a
 # hung agent loop, and a control plane that cannot be reached is a
