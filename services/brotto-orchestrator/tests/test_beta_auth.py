@@ -30,10 +30,15 @@ def _today() -> str:
 
 
 def _token(secret: str = JWT_SECRET, **overrides) -> str:
+    # A fixed exp, not `int(time.time()) + 3600`. Two mints of the same claims
+    # have to be the same string, and a live clock splits them whenever the
+    # stub and the assertion land on different seconds — which is how
+    # `test_a_listed_address_approves_itself_at_exchange` flaked in CI.
+    # Tests that care about expiry pass their own `exp`.
     payload = {
         "sub": USER_ID,
         "email": "beta@example.test",
-        "exp": int(time.time()) + 3600,
+        "exp": 2000000000,
         **overrides,
     }
     return make_jwt(payload, secret)
