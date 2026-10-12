@@ -1251,6 +1251,9 @@ async function startRelay(
       // The user's blocklist and remembered model are stored under this key,
       // not under the peer address — see deviceId().
       device_id: await deviceId(),
+      // Which build is talking. Additive — a server that predates this key
+      // ignores it, which is the whole point of a one-minor compat window.
+      ext_version: String(chrome.runtime.getManifest().version || ""),
     };
     if (stored.model_config) payload.model_config = stored.model_config;
     if (stored.api_key) payload.api_key = stored.api_key;

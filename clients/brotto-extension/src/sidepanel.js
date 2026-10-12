@@ -853,6 +853,7 @@ const waitlistJoinBtn = document.getElementById('waitlistJoinBtn');
 async function readAuthMode(res) {
   try {
     const body = await res.json();
+    if (body && typeof body.version === 'string') state.relayVersion = body.version;
     return body && typeof body.auth_mode === 'string' ? body.auth_mode : null;
   } catch {
     return null;
@@ -2243,6 +2244,8 @@ const state = {
   // reachable", which is treated as self-host because that is what every
   // server said before `auth_mode` existed.
   authMode: null,
+  // From /health's `version` — the relay build the panel last heard from.
+  relayVersion: null,
 };
 
 let timerInterval = null;
@@ -3310,12 +3313,21 @@ function failureNote(reason, detail) {
 // ponytail: Bug 2 — visible connection indicator. Dot-only — state
 // conveyed by colour (green/amber/red) + the title-attribute tooltip.
 // Driven by WS lifecycle events from background.ts.
+function connTitle(tooltipLabel) {
+  const ext = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest)
+    ? String(chrome.runtime.getManifest().version || '') : '';
+  const parts = [`Connection: ${tooltipLabel}`];
+  if (ext) parts.push(`ext ${ext}`);
+  if (state.relayVersion) parts.push(`relay ${state.relayVersion}`);
+  return parts.join(' · ');
+}
+
 function setConnPill(stateName, tooltipLabel) {
   if (!statusPill) return;
   statusPill.classList.remove('connected', 'reconnecting', 'error');
   if (stateName) statusPill.classList.add(stateName);
   if (connLabelEl) connLabelEl.textContent = tooltipLabel;
-  statusPill.title = `Connection: ${tooltipLabel}`;
+  statusPill.title = connTitle(tooltipLabel);
 }
 
 // ponytail: transient notice for events that leave no other trace. One
