@@ -437,10 +437,27 @@ credential is real and the *account* is not on the roster: an answer about an
 account, not about a probe.
 
 The ownership-scoped reads (`GET /v1/sessions`, `GET /v1/sessions/{id}/audit`,
-`DELETE …`) are deliberately **not** roster-gated and do not need to be: they
-are scoped by owner, and an unapproved person owns no sessions, because
-`POST /v1/sessions` is. Adding the lookup there would be a fourth control-plane
-hop per delete for no change in what can be read.
+`DELETE …`) are roster-gated too. They were briefly exempted, on the reasoning
+that they are filtered by owner and an unapproved person owns no sessions —
+**true for `not_invited`, false for `revoked`.** A withdrawn member ran tasks
+before the withdrawal, so `registry.owns` is still true for those ids
+(`owns()` is fail-closed only for ids it has never seen), and the exemption let
+a revoked account read its own transcript and erase its own sessions
+indefinitely. Revocation that leaves the transcript readable is not revocation.
+
+**One gate, one name, no exemptions.** The recurring failure here was a route
+picking a different gate than its neighbour *looks* like it should, and every
+pair of same-behaviour-different-name helpers is an invitation to the next one.
+`_approved` now gates every route that authenticates; `_auth` survives only as
+its own first step. Ownership scoping is a **second** question, not an
+alternative to the first: the gate says *this account may use the relay*, and
+`owns()` says *this session is one of theirs*. Both apply, in that order.
+
+The cost is one control-plane hop per delete, which is why it was exempted —
+and it is the right trade anyway, because the hop buys a withdrawn member's
+transcript otherwise. `ensure_on_roster` reaches Supabase **only** through
+`isinstance(auth.claims, Claims)`, which is never true in `secret` or `open`
+mode, so self-host pays nothing.
 
 ## Self-approval is an insert, never an upsert
 

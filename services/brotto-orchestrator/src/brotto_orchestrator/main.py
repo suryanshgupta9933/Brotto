@@ -360,27 +360,6 @@ def _auth(request: Request) -> AuthResult:
     )
 
 
-def _owner_scoped(request: Request) -> AuthResult:
-    """Signature-only auth, for a route whose every row is the caller's own.
-
-    **The exemption from `_approved`, and it is named on purpose.** The four
-    session routes are the only routes that ask this: an unapproved token
-    cannot reach a row that is not its owner's, so the roster question has
-    no answer to change. `POST /v1/sessions` is the only writer of
-    `registry._owners` and it is `_approved`-gated, so nobody becomes the
-    owner of anything without passing the roster first, and `owns()` is
-    fail-closed on an id it has never seen.
-
-    Why a function and not four comments: the bug a reviewer was pointing at
-    is not the four routes, it is the *next* route reaching for `_auth`
-    because the ones beside it do. A name is what stops that, and a comment
-    is what a route never reads. Anything touching a session that is *not*
-    filtered by `registry.owns` wants `_approved` instead — there is no
-    other place in this file that should call `_auth` directly.
-    """
-    return _auth(request)
-
-
 async def _approved(request: Request) -> tuple[AuthResult, JSONResponse | None]:
     """Roster membership, not just a valid signature. Auth result and any refusal.
 
@@ -397,13 +376,27 @@ async def _approved(request: Request) -> tuple[AuthResult, JSONResponse | None]:
     panel offer somebody the waitlist instead of a bare failure; *using*
     the product is not on the other side of that door. So the two open
     sign-in routes are the only unauthenticated surface a stranger
-    reaches, and every route that touches a policy, a report, a model
-    call or a session *mint* asks this. The four routes that read or erase
-    a session do not, and are named `_owner_scoped` — a caller there can
-    only reach their own rows.
+    reaches, and **every route that authenticates asks this** — the
+    session index, read, delete and erase-all among them.
 
-    There is deliberately no `_authed`-alike left on the request path:
-    a helper named for the weak check is what the next route picks.
+    Ownership scoping still applies on top of it: the gate says *this
+    account may use the relay*, and `registry.owns` says *this session is
+    one of theirs*. Two questions, neither answers the other.
+
+    It used to be exempted on the four session routes, on the reasoning
+    that an unapproved account owns nothing so the roster gate has no
+    answer to change. That holds for `not_invited` and is **false for
+    `revoked`**: a withdrawn member ran tasks before the withdrawal, so
+    it still owns them, `owns()` is fail-closed only for ids it has never
+    seen, and the exemption meant a revoked account could read its own
+    transcript and erase its own sessions indefinitely. Revocation that
+    leaves the transcript readable is not revocation.
+
+    **One gate, one name, no exemptions to reason about.** The recurring
+    failure here is a route picking a different gate than its neighbour
+    looks like it should, and every pair of same-behaviour-different-name
+    helpers is an invitation to the next one. `_auth` is the only weaker
+    check, and it exists solely as this function's own first step.
 
     Fails closed, exactly as `authorize_task_start` does — an unreachable
     control plane is a refusal, not a licence to serve. Self-host never
@@ -1349,9 +1342,9 @@ async def list_session_audits(request: Request):
     """
     from .agent.audit import list_sessions as _list
 
-    auth = _owner_scoped(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     sessions = _list()
     owner = _owner(auth.claims)
     if owner is not None:
@@ -1369,9 +1362,9 @@ async def read_audit(session_id: str, request: Request):
     """
     from .agent.audit import read as _read
 
-    auth = _owner_scoped(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     # Another account's session is a session that does not exist, not one
     # that is forbidden: a 403 confirms the id is real, and confirming
     # that is the whole of what the id is worth. Same rule as the bad-key
@@ -1402,9 +1395,9 @@ async def delete_session(session_id: str, request: Request):
     """
     from .agent.audit import delete as _delete
 
-    auth = _owner_scoped(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     if not registry.owns(session_id, _owner(auth.claims)):
         return _error(404, "unknown session")
     left: list[str] = []
@@ -1434,9 +1427,9 @@ async def delete_all_sessions(request: Request):
     """
     from .agent.audit import delete_all as _delete_all
 
-    auth = _owner_scoped(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     owner = _owner(auth.claims)
     if owner is None:
         deleted, residue = _delete_all()

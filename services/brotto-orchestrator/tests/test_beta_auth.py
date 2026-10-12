@@ -197,6 +197,7 @@ def test_http_routes_stay_shut_with_no_token(client, monkeypatch, hosted):
 
 
 def test_a_good_token_opens_the_route(client, monkeypatch, hosted):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so this is not the thing under test
     resp = client.get("/v1/sessions", headers={"authorization": f"Bearer {_token()}"})
     assert resp.status_code == 200
 
@@ -771,6 +772,7 @@ def test_the_owner_still_reaches_their_own_session(client, monkeypatch, hosted):
 
 def test_a_session_with_no_owner_belongs_to_nobody(client, monkeypatch, hosted, session_id):
     """Fail closed. A stale id or an evicted registry entry is nobody's."""
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so this is not the thing under test
     resp = client.get(
         f"/v1/sessions/{session_id('ownerless')}/audit",
         headers={"authorization": f"Bearer {_token()}"},

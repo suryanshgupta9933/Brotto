@@ -140,51 +140,174 @@ def test_erase_all_only_reaches_your_own(client, hosted, clean_registry):
     assert (d / f"{bob_sid}.json").exists(), "the unscoped residue sweep unlinked bob's"
 
 
-def test_an_unapproved_account_reaches_none_of_them(client, clean_registry, monkeypatch):
-    """The exemption is real, so it needs a test like any other guard.
+@pytest.fixture
+def withdrawal(monkeypatch):
+    """Two more roster answers, for the callers the gate is there to refuse.
 
-    These four routes deliberately ask `_owner_scoped` and never the roster,
-    which is only safe while an unapproved token cannot own anything. Sign-in
-    mints a token for anyone, so "valid signature" is not a small population
-    — this is the caller the exemption has to be safe against, and the one a
-    reviewer asking for gate parity is really describing.
+    Both need a valid signature, because that is what sign-in mints for
+    anybody who asks: "the token verified" is a small population and the
+    population that matters is the one with a perfect credential.
     """
-    from brotto_orchestrator.session import jwt_auth
-
-    async def _not_on_the_roster(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
-        return 200, "[]"  # a valid account, no row: `not_invited`
-
     monkeypatch.setenv("SUPABASE_JWT_SECRET", JWT_SECRET)
     monkeypatch.setenv("SUPABASE_URL", "https://project.test")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-key")
-    monkeypatch.setattr(jwt_auth, "_profiles", _not_on_the_roster)
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key")
 
-    # Seed a real transcript for somebody who *was* on the roster.
-    async def _approved_row(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+
+def _roster_answer(monkeypatch, body: str):
+    """Pin the one `profiles` row this account is answered with."""
+    from brotto_orchestrator.session import jwt_auth
+
+    async def _row(method, query, b=None, *, path="rest/v1/profiles", prefer=""):
         if method == "GET":
-            return 200, '[{"revoked_at": null, "week_start": null, "tasks_this_week": 0}]'
+            return 200, body
         return 200, "true"
 
-    monkeypatch.setattr(jwt_auth, "_profiles", _approved_row)
+    monkeypatch.setattr(jwt_auth, "_profiles", _row)
+
+
+APPROVED_ROW = '[{"revoked_at": null, "week_start": null, "tasks_this_week": 0}]'
+REVOKED_ROW = '[{"revoked_at": "2026-10-01T00:00:00Z", "week_start": null, "tasks_this_week": 0}]'
+
+
+def _assert_refused_on_all_four(client, headers, sid, goal):
+    """Every session route answers 403, and the transcript is still there."""
+    d = Path(audit_mod.default_dir())
+
+    index = client.get("/v1/sessions", headers=headers)
+    assert index.status_code == 403, "the index stayed reachable to a refused account"
+    assert sid not in index.text
+
+    read = client.get(f"/v1/sessions/{sid}/audit", headers=headers)
+    assert read.status_code == 403, "the transcript stayed readable after refusal"
+    assert goal not in read.text
+
+    one = client.delete(f"/v1/sessions/{sid}", headers=headers)
+    assert one.status_code == 403, "a refused account could still erase one session"
+    assert (d / f"{sid}.json").exists(), "a refused account erased the document"
+
+    every = client.delete("/v1/sessions", headers=headers)
+    assert every.status_code == 403, "a refused account could still sweep every session"
+    assert (d / f"{sid}.json").exists(), "the scoped sweep reached a refused account's file"
+
+
+def test_a_revoked_account_is_refused_on_every_session_route(
+        client, hosted, clean_registry, withdrawal, monkeypatch):
+    """The gap the exemption left, and the whole reason it is gone.
+
+    A **revoked** account is not an account that owns nothing: it ran tasks
+    before the operator withdrew it, so `registry.owns` is true for those
+    ids — `owns()` is fail-closed only for ids it has never seen. The four
+    session routes exempted from the roster gate could therefore not
+    distinguish it from an approved member, and it read its own transcript
+    and erased its own sessions indefinitely. Revocation that leaves the
+    transcript readable is not revocation.
+
+    This is the caller no test covered: the previous test only asked a
+    `not_invited` account, which passes the exemption by accident because
+    it owns nothing.
+    """
+    sid = _open_as(client, ALICE)
+    _seed_run(sid, "alice's private task")
+    assert (Path(audit_mod.default_dir()) / f"{sid}.json").exists()
+
+    _roster_answer(monkeypatch, REVOKED_ROW)
+    _assert_refused_on_all_four(client, {"authorization": f"Bearer {_token(ALICE)}"},
+                                 sid, "alice's private task")
+
+
+def test_an_unapproved_account_is_refused_on_every_session_route(
+        client, hosted, clean_registry, withdrawal, monkeypatch):
+    """Same four routes, same answer, for the account that was never invited.
+
+    This used to assert the exemption: a `not_invited` account read `[]`
+    from the index and 404 on the rest, because it owned nothing and so
+    had nothing to reach. It now gets **403**, and that is the correct
+    answer — an unapproved stranger has no business enumerating sessions
+    at all, and `[]` was the shape that made the exemption look harmless.
+
+    The mint assertion stays: minting is what records an owner, so it was
+    the gate that made the other three defensible, and it is `_approved`-
+    gated for the same one-gate reason they now are.
+    """
     sid = _open_as(client, ALICE)
     _seed_run(sid, "alice's private task")
 
-    # ...and ask the four routes as the stranger.
-    monkeypatch.setattr(jwt_auth, "_profiles", _not_on_the_roster)
+    _roster_answer(monkeypatch, "[]")  # a valid account, no row: `not_invited`
     stranger = {"authorization": f"Bearer {_token(BOB)}"}
+    _assert_refused_on_all_four(client, stranger, sid, "alice's private task")
 
-    assert client.get("/v1/sessions", headers=stranger).json()["sessions"] == [], \
-        "the index named a session the caller cannot own"
-    read = client.get(f"/v1/sessions/{sid}/audit", headers=stranger)
-    assert read.status_code == 404, "a stranger read somebody else's transcript"
-    assert "alice's private task" not in read.text
-    assert client.delete(f"/v1/sessions/{sid}", headers=stranger).status_code == 404
-    assert (Path(audit_mod.default_dir()) / f"{sid}.json").exists(), "a stranger erased it"
-    assert client.delete("/v1/sessions", headers=stranger).json() == {"deleted": 0, "residue": 0}
-
-    # The mint is the gate that makes all four safe, so pin it too.
     assert client.post("/v1/sessions", headers=stranger).status_code == 403, \
         "an unapproved token can mint, and minting is what records an owner"
+
+
+def test_an_approved_account_still_answers_for_its_own_sessions_only(
+        client, hosted, clean_registry, monkeypatch):
+    """Gate parity is only half the change; ownership scoping has to survive it.
+
+    Adding the gate in front of a route is the easy half, and the half that
+    breaks silently: if `_approved` were answering the ownership question
+    as well, one account would read another's transcript — which is what
+    the cross-tenant tests above exist to catch, restated here as the
+    positive case so the gate and the scope are asserted together.
+    """
+    _roster_answer(monkeypatch, APPROVED_ROW)
+    alice = {"authorization": f"Bearer {_token(ALICE)}"}
+    bob = {"authorization": f"Bearer {_token(BOB)}"}
+
+    alice_sid = _open_as(client, ALICE)
+    bob_sid = _open_as(client, BOB)
+    _seed_run(alice_sid, "alice's private task")
+    _seed_run(bob_sid, "bob's private task")
+
+    assert client.get(f"/v1/sessions/{alice_sid}/audit", headers=alice).status_code == 200
+    assert client.get(f"/v1/sessions/{bob_sid}/audit", headers=bob).status_code == 200
+    assert client.get(f"/v1/sessions/{bob_sid}/audit", headers=alice).status_code == 404
+    assert client.get(f"/v1/sessions/{alice_sid}/audit", headers=bob).status_code == 404
+
+    ids = {s["session_id"] for s in
+           client.get("/v1/sessions", headers=alice).json()["sessions"]}
+    assert alice_sid in ids and bob_sid not in ids, "the index stopped being scoped"
+
+    assert client.delete("/v1/sessions", headers=alice).json() == {"deleted": 1, "residue": 0}
+    d = Path(audit_mod.default_dir())
+    assert not (d / f"{alice_sid}.json").exists()
+    assert (d / f"{bob_sid}.json").exists(), "the sweep stopped being scoped"
+
+
+def test_self_host_never_asks_the_roster_at_all(client, clean_registry, monkeypatch):
+    """One credential, one person: `ensure_on_roster` must be a no-op off jwt.
+
+    The four routes now call `_approved`, so the question this pins is
+    whether that costs a self-hoster anything. It must not: `_approved`
+    only reaches the roster through `isinstance(auth.claims, Claims)`, and
+    a `Claims` object only exists when a JWT authenticated. `secret` and
+    `open` mode keep the exact behaviour they had — if this fails, the
+    bug is in `ensure_on_roster`'s reach, and fixing it at the route
+    would be papering over it.
+    """
+    from brotto_orchestrator.session import jwt_auth
+
+    def _unreachable(*a, **kw):  # pragma: no cover - the assertion is below
+        raise AssertionError("self-host consulted the roster")
+
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setattr(jwt_auth, "ensure_on_roster", _unreachable)
+
+    for env in ({"AGENT_SECRET": "s3cret"}, {}):  # secret mode, then open
+        monkeypatch.setenv("AGENT_SECRET", env.get("AGENT_SECRET", ""))
+        if not env.get("AGENT_SECRET"):
+            monkeypatch.delenv("AGENT_SECRET", raising=False)
+        headers = {"authorization": "Bearer s3cret"} if env else {}
+
+        main_registry = __import__("brotto_orchestrator.main", fromlist=["registry"]).registry
+        main_registry._sessions.clear()
+        sid = client.post("/v1/sessions", headers=headers).json()["session_id"]
+        _seed_run(sid, "self-hosted task")
+        assert client.get(f"/v1/sessions/{sid}/audit", headers=headers).status_code == 200
+        assert client.get("/v1/sessions", headers=headers).json()["sessions"] != []
+        assert client.delete(f"/v1/sessions/{sid}", headers=headers).status_code == 200
+        main_registry._sessions.clear()
 
 
 def test_the_relay_socket_refuses_a_session_you_do_not_own(client, hosted, clean_registry):
