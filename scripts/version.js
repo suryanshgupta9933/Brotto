@@ -78,8 +78,12 @@ if (require.main === module) {
     try {
       files = execFileSync("git", ["diff", "--name-only", `${base}...HEAD`],
         { cwd: root, encoding: "utf8" }).trim().split("\n").filter(Boolean);
-    } catch {
-      files = [];
+    } catch (err) {
+      // Fail closed: a merge gate that passes when git cannot answer is worse
+      // than no gate (shallow clone, missing base ref → "nothing changed").
+      const detail = String(err.stderr || err.message || "").trim();
+      console.error(`--shipped-diff: git diff ${base}...HEAD failed${detail ? `: ${detail}` : ""}`);
+      process.exit(1);
     }
     const shipped = shippedChanged(files);
     const versionTouched = files.some((f) =>
