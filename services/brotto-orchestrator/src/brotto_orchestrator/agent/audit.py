@@ -874,7 +874,7 @@ def record_owner(session_id: str, owner: str | None, *, dir: Path | None = None)
     d = dir or default_dir()
     try:
         d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{session_id}{_OWNER_EXT}"
+        path = d / f"{os.path.basename(session_id)}{_OWNER_EXT}"
         # Same two-step as `_flush`: a half-written sidecar is a sidecar that
         # reads as somebody else's account.
         tmp = path.with_suffix(f"{_OWNER_EXT}.tmp")
@@ -930,12 +930,15 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
     and `../../..` walks out of the directory entirely.
     """
     d = dir or default_dir()
-    p = d / f"{session_id}.json" if _is_document_stem(session_id) else None
-    # CodeQL cannot see that the ternary above already rejected every name
-    # containing a separator or a dot, which is the whole defence — it models
-    # the sink, not the predicate. The rule is switched off for this file in
-    # `.github/workflows/codeql.yml`, not suppressed here: an inline
-    # `# codeql[...]` comment suppresses nothing in this repo.
+    p = (d / f"{os.path.basename(session_id)}.json"
+         if _is_document_stem(session_id) else None)
+    # `_is_document_stem` is the real defence: it rejects every name with a
+    # separator or a dot, so this join can only resolve inside `d`. CodeQL
+    # models the sink, not that predicate — `os.path.basename` is the
+    # sanitizer it does model, applied here so the taint is cut where the
+    # scanner can see it. Nothing is switched off for this file in
+    # `.github/workflows/codeql.yml`, and an inline `# codeql[...]` comment
+    # suppresses nothing in this repo either.
     if p is None or not p.exists():
         return {"found": False, "session_id": session_id}
     try:
@@ -994,9 +997,6 @@ def delete(session_id: str, *, dir: Path | None = None,
             # exactly why it has to be named here rather than swept: the user
             # is told the session is erased, and this would be what is left.
             try:
-                # Same guard as `read`, one line above the loop: a session id
-                # with a separator or a dot never reaches here, so `name` can
-                # only resolve inside `d`. Suppressed in codeql.yml.
                 (d / name).unlink()
                 removed = True
             except FileNotFoundError:
@@ -1005,14 +1005,20 @@ def delete(session_id: str, *, dir: Path | None = None,
                 failed.append(name)
                 log.warning("audit: could not remove %s/%s: %s", d, name, exc)
 
-    names = [f"{session_id}{ext}" for ext in _SESSION_EXT]
+    # `_is_document_stem` above is the real guard: a session id with a
+    # separator or a dot never reaches here. `os.path.basename` is the
+    # sanitizer CodeQL models — `_is_document_stem` is a predicate it does not
+    # understand — so it is applied once here, where the names are built, and
+    # every join below is untainted rather than each sink carrying its own.
+    stem = os.path.basename(session_id)
+    names = [f"{stem}{ext}" for ext in _SESSION_EXT]
     # The owner sidecars go last, and only if everything before them went. An
     # `.owner` erased beside a scratchpad that survived is the same permanent
     # unreachability as an orphaned one, one delete earlier: after the next
     # restart `owned_sessions()` cannot name the file again, and nothing in
     # the product reaches a file no owner claims.
     owner_exts = _OWNER_EXTS
-    owner_names = [n for n in names if n[len(session_id):] in owner_exts]
+    owner_names = [n for n in names if n[len(stem):] in owner_exts]
     _unlink([n for n in names if n not in owner_names])
     if not failed:
         _unlink(owner_names)
@@ -1272,12 +1278,11 @@ def append_policy_event(session_id: str, *, step: int | None, kind: str,
         # JSON happened to sit above the sessions directory.
         if not _is_document_stem(session_id):
             return
-        # `_is_document_stem` rejects every name containing a separator or a
-        # dot, so a `session_id` that gets past it can only name a file inside
-        # `default_dir()`. CodeQL sees the sink, not the predicate that decides
-        # it — and it does not model that the predicate's failure returns from
-        # the function. Suppressed in `.github/workflows/codeql.yml`.
-        path = default_dir() / f"{session_id}.json"
+        # `_is_document_stem` is the real guard — it rejects every name with a
+        # separator or a dot, so this can only name a file inside
+        # `default_dir()`. `os.path.basename` is the sanitizer CodeQL models,
+        # applied where the path is built rather than at the sink.
+        path = default_dir() / f"{os.path.basename(session_id)}.json"
         if not path.exists():
             log.debug("audit: policy event for unknown session %s ignored",
                       session_id)
