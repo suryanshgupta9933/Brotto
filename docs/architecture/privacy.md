@@ -40,14 +40,16 @@ than from an account, and it is covered by "Writing new code here" below —
 see *The waitlist is the first data from someone who is not an account*.
 
 **`beta_access` and `waitlist` must stay disjoint.** The allowlist
-(`supabase/migrations/004_beta_access.sql`) is the same invitation a
-`profiles` row is, entered by address so the operator can bulk-paste a list —
-and it stays a table the operator writes by hand. **Of its three columns only
-`email` is ever read**: `_listed_for_beta` selects `select=email` and nothing
-else. `approved_at` exists because the table is a ledger someone will ask
-"when", and it is filled by the column default rather than by any path here;
-**`added_by` is written by nobody** — no code path supplies it, so the column
-that looks like an author field is empty for every row that exists. The moment
+(`supabase/migrations/004_beta_access.sql`) is the same *admission decision* a
+`profiles` row records, entered by address so the operator can bulk-paste a list —
+and it stays a table the operator writes by hand. **Removing a row from it does
+not revoke anyone** — see *The roster admits; `revoked_at` withdraws* below.
+**Of its three columns only `email` is ever read**: `_listed_for_beta` selects
+`select=email` and nothing else. `approved_at` exists because the table is a
+ledger someone will ask "when", and it is filled by the column default rather
+than by any path here; **`added_by` is written by nobody** — no code path
+supplies it, so the column that looks like an author field is empty for every
+row that exists. The moment
 anything copies a
 waitlist submission into it without a human deciding, `POST /v1/waitlist` — the
 one route reachable with **no credential at all** — answers "is this person in
@@ -345,6 +347,28 @@ read at `/v1/auth/exchange` instead, which is safe for one reason and one only:
 **by then the caller has read a code out of an inbox it controls**, and that is
 the gate `request-code` cannot verify. Pinned by
 `test_request_code_consults_no_allowlist`.
+
+## The roster admits; `revoked_at` withdraws
+
+`beta_access` is read in **exactly one place** — `_listed_for_beta`, called from
+`approve_at_exchange` — and only to decide whether to *create* a `profiles` row.
+`authorize_task_start`, the wall that actually gates a run, reads `profiles` and
+never consults the roster again. So the absence of a roster row is a refusal
+**only for somebody who has not been admitted yet**. Deleting one for an
+already-approved member changes nothing they can observe.
+
+Withdrawal is `update profiles set revoked_at = now() where email = '…'`, set
+by hand, and it takes effect at that member's next `task_start`. Deleting the
+roster row is a second, optional step that only keeps the paste-list honest.
+There is no `AFTER DELETE` trigger joining the two, and that is the decision
+rather than an omission: revocation belongs to `profiles`, where the `auth.users`
+row *is* the evidence, and a trigger would couple this table's rollback to
+another table's for a withdrawal rare enough in a beta to be a two-step.
+
+The operational consequence is the whole point: **an operator who removes a
+roster row instead of setting `revoked_at` has handed someone a working beta
+account while believing they took it away.** The migration file states this at
+the top of `004`, where an operator pasting a list will read it.
 
 ## Self-approval is an insert, never an upsert
 

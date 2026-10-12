@@ -1,10 +1,37 @@
 -- The addresses allowed to be in the beta, pasted in by the operator.
 --
 -- **A row IS the invitation**, exactly as in `profiles`: there is no invited
--- flag and no batch of pending requests, and the absence of a row is the
--- refusal. This is the same control plane, entered by the address rather than
--- by the account id, so an operator can bulk-paste a list instead of minting
--- one `auth.users` row per person by hand.
+-- flag and no batch of pending requests. This is the same control plane,
+-- entered by the address rather than by the account id, so an operator can
+-- bulk-paste a list instead of minting one `auth.users` row per person by hand.
+--
+-- ── removal is NOT revocation, and this is the second step to get wrong ──
+--
+-- **Absence of a row is the refusal for somebody who has not been admitted
+-- yet. It is not a refusal for somebody who already has.** `beta_access` is
+-- read in exactly one place, `approve_at_exchange`, and only to decide whether
+-- to *create* a `profiles` row. Once that row exists, `authorize_task_start`
+-- enforces `profiles` — existence and `revoked_at` — and never consults this
+-- table again.
+--
+-- So **deleting a row here does not withdraw an approved member.** They keep
+-- working beta access until `profiles.revoked_at` is set, which is by hand and
+-- is the deliberate mechanism. An operator who deletes the roster row believing
+-- it revoked them has removed a person who can still run tasks and believes
+-- they cannot.
+--
+-- The two steps, in the order to do them:
+--   1. `update profiles set revoked_at = now() where email = '<address>'`
+--      — this is the withdrawal, and it takes effect at the next `task_start`.
+--   2. delete from `beta_access where email = '<address>'` — optional, and only
+--      to keep the roster honest; it stops them being re-created if the
+--      `profiles` row is ever deleted.
+--
+-- Doing 2 alone is a no-op for access. Doing 1 alone fully withdraws them.
+-- No `AFTER DELETE` trigger ties the two: revocation belongs to `profiles`,
+-- where the evidence is, and a trigger would couple this table's rollback to
+-- another table's for a withdrawal that is rare enough during a beta to be a
+-- two-step.
 --
 -- `email` is the primary key, which is what makes a second paste a no-op: a
 -- duplicate arrives as a 409 and is the operator's confirmation that the

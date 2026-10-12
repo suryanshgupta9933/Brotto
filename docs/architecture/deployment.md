@@ -303,7 +303,7 @@ Two files rather than one `004`, because they are unrelated: `004` creates a
 table, `005` alters an existing one, and lumping them couples two changes whose
 rollback should not be coupled. Both are additive and neither touches a row.
 
-`004` is `profiles`' invitation expressed as an **address** instead of an
+`004` is `profiles`' admission decision expressed as an **address** instead of an
 account id, so the operator bulk-pastes a list instead of minting one
 `auth.users` row per person. `email text primary key`, already normalised by the
 caller — no normalisation function in SQL, so there is one rule to keep in step,
@@ -312,6 +312,15 @@ not two. It carries **no `owner` column**: the address is matched against the
 ever read (`select=email`); `approved_at` is filled by its column default and
 **`added_by` is written by no code path**, so it is empty for every row that
 exists — set it by hand if you ever need it.
+
+**To withdraw a member, set `profiles.revoked_at` — do not delete the roster
+row.** The roster is consulted once, at `/v1/auth/exchange`, and only to decide
+whether to create a `profiles` row; after that every check is `profiles`
+existence plus `revoked_at`. Deleting a `beta_access` row for somebody already
+approved leaves them with working beta access. `revoked_at` is set by hand and
+applies at their next task start; deleting the roster row afterwards is
+optional housekeeping. See `docs/architecture/privacy.md` § *The roster admits;
+`revoked_at` withdraws*.
 
 **The two tables must never be joined by a pipeline.** `POST /v1/waitlist` is
 reachable with no credential at all, so copying a stranger's submission into
