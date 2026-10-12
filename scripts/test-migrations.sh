@@ -41,18 +41,19 @@ docker run -d --rm --name "$CONTAINER" \
   -p "127.0.0.1:$PORT:5432" \
   "$PG_IMAGE" >/dev/null
 
-# Not `pg_isready`: it answers on the temporary init server that
-# postgres-alpine runs before restarting into the real one, so the first
-# bootstrap connection gets "terminating connection due to administrator
-# command". A real query is the only probe that means *this* server is up.
-ready() { docker exec "$CONTAINER" psql -U postgres -d postgres -c 'select 1' >/dev/null 2>&1; }
+# `-h 127.0.0.1` is load-bearing: postgres-alpine's temporary init server
+# is started with `listen_addresses=''`, so it answers `docker exec psql`
+# over the socket and then dies ("terminating connection due to
+# administrator command") as the real one takes over. TCP never sees that
+# server — a probe or a migration on the socket can hit it and lose.
+ready() { docker exec "$CONTAINER" psql -h 127.0.0.1 -U postgres -d postgres -c 'select 1' >/dev/null 2>&1; }
 for _ in $(seq 1 60); do
   ready && break
   sleep 0.5
 done
 ready || fail "postgres never became ready"
 
-run() { docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -q "$@"; }
+run() { docker exec -i "$CONTAINER" psql -h 127.0.0.1 -v ON_ERROR_STOP=1 -U postgres -q "$@"; }
 
 # ── The bootstrap Supabase provides and a bare Postgres does not ────────────
 #
