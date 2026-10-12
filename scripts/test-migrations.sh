@@ -105,7 +105,24 @@ out="$(run -tA -d postgres -c "
     and (select relrowsecurity from pg_class where relname='beta_access') = true
     and has_table_privilege('anon','beta_access','INSERT') = false
     and has_table_privilege('anon','beta_access','SELECT') = false
-    and has_table_privilege('authenticated','beta_access','SELECT') = false;" | tr -d '[:space:]')"
+    and has_table_privilege('authenticated','beta_access','SELECT') = false
+    and (select relrowsecurity from pg_class where relname='sign_in_codes') = true
+    and (select relrowsecurity from pg_class where relname='sign_in_events') = true
+    and (select count(*) from pg_policies
+          where tablename in ('sign_in_codes','sign_in_events')) = 0
+    and has_table_privilege('anon','sign_in_codes','SELECT') = false
+    and has_table_privilege('anon','sign_in_codes','INSERT') = false
+    and has_table_privilege('authenticated','sign_in_codes','SELECT') = false
+    and has_table_privilege('anon','sign_in_events','SELECT') = false
+    and has_table_privilege('authenticated','sign_in_events','SELECT') = false
+    -- A function PUBLIC can execute runs with the *caller's* privileges, so
+    -- redeem_sign_in_code is as sensitive as the codes behind it: an
+    -- executable one would burn any address's attempts on demand.
+    -- (No backticks anywhere in this string: bash would run one.)
+    and has_function_privilege('public',
+          'public.redeem_sign_in_code(text,text,int)','EXECUTE') = false
+    and has_function_privilege('anon',
+          'public.redeem_sign_in_code(text,text,int)','EXECUTE') = false;" | tr -d '[:space:]')"
 
 [ "$out" = "t" ] || fail "schema check failed (got '$out') — a column or grant is missing"
 
@@ -178,5 +195,139 @@ run -d postgres >/dev/null <<'SQL'
 alter table waitlist add constraint waitlist_email_no_formula
   check (email !~ '^[=+\-@\t\r]');
 SQL
+
+# ── `007`: a code that cannot be stored, guessed, or reused ───────────────
+#
+# The properties here are all things a comment can claim and only Postgres can
+# settle: that a six-digit code does not fit `code_hash`, that a wrong guess
+# costs an attempt whether or not it was wrong, and that the newest code for an
+# address is the only live one.
+expect() {  # expect <sql> <expected> <message>
+  local got
+  if ! got="$(run -tA -d postgres -c "$1" | tr -d '[:space:]')"; then
+    fail "$3 — the query itself failed"
+  fi
+  [ "$got" = "$2" ] || fail "$3 (got '$got', wanted '$2')"
+}
+
+# `set -e` would abort the whole script on an error these *want*, so an
+# expected refusal has to be a condition rather than a command whose status is
+# read afterwards.
+refuses() {  # refuses <message>; SQL on stdin, which Postgres must reject
+  if run -d postgres >/dev/null 2>&1; then
+    fail "$1 — Postgres accepted it"
+  fi
+}
+
+say "a plaintext code does not fit the column"
+refuses "a six-digit code fit sign_in_codes.code_hash" <<'SQL'
+insert into sign_in_codes (email, code_hash, expires_at)
+  values ('plaintext@example.test', '123456', now() + interval '10 min');
+SQL
+
+say "a code cannot be born expired, and cannot go negative"
+refuses "an already-expired code was stored" <<'SQL'
+insert into sign_in_codes (email, code_hash, expires_at)
+  values ('stale@example.test', repeat('a', 64), now() - interval '1 min');
+SQL
+refuses "a negative attempt count was stored" <<'SQL'
+insert into sign_in_codes (email, code_hash, expires_at, attempts)
+  values ('negative@example.test', repeat('a', 64), now() + interval '10 min', -1);
+SQL
+
+say "a wrong guess is charged, a right one is consumed, a replay is neither"
+run -d postgres >/dev/null <<'SQL'
+truncate sign_in_codes;
+insert into sign_in_codes (email, code_hash, expires_at)
+  values ('a@example.test', repeat('a', 64), now() + interval '10 min');
+SQL
+expect "select redeem_sign_in_code('a@example.test', repeat('b', 64), 5)" \
+  "f" "a wrong digest was accepted"
+expect "select attempts from sign_in_codes" "1" "a wrong digest was not charged"
+expect "select redeem_sign_in_code('a@example.test', repeat('a', 64), 5)" \
+  "t" "the right digest was refused"
+expect "select consumed_at is not null from sign_in_codes" \
+  "t" "a redeemed code was not marked consumed"
+expect "select redeem_sign_in_code('a@example.test', repeat('a', 64), 5)" \
+  "f" "a code was redeemable twice"
+expect "select attempts from sign_in_codes" \
+  "2" "a replayed code charged an attempt"
+
+say "the cap is charged before it is judged"
+run -d postgres >/dev/null <<'SQL'
+truncate sign_in_codes;
+insert into sign_in_codes (email, code_hash, expires_at)
+  values ('cap@example.test', repeat('c', 64), now() + interval '10 min');
+SQL
+expect "select count(*) from generate_series(1, 5)
+         where redeem_sign_in_code('cap@example.test', repeat('d', 64), 5)" \
+  "0" "a wrong digest was accepted"
+expect "select attempts from sign_in_codes" "5" "the five wrong guesses were not all charged"
+expect "select redeem_sign_in_code('cap@example.test', repeat('c', 64), 5)" \
+  "f" "the cap did not hold past the fifth attempt"
+
+say "only the newest code for an address is redeemable"
+run -d postgres >/dev/null <<'SQL'
+truncate sign_in_codes;
+insert into sign_in_codes (email, code_hash, expires_at)
+  values ('again@example.test', repeat('e', 64), now() + interval '10 min');
+insert into sign_in_codes (email, code_hash, expires_at)
+  values ('again@example.test', repeat('f', 64), now() + interval '10 min');
+SQL
+expect "select redeem_sign_in_code('again@example.test', repeat('e', 64), 5)" \
+  "f" "the superseded code was still redeemable"
+expect "select redeem_sign_in_code('again@example.test', repeat('f', 64), 5)" \
+  "t" "the newest code was refused"
+
+say "the budget is per address, so sending another does not reset it"
+run -d postgres >/dev/null <<'SQL'
+truncate sign_in_codes;
+insert into sign_in_codes (email, code_hash, expires_at)
+  values ('addr@example.test', repeat('1', 64), now() + interval '10 min');
+insert into sign_in_codes (email, code_hash, expires_at)
+  values ('addr@example.test', repeat('2', 64), now() + interval '10 min');
+SQL
+expect "select count(*) from generate_series(1, 5)
+         where redeem_sign_in_code('addr@example.test', repeat('9', 64), 5)" \
+  "0" "a wrong digest was accepted"
+expect "select redeem_sign_in_code('addr@example.test', repeat('2', 64), 5)" \
+  "f" "a fresh code reset the address's attempt budget"
+
+# ── `008`: the address is truncated by the schema, not by the caller ───────
+#
+# `cidr` alone is not enough — a bare address is a *valid* `cidr` and is stored
+# as `/32` — so the CHECK is what refuses the one form this table exists not to
+# keep, and both halves are asserted rather than only the ones that pass.
+say "a network is stored, a host route is not"
+run -d postgres >/dev/null <<'SQL'
+truncate sign_in_events;
+insert into sign_in_events (owner, ip, user_agent)
+  values (gen_random_uuid(), '192.168.1.0/24', 'Mozilla/5.0 (Macintosh) Chrome/141');
+insert into sign_in_events (owner, ip)
+  values (gen_random_uuid(), '2001:db8:abcd::/48');
+insert into sign_in_events (owner, ip) values (gen_random_uuid(), null);
+SQL
+expect "select count(*) from sign_in_events where masklen(ip) in (24, 48)" \
+  "2" "a masked network was not stored"
+for host_route in '192.168.1.55' '203.0.113.9/32' '2001:db8:abcd::1/128'; do
+  if ! run -d postgres >/dev/null 2>&1 -c \
+      "insert into sign_in_events (owner, ip) values (gen_random_uuid(), '$host_route');"; then
+    :
+  else
+    fail "sign_in_events stored the host route $host_route"
+  fi
+done
+
+say "a user agent is bounded, and an account may have no address at all"
+refuses "a 513-character user agent was stored" <<'SQL'
+insert into sign_in_events (owner, user_agent) values (gen_random_uuid(), repeat('x', 513));
+SQL
+expect "select count(*) from sign_in_events where ip is null" \
+  "1" "a sign-in with no forwarded peer could not be recorded"
+
+say "sign-in history outlives the account"
+expect "select count(*) from pg_constraint
+         where conrelid = 'sign_in_events'::regclass and contype = 'f'" \
+  "0" "sign_in_events has a foreign key — account deletion would erase it"
 
 printf '\033[32mall passed\033[0m\n'
