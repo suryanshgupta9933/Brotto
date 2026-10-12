@@ -1078,13 +1078,16 @@ async def get_effective_policy(request: Request):
 # outbound email to arbitrary third-party addresses through our Resend
 # account and to hammer Supabase's verify endpoint, so both are metered.
 #
-# **The limiter cannot become the account-existence oracle the route went
-# to such lengths not to be.** It keys on what the *caller* sent — the
-# peer address and the address they typed — and never consults anything
-# that knows whether an address is registered, so a throttled address and
-# a registered one are throttled for the same reason and after the same
-# number of attempts. The answer is a fixed 429 with a fixed body; there
-# is no branch anywhere below that consults the beta roster.
+# **The limiter must not add a second, worse oracle of its own.** The
+# request-code reply is now conditional on the roster (a deliberate
+# reversal — see that route), so membership is already public to anyone
+# who can ask. What the limiter must not do is answer a *throttled*
+# address differently from a registered one: it keys on what the *caller*
+# sent — the peer address and the address they typed — and never consults
+# anything that knows whether an address is registered, so a throttled
+# address and a registered one are throttled for the same reason and after
+# the same number of attempts. The answer is a fixed 429 with a fixed
+# body; there is no branch in the limiter that consults the beta roster.
 
 _SIGNIN_BUCKET_CAPACITY = 5.0
 _SIGNIN_REFILL_PER_SECOND = 5.0 / 600.0  # five attempts, refilled over ten minutes
@@ -1188,16 +1191,34 @@ def _forwarded_hop(request: Request) -> str:
 
 @app.post("/v1/auth/request-code")
 async def request_login_code(request: Request):
-    """Mail a 6-digit sign-in code.
+    """Mail a 6-digit sign-in code, and say which roster state the address
+    is in when one is not mailed.
 
-    The answer is the same for an address that has an account, one that
-    does not, and one on the beta roster. The relay now consults the
-    roster — so a code is minted and mailed only for an address somebody
-    deliberately admitted — but **what we do must never become what we
-    say**: a reply that branched on membership is a directory of the
-    beta, and that argument does not weaken just because the check moved
-    in-house. Every failure after the check is swallowed, so a stranger
-    gets the same `{"sent": true}` a member does.
+    Contract, HTTP 200 for all of them:
+
+        {"sent": true}
+        {"sent": false, "reason": "not_on_list"}
+        {"sent": false, "reason": "pending"}
+        {"sent": false, "reason": "revoked"}
+        {"sent": false, "reason": "try_again"}
+
+    **The reply is conditional now, and that is a deliberate reversal.** It
+    used to be byte-identical whether or not a code was minted — the roster
+    decided what we *did*, never what we *said* — because a reply that
+    branched on membership is a directory of the beta. The product owner
+    traded that away so a stranger is told immediately that they are not in
+    the closed beta, instead of being left with "if this address is in the
+    beta, a code is on its way". `exchange` is unchanged and stays
+    non-oracular; this route is a directory now, on purpose.
+
+    `try_again` is not a roster state: the address is admitted and the code
+    could not be stored, so the person should retry. It is a 200 with a
+    reason and not a 502 for the same reason the roster answers are — a
+    status code that only ever appears for an admitted address is the
+    oracle again, in a different spelling.
+
+    A control plane that cannot be read is still the one non-answer, and
+    still 502: it says nothing about the address.
 
     Signups are **on**, but they happen at `exchange`, not here. A code
     row needs no account; the `auth.users` row is created once the code
@@ -1221,14 +1242,16 @@ async def request_login_code(request: Request):
                             _forwarded_hop(request)):
         return _error(429, "too many attempts — wait a few minutes and try again")
     try:
-        await _send(email)
+        outcome = await _send(email)
     except SupabaseUnavailable as exc:
         # The call did not complete, which says nothing about the address
         # — so it is safe to report, and reporting it is the difference
         # between "check your inbox" and "nothing is wrong, wait".
         log.warning("sign-in code request unavailable: %s", str(exc)[:40])
         return _error(502, "could not reach the sign-in service")
-    return JSONResponse(content={"sent": True})
+    if outcome == "sent":
+        return JSONResponse(content={"sent": True})
+    return JSONResponse(content={"sent": False, "reason": outcome})
 
 
 @app.post("/v1/auth/exchange")
