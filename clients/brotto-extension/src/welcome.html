@@ -94,19 +94,24 @@
       background: var(--rule-2);
       flex-shrink: 0;
     }
-    .state.live .state-mark { background: var(--ok); }
+    .state.live .state-mark { background: var(--ink-2); }
     .state.wait .state-mark { background: var(--wait); }
-    .state.done .state-mark { background: var(--ink); }
+    .state.done .state-mark { background: var(--ok); }
+    /* Block, not inline: these are spans in the edition rows and divs here,
+       and inline spans ran the description on from the title. */
     .state-name {
+      display: block;
       font-family: var(--font-mono);
       font-size: 10px;
       letter-spacing: 0.16em;
       text-transform: uppercase;
       margin-bottom: 5px;
     }
-    .state.live .state-name { color: var(--ok); }
+    /* Matches the panel's outcome cell: working is ink-2, done is ok. */
+    .state.live .state-name { color: var(--ink-2); }
     .state.wait .state-name { color: var(--wait); }
-    .state-body { color: var(--ink-2); font-size: 12.5px; line-height: 1.5; }
+    .state.done .state-name { color: var(--ok); }
+    .state-body { display: block; color: var(--ink-2); font-size: 12.5px; line-height: 1.5; }
 
     /* The two editions, drawn with the same rows the three states use. The
        radio is the only control on the page, so it gets the ink and nothing
@@ -218,7 +223,13 @@
       line-height: 1.5;
       animation: toast-enter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    .toast.bad { border-left-color: var(--bad); color: var(--bad); }
+    /* Louder than a fact: the whole border goes bad (the error card's
+       vocabulary) and the soft tint it already defines, not just the rule. */
+    .toast.bad {
+      border-color: var(--bad);
+      background: var(--bad-soft);
+      color: var(--bad);
+    }
     .toast.ok { border-left-color: var(--ok); color: var(--ok); }
     .toast.leaving { animation: toast-leave 0.18s ease forwards; }
     @keyframes toast-enter {
@@ -362,7 +373,7 @@
         <p class="lede">If you've received a confirmation, sign in with your email.</p>
         <div class="field">
           <label for="cloudEmail">Email</label>
-          <input id="cloudEmail" class="input" type="email" autocomplete="email" spellcheck="false" />
+          <input id="cloudEmail" class="input" type="email" name="email" autocomplete="email" spellcheck="false" />
         </div>
         <div class="actions"><button id="sendCodeBtn" class="btn" type="button">Send code</button></div>
 
@@ -390,11 +401,11 @@
           <span class="lbl">Not in the beta yet?</span>
           <div class="field">
             <label for="waitlistName">Name (optional)</label>
-            <input id="waitlistName" class="input" type="text" maxlength="64" autocomplete="name" spellcheck="false" />
+            <input id="waitlistName" class="input" type="text" name="name" maxlength="64" autocomplete="name" spellcheck="false" />
           </div>
           <div class="field">
             <label for="waitlistEmail">Email</label>
-            <input id="waitlistEmail" class="input" type="email" autocomplete="email" spellcheck="false" />
+            <input id="waitlistEmail" class="input" type="email" name="email" autocomplete="email" spellcheck="false" />
           </div>
           <div class="actions"><button id="waitlistJoinBtn" class="btn btn-primary" type="button">Join the waitlist</button></div>
         </div>
