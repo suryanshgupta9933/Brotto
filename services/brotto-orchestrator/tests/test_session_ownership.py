@@ -140,6 +140,53 @@ def test_erase_all_only_reaches_your_own(client, hosted, clean_registry):
     assert (d / f"{bob_sid}.json").exists(), "the unscoped residue sweep unlinked bob's"
 
 
+def test_an_unapproved_account_reaches_none_of_them(client, clean_registry, monkeypatch):
+    """The exemption is real, so it needs a test like any other guard.
+
+    These four routes deliberately ask `_owner_scoped` and never the roster,
+    which is only safe while an unapproved token cannot own anything. Sign-in
+    mints a token for anyone, so "valid signature" is not a small population
+    — this is the caller the exemption has to be safe against, and the one a
+    reviewer asking for gate parity is really describing.
+    """
+    from brotto_orchestrator.session import jwt_auth
+
+    async def _not_on_the_roster(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        return 200, "[]"  # a valid account, no row: `not_invited`
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", JWT_SECRET)
+    monkeypatch.setenv("SUPABASE_URL", "https://project.test")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-key")
+    monkeypatch.setattr(jwt_auth, "_profiles", _not_on_the_roster)
+
+    # Seed a real transcript for somebody who *was* on the roster.
+    async def _approved_row(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        if method == "GET":
+            return 200, '[{"revoked_at": null, "week_start": null, "tasks_this_week": 0}]'
+        return 200, "true"
+
+    monkeypatch.setattr(jwt_auth, "_profiles", _approved_row)
+    sid = _open_as(client, ALICE)
+    _seed_run(sid, "alice's private task")
+
+    # ...and ask the four routes as the stranger.
+    monkeypatch.setattr(jwt_auth, "_profiles", _not_on_the_roster)
+    stranger = {"authorization": f"Bearer {_token(BOB)}"}
+
+    assert client.get("/v1/sessions", headers=stranger).json()["sessions"] == [], \
+        "the index named a session the caller cannot own"
+    read = client.get(f"/v1/sessions/{sid}/audit", headers=stranger)
+    assert read.status_code == 404, "a stranger read somebody else's transcript"
+    assert "alice's private task" not in read.text
+    assert client.delete(f"/v1/sessions/{sid}", headers=stranger).status_code == 404
+    assert (Path(audit_mod.default_dir()) / f"{sid}.json").exists(), "a stranger erased it"
+    assert client.delete("/v1/sessions", headers=stranger).json() == {"deleted": 0, "residue": 0}
+
+    # The mint is the gate that makes all four safe, so pin it too.
+    assert client.post("/v1/sessions", headers=stranger).status_code == 403, \
+        "an unapproved token can mint, and minting is what records an owner"
+
+
 def test_the_relay_socket_refuses_a_session_you_do_not_own(client, hosted, clean_registry):
     """Call site 5 of 5: `POST /ws/ext/{id}`, which closes 4004.
 

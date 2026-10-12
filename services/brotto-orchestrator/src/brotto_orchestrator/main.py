@@ -360,6 +360,27 @@ def _auth(request: Request) -> AuthResult:
     )
 
 
+def _owner_scoped(request: Request) -> AuthResult:
+    """Signature-only auth, for a route whose every row is the caller's own.
+
+    **The exemption from `_approved`, and it is named on purpose.** The four
+    session routes are the only routes that ask this: an unapproved token
+    cannot reach a row that is not its owner's, so the roster question has
+    no answer to change. `POST /v1/sessions` is the only writer of
+    `registry._owners` and it is `_approved`-gated, so nobody becomes the
+    owner of anything without passing the roster first, and `owns()` is
+    fail-closed on an id it has never seen.
+
+    Why a function and not four comments: the bug a reviewer was pointing at
+    is not the four routes, it is the *next* route reaching for `_auth`
+    because the ones beside it do. A name is what stops that, and a comment
+    is what a route never reads. Anything touching a session that is *not*
+    filtered by `registry.owns` wants `_approved` instead — there is no
+    other place in this file that should call `_auth` directly.
+    """
+    return _auth(request)
+
+
 async def _approved(request: Request) -> tuple[AuthResult, JSONResponse | None]:
     """Roster membership, not just a valid signature. Auth result and any refusal.
 
@@ -376,8 +397,10 @@ async def _approved(request: Request) -> tuple[AuthResult, JSONResponse | None]:
     panel offer somebody the waitlist instead of a bare failure; *using*
     the product is not on the other side of that door. So the two open
     sign-in routes are the only unauthenticated surface a stranger
-    reaches, and every route that touches a session, a policy, a report
-    or a model call asks this.
+    reaches, and every route that touches a policy, a report, a model
+    call or a session *mint* asks this. The four routes that read or erase
+    a session do not, and are named `_owner_scoped` — a caller there can
+    only reach their own rows.
 
     There is deliberately no `_authed`-alike left on the request path:
     a helper named for the weak check is what the next route picks.
@@ -1326,7 +1349,7 @@ async def list_session_audits(request: Request):
     """
     from .agent.audit import list_sessions as _list
 
-    auth = _auth(request)
+    auth = _owner_scoped(request)
     if not auth.ok:
         return _error(404, "not found")
     sessions = _list()
@@ -1346,7 +1369,7 @@ async def read_audit(session_id: str, request: Request):
     """
     from .agent.audit import read as _read
 
-    auth = _auth(request)
+    auth = _owner_scoped(request)
     if not auth.ok:
         return _error(404, "not found")
     # Another account's session is a session that does not exist, not one
@@ -1379,7 +1402,7 @@ async def delete_session(session_id: str, request: Request):
     """
     from .agent.audit import delete as _delete
 
-    auth = _auth(request)
+    auth = _owner_scoped(request)
     if not auth.ok:
         return _error(404, "not found")
     if not registry.owns(session_id, _owner(auth.claims)):
@@ -1411,7 +1434,7 @@ async def delete_all_sessions(request: Request):
     """
     from .agent.audit import delete_all as _delete_all
 
-    auth = _auth(request)
+    auth = _owner_scoped(request)
     if not auth.ok:
         return _error(404, "not found")
     owner = _owner(auth.claims)

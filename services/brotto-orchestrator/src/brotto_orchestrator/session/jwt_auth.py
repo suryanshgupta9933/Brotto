@@ -448,6 +448,19 @@ async def ensure_on_roster(claims: Claims) -> dict:
     "we could not check whether this person was revoked" is not a licence
     to serve them anyway. Self-host never reaches this function — it has
     no Supabase configured and authenticates with `AGENT_SECRET`.
+
+    **Considered and rejected: a positive cache keyed on `sub`.** One round
+    trip per gated request sounds alarming and is not at five users' scale —
+    but the volume is not the reason. The one caller who can force a round
+    trip per request is a signed-up stranger looping `POST /v1/model/check`,
+    and a stranger is *by definition* never positively cached: every one of
+    their requests is a miss. **A cache is invisible to the attack it would
+    defend against** — it only speeds up people who were already allowed. What
+    it would actually buy is a withdrawn member's access, for up to one TTL.
+    If the round trip ever matters, the fix is rate limiting on the two
+    credit-spending routes; for the same reason `SUPABASE_TIMEOUT_SECONDS`
+    stays at 5s, since this fails closed and a shorter deadline only turns a
+    slow control plane into refusals served to users who did nothing wrong.
     """
     if not _supabase_url() or not _service_key():
         raise AccountRefused(
