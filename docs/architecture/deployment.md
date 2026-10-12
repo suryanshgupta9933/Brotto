@@ -289,7 +289,7 @@ psql "$SUPABASE_URL" -f supabase/migrations/002_failure_reports.sql
 psql "$SUPABASE_URL" -f supabase/migrations/003_waitlist.sql
 ```
 
-**All five are applied by hand, before the deploy.** There is no migration
+**All six are applied by hand, before the deploy.** There is no migration
 runner and no GitHub integration that applies them on merge — `scripts/test-migrations.sh`
 runs them against a throwaway local Supabase in CI to prove they parse, and
 nothing applies them to the real project. That is the whole reason the "edit
@@ -309,11 +309,13 @@ success-looking failure. See `docs/architecture/privacy.md`.
 ```bash
 psql "$SUPABASE_URL" -f supabase/migrations/004_beta_access.sql
 psql "$SUPABASE_URL" -f supabase/migrations/005_waitlist_name.sql
+psql "$SUPABASE_URL" -f supabase/migrations/006_waitlist_email.sql
 ```
 
-Two files rather than one `004`, because they are unrelated: `004` creates a
-table, `005` alters an existing one, and lumping them couples two changes whose
-rollback should not be coupled. Both are additive and neither touches a row.
+Three files rather than one `004`, because they are unrelated: `004` creates a
+table, `005` and `006` each alter an existing one, and lumping them couples
+three changes whose rollback should not be coupled. `004` and `005` are additive
+and neither touches a row.
 
 `004` is `profiles`' admission decision expressed as an **address** instead of an
 account id, so the operator bulk-pastes a list instead of minting one
@@ -432,6 +434,16 @@ reachable with no credential at all, so copying a stranger's submission into
 
 `005` adds `waitlist.name`, nullable and with no default, so a blank field
 stays absent rather than becoming a string the visitor never sent.
+
+`006` is the same spreadsheet guard `005` gave `name`, applied to the column
+`005` left open. **It backfills before it constrains**, so a row typed before
+the constraint existed cannot fail the `ADD` and take the migration with it.
+Unlike the name, the server **refuses** a triggering address rather than
+quoting it: a name is text we want back in the export, but an email is an
+identifier that has to round-trip, and a stored `'+tag@example.test` is no
+longer the mailbox that person signs in with. Nothing is lost by the refusal —
+a `+tag` address and the base address are the same mailbox, so the visitor
+submits the plain one. See `docs/architecture/privacy.md`.
 
 ### The confirmation email, and the two variables that switch it on
 

@@ -143,4 +143,40 @@ alter table waitlist add constraint waitlist_name_no_formula
   check (name is null or name !~ '^[=+\-@\t\r]');
 SQL
 
+# ── `006`: the same backfill-then-constrain shape, for `email` ─────────────
+#
+# `005` guarded the name and left the address, which the same export would
+# have run. The server now refuses a formula-leading email rather than
+# prefixing it — an identifier has to round-trip — so this constraint is the
+# only thing standing between a row written by the table editor and the
+# operator's spreadsheet.
+say "replaying the email backfill against a hostile row"
+run -d postgres >/dev/null <<'SQL'
+alter table waitlist drop constraint waitlist_email_no_formula;
+insert into waitlist (email, batch) values
+  ('=cmd|...@example.test','test'),
+  ('+1+1@example.test','test'),
+  ('clean2@example.test','test');
+SQL
+
+backfill="$(grep -E '^[[:space:]]*update waitlist set email' "$ROOT/supabase/migrations/006_waitlist_email.sql")"
+[ -n "$backfill" ] || fail "no backfill statement found in 006_waitlist_email.sql"
+printf '%s;\n' "$backfill" | run -d postgres >/dev/null \
+  || fail "the backfill statement in 006 does not run"
+
+out="$(run -tA -d postgres -c "
+  select count(*) from waitlist
+   where email ~ '^[=+\-@\t\r]';" | tr -d '[:space:]')"
+[ "$out" = "0" ] || fail "$out email row(s) still carry a formula prefix after the backfill"
+
+# The backfill must not touch an address that was already safe.
+out="$(run -tA -d postgres -c "select email from waitlist where email='clean2@example.test'" | tr -d '[:space:]')"
+[ "$out" = "clean2@example.test" ] || fail "the backfill rewrote a safe email (got '$out')"
+
+say "re-adding the email constraint"
+run -d postgres >/dev/null <<'SQL'
+alter table waitlist add constraint waitlist_email_no_formula
+  check (email !~ '^[=+\-@\t\r]');
+SQL
+
 printf '\033[32mall passed\033[0m\n'
