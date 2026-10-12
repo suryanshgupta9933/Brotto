@@ -4,15 +4,16 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-
 jobs:
   release:
     name: Build and publish the release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Tag must equal manifest version
         run: |
@@ -28,6 +29,9 @@ jobs:
       - name: All version sites agree
         run: node scripts/version.js
 
+      - name: Install librsvg (rsvg-convert)
+        run: sudo apt-get update && sudo apt-get install -y librsvg2-bin
+
       - name: Install and build the extension
         working-directory: clients/brotto-extension
         run: |
@@ -37,10 +41,10 @@ jobs:
 
       - name: Zip the store package
         run: |
-          cd clients/brotto-extension
-          zip -r "../../brotto-extension-${GITHUB_REF_NAME}.zip" \
-            dist manifest.json icons \
-            -x '*.map' -x '*node_modules*'
+          cd clients/brotto-extension/dist
+          zip -r "../../brotto-extension-${GITHUB_REF_NAME}.zip" . -x '*.map'
+          unzip -l "../../brotto-extension-${GITHUB_REF_NAME}.zip" | grep -q ' manifest.json$'
+          unzip -l "../../brotto-extension-${GITHUB_REF_NAME}.zip" | grep -q ' background.js$'
 
       - name: Create the GitHub Release
         env:

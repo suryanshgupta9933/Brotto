@@ -52,6 +52,8 @@ test("shippedChanged classifies by path", () => {
   assert.deepEqual(shippedChanged(["services/brotto-orchestrator/src/brotto_orchestrator/main.py"]),
     ["services/brotto-orchestrator/src/brotto_orchestrator/main.py"]);
   assert.deepEqual(shippedChanged(["scripts/version.js"]), []);
+  assert.deepEqual(shippedChanged(["requirements.txt"]), ["requirements.txt"]);
+  assert.deepEqual(shippedChanged(["requirements-dev.txt"]), []);
 });
 
 test("shipped change with no bump → exit 1", () => {

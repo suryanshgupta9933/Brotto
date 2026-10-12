@@ -47,6 +47,7 @@ const SHIPPED_PATHS = [
   /^Dockerfile$/,
   /^Procfile$/,
   /^docker-compose\.yml$/,
+  /^requirements\.txt$/,
 ];
 
 function shippedChanged(files) {

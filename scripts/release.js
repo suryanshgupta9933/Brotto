@@ -96,6 +96,6 @@ console.log(`\n  version  ${current} -> ${next}`);
 console.log(`  tag      v${next}`);
 console.log(`  notes    ${notesPath}`);
 console.log("\nNext, by hand:");
-console.log("  git push origin HEAD --follow-tags");
+console.log("  git push origin HEAD");
 console.log("  # merge the PR, then push the tag: git push origin v" + next);
 console.log("  # pushing the tag fires CD. CWS publish and the Heroku approve are still yours.");
