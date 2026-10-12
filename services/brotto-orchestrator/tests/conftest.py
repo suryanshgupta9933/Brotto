@@ -48,8 +48,33 @@ def _offline_auth(monkeypatch):
     for var in (
         "SUPABASE_JWT_SECRET", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
         "SUPABASE_ANON_KEY", "BROTTO_BETA_TASK_CAP",
+        # The operator's real Resend key lives in services/brotto-orchestrator/.env
+        # and main.py's load_dotenv() puts it here. Left in place, every
+        # `/v1/waitlist` and `/v1/auth/request-code` in the suite sends real mail.
+        "RESEND_API_KEY", "RESEND_FROM",
     ):
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_http(monkeypatch):
+    """No test may open a socket. The wall behind the delenv above.
+
+    Clearing `RESEND_API_KEY` is the root cause; this is what stops a test
+    that sets its own key and forgets to stub `_deliver`. It patches the
+    session constructor rather than the three `_deliver` seams so the one
+    test that inspects a real request (`test_the_request_carries_no_
+    idempotency_key`) can still replace `aiohttp.ClientSession` and run the
+    seam's body. Red the moment anyone builds a real session in a test.
+    """
+
+    class _NoNetwork:
+        def __init__(self, *a, **kw):
+            raise AssertionError(
+                "a test tried to open an HTTP session — stub the seam"
+            )
+
+    monkeypatch.setattr("aiohttp.ClientSession", _NoNetwork)
 
 
 @pytest.fixture(autouse=True)
