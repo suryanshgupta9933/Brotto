@@ -280,3 +280,15 @@ length bound are in `extension.md`.
 
 **Not verified in a browser.** The reconnect path and the offline-history
 fallback are unit-tested logic only.
+
+## Version pair and the compat window
+
+`task_start` carries `ext_version` (additive). `/health` carries `version`.
+The panel shows both on the connection pill's tooltip — that pair is the
+first question of every bug report.
+
+**Server first.** The orchestrator always deploys before the matching
+extension build reaches users. It accepts the current and the previous
+minor of extension frames. Removing a `task_start` key or a frame type is a
+minor bump and a one-minor deprecation, never a patch. The grow-only set is
+pinned by `scripts/test-frame-contract.test.js`.
