@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
+from urllib.parse import unquote
 
 import pytest
 from fastapi.testclient import TestClient
 
 from brotto_orchestrator.session import jwt_auth
 from brotto_orchestrator.session.auth import auth_mode, authenticate, validate_request
-from brotto_orchestrator.session.jwt_auth import Claims, make_jwt
+from brotto_orchestrator.session.jwt_auth import AccountRefused, Claims, make_jwt
 
 JWT_SECRET = "jwt-secret-for-tests"
 USER_ID = "11111111-2222-3333-4444-555555555555"
@@ -196,6 +197,7 @@ def test_http_routes_stay_shut_with_no_token(client, monkeypatch, hosted):
 
 
 def test_a_good_token_opens_the_route(client, monkeypatch, hosted):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so this is not the thing under test
     resp = client.get("/v1/sessions", headers={"authorization": f"Bearer {_token()}"})
     assert resp.status_code == 200
 
@@ -240,6 +242,8 @@ def test_a_wrong_credential_still_closes_4001(client, monkeypatch, hosted, sessi
 
 
 def test_a_good_credential_connects(client, monkeypatch, hosted, session_id):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
+    _profiles_stub(monkeypatch, [_APPROVED])
     minted = _mint(client, _token())
     with client.websocket_connect(
         f"/ws/ext/{minted}", subprotocols=["brotto-v1", _token()]
@@ -255,6 +259,12 @@ def test_self_host_keeps_one_answer_for_both_failures(client, monkeypatch, tmp_p
 
 
 # ── the control plane, at task start only ─────────────────────────────────
+
+#: An approved, un-revoked row. The hosted relay now asks the roster on
+#: every route, not only at task start, so a test that is exercising the
+#: route needs this to get past the gate.
+_APPROVED = {"revoked_at": None, "week_start": None, "tasks_this_week": 0}
+
 
 def _profiles_stub(monkeypatch, rows, *, fail_on=()):
     calls = []
@@ -382,8 +392,11 @@ def test_a_task_start_from_a_revoked_user_never_reaches_the_agent(client, monkey
     agent exists.
     """
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path))
-    _profiles_stub(monkeypatch, [{"revoked_at": "2026-10-01T00:00:00Z", "week_start": _today(), "tasks_this_week": 1}])
+    # Minted while the account is still approved — POST /v1/sessions asks
+    # the roster now too — and revoked before the task starts.
+    _profiles_stub(monkeypatch, [_APPROVED])
     minted = _mint(client, _token())
+    _profiles_stub(monkeypatch, [{"revoked_at": "2026-10-01T00:00:00Z", "week_start": _today(), "tasks_this_week": 1}])
 
     with client.websocket_connect(
         f"/ws/ext/{minted}", subprotocols=["brotto-v1", _token()]
@@ -494,11 +507,18 @@ def test_exchange_returns_the_access_token(client, monkeypatch, hosted):
         return "a.b.c"
 
     monkeypatch.setattr(jwt_auth, "exchange_login_code", fake)
+    monkeypatch.setattr(jwt_auth, "approve_at_exchange", _no_approval)
     resp = client.post(
         "/v1/auth/exchange", json={"email": "beta@example.test", "code": "123456"}
     )
     assert resp.status_code == 200
-    assert resp.json() == {"access_token": "a.b.c"}
+    assert resp.json() == {"access_token": "a.b.c", "approved": False}
+
+
+async def _no_approval(token: str) -> bool:
+    """The approval step answered False. Used wherever approval is not the
+    subject of the test, so those tests never reach the control plane."""
+    return False
 
 
 def test_a_wrong_code_answers_400_and_leaks_nothing(client, monkeypatch, hosted):
@@ -681,6 +701,7 @@ def _write_transcript(session_id: str) -> str:
 
 
 def test_another_account_cannot_see_the_session_in_the_index(client, monkeypatch, hosted, tmp_path):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     _mint(client, _token())
     _write_transcript(_mint(client, _b_token()))
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path / "sessions"))
@@ -691,6 +712,7 @@ def test_another_account_cannot_see_the_session_in_the_index(client, monkeypatch
 
 
 def test_another_account_gets_404_not_403_on_the_audit(client, monkeypatch, hosted):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     mine = _write_transcript(_mint(client, _token()))
     resp = client.get(
         f"/v1/sessions/{mine}/audit", headers={"authorization": f"Bearer {_b_token()}"}
@@ -706,6 +728,7 @@ def test_another_account_gets_404_not_403_on_the_audit(client, monkeypatch, host
 
 
 def test_another_account_cannot_delete_the_session(client, monkeypatch, hosted):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     mine = _mint(client, _token())
     resp = client.delete(
         f"/v1/sessions/{mine}", headers={"authorization": f"Bearer {_b_token()}"}
@@ -717,6 +740,7 @@ def test_another_account_cannot_delete_the_session(client, monkeypatch, hosted):
 
 
 def test_another_account_cannot_connect_to_the_socket(client, monkeypatch, hosted, session_id):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     """A valid token for the wrong person is not a credential failure.
 
     4001/4003 say "your credential"; 4004 says "this is not a session you
@@ -727,6 +751,7 @@ def test_another_account_cannot_connect_to_the_socket(client, monkeypatch, hoste
 
 
 def test_delete_all_only_reaches_the_callers_own_sessions(client, monkeypatch, hosted, tmp_path):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path / "sessions"))
     mine = _write_transcript(_mint(client, _token()))
     theirs = _write_transcript(_mint(client, _b_token()))
@@ -738,6 +763,7 @@ def test_delete_all_only_reaches_the_callers_own_sessions(client, monkeypatch, h
 
 
 def test_the_owner_still_reaches_their_own_session(client, monkeypatch, hosted):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     mine = _write_transcript(_mint(client, _token()))
     assert client.get(
         f"/v1/sessions/{mine}/audit", headers={"authorization": f"Bearer {_token()}"}
@@ -746,6 +772,7 @@ def test_the_owner_still_reaches_their_own_session(client, monkeypatch, hosted):
 
 def test_a_session_with_no_owner_belongs_to_nobody(client, monkeypatch, hosted, session_id):
     """Fail closed. A stale id or an evicted registry entry is nobody's."""
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so this is not the thing under test
     resp = client.get(
         f"/v1/sessions/{session_id('ownerless')}/audit",
         headers={"authorization": f"Bearer {_token()}"},
@@ -966,6 +993,7 @@ def test_exchange_is_throttled_too(client, monkeypatch, hosted):
         return "a.b.c"
 
     monkeypatch.setattr(jwt_auth, "exchange_login_code", fake)
+    monkeypatch.setattr(jwt_auth, "approve_at_exchange", _no_approval)
     codes = [
         client.post("/v1/auth/exchange",
                     json={"email": "beta@example.test", "code": "123456"}).status_code
@@ -990,3 +1018,575 @@ def test_the_sign_in_limiter_sees_through_a_proxy(client, monkeypatch, hosted):
         )
         assert resp.status_code == 200
     assert len(sent) == 5
+
+
+# ── self-approval: the roster, not the invitation ─────────────────────────
+#
+# Invitations were rows the operator typed. Now the roster is a table of
+# approved addresses and the row in `profiles` is written by the relay at
+# exchange — which moves three things onto code that used to have none of
+# them, and each is pinned below: signups must exist at all, the open route
+# must not learn who is on the roster, and the insert must not be able to
+# un-revoke anybody.
+
+LISTED = "listed@example.test"
+
+
+def _parse_postgrest(query):
+    r"""Parse a PostgREST query the way PostgREST does.
+
+    Two steps, **in this order**, and the order is the whole point of
+    this helper: every value is URL-decoded first, and only then handed to
+    the filter grammar. Percent-encoding a comma therefore does not stop
+    it being a comma — it is a comma by the time anything reads it, which
+    is why a test that compares the decoded string back against the input
+    proves nothing about the parser that will actually see it.
+
+    The grammar: `column.op.value`, where an unquoted `value` is a
+    comma-separated *list* and a `"…"` literal is one value. Anything
+    after a literal's closing quote is grammar again, so it is reported
+    separately rather than being silently dropped — a value that closes
+    its own quoting and then appends a second column is exactly the bug.
+    Returns one dict per filter.
+
+    **Escapes are processed before the closing quote is located**, because
+    that is the order PostgREST's lexer is in: `\` is the escape character
+    *inside* a literal, so `\"` does not end the string and `\\` is one
+    backslash. A parser that searches for the next `"` instead will end
+    the literal early on exactly the inputs that were built to escape —
+    it reports the tail as `trailing` grammar, and a test written against
+    it asserts the *wrong* parse while looking entirely reasonable. That
+    is not hypothetical: the percent-encoding round last round got through
+    because this helper shared the implementation's assumption rather than
+    checking the grammar independently.
+    """
+    filters = []
+    for part in query.lstrip("?").split("&"):
+        # Decode the whole `name=value` and only then split it: the column
+        # and the operator are part of the grammar, so taking them off
+        # before the decode would be parsing something PostgREST never
+        # sees.
+        decoded = unquote(part)
+        name, sep, rest = decoded.partition("=")
+        if name in ("select", "on_conflict", "order", "limit"):
+            continue
+        assert sep, f"filter has no value: {decoded!r}"
+        op, sep, value = rest.partition(".")
+        assert sep, f"filter {name} has no operator: {decoded!r}"
+        column = name
+        trailing = ""
+        if value.startswith('"'):
+            # Walk the literal one character at a time, consuming escapes
+            # as pairs, so the quote we stop on is the one that is not
+            # escaped. `find` cannot do this and must not be used here.
+            chars, i, closed = [], 1, False
+            while i < len(value):
+                c = value[i]
+                if c == "\\" and i + 1 < len(value):
+                    chars.append(value[i + 1])
+                    i += 2
+                    continue
+                if c == '"':
+                    closed = True
+                    break
+                chars.append(c)
+                i += 1
+            assert closed, f"unterminated string literal on {column}: {decoded!r}"
+            values, trailing = ["".join(chars)], value[i + 1:]
+        else:
+            values = value.split(",")
+        filters.append({"column": column, "op": op, "values": values, "trailing": trailing})
+    return filters
+
+
+def _roster_stub(monkeypatch, *, listed=(), profiles=(), revoked=()):
+    """The control plane as the approval path uses it.
+
+    Models the two tables rather than answering the same thing to every
+    query: `beta_access` filters by the address asked for (so a claim that
+    is *not* the one the caller typed finds nothing), and `profiles` hands
+    back whatever rows it was seeded with. Returns the calls.
+
+    The `beta_access` branch goes through `_parse_postgrest`, so the stub
+    agrees with the server about where the filter ends — stubbing the raw
+    string would make any encoding look correct, because the test would be
+    the only parser in the room. `revoked` are addresses that are on the
+    roster *and* withdrawn.
+    """
+    calls = []
+
+    async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        calls.append({"method": method, "query": query, "body": body,
+                      "path": path, "prefer": prefer})
+        if path == jwt_auth.BETA_ACCESS_PATH:
+            parsed = [f for f in _parse_postgrest(query) if f["column"] == "email"]
+            # A filter that does not resolve to exactly one address is not a
+            # lookup for anybody, which is the outcome a parser differential
+            # produces and the one this stub has to be able to produce.
+            want = parsed[0]["values"][0] if (
+                len(parsed) == 1 and len(parsed[0]["values"]) == 1 and not parsed[0]["trailing"]
+            ) else None
+            return 200, json.dumps([
+                {"email": r, "revoked_at": "2026-10-01T00:00:00Z" if r in revoked else None}
+                for r in listed if r == want
+            ])
+        if method == "POST":
+            return 201, ""
+        return 200, json.dumps(list(profiles))
+
+    monkeypatch.setattr(jwt_auth, "_profiles", fake)
+    return calls
+
+
+def _stub_verify(monkeypatch, email=LISTED):
+    """Supabase hands back a token whose claims name the listed address.
+
+    The claims — not the body — are what the approval reads, so the stub
+    has to agree with the roster or every happy-path test is really
+    testing the miss.
+    """
+    async def fake(_email, _code):
+        return _token(email=email)
+
+    monkeypatch.setattr(jwt_auth, "exchange_login_code", fake)
+
+
+def test_signups_are_on_so_a_new_person_can_get_a_credential(hosted, monkeypatch):
+    """There is no other signup path, so `create_user: false` closed the door
+    on everybody who was not already a row."""
+    sent = []
+
+    async def fake(method, path, *, json_body, api_key, service=False, prefer=""):
+        sent.append((path, json_body))
+        return 200, "{}"
+
+    monkeypatch.setattr(jwt_auth, "_supabase_call", fake)
+    import asyncio
+
+    asyncio.run(jwt_auth.request_login_code("  Beta@Example.TEST "))
+    assert sent[0] == ("auth/v1/otp", {"email": "beta@example.test", "create_user": True})
+
+
+def test_request_code_consults_no_allowlist(client, monkeypatch, hosted):
+    """The branch that would turn an open route into a directory of the beta.
+
+    `profiles.id` is an FK into `auth.users`, so no row can be seeded for an
+    address with no auth account — which means the roster check *could* only
+    ever land on this route, the one with no credential. It does not land
+    here: an unlisted stranger and a listed member are the same request.
+    """
+    def explode(*a, **k):
+        raise AssertionError("request-code consulted the roster")
+
+    monkeypatch.setattr(jwt_auth, "_profiles", explode)
+    monkeypatch.setattr(jwt_auth, "_listed_for_beta", explode)
+    _stub_send(monkeypatch)
+    assert client.post(
+        "/v1/auth/request-code", json={"email": "stranger@example.test"}
+    ).json() == {"sent": True}
+
+
+def test_a_listed_address_approves_itself_at_exchange(client, monkeypatch, hosted):
+    calls = _roster_stub(monkeypatch, listed=[LISTED], profiles=[{"revoked_at": None}])
+    _stub_verify(monkeypatch)
+    resp = client.post(
+        "/v1/auth/exchange", json={"email": LISTED, "code": "123456"}
+    )
+    assert resp.json() == {"access_token": _token(email=LISTED), "approved": True}
+    insert = next(c for c in calls if c["method"] == "POST" and c["path"] == "rest/v1/profiles")
+    assert insert["body"] == {"id": USER_ID, "email": LISTED}
+    # Insert-if-absent, not an upsert. Written as an upsert it would touch an
+    # existing row, and `test_a_revoked_member_keeps_the_revocation` is what
+    # that costs.
+    assert insert["query"] == "?on_conflict=id"
+    assert insert["prefer"] == "resolution=ignore-duplicates"
+
+
+def test_the_roster_filter_survives_a_postgrest_parser(client, monkeypatch, hosted):
+    """The address comes back out of the filter parser exactly as typed.
+
+    `EMAIL_RE`'s local part admits a comma, and in PostgREST a comma
+    separates values in a list — so an address this code accepts and a
+    parser reading the same string can place the end of the filter in
+    different spots. The address here is otherwise entirely legitimate,
+    which is the point: nothing about the alphabet changed, only how it
+    reaches the query.
+
+    **This asserts against a parser, not against a round trip.** The test
+    that preceded it compared the decoded query string with the address it
+    started from, and it passed under both the broken and the fixed
+    implementation — because a round trip through *this* decoder always
+    gets the value back, whatever PostgREST then does with it. PostgREST
+    URL-decodes **before** it parses the filter grammar, so a
+    percent-encoded comma is a comma to the thing that matters;
+    `_parse_postgrest` does it in that order, and the assertion is on the
+    structure that comes back.
+    """
+    nasty = "a,b(c)@example.test"
+    calls = _roster_stub(monkeypatch, listed=[nasty], profiles=[{"revoked_at": None}])
+    _stub_verify(monkeypatch, email=nasty)
+    resp = client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
+    # The parser is the stub's own, so this is the end-to-end consequence:
+    # a filter the parser cannot resolve to one address finds nobody, and
+    # a listed member is refused at sign-in.
+    assert resp.json()["approved"] is True
+
+    roster = next(c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH)
+    parsed = _parse_postgrest(roster["query"])
+    assert len(parsed) == 1, f"one filter in, {len(parsed)} out: {roster['query']}"
+    got = parsed[0]
+    assert got["column"] == "email"
+    assert got["op"] == "eq"
+    # One value, and it is the address — not a list, and not a prefix of it.
+    assert got["values"] == [nasty]
+    assert not got["trailing"]
+
+
+def test_a_quote_in_an_address_is_refused_rather_than_quoted(client, monkeypatch, hosted):
+    """A value must not be able to close its own quoting.
+
+    `quote()` percent-encodes `"`, so inside the literal a quote would be
+    invisible on the wire and reappear at the grammar layer exactly where
+    it ends the string. There is no escape sequence defined here that has
+    been checked against PostgREST, so the value is rejected — and it is
+    rejected *loudly enough to tell it from a miss*, because a rejection
+    here otherwise reads as "not in the beta".
+    """
+    nasty = 'a"b@example.test'
+    calls = _roster_stub(monkeypatch, listed=[nasty])
+    _stub_verify(monkeypatch, email=nasty)
+    resp = client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
+    assert resp.json()["approved"] is False
+    assert [c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH] == []
+
+
+def test_a_backslash_in_an_address_is_refused_rather_than_quoted(client, monkeypatch, hosted):
+    """The escape character is the other half of the same hole.
+
+    Inside a PostgREST literal `\\` is the escape character, so a value
+    carrying one can terminate or reshape the literal even though it never
+    contains a `"`. `EMAIL_RE`'s local part is `[^@\\s]{1,64}` and accepts a
+    backslash, so this is reachable from a real address typed on a form —
+    the same trade already accepted for `"` and rejected for the same
+    reason: no escape rule here has been checked against a real PostgREST,
+    so the value is refused instead of guessed at.
+
+    The guard is deny-by-default on what the grammar *reserves*, not
+    allow-by-default on what it does not; an allow-list of safe characters
+    would have passed both of these and is the version that keeps getting
+    written by accident.
+    """
+    nasty = "a\\b@example.test"
+    calls = _roster_stub(monkeypatch, listed=[nasty])
+    _stub_verify(monkeypatch, email=nasty)
+    resp = client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
+    assert resp.json()["approved"] is False
+    # Refused *before* the lookup: the address never reaches the query.
+    assert [c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH] == []
+    with pytest.raises(ValueError):
+        jwt_auth._filter_value(nasty)
+
+
+def test_the_test_parser_reads_escapes_before_it_finds_the_closing_quote():
+    """The parser must assert against PostgREST's grammar, not mirror the code.
+
+    `_parse_postgrest` is the only PostgREST in the room, so a parser that
+    shared the implementation's assumption would agree with it on every
+    input including the wrong ones — which is exactly how the
+    percent-encoding bug survived a round that had a test for it. This
+    case is the one that separates them: `\\"` is an escaped quote and does
+    **not** end the literal, and an old `value.find('"', 1)` parser reads
+    the whole tail as `trailing` grammar.
+    """
+    parsed = _parse_postgrest('?email=eq."a\\"b,c@example.test"')
+    assert len(parsed) == 1
+    assert parsed[0]["values"] == ['a"b,c@example.test'], (
+        "an escaped quote must not end the literal"
+    )
+    assert parsed[0]["trailing"] == ""
+
+    # A doubled backslash on the wire is one backslash in the value, and
+    # the comma after it is inside the literal, not a list separator.
+    parsed = _parse_postgrest(r'?email=eq."a\\b,c@example.test"')
+    assert parsed[0]["values"] == ["a\\b,c@example.test"]
+    assert parsed[0]["trailing"] == ""
+
+
+def test_an_unreadable_roster_is_loud_where_a_genuine_miss_is_not(monkeypatch, hosted, caplog):
+    """`PGRST204` must not be able to pass for "not in the beta".
+
+    Both call sites deliberately answer a control-plane failure the way they
+    answer a genuine miss — that is the right direction to fail, and a
+    caller who has already proved inbox control gets the same answer
+    either way. So the log is the *only* place the two can be told apart,
+    and it is the only thing between an unapplied migration and every
+    approved member being refused while the log says they were never
+    listed. The status goes in; the body does not, because on some errors
+    PostgREST echoes the filter, and the filter is somebody's address.
+    """
+    import asyncio
+    import logging
+
+    missing_column = json.dumps(
+        {"code": "PGRST204", "details": "Could not find the 'revoked_at' column"}
+    )
+
+    async def broken(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        return 400, missing_column
+
+    monkeypatch.setattr(jwt_auth, "_profiles", broken)
+
+    with caplog.at_level(logging.ERROR, logger="brotto.jwt_auth"):
+        assert asyncio.run(jwt_auth._listed_for_beta(LISTED)) is False
+    assert "400" in caplog.text
+    assert "migrations" in caplog.text
+    assert "PGRST204" not in caplog.text and "revoked_at" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="brotto.jwt_auth"):
+        with pytest.raises(AccountRefused) as caught:
+            asyncio.run(jwt_auth.ensure_on_roster(Claims(sub=USER_ID, email=LISTED)))
+    # The refusal the user sees is unchanged — it is a control-plane
+    # problem, not "this account is not part of the beta" — but it is now
+    # an answer the operator can trace.
+    assert caught.value.reason == "control_plane_unavailable"
+    assert "400" in caplog.text
+    assert "PGRST204" not in caplog.text
+
+    # A lookup that raises is one event, so it is **one record** carrying
+    # both the what and the why. It used to log the exception type and then
+    # call `_control_plane_failed`, which is two ERROR records for one
+    # failure and reads as two incidents.
+    async def boom(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        raise TimeoutError("upstream connect timeout")
+
+    monkeypatch.setattr(jwt_auth, "_profiles", boom)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="brotto.jwt_auth"):
+        assert asyncio.run(jwt_auth._listed_for_beta(LISTED)) is False
+    records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(records) == 1, f"one event, {len(records)} records: {caplog.text}"
+    assert "TimeoutError" in caplog.text
+    # The message can carry the address; the type cannot.
+    assert "upstream connect timeout" not in caplog.text
+
+
+def test_an_unlisted_address_says_nothing_at_all(monkeypatch, hosted, caplog):
+    """The other half of the distinction: a real miss is not an incident."""
+    import asyncio
+    import logging
+
+    async def empty(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        return 200, "[]"
+
+    monkeypatch.setattr(jwt_auth, "_profiles", empty)
+    with caplog.at_level(logging.ERROR, logger="brotto.jwt_auth"):
+        assert asyncio.run(jwt_auth._listed_for_beta(LISTED)) is False
+    assert caplog.text == ""
+
+
+def test_a_withdrawn_roster_row_is_refused_even_though_it_is_still_listed(client, monkeypatch, hosted):
+    """`revoked_at` on `beta_access` is the withdrawal; the row is still there.
+
+    The row surviving is what makes this the trap. `profiles.id` is an FK
+    into `auth.users`, so deleting the auth account cascades the
+    `profiles` row away and takes `profiles.revoked_at` — the thing
+    `authorize_task_start` reads — with it. A member in that state who
+    signs back in would otherwise find the roster row still present,
+    write a fresh `profiles` row, and re-admit themselves. Withdrawn
+    here means no row is written at all.
+    """
+    calls = _roster_stub(
+        monkeypatch, listed=[LISTED], profiles=[{"revoked_at": None}], revoked=[LISTED]
+    )
+    _stub_verify(monkeypatch)
+    resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
+    assert resp.status_code == 200
+    assert resp.json()["approved"] is False
+    # Sign-in still succeeded — the credential is real — and nothing was written.
+    assert [c["method"] for c in calls if c["path"] == "rest/v1/profiles"] == []
+
+
+def test_an_unlisted_address_is_approved_by_nobody_and_writes_nothing(client, monkeypatch, hosted):
+    """Sign-in still succeeds — the credential is real — and no row appears."""
+    calls = _roster_stub(monkeypatch, listed=[LISTED])
+    _stub_verify(monkeypatch)
+    monkeypatch.setattr(
+        jwt_auth, "verify_jwt", lambda token: Claims(sub=USER_ID, email="stranger@example.test")
+    )
+    resp = client.post(
+        "/v1/auth/exchange", json={"email": "stranger@example.test", "code": "123456"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["approved"] is False
+    assert [c["method"] for c in calls if c["path"] == "rest/v1/profiles"] == []
+
+
+def test_the_approved_email_is_the_claims_and_not_the_body(client, monkeypatch, hosted):
+    """The body is caller-supplied and this is the one function acting on it.
+
+    The roster holds the address the caller *typed*; the token Supabase
+    issued says somebody else. Acting on the body would approve the wrong
+    inbox, so the claim wins even when the claim is the unwelcome answer.
+    """
+    calls = _roster_stub(monkeypatch, listed=[LISTED])
+    _stub_verify(monkeypatch)  # these claims say listed@example.test; the roster holds it
+    monkeypatch.setattr(jwt_auth, "verify_jwt",
+                        lambda token: Claims(sub=USER_ID, email="stranger@example.test"))
+    resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
+    assert resp.json()["approved"] is False
+    assert [c["method"] for c in calls if c["path"] == "rest/v1/profiles"] == []
+
+
+def test_a_revoked_member_keeps_the_revocation_by_signing_in_again(client, monkeypatch, hosted):
+    """**The trap.** Self-approval must be an insert-if-absent.
+
+    Written as an upsert — or with `revoked_at: null` in the body "because
+    the row should be active" — a member the operator deliberately
+    withdrew signs back in and is silently reinstated, with nothing
+    anywhere recording that it happened. `revoked_at` is not written by any
+    path here, and the `Prefer` header is what declines to touch the row.
+    """
+    calls = _roster_stub(
+        monkeypatch, listed=[LISTED], profiles=[{"revoked_at": "2026-10-01T00:00:00Z"}]
+    )
+    _stub_verify(monkeypatch)
+    resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
+    assert resp.status_code == 200
+    assert resp.json()["approved"] is False
+    # No write touched the revocation — not even naming the field. The
+    # *read* below it selects `revoked_at`, which is the whole point of the
+    # re-read, so this is scoped to the calls that write.
+    writes = [c for c in calls if c["method"] == "POST"]
+    assert "revoked_at" not in json.dumps(writes)
+    assert set(writes[0]["body"]) == {"id", "email"}
+
+
+def test_the_second_wall_still_stands_after_an_approved_sign_in(client, monkeypatch, hosted, session_id, tmp_path):
+    """`approved` is a report for the panel; the decision is at task start.
+
+    The row is active when the person signs in and revoked a minute later —
+    which is the whole point of reading the roster at task start instead of
+    trusting a token.
+    """
+    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path))
+    calls = _roster_stub(monkeypatch, listed=[LISTED], profiles=[{"revoked_at": None}])
+    _stub_verify(monkeypatch)
+    assert client.post(
+        "/v1/auth/exchange", json={"email": LISTED, "code": "123456"}
+    ).json()["approved"] is True
+
+    calls.clear()
+    rows = [{"revoked_at": None, "week_start": _today(), "tasks_this_week": 0}]
+    _profiles_stub(monkeypatch, rows)
+    minted = _mint(client, _token())
+
+    rows[0]["revoked_at"] = "2026-10-02T00:00:00Z"  # the operator, mid-session
+    import asyncio
+
+    with pytest.raises(jwt_auth.AccountRefused) as caught:
+        asyncio.run(jwt_auth.authorize_task_start(Claims(sub=USER_ID, email=LISTED)))
+    assert caught.value.reason == "revoked"
+
+
+def test_an_unreachable_control_plane_leaves_the_caller_signed_in(client, monkeypatch, hosted):
+    """The credential is real and the answer is only a report.
+
+    Failing the whole exchange would sign a valid person out because
+    Supabase's REST side blinked; failing *this* costs one confusing UI
+    state, and task start refuses on the same failure.
+    """
+    async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        raise jwt_auth.SupabaseUnavailable("boom")
+
+    monkeypatch.setattr(jwt_auth, "_profiles", fake)
+    _stub_verify(monkeypatch)
+    resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
+    assert resp.status_code == 200
+    assert resp.json() == {"access_token": _token(email=LISTED), "approved": False}
+
+
+# ── the same wall on every use path, not only at task start ──────────────
+
+#: Every route that spends the operator's credits, stores the user's data or
+#: writes to a table. None of them may answer on a valid signature alone.
+USE_ROUTES = [
+    ("/v1/model/check", {"model_config": {}}),
+    ("/v1/policy", None),
+    ("/v1/sessions", {}),
+    ("/v1/policy_ack", {"settings": {}}),
+    ("/v1/reports", {"reports": []}),
+    ("/v1/suggestions", {"url": "https://example.test"}),
+]
+
+
+@pytest.mark.parametrize("route,body", USE_ROUTES)
+def test_an_unapproved_token_is_refused_on_every_use_path(
+    client, monkeypatch, hosted, route, body
+):
+    """The signature is not the invitation.
+
+    `create_user` is unconditionally true on the sign-in route, so every
+    person who signs up holds a token that verifies — a signature proves
+    an account exists, and these six routes were answering on that alone.
+    Two of them spend the operator's model credits, which is the cost this
+    is really about.
+    """
+    _profiles_stub(monkeypatch, [])  # a valid JWT with no profile row
+    headers = {"Authorization": f"Bearer {_token()}"}
+    resp = (client.get(route, headers=headers) if body is None
+            else client.post(route, json=body, headers=headers))
+    assert resp.status_code == 403, f"{route} answered {resp.status_code}"
+
+
+@pytest.mark.parametrize("route,body", USE_ROUTES)
+def test_an_unreachable_control_plane_fails_closed_on_every_use_path(
+    client, monkeypatch, hosted, route, body
+):
+    """Same direction as task start, same reason: "we could not check"
+    is not a licence to serve. An outage must not become an access
+    decision — especially on the two routes that call a provider.
+    """
+    _profiles_stub(monkeypatch, [], fail_on=("GET",))
+    headers = {"Authorization": f"Bearer {_token()}"}
+    resp = (client.get(route, headers=headers) if body is None
+            else client.post(route, json=body, headers=headers))
+    assert resp.status_code == 403, f"{route} answered {resp.status_code}"
+
+
+@pytest.mark.parametrize("route,body", USE_ROUTES)
+def test_a_revoked_account_is_refused_on_every_use_path(
+    client, monkeypatch, hosted, route, body
+):
+    _profiles_stub(monkeypatch, [{"revoked_at": "2026-10-01T00:00:00Z"}])
+    headers = {"Authorization": f"Bearer {_token()}"}
+    resp = (client.get(route, headers=headers) if body is None
+            else client.post(route, json=body, headers=headers))
+    assert resp.status_code == 403, f"{route} answered {resp.status_code}"
+
+
+def test_an_approved_account_reaches_every_use_path(client, monkeypatch, hosted):
+    """The guard is not a door that does not open — the roster hit passes."""
+    _profiles_stub(monkeypatch, [{"revoked_at": None}])
+    headers = {"Authorization": f"Bearer {_token()}"}
+    assert client.get("/v1/policy", headers=headers).status_code == 200
+    assert client.post("/v1/sessions", json={}, headers=headers).status_code == 201
+
+
+def test_a_bad_credential_is_still_a_404_not_a_403(client, monkeypatch, hosted):
+    """403 confirms the route is worth probing, and this server holds the
+    user's transcripts. 403 is reserved for a real credential whose
+    account is not on the roster."""
+    _profiles_stub(monkeypatch, [{"revoked_at": None}])
+    resp = client.get("/v1/policy", headers={"Authorization": "Bearer nope"})
+    assert resp.status_code == 404
+
+
+def test_self_host_answers_every_use_path_unchanged(client, monkeypatch):
+    """No `Claims` object exists on self-host, so the roster is never
+    consulted and a self-hoster's own box behaves exactly as it did."""
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("AGENT_SECRET", "s3cret")
+    headers = {"Authorization": "Bearer s3cret"}
+    assert client.get("/v1/policy", headers=headers).status_code == 200
+    assert client.post("/v1/sessions", json={}, headers=headers).status_code == 201

@@ -55,6 +55,11 @@ function check(name, cond, detail) {
 
 const TOKEN = "eyJhbGciOiJIUzI1NiJ9." + "A".repeat(600) + ".sig";
 
+// Comments are stripped before a source is asserted on: both files explain
+// themselves by naming innerHTML, and a check that trips on the explanation
+// defeats the rule it states.
+const code = (s) => s.replace(/^\s*\/\/.*$/gm, "");
+
 /** A fake fetch plus the storage the exchange writes to. */
 function rig(src, name, respond) {
   const calls = [];
@@ -73,12 +78,18 @@ function rig(src, name, respond) {
     $cloudCode: { value: "123456" },
     $agentSecret: { value: "" },
     $cloudStatus: { textContent: "", className: "status" },
+    $waitlistEmail: { value: "" },
+    $waitlistName: { value: "" },
     setCloudStatus(text, tone) {
       sandbox.$cloudStatus.textContent = text || "";
       sandbox.$cloudStatus.className = tone ? `status ${tone}` : "status";
       sandbox.statusText = text || "";
       sandbox.statusTone = tone || "";
     },
+    // `joinWaitlist` is a different file's test; here the refusal only has to
+    // reach the waitlist box, and `prefillWaitlist` is the real extracted one.
+    setWaitlistStatus(text) { sandbox.waitlistStatusText = text || ""; },
+    document: { getElementById: () => null },
     serverBase() { return "https://agent.brotto.dev"; },
     storeAgentSecret: async (value) => {
       sandbox.stored = { ...(sandbox.stored || {}), agentSecret: value };
@@ -99,8 +110,11 @@ function rig(src, name, respond) {
   sandbox.cloudEmail = sandbox.$cloudEmail;
   sandbox.cloudCode = sandbox.$cloudCode;
   sandbox.agentSecretSetting = sandbox.$agentSecret;
+  sandbox.waitlistEmail = sandbox.$waitlistEmail;
+  sandbox.waitlistName = sandbox.$waitlistName;
   vm.runInContext(extract(src, name), sandbox);
   vm.runInContext(extract(src, "postAuth"), sandbox);
+  vm.runInContext(extract(src, "prefillWaitlist"), sandbox);
   return sandbox;
 }
 
@@ -186,6 +200,66 @@ function json(okStatus, body) {
   check("and refuses just as firmly",
     (await panelBad.exchangeSignInCode()) === false && !panelBad.stored.agentSecret);
 
+  // ── `approved` ──────────────────────────────────────────────────────────
+  // A report, not the gate: an unlisted address and an unreachable control
+  // plane both come back as a valid token, a 200 and `false`. So the token
+  // is stored either way — dropping it would strand an address the operator
+  // approves later — and what changes is the sentence and the waitlist box.
+  const offBeta = rig(sidepanel, "exchangeSignInCode", json(200, { access_token: TOKEN, approved: false }));
+  check("an unlisted address still gets its token — it is a real one",
+    (await offBeta.exchangeSignInCode()) === true && offBeta.stored.agentSecret === TOKEN,
+    "a refusal that threw the token away is how an approved-later account never recovers");
+  check("and sign-in does not read as a success",
+    offBeta.statusTone !== "ok" && !/^signed in to brotto cloud\.?$/i.test(offBeta.statusText.trim()),
+    offBeta.statusText);
+  check("it says they are not in the beta, without blaming them",
+    /beta/i.test(offBeta.statusText) && /not on the list/i.test(offBeta.statusText), offBeta.statusText);
+  check("and the waitlist box is offered the address they just proved",
+    offBeta.$waitlistEmail.value === "person@example.com", offBeta.$waitlistEmail.value);
+  check("offered, not sent — the refusal makes no second request",
+    offBeta.calls.length === 1, JSON.stringify(offBeta.calls.map((c) => c.url)));
+
+  const onBeta = rig(sidepanel, "exchangeSignInCode", json(200, { access_token: TOKEN, approved: true }));
+  check("an approved address signs in plainly",
+    (await onBeta.exchangeSignInCode()) === true
+    && /signed in to brotto cloud/i.test(onBeta.statusText), onBeta.statusText);
+  check("and is not handed a waitlist it does not need",
+    onBeta.$waitlistEmail.value === "");
+
+  // Additive means additive: a server too old to send the field must not read
+  // as a refusal, or every install on it would be told it is not in the beta.
+  const noField = rig(sidepanel, "exchangeSignInCode", json(200, { access_token: TOKEN }));
+  check("a response with no `approved` at all is not a refusal",
+    (await noField.exchangeSignInCode()) === true
+    && /signed in to brotto cloud/i.test(noField.statusText), noField.statusText);
+
+  // Truthiness is the bug here: an absent field is `undefined`, and
+  // `if (body.approved)` would make every pre-cloud server a refusal.
+  check("it is compared against false, never truthiness",
+    /body\.approved === false/.test(code(sidepanel) + code(welcome))
+    && !/if \(body\.approved\)|body\.approved \?|!body\.approved\)/.test(code(sidepanel) + code(welcome)));
+
+  // A refusal on a response that carries no token is not a refusal at all —
+  // the failure path wins, so nothing here can say "not in the beta" about a
+  // sign-in that never happened.
+  const badAndOff = rig(sidepanel, "exchangeSignInCode", json(400, { approved: false }));
+  check("a refused code is a refused code, not a closed beta",
+    (await badAndOff.exchangeSignInCode()) === false
+    && /did not work/i.test(badAndOff.statusText)
+    && badAndOff.$waitlistEmail.value === "", badAndOff.statusText);
+
+  // The wizard: same field, same outcome, and the step still advances — the
+  // token is real and `finish()` has something to save.
+  const wizOff = rig(welcome, "exchangeCode", json(200, { access_token: TOKEN, approved: false }));
+  check("the wizard stores the token on an unlisted address",
+    (await wizOff.exchangeCode()) === true && wizOff.$agentSecret.value === TOKEN);
+  check("says so, and offers the waitlist the same address",
+    /beta/i.test(wizOff.statusText)
+    && wizOff.$waitlistEmail.value === "person@example.com", wizOff.statusText);
+  const wizOn = rig(welcome, "exchangeCode", json(200, { access_token: TOKEN, approved: true }));
+  check("and an approved wizard sign-in is an ordinary sign-in",
+    (await wizOn.exchangeCode()) === true && /^signed in$/i.test(wizOn.statusText.trim()), wizOn.statusText);
+
   // ── The shape of the token is never inspected ───────────────────────────
   check("nothing splits or measures the token",
     !/access_token[\s\S]{0,40}(split|length|slice|indexOf|match)/.test(welcome + sidepanel));
@@ -197,10 +271,7 @@ function json(okStatus, body) {
 
   // ── What the user is told ───────────────────────────────────────────────
   // The panel's rule is that no unescaped string reaches innerHTML. The email
-  // is typed into this flow, and it lands in a status line. Comments are
-  // stripped first: both functions explain themselves by naming innerHTML,
-  // and a check that trips on the explanation defeats the rule it states.
-  const code = (s) => s.replace(/^\s*\/\/.*$/gm, "");
+  // is typed into this flow, and it lands in a status line.
   const statusSrc = code(extract(sidepanel, "setCloudStatus"));
   check("the panel's status line is textContent",
     /\.textContent = text \|\| ''/.test(statusSrc) && !/innerHTML/.test(statusSrc));

@@ -30,13 +30,41 @@ So the privacy posture is not "we do not collect your data". It is:
 | API key | `chrome.storage.local`, user | until the user clears it |
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
-| Waitlist signup (an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |
+| Waitlist signup (a name, an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |
+| Beta allowlist (an email, the row's insert timestamp, and a withdrawal timestamp once one is set) | `beta_access` table in Supabase, server | until the operator drops it |
 | Waitlist confirmation (the address, in transit and in Resend's request logs) | `api.resend.com` | theirs, not ours |
 | Audit request bodies | whatever the model provider logs | theirs, not ours |
 
 The waitlist is the one row in that table that came from **a stranger** rather
 than from an account, and it is covered by "Writing new code here" below —
 see *The waitlist is the first data from someone who is not an account*.
+
+**`beta_access` and `waitlist` must stay disjoint.** The allowlist
+(`supabase/migrations/004_beta_access.sql`) is the same *admission decision* a
+`profiles` row records, entered by address so the operator can bulk-paste a list —
+and it stays a table the operator writes by hand, through `scripts/beta-roster.sh`.
+**That script is the only way an address enters or leaves the roster**, and
+deliberately not an HTTP route: an admin route that appends addresses is a
+weakly-authenticated write into the front door of the hosted beta, whereas the
+script runs on the operator's own machine over the Supabase CLI's linked-project
+credentials, so there is nothing remote to compromise. **Removing a row from the
+table does not revoke anyone** — see *The roster admits; `revoked_at` withdraws*
+below.
+**Of its four columns only `email` and `revoked_at` are ever read**:
+`_listed_for_beta` selects `select=email,revoked_at`, and the second is the
+withdrawal — see *The roster admits; `revoked_at` withdraws* below.
+`approved_at` exists because the table is a
+ledger someone will ask "when", and it is filled by the column default rather
+than by any path here. `added_by` is written by **no code path on the server** —
+the relay never writes this table — and by exactly one client of it,
+`beta-roster.sh`, which stamps `whoami` on `add`; a row created any other way
+carries an empty author rather than a wrong one. The moment
+anything copies a
+waitlist submission into it without a human deciding, `POST /v1/waitlist` — the
+one route reachable with **no credential at all** — answers "is this person in
+the beta?" to anyone who posts an address. A stranger's row becoming an
+invitation by pipeline is that route turned into a membership oracle; the same
+reason the waitlist answers a duplicate exactly as it answers a first submit.
 
 **Resend is a third party for waitlist addresses and for nothing else here.**
 An account's identity is Supabase's, and Supabase's own mail (the sign-in code)
@@ -309,23 +337,247 @@ the counter — at task start. The email is there so the operator can answer
 are how a credential comes into existence; gating them on one is a closed door.
 That makes them the one place a route can become **a directory of the beta**:
 `POST /v1/auth/request-code` returns the same answer for an address that has an
-account, one that does not, and one this project has signups disabled for.
-Supabase's own `create_user: false` is what keeps that true, and every response
-body is swallowed rather than relayed — its text names whether the address
-exists, what the code was worth, and how long the project has been rate limited.
+account, one that does not, and one on the beta roster — this route consults
+nothing that knows who is in the beta, and every response body is swallowed
+rather than relayed. Supabase's text names whether the address exists, what the
+code was worth, and how long the project has been rate limited.
 `/v1/auth/exchange` raises a fixed `"invalid or expired code"` for the same
 reason. Only an **incomplete call** is reported, because that says nothing about
 the address and reporting it is the difference between "check your inbox" and
 "nothing is wrong, wait".
 
-**Revocation is checked once per task, and it fails closed.** The JWT says who
-you are and nothing about whether you are still welcome, so `profiles` is the
-only answer to the second question — and task start is the only moment a
-decision is made. Putting it on the request path would make every step of every
-run depend on Supabase's uptime. **Failing closed is right here and only here**:
-this is the relay where every transcript lands on our disk, and "we could not
-check whether this person was revoked" is not a licence to record one more. A
-self-host relay never reaches the function.
+**And `create_user` is `True` — it is not allowed to become conditional.**
+There used to be no signup path at all, and that is not a neutral choice:
+`profiles.id` is an FK into `auth.users`, so a profile *cannot* be pre-seeded
+for an address that has no auth account, and the roster check could therefore
+only ever land on the unauthenticated route — turning "check your inbox" into
+"are you on the list?" for anyone who can reach a public URL. So the roster is
+read at `/v1/auth/exchange` instead, which is safe for one reason and one only:
+**by then the caller has read a code out of an inbox it controls**, and that is
+the gate `request-code` cannot verify. Pinned by
+`test_request_code_consults_no_allowlist`.
+
+## The roster admits; `revoked_at` withdraws
+
+`beta_access` is read in **exactly one place** — `_listed_for_beta`, called from
+`approve_at_exchange` — and only to decide whether to *create* a `profiles` row.
+`ensure_on_roster`, the gate every use path and task start now shares, reads
+`profiles` and never consults the roster again. So the absence of a roster row
+is a refusal **only for somebody who has not been admitted yet**. Deleting one
+for an already-approved member changes nothing they can observe.
+
+**The withdrawal is two writes, and neither is sufficient alone.** Set
+`beta_access.revoked_at` *and* `profiles.revoked_at`, with the address passed
+through `lower(btrim(...))` — both tables store email already normalised, so an
+un-normalised `where email = '…'` matches zero rows, reports success, and
+withdraws nobody. The runnable form, guard and all, is
+`./scripts/beta-roster.sh revoke <address>`; `004`'s header carries the same
+reasoning in full, because that is where an operator pasting a list will read it.
+
+**The `profiles` half is keyed on the account id.** `profiles.email` is written
+once, by `approve_at_exchange`, from the verified JWT claim at first sign-in,
+and is never updated afterwards — a member who changes their Supabase email
+leaves the old spelling on the row permanently, so an address-keyed update
+matches zero rows, reports success, and withdraws nobody. So the procedure
+resolves the address to an id and updates by `profiles.id`, which is the stable
+key: **`profiles` first**, because that is the spelling the address was admitted
+under and so the spelling on the operator's own list, then **`auth.users`**,
+whose `email` is written by Supabase's signup path and is the only one of the
+three not stored normalised, hence the `lower(btrim(...))` on that comparison
+alone.
+
+**An address that resolves to neither account writes and warns rather than
+raising.** This is a correction, and the earlier design here was wrong. A
+rostered address that never signed in has no account and no profile, so there is
+genuinely nothing to withdraw — but it yields the same zero rows as a mistyped
+address, and the procedure this used to describe could not tell them apart. So it
+raised `no account for <address>`, and the raise threw away the half that
+matters: `beta_access.revoked_at` is the only part of a withdrawal that outlives
+the auth account, and a raise aborts the transaction, so aborting rolled back
+the roster write too — the one write that would still have been standing had the
+account been deleted a month later — while keeping the one the `auth.users`
+cascade would recreate unrevoked. **Every exit from that branch left the member
+*less* withdrawn than the operator asked, while looking like a loud, correct
+refusal.**
+
+So the refusal moved to where the ambiguity actually is. **An address not on
+the roster at all dies loudly**, because a mistyped address withdrawing nobody is
+the one failure the command exists to prevent, and there is nothing to undo. An
+address that *is* on the roster and resolves to no account is a real withdrawal
+of the roster half, so that write always lands and the script says which half it
+skipped and what to type to re-admit. One statement is what makes skipping the
+`profiles` half safe: the roster write is never in doubt, so a withdrawal that
+missed a profile cannot leave a torn pair behind. The failure the raise was
+trying to prevent — reporting a withdrawal that withdrew nobody — is still
+prevented, and more cheaply: the script reports which of the two rows the
+statement matched. Silence would be the bug; the raise was not the fix.
+
+The first refuses *re-admission* at sign-in; the second is what
+`authorize_task_start` reads at task start, and **that function never consults
+the roster**, so the roster write alone withdraws nobody who is already signed
+in. The failure mode is silent in both directions and worth naming: run only
+the first and a member keeps a working beta account until they happen to sign
+out, with a withdrawal on record saying otherwise.
+
+`beta_access.revoked_at` is not a second copy of `profiles.revoked_at` for
+tidiness; it is the only one of the two a cascade cannot erase.
+`profiles.id` references
+`auth.users` **on delete cascade**, so when the auth account goes — the person
+deletes it, Supabase purges it, a test fires the cascade — the `profiles` row
+and its `revoked_at` go with it. They sign up again, the address is still on the
+roster, and `approve_at_exchange` inserts a fresh, unrevoked profile.
+**Revocation was not durable**, and the cascade walked straight around the
+insert-if-absent that exists precisely to stop a withdrawn member reinstating
+themselves. The evidence has to outlive the account it was recorded against, so
+`beta_access.revoked_at` is **not a foreign key and must never become one**, and
+`_listed_for_beta` refuses an address whose `revoked_at` is set.
+
+**A 409 on a paste says "already there", not "admitted".** With `revoked_at`
+in play, already-there is either **granted** (`revoked_at is null`) or
+**withdrawn** (set), and the primary key answers identically for both. One line
+separates them — `select email, revoked_at from beta_access where email =
+lower(btrim('…'))` — and the operator has to read it; no code path may infer
+which from the response. `beta-roster.sh add` reads it for you and refuses to
+undo a withdrawal, pointing at `unrevoke` instead, because an `add` that cleared
+`revoked_at` would reinstate somebody on purpose.
+
+**Re-admission is `./scripts/beta-roster.sh unrevoke <address>`** — the same
+pair with the values nulled, the roster write first, the `profiles` half
+resolving in the same two-lookup order, because `authorize_task_start` reads
+only `profiles`. **It skips the raise for the same reason the withdrawal does,
+and here skipping is the whole point**: the account is frequently *gone* by the
+time anybody re-admits — never signed in, or deleted their account and the
+cascade took the profile — and raising would abort the transaction and leave
+them **withdrawn**, the one state the operator asked to leave. The refusal that
+is kept is the one that can be acted on: an address that is not on the roster at
+all, where there is no row to null.
+
+Deleting the roster row afterwards remains optional housekeeping — now it
+*closes* the door rather than re-opening it, and it withdraws nobody on its own.
+There is no `AFTER DELETE` trigger joining anything: a trigger fires on a
+*delete*, and a withdrawal is an `UPDATE` that deliberately leaves its evidence
+in place.
+
+The operational consequence is the whole point: **an operator who removes a
+roster row instead of setting `revoked_at` has handed someone a working beta
+account while believing they took it away.** The migration file states this at
+the top of `004`, and `beta-roster.sh` is what the operator actually runs.
+
+## A valid signature is not a place in the beta
+
+`create_user` being `True` has a consequence that is easy to miss: **every person
+who signs up now holds a token that verifies.** A signature proves an account
+exists; it says nothing about the roster. So the six routes that gated on
+`_authed` — `POST /v1/model/check`, `GET /v1/policy`, `POST /v1/sessions`,
+`POST /v1/policy_ack`, `POST /v1/reports`, `POST /v1/suggestions` — were
+answering anyone who signed up, and two of them spend the operator's model
+credits.
+
+They now go through `_approved`, which is `ensure_on_roster` (existence plus
+`revoked_at`; no cap, no reservation) applied to every HTTP route that acts. The
+sign-in path keeps its own answer — a token is minted for anyone, on purpose,
+because that is what lets the panel offer somebody the waitlist instead of a
+bare failure. **Minting is open; using is not.** That split is the design, not
+a gap in it.
+
+`ensure_on_roster` is also the first half of `authorize_task_start`, which adds
+the cap and the reservation on top. One lookup, two callers: a second copy of
+the "no row means `not_invited`" rule would be two things to keep in step and
+one of them would drift. It **fails closed**, for the reason task start already
+did — an unreachable control plane is a refusal, not a licence to serve, and on
+two of these routes the alternative makes a third party's outage into an
+access-control decision.
+
+Two codes, deliberately. A **bad key is 404** — 403 confirms the route is worth
+probing, and this server holds the user's transcripts. A **403** means the
+credential is real and the *account* is not on the roster: an answer about an
+account, not about a probe.
+
+The ownership-scoped reads (`GET /v1/sessions`, `GET /v1/sessions/{id}/audit`,
+`DELETE …`) are roster-gated too. They were briefly exempted, on the reasoning
+that they are filtered by owner and an unapproved person owns no sessions —
+**true for `not_invited`, false for `revoked`.** A withdrawn member ran tasks
+before the withdrawal, so `registry.owns` is still true for those ids
+(`owns()` is fail-closed only for ids it has never seen), and the exemption let
+a revoked account read its own transcript and erase its own sessions
+indefinitely. Revocation that leaves the transcript readable is not revocation.
+
+**One gate, one name, no exemptions.** The recurring failure here was a route
+picking a different gate than its neighbour *looks* like it should, and every
+pair of same-behaviour-different-name helpers is an invitation to the next one.
+`_approved` now gates every route that authenticates; `_auth` survives only as
+its own first step. Ownership scoping is a **second** question, not an
+alternative to the first: the gate says *this account may use the relay*, and
+`owns()` says *this session is one of theirs*. Both apply, in that order.
+
+The cost is one control-plane hop per delete, which is why it was exempted —
+and it is the right trade anyway, because the hop buys a withdrawn member's
+transcript otherwise. `ensure_on_roster` reaches Supabase **only** through
+`isinstance(auth.claims, Claims)`, which is never true in `secret` or `open`
+mode, so self-host pays nothing.
+
+## Self-approval is an insert, never an upsert
+
+The invitation is now a pre-loaded row in `beta_access`, and the `profiles` row
+is written by the relay at exchange. That puts the whole risk onto one
+statement, because the natural way to write "this account is approved" against
+a table with a primary key is an **upsert** — and an upsert on this path is a
+revocation erased from the record. A member the operator deliberately withdrew
+(`revoked_at` set) signs back in, the upsert nulls their revocation, and nothing
+anywhere records that it happened. So the write is
+`POST /profiles?on_conflict=id` with `Prefer: resolution=ignore-duplicates`:
+PostgREST declines to touch a row that is already there, and the code
+**re-reads the row afterwards** rather than trusting the insert — "already
+there" *is* the revoked case. `revoked_at` is not in the insert body and is not
+written by any path here. Pinned by
+`test_a_revoked_member_keeps_the_revocation_by_signing_in_again`.
+
+The email is read from the **verified JWT claims** and never from the submitted
+body: the body is caller-supplied and this is the only function that acts on it.
+
+`approved` in the exchange response is a report and not the gate. It is safe to
+return for the inbox-control reason above, and it is only a report because
+`authorize_task_start` asks the same question again at task start — a member
+revoked between signing in and starting a task is still refused, pinned by
+`test_the_second_wall_still_stands_after_an_approved_sign_in`. Every failure in
+the approval path answers `false` rather than raising: the credential is real
+either way, and failing the whole exchange would sign a valid person out
+because Supabase's REST side blinked.
+
+**A waitlist row is now an email, a bounded name, and the operator's batch.**
+The name is the one field the visitor typed that is not an address, and it is
+there for one reason: the operator is about to send these people an invite and
+cannot say their name without it. `build_row`'s named-argument shape is
+unchanged, so there is still nowhere for a referrer, a user agent, a URL or a
+note to land, and a name that grew past `NAME_MAX_CHARS` is truncated rather
+than costing the signup. The answer is still `{"ok": true}` whatever the body
+said.
+
+**The name is also neutralised for a spreadsheet, in the code and in the
+table.** The sink is not the row, it is the CSV export: the operator opens
+the table in whatever admin UI, exports, and that file lands in Excel or
+Sheets — and both execute a leading `=`, `+`, `-` or `@` as a formula. A
+stranger typing into a public form would then be running on the machine of
+the person who opens the export to send invites from. `build_row` prefixes
+those four characters with the apostrophe both spreadsheets read as "text",
+so the name still reads as the name the visitor typed. The **migration's
+CHECK** covers a row written by any path that is not the server's — the
+table editor, a `psql` session, a future import — and it is the half that
+cannot be renamed away. Both halves, or one of them is a guard waiting for
+a refactor.
+
+**Revocation is checked per request and per task, and it fails closed.** The
+JWT says who you are and nothing about whether you are still welcome, so
+`profiles` is the only answer to the second question. The *decision* — the cap,
+the reservation — is made once, at task start, so putting that on the request
+path would make every step of every run depend on Supabase's uptime. The
+*existence and revocation* question is asked on every route that acts (see
+*A valid signature is not a place in the beta*), because a signature no longer
+distinguishes a beta member from anyone who signed up. **Failing closed is
+right on both**: this is the relay where every transcript lands on our disk and
+the operator's credits are spent, and "we could not check whether this person
+was revoked" is not a licence to serve them. A self-host relay never reaches
+the function — no `Claims` object exists there.
 
 **Retention now has a default, and only here.** `BROTTO_RETENTION_DAYS`
 unset returns 30 on the hosted relay and `None` everywhere else. The reason is

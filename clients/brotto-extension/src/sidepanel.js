@@ -840,6 +840,9 @@ const cloudCodeBtn = document.getElementById('cloudCodeBtn');
 const cloudSignInBtn = document.getElementById('cloudSignInBtn');
 const cloudSignOutBtn = document.getElementById('cloudSignOutBtn');
 const agentSecretField = document.getElementById('agentSecretField');
+const waitlistEmail = document.getElementById('waitlistEmail');
+const waitlistName = document.getElementById('waitlistName');
+const waitlistJoinBtn = document.getElementById('waitlistJoinBtn');
 
 // `res.json()` on a body that is not JSON must not throw into the caller:
 // the init path reads a throw as "server unreachable", which is the one
@@ -972,9 +975,21 @@ async function exchangeSignInCode() {
   if (!/^\d{6}$/.test(code)) { setCloudStatus('That code should be six digits.', 'bad'); return false; }
   setCloudStatus('Signing in…');
   let token = null;
+  let waitlisted = false;
   try {
     const { ok, body } = await postAuth('/v1/auth/exchange', { email, code });
     if (ok && body && typeof body.access_token === 'string') token = body.access_token;
+    // `approved` is additive and is a REPORT, not the gate: an unlisted
+    // address and an unreachable control plane both come back as a valid
+    // token, a 200 and `false`. So it is only ever read after a token
+    // exists, it is compared against `false` rather than truthiness — a
+    // server too old to send the field must not read as a refusal — and it
+    // never decides whether the token is stored. The token is real, so it
+    // goes in the slot either way: when the operator approves this address
+    // later, the install starts working with nobody signing in again, and
+    // `cloudSignedIn()` stays "the slot is non-empty" with no second flag
+    // beside it that could disagree.
+    if (token && body.approved === false) waitlisted = true;
   } catch { /* the sentence below is the user-facing failure */ }
   if (!token) {
     setCloudStatus('That code did not work. Send another and try again.', 'bad');
@@ -982,8 +997,59 @@ async function exchangeSignInCode() {
   }
   await storeAgentSecret(token);
   cloudCode.value = '';
+  if (waitlisted) {
+    // They have just proved they control this address by completing the code
+    // exchange, which is exactly why offering the waitlist HERE is consented
+    // rather than a capture. Offered, never sent: the button is theirs.
+    prefillWaitlist(email);
+    setCloudStatus('Signed in, but Brotto Cloud is a closed beta and this address is not on the list yet.');
+    return true;
+  }
   setCloudStatus('Signed in to Brotto Cloud.', 'ok');
   return true;
+}
+
+// ── The waitlist ──────────────────────────────────────────────────────────
+// One form, three ways in: this panel's Settings, the wizard, and the refusal
+// above. `POST /v1/waitlist` takes an address and an optional name and answers
+// `{"ok": true}` for a new address and for one already on the list alike —
+// deliberately, so the route cannot be asked who is on it. So the sentence
+// after a 200 is true for both, and is never "you're on the list".
+function setWaitlistStatus(text, tone) {
+  const el = document.getElementById('waitlistStatus');
+  if (!el) return;
+  // textContent for the same reason setCloudStatus is: the address here was
+  // typed, and the panel's rule covers a settings hint as much as a card.
+  el.textContent = text || '';
+  el.className = tone ? `settings-hint ${tone}` : 'settings-hint';
+}
+
+// The block is always there in Settings — somebody with no idea a closed beta
+// exists has to be able to reach it from where they are — so "offering" it is
+// the prefill, not a reveal. It never overwrites an address already typed.
+function prefillWaitlist(email) {
+  if (email && waitlistEmail && !waitlistEmail.value.trim()) waitlistEmail.value = email;
+}
+
+async function joinWaitlist() {
+  const email = waitlistEmail.value.trim();
+  const name = waitlistName ? waitlistName.value.trim() : '';
+  if (!email) { setWaitlistStatus('Enter the address to reach.', 'bad'); return false; }
+  setWaitlistStatus('Adding you to the list…');
+  try {
+    // No credential, and none asked for: this route is the only one on the
+    // relay that answers a caller holding none.
+    const { ok } = await postAuth('/v1/waitlist', { email, name });
+    if (!ok) {
+      setWaitlistStatus('That did not go through — try again in a few minutes.', 'bad');
+      return false;
+    }
+    setWaitlistStatus(`Thanks. If a place opens, we'll email ${email}.`, 'ok');
+    return true;
+  } catch {
+    setWaitlistStatus('Could not reach the server — try again later.', 'bad');
+    return false;
+  }
 }
 
 // Signing out is not "clear the field". A stale token in the slot is a
@@ -999,6 +1065,7 @@ async function signOutOfCloud() {
 if (cloudCodeBtn) cloudCodeBtn.addEventListener('click', () => { void requestSignInCode(); });
 if (cloudSignInBtn) cloudSignInBtn.addEventListener('click', () => { void exchangeSignInCode(); });
 if (cloudSignOutBtn) cloudSignOutBtn.addEventListener('click', () => { void signOutOfCloud(); });
+if (waitlistJoinBtn) waitlistJoinBtn.addEventListener('click', () => { void joinWaitlist(); });
 
 // ── Session history ────────────────────────────────────────────────────────
 const historyBtn     = document.getElementById('historyBtn');
@@ -3108,7 +3175,7 @@ const FAILURE_NOTE = {
   // Server-side account refusals. Distinct from the two above: those are the
   // socket, these are the relay answering a request it authenticated. None can
   // be fixed by retrying the same task.
-  not_invited: "This account isn't on the Brotto Cloud beta list. Ask for an invitation.",
+  not_invited: "This account isn't on the Brotto Cloud beta list. Leave your address under Not in the beta yet? in Settings and we'll invite you when a place opens.",
   revoked: "This account's Brotto Cloud access has been withdrawn.",
   task_cap_reached: "You've used this week's Brotto Cloud tasks. They reset on Monday.",
   control_plane_unavailable: "Brotto Cloud couldn't confirm your access, so it stopped rather than run unchecked. Try again in a minute.",

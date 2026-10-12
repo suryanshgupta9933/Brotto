@@ -1,10 +1,10 @@
 """The waitlist: one field in, one field on disk, and nothing to ask about it.
 
-The load-bearing test is `test_a_waitlist_row_is_exactly_the_email_and_a_batch`.
+The load-bearing test is `test_a_waitlist_row_is_exactly_the_email_a_name_and_a_batch`.
 This is the first thing the project holds about someone who is *not* an
 account — a stranger who filled in a form — and the guarantee that matters is
-that there is nowhere to put a referrer, a user agent or a URL. `build_row`
-takes one named argument and raises on the rest, so widening the payload is a
+that there is nowhere to put a referrer, a user agent, a URL or a note. `build_row`
+takes named arguments and raises on the rest, so widening the payload is a
 code change this suite fails on rather than something a later commit does
 quietly.
 
@@ -87,7 +87,7 @@ def _supabase_stub(monkeypatch, *, status=201, raises=None):
 
 # ── the boundary ──────────────────────────────────────────────────────────
 
-def test_a_waitlist_row_is_exactly_the_email_and_a_batch(monkeypatch):
+def test_a_waitlist_row_is_exactly_the_email_a_name_and_a_batch(monkeypatch):
     row = wl.build_row(email=VISITOR)
     assert set(row) == set(wl.COLUMNS), "a column nobody wrote a reason for"
     assert row["email"] == VISITOR
@@ -110,6 +110,104 @@ def test_the_row_cannot_carry_a_referrer_a_url_or_a_typed_field():
 def test_the_batch_is_the_operators_label_not_the_callers(monkeypatch):
     monkeypatch.setenv(wl.BATCH_ENV, "batch-2")
     assert wl.build_row(email=VISITOR)["batch"] == "batch-2"
+
+
+def test_a_typed_name_is_stored_bounded(hosted, client, monkeypatch):
+    """The one field the visitor typed that is not an address, for one
+    reason: the operator is about to send these people an invite and cannot
+    say their name without it. Bounded because a paragraph is the form being
+    used as storage."""
+    seen = _supabase_stub(monkeypatch)
+    resp = client.post("/v1/waitlist", json={"email": VISITOR, "name": "  Ada Lovelace "})
+    assert resp.status_code == 200
+    assert seen[0]["body"]["name"] == "Ada Lovelace"
+    client.post("/v1/waitlist", json={"email": VISITOR, "name": "A" * 500})
+    assert len(seen[1]["body"]["name"]) == wl.NAME_MAX_CHARS
+
+
+def test_a_name_a_spreadsheet_would_run_is_stored_as_text(hosted, client, monkeypatch):
+    """CSV is how the operator gets this table out, and Excel and Google
+    Sheets both execute a leading `=`, `+`, `-` or `@` when they open one.
+
+    So a stranger typing into a public form is a thing the operator's own
+    machine runs, on the export they open to send invites from. The four
+    characters are quoted with the apostrophe both spreadsheets read as
+    "text, not formula" — not stripped, so a name that genuinely starts
+    with a dash still reads as the name the visitor typed.
+    """
+    for typed in ("=cmd|' /C calc'!A0", "+1+1", "-2+3", "@SUM(A1)", "\tName", "\rName"):
+        stored = wl.build_row(email=VISITOR, name=typed)["name"]
+        assert stored.startswith("'"), f"{typed!r} stored as {stored!r}"
+        assert not wl._NAME_FORMULA_RE.match(stored), f"{typed!r} stored as {stored!r}"
+    # An ordinary name is untouched — no prefix, no apostrophe.
+    assert wl.build_row(email=VISITOR, name="Ada Lovelace")["name"] == "Ada Lovelace"
+    # And the one the operator reads is not a guess: the prefix is what
+    # makes it display without itself.
+    assert wl.build_row(email=VISITOR, name="=x")["name"] == "'=x"
+    # The row that actually reaches the table, not just the helper's return
+    # value — the sink is the CSV export, and this is what lands in it.
+    seen = _supabase_stub(monkeypatch)
+    client.post("/v1/waitlist", json={"email": VISITOR, "name": "=cmd|' /C calc'!A0"})
+    assert seen[0]["body"]["name"] == "'=cmd|' /C calc'!A0"
+
+
+def test_the_formula_guard_holds_after_the_length_bound(monkeypatch):
+    """Truncation must not run *after* the guard, or a name whose first
+    `NAME_MAX_CHARS` are safe and whose lead is not... is not the case
+    here — but the bound runs first, so a guard applied to a different
+    string than the one stored would be a guard against nothing.
+
+    This pins the order rather than the truth table: the stored value is
+    exactly `stored[:NAME_MAX_CHARS + 1]`, the guard and the bound applied
+    to the same string.
+    """
+    long_name = "=" + "A" * wl.NAME_MAX_CHARS * 2
+    stored = wl.build_row(email=VISITOR, name=long_name)["name"]
+    assert len(stored) == wl.NAME_MAX_CHARS + 1  # the quote, and nothing else
+    assert stored == "'=" + "A" * (wl.NAME_MAX_CHARS - 1)
+
+
+def test_a_name_is_optional_and_the_answer_does_not_mention_it(hosted, client, monkeypatch):
+    """A signup stays `{"ok": true}` whatever the body said — a name is not
+    an oracle and not a status."""
+    _supabase_stub(monkeypatch)
+    assert client.post("/v1/waitlist", json={"email": VISITOR}).json() == {"ok": True}
+    assert client.post(
+        "/v1/waitlist", json={"email": VISITOR, "name": "Ada Lovelace"}
+    ).json() == {"ok": True}
+
+
+def test_a_name_is_not_a_back_door_for_the_fields_that_are_refused(hosted, client, monkeypatch):
+    """Still nowhere to put a referrer, a URL or a note. The shape that
+    enforced this is `build_row`'s named arguments, and adding `name` did
+    not turn it into `**kwargs`."""
+    seen = _supabase_stub(monkeypatch)
+    client.post("/v1/waitlist", json={
+        "email": VISITOR, "name": "Ada",
+        "referrer": "https://example.test/pricing", "note": "the Gmail one",
+    })
+    assert seen[0]["body"] == {"email": VISITOR, "name": "Ada", "batch": ""}
+    with pytest.raises(ValueError):
+        wl.build_row(email=VISITOR, note="the Gmail one")
+
+
+def test_self_host_is_answered_a_404_and_stores_no_name(monkeypatch, client):
+    """The name is the cloud relay's business. A self-hosted box does not
+    have this route at all, so it has nowhere to put one."""
+    from brotto_orchestrator.session import jwt_auth as fresh_jwt
+
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.delenv("AGENT_SECRET", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://project.test")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-key")
+
+    async def explode(*a, **k):
+        raise AssertionError("self-host wrote to the waitlist")
+
+    monkeypatch.setattr(fresh_jwt, "_profiles", explode)
+    assert client.post(
+        "/v1/waitlist", json={"email": VISITOR, "name": "Ada Lovelace"}
+    ).status_code == 404
 
 
 # ── where it runs at all ──────────────────────────────────────────────────
@@ -155,7 +253,7 @@ def test_a_valid_email_is_accepted(hosted, client, monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
     assert [c["path"] for c in seen] == ["rest/v1/waitlist"]
-    assert seen[0]["body"] == {"email": VISITOR, "batch": ""}
+    assert seen[0]["body"] == {"email": VISITOR, "name": "", "batch": ""}
 
 
 def test_the_address_is_normalised_before_it_is_written(hosted, client, monkeypatch):
@@ -175,7 +273,7 @@ def test_the_body_carries_nothing_else(hosted, client, monkeypatch):
         "utm_source": "twitter",
     })
     assert resp.status_code == 200
-    assert seen[0]["body"] == {"email": VISITOR, "batch": ""}
+    assert seen[0]["body"] == {"email": VISITOR, "name": "", "batch": ""}
 
 
 @pytest.mark.parametrize("bad", ["", "not-an-email", "a@b", "@example.test", "a b@example.test", None])

@@ -438,6 +438,18 @@
       color: var(--ink-3);
     }
 
+    /* The waitlist sits below the sign-in in the same block, so it is cut off
+       by the same hairline the section headings use. Two fields, one status
+       line, one button — no box, nothing collapsible. */
+    .waitlist-block {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--rule);
+    }
+
     /* ─── Session history ─────────────────────────────────────────────────
        One row per past task, newest first. A ledger line, not a card: a
        hairline between rows, no box, no radius. Identity is the task text
@@ -1963,6 +1975,30 @@
           <button id="cloudCodeBtn" class="btn" type="button">Send code</button>
           <button id="cloudSignInBtn" class="btn btn-primary" type="button">Sign in</button>
           <button id="cloudSignOutBtn" class="btn" type="button" hidden>Sign out</button>
+        </div>
+
+        <!-- The waitlist, in the same block and on the same server. It is
+             always here rather than hidden behind the refusal, because
+             somebody who has never heard of the beta has to be able to leave
+             an address from the panel they already have open. The one extra
+             affordance: an exchange that comes back `approved: false`
+             pre-fills the address it just proved they control
+             (prefillWaitlist), and offers — it never posts for them. -->
+        <div id="waitlistBlock" class="waitlist-block">
+          <span class="lbl">Not in the beta yet?</span>
+          <div class="field">
+            <label class="lbl" for="waitlistName">Name (optional)</label>
+            <input id="waitlistName" class="input" type="text" maxlength="64"
+                   autocomplete="name" spellcheck="false">
+          </div>
+          <div class="field">
+            <label class="lbl" for="waitlistEmail">Email</label>
+            <input id="waitlistEmail" class="input" type="email" autocomplete="email" spellcheck="false">
+          </div>
+          <p id="waitlistStatus" class="settings-hint"></p>
+          <div class="settings-actions-row">
+            <button id="waitlistJoinBtn" class="btn" type="button">Join the waitlist</button>
+          </div>
         </div>
       </div>
 

@@ -7,9 +7,11 @@ Ordered by what unblocks someone using Brotto today.
 
 ### The one install step left
 
-The extension is on the Chrome Web Store, under review — one click as soon as it
-clears. What survives that is `docker compose up`, and it is the only thing
-between someone who does not write code and using Brotto.
+The extension is not on the store yet. The listing was **rejected 2026-10-10**
+— the description named model providers and the policy caps a description at
+five brands — and the copy was corrected and has not been resubmitted. What
+survives that is `docker compose up`, and it is the only thing between someone
+who does not write code and using Brotto.
 
 Removing it is a one-command installer for the **server half only**: check
 Docker, generate `AGENT_SECRET`, write `.env`, `compose up`, print the address
@@ -131,11 +133,21 @@ is the fix, and it is not cheap: about thirty call sites construct an
 
 ### The Chrome Web Store listing
 
-**Submitted, under review.** Icons, screenshots, the privacy-practices
-disclosure and the category are done; nothing is outstanding but the review
-itself. `debugger` plus `<all_urls>` is the combination reviewers slow down on,
-so the clock is budgeted at one to two weeks rather than days — which is why the
-server installer above is the thing being built in parallel, not after it.
+**Rejected once, corrected, awaiting resubmission.** The 2026-10-10 rejection
+cited excessive keywords in the description — the provider list, where the policy
+allows five brands and the copy named seven, one of which was not even in the
+catalogue. The description was rewritten 2026-10-11 with every brand name
+removed, and nothing else about it needed to change.
+
+Icons, screenshots, the permission justifications and the category are done.
+`debugger` plus `<all_urls>` is the combination reviewers slow down on, so
+budget one to two weeks from submission, not days — which is why the server
+installer above is the thing being built in parallel, not after it.
+
+Two things the resubmission has to carry that are newer than the copy: the
+**failure-reporting** path and the **waitlist** path. The disclosure must also
+agree with `PRIVACY.md` and the live privacy page in as many words, or it is
+rejected again for the same class of reason.
 
 No code change was needed to submit: the origin allow-list matches any valid
 extension id, so the store-assigned id is allowed automatically.
@@ -171,20 +183,25 @@ protect until we know whether anyone wants this". The first two records on disk
 assumed no operator and were **superseded by new ones rather than edited** —
 `2026-10-10-hosted-beta-accounts-and-the-secret.md`, then
 `2026-10-10-hosted-beta-accounts-supabase-and-resend.md`, which replaced the
-per-invitation `AGENT_SECRET` with Supabase Auth and Resend. That part is
-accepted and unbuilt; the relay itself is live behind `AGENT_SECRET`.
+per-invitation `AGENT_SECRET` with Supabase Auth and Resend. **That part has
+since shipped**: the relay is live with real accounts, a waitlist, a batch label,
+a failure-code table, and a confirmation mail. The cap of ten is gone too — a
+public waitlist feeds batches instead. None of that makes it a tier. It is still
+a way to watch a handful of people use it, and the kill criterion is unchanged.
 
 `docs/architecture/privacy.md` rule 2a and `docs/architecture/deployment.md`
 carry the operational detail, and `PRIVACY.md` discloses the relay in as many
 words as the self-hosted default gets.
 
-Pro sells compounding and performance — routines syncing, throughput, support —
-and **never custody**. The rule that survives: if a Pro feature can be phrased as
-"we keep your data", it is not a Pro feature.
+Pro sells compounding and throughput — multi-tab parallelism, a speed pack,
+local routines — and **never custody**. The rule that survives: if a Pro
+feature can be phrased as "we keep your data", it is not a Pro feature. **The
+test every future Pro feature has to pass is that none of them needs an
+operator**, because that is what would reopen the hosted tier closed above.
 
-**Free-tier task caps.** 1 concurrent, 25/day. On a box the user runs, against
-a key the user owns, a cap spends the user's tokens for them. It is friction
-without a beneficiary.
+**Free-tier task caps.** There are none, and there never were any in code. On a
+box the user runs, against a key the user owns, a cap spends the user's tokens
+for them: friction without a beneficiary.
 
 **Relocating history *out* of `/data/sessions` entirely.** The IndexedDB half of
 this shipped — `session_store.js` mirrors each audit document into the browser
@@ -203,6 +220,11 @@ document would be a second memory that disagrees with the first.
 
 ## Last shipped
 
+- The waitlist, and a confirmation mail that reports `delivered` on the relay —
+  with the same answer for a new address and a duplicate, in body and in timing
+- Cloud accounts on the relay: Supabase Auth, a six-digit code, an invitation
+  that is a row, and a failure-code table with no page content in it
+- The model key surviving a browser restart
 - Privacy, security and contributing folded into the README
 - Idle-page suggestions labelled with the page they came from
 - Per-task cost, priced from the catalogue — now behind `BROTTO_PRO`
@@ -213,3 +235,21 @@ document would be a second memory that disagrees with the first.
 - `press_key`, and two argument-name bugs it exposed
 - Auth across every route the extension calls; a bad key gets 404, not 403
 - The panel's working line, as a phase key rather than a sentence
+
+## Known outstanding
+
+Not roadmap — just not done, so nobody rediscovers them from memory.
+
+- **The Chrome Web Store listing has not been resubmitted.** Corrected copy
+  exists; the paste is the user's, from their own account.
+- **The data-usage disclosure predates the waitlist and the failure reports.**
+  It has to name both, and agree with `PRIVACY.md` and the live privacy page.
+- **Five live secrets need rotating** — four Supabase/orchestrator keys plus
+  the Resend key. They were printed into a transcript; the relay keeps working
+  with them, so nothing will surface this on its own. Rotate Supabase's Auth
+  SMTP and the mail key separately: different keys, different places.
+- **The "offer the reader something, don't reassure them" copy rule has never
+  been applied** to the existing site and blog copy. It landed in the waitlist
+  email and nowhere else.
+- **No Limited Use disclosure sentence** exists on any Brotto-controlled page.
+  One sentence, and it is the cheapest insurance on the store listing.

@@ -36,6 +36,9 @@ const $cloudCode = document.getElementById("cloudCode");
 const $cloudStatus = document.getElementById("cloudStatus");
 const $sendCodeBtn = document.getElementById("sendCodeBtn");
 const $serverUrlHint = document.getElementById("serverUrlHint");
+const $waitlistEmail = document.getElementById("waitlistEmail");
+const $waitlistName = document.getElementById("waitlistName");
+const $waitlistJoinBtn = document.getElementById("waitlistJoinBtn");
 
 const CLOUD_HINT = "Brotto Cloud. This is where your tasks go.";
 const SELF_HOST_HINT = "Leave this as-is if you're using the Brotto service. Change it only if you run your own server.";
@@ -91,6 +94,7 @@ function applyEdition() {
 $editionSelf.addEventListener("change", applyEdition);
 $editionCloud.addEventListener("change", applyEdition);
 $sendCodeBtn.addEventListener("click", () => { void requestCode(); });
+if ($waitlistJoinBtn) $waitlistJoinBtn.addEventListener("click", () => { void joinWaitlist(); });
 
 let step = 1;
 
@@ -230,17 +234,75 @@ async function exchangeCode() {
   if (!/^\d{6}$/.test(code)) { setCloudStatus("That code should be six digits", "bad"); return false; }
   setCloudStatus("Signing in");
   let token = null;
+  let notApproved = false;
   try {
     const { ok, body } = await postAuth("/v1/auth/exchange", { email, code });
     if (ok && body && typeof body.access_token === "string") token = body.access_token;
+    // `approved` is additive and is a REPORT, not the gate: an unlisted
+    // address and an unreachable control plane both come back as a valid
+    // token, a 200 and `false`. Read only after a token exists, compared
+    // against `false` so a server too old to send it is not read as a
+    // refusal, and never allowed to decide whether the token is stored.
+    if (token && body.approved === false) notApproved = true;
   } catch { /* the sentence below is the user-facing failure */ }
   if (!token) { setCloudStatus("That code did not work — send another and try again", "bad"); return false; }
   // Into the same input the self-host key uses, deliberately: one writer,
   // one storage shape, and nothing here has to know what a token is.
   $agentSecret.value = token;
   $cloudCode.value = "";
+  if (notApproved) {
+    // Still true, and the wizard still advances: the token is real, so
+    // `finish()` has something to save and an address the operator approves
+    // later starts working with nobody setting Brotto up again. What changes
+    // is the sentence and the address already sitting in the waitlist box —
+    // they proved they control it by completing this exchange, which is why
+    // offering here is consented. Offered, never sent.
+    prefillWaitlist(email);
+    setCloudStatus("Signed in — but Brotto Cloud is a closed beta and this address is not on the list yet");
+    return true;
+  }
   setCloudStatus("Signed in", "ok");
   return true;
+}
+
+// ── The waitlist ──────────────────────────────────────────────────────────
+// The same form the side panel carries, on the same server, taking an address
+// and an optional name. `POST /v1/waitlist` answers `{"ok": true}` for a new
+// address and for one already on the list alike, deliberately, so the route
+// cannot be asked who is on it — which is why the sentence after a 200 is the
+// same one for both.
+function setWaitlistStatus(text, tone) {
+  const el = document.getElementById("waitlistStatus");
+  if (!el) return;
+  // textContent, not innerHTML: the address here is typed text, and this
+  // wizard holds the same rule the panel does.
+  el.textContent = text || "";
+  el.className = tone ? `status ${tone}` : "status";
+}
+
+// Never overwrites an address already typed — the prefill is the refusal's
+// convenience, not the form's default.
+function prefillWaitlist(email) {
+  if (email && $waitlistEmail && !$waitlistEmail.value.trim()) $waitlistEmail.value = email;
+}
+
+async function joinWaitlist() {
+  const email = $waitlistEmail.value.trim();
+  const name = $waitlistName ? $waitlistName.value.trim() : "";
+  if (!email) { setWaitlistStatus("Enter the address to reach", "bad"); return false; }
+  setWaitlistStatus("Adding you to the list");
+  try {
+    const { ok } = await postAuth("/v1/waitlist", { email, name });
+    if (!ok) {
+      setWaitlistStatus("That did not go through — try again in a few minutes", "bad");
+      return false;
+    }
+    setWaitlistStatus(`Thanks. If a place opens, we'll email ${email}.`, "ok");
+    return true;
+  } catch {
+    setWaitlistStatus("Could not reach the server — try again later", "bad");
+    return false;
+  }
 }
 
 async function finish() {

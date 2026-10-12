@@ -360,14 +360,68 @@ def _auth(request: Request) -> AuthResult:
     )
 
 
-def _authed(request: Request) -> bool:
-    """HTTP flavour of the WebSocket check.
+async def _approved(request: Request) -> tuple[AuthResult, JSONResponse | None]:
+    """Roster membership, not just a valid signature. Auth result and any refusal.
 
-    A bad key answers 404 rather than 403: 403 confirms the route and
+    A signature check answers "is this a credential this relay accepts",
+    which in jwt mode is now a much weaker question than it looks: the
+    sign-in route creates the auth account for anyone who asks, so *every
+    person who signs up* holds a token that verifies. A signature proves
+    an account exists. It does not prove a place in the beta, and the six
+    routes that checked only this — two of which spend the operator's
+    model credits — were serving anyone who signed up.
+
+    **The split with the sign-in path is deliberate and is the point.**
+    Minting a token is left open on purpose, because it is what lets the
+    panel offer somebody the waitlist instead of a bare failure; *using*
+    the product is not on the other side of that door. So the two open
+    sign-in routes are the only unauthenticated surface a stranger
+    reaches, and **every route that authenticates asks this** — the
+    session index, read, delete and erase-all among them.
+
+    Ownership scoping still applies on top of it: the gate says *this
+    account may use the relay*, and `registry.owns` says *this session is
+    one of theirs*. Two questions, neither answers the other.
+
+    It used to be exempted on the four session routes, on the reasoning
+    that an unapproved account owns nothing so the roster gate has no
+    answer to change. That holds for `not_invited` and is **false for
+    `revoked`**: a withdrawn member ran tasks before the withdrawal, so
+    it still owns them, `owns()` is fail-closed only for ids it has never
+    seen, and the exemption meant a revoked account could read its own
+    transcript and erase its own sessions indefinitely. Revocation that
+    leaves the transcript readable is not revocation.
+
+    **One gate, one name, no exemptions to reason about.** The recurring
+    failure here is a route picking a different gate than its neighbour
+    looks like it should, and every pair of same-behaviour-different-name
+    helpers is an invitation to the next one. `_auth` is the only weaker
+    check, and it exists solely as this function's own first step.
+
+    Fails closed, exactly as `authorize_task_start` does — an unreachable
+    control plane is a refusal, not a licence to serve. Self-host never
+    consults it: a `Claims` object only exists when a JWT authenticated,
+    and `AGENT_SECRET` has always meant "this is the operator".
+
+    A bad key answers **404 rather than 403**: 403 confirms the route and
     the failure mode are worth probing, and this server holds the user's
-    own transcripts.
+    own transcripts. A 403 is reserved for a credential that is *real*
+    and the account behind it that is not on the roster — that answer is
+    about an account, not about a probe.
     """
-    return _auth(request).ok
+    from .session.jwt_auth import AccountRefused, Claims, ensure_on_roster
+
+    auth = _auth(request)
+    if not auth.ok:
+        return auth, _error(404, "not found")
+    if isinstance(auth.claims, Claims):
+        try:
+            await ensure_on_roster(auth.claims)
+        except AccountRefused as exc:
+            # The message is our own — `AccountRefused.detail` never
+            # carries text from Supabase.
+            return auth, _error(403, exc.detail)
+    return auth, None
 
 
 def _owner(claims: object) -> str | None:
@@ -922,8 +976,9 @@ async def check_model(request: Request):
     from pydantic_ai.messages import ModelRequest, UserPromptPart
     from pydantic_ai.models import ModelRequestParameters
 
-    if not _authed(request):
-        return _error(404, "not found")
+    _, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     body = await _json_body(request)
     client_host = _caller_key(request, body.get("device_id"))
     inline_config = _inline_model(body.get("model_config"))
@@ -986,8 +1041,9 @@ async def check_model(request: Request):
 @app.get("/v1/policy")
 async def get_effective_policy(request: Request):
     from .policy import UserPolicy
-    if not _authed(request):
-        return _error(404, "not found")
+    _, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     # Caller identity: prefer the install id the extension sends, fall back
     # to the peer address (SessionRegistry tracks per-key for the lifetime of
     # the server).
@@ -1135,10 +1191,18 @@ async def request_login_code(request: Request):
     """Mail a 6-digit sign-in code.
 
     The answer is the same for an address that has an account, one that
-    does not, and one this project has signups disabled for: Supabase's
-    own `create_user: false` is what keeps that true, and this route
-    swallows the rest rather than relaying it. A relay that told the
-    caller which addresses exist is a directory of the beta.
+    does not, and one on the beta roster: this route consults nothing
+    that knows who is in the beta and swallows Supabase's answer rather
+    than relaying it. A relay that told the caller which addresses exist
+    is a directory of the beta.
+
+    Signups are **on**, because there is otherwise no way for a brand-new
+    person to obtain a credential at all — `profiles.id` is an FK into
+    `auth.users`, so no row can be seeded for an address with no auth
+    account. That is exactly why the value may not become conditional on
+    the roster: it is the one branch on this route that would hand an
+    unauthenticated caller a membership oracle. Approval happens at
+    `exchange`, where the emailed code has already proved inbox control.
     """
     from .session.jwt_auth import (
         EMAIL_RE,
@@ -1170,16 +1234,25 @@ async def request_login_code(request: Request):
 
 @app.post("/v1/auth/exchange")
 async def exchange_login_code(request: Request):
-    """Trade the emailed code for a relay access token.
+    """Trade the emailed code for a relay access token, and say whether
+    this identity is on the beta roster.
 
     Supabase's body names whether the address exists, what the code was
     worth and how long the project has been rate limited; none of it
     crosses back. The caller learns that its code did not work, which is
     all the panel can act on.
+
+    **Reporting `approved` here is not the account-existence oracle
+    `request-code` is not allowed to become**, and the difference is the
+    gate: by the time this runs the caller has read a code out of an
+    inbox it controls, which `request-code` cannot verify. `approved` is
+    also only a report — `authorize_task_start` asks the same question
+    again at task start, so this is a UI state and not the decision.
     """
     from .session.jwt_auth import (
         EMAIL_RE,
         SupabaseUnavailable,
+        approve_at_exchange,
         exchange_login_code as _exchange,
         normalize_email,
     )
@@ -1198,7 +1271,10 @@ async def exchange_login_code(request: Request):
         return _error(502, "could not reach the sign-in service")
     except ValueError:
         return _error(400, "invalid or expired code")
-    return JSONResponse(content={"access_token": token})
+    # Never raises: a control plane that cannot answer this still leaves the
+    # caller signed in, and the second wall decides at task start.
+    approved = await approve_at_exchange(token)
+    return JSONResponse(content={"access_token": token, "approved": approved})
 
 
 # ---------------------------------------------------------------------------
@@ -1210,9 +1286,9 @@ async def create_session(request: Request):
     # Mints a session and allocates registry state, so it is gated like
     # the reads — otherwise anyone reaching the port can fill the registry
     # up to its 256-entry prune without ever holding the secret.
-    auth = _auth(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
 
     session_id = str(uuid.uuid4())
     # Validate before the registry write: a rejected host must not consume one
@@ -1266,9 +1342,9 @@ async def list_session_audits(request: Request):
     """
     from .agent.audit import list_sessions as _list
 
-    auth = _auth(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     sessions = _list()
     owner = _owner(auth.claims)
     if owner is not None:
@@ -1286,9 +1362,9 @@ async def read_audit(session_id: str, request: Request):
     """
     from .agent.audit import read as _read
 
-    auth = _auth(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     # Another account's session is a session that does not exist, not one
     # that is forbidden: a 403 confirms the id is real, and confirming
     # that is the whole of what the id is worth. Same rule as the bad-key
@@ -1319,9 +1395,9 @@ async def delete_session(session_id: str, request: Request):
     """
     from .agent.audit import delete as _delete
 
-    auth = _auth(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     if not registry.owns(session_id, _owner(auth.claims)):
         return _error(404, "unknown session")
     left: list[str] = []
@@ -1351,9 +1427,9 @@ async def delete_all_sessions(request: Request):
     """
     from .agent.audit import delete_all as _delete_all
 
-    auth = _auth(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     owner = _owner(auth.claims)
     if owner is None:
         deleted, residue = _delete_all()
@@ -1383,8 +1459,9 @@ async def delete_all_sessions(request: Request):
 # this one logs even when the user clicks Save with no task running.
 @app.post("/v1/policy_ack")
 async def policy_ack(request: Request):
-    if not _authed(request):
-        return _error(404, "not found")
+    _, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     body = await _json_body(request)
     settings = body.get("settings") or {}
     user_id = _caller_key(request, body.get("user_id"))
@@ -1458,9 +1535,11 @@ async def policy_ack(request: Request):
 async def create_reports(request: Request):
     from .session import failure_report as fr
 
-    if not _authed(request) or not fr.reporting_enabled():
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
+    if not fr.reporting_enabled():
         return _error(404, "not found")
-    auth = _auth(request)
     owner = auth.claims.sub if auth.claims is not None else None
     if not owner:
         # jwt mode authenticated by something else. Nothing here can name
@@ -1502,8 +1581,9 @@ async def suggestions(request: Request):
     """
     from .agent.suggest import generate
 
-    if not _authed(request):
-        return _error(404, "not found")
+    _, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     body = await _json_body(request)
     url = str(body.get("url", "") or "").strip()
     if not url:
@@ -2289,8 +2369,9 @@ async def run_task(request: Request):
 # careful:
 #
 #   * the **meter**, so an open form is not a bulk-write button;
-#   * the **one-field row** (`waitlist.build_row`), so nothing a browser can
-#     send — a referrer, a user agent, a URL — has somewhere to land;
+#   * the **narrow row** (`waitlist.build_row` — an email, a bounded display
+#     name, and the operator's batch), so nothing a browser can send — a
+#     referrer, a user agent, a URL, a free-text note — has somewhere to land;
 #   * the **same answer either way**, so it cannot be asked who is on the list.
 #
 # **It is its own `FastAPI()` because CORS middleware is per-application.**
@@ -2337,7 +2418,8 @@ async def _waitlist_http_exc(_request: Request, exc: StarletteHTTPException):
 
 @waitlist_app.post("/waitlist")
 async def join_waitlist(request: Request, background: BackgroundTasks):
-    """Take one email address. The reply does not say whether it was new."""
+    """Take one email address and, optionally, the name to address the invite
+    to. The reply does not say whether it was new."""
     from .session import waitlist as wl
     from .session.jwt_auth import EMAIL_RE, normalize_email
 
@@ -2383,7 +2465,12 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
     if not _signin_allowed(_signin_peer(request), email,
                             _forwarded_hop(request), prefix="waitlist:"):
         return _error(429, "too many attempts — wait a few minutes and try again")
-    signup = await wl.add(email)
+    # The one field the visitor typed that is not an address, so the operator
+    # can address the invite they are about to send. Bounded at
+    # `NAME_MAX_CHARS` inside `build_row`, stripped here, and absent from the
+    # answer either way — a signup is `{"ok": true}` whatever the body said.
+    name = str(body.get("name", "") or "").strip()
+    signup = await wl.add(email, name)
     if not signup.ok:
         # Fixed text. The address is not in it, and neither is a PostgREST
         # body — a PostgREST error quotes the row.

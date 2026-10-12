@@ -26,7 +26,7 @@ gh api repos/suryanshgupta9933/brotto/rulesets/24720045 \
 |---|---|---|
 | `deletion` | — | deleting the branch |
 | `non_fast_forward` | — | force pushes, i.e. every history rewrite |
-| `required_status_checks` | the three job names, non-strict | **merging with red CI** |
+| `required_status_checks` | the four job names, non-strict | **merging with red CI** |
 | `code_scanning` | CodeQL, `alerts_threshold: errors`, `security_alerts_threshold: high_or_higher` | merging with an open high-severity CodeQL alert |
 | `code_coverage` | `minimum_coverage: 60`, `max_coverage_drop: null` | see [the coverage gap](#the-two-gaps) |
 | `pull_request` | see below | direct pushes to `main` |
@@ -45,8 +45,9 @@ The `pull_request` rule allows `merge`, `squash` and `rebase`, and sets:
 ## The gaps
 
 **1. There is no `required_status_checks` rule.** ~~A PR can merge with red CI.~~
-**Fixed 2026-10-10.** The rule now requires the three real job names —
-`Orchestrator tests`, `Extension build`, `Docker image build` — which is why those
+**Fixed 2026-10-10.** The rule now requires the four real job names —
+`Orchestrator tests`, `Extension build`, `Docker image build`,
+`Migrations apply` — which is why those
 exact strings are load-bearing in `ci.yml`. The workflow has no aggregator, so a
 check named `CI` would never report and the rule would silently never be
 satisfied. Renaming a job in `ci.yml` without editing the ruleset breaks every
@@ -159,7 +160,8 @@ gh api --method PUT \
         "required_status_checks": [
           { "context": "Orchestrator tests" },
           { "context": "Extension build" },
-          { "context": "Docker image build" }
+          { "context": "Docker image build" },
+          { "context": "Migrations apply" }
         ]
       }
     },

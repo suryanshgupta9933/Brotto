@@ -134,6 +134,26 @@
     .status.ok { color: var(--ok); }
     .status.bad { color: var(--bad); }
 
+    /* The waitlist sits below the sign-in in the same step, so it is cut off
+       by the same hairline the head uses. Two fields, one status line, one
+       button — no box. */
+    .waitlist-block {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--rule);
+    }
+    .waitlist-block > .lbl {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-2);
+    }
+
     /* ── Foot ───────────────────────────────────────────────────────────── */
     #foot {
       display: flex;
@@ -258,6 +278,25 @@
           <div><button id="sendCodeBtn" class="btn" type="button">Send code</button></div>
         </div>
         <div id="cloudStatus" class="status"></div>
+        <!-- The same form the side panel carries. Always here rather than
+             hidden behind the refusal below, because somebody who has never
+             heard of the beta has to be able to leave an address from the
+             screen they are already on. An exchange that comes back
+             `approved: false` pre-fills the address it just proved they
+             control (prefillWaitlist) — and offers, never posts. -->
+        <div id="waitlistBlock" class="waitlist-block">
+          <span class="lbl">Not in the beta yet?</span>
+          <div class="field">
+            <label for="waitlistName">Name (optional)</label>
+            <input id="waitlistName" class="input" type="text" maxlength="64" autocomplete="name" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="waitlistEmail">Email</label>
+            <input id="waitlistEmail" class="input" type="email" autocomplete="email" spellcheck="false" />
+          </div>
+          <div id="waitlistStatus" class="status"></div>
+          <div><button id="waitlistJoinBtn" class="btn" type="button">Join the waitlist</button></div>
+        </div>
       </div>
     </section>
 

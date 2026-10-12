@@ -123,7 +123,7 @@ def test_the_waitlist_origin_is_allowed_to_post_the_form(client, monkeypatch):
 
     seen = []
 
-    async def fake_add(email):
+    async def fake_add(email, name=""):
         seen.append(email)
         return wl.Signup.CREATED
 
@@ -186,7 +186,7 @@ def test_the_waitlist_still_answers_the_same_everyway(client, monkeypatch):
 
 
 def _always(wl, value):
-    async def add(email):
+    async def add(email, name=""):
         return value
 
     return add
