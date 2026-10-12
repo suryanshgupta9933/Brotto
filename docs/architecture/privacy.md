@@ -352,10 +352,10 @@ the gate `request-code` cannot verify. Pinned by
 
 `beta_access` is read in **exactly one place** — `_listed_for_beta`, called from
 `approve_at_exchange` — and only to decide whether to *create* a `profiles` row.
-`authorize_task_start`, the wall that actually gates a run, reads `profiles` and
-never consults the roster again. So the absence of a roster row is a refusal
-**only for somebody who has not been admitted yet**. Deleting one for an
-already-approved member changes nothing they can observe.
+`ensure_on_roster`, the gate every use path and task start now shares, reads
+`profiles` and never consults the roster again. So the absence of a roster row
+is a refusal **only for somebody who has not been admitted yet**. Deleting one
+for an already-approved member changes nothing they can observe.
 
 Withdrawal is `update profiles set revoked_at = now() where email = '…'`, set
 by hand, and it takes effect at that member's next `task_start`. Deleting the
@@ -369,6 +369,42 @@ The operational consequence is the whole point: **an operator who removes a
 roster row instead of setting `revoked_at` has handed someone a working beta
 account while believing they took it away.** The migration file states this at
 the top of `004`, where an operator pasting a list will read it.
+
+## A valid signature is not a place in the beta
+
+`create_user` being `True` has a consequence that is easy to miss: **every person
+who signs up now holds a token that verifies.** A signature proves an account
+exists; it says nothing about the roster. So the six routes that gated on
+`_authed` — `POST /v1/model/check`, `GET /v1/policy`, `POST /v1/sessions`,
+`POST /v1/policy_ack`, `POST /v1/reports`, `POST /v1/suggestions` — were
+answering anyone who signed up, and two of them spend the operator's model
+credits.
+
+They now go through `_approved`, which is `ensure_on_roster` (existence plus
+`revoked_at`; no cap, no reservation) applied to every HTTP route that acts. The
+sign-in path keeps its own answer — a token is minted for anyone, on purpose,
+because that is what lets the panel offer somebody the waitlist instead of a
+bare failure. **Minting is open; using is not.** That split is the design, not
+a gap in it.
+
+`ensure_on_roster` is also the first half of `authorize_task_start`, which adds
+the cap and the reservation on top. One lookup, two callers: a second copy of
+the "no row means `not_invited`" rule would be two things to keep in step and
+one of them would drift. It **fails closed**, for the reason task start already
+did — an unreachable control plane is a refusal, not a licence to serve, and on
+two of these routes the alternative makes a third party's outage into an
+access-control decision.
+
+Two codes, deliberately. A **bad key is 404** — 403 confirms the route is worth
+probing, and this server holds the user's transcripts. A **403** means the
+credential is real and the *account* is not on the roster: an answer about an
+account, not about a probe.
+
+The ownership-scoped reads (`GET /v1/sessions`, `GET /v1/sessions/{id}/audit`,
+`DELETE …`) are deliberately **not** roster-gated and do not need to be: they
+are scoped by owner, and an unapproved person owns no sessions, because
+`POST /v1/sessions` is. Adding the lookup there would be a fourth control-plane
+hop per delete for no change in what can be read.
 
 ## Self-approval is an insert, never an upsert
 
@@ -407,14 +443,31 @@ note to land, and a name that grew past `NAME_MAX_CHARS` is truncated rather
 than costing the signup. The answer is still `{"ok": true}` whatever the body
 said.
 
-**Revocation is checked once per task, and it fails closed.** The JWT says who
-you are and nothing about whether you are still welcome, so `profiles` is the
-only answer to the second question — and task start is the only moment a
-decision is made. Putting it on the request path would make every step of every
-run depend on Supabase's uptime. **Failing closed is right here and only here**:
-this is the relay where every transcript lands on our disk, and "we could not
-check whether this person was revoked" is not a licence to record one more. A
-self-host relay never reaches the function.
+**The name is also neutralised for a spreadsheet, in the code and in the
+table.** The sink is not the row, it is the CSV export: the operator opens
+the table in whatever admin UI, exports, and that file lands in Excel or
+Sheets — and both execute a leading `=`, `+`, `-` or `@` as a formula. A
+stranger typing into a public form would then be running on the machine of
+the person who opens the export to send invites from. `build_row` prefixes
+those four characters with the apostrophe both spreadsheets read as "text",
+so the name still reads as the name the visitor typed. The **migration's
+CHECK** covers a row written by any path that is not the server's — the
+table editor, a `psql` session, a future import — and it is the half that
+cannot be renamed away. Both halves, or one of them is a guard waiting for
+a refactor.
+
+**Revocation is checked per request and per task, and it fails closed.** The
+JWT says who you are and nothing about whether you are still welcome, so
+`profiles` is the only answer to the second question. The *decision* — the cap,
+the reservation — is made once, at task start, so putting that on the request
+path would make every step of every run depend on Supabase's uptime. The
+*existence and revocation* question is asked on every route that acts (see
+*A valid signature is not a place in the beta*), because a signature no longer
+distinguishes a beta member from anyone who signed up. **Failing closed is
+right on both**: this is the relay where every transcript lands on our disk and
+the operator's credits are spent, and "we could not check whether this person
+was revoked" is not a licence to serve them. A self-host relay never reaches
+the function — no `Claims` object exists there.
 
 **Retention now has a default, and only here.** `BROTTO_RETENTION_DAYS`
 unset returns 30 on the hosted relay and `None` everywhere else. The reason is

@@ -240,6 +240,8 @@ def test_a_wrong_credential_still_closes_4001(client, monkeypatch, hosted, sessi
 
 
 def test_a_good_credential_connects(client, monkeypatch, hosted, session_id):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
+    _profiles_stub(monkeypatch, [_APPROVED])
     minted = _mint(client, _token())
     with client.websocket_connect(
         f"/ws/ext/{minted}", subprotocols=["brotto-v1", _token()]
@@ -255,6 +257,12 @@ def test_self_host_keeps_one_answer_for_both_failures(client, monkeypatch, tmp_p
 
 
 # ── the control plane, at task start only ─────────────────────────────────
+
+#: An approved, un-revoked row. The hosted relay now asks the roster on
+#: every route, not only at task start, so a test that is exercising the
+#: route needs this to get past the gate.
+_APPROVED = {"revoked_at": None, "week_start": None, "tasks_this_week": 0}
+
 
 def _profiles_stub(monkeypatch, rows, *, fail_on=()):
     calls = []
@@ -382,8 +390,11 @@ def test_a_task_start_from_a_revoked_user_never_reaches_the_agent(client, monkey
     agent exists.
     """
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path))
-    _profiles_stub(monkeypatch, [{"revoked_at": "2026-10-01T00:00:00Z", "week_start": _today(), "tasks_this_week": 1}])
+    # Minted while the account is still approved — POST /v1/sessions asks
+    # the roster now too — and revoked before the task starts.
+    _profiles_stub(monkeypatch, [_APPROVED])
     minted = _mint(client, _token())
+    _profiles_stub(monkeypatch, [{"revoked_at": "2026-10-01T00:00:00Z", "week_start": _today(), "tasks_this_week": 1}])
 
     with client.websocket_connect(
         f"/ws/ext/{minted}", subprotocols=["brotto-v1", _token()]
@@ -688,6 +699,7 @@ def _write_transcript(session_id: str) -> str:
 
 
 def test_another_account_cannot_see_the_session_in_the_index(client, monkeypatch, hosted, tmp_path):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     _mint(client, _token())
     _write_transcript(_mint(client, _b_token()))
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path / "sessions"))
@@ -698,6 +710,7 @@ def test_another_account_cannot_see_the_session_in_the_index(client, monkeypatch
 
 
 def test_another_account_gets_404_not_403_on_the_audit(client, monkeypatch, hosted):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     mine = _write_transcript(_mint(client, _token()))
     resp = client.get(
         f"/v1/sessions/{mine}/audit", headers={"authorization": f"Bearer {_b_token()}"}
@@ -713,6 +726,7 @@ def test_another_account_gets_404_not_403_on_the_audit(client, monkeypatch, host
 
 
 def test_another_account_cannot_delete_the_session(client, monkeypatch, hosted):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     mine = _mint(client, _token())
     resp = client.delete(
         f"/v1/sessions/{mine}", headers={"authorization": f"Bearer {_b_token()}"}
@@ -724,6 +738,7 @@ def test_another_account_cannot_delete_the_session(client, monkeypatch, hosted):
 
 
 def test_another_account_cannot_connect_to_the_socket(client, monkeypatch, hosted, session_id):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     """A valid token for the wrong person is not a credential failure.
 
     4001/4003 say "your credential"; 4004 says "this is not a session you
@@ -734,6 +749,7 @@ def test_another_account_cannot_connect_to_the_socket(client, monkeypatch, hoste
 
 
 def test_delete_all_only_reaches_the_callers_own_sessions(client, monkeypatch, hosted, tmp_path):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path / "sessions"))
     mine = _write_transcript(_mint(client, _token()))
     theirs = _write_transcript(_mint(client, _b_token()))
@@ -745,6 +761,7 @@ def test_delete_all_only_reaches_the_callers_own_sessions(client, monkeypatch, h
 
 
 def test_the_owner_still_reaches_their_own_session(client, monkeypatch, hosted):
+    _profiles_stub(monkeypatch, [_APPROVED])  # the roster, so POST /v1/sessions is not the thing under test
     mine = _write_transcript(_mint(client, _token()))
     assert client.get(
         f"/v1/sessions/{mine}/audit", headers={"authorization": f"Bearer {_token()}"}
@@ -1197,3 +1214,89 @@ def test_an_unreachable_control_plane_leaves_the_caller_signed_in(client, monkey
     resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
     assert resp.status_code == 200
     assert resp.json() == {"access_token": _token(email=LISTED), "approved": False}
+
+
+# ── the same wall on every use path, not only at task start ──────────────
+
+#: Every route that spends the operator's credits, stores the user's data or
+#: writes to a table. None of them may answer on a valid signature alone.
+USE_ROUTES = [
+    ("/v1/model/check", {"model_config": {}}),
+    ("/v1/policy", None),
+    ("/v1/sessions", {}),
+    ("/v1/policy_ack", {"settings": {}}),
+    ("/v1/reports", {"reports": []}),
+    ("/v1/suggestions", {"url": "https://example.test"}),
+]
+
+
+@pytest.mark.parametrize("route,body", USE_ROUTES)
+def test_an_unapproved_token_is_refused_on_every_use_path(
+    client, monkeypatch, hosted, route, body
+):
+    """The signature is not the invitation.
+
+    `create_user` is unconditionally true on the sign-in route, so every
+    person who signs up holds a token that verifies — a signature proves
+    an account exists, and these six routes were answering on that alone.
+    Two of them spend the operator's model credits, which is the cost this
+    is really about.
+    """
+    _profiles_stub(monkeypatch, [])  # a valid JWT with no profile row
+    headers = {"Authorization": f"Bearer {_token()}"}
+    resp = (client.get(route, headers=headers) if body is None
+            else client.post(route, json=body, headers=headers))
+    assert resp.status_code == 403, f"{route} answered {resp.status_code}"
+
+
+@pytest.mark.parametrize("route,body", USE_ROUTES)
+def test_an_unreachable_control_plane_fails_closed_on_every_use_path(
+    client, monkeypatch, hosted, route, body
+):
+    """Same direction as task start, same reason: "we could not check"
+    is not a licence to serve. An outage must not become an access
+    decision — especially on the two routes that call a provider.
+    """
+    _profiles_stub(monkeypatch, [], fail_on=("GET",))
+    headers = {"Authorization": f"Bearer {_token()}"}
+    resp = (client.get(route, headers=headers) if body is None
+            else client.post(route, json=body, headers=headers))
+    assert resp.status_code == 403, f"{route} answered {resp.status_code}"
+
+
+@pytest.mark.parametrize("route,body", USE_ROUTES)
+def test_a_revoked_account_is_refused_on_every_use_path(
+    client, monkeypatch, hosted, route, body
+):
+    _profiles_stub(monkeypatch, [{"revoked_at": "2026-10-01T00:00:00Z"}])
+    headers = {"Authorization": f"Bearer {_token()}"}
+    resp = (client.get(route, headers=headers) if body is None
+            else client.post(route, json=body, headers=headers))
+    assert resp.status_code == 403, f"{route} answered {resp.status_code}"
+
+
+def test_an_approved_account_reaches_every_use_path(client, monkeypatch, hosted):
+    """The guard is not a door that does not open — the roster hit passes."""
+    _profiles_stub(monkeypatch, [{"revoked_at": None}])
+    headers = {"Authorization": f"Bearer {_token()}"}
+    assert client.get("/v1/policy", headers=headers).status_code == 200
+    assert client.post("/v1/sessions", json={}, headers=headers).status_code == 201
+
+
+def test_a_bad_credential_is_still_a_404_not_a_403(client, monkeypatch, hosted):
+    """403 confirms the route is worth probing, and this server holds the
+    user's transcripts. 403 is reserved for a real credential whose
+    account is not on the roster."""
+    _profiles_stub(monkeypatch, [{"revoked_at": None}])
+    resp = client.get("/v1/policy", headers={"Authorization": "Bearer nope"})
+    assert resp.status_code == 404
+
+
+def test_self_host_answers_every_use_path_unchanged(client, monkeypatch):
+    """No `Claims` object exists on self-host, so the roster is never
+    consulted and a self-hoster's own box behaves exactly as it did."""
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("AGENT_SECRET", "s3cret")
+    headers = {"Authorization": "Bearer s3cret"}
+    assert client.get("/v1/policy", headers=headers).status_code == 200
+    assert client.post("/v1/sessions", json={}, headers=headers).status_code == 201

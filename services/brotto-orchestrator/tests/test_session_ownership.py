@@ -46,6 +46,16 @@ def hosted(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://project.test")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-key")
     monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key")
+    # An approved, un-revoked account. Every hosted route asks the roster
+    # now, not only task start — these files are about ownership and
+    # reports, not about the gate, so it is answered once here.
+    async def _approved_row(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        if method == "GET":
+            return 200, '[{"revoked_at": null, "week_start": null, "tasks_this_week": 0}]'
+        return 200, "true"
+
+    from brotto_orchestrator.session import jwt_auth
+    monkeypatch.setattr(jwt_auth, "_profiles", _approved_row)
 
 
 @pytest.fixture

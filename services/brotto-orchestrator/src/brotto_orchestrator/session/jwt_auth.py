@@ -398,15 +398,20 @@ async def approve_at_exchange(token: str) -> bool:
     return not row.get("revoked_at")
 
 
-async def authorize_task_start(claims: Claims) -> None:
-    """Revocation and the weekly cap, checked once per task. Raises AccountRefused.
+async def ensure_on_roster(claims: Claims) -> dict:
+    """This identity has a `profiles` row and it is not revoked. Returns the row.
+
+    **The one roster gate.** Existence and revocation, and nothing else —
+    no cap, no counter, no reservation — so every route can ask the
+    question task start asks without consuming a task slot it is not
+    getting. Raises `AccountRefused`.
 
     Fails **closed** if Supabase cannot be reached. That is the right
-    direction only here: this is the hosted relay, where the transcript
-    of every task lands on our disk, and "we could not check whether this
-    person was revoked" is not a licence to record one more. Self-host
-    never reaches this function — it has no Supabase configured and
-    authenticates with `AGENT_SECRET`.
+    direction: this is the hosted relay, where the transcript of every
+    task lands on our disk and the operator's model credits are spent, and
+    "we could not check whether this person was revoked" is not a licence
+    to serve them anyway. Self-host never reaches this function — it has
+    no Supabase configured and authenticates with `AGENT_SECRET`.
     """
     if not _supabase_url() or not _service_key():
         raise AccountRefused(
@@ -414,7 +419,6 @@ async def authorize_task_start(claims: Claims) -> None:
             "This relay has no Supabase configuration, so it cannot tell whether "
             "your access is still active.",
         )
-    today = datetime.now(timezone.utc).date().isoformat()
     try:
         status, text = await _profiles(
             "GET", f"?id=eq.{claims.sub}&select=revoked_at,week_start,tasks_this_week"
@@ -429,8 +433,9 @@ async def authorize_task_start(claims: Claims) -> None:
         raise AccountRefused("control_plane_unavailable", "Could not confirm your access.") from exc
 
     if not isinstance(rows, list) or not rows:
-        # Invitations are hand-issued: a valid JWT with no row is somebody
-        # who signed in without being invited, which is not a beta user.
+        # A valid JWT with no row is somebody who signed in without being
+        # invited, which is not a beta user. Sign-in creates the auth
+        # account for anyone; the allowlist creates this row.
         raise AccountRefused(
             "not_invited",
             "This account is not part of the beta. Ask the operator for an invitation.",
@@ -438,6 +443,18 @@ async def authorize_task_start(claims: Claims) -> None:
     row = rows[0] if isinstance(rows[0], dict) else {}
     if row.get("revoked_at"):
         raise AccountRefused("revoked", "This account's access has been withdrawn.")
+    return row
+
+
+async def authorize_task_start(claims: Claims) -> None:
+    """Revocation and the weekly cap, checked once per task. Raises AccountRefused.
+
+    `ensure_on_roster` is the membership half and it is shared with the
+    HTTP routes below the socket; the cap and the reservation are not, and
+    stay here where they are read exactly once per run.
+    """
+    row = await ensure_on_roster(claims)
+    today = datetime.now(timezone.utc).date().isoformat()
     # The counter resets by comparing week_start to today on read. A cron
     # to reset a number ten people move a few hundred times is a cron that
     # quietly stops running.

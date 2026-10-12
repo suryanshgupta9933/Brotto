@@ -360,14 +360,52 @@ def _auth(request: Request) -> AuthResult:
     )
 
 
-def _authed(request: Request) -> bool:
-    """HTTP flavour of the WebSocket check.
+async def _approved(request: Request) -> tuple[AuthResult, JSONResponse | None]:
+    """Roster membership, not just a valid signature. Auth result and any refusal.
 
-    A bad key answers 404 rather than 403: 403 confirms the route and
+    A signature check answers "is this a credential this relay accepts",
+    which in jwt mode is now a much weaker question than it looks: the
+    sign-in route creates the auth account for anyone who asks, so *every
+    person who signs up* holds a token that verifies. A signature proves
+    an account exists. It does not prove a place in the beta, and the six
+    routes that checked only this — two of which spend the operator's
+    model credits — were serving anyone who signed up.
+
+    **The split with the sign-in path is deliberate and is the point.**
+    Minting a token is left open on purpose, because it is what lets the
+    panel offer somebody the waitlist instead of a bare failure; *using*
+    the product is not on the other side of that door. So the two open
+    sign-in routes are the only unauthenticated surface a stranger
+    reaches, and every route that touches a session, a policy, a report
+    or a model call asks this.
+
+    There is deliberately no `_authed`-alike left on the request path:
+    a helper named for the weak check is what the next route picks.
+
+    Fails closed, exactly as `authorize_task_start` does — an unreachable
+    control plane is a refusal, not a licence to serve. Self-host never
+    consults it: a `Claims` object only exists when a JWT authenticated,
+    and `AGENT_SECRET` has always meant "this is the operator".
+
+    A bad key answers **404 rather than 403**: 403 confirms the route and
     the failure mode are worth probing, and this server holds the user's
-    own transcripts.
+    own transcripts. A 403 is reserved for a credential that is *real*
+    and the account behind it that is not on the roster — that answer is
+    about an account, not about a probe.
     """
-    return _auth(request).ok
+    from .session.jwt_auth import AccountRefused, Claims, ensure_on_roster
+
+    auth = _auth(request)
+    if not auth.ok:
+        return auth, _error(404, "not found")
+    if isinstance(auth.claims, Claims):
+        try:
+            await ensure_on_roster(auth.claims)
+        except AccountRefused as exc:
+            # The message is our own — `AccountRefused.detail` never
+            # carries text from Supabase.
+            return auth, _error(403, exc.detail)
+    return auth, None
 
 
 def _owner(claims: object) -> str | None:
@@ -922,8 +960,9 @@ async def check_model(request: Request):
     from pydantic_ai.messages import ModelRequest, UserPromptPart
     from pydantic_ai.models import ModelRequestParameters
 
-    if not _authed(request):
-        return _error(404, "not found")
+    _, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     body = await _json_body(request)
     client_host = _caller_key(request, body.get("device_id"))
     inline_config = _inline_model(body.get("model_config"))
@@ -986,8 +1025,9 @@ async def check_model(request: Request):
 @app.get("/v1/policy")
 async def get_effective_policy(request: Request):
     from .policy import UserPolicy
-    if not _authed(request):
-        return _error(404, "not found")
+    _, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     # Caller identity: prefer the install id the extension sends, fall back
     # to the peer address (SessionRegistry tracks per-key for the lifetime of
     # the server).
@@ -1230,9 +1270,9 @@ async def create_session(request: Request):
     # Mints a session and allocates registry state, so it is gated like
     # the reads — otherwise anyone reaching the port can fill the registry
     # up to its 256-entry prune without ever holding the secret.
-    auth = _auth(request)
-    if not auth.ok:
-        return _error(404, "not found")
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
 
     session_id = str(uuid.uuid4())
     # Validate before the registry write: a rejected host must not consume one
@@ -1403,8 +1443,9 @@ async def delete_all_sessions(request: Request):
 # this one logs even when the user clicks Save with no task running.
 @app.post("/v1/policy_ack")
 async def policy_ack(request: Request):
-    if not _authed(request):
-        return _error(404, "not found")
+    _, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     body = await _json_body(request)
     settings = body.get("settings") or {}
     user_id = _caller_key(request, body.get("user_id"))
@@ -1478,9 +1519,11 @@ async def policy_ack(request: Request):
 async def create_reports(request: Request):
     from .session import failure_report as fr
 
-    if not _authed(request) or not fr.reporting_enabled():
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
+    if not fr.reporting_enabled():
         return _error(404, "not found")
-    auth = _auth(request)
     owner = auth.claims.sub if auth.claims is not None else None
     if not owner:
         # jwt mode authenticated by something else. Nothing here can name
@@ -1522,8 +1565,9 @@ async def suggestions(request: Request):
     """
     from .agent.suggest import generate
 
-    if not _authed(request):
-        return _error(404, "not found")
+    _, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
     body = await _json_body(request)
     url = str(body.get("url", "") or "").strip()
     if not url:
