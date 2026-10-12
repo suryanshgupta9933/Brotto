@@ -7,30 +7,23 @@
 --
 -- ── the withdrawal: two statements, and each one alone is wrong ──────────
 --
--- **To withdraw a member, run two statements. Neither is sufficient alone**,
--- so the procedure below runs both, in one transaction, and refuses to run at
--- all if the address is not on the roster:
+-- **Withdrawing a member is two writes, and neither one alone is correct.**
+-- To withdraw somebody, run:
 --
---   do $$
---   declare
---     v text := lower(btrim('<address>'));
---     u uuid;
---   begin
---     if not exists (select 1 from beta_access where email = v) then
---       raise exception 'no beta_access row for %', v
---         using hint = 'addresses are stored normalised as lower(btrim(address))';
---     end if;
---     update beta_access set revoked_at = now() where email = v;
---     select id into u from profiles where email = v;
---     if u is null then
---       select id into u from auth.users where lower(btrim(email)) = v;
---     end if;
---     if u is null then
---       raise exception 'no account for %', v
---         using hint = 'admitted under a different spelling, or never signed in';
---     end if;
---     update profiles set revoked_at = now() where id = u;
---   end $$;
+--   ./scripts/beta-roster.sh revoke <address>
+--
+-- That script is the procedure. There is deliberately no HTTP route for it —
+-- see the header of `scripts/beta-roster.sh` — and nothing in this migration
+-- or the code creates one.
+--
+-- The two writes it makes, which is all this section needs to show, are:
+--
+--   update beta_access set revoked_at = now() where email = v;   -- the roster
+--   update profiles   set revoked_at = now() where id = uid;    -- the account
+--
+-- where `v = lower(btrim('<address>'))` and `uid` is resolved by the two
+-- lookups below. They run as **one statement**, so the two halves commit
+-- together or not at all.
 --
 -- **The failure mode, stated plainly: the `beta_access` write alone withdraws
 -- nobody who is already signed in.** It refuses *re-admission* at sign-in,
@@ -46,8 +39,8 @@
 -- normalised and compared by equality, so `where email = 'Foo@Bar.com'`
 -- matches **zero rows, reports success, and withdraws nobody** — and nothing in
 -- any log says a member was not revoked. `lower(btrim(...))` is written into
--- the procedure rather than left as prose an operator can skip, and the
--- `exists` check turns a mistyped or mis-spelled address into a loud failure.
+-- the script rather than left as prose an operator can skip, and its zero-row
+-- check turns a mistyped or mis-spelled address into a loud failure.
 -- (`citext` would fix the comparison itself, but it is a type change to a
 -- table that has not shipped anywhere, against a guarantee we already enforce
 -- at the write path — the guard gets 95% of the value at none of the blast
@@ -72,7 +65,7 @@
 -- on delete cascade`), so the procedure resolves the address to an id and
 -- updates by that.
 --
--- **Two lookups, in order, and then a raise.** The *snapshot* comes first —
+-- **Two lookups, in order.** The *snapshot* comes first —
 -- `profiles`, where the address is spelled the way it was admitted, which is
 -- the spelling on the operator's own list. Only when that misses does it fall
 -- back to the live row in `auth.users`, whose `email` is written by Supabase's
@@ -80,16 +73,36 @@
 -- `beta_access.email` and `profiles.email` are stored with; that is why it alone
 -- needs the `lower(btrim(...))` in the comparison.
 --
--- **Neither lookup resolving raises, because the operator cannot tell why.**
--- A rostered address that has never signed in has no account at all, and there is
--- genuinely nothing to withdraw — but that produces exactly the same zero rows
--- as an address they mistyped. So the procedure says so rather than returning
--- success, and the message names both causes. The alternative — an `if found`
--- that skips the second write — reports
--- a withdrawal that withdrew nobody, which is the exact failure the roster
--- `exists` guard above exists to prevent, reintroduced one statement later. A
--- raise also aborts the block, so the roster write does **not** survive it:
--- the honest outcome is no state changed and the operator told why.
+-- **Neither lookup resolving does NOT raise. This is a correction, and the
+-- earlier design here was wrong.** The procedure this section used to describe
+-- raised `no account for <address>` whenever the two lookups both came back
+-- empty, on the reasoning that a rostered address which has never signed in is
+-- indistinguishable from an address the operator mistyped — so the operator
+-- must be told rather than allowed to believe a withdrawal happened.
+--
+-- **The raise threw away the half that matters.** `beta_access.revoked_at` is
+-- the only part of a withdrawal that outlives the auth account; `profiles` is
+-- erased by the cascade below. A raise aborts the transaction, so aborting
+-- here rolled back the roster write too — the one write that would still have
+-- been standing had the account been deleted a month later — and kept the one
+-- that would have been recreated unrevoked on the next sign-up. Every exit from
+-- that branch left the member *less* withdrawn than the operator asked for,
+-- while looking like a loud, correct refusal.
+--
+-- So the refusal moved to where the ambiguity actually is: an address that is
+-- **not on the roster at all** is a typo, or somebody nobody invited, and the
+-- script dies there with nothing to undo. An address that *is* on the roster
+-- and resolves to no account is a real withdrawal of the roster half, so that
+-- write always lands, and the script says which half it skipped and what to
+-- type to re-admit. Both writes being in one statement is what makes skipping
+-- the `profiles` half safe: the roster write is never in doubt, and a
+-- withdrawal that missed a profile cannot leave a torn pair behind.
+--
+-- The failure the raise was trying to prevent — reporting a withdrawal that
+-- withdrew nobody — is still prevented, and more cheaply: the script reports
+-- which of the two rows the statement actually matched, and *an address not on
+-- the roster refuses outright*. Silence would be the bug; the raise was not
+-- the fix.
 --
 -- **Absence of a row is still the refusal for somebody not admitted yet.**
 -- `_listed_for_beta` refuses an address that is absent *or* that has
@@ -123,42 +136,37 @@
 -- this address is **withdrawn**, and pasting it again changes nothing —
 -- `_listed_for_beta` refuses a row whose `revoked_at` is set.
 --
--- **Re-admission is the same two-statement procedure with the values nulled,
--- and the order is unchanged** — `beta_access` first, then `profiles`, in one
--- transaction:
+-- **Re-admission is the same two writes with the values nulled, and the order
+-- is unchanged** — `beta_access` first, then `profiles`, as one statement:
 --
---   do $$
---   declare
---     v text := lower(btrim('<address>'));
---     u uuid;
---   begin
---     if not exists (select 1 from beta_access where email = v) then
---       raise exception 'no beta_access row for %', v
---         using hint = 'a withdrawn address keeps its row; do not paste to re-admit';
---     end if;
---     update beta_access set revoked_at = null where email = v;
---     select id into u from profiles where email = v;
---     if u is null then
---       select id into u from auth.users where lower(btrim(email)) = v;
---     end if;
---     if u is null then
---       raise exception 'no account for %', v
---         using hint = 'admitted under a different spelling, or never signed in';
---     end if;
---     update profiles set revoked_at = null where id = u;
---   end $$;
+--   ./scripts/beta-roster.sh unrevoke <address>
+--
+-- which runs:
+--
+--   update beta_access set revoked_at = null where email = v;   -- the roster
+--   update profiles   set revoked_at = null where id = uid;    -- the account
 --
 -- Both are required again, and for the same reason in reverse: nulling only
 -- `profiles` re-opens task start for somebody the roster still refuses at
 -- sign-in, and nulling only the roster un-revokes nothing that
 -- `authorize_task_start` — which reads `profiles` only — will honour. The
 -- `profiles` half resolves the address exactly as the withdrawal does — the
--- snapshot first, the live `auth.users` row second, and a raise when neither
--- resolves — and updates by `profiles.id`. It raises for the same reason: an
--- account deleted since the withdrawal is indistinguishable from a mistyped
--- address, and reporting success would leave the operator believing a profile
--- was un-revoked when none was. The fresh profile, if they sign up afterwards,
--- is created unrevoked either way.
+-- snapshot first, the live `auth.users` row second — and updates by
+-- `profiles.id`.
+--
+-- **Here, skipping the raise is what makes the re-admission safe, for the same
+-- reason the withdrawal does it.** The account is frequently *gone* by the time
+-- anybody re-admits: the member never signed in, or signed in and deleted the
+-- account and the cascade took the profile with it. That is not an error, it is
+-- the common case, and `beta_access.revoked_at = null` is the whole of it —
+-- `approve_at_exchange` will insert a fresh profile on their next sign-in
+-- anyway. Raising `no account for <address>` would abort the transaction and
+-- leave them **withdrawn**, which is the one state the operator asked to leave.
+-- The `beta_access` write sits in the same statement as the resolve, so
+-- clearing it never depends on the resolve succeeding, and the script says
+-- plainly when there was no profile row to clear rather than implying one was
+-- touched. The refusal that *is* kept is the one that can be acted on: an
+-- address that is not on the roster at all, where there is no row to null.
 --
 -- The address is matched against the **`email` claim on a verified JWT**, never
 -- against a body field, a query parameter or anything else a caller sent — the

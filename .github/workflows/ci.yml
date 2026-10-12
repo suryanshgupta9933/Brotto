@@ -172,3 +172,26 @@ jobs:
           tags: brotto:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ─── Migrations apply, in order, against real Postgres ────────────────
+  # There is no migration runner. The control plane is created by `psql -f`,
+  # once, by a human — so a statement that is only ever executed at that moment
+  # gets no other execution. `tests/` covers the Python that reads these tables
+  # and never the SQL that makes them.
+  #
+  # The gap already bit: 005_waitlist_name.sql shipped a backfill written
+  # `''' || name`, a syntax error that aborted the whole migration. Every test
+  # was green. The public waitlist would have 502'd on deploy and a self-hoster
+  # could not have built a database at all. The script stubs `auth.users` and
+  # the two Supabase roles so it runs against a bare Postgres, which is the
+  # point — a self-hoster has no Supabase.
+  migrations:
+    name: Migrations apply
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Docker is preinstalled on ubuntu-latest; the script does the rest,
+      # including cleaning up its own container via a trap.
+      - name: Apply every migration in order
+        run: ./scripts/test-migrations.sh
