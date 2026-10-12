@@ -30,13 +30,30 @@ So the privacy posture is not "we do not collect your data". It is:
 | API key | `chrome.storage.local`, user | until the user clears it |
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
-| Waitlist signup (an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |
+| Waitlist signup (a name, an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |
+| Beta allowlist (an email, and the row's insert timestamp) | `beta_access` table in Supabase, server | until the operator drops it |
 | Waitlist confirmation (the address, in transit and in Resend's request logs) | `api.resend.com` | theirs, not ours |
 | Audit request bodies | whatever the model provider logs | theirs, not ours |
 
 The waitlist is the one row in that table that came from **a stranger** rather
 than from an account, and it is covered by "Writing new code here" below —
 see *The waitlist is the first data from someone who is not an account*.
+
+**`beta_access` and `waitlist` must stay disjoint.** The allowlist
+(`supabase/migrations/004_beta_access.sql`) is the same invitation a
+`profiles` row is, entered by address so the operator can bulk-paste a list —
+and it stays a table the operator writes by hand. **Of its three columns only
+`email` is ever read**: `_listed_for_beta` selects `select=email` and nothing
+else. `approved_at` exists because the table is a ledger someone will ask
+"when", and it is filled by the column default rather than by any path here;
+**`added_by` is written by nobody** — no code path supplies it, so the column
+that looks like an author field is empty for every row that exists. The moment
+anything copies a
+waitlist submission into it without a human deciding, `POST /v1/waitlist` — the
+one route reachable with **no credential at all** — answers "is this person in
+the beta?" to anyone who posts an address. A stranger's row becoming an
+invitation by pipeline is that route turned into a membership oracle; the same
+reason the waitlist answers a duplicate exactly as it answers a first submit.
 
 **Resend is a third party for waitlist addresses and for nothing else here.**
 An account's identity is Supabase's, and Supabase's own mail (the sign-in code)
@@ -309,14 +326,62 @@ the counter — at task start. The email is there so the operator can answer
 are how a credential comes into existence; gating them on one is a closed door.
 That makes them the one place a route can become **a directory of the beta**:
 `POST /v1/auth/request-code` returns the same answer for an address that has an
-account, one that does not, and one this project has signups disabled for.
-Supabase's own `create_user: false` is what keeps that true, and every response
-body is swallowed rather than relayed — its text names whether the address
-exists, what the code was worth, and how long the project has been rate limited.
+account, one that does not, and one on the beta roster — this route consults
+nothing that knows who is in the beta, and every response body is swallowed
+rather than relayed. Supabase's text names whether the address exists, what the
+code was worth, and how long the project has been rate limited.
 `/v1/auth/exchange` raises a fixed `"invalid or expired code"` for the same
 reason. Only an **incomplete call** is reported, because that says nothing about
 the address and reporting it is the difference between "check your inbox" and
 "nothing is wrong, wait".
+
+**And `create_user` is `True` — it is not allowed to become conditional.**
+There used to be no signup path at all, and that is not a neutral choice:
+`profiles.id` is an FK into `auth.users`, so a profile *cannot* be pre-seeded
+for an address that has no auth account, and the roster check could therefore
+only ever land on the unauthenticated route — turning "check your inbox" into
+"are you on the list?" for anyone who can reach a public URL. So the roster is
+read at `/v1/auth/exchange` instead, which is safe for one reason and one only:
+**by then the caller has read a code out of an inbox it controls**, and that is
+the gate `request-code` cannot verify. Pinned by
+`test_request_code_consults_no_allowlist`.
+
+## Self-approval is an insert, never an upsert
+
+The invitation is now a pre-loaded row in `beta_access`, and the `profiles` row
+is written by the relay at exchange. That puts the whole risk onto one
+statement, because the natural way to write "this account is approved" against
+a table with a primary key is an **upsert** — and an upsert on this path is a
+revocation erased from the record. A member the operator deliberately withdrew
+(`revoked_at` set) signs back in, the upsert nulls their revocation, and nothing
+anywhere records that it happened. So the write is
+`POST /profiles?on_conflict=id` with `Prefer: resolution=ignore-duplicates`:
+PostgREST declines to touch a row that is already there, and the code
+**re-reads the row afterwards** rather than trusting the insert — "already
+there" *is* the revoked case. `revoked_at` is not in the insert body and is not
+written by any path here. Pinned by
+`test_a_revoked_member_keeps_the_revocation_by_signing_in_again`.
+
+The email is read from the **verified JWT claims** and never from the submitted
+body: the body is caller-supplied and this is the only function that acts on it.
+
+`approved` in the exchange response is a report and not the gate. It is safe to
+return for the inbox-control reason above, and it is only a report because
+`authorize_task_start` asks the same question again at task start — a member
+revoked between signing in and starting a task is still refused, pinned by
+`test_the_second_wall_still_stands_after_an_approved_sign_in`. Every failure in
+the approval path answers `false` rather than raising: the credential is real
+either way, and failing the whole exchange would sign a valid person out
+because Supabase's REST side blinked.
+
+**A waitlist row is now an email, a bounded name, and the operator's batch.**
+The name is the one field the visitor typed that is not an address, and it is
+there for one reason: the operator is about to send these people an invite and
+cannot say their name without it. `build_row`'s named-argument shape is
+unchanged, so there is still nowhere for a referrer, a user agent, a URL or a
+note to land, and a name that grew past `NAME_MAX_CHARS` is truncated rather
+than costing the signup. The answer is still `{"ok": true}` whatever the body
+said.
 
 **Revocation is checked once per task, and it fails closed.** The JWT says who
 you are and nothing about whether you are still welcome, so `profiles` is the

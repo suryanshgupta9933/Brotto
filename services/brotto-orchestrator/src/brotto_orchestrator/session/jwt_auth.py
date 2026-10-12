@@ -165,16 +165,24 @@ def _anon_key() -> str:
 
 
 async def _supabase_call(
-    method: str, path: str, *, json_body: dict, api_key: str, service: bool = False
+    method: str, path: str, *, json_body: dict, api_key: str, service: bool = False,
+    prefer: str = "",
 ) -> tuple[int, str]:
     """One authenticated call to Supabase. Status and raw text.
 
     The text is returned unparsed so every caller decides what a body
     means; nothing here logs it, because these bodies hold email
     addresses and service-key material.
+
+    `prefer` carries a `Prefer:` header — PostgREST's own request
+    preferences. One caller needs it: the self-approval insert is
+    `resolution=ignore-duplicates`, which is what makes it an insert and
+    not an upsert.
     """
     url = f"{_supabase_url()}/{path.lstrip('/')}"
     headers = {"apikey": api_key, "Content-Type": "application/json"}
+    if prefer:
+        headers["Prefer"] = prefer
     if service:
         headers["Authorization"] = f"Bearer {api_key}"
     timeout = aiohttp.ClientTimeout(total=SUPABASE_TIMEOUT_SECONDS)
@@ -187,16 +195,19 @@ async def _supabase_call(
 
 
 def _profiles(
-    method: str, query: str, body: dict | None = None, *, path: str = "rest/v1/profiles"
+    method: str, query: str, body: dict | None = None, *, path: str = "rest/v1/profiles",
+    prefer: str = "",
 ) -> tuple[int, str]:
     """A PostgREST call bound to the service role. The one seam tests stub.
 
     `path` is the whole relative path because the cap reservation is an
-    RPC against the same table, not a REST verb on it — both go through
+    RPC against the same table, not a REST verb on it, and the
+    self-approval insert reads a different table — all three go through
     here so one stub in a test covers the whole control plane.
     """
     return _supabase_call(
-        method, f"{path}{query}", json_body=body or {}, api_key=_service_key(), service=True
+        method, f"{path}{query}", json_body=body or {}, api_key=_service_key(),
+        service=True, prefer=prefer,
     )
 
 
@@ -220,9 +231,23 @@ async def request_login_code(email: str) -> None:
     """Ask Supabase to mail a 6-digit sign-in code.
 
     Raises SupabaseUnavailable only when the call did not complete. A
-    Supabase *answer* is swallowed whatever it says, because "signups not
-    allowed for otp" and "user not found" are exactly the two responses
-    that turn this route into an account-existence oracle.
+    Supabase *answer* is swallowed whatever it says, because "user not
+    found" and a rate-limit refusal are exactly the two responses that
+    turn this route into an account-existence oracle.
+
+    **`create_user` is unconditionally `True`, and it is not allowed to
+    become anything else.** This used to be `False`, which — while
+    invitations were hand-issued — meant a brand-new address could obtain
+    no credential at all. It could not simply be flipped back on
+    membership, either: `profiles.id` is an FK into `auth.users`, so no
+    profile can be seeded for an address with no auth account, and the
+    gate would have to live here to have any effect. This route is
+    unauthenticated, so a conditional here is a branch that answers
+    differently for a listed address and a stranger's — a directory of
+    the beta, handed to anyone who can reach a public URL. **The
+    allowlist is consulted at `exchange`, after the caller has proved
+    inbox control, which is the gate that makes that answer safe.**
+    Pinned by `test_request_code_consults_no_allowlist`.
     """
     key = _anon_key()
     if not _supabase_url() or not key:
@@ -231,7 +256,7 @@ async def request_login_code(email: str) -> None:
         status, _ = await _supabase_call(
             "POST",
             "auth/v1/otp",
-            json_body={"email": normalize_email(email), "create_user": False},
+            json_body={"email": normalize_email(email), "create_user": True},
             api_key=key,
         )
     except SupabaseUnavailable:
@@ -272,6 +297,105 @@ async def exchange_login_code(email: str, code: str) -> str:
     if not isinstance(token, str) or not token:
         raise ValueError("invalid or expired code")
     return token
+
+
+#: The pre-loaded roster. One row per approved address, normalised on the way
+#: in, so the lookup below is a string equality and not a normalisation that
+#: could disagree between the two spellings of one person's inbox.
+BETA_ACCESS_PATH = "rest/v1/beta_access"
+
+#: PostgREST's own spelling of "insert if absent, leave the row alone if it is
+#: already there". Without it an `on_conflict` POST is an **upsert**, and an
+#: upsert on this path is a revocation erased from the record: a member the
+#: operator deliberately withdrew signs back in and is silently reinstated,
+#: with nothing anywhere saying so. See `approve_at_exchange`.
+_IGNORE_DUPLICATES = "resolution=ignore-duplicates"
+
+
+async def _listed_for_beta(email: str) -> bool:
+    """Whether `beta_access` carries this normalised address.
+
+    Never raises and never reports *why* — a miss and an unreachable
+    control plane are both False here, because a caller who has already
+    proved inbox control gets the same answer either way and the second
+    wall (`authorize_task_start`) is what actually decides.
+    """
+    try:
+        status, text = await _profiles(
+            "GET", f"?email=eq.{email}&select=email", path=BETA_ACCESS_PATH
+        )
+    except Exception as exc:
+        log.warning("beta_access lookup failed: %s", type(exc).__name__)
+        return False
+    if status >= 400:
+        log.warning("beta_access lookup answered %d", status)
+        return False
+    try:
+        rows = json.loads(text)
+    except Exception:
+        return False
+    return isinstance(rows, list) and bool(rows)
+
+
+async def approve_at_exchange(token: str) -> bool:
+    """Self-approve a just-signed-in identity if the roster lists it.
+
+    Called once, from `POST /v1/auth/exchange`, with the access token
+    Supabase just minted. **The email comes from the verified claims and
+    never from the submitted body**: the body is caller-supplied and this
+    is the one function that would act on it.
+
+    **Insert-if-absent, never upsert.** `on_conflict=id` with
+    `Prefer: resolution=ignore-duplicates` is an insert that declines to
+    touch an existing row, so a member the operator revoked (`revoked_at`
+    set) keeps that row, and the re-read below answers `False` for them.
+    `revoked_at` is not in the insert body and is not written here by any
+    path. The alternative — upserting `revoked_at: null` because the row
+    "should" be active — reinstates a withdrawn member on their next
+    sign-in and leaves no trace of it anywhere.
+
+    `True` is a report, not the gate: `authorize_task_start` asks again at
+    task start, so a wrong answer here costs one confusing UI state and
+    not an unauthorised run. That is why every failure below answers
+    False instead of raising — the credential is valid either way.
+    """
+    if not _supabase_url() or not _service_key():
+        return False
+    claims = verify_jwt(token)
+    if claims is None:
+        return False
+    email = normalize_email(claims.email)
+    # Also the injection guard: this string goes into a PostgREST filter, and
+    # a comma in an `eq.` value is a filter separator.
+    if not EMAIL_RE.fullmatch(email):
+        return False
+    if not await _listed_for_beta(email):
+        return False
+    try:
+        status, _ = await _profiles(
+            "POST", "?on_conflict=id", {"id": claims.sub, "email": email},
+            prefer=_IGNORE_DUPLICATES,
+        )
+        if status >= 400:
+            log.warning("profile insert answered %d", status)
+            return False
+        # Read it back rather than trusting the insert: the row may have been
+        # there already, and "there already" is the revoked case.
+        status, text = await _profiles("GET", f"?id=eq.{claims.sub}&select=revoked_at")
+    except Exception as exc:
+        log.warning("profile approval failed: %s", type(exc).__name__)
+        return False
+    if status >= 400:
+        log.warning("profile re-read answered %d", status)
+        return False
+    try:
+        rows = json.loads(text)
+    except Exception:
+        return False
+    if not isinstance(rows, list) or not rows:
+        return False
+    row = rows[0] if isinstance(rows[0], dict) else {}
+    return not row.get("revoked_at")
 
 
 async def authorize_task_start(claims: Claims) -> None:

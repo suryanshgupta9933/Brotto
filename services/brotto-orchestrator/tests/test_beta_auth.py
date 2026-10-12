@@ -494,11 +494,18 @@ def test_exchange_returns_the_access_token(client, monkeypatch, hosted):
         return "a.b.c"
 
     monkeypatch.setattr(jwt_auth, "exchange_login_code", fake)
+    monkeypatch.setattr(jwt_auth, "approve_at_exchange", _no_approval)
     resp = client.post(
         "/v1/auth/exchange", json={"email": "beta@example.test", "code": "123456"}
     )
     assert resp.status_code == 200
-    assert resp.json() == {"access_token": "a.b.c"}
+    assert resp.json() == {"access_token": "a.b.c", "approved": False}
+
+
+async def _no_approval(token: str) -> bool:
+    """The approval step answered False. Used wherever approval is not the
+    subject of the test, so those tests never reach the control plane."""
+    return False
 
 
 def test_a_wrong_code_answers_400_and_leaks_nothing(client, monkeypatch, hosted):
@@ -966,6 +973,7 @@ def test_exchange_is_throttled_too(client, monkeypatch, hosted):
         return "a.b.c"
 
     monkeypatch.setattr(jwt_auth, "exchange_login_code", fake)
+    monkeypatch.setattr(jwt_auth, "approve_at_exchange", _no_approval)
     codes = [
         client.post("/v1/auth/exchange",
                     json={"email": "beta@example.test", "code": "123456"}).status_code
@@ -990,3 +998,202 @@ def test_the_sign_in_limiter_sees_through_a_proxy(client, monkeypatch, hosted):
         )
         assert resp.status_code == 200
     assert len(sent) == 5
+
+
+# ── self-approval: the roster, not the invitation ─────────────────────────
+#
+# Invitations were rows the operator typed. Now the roster is a table of
+# approved addresses and the row in `profiles` is written by the relay at
+# exchange — which moves three things onto code that used to have none of
+# them, and each is pinned below: signups must exist at all, the open route
+# must not learn who is on the roster, and the insert must not be able to
+# un-revoke anybody.
+
+LISTED = "listed@example.test"
+
+
+def _roster_stub(monkeypatch, *, listed=(), profiles=()):
+    """The control plane as the approval path uses it.
+
+    Models the two tables rather than answering the same thing to every
+    query: `beta_access` filters by the address asked for (so a claim that
+    is *not* the one the caller typed finds nothing), and `profiles` hands
+    back whatever rows it was seeded with. Returns the calls.
+    """
+    calls = []
+
+    async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        calls.append({"method": method, "query": query, "body": body,
+                      "path": path, "prefer": prefer})
+        if path == jwt_auth.BETA_ACCESS_PATH:
+            want = query.split("email=eq.", 1)[1].split("&", 1)[0]
+            return 200, json.dumps([{"email": r} for r in listed if r == want])
+        if method == "POST":
+            return 201, ""
+        return 200, json.dumps(list(profiles))
+
+    monkeypatch.setattr(jwt_auth, "_profiles", fake)
+    return calls
+
+
+def _stub_verify(monkeypatch):
+    """Supabase hands back a token whose claims name the listed address.
+
+    The claims — not the body — are what the approval reads, so the stub
+    has to agree with the roster or every happy-path test is really
+    testing the miss.
+    """
+    async def fake(email, code):
+        return _token(email=LISTED)
+
+    monkeypatch.setattr(jwt_auth, "exchange_login_code", fake)
+
+
+def test_signups_are_on_so_a_new_person_can_get_a_credential(hosted, monkeypatch):
+    """There is no other signup path, so `create_user: false` closed the door
+    on everybody who was not already a row."""
+    sent = []
+
+    async def fake(method, path, *, json_body, api_key, service=False, prefer=""):
+        sent.append((path, json_body))
+        return 200, "{}"
+
+    monkeypatch.setattr(jwt_auth, "_supabase_call", fake)
+    import asyncio
+
+    asyncio.run(jwt_auth.request_login_code("  Beta@Example.TEST "))
+    assert sent[0] == ("auth/v1/otp", {"email": "beta@example.test", "create_user": True})
+
+
+def test_request_code_consults_no_allowlist(client, monkeypatch, hosted):
+    """The branch that would turn an open route into a directory of the beta.
+
+    `profiles.id` is an FK into `auth.users`, so no row can be seeded for an
+    address with no auth account — which means the roster check *could* only
+    ever land on this route, the one with no credential. It does not land
+    here: an unlisted stranger and a listed member are the same request.
+    """
+    def explode(*a, **k):
+        raise AssertionError("request-code consulted the roster")
+
+    monkeypatch.setattr(jwt_auth, "_profiles", explode)
+    monkeypatch.setattr(jwt_auth, "_listed_for_beta", explode)
+    _stub_send(monkeypatch)
+    assert client.post(
+        "/v1/auth/request-code", json={"email": "stranger@example.test"}
+    ).json() == {"sent": True}
+
+
+def test_a_listed_address_approves_itself_at_exchange(client, monkeypatch, hosted):
+    calls = _roster_stub(monkeypatch, listed=[LISTED], profiles=[{"revoked_at": None}])
+    _stub_verify(monkeypatch)
+    resp = client.post(
+        "/v1/auth/exchange", json={"email": LISTED, "code": "123456"}
+    )
+    assert resp.json() == {"access_token": _token(email=LISTED), "approved": True}
+    insert = next(c for c in calls if c["method"] == "POST" and c["path"] == "rest/v1/profiles")
+    assert insert["body"] == {"id": USER_ID, "email": LISTED}
+    # Insert-if-absent, not an upsert. Written as an upsert it would touch an
+    # existing row, and `test_a_revoked_member_keeps_the_revocation` is what
+    # that costs.
+    assert insert["query"] == "?on_conflict=id"
+    assert insert["prefer"] == "resolution=ignore-duplicates"
+
+
+def test_an_unlisted_address_is_approved_by_nobody_and_writes_nothing(client, monkeypatch, hosted):
+    """Sign-in still succeeds — the credential is real — and no row appears."""
+    calls = _roster_stub(monkeypatch, listed=[LISTED])
+    _stub_verify(monkeypatch)
+    monkeypatch.setattr(
+        jwt_auth, "verify_jwt", lambda token: Claims(sub=USER_ID, email="stranger@example.test")
+    )
+    resp = client.post(
+        "/v1/auth/exchange", json={"email": "stranger@example.test", "code": "123456"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["approved"] is False
+    assert [c["method"] for c in calls if c["path"] == "rest/v1/profiles"] == []
+
+
+def test_the_approved_email_is_the_claims_and_not_the_body(client, monkeypatch, hosted):
+    """The body is caller-supplied and this is the one function acting on it.
+
+    The roster holds the address the caller *typed*; the token Supabase
+    issued says somebody else. Acting on the body would approve the wrong
+    inbox, so the claim wins even when the claim is the unwelcome answer.
+    """
+    calls = _roster_stub(monkeypatch, listed=[LISTED])
+    _stub_verify(monkeypatch)  # these claims say listed@example.test; the roster holds it
+    monkeypatch.setattr(jwt_auth, "verify_jwt",
+                        lambda token: Claims(sub=USER_ID, email="stranger@example.test"))
+    resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
+    assert resp.json()["approved"] is False
+    assert [c["method"] for c in calls if c["path"] == "rest/v1/profiles"] == []
+
+
+def test_a_revoked_member_keeps_the_revocation_by_signing_in_again(client, monkeypatch, hosted):
+    """**The trap.** Self-approval must be an insert-if-absent.
+
+    Written as an upsert — or with `revoked_at: null` in the body "because
+    the row should be active" — a member the operator deliberately
+    withdrew signs back in and is silently reinstated, with nothing
+    anywhere recording that it happened. `revoked_at` is not written by any
+    path here, and the `Prefer` header is what declines to touch the row.
+    """
+    calls = _roster_stub(
+        monkeypatch, listed=[LISTED], profiles=[{"revoked_at": "2026-10-01T00:00:00Z"}]
+    )
+    _stub_verify(monkeypatch)
+    resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
+    assert resp.status_code == 200
+    assert resp.json()["approved"] is False
+    # No write touched the revocation — not even naming the field. The
+    # *read* below it selects `revoked_at`, which is the whole point of the
+    # re-read, so this is scoped to the calls that write.
+    writes = [c for c in calls if c["method"] == "POST"]
+    assert "revoked_at" not in json.dumps(writes)
+    assert set(writes[0]["body"]) == {"id", "email"}
+
+
+def test_the_second_wall_still_stands_after_an_approved_sign_in(client, monkeypatch, hosted, session_id, tmp_path):
+    """`approved` is a report for the panel; the decision is at task start.
+
+    The row is active when the person signs in and revoked a minute later —
+    which is the whole point of reading the roster at task start instead of
+    trusting a token.
+    """
+    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(tmp_path))
+    calls = _roster_stub(monkeypatch, listed=[LISTED], profiles=[{"revoked_at": None}])
+    _stub_verify(monkeypatch)
+    assert client.post(
+        "/v1/auth/exchange", json={"email": LISTED, "code": "123456"}
+    ).json()["approved"] is True
+
+    calls.clear()
+    rows = [{"revoked_at": None, "week_start": _today(), "tasks_this_week": 0}]
+    _profiles_stub(monkeypatch, rows)
+    minted = _mint(client, _token())
+
+    rows[0]["revoked_at"] = "2026-10-02T00:00:00Z"  # the operator, mid-session
+    import asyncio
+
+    with pytest.raises(jwt_auth.AccountRefused) as caught:
+        asyncio.run(jwt_auth.authorize_task_start(Claims(sub=USER_ID, email=LISTED)))
+    assert caught.value.reason == "revoked"
+
+
+def test_an_unreachable_control_plane_leaves_the_caller_signed_in(client, monkeypatch, hosted):
+    """The credential is real and the answer is only a report.
+
+    Failing the whole exchange would sign a valid person out because
+    Supabase's REST side blinked; failing *this* costs one confusing UI
+    state, and task start refuses on the same failure.
+    """
+    async def fake(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        raise jwt_auth.SupabaseUnavailable("boom")
+
+    monkeypatch.setattr(jwt_auth, "_profiles", fake)
+    _stub_verify(monkeypatch)
+    resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
+    assert resp.status_code == 200
+    assert resp.json() == {"access_token": _token(email=LISTED), "approved": False}

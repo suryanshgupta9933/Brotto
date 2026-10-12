@@ -1135,10 +1135,18 @@ async def request_login_code(request: Request):
     """Mail a 6-digit sign-in code.
 
     The answer is the same for an address that has an account, one that
-    does not, and one this project has signups disabled for: Supabase's
-    own `create_user: false` is what keeps that true, and this route
-    swallows the rest rather than relaying it. A relay that told the
-    caller which addresses exist is a directory of the beta.
+    does not, and one on the beta roster: this route consults nothing
+    that knows who is in the beta and swallows Supabase's answer rather
+    than relaying it. A relay that told the caller which addresses exist
+    is a directory of the beta.
+
+    Signups are **on**, because there is otherwise no way for a brand-new
+    person to obtain a credential at all — `profiles.id` is an FK into
+    `auth.users`, so no row can be seeded for an address with no auth
+    account. That is exactly why the value may not become conditional on
+    the roster: it is the one branch on this route that would hand an
+    unauthenticated caller a membership oracle. Approval happens at
+    `exchange`, where the emailed code has already proved inbox control.
     """
     from .session.jwt_auth import (
         EMAIL_RE,
@@ -1170,16 +1178,25 @@ async def request_login_code(request: Request):
 
 @app.post("/v1/auth/exchange")
 async def exchange_login_code(request: Request):
-    """Trade the emailed code for a relay access token.
+    """Trade the emailed code for a relay access token, and say whether
+    this identity is on the beta roster.
 
     Supabase's body names whether the address exists, what the code was
     worth and how long the project has been rate limited; none of it
     crosses back. The caller learns that its code did not work, which is
     all the panel can act on.
+
+    **Reporting `approved` here is not the account-existence oracle
+    `request-code` is not allowed to become**, and the difference is the
+    gate: by the time this runs the caller has read a code out of an
+    inbox it controls, which `request-code` cannot verify. `approved` is
+    also only a report — `authorize_task_start` asks the same question
+    again at task start, so this is a UI state and not the decision.
     """
     from .session.jwt_auth import (
         EMAIL_RE,
         SupabaseUnavailable,
+        approve_at_exchange,
         exchange_login_code as _exchange,
         normalize_email,
     )
@@ -1198,7 +1215,10 @@ async def exchange_login_code(request: Request):
         return _error(502, "could not reach the sign-in service")
     except ValueError:
         return _error(400, "invalid or expired code")
-    return JSONResponse(content={"access_token": token})
+    # Never raises: a control plane that cannot answer this still leaves the
+    # caller signed in, and the second wall decides at task start.
+    approved = await approve_at_exchange(token)
+    return JSONResponse(content={"access_token": token, "approved": approved})
 
 
 # ---------------------------------------------------------------------------
