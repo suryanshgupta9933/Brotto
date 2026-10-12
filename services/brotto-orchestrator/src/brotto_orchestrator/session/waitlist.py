@@ -61,6 +61,7 @@ from __future__ import annotations
 import enum
 import logging
 import os
+import re
 
 from .auth import auth_mode
 
@@ -104,6 +105,29 @@ def batch() -> str:
     return os.getenv(BATCH_ENV, "").strip()[:64]
 
 
+#: A name a spreadsheet will *run*. CSV is the interchange format for every
+#: table editor, and Excel and Google Sheets both execute a leading `=`, `+`,
+#: `-` or `@` as a formula when the export is opened. The operator exports the
+#: waitlist to invite from it, so a stranger's name is a thing they can hand
+#: this operator's shell. Not a refactor of the leading space — a prefix, and
+#: the same four characters the migration's CHECK refuses.
+_NAME_FORMULA_RE = re.compile(r"\A[=+\-@\t\r]")
+
+
+def _safe_name(name: str) -> str:
+    """The name as stored, truncated and stripped of a formula prefix.
+
+    An apostrophe is what both spreadsheets read as "this cell is text",
+    so `=cmd|…` is stored as `'=cmd|…` and displays without it. It is not
+    stripped rather than quoted because a visitor whose name genuinely
+    begins with a dash should still see their own name in the export.
+    """
+    name = name[:NAME_MAX_CHARS]
+    if _NAME_FORMULA_RE.match(name):
+        name = "'" + name
+    return name
+
+
 def build_row(*, email: str, name: str = "", **extra) -> dict:
     """The row for one signup. Raises on anything it was not asked to store.
 
@@ -115,15 +139,22 @@ def build_row(*, email: str, name: str = "", **extra) -> dict:
     `name` is the one field the visitor typed that is not an address, and it is
     here for one reason: the operator invites these people by mail and cannot
     say their name without it. It is a display name, bounded at
-    `NAME_MAX_CHARS`, and there is still no parameter for a referrer, a user
-    agent, a URL or a note — which is the guarantee that matters, and which
+    `NAME_MAX_CHARS` and neutralised for a spreadsheet — see `_safe_name` — and
+    there is still no parameter for a referrer, a user agent, a URL or a note,
+    which is the guarantee that matters, and which
     `test_the_row_cannot_carry_a_referrer_a_url_or_a_typed_field` holds.
+
+    **The formula guard is here AND in the migration** (`005`'s CHECK). This is
+    the path every caller goes through today; the constraint is what covers a
+    row written by anything else — the table editor, a `psql` session, a future
+    import — and a guard that only exists in one of two places is a guard that
+    one rename removes.
     """
     if extra:
         raise ValueError(
             f"a waitlist row takes only {sorted(COLUMNS)}; got extra {sorted(extra)}"
         )
-    return {"email": email, "name": name[:NAME_MAX_CHARS], "batch": batch()}
+    return {"email": email, "name": _safe_name(name), "batch": batch()}
 
 
 def waitlist_enabled() -> bool:

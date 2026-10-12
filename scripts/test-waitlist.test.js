@@ -122,6 +122,19 @@ async function runSurface(label, src) {
   check(`${label}: an empty name is sent as empty, not dropped as undefined`,
     noName.calls[0].body === JSON.stringify({ email: "person@example.com", name: "" }), noName.calls[0].body);
 
+  // There is exactly ONE neutraliser for a formula, and it is the server's
+  // `build_row` (plus the migration's CHECK). A client-side one would be a
+  // second implementation that could disagree with it — the same reason
+  // `is_secret_field` lives in the server and not in a relay. So the name
+  // reaches the wire with its leading `=` intact, and the client does not
+  // quietly mangle a name into something the operator did not type.
+  const formula = rig(src, json(200, { ok: true }));
+  formula.name.value = "=cmd|' /C calc'!A0";
+  await formula.joinWaitlist();
+  check(`${label}: a name that a spreadsheet would run reaches the wire untouched`,
+    formula.calls[0].body === JSON.stringify({ email: "person@example.com", name: "=cmd|' /C calc'!A0" }),
+    formula.calls[0].body);
+
   const blank = rig(src, json(200, { ok: true }));
   blank.email.value = "  ";
   const blankOk = await blank.joinWaitlist();

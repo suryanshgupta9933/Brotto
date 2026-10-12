@@ -125,6 +125,48 @@ def test_a_typed_name_is_stored_bounded(hosted, client, monkeypatch):
     assert len(seen[1]["body"]["name"]) == wl.NAME_MAX_CHARS
 
 
+def test_a_name_a_spreadsheet_would_run_is_stored_as_text(hosted, client, monkeypatch):
+    """CSV is how the operator gets this table out, and Excel and Google
+    Sheets both execute a leading `=`, `+`, `-` or `@` when they open one.
+
+    So a stranger typing into a public form is a thing the operator's own
+    machine runs, on the export they open to send invites from. The four
+    characters are quoted with the apostrophe both spreadsheets read as
+    "text, not formula" — not stripped, so a name that genuinely starts
+    with a dash still reads as the name the visitor typed.
+    """
+    for typed in ("=cmd|' /C calc'!A0", "+1+1", "-2+3", "@SUM(A1)", "\tName", "\rName"):
+        stored = wl.build_row(email=VISITOR, name=typed)["name"]
+        assert stored.startswith("'"), f"{typed!r} stored as {stored!r}"
+        assert not wl._NAME_FORMULA_RE.match(stored), f"{typed!r} stored as {stored!r}"
+    # An ordinary name is untouched — no prefix, no apostrophe.
+    assert wl.build_row(email=VISITOR, name="Ada Lovelace")["name"] == "Ada Lovelace"
+    # And the one the operator reads is not a guess: the prefix is what
+    # makes it display without itself.
+    assert wl.build_row(email=VISITOR, name="=x")["name"] == "'=x"
+    # The row that actually reaches the table, not just the helper's return
+    # value — the sink is the CSV export, and this is what lands in it.
+    seen = _supabase_stub(monkeypatch)
+    client.post("/v1/waitlist", json={"email": VISITOR, "name": "=cmd|' /C calc'!A0"})
+    assert seen[0]["body"]["name"] == "'=cmd|' /C calc'!A0"
+
+
+def test_the_formula_guard_holds_after_the_length_bound(monkeypatch):
+    """Truncation must not run *after* the guard, or a name whose first
+    `NAME_MAX_CHARS` are safe and whose lead is not... is not the case
+    here — but the bound runs first, so a guard applied to a different
+    string than the one stored would be a guard against nothing.
+
+    This pins the order rather than the truth table: the stored value is
+    exactly `stored[:NAME_MAX_CHARS + 1]`, the guard and the bound applied
+    to the same string.
+    """
+    long_name = "=" + "A" * wl.NAME_MAX_CHARS * 2
+    stored = wl.build_row(email=VISITOR, name=long_name)["name"]
+    assert len(stored) == wl.NAME_MAX_CHARS + 1  # the quote, and nothing else
+    assert stored == "'=" + "A" * (wl.NAME_MAX_CHARS - 1)
+
+
 def test_a_name_is_optional_and_the_answer_does_not_mention_it(hosted, client, monkeypatch):
     """A signup stays `{"ok": true}` whatever the body said — a name is not
     an oracle and not a status."""

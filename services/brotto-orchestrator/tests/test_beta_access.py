@@ -87,3 +87,21 @@ def test_the_waitlist_name_is_a_new_file_and_not_an_edit_to_003():
     `003` is what `005` has to reach."""
     assert "add column" not in _sql("003_waitlist.sql")
     assert "name" not in _sql("003_waitlist.sql")
+
+
+def test_the_waitlist_name_cannot_carry_a_formula():
+    """CSV is how the operator gets the table out, and Excel and Sheets run
+    a leading `=`, `+`, `-` or `@` when they open one.
+
+    `build_row` quotes those four characters, and the constraint is what
+    covers a row written by any *other* path — the table editor, a `psql`
+    session, a future import. Both halves, or the guard is a rename away
+    from gone.
+    """
+    sql = _sql("005_waitlist_name.sql")
+    assert "check (name is null or name !~ '^[=+\\-@\\t\\r]')" in sql
+    assert "waitlist_name_no_formula" in sql
+    # And the backfill, because ADD CONSTRAINT scans the table: a row typed
+    # before this constraint existed would fail the ADD and take the whole
+    # migration — including the column — down with it.
+    assert "update waitlist set name" in sql
