@@ -2470,7 +2470,17 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
     # `NAME_MAX_CHARS` inside `build_row`, stripped here, and absent from the
     # answer either way — a signup is `{"ok": true}` whatever the body said.
     name = str(body.get("name", "") or "").strip()
-    signup = await wl.add(email, name)
+    try:
+        signup = await wl.add(email, name)
+    except ValueError as exc:
+        # `build_row` refuses an address a spreadsheet would run as a formula,
+        # and refuses it *loudly* — see its reason for not quoting a `+tag`
+        # the way a name is quoted. `add` calls `build_row` with named
+        # arguments, so this is the only `ValueError` on the way: it is a
+        # 400 on a route whose every other error path is a 400, and it comes
+        # back through `_error` explicitly because a raise here is dispatched
+        # by the mounted sub-application and would otherwise be a 500.
+        return _error(400, str(exc))
     if not signup.ok:
         # Fixed text. The address is not in it, and neither is a PostgREST
         # body — a PostgREST error quotes the row.

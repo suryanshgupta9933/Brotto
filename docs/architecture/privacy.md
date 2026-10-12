@@ -566,6 +566,21 @@ table editor, a `psql` session, a future import — and it is the half that
 cannot be renamed away. Both halves, or one of them is a guard waiting for
 a refactor.
 
+**The email column wants the guard and gets a different answer.** `005`
+guarded the name and left the address one column over, and `EMAIL_RE`
+admits a leading `=`, `+` or `-`, so `+1+1@example.test` was stored as-is
+and would have been run by the same export. **Refused, not quoted** — the
+asymmetry is the point. A name is arbitrary text we *want* back in the
+export, and an apostrophe is invisible once the cell renders as text. An
+address has to round-trip: a stored `'+tag@example.test` is no longer the
+mailbox that person signs in with, and depending on how the export is read
+that is either a clean value or one with a stray apostrophe — silent
+corruption of an identifier until an invite does not arrive. Nothing is lost
+by the rejection, because `user+tag@` and `user@` are the *same mailbox*:
+the visitor submits the base address, and the operator can add the tagged
+spelling straight to `beta_access`, which nothing here touches. The
+refusal is a fixed 400 that echoes the address nowhere.
+
 **Revocation is checked per request and per task, and it fails closed.** The
 JWT says who you are and nothing about whether you are still welcome, so
 `profiles` is the only answer to the second question. The *decision* — the cap,

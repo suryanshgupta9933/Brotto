@@ -113,6 +113,33 @@ def batch() -> str:
 #: the same four characters the migration's CHECK refuses.
 _NAME_FORMULA_RE = re.compile(r"\A[=+\-@\t\r]")
 
+#: The same characters on the **address**, which is the column that was
+#: forgotten. `EMAIL_RE` (`jwt_auth.py:36`) is "looks like an email" and nothing
+#: more: its local part is `[^@\s]{1,64}`, which admits a leading `+`, so
+#: `+1+1@example.test` is accepted by the public route and would be executed as a
+#: formula by the operator's spreadsheet the moment they export the table to
+#: send invites from. Same file, same unauthenticated route, one column over.
+#:
+#: **Identical to `_NAME_FORMULA_RE` on purpose, character for character**, so
+#: migration `006`'s `waitlist_email_no_formula` uses `^[=+\-@\t\r]` exactly as
+#: `005` did. Two columns guarded by two different character classes is a guard
+#: that one rename removes — the argument `005`'s own comment makes.
+#:
+#: **The class is wider than anything reachable, and deliberately so.** `EMAIL_RE`
+#: excludes `@` and `\s` from the local part, so `@`, `\t` and `\r` can never
+#: reach here; only `=`, `+` and `-` can, and of those only `+` is a plausible
+#: real address (`user+tag@example.test` is one mailbox). The refusal is
+#: therefore written once for the whole class and costs nobody anything they
+#: could actually use.
+_EMAIL_FORMULA_RE = re.compile(r"\A[=+\-@\t\r]")
+
+#: What a refused address is told. Fixed text, quoted nowhere and echoed from
+#: nowhere — the caller gets the instruction and the address gets nothing said
+#: back about it.
+EMAIL_FORMULA_REFUSAL = (
+    "submit the plain address — drop the +tag part and try again"
+)
+
 
 def _safe_name(name: str) -> str:
     """The name as stored, truncated and stripped of a formula prefix.
@@ -144,17 +171,39 @@ def build_row(*, email: str, name: str = "", **extra) -> dict:
     which is the guarantee that matters, and which
     `test_the_row_cannot_carry_a_referrer_a_url_or_a_typed_field` holds.
 
-    **The formula guard is here AND in the migration** (`005`'s CHECK). This is
+    **The formula guard is here AND in the migration** (`005`'s CHECK for the
+    name, `006`'s for the email). This is
     the path every caller goes through today; the constraint is what covers a
     row written by anything else — the table editor, a `psql` session, a future
     import — and a guard that only exists in one of two places is a guard that
-    one rename removes.
+    one rename removes. The two columns are guarded the *same way* in the
+    migration and different ways here: the name is quoted (it is text to keep),
+    the email is refused (it is an identifier that must round-trip).
     """
     if extra:
         raise ValueError(
             f"a waitlist row takes only {sorted(COLUMNS)}; got extra {sorted(extra)}"
         )
-    return {"email": email, "name": _safe_name(name), "batch": batch()}
+    if _EMAIL_FORMULA_RE.match(email):
+        # Refused, not quoted — the opposite of `_safe_name`, and the asymmetry
+        # is the whole point. A name is arbitrary text we *want* back in the
+        # export; an apostrophe is invisible once a spreadsheet renders the cell
+        # as text. An address has to round-trip: the operator exports this
+        # column to send invites from, and a stored `'+tag@example.test` is no
+        # longer the mailbox that person signs in with. Depending on how the
+        # export is read that is a clean value or one with a stray apostrophe,
+        # and the failure is silent until an invite does not arrive. Silent
+        # corruption of an identifier is worse than a loud rejection — and here
+        # the rejection is free, because a `+tag` address and the plain one are
+        # the same mailbox. Nothing is lost by refusing: the visitor submits the
+        # base address, or the operator adds the tagged spelling straight to
+        # `beta_access`, which this module does not touch.
+        raise ValueError(EMAIL_FORMULA_REFUSAL)
+    return {
+        "email": email,
+        "name": _safe_name(name),
+        "batch": batch(),
+    }
 
 
 def waitlist_enabled() -> bool:
@@ -178,9 +227,15 @@ async def add(email: str, name: str = "") -> "Signup":
     """Write one row through the same PostgREST seam as the other two tables.
 
     Which of the three happened — written, already there, or refused. Never
-    raises, and never returns anything about the address. The caller decides
-    what a `Signup` means to the outside world; see the module docstring for
-    why the one thing it must not mean is "this address was new".
+    returns anything about the address. The caller decides what a `Signup` means
+    to the outside world; see the module docstring for why the one thing it must
+    not mean is "this address was new".
+
+    **Raises `ValueError` for an address `build_row` refuses** (the `+tag`
+    formula trigger) — before the write, and therefore before anything was
+    spent. That is the *only* `ValueError` reachable from here: `add` calls
+    `build_row` with named arguments, so the extra-keys raise cannot fire. The
+    route catches it as a 400 rather than letting it become a 500.
     """
     from .jwt_auth import SupabaseUnavailable, _profiles
 

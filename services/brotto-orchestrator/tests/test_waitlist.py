@@ -151,6 +151,59 @@ def test_a_name_a_spreadsheet_would_run_is_stored_as_text(hosted, client, monkey
     assert seen[0]["body"]["name"] == "'=cmd|' /C calc'!A0"
 
 
+def test_an_email_a_spreadsheet_would_run_is_refused_not_quoted(hosted, client, monkeypatch):
+    """The same attack on the same export, one column over — with a different
+    answer from the name, on purpose.
+
+    `name` was guarded in `_safe_name` and in `005`'s CHECK; `email` was
+    forgotten in both. `EMAIL_RE` is "looks like an email" and nothing more —
+    its local part is `[^@\\s]{1,64}`, which admits a leading `+` — so
+    `+1+1@example.test` reaches `build_row` and is executed by the operator's
+    spreadsheet the moment the waitlist is exported to send invites from.
+
+    **Refused rather than prefixed.** Quoting is right for a name, which is
+    arbitrary text we want back in the export and where the apostrophe is
+    invisible once the cell renders as text. An address has to round-trip: the
+    operator exports this column to send invites from, and a stored
+    `'+tag@example.test` is no longer the mailbox that person signs in with —
+    silently wrong until an invite does not arrive. And the rejection costs
+    nobody anything real, because a `+tag` address and the plain one are the
+    *same mailbox*: the visitor submits the base one, and the operator can add
+    the tagged spelling straight to `beta_access`, which nothing here
+    constrains or prefixes.
+    """
+    for typed in ("+1+1@example.test", "+tag@example.test", "-2+3@example.test",
+                  "=1+1@example.test", "@evil@example.test",
+                  "\tvisitor@example.test", "\rvisitor@example.test"):
+        with pytest.raises(ValueError) as caught:
+            wl.build_row(email=typed)
+        assert str(caught.value) == wl.EMAIL_FORMULA_REFUSAL
+        assert typed not in str(caught.value), "the refusal must not echo the address"
+
+    # An ordinary address is stored verbatim — the assertion the quoted
+    # version could not make, and the one that would fail against it.
+    assert wl.build_row(email=VISITOR)["email"] == VISITOR
+    # A `+` mid-local-part is an ordinary address, not a trigger — the guard is
+    # on the first character, and only a *leading* `+` is something a
+    # spreadsheet executes. `user+tag@` is a real mailbox and is stored
+    # exactly as typed.
+    assert wl.build_row(email="ada+b@example.test")["email"] == "ada+b@example.test"
+
+    # Through the route: a 4xx carrying the instruction, not a 500 and not a
+    # write. `build_row` raises inside the mounted sub-application, where the
+    # `_BadRequest` handler is not registered, so this is where the 400 is
+    # bought back.
+    seen = _supabase_stub(monkeypatch)
+    resp = client.post("/v1/waitlist", json={"email": "+tag@example.test"})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == wl.EMAIL_FORMULA_REFUSAL
+    assert seen == [], "a refused address must not reach the table"
+
+    # And the neighbour is untouched, so the refusal is not a blanket one.
+    assert client.post("/v1/waitlist", json={"email": VISITOR}).status_code == 200
+    assert seen[0]["body"]["email"] == VISITOR
+
+
 def test_the_formula_guard_holds_after_the_length_bound(monkeypatch):
     """Truncation must not run *after* the guard, or a name whose first
     `NAME_MAX_CHARS` are safe and whose lead is not... is not the case
