@@ -8,6 +8,7 @@ text leaves half the readers on a page they cannot act from.
 """
 from __future__ import annotations
 
+import os
 import re
 
 from brotto_orchestrator.session import beta_invite, waitlist_email
@@ -64,3 +65,33 @@ def test_no_attachment_entry_when_there_is_no_mark(monkeypatch):
     payload = beta_invite.payload("someone@example.test")
     assert payload["attachments"] == []
     assert "cid:" not in payload["html"]
+
+
+# The operator's key lives in `services/brotto-orchestrator/.env` and not on
+# the command line. `main()` is the only place that file is read — importing
+# this module must not do it, or every test here would depend on whatever a
+# developer has in their real `.env`.
+
+def test_main_reads_the_dev_env_and_never_overrides_the_shell(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("RESEND_API_KEY=from-dotenv\n")
+    monkeypatch.setattr(beta_invite, "_DEV_ENV", env_file)
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+
+    # Wrong arity: `main` loads the dotenv, then prints usage and returns 2.
+    # Nothing here touches the network.
+    assert beta_invite.main(["beta_invite"]) == 2
+    assert os.environ["RESEND_API_KEY"] == "from-dotenv"
+
+    # A value already in the shell wins — `RESEND_API_KEY=… ./scripts/beta-roster.sh
+    # add …` keeps working exactly as the script's header documents.
+    monkeypatch.setenv("RESEND_API_KEY", "from-shell")
+    assert beta_invite.main(["beta_invite"]) == 2
+    assert os.environ["RESEND_API_KEY"] == "from-shell"
+
+
+def test_the_unset_message_names_the_file(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(beta_invite, "_DEV_ENV", tmp_path / ".env")  # absent
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    assert beta_invite.main(["beta_invite", "someone@example.test"]) == 3
+    assert "services/brotto-orchestrator/.env" in capsys.readouterr().err

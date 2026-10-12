@@ -8,7 +8,8 @@
 # `session.beta_invite`), but the mail is only the announcement: a send that
 # fails leaves the admission standing, because the row is what admits them.
 #
-#   RESEND_API_KEY=…  ./scripts/beta-roster.sh add you@example.com
+#   ./scripts/beta-roster.sh add you@example.com
+#   (RESEND_API_KEY lives in services/brotto-orchestrator/.env, or export it)
 #   ./scripts/beta-roster.sh list
 #   ./scripts/beta-roster.sh revoke someone@example.com
 #   ./scripts/beta-roster.sh unrevoke someone@example.com

@@ -19,8 +19,10 @@ import html as html_lib
 import logging
 import os
 import sys
+from pathlib import Path
 
 import aiohttp
+from dotenv import load_dotenv
 
 from .waitlist_email import (
     ENDPOINT,
@@ -298,7 +300,19 @@ def _preview(path: str) -> None:
     print(f"\nHTML written to {path}", file=sys.stderr)
 
 
+#: The *dev* `.env` — `services/brotto-orchestrator/.env`, the one that carries
+#: a model key. Explicit rather than `find_dotenv()` walking up from cwd, and
+#: deliberately not the repo-root `.env` beside `docker-compose.yml` (only
+#: `AGENT_SECRET`; the two are not interchangeable).
+_DEV_ENV = Path(__file__).resolve().parents[3] / ".env"
+
+
 def main(argv: list[str]) -> int:
+    # Load here, not at import: `test_beta_invite.py` imports this module and
+    # must not pick up whatever the operator has in their `.env`.
+    # `override=False` keeps `RESEND_API_KEY=… ./scripts/beta-roster.sh add …`
+    # winning over the file, exactly as the script's header documents.
+    load_dotenv(_DEV_ENV, override=False)
     if len(argv) == 3 and argv[1] == "--preview":
         _preview(argv[2])
         return 0
@@ -307,7 +321,7 @@ def main(argv: list[str]) -> int:
         print("       … --preview <file.html>   write the HTML and print the text", file=sys.stderr)
         return 2
     if not enabled():
-        print("RESEND_API_KEY is not set, so no mail was sent.", file=sys.stderr)
+        print("RESEND_API_KEY is not set — add it to services/brotto-orchestrator/.env, or export it.", file=sys.stderr)
         return 3
     email = argv[1].strip()
     try:
