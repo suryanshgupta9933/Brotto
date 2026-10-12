@@ -89,6 +89,7 @@ function rig(src, name, respond, { codeFieldHidden = false } = {}) {
     goalEl: { focus() {} },
     toast() {},
     async greetOnSignIn() { sandbox.greeted = true; },
+    $waitlistBlock: { open: false },
     $waitlistEmail: { value: "" },
     $waitlistName: { value: "" },
     setCloudStatus(text, tone) {
@@ -160,6 +161,8 @@ function json(okStatus, body) {
     "finish() is the one writer; a second one is a second shape to keep in step");
   check("the code box is cleared once used", good.$cloudCode.value === "");
   check("the user is told it worked", /signed in/i.test(good.statusText), good.statusText);
+  check("an approved sign-in leaves the waitlist collapsed",
+    good.$waitlistBlock.open === false);
 
   const bad = rig(welcome, "exchangeCode", json(401, { detail: "nope" }));
   const badOk = await bad.exchangeCode();
@@ -229,6 +232,8 @@ function json(okStatus, body) {
     && /not in the closed beta/i.test(offList.statusText), offList.statusText);
   check("and the waitlist is offered the address they just tried",
     offList.$waitlistEmail.value === "person@example.com", offList.$waitlistEmail.value);
+  check("and the waitlist toggle opens — the form they are told to use has to be visible",
+    offList.$waitlistBlock.open === true);
   check("offered, not sent — the refusal makes no second request",
     offList.calls.length === 1, JSON.stringify(offList.calls.map((c) => c.url)));
 
@@ -413,6 +418,8 @@ function json(okStatus, body) {
   check("says so, and offers the waitlist the same address",
     /beta/i.test(wizOff.statusText)
     && wizOff.$waitlistEmail.value === "person@example.com", wizOff.statusText);
+  check("and opens the waitlist toggle on that path too",
+    wizOff.$waitlistBlock.open === true);
   const wizOn = rig(welcome, "exchangeCode", json(200, { access_token: TOKEN, approved: true }));
   check("and an approved wizard sign-in is an ordinary sign-in",
     (await wizOn.exchangeCode()) === true && /^signed in$/i.test(wizOn.statusText.trim()), wizOn.statusText);

@@ -93,6 +93,7 @@ function rig(src, respond) {
   // panel uses bare names and `serverBase()`. Same contract, so one rig.
   sandbox.waitlistEmail = sandbox.$waitlistEmail = sandbox.email;
   sandbox.waitlistName = sandbox.$waitlistName = sandbox.name;
+  sandbox.$waitlistBlock = { open: false };
   vm.createContext(sandbox);
   vm.runInContext(extract(src, "setWaitlistStatus"), sandbox);
   vm.runInContext(extract(src, "postAuth"), sandbox);
@@ -192,6 +193,12 @@ async function runSurface(label, src) {
   const empty = rig(src, json(200, { ok: true }));
   empty.prefillWaitlist("person@example.com");
   check(`${label}: and fills a blank one`, empty.email.value === "person@example.com", empty.email.value);
+  // The wizard collapses the waitlist to its question; the panel's is open in
+  // Settings already. Only the wizard has a toggle to open.
+  if (label === "wizard") {
+    check("wizard: the prefill opens the collapsed waitlist",
+      empty.$waitlistBlock.open === true);
+  }
 }
 
 (async () => {
