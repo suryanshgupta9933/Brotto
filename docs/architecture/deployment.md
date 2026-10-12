@@ -325,13 +325,17 @@ Neither write is sufficient alone:
 do $$
 declare
   v text := lower(btrim('x@example.com'));
+  u uuid;
 begin
   if not exists (select 1 from beta_access where email = v) then
     raise exception 'no beta_access row for %', v
       using hint = 'addresses are stored normalised as lower(btrim(address))';
   end if;
   update beta_access set revoked_at = now() where email = v;
-  update profiles    set revoked_at = now() where email = v;
+  select id into u from auth.users where email = v;
+  if found then
+    update profiles set revoked_at = now() where id = u;
+  end if;
 end $$;
 ```
 
@@ -352,9 +356,19 @@ already normalised — the caller strips and lower-cases before writing — so a
 bare `where email = 'Foo@Bar.com'` matches **zero rows, reports success, and
 withdraws nobody**, with nothing in any log to say so. `lower(btrim(...))` is
 written into the procedure rather than left as prose, and the guard turns a
-mistyped address into a loud failure. The `profiles` write may legitimately
-match zero rows — an address on the roster that never signed up has no profile
-— which is why only the roster lookup is guarded.
+mistyped address into a loud failure. Only the *roster* lookup is guarded
+because only the roster is where a wrong address is still wrong.
+
+**The `profiles` half is keyed on the account id, not on the address.**
+`profiles.email` is written once, by `approve_at_exchange`, from the verified
+JWT claim at first sign-in, and is never updated afterwards — if the member
+changes their Supabase email that column keeps the old spelling for good, and
+`update profiles … where email = v` silently matches nothing. So the procedure
+resolves the rostered address to its `auth.users` row and updates by
+`profiles.id`, which is the stable key. The `if found` is the honest answer
+rather than a swallow: a rostered address that never signed up has no
+`auth.users` row and no profile either, so there is genuinely nothing to
+withdraw.
 
 **A duplicate paste answers 409, and that no longer means "admitted".** Since
 `revoked_at` exists, already-there means *granted* or *withdrawn*, and both
@@ -367,8 +381,10 @@ select email, revoked_at from beta_access where email = lower(btrim('x@example.c
 `null` is a live grant and needs no action; a timestamp is a withdrawal already
 on record, and pasting the address again changes nothing — `_listed_for_beta`
 refuses a row whose `revoked_at` is set. **Re-admission is the same two
-statements with the values nulled, roster first then `profiles`**, because
-`authorize_task_start` reads only the second. Both are in `004`'s header.
+statements with the values nulled, roster first then `profiles`**, resolving the
+`profiles` half through `auth.users` to `profiles.id` in exactly the same way,
+because `authorize_task_start` reads only the second. Both are in `004`'s
+header.
 
 Deleting the roster row afterwards is optional housekeeping and withdraws
 nobody on its own; do it before the `revoked_at` update and you have closed a

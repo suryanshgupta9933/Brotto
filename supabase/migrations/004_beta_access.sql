@@ -14,13 +14,17 @@
 --   do $$
 --   declare
 --     v text := lower(btrim('<address>'));
+--     u uuid;
 --   begin
 --     if not exists (select 1 from beta_access where email = v) then
 --       raise exception 'no beta_access row for %', v
 --         using hint = 'addresses are stored normalised as lower(btrim(address))';
 --     end if;
 --     update beta_access set revoked_at = now() where email = v;
---     update profiles    set revoked_at = now() where email = v;
+--     select id into u from auth.users where email = v;
+--     if found then
+--       update profiles set revoked_at = now() where id = u;
+--     end if;
 --   end $$;
 --
 -- **The failure mode, stated plainly: the `beta_access` write alone withdraws
@@ -54,9 +58,20 @@
 -- recorded against, so `revoked_at` here is **not a foreign key and must never
 -- become one.**
 --
--- **The `profiles` write may legitimately match zero rows** — an address on the
--- roster that has never signed up has no profile. That is correct, not a
--- mistyped address, which is why only the roster lookup is guarded.
+-- **The `profiles` half is keyed on the account id, not on the address.**
+-- `profiles.email` is written once, by `approve_at_exchange`, from the verified
+-- JWT claim at first sign-in, and is never updated afterwards. If the member
+-- changes their Supabase email, that column keeps the old spelling for good —
+-- so `update profiles … where email = v` matches zero rows, reports success,
+-- and withdraws nobody. `profiles.id` is the stable key (`references auth.users
+-- on delete cascade`), so the procedure resolves the rostered address to the
+-- `auth.users` row and updates by id.
+--
+-- **The `if found` guard is the honest answer, not a swallow.** A rostered
+-- address that has never signed up has no `auth.users` row and therefore no
+-- `profiles` row either; there is genuinely nothing to withdraw. That is
+-- correct, not a mistyped address, which is why only the *roster* lookup is
+-- guarded — the roster is where a wrong address is still a wrong address.
 --
 -- **Absence of a row is still the refusal for somebody not admitted yet.**
 -- `_listed_for_beta` refuses an address that is absent *or* that has
@@ -97,22 +112,27 @@
 --   do $$
 --   declare
 --     v text := lower(btrim('<address>'));
+--     u uuid;
 --   begin
 --     if not exists (select 1 from beta_access where email = v) then
 --       raise exception 'no beta_access row for %', v
 --         using hint = 'a withdrawn address keeps its row; do not paste to re-admit';
 --     end if;
 --     update beta_access set revoked_at = null where email = v;
---     update profiles    set revoked_at = null where email = v;
+--     select id into u from auth.users where email = v;
+--     if found then
+--       update profiles set revoked_at = null where id = u;
+--     end if;
 --   end $$;
 --
 -- Both are required again, and for the same reason in reverse: nulling only
 -- `profiles` re-opens task start for somebody the roster still refuses at
 -- sign-in, and nulling only the roster un-revokes nothing that
--- `authorize_task_start` — which reads `profiles` only — will honour. An
--- account deleted since the withdrawal has no profile row, so the second
--- statement matches zero rows and the re-admission is the roster write alone,
--- which is correct: the fresh profile is created unrevoked.
+-- `authorize_task_start` — which reads `profiles` only — will honour. The
+-- `profiles` half resolves the address through `auth.users` and updates by
+-- `profiles.id`, for the reason above. An account deleted since the withdrawal
+-- has no `auth.users` row, so `found` is false and the re-admission is the
+-- roster write alone, which is correct: the fresh profile is created unrevoked.
 --
 -- The address is matched against the **`email` claim on a verified JWT**, never
 -- against a body field, a query parameter or anything else a caller sent — the

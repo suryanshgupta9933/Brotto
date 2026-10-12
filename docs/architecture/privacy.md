@@ -366,6 +366,16 @@ normalised, so an un-normalised `where email = '…'` matches zero rows, reports
 success, and withdraws nobody. The runnable form, guard and all, is at the top
 of `004`.
 
+**The `profiles` half is keyed on the account id.** `profiles.email` is written
+once, by `approve_at_exchange`, from the verified JWT claim at first sign-in,
+and is never updated afterwards — a member who changes their Supabase email
+leaves the old spelling on the row permanently, so an address-keyed update
+matches zero rows, reports success, and withdraws nobody. So the procedure
+resolves the rostered address to its `auth.users` row and updates by
+`profiles.id`, which is the stable key. The `if found` is not a swallowed
+error: a rostered address that never signed up has no `auth.users` row and no
+profile, so there is nothing to withdraw.
+
 The first refuses *re-admission* at sign-in; the second is what
 `authorize_task_start` reads at task start, and **that function never consults
 the roster**, so the roster write alone withdraws nobody who is already signed
@@ -392,7 +402,8 @@ in play, already-there is either **granted** (`revoked_at is null`) or
 separates them — `select email, revoked_at from beta_access where email =
 lower(btrim('…'))` — and the operator has to read it; no code path may infer
 which from the response. **Re-admission is its own two-statement step**, the
-same pair with the values nulled and the roster write first, because
+same pair with the values nulled and the roster write first, resolving the
+`profiles` half through `auth.users` to `profiles.id` in the same way, because
 `authorize_task_start` reads only `profiles`.
 
 Deleting the roster row afterwards remains optional housekeeping — now it
