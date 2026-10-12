@@ -318,21 +318,57 @@ ever read (`select=email,revoked_at`); `approved_at` is filled by its column def
 **`added_by` is written by no code path**, so it is empty for every row that
 exists — set it by hand if you ever need it.
 
-**To withdraw a member, set `beta_access.revoked_at`.** That one statement *is*
-the withdrawal:
+**To withdraw a member, set `revoked_at` on *both* tables, in one transaction.**
+Neither write is sufficient alone:
 
 ```sql
-update beta_access set revoked_at = now() where email = 'x@example.com';
+do $$
+declare
+  v text := lower(btrim('x@example.com'));
+begin
+  if not exists (select 1 from beta_access where email = v) then
+    raise exception 'no beta_access row for %', v
+      using hint = 'addresses are stored normalised as lower(btrim(address))';
+  end if;
+  update beta_access set revoked_at = now() where email = v;
+  update profiles    set revoked_at = now() where email = v;
+end $$;
 ```
 
-It takes effect at their next sign-in, and it is the only one of the two writes
-that **survives the auth account being deleted** — `profiles.id` is
-`on delete cascade` from `auth.users`, so deleting the account deletes the
-profile *and* its `revoked_at`, and a re-signup on the same address would
-otherwise be re-admitted fresh. Set `profiles.revoked_at` alongside it as well:
-that is what `authorize_task_start` reads at task start, so without it an
-already-signed-in member keeps working until their next sign-in. Necessary and
-not sufficient — a cascade erases only the second one.
+**The failure mode if you run only one.** The `beta_access` write refuses
+*re-admission* at sign-in — a different job from stopping a working member.
+`authorize_task_start` is the thing that actually stops a working member at
+every step, and it reads `profiles.revoked_at` and **never consults the
+roster**, so the first statement alone withdraws nobody who is already signed
+in, and leaves a withdrawal on record that says otherwise. The second is the
+only one of the two that **survives the auth account being deleted**:
+`profiles.id` is `on delete cascade` from `auth.users`, so deleting the account
+deletes the profile *and* its `revoked_at`, and a re-signup on the same address
+would otherwise be re-admitted fresh. A cascade erases only the second, which is
+why it cannot be the whole procedure.
+
+**The `exists` guard is load-bearing, not ceremony.** Both tables store email
+already normalised — the caller strips and lower-cases before writing — so a
+bare `where email = 'Foo@Bar.com'` matches **zero rows, reports success, and
+withdraws nobody**, with nothing in any log to say so. `lower(btrim(...))` is
+written into the procedure rather than left as prose, and the guard turns a
+mistyped address into a loud failure. The `profiles` write may legitimately
+match zero rows — an address on the roster that never signed up has no profile
+— which is why only the roster lookup is guarded.
+
+**A duplicate paste answers 409, and that no longer means "admitted".** Since
+`revoked_at` exists, already-there means *granted* or *withdrawn*, and both
+return the same 409. One line tells them apart:
+
+```sql
+select email, revoked_at from beta_access where email = lower(btrim('x@example.com'));
+```
+
+`null` is a live grant and needs no action; a timestamp is a withdrawal already
+on record, and pasting the address again changes nothing — `_listed_for_beta`
+refuses a row whose `revoked_at` is set. **Re-admission is the same two
+statements with the values nulled, roster first then `profiles`**, because
+`authorize_task_start` reads only the second. Both are in `004`'s header.
 
 Deleting the roster row afterwards is optional housekeeping and withdraws
 nobody on its own; do it before the `revoked_at` update and you have closed a

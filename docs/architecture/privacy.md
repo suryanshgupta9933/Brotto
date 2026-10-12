@@ -359,11 +359,23 @@ the gate `request-code` cannot verify. Pinned by
 is a refusal **only for somebody who has not been admitted yet**. Deleting one
 for an already-approved member changes nothing they can observe.
 
-**The withdrawal is `update beta_access set revoked_at = now() where email =
-'…'`,** set by hand, and it takes effect at that member's next sign-in.
+**The withdrawal is two writes, and neither is sufficient alone.** Set
+`beta_access.revoked_at` *and* `profiles.revoked_at`, in one transaction, with
+the address passed through `lower(btrim(...))` — both tables store email already
+normalised, so an un-normalised `where email = '…'` matches zero rows, reports
+success, and withdraws nobody. The runnable form, guard and all, is at the top
+of `004`.
 
-That column is not a second copy of `profiles.revoked_at` for tidiness; it is
-the only one of the two a cascade cannot erase. `profiles.id` references
+The first refuses *re-admission* at sign-in; the second is what
+`authorize_task_start` reads at task start, and **that function never consults
+the roster**, so the roster write alone withdraws nobody who is already signed
+in. The failure mode is silent in both directions and worth naming: run only
+the first and a member keeps a working beta account until they happen to sign
+out, with a withdrawal on record saying otherwise.
+
+`beta_access.revoked_at` is not a second copy of `profiles.revoked_at` for
+tidiness; it is the only one of the two a cascade cannot erase.
+`profiles.id` references
 `auth.users` **on delete cascade**, so when the auth account goes — the person
 deletes it, Supabase purges it, a test fires the cascade — the `profiles` row
 and its `revoked_at` go with it. They sign up again, the address is still on the
@@ -374,11 +386,14 @@ themselves. The evidence has to outlive the account it was recorded against, so
 `beta_access.revoked_at` is **not a foreign key and must never become one**, and
 `_listed_for_beta` refuses an address whose `revoked_at` is set.
 
-**Do the `profiles` write alongside it.** `update profiles set revoked_at = now()
-where email = '…'` is what `authorize_task_start` actually reads at task start,
-so without it a member who is already signed in keeps working until they next
-sign in. It is necessary and not sufficient, and the distinction is not
-stylistic: it is the one a cascade erases.
+**A 409 on a paste says "already there", not "admitted".** With `revoked_at`
+in play, already-there is either **granted** (`revoked_at is null`) or
+**withdrawn** (set), and the primary key answers identically for both. One line
+separates them — `select email, revoked_at from beta_access where email =
+lower(btrim('…'))` — and the operator has to read it; no code path may infer
+which from the response. **Re-admission is its own two-statement step**, the
+same pair with the values nulled and the roster write first, because
+`authorize_task_start` reads only `profiles`.
 
 Deleting the roster row afterwards remains optional housekeeping — now it
 *closes* the door rather than re-opening it, and it withdraws nobody on its own.

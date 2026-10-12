@@ -5,17 +5,46 @@
 -- entered by the address rather than by the account id, so an operator can
 -- bulk-paste a list instead of minting one `auth.users` row per person by hand.
 --
--- ── the withdrawal, and the step that used to be half of it ──────────────
+-- ── the withdrawal: two statements, and each one alone is wrong ──────────
 --
--- **To withdraw a member, run one statement:**
+-- **To withdraw a member, run two statements. Neither is sufficient alone**,
+-- so the procedure below runs both, in one transaction, and refuses to run at
+-- all if the address is not on the roster:
 --
---   update beta_access set revoked_at = now() where email = '<address>';
+--   do $$
+--   declare
+--     v text := lower(btrim('<address>'));
+--   begin
+--     if not exists (select 1 from beta_access where email = v) then
+--       raise exception 'no beta_access row for %', v
+--         using hint = 'addresses are stored normalised as lower(btrim(address))';
+--     end if;
+--     update beta_access set revoked_at = now() where email = v;
+--     update profiles    set revoked_at = now() where email = v;
+--   end $$;
 --
--- That is the withdrawal. It is one statement, it takes effect at their next
--- sign-in, and **it survives the auth account being deleted** — which is why
--- it is here and not only on `profiles`.
+-- **The failure mode, stated plainly: the `beta_access` write alone withdraws
+-- nobody who is already signed in.** It refuses *re-admission* at sign-in,
+-- which is a different job from stopping a working member. The thing that
+-- actually stops a working member at every step is `authorize_task_start`, and
+-- it reads `profiles.revoked_at` and **never consults the roster at all**.
+-- Run only the first statement and the member keeps a working beta account
+-- until they happen to sign out — with a withdrawal on record that says
+-- otherwise. Run only the second and you have a revocation a cascade can erase
+-- (below). Hence two statements.
 --
--- **Why it cannot live on `profiles` alone.** `profiles.id` references
+-- **The guard is the point, not decoration.** `email` is stored already
+-- normalised and compared by equality, so `where email = 'Foo@Bar.com'`
+-- matches **zero rows, reports success, and withdraws nobody** — and nothing in
+-- any log says a member was not revoked. `lower(btrim(...))` is written into
+-- the procedure rather than left as prose an operator can skip, and the
+-- `exists` check turns a mistyped or mis-spelled address into a loud failure.
+-- (`citext` would fix the comparison itself, but it is a type change to a
+-- table that has not shipped anywhere, against a guarantee we already enforce
+-- at the write path — the guard gets 95% of the value at none of the blast
+-- radius. Prefer it until a second writer ever needs to normalise.)
+--
+-- **Why the `beta_access` write cannot be left off.** `profiles.id` references
 -- `auth.users` on delete cascade, so deleting the auth account deletes the
 -- profile *and its `revoked_at` with it*. They sign up again, the roster still
 -- holds the address, and `approve_at_exchange` inserts a fresh, unrevoked
@@ -25,6 +54,10 @@
 -- recorded against, so `revoked_at` here is **not a foreign key and must never
 -- become one.**
 --
+-- **The `profiles` write may legitimately match zero rows** — an address on the
+-- roster that has never signed up has no profile. That is correct, not a
+-- mistyped address, which is why only the roster lookup is guarded.
+--
 -- **Absence of a row is still the refusal for somebody not admitted yet.**
 -- `_listed_for_beta` refuses an address that is absent *or* that has
 -- `revoked_at` set, so deleting the roster row after withdrawing closes the
@@ -32,26 +65,54 @@
 -- alone withdraws nobody. Withdraw first; deleting the row is optional
 -- housekeeping.
 --
--- **Do the `profiles` write alongside it, and it is not sufficient on its
--- own.** `update profiles set revoked_at = now() where email = '<address>'` is
--- what `authorize_task_start` actually reads at task start, so without it a
--- member who is already signed in keeps working until their next sign-in. It
--- is also **the only one of the two writes a cascade can erase**, which is
--- exactly why it cannot be the whole procedure. Two statements, in this order:
---   1. update beta_access  set revoked_at = now() where email = '<address>'
---   2. update profiles     set revoked_at = now() where email = '<address>'
+-- No `AFTER DELETE` trigger ties the two tables: a trigger fires on a
+-- *delete*, and a withdrawal is an `UPDATE` that deliberately leaves its
+-- evidence in place.
 --
--- No `AFTER DELETE` trigger ties them: a trigger fires on a *delete*, and a
--- withdrawal is an `UPDATE` that deliberately leaves its evidence in place.
+-- ── a duplicate paste, and re-admission ──────────────────────────────────
 --
 -- `email` is the primary key, which is what makes a second paste a no-op: a
--- duplicate arrives as a 409 and is the operator's confirmation that the
--- address was already in, not an error to retry. It is stored **already
+-- duplicate arrives as a 409 and is not an error to retry. It is stored **already
 -- normalised** — the caller strips and lower-cases before the insert, so the
 -- key compares one spelling of an address with itself. There is no
 -- normalisation function here on purpose: the same rule is applied by the
 -- waitlist write, and a second implementation in SQL is a second thing to keep
 -- in step with the first.
+--
+-- **A 409 says "already there", not "admitted".** Since `revoked_at` exists,
+-- already-there has two meanings — **granted** (`revoked_at is null`) and
+-- **withdrawn** (set) — and both return the same 409, because the primary key
+-- cannot tell them apart. One line tells them apart:
+--
+--   select email, revoked_at from beta_access where email = lower(btrim('<address>'));
+--
+-- null means a live grant and the paste needs no action; a timestamp means
+-- this address is **withdrawn**, and pasting it again changes nothing —
+-- `_listed_for_beta` refuses a row whose `revoked_at` is set.
+--
+-- **Re-admission is the same two-statement procedure with the values nulled,
+-- and the order is unchanged** — `beta_access` first, then `profiles`, in one
+-- transaction:
+--
+--   do $$
+--   declare
+--     v text := lower(btrim('<address>'));
+--   begin
+--     if not exists (select 1 from beta_access where email = v) then
+--       raise exception 'no beta_access row for %', v
+--         using hint = 'a withdrawn address keeps its row; do not paste to re-admit';
+--     end if;
+--     update beta_access set revoked_at = null where email = v;
+--     update profiles    set revoked_at = null where email = v;
+--   end $$;
+--
+-- Both are required again, and for the same reason in reverse: nulling only
+-- `profiles` re-opens task start for somebody the roster still refuses at
+-- sign-in, and nulling only the roster un-revokes nothing that
+-- `authorize_task_start` — which reads `profiles` only — will honour. An
+-- account deleted since the withdrawal has no profile row, so the second
+-- statement matches zero rows and the re-admission is the roster write alone,
+-- which is correct: the fresh profile is created unrevoked.
 --
 -- The address is matched against the **`email` claim on a verified JWT**, never
 -- against a body field, a query parameter or anything else a caller sent — the
