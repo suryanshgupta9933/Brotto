@@ -59,15 +59,23 @@ EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s.]+(\.[^@\s.]+)+$")
 #: there, but only for what survives *after* the grammar layer has decided
 #: the value is one string — it keeps `@` and spaces from being reinterpreted
 #: at the HTTP layer, not commas from being reinterpreted at the filter layer.
-#: Inside the literal a `"` would close it early and everything after it
-#: would be parsed as grammar, so a value carrying one is **rejected rather
-#: than escaped**: no escaping is defined here that has been checked against
-#: PostgREST, and a caller reaching this with a `"` is a caller whose claim is
-#: not the shape a claim is supposed to be. Pinned by
-#: `test_the_roster_filter_survives_a_postgrest_parser`.
+#: Inside the literal `"` closes it and `\` is the escape character, so a
+#: value carrying either can terminate or reshape the literal — and
+#: `quote()` percent-encodes both, which buys nothing, because the decode
+#: above happens before the grammar layer ever sees either byte. The check
+#: is therefore **deny-by-default on the characters the grammar reserves**,
+#: not allow-by-default on the ones it does not: `EMAIL_RE`'s local part
+#: (`[^@\s]{1,64}`) accepts a backslash, so the address is reachable. Both
+#: are **rejected rather than escaped** — no escaping is defined here that
+#: has been checked against PostgREST, and rejecting is the honest
+#: alternative to guessing. It fails closed at all three call sites
+#: (`_listed_for_beta` → `False`, `approve_at_exchange` → `False`,
+#: `ensure_on_roster` → a refusal). Pinned by
+#: `test_the_roster_filter_survives_a_postgrest_parser` and
+#: `test_a_backslash_in_an_address_is_refused_rather_than_quoted`.
 def _filter_value(value: str) -> str:
-    if '"' in value:
-        raise ValueError("filter value contains a double quote")
+    if any(c in value for c in ('"', "\\")):
+        raise ValueError("filter value contains a grammar-reserved character")
     return '"' + quote(value, safe="") + '"'
 
 # The relay's own timeouts. Supabase answering slowly must not become a
@@ -348,7 +356,9 @@ BETA_ACCESS_PATH = "rest/v1/beta_access"
 _IGNORE_DUPLICATES = "resolution=ignore-duplicates"
 
 
-def _control_plane_failed(what: str, status: int | None = None) -> None:
+def _control_plane_failed(
+    what: str, status: int | None = None, exc_type: str | None = None
+) -> None:
     """Say loudly that an answer is about *our* database, not about the caller.
 
     Every consumer of these two lookups turns a control-plane failure into
@@ -362,16 +372,23 @@ def _control_plane_failed(what: str, status: int | None = None) -> None:
     presenting as a product decision, and it is invisible unless the log
     says which of the two it was.
 
-    Status only, and `None` for a call that never came back. The body names
-    columns and on some errors echoes the filter, which is somebody's email
-    address — `_error` in `main.py` set the precedent that the type is fine
-    and a Supabase body is not.
+    Status only, and `None` for a call that never came back. `exc_type` is
+    the *type* of an exception and never its message, on the same rule: a
+    PostgREST error body can echo the row, and the exception that carries it
+    does too. Both are carried here so one event is one record — the caller
+    no longer logs the type itself, and a transient outage logs the same
+    single actionable line every time rather than a second vague one. That
+    repetition is deliberate: under a sustained outage the line firing on
+    every request *is* the signal. Pinned by
+    `test_an_unreadable_roster_is_loud_where_a_genuine_miss_is_not`.
     """
     log.error(
-        "%s did not answer%s — the roster could not be read, so every identity "
+        "%s did not answer%s%s — the roster could not be read, so every identity "
         "looks absent. Check the deployed migrations under supabase/migrations/ "
         "before reading any of these answers as a real refusal.",
-        what, f" (status {status})" if status is not None else " at all",
+        what,
+        f" (status {status})" if status is not None else " at all",
+        f" [raised {exc_type}]" if exc_type is not None else "",
     )
 
 
@@ -401,8 +418,7 @@ async def _listed_for_beta(email: str) -> bool:
             path=BETA_ACCESS_PATH,
         )
     except Exception as exc:
-        log.error("beta_access lookup raised %s", type(exc).__name__)
-        _control_plane_failed("the beta_access lookup")
+        _control_plane_failed("the beta_access lookup", exc_type=type(exc).__name__)
         return False
     if status >= 400:
         _control_plane_failed("the beta_access lookup", status)
@@ -412,8 +428,10 @@ async def _listed_for_beta(email: str) -> bool:
     except Exception as exc:
         # A body that does not parse is not a roster answer either, and it
         # is the shape a proxy error page takes.
-        log.error("beta_access lookup returned an unparseable body: %s", type(exc).__name__)
-        _control_plane_failed("the beta_access lookup")
+        _control_plane_failed(
+            "the beta_access lookup (unparseable body)",
+            exc_type=type(exc).__name__,
+        )
         return False
     if not isinstance(rows, list) or not rows:
         return False

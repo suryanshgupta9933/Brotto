@@ -1033,7 +1033,7 @@ LISTED = "listed@example.test"
 
 
 def _parse_postgrest(query):
-    """Parse a PostgREST query the way PostgREST does.
+    r"""Parse a PostgREST query the way PostgREST does.
 
     Two steps, **in this order**, and the order is the whole point of
     this helper: every value is URL-decoded first, and only then handed to
@@ -1048,6 +1048,17 @@ def _parse_postgrest(query):
     separately rather than being silently dropped — a value that closes
     its own quoting and then appends a second column is exactly the bug.
     Returns one dict per filter.
+
+    **Escapes are processed before the closing quote is located**, because
+    that is the order PostgREST's lexer is in: `\` is the escape character
+    *inside* a literal, so `\"` does not end the string and `\\` is one
+    backslash. A parser that searches for the next `"` instead will end
+    the literal early on exactly the inputs that were built to escape —
+    it reports the tail as `trailing` grammar, and a test written against
+    it asserts the *wrong* parse while looking entirely reasonable. That
+    is not hypothetical: the percent-encoding round last round got through
+    because this helper shared the implementation's assumption rather than
+    checking the grammar independently.
     """
     filters = []
     for part in query.lstrip("?").split("&"):
@@ -1065,9 +1076,23 @@ def _parse_postgrest(query):
         column = name
         trailing = ""
         if value.startswith('"'):
-            end = value.find('"', 1)
-            assert end > 0, f"unterminated string literal on {column}: {decoded!r}"
-            values, trailing = [value[1:end]], value[end + 1:]
+            # Walk the literal one character at a time, consuming escapes
+            # as pairs, so the quote we stop on is the one that is not
+            # escaped. `find` cannot do this and must not be used here.
+            chars, i, closed = [], 1, False
+            while i < len(value):
+                c = value[i]
+                if c == "\\" and i + 1 < len(value):
+                    chars.append(value[i + 1])
+                    i += 2
+                    continue
+                if c == '"':
+                    closed = True
+                    break
+                chars.append(c)
+                i += 1
+            assert closed, f"unterminated string literal on {column}: {decoded!r}"
+            values, trailing = ["".join(chars)], value[i + 1:]
         else:
             values = value.split(",")
         filters.append({"column": column, "op": op, "values": values, "trailing": trailing})
@@ -1235,6 +1260,58 @@ def test_a_quote_in_an_address_is_refused_rather_than_quoted(client, monkeypatch
     assert [c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH] == []
 
 
+def test_a_backslash_in_an_address_is_refused_rather_than_quoted(client, monkeypatch, hosted):
+    """The escape character is the other half of the same hole.
+
+    Inside a PostgREST literal `\\` is the escape character, so a value
+    carrying one can terminate or reshape the literal even though it never
+    contains a `"`. `EMAIL_RE`'s local part is `[^@\\s]{1,64}` and accepts a
+    backslash, so this is reachable from a real address typed on a form —
+    the same trade already accepted for `"` and rejected for the same
+    reason: no escape rule here has been checked against a real PostgREST,
+    so the value is refused instead of guessed at.
+
+    The guard is deny-by-default on what the grammar *reserves*, not
+    allow-by-default on what it does not; an allow-list of safe characters
+    would have passed both of these and is the version that keeps getting
+    written by accident.
+    """
+    nasty = "a\\b@example.test"
+    calls = _roster_stub(monkeypatch, listed=[nasty])
+    _stub_verify(monkeypatch, email=nasty)
+    resp = client.post("/v1/auth/exchange", json={"email": nasty, "code": "123456"})
+    assert resp.json()["approved"] is False
+    # Refused *before* the lookup: the address never reaches the query.
+    assert [c for c in calls if c["path"] == jwt_auth.BETA_ACCESS_PATH] == []
+    with pytest.raises(ValueError):
+        jwt_auth._filter_value(nasty)
+
+
+def test_the_test_parser_reads_escapes_before_it_finds_the_closing_quote():
+    """The parser must assert against PostgREST's grammar, not mirror the code.
+
+    `_parse_postgrest` is the only PostgREST in the room, so a parser that
+    shared the implementation's assumption would agree with it on every
+    input including the wrong ones — which is exactly how the
+    percent-encoding bug survived a round that had a test for it. This
+    case is the one that separates them: `\\"` is an escaped quote and does
+    **not** end the literal, and an old `value.find('"', 1)` parser reads
+    the whole tail as `trailing` grammar.
+    """
+    parsed = _parse_postgrest('?email=eq."a\\"b,c@example.test"')
+    assert len(parsed) == 1
+    assert parsed[0]["values"] == ['a"b,c@example.test'], (
+        "an escaped quote must not end the literal"
+    )
+    assert parsed[0]["trailing"] == ""
+
+    # A doubled backslash on the wire is one backslash in the value, and
+    # the comma after it is inside the literal, not a list separator.
+    parsed = _parse_postgrest(r'?email=eq."a\\b,c@example.test"')
+    assert parsed[0]["values"] == ["a\\b,c@example.test"]
+    assert parsed[0]["trailing"] == ""
+
+
 def test_an_unreadable_roster_is_loud_where_a_genuine_miss_is_not(monkeypatch, hosted, caplog):
     """`PGRST204` must not be able to pass for "not in the beta".
 
@@ -1275,6 +1352,23 @@ def test_an_unreadable_roster_is_loud_where_a_genuine_miss_is_not(monkeypatch, h
     assert caught.value.reason == "control_plane_unavailable"
     assert "400" in caplog.text
     assert "PGRST204" not in caplog.text
+
+    # A lookup that raises is one event, so it is **one record** carrying
+    # both the what and the why. It used to log the exception type and then
+    # call `_control_plane_failed`, which is two ERROR records for one
+    # failure and reads as two incidents.
+    async def boom(method, query, body=None, *, path="rest/v1/profiles", prefer=""):
+        raise TimeoutError("upstream connect timeout")
+
+    monkeypatch.setattr(jwt_auth, "_profiles", boom)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="brotto.jwt_auth"):
+        assert asyncio.run(jwt_auth._listed_for_beta(LISTED)) is False
+    records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(records) == 1, f"one event, {len(records)} records: {caplog.text}"
+    assert "TimeoutError" in caplog.text
+    # The message can carry the address; the type cannot.
+    assert "upstream connect timeout" not in caplog.text
 
 
 def test_an_unlisted_address_says_nothing_at_all(monkeypatch, hosted, caplog):
