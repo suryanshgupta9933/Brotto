@@ -406,10 +406,22 @@ to run without a usable credential; `not_invited`, `revoked`,
 request it *did* authenticate. Neither group is fixed by sending the task again.
 Pinned by `scripts/test-failure-reasons.test.js`.
 
-**The status line is `textContent` in both surfaces.** The wizard's
-`setCloudStatus` and the panel's put a typed email address into that line, and
-the no-unescaped-`innerHTML` rule applies to a settings hint exactly as it
-applies to a card.
+**The wizard's status lines are toasts; the panel's are still inline.** Every
+error and notification in `welcome.*` goes through a copy of the side panel's
+`toast()` — fixed, square, 3px left rule for the kind, one at a time. The
+three writers (`setCloudStatus` / `setServerStatus` / `setWaitlistStatus`) are
+thin wrappers so call sites and extraction tests keep their names. **The sink
+is `textContent` either way** — a typed email address lands in that text, and
+the no-unescaped-`innerHTML` rule applies to a toast exactly as it applies to
+a card.
+
+**`POST /v1/auth/request-code` names the roster state.** It answers
+`{"sent": true}` or `{"sent": false, "reason": "not_on_list" | "pending" |
+"revoked" | "try_again"}`, always HTTP 200. Both surfaces map those to one
+sentence each and only open the code box on `sent: true` — the box is still
+the user's click asking for a code, and it stays shut when the server says no
+mail is coming. `welcome.js` `requestCode` and `sidepanel.js`
+`requestSignInCode` carry the same four-way mapping.
 
 ## `approved` is a report, and the token is stored either way
 

@@ -324,11 +324,8 @@ caller — no normalisation function in SQL, so there is one rule to keep in ste
 not two. It carries **no `owner` column**: the address is matched against the
 `email` claim on a verified JWT, never against a body field. Only `email` and
 `revoked_at` are ever read (`select=email,revoked_at`); `approved_at` is filled by
-its column default, and `added_by` is written by **no server code path** — the
-relay never writes this table — but by exactly one client of it,
-`scripts/beta-roster.sh`, which stamps `whoami` on `add`. A row created any
-other way carries an empty author rather than a wrong one, and it is nullable for
-the same reason: a bulk paste arrives with no single author.
+its column default. (`added_by` was a fourth column and is gone as of `009` —
+only `beta-roster.sh` ever wrote it, and nobody read it.)
 
 **Admitting and withdrawing a member is `scripts/beta-roster.sh`, and it is
 deliberately not an HTTP route.** An admin route that appends addresses is an
