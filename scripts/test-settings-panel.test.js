@@ -405,8 +405,13 @@ function main() {
       !/\.dd-list\s*\{[^}]*box-shadow/.test(panelHtml));
     check("the panel still forces square corners globally",
       /border-radius:\s*0\s*!important/.test(panelHtml));
-    check("Replay setup is a link, not a second button",
-      /id="replaySetupBtn" class="settings-link"/.test(panelHtml));
+    // A quiet link labelled "Replay setup" read as a replay of something
+    // rather than the setup itself, and a tester who could not find the way
+    // back into the wizard had no way to re-run the flow. It is a real
+    // control now, named for what it does.
+    check("Set up Brotto is a button, not a link",
+      /id="replaySetupBtn" class="btn"[\s\S]{0,160}Set up Brotto/.test(panelHtml)
+      && !/id="replaySetupBtn" class="settings-link"/.test(panelHtml));
     // Counted against the sections rather than a literal: a hardcoded 4 broke
     // the moment a section was added, which is the opposite of what a test for
     // "every section is headed" should do.
@@ -415,6 +420,31 @@ function main() {
       sections > 0 &&
       (panelHtml.match(/<h3>/g) || []).length === sections &&
       /\.settings-section \+ \.settings-section \{[^}]*border-top: 1px solid var\(--rule\)/.test(panelHtml));
+  }
+
+  // ── The caller key is a storage key, and only the write needs one ────────
+  //
+  // `user_id` is a per-install uuid the browser mints for itself. The server
+  // prefers it over the peer address precisely because the address is not
+  // stable (a laptop changes network; a container sees the docker gateway) —
+  // so dropping it everywhere would move every self-hoster's blocklist back to
+  // their IP and, on the relay where every caller shares the proxy address,
+  // collapse every account onto one file. It is not an identity the extension
+  // gets to assert; it is the key the server files a policy under.
+  {
+    const hydrate = extract("hydrateSettingsPanel");
+    const probe = hydrate.slice(hydrate.indexOf("/v1/policy`"), hydrate.indexOf("catch (e)", hydrate.indexOf("/v1/policy`")));
+    check("the Settings reachability probe sends no caller key",
+      probe.includes("/v1/policy`") && !/user_id|device_id/.test(probe),
+      probe.trim());
+    const save = sidepanel.slice(
+      sidepanel.indexOf("saveSettingsBtn.addEventListener('click'"),
+      sidepanel.indexOf("/v1/policy_ack", sidepanel.indexOf("saveSettingsBtn.addEventListener('click'")) + 400);
+    check("…and the save that actually writes a policy still sends one",
+      /\/v1\/policy_ack[\s\S]{0,320}user_id: await deviceId\(\)/.test(save));
+    check("deviceId() says what it is — a storage key, not who the user is",
+      /\*storage key\*[\s\S]{0,600}async function deviceId\(/.test(sidepanel),
+      "the docstring above deviceId() is what the next reader has");
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

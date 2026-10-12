@@ -33,6 +33,9 @@ So the privacy posture is not "we do not collect your data". It is:
 | Waitlist signup (a name, an email, a batch label, a timestamp) | `waitlist` table in Supabase, server | until the operator drops it |
 | Beta allowlist (an email, the row's insert timestamp, and a withdrawal timestamp once one is set) | `beta_access` table in Supabase, server | until the operator drops it |
 | Waitlist confirmation (the address, in transit and in Resend's request logs) | `api.resend.com` | theirs, not ours |
+| Sign-in code (a keyed digest of a six-digit code) | `sign_in_codes` table in Supabase, server | ~10 minutes, then useless |
+| Sign-in event (an account id, a /24 or /48 network, a browser/OS string) | `sign_in_events` table in Supabase, server | until the operator drops it |
+| Sign-in code mail (the code, in transit and in Resend's request logs) | `api.resend.com` | theirs, not ours |
 | Audit request bodies | whatever the model provider logs | theirs, not ours |
 
 The waitlist is the one row in that table that came from **a stranger** rather
@@ -66,26 +69,25 @@ the beta?" to anyone who posts an address. A stranger's row becoming an
 invitation by pipeline is that route turned into a membership oracle; the same
 reason the waitlist answers a duplicate exactly as it answers a first submit.
 
-**Resend is a third party for waitlist addresses and for nothing else here.**
-An account's identity is Supabase's, and Supabase's own mail (the sign-in code)
-is configured as a custom SMTP provider — that is a second, unbuilt use of
-Resend and it is not this one. This one is `session/waitlist_email.py`: our own
-HTTP call to `api.resend.com` carrying a stranger's address, because a signup is
-confirmed by an email we send. So the address crosses **two** processors rather
-than one, and the difference is worth stating rather than folding into the
-Supabase line above: it is the only field in the project that is handed to a
-party that has no table of ours to look it up in. Two consequences, both
-deliberate. **The address is never written to a log line here**, on any path,
-including the failure paths — a transport exception quotes the request body, and
-the request body is the address, so only the exception's TYPE crosses into a
-log. And **the address appears in exactly one field of the request we send**,
-`to`: no header, no tag, no `List-Unsubscribe` value carries it. There is no way
-to make a third-party mail API not see the recipient; there is a way to stop it
-being the thing we paste into their logs ourselves. (There *was* a third copy,
-in an `Idempotency-Key` hashed from the address — removed 2026-10-12 because
-that header refused a legitimately new signup as a `409`, which is a delivery
-failure bought for a duplicate-send guarantee the unique constraint already
-gave. See "What the waitlist table guarantees" in `waitlist.py`.)
+**Resend is a third party for waitlist addresses and for sign-in codes.**
+An account's identity is Supabase's, but Supabase no longer mails anything: the
+sign-in code is minted here and sent through the same Resend account the
+waitlist confirmation uses (`session/sign_in_code_email.py`, design language
+imported from `waitlist_email` rather than copied). That is the second
+processor, and it is the same shape of disclosure twice — the address crosses
+to a party that has no table of ours to look it up in. The two consequences
+hold for both mails. **The address is never written to a log line here**, on any
+path, including the failure paths — a transport exception quotes the request
+body, and the request body is the address, so only the exception's TYPE crosses
+into a log. And **the address appears in exactly one field of the request we
+send**, `to`: no header, no tag, no `List-Unsubscribe` value carries it. There
+is no way to make a third-party mail API not see the recipient; there is a way
+to stop it being the thing we paste into their logs ourselves. (There *was* a
+third copy, in an `Idempotency-Key` hashed from the address — removed
+2026-10-12 because that header refused a legitimately new signup as a `409`,
+which is a delivery failure bought for a duplicate-send guarantee the unique
+constraint already gave. See "What the waitlist table guarantees" in
+`waitlist.py`.)
 
 Page text itself is **not** written to disk, and neither is the AX diff that
 used to quote it. The `.pages.json` sidecar that was meant to hold page bodies
@@ -337,25 +339,31 @@ the counter — at task start. The email is there so the operator can answer
 are how a credential comes into existence; gating them on one is a closed door.
 That makes them the one place a route can become **a directory of the beta**:
 `POST /v1/auth/request-code` returns the same answer for an address that has an
-account, one that does not, and one on the beta roster — this route consults
-nothing that knows who is in the beta, and every response body is swallowed
-rather than relayed. Supabase's text names whether the address exists, what the
-code was worth, and how long the project has been rate limited.
-`/v1/auth/exchange` raises a fixed `"invalid or expired code"` for the same
-reason. Only an **incomplete call** is reported, because that says nothing about
-the address and reporting it is the difference between "check your inbox" and
-"nothing is wrong, wait".
+account, one that does not, and one on the beta roster. The relay now *does*
+consult `beta_access` at mint — a code is the raw material for signing in, and
+mailing one to a stranger is mailing a live credential to an address nobody
+chose — but **the roster decides what we do, never what we say**: a listed
+address gets a code and a mail, a stranger gets the same `{"sent": true}` and an
+inbox that stays empty. Everything after the roster check is swallowed rather
+than relayed, so a mint that fails is logged and returns rather than becoming a
+502 the stranger never got. Pinned by
+`test_the_reply_cannot_tell_a_member_from_a_stranger`.
+`/v1/auth/exchange` raises a fixed `"invalid or expired code"` for wrong,
+expired, spent and never-issued alike, because saying which half was wrong is
+the same oracle. Only an **incomplete call** is reported, because that says
+nothing about the address and reporting it is the difference between "check
+your inbox" and "nothing is wrong, wait".
 
-**And `create_user` is `True` — it is not allowed to become conditional.**
-There used to be no signup path at all, and that is not a neutral choice:
-`profiles.id` is an FK into `auth.users`, so a profile *cannot* be pre-seeded
-for an address that has no auth account, and the roster check could therefore
-only ever land on the unauthenticated route — turning "check your inbox" into
-"are you on the list?" for anyone who can reach a public URL. So the roster is
-read at `/v1/auth/exchange` instead, which is safe for one reason and one only:
-**by then the caller has read a code out of an inbox it controls**, and that is
-the gate `request-code` cannot verify. Pinned by
-`test_request_code_consults_no_allowlist`.
+**The account is created at exchange, with Supabase sending no mail.** The
+create goes through the service-role admin API with `email_confirm: true` —
+that flag is what stops Supabase mailing a branded "Confirm your email address"
+of its own, which is the whole reason the code is ours now. It happens at
+**exchange** and not at mint because a code row needs no account (see
+`test_a_code_is_issued_to_an_address_that_need_not_have_an_account`), and
+creating at mint time would mint an auth account for someone who never
+redeemed. `profiles.id` is still an FK into `auth.users`, so the account row
+remains Supabase's; only the mail is gone. If the user already exists, the id
+is read back rather than failing the sign-in.
 
 ## The roster admits; `revoked_at` withdraws
 
@@ -465,20 +473,20 @@ the top of `004`, and `beta-roster.sh` is what the operator actually runs.
 
 ## A valid signature is not a place in the beta
 
-`create_user` being `True` has a consequence that is easy to miss: **every person
-who signs up now holds a token that verifies.** A signature proves an account
-exists; it says nothing about the roster. So the six routes that gated on
-`_authed` — `POST /v1/model/check`, `GET /v1/policy`, `POST /v1/sessions`,
-`POST /v1/policy_ack`, `POST /v1/reports`, `POST /v1/suggestions` — were
-answering anyone who signed up, and two of them spend the operator's model
-credits.
+**Every person who signs in holds a token that verifies.** A signature proves
+an account exists; it says nothing about the roster. So the six routes that
+gated on `_authed` — `POST /v1/model/check`, `GET /v1/policy`,
+`POST /v1/sessions`, `POST /v1/policy_ack`, `POST /v1/reports`,
+`POST /v1/suggestions` — were answering anyone who signed up, and two of them
+spend the operator's model credits.
 
 They now go through `_approved`, which is `ensure_on_roster` (existence plus
 `revoked_at`; no cap, no reservation) applied to every HTTP route that acts. The
-sign-in path keeps its own answer — a token is minted for anyone, on purpose,
-because that is what lets the panel offer somebody the waitlist instead of a
-bare failure. **Minting is open; using is not.** That split is the design, not
-a gap in it.
+sign-in path keeps its own answer — a token is minted for anyone who redeems a
+code, on purpose, because that is what lets the panel offer somebody the
+waitlist instead of a bare failure. **A code is minted only for an admitted
+address; using the token is gated again.** That split is the design, not a gap
+in it.
 
 `ensure_on_roster` is also the first half of `authorize_task_start`, which adds
 the cap and the reservation on top. One lookup, two callers: a second copy of
@@ -515,6 +523,37 @@ and it is the right trade anyway, because the hop buys a withdrawn member's
 transcript otherwise. `ensure_on_roster` reaches Supabase **only** through
 `isinstance(auth.claims, Claims)`, which is never true in `secret` or `open`
 mode, so self-host pays nothing.
+
+## `sign_in_events` is incident response, not analytics
+
+One row per **successful** `POST /v1/auth/exchange`, written as a background
+task after the response is on the wire. A failed exchange writes nothing — a
+wrong guess is not a sign-in.
+
+The row holds three fields and no more: the account id (read off the verified
+token, never the request body), the peer as a **network** — `ip_network(…/24)`
+on IPv4 and `…/48` on IPv6, never the address — and the browser/OS string,
+bounded at 512 characters. Nothing else exists to write: no page content, no
+URL, no task title, no session id. This is the first table here holding
+personal data, and the columns are the ones an incident needs and nothing the
+product would like to have.
+
+**What it is for:** answering "is this the same person on a new laptop, or
+somebody else holds the account?" A `/24` is coarse enough to be an honest
+answer to that question and fine enough to notice a different city. That is
+the whole use.
+
+**What it is not:** not analytics, not joined to anything else, not a browsing
+history. There is no retention job and no expiry column — a cron that stops
+running fails quietly, and `profiles.week_start` is built on the same argument.
+The rows stay until somebody runs a `delete`, and they go when the beta goes.
+
+Pinned by `test_a_successful_exchange_records_one_sign_in_event`,
+`test_a_failed_exchange_records_no_sign_in_event`,
+`test_the_peer_is_stored_as_a_network_and_never_as_a_host`, and
+`test_an_oversized_user_agent_is_dropped_rather_than_truncated`. The SQL shape
+(`cidr` + mask CHECK, no FK, RLS deny-all) is pinned in
+`tests/test_sign_in_tables.py`.
 
 ## Self-approval is an insert, never an upsert
 

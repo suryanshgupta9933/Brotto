@@ -836,7 +836,9 @@ const HOSTED_HINT = 'Brotto Cloud. Your address is fixed; run your own server to
 const cloudSignIn = document.getElementById('cloudSignIn');
 const cloudEmail = document.getElementById('cloudEmail');
 const cloudCode = document.getElementById('cloudCode');
+const cloudCodeField = document.getElementById('cloudCodeField');
 const cloudCodeBtn = document.getElementById('cloudCodeBtn');
+const cloudResendBtn = document.getElementById('cloudResendBtn');
 const cloudSignInBtn = document.getElementById('cloudSignInBtn');
 const cloudSignOutBtn = document.getElementById('cloudSignOutBtn');
 const agentSecretField = document.getElementById('agentSecretField');
@@ -882,6 +884,7 @@ function applyAuthMode() {
   if (agentSecretField) agentSecretField.hidden = cloud;
   if (cloudSignIn) cloudSignIn.hidden = !cloud;
   if (cloudEmail) cloudEmail.value = cloud ? cloudEmail.value : '';
+  if (!cloud) hideCloudCodeEntry();
   renderCloudSignInStatus();
 }
 
@@ -924,6 +927,12 @@ function renderCloudSignInStatus() {
   if (!cloudSignIn || state.authMode !== 'jwt') return;
   void cloudSignedIn().then((signedIn) => {
     if (state.authMode !== 'jwt') return;
+    if (signedIn) {
+      hideCloudCodeEntry();
+      if (cloudCodeBtn) cloudCodeBtn.hidden = true;
+    } else if (cloudCodeBtn) {
+      cloudCodeBtn.hidden = false;
+    }
     setCloudStatus(signedIn ? 'Signed in to Brotto Cloud.' : 'Signed out — send yourself a code to sign in.', signedIn ? 'ok' : '');
   });
 }
@@ -956,22 +965,44 @@ async function postAuth(path, payload) {
   return { ok: res.ok, body };
 }
 
+// The code box is revealed by the user's own click and by nothing else.
+// `request-code` answers a listed and an unlisted address byte-identically,
+// deliberately, because a conditional answer on an unauthenticated route is
+// a directory of the beta — so there is no field in the response that could
+// be revealed on, and a screen that waited for one would wait forever. What
+// the reveal is *not* is a membership test.
+function showCloudCodeEntry() {
+  if (cloudCodeField) cloudCodeField.hidden = false;
+  if (cloudCode) cloudCode.focus();
+}
+
+function hideCloudCodeEntry() {
+  if (cloudCodeField) cloudCodeField.hidden = true;
+  if (cloudCode) cloudCode.value = '';
+}
+
 async function requestSignInCode() {
   const email = cloudEmail.value.trim();
   if (!email) { setCloudStatus('Enter the email you signed up with.', 'bad'); return; }
   setCloudStatus('Sending…');
   try {
     const { ok } = await postAuth('/v1/auth/request-code', { email });
-    setCloudStatus(ok ? `Code sent to ${email}. It can take a minute to arrive.` : 'That address could not be sent a code.', ok ? 'ok' : 'bad');
+    if (!ok) { setCloudStatus('That address could not be sent a code.', 'bad'); return; }
   } catch {
-    setCloudStatus('Could not reach the server — check the address above.', 'bad');
+    setCloudStatus('Could not reach the server.', 'bad');
+    return;
   }
+  showCloudCodeEntry();
+  // True of a member and a stranger alike, because the server will only have
+  // mailed one to the first of them and we are not told which.
+  setCloudStatus(`If ${email} is in the beta, a code is on its way — it can take a minute.`, 'ok');
 }
 
 async function exchangeSignInCode() {
   const email = cloudEmail.value.trim();
   const code = cloudCode.value.trim();
   if (!email) { setCloudStatus('Enter the email you signed up with.', 'bad'); return false; }
+  if (cloudCodeField && cloudCodeField.hidden) { setCloudStatus('Send yourself a code first.', 'bad'); return false; }
   if (!/^\d{6}$/.test(code)) { setCloudStatus('That code should be six digits.', 'bad'); return false; }
   setCloudStatus('Signing in…');
   let token = null;
@@ -1000,13 +1031,39 @@ async function exchangeSignInCode() {
   if (waitlisted) {
     // They have just proved they control this address by completing the code
     // exchange, which is exactly why offering the waitlist HERE is consented
-    // rather than a capture. Offered, never sent: the button is theirs.
+    // rather than a capture. Offered, never sent: the button is theirs. The
+    // sign-in is real, so the panel goes back to work either way.
     prefillWaitlist(email);
     setCloudStatus('Signed in, but Brotto Cloud is a closed beta and this address is not on the list yet.');
+    hideCloudCodeEntry();
     return true;
   }
+  hideCloudCodeEntry();
   setCloudStatus('Signed in to Brotto Cloud.', 'ok');
+  await greetOnSignIn();
   return true;
+}
+
+// The only name Brotto holds is one the user typed on the waitlist form, so
+// that is the only source a greeting may read. It comes out of the same
+// `settings` object rather than a variable of its own, so there is no second
+// copy to fall out of step with a sign-out.
+async function storedAccountName() {
+  const stored = await chrome.storage.local.get('settings');
+  const name = stored.settings && stored.settings.accountName;
+  return typeof name === 'string' ? name.trim() : '';
+}
+
+// Signing in ends the sign-in: the overlay closes and the composer is
+// offered, because a Settings panel over a working account is the one screen
+// with nothing left to do on it. The greeting rides the toast rather than a
+// screen of its own — a card here would be one more thing to dismiss before
+// the user could ask for anything.
+async function greetOnSignIn() {
+  const name = await storedAccountName();
+  settingsOverlay.classList.remove('open');
+  toast(name ? `Signed in. Welcome, ${name}.` : 'Signed in to Brotto Cloud.', name ? 'greet' : undefined, 3200);
+  goalEl.focus();
 }
 
 // ── The waitlist ──────────────────────────────────────────────────────────
@@ -1044,12 +1101,27 @@ async function joinWaitlist() {
       setWaitlistStatus('That did not go through — try again in a few minutes.', 'bad');
       return false;
     }
+    // They gave us the name here, so this is the one place it is worth
+    // keeping: it is what a later sign-in greets them by. Written through
+    // the same spread every other settings writer uses, so a field written
+    // elsewhere in the session is not dropped by it.
+    if (name) await rememberAccountName(name);
     setWaitlistStatus(`Thanks. If a place opens, we'll email ${email}.`, 'ok');
     return true;
   } catch {
     setWaitlistStatus('Could not reach the server — try again later.', 'bad');
     return false;
   }
+}
+
+// The one name Brotto holds is one the user typed here, so this is the only
+// place worth writing it down. It rides the `settings` spread every other
+// writer uses, so it cannot drop a field somebody else added.
+async function rememberAccountName(name) {
+  const stored = await chrome.storage.local.get('settings');
+  await chrome.storage.local.set({
+    settings: { ...(stored.settings || {}), accountName: name },
+  });
 }
 
 // Signing out is not "clear the field". A stale token in the slot is a
@@ -1063,6 +1135,11 @@ async function signOutOfCloud() {
 }
 
 if (cloudCodeBtn) cloudCodeBtn.addEventListener('click', () => { void requestSignInCode(); });
+// Same call, second button: the address is already in the field and the code
+// is already on its way somewhere the user may have deleted. Asking again is
+// the whole of the recovery, and a separate "resend" flow would be a second
+// place for it to be wrong.
+if (cloudResendBtn) cloudResendBtn.addEventListener('click', () => { void requestSignInCode(); });
 if (cloudSignInBtn) cloudSignInBtn.addEventListener('click', () => { void exchangeSignInCode(); });
 if (cloudSignOutBtn) cloudSignOutBtn.addEventListener('click', () => { void signOutOfCloud(); });
 if (waitlistJoinBtn) waitlistJoinBtn.addEventListener('click', () => { void joinWaitlist(); });
@@ -1505,9 +1582,17 @@ function refillComposer(task) {
 // leaves Wi-Fi gets a new address, and a server in a container sees the docker
 // gateway rather than the machine. Either way the user's approved sites
 // silently reset.
+//
 // Deliberately not a uuid per session and not derived from anything
-// identifying: it is a handle for "the same browser", nothing more. The
-// blocklist it keys is the user's own file on their own disk.
+// identifying: it is a handle for "the same browser", nothing more, and it
+// is a *storage key* rather than an identity. The blocklist it keys is the
+// user's own file on their own disk, and dropping it from the panel would
+// move every self-hoster's blocklist back to their IP — and on the relay,
+// where every caller shares the proxy's address, onto one file shared by
+// everyone signed in. Who a caller *is* is the server's answer to a
+// credential, not something a browser should mint for itself; where the two
+// disagree today, the credential wins at `/v1/auth/exchange` and this only
+// decides which file on the relay a policy lands in.
 async function deviceId() {
   const stored = await chrome.storage.local.get('deviceId');
   if (typeof stored.deviceId === 'string' && stored.deviceId) return stored.deviceId;
@@ -1892,13 +1977,13 @@ async function hydrateSettingsPanel() {
   const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
 
   // Reachability probe for the footer. Nothing the user edits comes from
-  // here.
+  // here — and nothing is written under a caller key either, so this call
+  // carries no `user_id`: it is the one place the extension would hand out
+  // a stable per-install identifier for a response it does not read. The
+  // policy save below is the caller that actually needs one.
   let effective = null;
   try {
-    const r = await fetch(
-      `${base}/v1/policy?user_id=${encodeURIComponent(await deviceId())}`,
-      { headers: await authHeaders() },
-    );
+    const r = await fetch(`${base}/v1/policy`, { headers: await authHeaders() });
     if (r.ok) effective = await r.json();
   } catch (e) {
     console.warn('[brotto] could not reach server for policy check:', e);

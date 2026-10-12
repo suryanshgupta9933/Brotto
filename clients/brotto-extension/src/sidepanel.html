@@ -808,6 +808,10 @@
       transition: border-color var(--t);
     }
     .input:focus { border-color: var(--ink); border-width: 2px; }
+    /* Six single-width digits with a hair of space between them. Letter
+       spacing on a proportional face jitters every glyph; mono plus a fixed
+       tracking does not. */
+    .input--code { font-family: var(--font-mono); letter-spacing: 0.5em; }
 
     #settingsClose { margin-bottom: -4px; }
 
@@ -1288,6 +1292,18 @@
       animation: msg-enter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
     .toast.bad { border-left-color: var(--bad); color: var(--bad); }
+    /* The one place a name is ever rendered. The toast's own voice is a mono
+       caption for facts, and a person's name set that way is a shout — so a
+       greeting opts out of it and speaks in the panel's sentence type. */
+    .toast.greet {
+      font-family: var(--font-ui);
+      font-size: 13px;
+      font-weight: 400;
+      letter-spacing: normal;
+      text-transform: none;
+      border-left-color: var(--ok);
+      padding: 11px 12px;
+    }
     .toast.leaving { animation: msg-leave 0.18s ease forwards; }
     /* The vertical offset is set by toast() from the measured height of
        whatever sits at the bottom of the panel, so it cannot go stale when
@@ -1963,17 +1979,30 @@
         <div class="field">
           <label class="lbl" for="cloudEmail">Email</label>
           <input id="cloudEmail" class="input" type="email" autocomplete="email" spellcheck="false">
+          <p class="settings-hint">We email you a 6-digit code instead of a link — no extra browser permission, nothing to approve.</p>
         </div>
-        <div class="field">
-          <label class="lbl" for="cloudCode">6-digit code</label>
-          <input id="cloudCode" class="input" inputmode="numeric" maxlength="6"
-                 autocomplete="one-time-code" spellcheck="false">
-          <p class="settings-hint">We email you a code instead of a link — no extra browser permission, nothing to approve.</p>
-        </div>
-        <p id="cloudSignInStatus" class="settings-hint"></p>
         <div class="settings-actions-row">
           <button id="cloudCodeBtn" class="btn" type="button">Send code</button>
-          <button id="cloudSignInBtn" class="btn btn-primary" type="button">Sign in</button>
+        </div>
+        <p id="cloudSignInStatus" class="settings-hint"></p>
+
+        <!-- Revealed by the user's own click, never by the server's answer.
+             `request-code` replies byte-identically for an address on the
+             beta and one that is not — the route cannot be asked who is in —
+             so there is nothing in the response to reveal on, and pretending
+             otherwise would make this screen a membership oracle. -->
+        <div id="cloudCodeField" hidden>
+          <div class="field">
+            <label class="lbl" for="cloudCode">6-digit code</label>
+            <input id="cloudCode" class="input input--code" inputmode="numeric" maxlength="6"
+                   autocomplete="one-time-code" spellcheck="false">
+          </div>
+          <div class="settings-actions-row">
+            <button id="cloudSignInBtn" class="btn btn-primary" type="button">Sign in</button>
+            <button id="cloudResendBtn" class="btn" type="button">Send another</button>
+          </div>
+        </div>
+        <div class="settings-actions-row">
           <button id="cloudSignOutBtn" class="btn" type="button" hidden>Sign out</button>
         </div>
 
@@ -2011,13 +2040,16 @@
     </section>
 
     <!-- ── Actions ─────────────────────────────────────────────────────
-         Save is the panel's only commit. Replay setup is a link, not a
-         button: it is a "start over" affordance that re-points the panel at
-         the wizard, not a preference you set and keep. -->
+         Save is the panel's only commit. Set up Brotto is a button, not the
+         quiet link it used to be: a tester who cannot find the way back into
+         the wizard has no way to re-run the flow, and "Replay setup" read as
+         a replay of something rather than the setup itself. It is a real
+         control, named for what it does, in the same row as the button that
+         saves. -->
     <div class="settings-footer">
       <button id="saveSettingsBtn" class="btn btn-primary" type="button">Save</button>
-      <button id="replaySetupBtn" class="settings-link"
-              type="button" title="Show the first-run wizard again">Replay setup</button>
+      <button id="replaySetupBtn" class="btn"
+              type="button" title="Open the Brotto setup wizard again">Set up Brotto</button>
     </div>
   </div>
 </div>
