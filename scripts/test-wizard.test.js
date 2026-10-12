@@ -132,7 +132,11 @@ const APPLY = extract(welcome, "applyEdition");
 function applyEditionTo(selfChecked, cloudChecked, serverUrl) {
   const sandbox = {
     $selfHostFields: { hidden: false },
+    $serverAddressField: { hidden: false },
     $cloudFields: { hidden: false },
+    $cloudCodeField: { hidden: false },
+    $cloudCode: { value: "123456" },
+    $resendCodeBtn: { hidden: false },
     $serverUrl: { ...serverUrl, classList: { toggle() {} } },
     $serverUrlHint: { textContent: "" },
     $serverStatus: { textContent: "", className: "" },
@@ -140,26 +144,36 @@ function applyEditionTo(selfChecked, cloudChecked, serverUrl) {
     edition() { return cloudChecked ? "cloud" : "self"; },
     setCloudStatus() {},
     CLOUD_SERVER_URL: "https://agent.brotto.dev",
-    CLOUD_HINT: "cloud hint",
     SELF_HOST_HINT: "self hint",
   };
   vm.createContext(sandbox);
   vm.runInContext(APPLY, sandbox);
+  vm.runInContext(extract(welcome, "hideCodeEntry"), sandbox);
   sandbox.applyEdition();
   return sandbox;
 }
 
 const selfRun = applyEditionTo(true, false, { value: "http://localhost:8000", readOnly: false });
-check("self-host leaves the address editable", selfRun.$serverUrl.readOnly === false);
 check("self-host keeps the address the user has", selfRun.$serverUrl.value === "http://localhost:8000");
+check("self-host shows the address field", selfRun.$serverAddressField.hidden === false);
 check("self-host shows the key field", selfRun.$selfHostFields.hidden === false);
 check("self-host hides the sign-in block", selfRun.$cloudFields.hidden === true);
 
 const cloudRun = applyEditionTo(false, true, { value: "", readOnly: false });
 check("cloud prefills the address rather than leaving it blank", cloudRun.$serverUrl.value === "https://agent.brotto.dev");
-check("cloud locks the address", cloudRun.$serverUrl.readOnly === true);
+// The address is not presented at all on the cloud path — there is nothing on
+// that side for the user to choose, and a field called "where your tasks go"
+// invites an edit that cannot be made. `hidden` is what takes it out of the
+// tab order and the accessibility tree as well as off the screen.
+check("cloud does not present the address field at all", cloudRun.$serverAddressField.hidden === true);
 check("cloud hides the AGENT_SECRET field", cloudRun.$selfHostFields.hidden === true);
 check("cloud shows email and code", cloudRun.$cloudFields.hidden === false);
+// The value is still written, because `finish()` and `postAuth` read the
+// field and neither knows which edition this is. A cloud user has to end up
+// with a working `serverUrl` in storage.
+check("and the address a cloud user saves is still written",
+  cloudRun.$serverUrl.value === "https://agent.brotto.dev");
+check("a finished waitlist does not greet twice", cloudRun.$cloudCodeField.hidden === true);
 
 // ── The self-host path is unchanged ───────────────────────────────────────
 // This is the promise the contract makes about self-host, and it is an

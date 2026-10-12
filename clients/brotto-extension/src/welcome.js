@@ -25,23 +25,27 @@ const $serverUrl = document.getElementById("serverUrl");
 const $agentSecret = document.getElementById("agentSecret");
 const $serverStatus = document.getElementById("serverStatus");
 const $provider = document.getElementById("provider");
+const $providerStatus = document.getElementById("providerStatus");
+const $providerRetryBtn = document.getElementById("providerRetryBtn");
 const $model = document.getElementById("model");
 const $apiKey = document.getElementById("apiKey");
 const $editionSelf = document.getElementById("editionSelf");
 const $editionCloud = document.getElementById("editionCloud");
 const $selfHostFields = document.getElementById("selfHostFields");
+const $serverAddressField = document.getElementById("serverAddressField");
 const $cloudFields = document.getElementById("cloudFields");
 const $cloudEmail = document.getElementById("cloudEmail");
 const $cloudCode = document.getElementById("cloudCode");
+const $cloudCodeField = document.getElementById("cloudCodeField");
 const $cloudStatus = document.getElementById("cloudStatus");
 const $sendCodeBtn = document.getElementById("sendCodeBtn");
+const $resendCodeBtn = document.getElementById("resendCodeBtn");
 const $serverUrlHint = document.getElementById("serverUrlHint");
 const $waitlistEmail = document.getElementById("waitlistEmail");
 const $waitlistName = document.getElementById("waitlistName");
 const $waitlistJoinBtn = document.getElementById("waitlistJoinBtn");
 
-const CLOUD_HINT = "Brotto Cloud. This is where your tasks go.";
-const SELF_HOST_HINT = "Leave this as-is if you're using the Brotto service. Change it only if you run your own server.";
+const SELF_HOST_HINT = "Where your tasks go. Leave it alone unless you run your own server.";
 
 // The radio is the only record of which edition this is — derived, never
 // mirrored into a variable, so the two can't disagree.
@@ -73,13 +77,18 @@ let selfHostServerUrl = "";
 function applyEdition() {
   const cloud = edition() === "cloud";
   $selfHostFields.hidden = cloud;
+  // The address is not shown at all on the cloud path, not dimmed and not
+  // read-only: there is nothing on that side for the user to choose, and a
+  // field called "where your tasks go" invites them to edit a value that
+  // cannot be edited. `hidden` takes it out of the tab order and out of the
+  // accessibility tree with it, so it is absent rather than merely unseen.
+  $serverAddressField.hidden = cloud;
   $cloudFields.hidden = !cloud;
-  $serverUrl.readOnly = cloud;
-  $serverUrl.classList.toggle("input--readonly", cloud);
-  if ($serverUrlHint) $serverUrlHint.textContent = cloud ? CLOUD_HINT : SELF_HOST_HINT;
-  // The cloud address is fixed, so it is written on the way in rather than
-  // typed. Every self-host field keeps whatever the user already had — the
-  // address included, which is why it is snapshotted rather than overwritten.
+  if ($serverUrlHint) $serverUrlHint.textContent = SELF_HOST_HINT;
+  // The value is still written on the way in, because `finish()` and
+  // `postAuth` read the field and neither knows which edition this is. That
+  // is why the field can go: the storage shape and the one writer behind it
+  // are unchanged, and a cloud user still ends up with a working `serverUrl`.
   if (cloud) {
     if ($serverUrl.value.trim() !== CLOUD_SERVER_URL) selfHostServerUrl = $serverUrl.value;
     $serverUrl.value = CLOUD_SERVER_URL;
@@ -89,11 +98,14 @@ function applyEdition() {
   $serverStatus.textContent = "";
   $serverStatus.className = "status";
   setCloudStatus("");
+  hideCodeEntry();
 }
 
 $editionSelf.addEventListener("change", applyEdition);
 $editionCloud.addEventListener("change", applyEdition);
 $sendCodeBtn.addEventListener("click", () => { void requestCode(); });
+$resendCodeBtn.addEventListener("click", () => { void requestCode(); });
+if ($providerRetryBtn) $providerRetryBtn.addEventListener("click", () => { void loadCatalog(); });
 if ($waitlistJoinBtn) $waitlistJoinBtn.addEventListener("click", () => { void joinWaitlist(); });
 
 let step = 1;
@@ -108,18 +120,75 @@ function show(n) {
   $next.textContent = n === TOTAL_STEPS ? "Start" : "Next";
   $serverStatus.textContent = "";
   $serverStatus.className = "status";
+  // The catalogue belongs to the address it was fetched from, and the address
+  // can change two steps after the fetch.
+  if (n === TOTAL_STEPS) {
+    const base = $serverUrl.value.trim() || DEFAULT_SERVER;
+    if (base !== catalogBase) void loadCatalog();
+  }
   $next.focus();
 }
 
+// ── The model catalogue ────────────────────────────────────────────────────
+// The list is the server's, from `GET /v1/models`, and it used to be fetched
+// at module load — before the IIFE at the bottom had pre-filled the address
+// from storage, so it always went to localhost whatever the user had chosen.
+// It is loaded from the address the field actually holds, and again if that
+// address changes before step 4.
+//
+// `load()` cannot reject — it falls back to the cached catalogue and then to
+// the built-in one — so the state this has to render is not "failed" but
+// "offline", and a control that cannot tell those apart from "still loading"
+// is a select the user watches forever. Three states, one line, one retry.
 let catalog = null;
+let catalogBase = "";
 
-function populateProviders() {
+function setProviderStatus(text, tone) {
+  $providerStatus.textContent = text || "";
+  $providerStatus.className = tone ? `hint ${tone}` : "hint";
+}
+
+async function loadCatalog() {
+  const base = $serverUrl.value.trim() || DEFAULT_SERVER;
+  catalogBase = base;
+  $provider.disabled = true;
+  $providerRetryBtn.hidden = true;
+  setProviderStatus("Reading the model list from your server.");
+  catalog = await brottoModelCatalog.load(base);
+  renderProviders();
+}
+
+function renderProviders() {
+  const list = (catalog && catalog.providers) || [];
   $provider.textContent = "";
-  for (const p of catalog?.providers || []) {
+  for (const p of list) {
     const opt = document.createElement("option");
     opt.value = p.id;
     opt.textContent = p.label || p.id;
     $provider.appendChild(opt);
+  }
+  if (!list.length) {
+    // Nothing to choose from is a different sentence from "we couldn't ask",
+    // and neither is silence.
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "No providers";
+    $provider.appendChild(none);
+    $provider.disabled = true;
+    $providerRetryBtn.hidden = false;
+    setProviderStatus("Your server's model list came back empty.", "bad");
+    return;
+  }
+  $provider.disabled = false;
+  // `offline` is `load()`'s own word for "this is the cached or built-in
+  // list, not your server's", and it is the only signal the caller gets that
+  // the fetch did not land. It is true whenever a provider here is stale.
+  if (catalog && catalog.offline) {
+    $providerRetryBtn.hidden = false;
+    setProviderStatus("Couldn't reach your server — showing a built-in list.", "bad");
+  } else {
+    $providerRetryBtn.hidden = true;
+    setProviderStatus("");
   }
   populateModels();
 }
@@ -129,7 +198,7 @@ function populateModels() {
   if (!list) return;
   const p = brottoModelCatalog.provider(catalog, $provider.value);
   list.textContent = "";
-  for (const entry of p?.models || []) {
+  for (const entry of (p && p.models) || []) {
     const opt = document.createElement("option");
     opt.value = entry.id;
     list.appendChild(opt);
@@ -139,12 +208,6 @@ function populateModels() {
   if (!document.activeElement || document.activeElement !== $model) $model.value = "";
 }
 $provider.addEventListener("change", populateModels);
-
-// Runs on load, not on a step change: the server may not be up yet, and the
-// loader falls back to the cached catalogue then the built-in one, so this
-// never blocks the wizard.
-catalog = brottoModelCatalog.load($serverUrl.value.trim() || DEFAULT_SERVER);
-catalog.then(populateProviders);
 
 // A dead server address, or a wrong key, is the mistake here that costs the
 // user a confused first task — so say so now rather than on their first send.
@@ -156,6 +219,8 @@ catalog.then(populateProviders);
 // It returns what it found as well as writing it, because blur alone is a weak
 // signal: a user can leave a dead address in the field and only find out on
 // their first real task. `finish()` asks the same question before it saves.
+// Self-host only: on the cloud path there is no address to check, and the
+// exchange is the gate instead.
 async function checkServer() {
   const base = $serverUrl.value.trim() || DEFAULT_SERVER;
   const secret = $agentSecret.value.trim();
@@ -210,19 +275,38 @@ async function postAuth(path, payload) {
   return { ok: res.ok, body };
 }
 
+function showCodeEntry() {
+  $cloudCodeField.hidden = false;
+  $resendCodeBtn.hidden = false;
+  $cloudCode.focus();
+}
+
+function hideCodeEntry() {
+  $cloudCodeField.hidden = true;
+  $resendCodeBtn.hidden = true;
+  $cloudCode.value = "";
+}
+
 async function requestCode() {
   const email = $cloudEmail.value.trim();
   if (!email) { setCloudStatus("Enter the email you signed up with", "bad"); return; }
   setCloudStatus("Sending");
   try {
     const { ok } = await postAuth("/v1/auth/request-code", { email });
-    setCloudStatus(
-      ok ? `Code sent to ${email} — it can take a minute` : "That address could not be sent a code",
-      ok ? "ok" : "bad",
-    );
+    if (!ok) {
+      setCloudStatus("That address could not be sent a code", "bad");
+      return;
+    }
   } catch {
-    setCloudStatus("Could not reach the server — check the address above", "bad");
+    setCloudStatus("Could not reach the server", "bad");
+    return;
   }
+  // Revealed because a request went out, and for no other reason. The reply
+  // is byte-identical for an address on the beta and one that is not — the
+  // route cannot be asked who is in — so the sentence below is true of both,
+  // and a stranger is not told a mail is on its way to them.
+  showCodeEntry();
+  setCloudStatus(`If ${email} is in the beta, a code is on its way — it can take a minute`, "ok");
 }
 
 // Returns whether there is now a token, because the step it guards only
@@ -231,6 +315,7 @@ async function exchangeCode() {
   const email = $cloudEmail.value.trim();
   const code = $cloudCode.value.trim();
   if (!email) { setCloudStatus("Enter the email you signed up with", "bad"); return false; }
+  if ($cloudCodeField.hidden) { setCloudStatus("Send yourself a code first", "bad"); return false; }
   if (!/^\d{6}$/.test(code)) { setCloudStatus("That code should be six digits", "bad"); return false; }
   setCloudStatus("Signing in");
   let token = null;
@@ -250,6 +335,8 @@ async function exchangeCode() {
   // one storage shape, and nothing here has to know what a token is.
   $agentSecret.value = token;
   $cloudCode.value = "";
+  hideCodeEntry();
+  const name = await storedAccountName();
   if (notApproved) {
     // Still true, and the wizard still advances: the token is real, so
     // `finish()` has something to save and an address the operator approves
@@ -261,7 +348,7 @@ async function exchangeCode() {
     setCloudStatus("Signed in — but Brotto Cloud is a closed beta and this address is not on the list yet");
     return true;
   }
-  setCloudStatus("Signed in", "ok");
+  setCloudStatus(name ? `Signed in. Welcome, ${name}.` : "Signed in", "ok");
   return true;
 }
 
@@ -286,6 +373,22 @@ function prefillWaitlist(email) {
   if (email && $waitlistEmail && !$waitlistEmail.value.trim()) $waitlistEmail.value = email;
 }
 
+// The only name Brotto ever holds is one the user typed here, so this is the
+// only source a greeting may use. It is read back out of the same `settings`
+// object rather than mirrored, so there is no second copy to fall out of step.
+async function storedAccountName() {
+  const s = (await chrome.storage.local.get("settings")).settings || {};
+  return typeof s.accountName === "string" ? s.accountName.trim() : "";
+}
+
+async function rememberAccountName(name) {
+  if (!name) return;
+  const stored = await chrome.storage.local.get("settings");
+  await chrome.storage.local.set({
+    settings: { ...(stored.settings || {}), accountName: name },
+  });
+}
+
 async function joinWaitlist() {
   const email = $waitlistEmail.value.trim();
   const name = $waitlistName ? $waitlistName.value.trim() : "";
@@ -297,6 +400,9 @@ async function joinWaitlist() {
       setWaitlistStatus("That did not go through — try again in a few minutes", "bad");
       return false;
     }
+    // They gave us the name here, so this is the one place it is worth
+    // keeping — it is what a later sign-in greets them by.
+    await rememberAccountName(name);
     setWaitlistStatus(`Thanks. If a place opens, we'll email ${email}.`, "ok");
     return true;
   } catch {
@@ -355,13 +461,17 @@ $next.addEventListener("click", async () => {
   // Verified on save, not on blur. Blur is advice; this is the moment the
   // address becomes the one every later read trusts, and saving one that does
   // not answer is the "find out on your first real task" failure this screen
-  // exists to prevent. Back to the step it was typed on, with the sentence.
-  const verified = await checkServer();
-  if (!verified.ok) {
-    $next.disabled = false;
-    show(SERVER_STEP);
-    setServerStatus(verified.text, verified.tone);
-    return;
+  // exists to prevent. Self-host only: on the cloud path the exchange above
+  // was the gate and there is no address on this step to verify. Back to the
+  // step it was typed on, with the sentence.
+  if (edition() === "self") {
+    const verified = await checkServer();
+    if (!verified.ok) {
+      $next.disabled = false;
+      show(SERVER_STEP);
+      setServerStatus(verified.text, verified.tone);
+      return;
+    }
   }
   $next.textContent = "Starting…";
   void finish();
@@ -397,6 +507,9 @@ function initialEdition(storedServerUrl) {
   $editionCloud.checked = opening === "cloud";
   $editionSelf.checked = opening === "self";
   applyEdition();
-  populateModels();
+  // After the pre-fill, not before it. Loading the catalogue from a module
+  // body read an empty field and so asked localhost on every install,
+  // including the ones whose server was somewhere else entirely.
+  await loadCatalog();
   show(1);
 })();

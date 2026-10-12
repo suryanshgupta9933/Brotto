@@ -60,8 +60,9 @@ const TOKEN = "eyJhbGciOiJIUzI1NiJ9." + "A".repeat(600) + ".sig";
 // defeats the rule it states.
 const code = (s) => s.replace(/^\s*\/\/.*$/gm, "");
 
-/** A fake fetch plus the storage the exchange writes to. */
-function rig(src, name, respond) {
+/** A fake fetch plus the storage the exchange writes to. The code box starts
+ *  hidden, as the markup does; a rig that wants to test an exchange sets it. */
+function rig(src, name, respond, { codeFieldHidden = false } = {}) {
   const calls = [];
   const store = { local: {}, session: {} };
   const sandbox = {
@@ -75,9 +76,19 @@ function rig(src, name, respond) {
     },
     $serverUrl: { value: "https://agent.brotto.dev" },
     $cloudEmail: { value: "person@example.com" },
-    $cloudCode: { value: "123456" },
+    $cloudCode: { value: "123456", focus() {} },
+    $cloudCodeField: { hidden: codeFieldHidden },
+    $resendCodeBtn: { hidden: true },
+    $providerRetryBtn: null,
     $agentSecret: { value: "" },
     $cloudStatus: { textContent: "", className: "status" },
+    cloudCodeField: { hidden: false },
+    cloudCode: { value: "123456", focus() {} },
+    cloudResendBtn: null,
+    settingsOverlay: { classList: { remove() {}, add() {} } },
+    goalEl: { focus() {} },
+    toast() {},
+    async greetOnSignIn() { sandbox.greeted = true; },
     $waitlistEmail: { value: "" },
     $waitlistName: { value: "" },
     setCloudStatus(text, tone) {
@@ -109,12 +120,19 @@ function rig(src, name, respond) {
   // same contract, so the rig answers to both.
   sandbox.cloudEmail = sandbox.$cloudEmail;
   sandbox.cloudCode = sandbox.$cloudCode;
+  sandbox.cloudCodeField = sandbox.$cloudCodeField;
   sandbox.agentSecretSetting = sandbox.$agentSecret;
   sandbox.waitlistEmail = sandbox.$waitlistEmail;
   sandbox.waitlistName = sandbox.$waitlistName;
   vm.runInContext(extract(src, name), sandbox);
   vm.runInContext(extract(src, "postAuth"), sandbox);
   vm.runInContext(extract(src, "prefillWaitlist"), sandbox);
+  vm.runInContext(extract(src, "storedAccountName"), sandbox);
+  // The reveal helpers are the real ones on both surfaces: "did the code box
+  // open" is the behaviour under test, so stubbing it would assert nothing.
+  for (const fn of ["showCodeEntry", "hideCodeEntry", "showCloudCodeEntry", "hideCloudCodeEntry"]) {
+    try { vm.runInContext(extract(src, fn), sandbox); } catch { /* the other surface's name */ }
+  }
   return sandbox;
 }
 
@@ -191,6 +209,57 @@ function json(okStatus, body) {
   check("and confirms with the address it went to",
     /person@example\.com/.test(req.statusText), req.statusText);
 
+  // ── The reveal, and what it is not driven by ────────────────────────────
+  // `request-code` answers a listed and an unlisted address byte-identically,
+  // deliberately, so nothing in this response can tell the two apart. The
+  // reveal therefore rides on the request going out — the user's own click
+  // plus an accepted request — and the sentence is one that is true of both.
+  check("a 200 reveals the code box",
+    req.$cloudCodeField.hidden === false && req.$resendCodeBtn.hidden === false,
+    `code@${req.$cloudCodeField.hidden} resend@${req.$resendCodeBtn.hidden}`);
+  check("and never claims a mail is on its way to that address",
+    !/code (sent|is on its way to)\b(?! — can take)/i.test(req.statusText)
+    && /if person@example\.com is in the beta/i.test(req.statusText), req.statusText);
+
+  const asked = rig(welcome, "requestCode", json(429, { detail: "slow down" }), { codeFieldHidden: true });
+  await asked.requestCode();
+  check("a refused request reveals nothing",
+    asked.$cloudCodeField.hidden === true && asked.$resendCodeBtn.hidden === true,
+    "a box the user can fill when no mail is coming is worse than no box");
+  const dropped = rig(welcome, "requestCode", async () => { throw new Error("network down"); }, { codeFieldHidden: true });
+  await dropped.requestCode();
+  check("and neither does one that never reached the server",
+    dropped.$cloudCodeField.hidden === true);
+
+  const blankAddr = rig(welcome, "requestCode", json(200, { ok: true }), { codeFieldHidden: true });
+  blankAddr.$cloudEmail.value = "  ";
+  await blankAddr.requestCode();
+  check("no address, no request and no box",
+    blankAddr.calls.length === 0 && blankAddr.$cloudCodeField.hidden === true);
+
+  // The other direction: the code box is never a free-standing field, so an
+  // exchange typed before the reveal is refused rather than posted.
+  const early = rig(welcome, "exchangeCode", json(200, { access_token: TOKEN }));
+  early.$cloudCodeField.hidden = true;
+  check("a code typed before the reveal never leaves",
+    (await early.exchangeCode()) === false && early.calls.length === 0
+    && early.$agentSecret.value === "", "the guard is a UX affordance only if it is a real refusal");
+  check("and it says why, rather than failing silently",
+    /send yourself a code first/i.test(early.statusText), early.statusText);
+
+  const afterGood = rig(welcome, "exchangeCode", json(200, { access_token: TOKEN }));
+  await afterGood.exchangeCode();
+  check("a real exchange closes the box again",
+    afterGood.$cloudCodeField.hidden === true && afterGood.$resendCodeBtn.hidden === true);
+
+  check("the resend button is the same call, not a second flow",
+    /\$resendCodeBtn\.addEventListener\("click", \(\) => \{ void requestCode\(\); \}\)/.test(welcome));
+  check("and the panel's is too",
+    /cloudResendBtn\.addEventListener\('click', \(\) => \{ void requestSignInCode\(\); \}\)/.test(sidepanel));
+  check("neither surface asks for the code twice in one screen",
+    !/id="cloudCode"[\s\S]{0,400}id="sendCodeBtn"/.test(welcomeHtml),
+    "the box opens on the send; it is not on screen asking to be filled first");
+
   // ── The panel's exchange, same contract ─────────────────────────────────
   const panelGood = rig(sidepanel, "exchangeSignInCode", json(200, { access_token: TOKEN }));
   check("the panel exchanges too",
@@ -199,6 +268,56 @@ function json(okStatus, body) {
   const panelBad = rig(sidepanel, "exchangeSignInCode", json(400, {}));
   check("and refuses just as firmly",
     (await panelBad.exchangeSignInCode()) === false && !panelBad.stored.agentSecret);
+
+  // ── The panel's reveal, same contract as the wizard's ───────────────────
+  const pReq = rig(sidepanel, "requestSignInCode", json(200, { ok: true }), { codeFieldHidden: true });
+  await pReq.requestSignInCode();
+  check("a 200 reveals the panel's code box too", pReq.cloudCodeField.hidden === false);
+  check("with a sentence true of a member and a stranger",
+    /if person@example\.com is in the beta/i.test(pReq.statusText)
+    && !/code sent to/i.test(pReq.statusText), pReq.statusText);
+  const pRefused = rig(sidepanel, "requestSignInCode", json(429, {}), { codeFieldHidden: true });
+  await pRefused.requestSignInCode();
+  check("and a refused one reveals nothing", pRefused.cloudCodeField.hidden === true);
+  const pEarly = rig(sidepanel, "exchangeSignInCode", json(200, { access_token: TOKEN }), { codeFieldHidden: true });
+  check("the panel refuses an exchange typed before the reveal",
+    (await pEarly.exchangeSignInCode()) === false && pEarly.calls.length === 0
+    && !pEarly.stored.agentSecret);
+  const pSpent = rig(sidepanel, "exchangeSignInCode", json(200, { access_token: TOKEN, approved: true }));
+  await pSpent.exchangeSignInCode();
+  check("and the box closes again once a code is spent", pSpent.cloudCodeField.hidden === true);
+
+  // ── Greeting ───────────────────────────────────────────────────────────
+  // The only name Brotto ever holds is one the user typed on the waitlist
+  // form, so it is written on a successful signup and read back. Nothing new
+  // about the person leaves the browser to earn it.
+  const named = rig(sidepanel, "exchangeSignInCode", json(200, { access_token: TOKEN, approved: true }));
+  named.stored = { settings: { accountName: "Ada Lovelace" } };
+  check("a sign-in on a stored name greets by it",
+    (await named.exchangeSignInCode()) === true && named.greeted === true);
+  const unnamed = rig(sidepanel, "exchangeSignInCode", json(200, { access_token: TOKEN, approved: true }));
+  check("and one with no name still signs in plainly",
+    (await unnamed.exchangeSignInCode()) === true && unnamed.greeted === true);
+
+  const greetSrc = code(extract(sidepanel, "greetOnSignIn"));
+  check("the greeting is the name, or the plain sentence when there is none",
+    /name \? `Signed in\. Welcome, \$\{name\}\.` : 'Signed in to Brotto Cloud\.'/.test(greetSrc),
+    greetSrc);
+  check("it closes the settings overlay and returns focus to the composer",
+    /settingsOverlay\.classList\.remove\('open'\)/.test(greetSrc)
+    && /goalEl\.focus\(\)/.test(greetSrc));
+  check("and the name is read from the one place it is written",
+    /stored\.settings && stored\.settings\.accountName/.test(code(extract(sidepanel, "storedAccountName"))));
+  // Only a field the user filled in may write one. Two occurrences of the
+  // name in a file — the definition and a single call, inside joinWaitlist.
+  for (const [label, src] of [["panel", sidepanel], ["wizard", welcome]]) {
+    const body = code(src);
+    check(`${label}: an account name is written in exactly one place`,
+      body.split("rememberAccountName(").length === 3
+      && code(extract(src, "joinWaitlist")).includes("rememberAccountName(name)"),
+      `${body.split("rememberAccountName(").length - 1} occurrences`,
+      );
+  }
 
   // ── `approved` ──────────────────────────────────────────────────────────
   // A report, not the gate: an unlisted address and an unreachable control

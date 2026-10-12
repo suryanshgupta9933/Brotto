@@ -7,7 +7,14 @@
   <link rel="stylesheet" href="panel-tokens.css">
   <style>
     /* Same system as the panel (panel-tokens.css owns the tokens), scoped to
-       one job: get three answers and get out of the way. */
+       one job: get three answers and get out of the way.
+
+       The type scale is 18 / 13 / 12 / 10 — a heading, a sentence, a
+       subordinate line, and a mono caption. It was 17 / 13 / 10 with no step
+       between the sentence and the caption, so a three-line explanation and
+       its own label rendered at the same weight as each other and the screen
+       read as a wall. One rung per level, and the caption is the only
+       uppercase. */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     html, body {
@@ -16,6 +23,7 @@
       color: var(--ink);
       font-family: var(--font-ui);
       font-size: 13px;
+      line-height: 1.5;
       -webkit-font-smoothing: antialiased;
     }
 
@@ -28,7 +36,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 14px 16px;
+      padding: 14px 18px;
       border-bottom: 1px solid var(--rule-ink);
       flex-shrink: 0;
     }
@@ -38,21 +46,28 @@
       font-size: 10px;
       letter-spacing: 0.14em;
       text-transform: uppercase;
-      color: var(--ink-2);
+      color: var(--ink-3);
     }
 
     /* ── Steps ──────────────────────────────────────────────────────────── */
     #steps { flex: 1; min-height: 0; overflow-y: auto; }
-    .step { display: none; padding: 20px 16px; }
-    .step.active { display: block; }
+    .step { display: none; padding: 22px 18px 26px; }
+    .step.active { display: block; animation: step-in 160ms ease-out; }
+    /* A step arrives rather than blinks. 4px of travel, no scale — a panel
+       is 320px wide and anything larger reads as a transition the UI
+       announced. */
+    @keyframes step-in {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: none; }
+    }
 
     .step h1 {
-      font-size: 17px;
+      font-size: 18px;
       font-weight: 600;
       letter-spacing: -0.01em;
-      margin-bottom: 6px;
+      margin-bottom: 8px;
     }
-    .step > p { color: var(--ink-2); line-height: 1.5; margin-bottom: 18px; }
+    .step > p { color: var(--ink-2); margin-bottom: 20px; }
 
     /* The three states, drawn in the system rather than described in prose:
        a rule-weight sample per state, so the shape is recognisable before
@@ -60,9 +75,9 @@
     .states { border: 1px solid var(--rule-2); }
     .state {
       display: flex;
-      gap: 10px;
+      gap: 11px;
       align-items: flex-start;
-      padding: 12px;
+      padding: 13px;
     }
     .state + .state { border-top: 1px solid var(--rule); }
     .state-mark {
@@ -77,50 +92,72 @@
     .state-name {
       font-family: var(--font-mono);
       font-size: 10px;
-      letter-spacing: 0.14em;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
-      margin-bottom: 3px;
+      margin-bottom: 5px;
     }
     .state.live .state-name { color: var(--ok); }
     .state.wait .state-name { color: var(--wait); }
-    .state-body { color: var(--ink-2); line-height: 1.45; }
+    .state-body { color: var(--ink-2); font-size: 12.5px; line-height: 1.5; }
+
     /* The two editions, drawn with the same rows the three states use. The
        radio is the only control on the page, so it gets the ink and nothing
-       else — no accent, no fill. */
-    label.state { cursor: pointer; }
+       else — no accent, no fill. The picked row carries the weight instead:
+       two rows of identical weight read as a coin flip, and cloud is the one
+       we mean to be chosen. */
+    label.state { cursor: pointer; transition: background var(--t); }
     label.state > input { margin: 2px 0 0; accent-color: var(--ink); flex-shrink: 0; }
     label.state > span { display: block; }
+    label.state:has(input:checked) { background: var(--paper-3); }
+    label.state:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: -2px; }
+
+    /* The beta marker. A caption, not a badge with a fill — it sits on the
+       option's own name line and carries no weight of its own. */
+    .tag {
+      display: inline-block;
+      margin-left: 7px;
+      padding: 1px 5px;
+      border: 1px solid var(--rule-2);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--ink-2);
+      vertical-align: 1px;
+    }
 
     /* ── Fields ─────────────────────────────────────────────────────────── */
     fieldset { border: 0; display: block; }
-    .field { margin-bottom: 16px; }
-    .field > label {
+    .field { margin-bottom: 18px; }
+    .field > label, .lbl {
       display: block;
       font-family: var(--font-mono);
       font-size: 10px;
-      letter-spacing: 0.14em;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
       color: var(--ink-2);
       margin-bottom: 6px;
     }
     .input {
       width: 100%;
-      padding: 8px 10px;
+      padding: 9px 10px;
       border: 1px solid var(--rule-2);
       background: var(--paper-2);
       color: var(--ink);
       font-family: var(--font-ui);
       font-size: 13px;
       outline: none;
-      transition: border-color var(--t);
+      transition: border-color var(--t), background var(--t);
     }
-    .input:focus { border-color: var(--ink); border-width: 2px; }
+    .input:focus { border-color: var(--ink); border-width: 2px; padding: 8px 9px; }
+    .input:disabled { background: var(--paper-3); color: var(--ink-3); cursor: not-allowed; }
+    /* The code box is six single-width glyphs and a hair of space; anything
+       but a fixed box lets the digits jitter as they are typed. */
+    .input--code { letter-spacing: 0.5em; font-family: var(--font-mono); }
     select.input { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; }
     textarea.input { resize: vertical; font-family: var(--font-ui); line-height: 1.5; }
-    .hint { color: var(--ink-3); font-size: 11.5px; line-height: 1.45; margin-top: 5px; }
-    /* Cloud's address is the one the user cannot change, and says so by
-       looking unlike the others. Same rule as the panel's `.input--readonly`. */
-    .input--readonly { background: var(--paper-3); color: var(--ink-2); cursor: not-allowed; }
+    .hint { color: var(--ink-3); font-size: 12px; line-height: 1.5; margin-top: 6px; }
+    .hint.bad { color: var(--bad); }
 
     /* One status line, used by the self-host probe and the cloud sign-in. */
     .status {
@@ -141,25 +178,18 @@
       display: flex;
       flex-direction: column;
       gap: 12px;
-      margin-top: 16px;
-      padding-top: 16px;
+      margin-top: 20px;
+      padding-top: 18px;
       border-top: 1px solid var(--rule);
     }
-    .waitlist-block > .lbl {
-      display: block;
-      font-family: var(--font-mono);
-      font-size: 10px;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--ink-2);
-    }
+    .waitlist-block > .lbl { margin-bottom: 0; }
 
     /* ── Foot ───────────────────────────────────────────────────────────── */
     #foot {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 12px 16px;
+      padding: 12px 18px;
       border-top: 1px solid var(--rule-ink);
       flex-shrink: 0;
     }
@@ -168,23 +198,26 @@
       background: var(--paper);
       color: var(--ink);
       font-family: var(--font-mono);
-      font-size: 9.5px;
+      font-size: 10px;
       font-weight: 500;
       letter-spacing: 0.14em;
       text-transform: uppercase;
       cursor: pointer;
-      padding: 8px 14px;
-      transition: background var(--t), color var(--t);
+      padding: 9px 14px;
+      transition: background var(--t), color var(--t), border-color var(--t);
     }
     .btn:hover { background: var(--paper-3); }
     .btn-primary { background: var(--ink); color: var(--paper); }
     .btn-primary:hover { background: var(--ink); color: var(--paper); border-color: var(--ink-2); }
-    .btn-primary:disabled { background: var(--paper-3); border-color: var(--rule-2); color: var(--ink-3); cursor: not-allowed; }
+    .btn:disabled { background: var(--paper-3); border-color: var(--rule-2); color: var(--ink-3); cursor: not-allowed; }
     .btn[hidden] { display: none; }
     #footSpacer { flex: 1; }
 
+    /* Reduced motion is a real setting, not a nicety: the animation above is
+       the only motion here, and a cross-fade on a step is exactly the kind of
+       thing a vestibular trigger turns into nausea. */
     @media (prefers-reduced-motion: reduce) {
-      * { transition: none !important; }
+      *, *::before, *::after { transition: none !important; animation: none !important; }
     }
   </style>
 </head>
@@ -204,20 +237,20 @@
 
     <section class="step active" data-step="1" aria-labelledby="s1h">
       <h1 id="s1h">Which Brotto?</h1>
-      <p>Same extension, same browser either way. The one difference is whose server the tasks go to.</p>
+      <p>Same extension, same browser either way. The difference is who runs the server.</p>
       <div class="states">
         <label class="state" for="editionCloud">
           <input type="radio" name="edition" id="editionCloud" value="cloud" checked>
           <span>
-            <span class="state-name">Brotto Cloud</span>
-            <span class="state-body">We run the server. Sign in with your email — we send you a 6-digit code, no account password and no extra browser permission.</span>
+            <span class="state-name">Brotto Cloud<span class="tag">Beta</span></span>
+            <span class="state-body">We run the server. Sign in with your email — no password, no extra browser permission.</span>
           </span>
         </label>
         <label class="state" for="editionSelf">
           <input type="radio" name="edition" id="editionSelf" value="self">
           <span>
             <span class="state-name">Self-host</span>
-            <span class="state-body">You run the server, with <code>docker compose</code>. Free, permanent, and yours to keep. Brotto needs its address and, if you set one, its key.</span>
+            <span class="state-body">You run the server, with <code>docker compose</code>. Free, and yours to keep.</span>
           </span>
         </label>
       </div>
@@ -225,59 +258,80 @@
 
     <section class="step" data-step="2" aria-labelledby="s2h">
       <h1 id="s2h">Brotto drives this browser</h1>
-      <p>Let you ask an AI to perform tasks in your own logged-in browser.</p>
-      <p>You describe a task in your own words. Brotto works through it and tells you when it needs a decision from you.</p>
+      <p>Ask for a task in your own words. Brotto works through it in this browser, on your logged-in session.</p>
       <div class="states">
         <div class="state live">
           <span class="state-mark"></span>
           <div>
             <div class="state-name">Working</div>
-            <div class="state-body">Browsing, reading, filling in forms. You can keep using other tabs.</div>
+            <div class="state-body">Browsing, reading, filling in forms.</div>
           </div>
         </div>
         <div class="state wait">
           <span class="state-mark"></span>
           <div>
             <div class="state-name">Needs you</div>
-            <div class="state-body">An approval, a sign-in, or a question. Brotto stops and waits — you decide.</div>
+            <div class="state-body">It stops and waits. You decide.</div>
           </div>
         </div>
         <div class="state done">
           <span class="state-mark"></span>
           <div>
             <div class="state-name">Done</div>
-            <div class="state-body">The answer, with what it did and what it found.</div>
+            <div class="state-body">The answer, with what it did.</div>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="step" data-step="3" aria-labelledby="s3h">
-      <h1 id="s3h">Where should tasks go?</h1>
-      <p>Brotto is model-agnostic. The server you point at decides which model runs.</p>
-      <div class="field">
-        <label for="serverUrl">Server address</label>
-        <input id="serverUrl" class="input" type="url" placeholder="http://localhost:8000" spellcheck="false" />
-        <p class="hint" id="serverUrlHint">Leave this as-is if you're using the Brotto service. Change it only if you run your own server.</p>
-        <div id="serverStatus" class="status"></div>
+    <!-- Two screens behind one step number, because they are two different
+         questions and the step count should not change when the edition
+         does. Cloud gets no address field at all: there is nothing for the
+         user to choose, and a read-only field named "where your tasks go"
+         answers a question the cloud does not have. -->
+    <section class="step" data-step="3">
+      <div id="selfHostBlock">
+        <h1 id="s3h">Your Brotto server</h1>
+        <p>Brotto is model-agnostic. The server you point at decides which model runs.</p>
+        <div class="field" id="serverAddressField">
+          <label for="serverUrl">Server address</label>
+          <input id="serverUrl" class="input" type="url" placeholder="http://localhost:8000" spellcheck="false" />
+          <p class="hint" id="serverUrlHint">Where your tasks go. Leave it alone unless you run your own server.</p>
+          <div id="serverStatus" class="status"></div>
+        </div>
+        <div class="field" id="selfHostFields">
+          <label for="agentSecret">Server key</label>
+          <input id="agentSecret" class="input" type="password" placeholder="Only if your server sets one" autocomplete="off" spellcheck="false" />
+          <p class="hint">The <code>AGENT_SECRET</code> from the <code>.env</code> beside your <code>docker-compose.yml</code>. A server that sets one turns auth on by itself; leave this blank if yours doesn't.</p>
+        </div>
       </div>
-      <div class="field" id="selfHostFields">
-        <label for="agentSecret">Server key</label>
-        <input id="agentSecret" class="input" type="password" placeholder="Only if your server sets one" autocomplete="off" spellcheck="false" />
-        <p class="hint">The <code>AGENT_SECRET</code> from the <code>.env</code> beside your <code>docker-compose.yml</code>. A server that sets one turns auth on by itself; leave this blank if yours doesn't.</p>
-      </div>
+
       <div id="cloudFields" hidden>
+        <h1 id="s3cloudh">Sign in to Brotto Cloud</h1>
+        <p>We email you a 6-digit code instead of a link, so the extension asks for no extra permission.</p>
         <div class="field">
           <label for="cloudEmail">Email</label>
           <input id="cloudEmail" class="input" type="email" autocomplete="email" spellcheck="false" />
         </div>
-        <div class="field">
-          <label for="cloudCode">6-digit code</label>
-          <input id="cloudCode" class="input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" spellcheck="false" />
-          <p class="hint">Press <strong>Send code</strong>, then type what arrives. A code instead of a link, so the extension asks for no extra permission.</p>
-          <div><button id="sendCodeBtn" class="btn" type="button">Send code</button></div>
-        </div>
+        <div><button id="sendCodeBtn" class="btn" type="button">Send code</button></div>
         <div id="cloudStatus" class="status"></div>
+
+        <!-- The code box appears only once a request has gone out, and never
+             because the server said this address is on the list: it answers
+             a listed and an unlisted address identically, by design, so
+             there is nothing in the response to reveal on. What reveals it
+             is the user's own click. -->
+        <div id="cloudCodeField" hidden>
+          <div class="field">
+            <label for="cloudCode">6-digit code</label>
+            <input id="cloudCode" class="input input--code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" spellcheck="false" />
+          </div>
+          <div>
+            <button id="exchangeCodeBtn" class="btn btn-primary" type="button">Sign in</button>
+            <button id="resendCodeBtn" class="btn" type="button" hidden>Send another</button>
+          </div>
+        </div>
+
         <!-- The same form the side panel carries. Always here rather than
              hidden behind the refusal below, because somebody who has never
              heard of the beta has to be able to leave an address from the
@@ -305,19 +359,27 @@
       <p>Brotto needs a key to reach your model provider. It goes to your Brotto server and nowhere else.</p>
       <div class="field">
         <label for="provider">Provider</label>
-        <select id="provider" class="input">
-          <!-- populated from GET /v1/models -->
+        <!-- A bare <select> with no loading, empty or error state cannot
+             tell those three apart, and "still loading" and "it broke" look
+             identical for as long as the user is willing to wait. The list is
+             filled from GET /v1/models on the server the wizard is actually
+             pointed at, and every way that can fail says so here. -->
+        <select id="provider" class="input" disabled>
+          <option value="" selected>Loading models…</option>
         </select>
+        <p class="hint" id="providerStatus">Reading the model list from your server.</p>
+        <div><button id="providerRetryBtn" class="btn" type="button" hidden>Try again</button></div>
       </div>
       <div class="field">
         <label for="model">Model</label>
         <input id="model" class="input" list="model-options" placeholder="Model id" autocomplete="off" />
         <datalist id="model-options"></datalist>
+        <p class="hint">Leave both blank to let your server decide.</p>
       </div>
       <div class="field">
         <label for="apiKey">API key</label>
         <input id="apiKey" class="input" type="password" placeholder="Leave blank to use server default" autocomplete="off" />
-        <p class="hint">Stored in this browser, on your own machine. It is sent to the Brotto server you connect to — your own if you self-host, <code>agent.brotto.dev</code> if you chose Brotto Cloud, which passes it straight to your model provider and never stores it. Clear or change it in Settings. A <code>docker compose</code> server carries no model key of its own, so if you self-host, paste one here.</p>
+        <p class="hint">Stored in this browser, on your own machine, and sent to the Brotto server you connect to — your own if you self-host, Brotto's if you chose the cloud, which passes it straight to your model provider and never stores it. Change or clear it in Settings.</p>
       </div>
     </section>
 

@@ -74,6 +74,14 @@ function rig(src, respond) {
       return respond(url, opts);
     },
     serverBase() { return "https://agent.brotto.dev"; },
+    chrome: {
+      storage: {
+        local: {
+          get: async () => ({ settings: sandbox.saved || {} }),
+          set: async (o) => { sandbox.saved = o.settings; sandbox.stored = o; },
+        },
+      },
+    },
   };
   // The wizard names its inputs with `$` and posts to the field's value; the
   // panel uses bare names and `serverBase()`. Same contract, so one rig.
@@ -84,6 +92,7 @@ function rig(src, respond) {
   vm.runInContext(extract(src, "postAuth"), sandbox);
   vm.runInContext(extract(src, "joinWaitlist"), sandbox);
   vm.runInContext(extract(src, "prefillWaitlist"), sandbox);
+  vm.runInContext(extract(src, "rememberAccountName"), sandbox);
   return sandbox;
 }
 
