@@ -630,7 +630,7 @@ def test_a_loopback_bind_with_no_credential_still_boots(monkeypatch):
     assert launched
 
 
-# ── retention, which the hosted relay defaults on ─────────────────────────
+# ── retention, off by default on every deployment ────────────────────────
 
 def test_retention_is_off_on_a_self_host_by_default(monkeypatch):
     from brotto_orchestrator.main import retention_days
@@ -640,16 +640,12 @@ def test_retention_is_off_on_a_self_host_by_default(monkeypatch):
     assert retention_days() is None
 
 
-def test_the_hosted_relay_ages_sessions_out_without_being_asked(monkeypatch, hosted):
-    """An ephemeral dyno is not a self-hoster's own disk.
-
-    Every beta transcript would otherwise sit on the filesystem until the
-    filesystem died, decided by nobody.
-    """
+def test_the_hosted_relay_does_not_age_sessions_out_unless_asked(monkeypatch, hosted):
+    """A run record stays so it is there when the user comes back to it."""
     from brotto_orchestrator.main import retention_days
 
     monkeypatch.delenv("BROTTO_RETENTION_DAYS", raising=False)
-    assert retention_days() == 30.0
+    assert retention_days() is None
 
 
 def test_an_operator_setting_retention_still_wins(monkeypatch, hosted):

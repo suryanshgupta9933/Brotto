@@ -169,23 +169,17 @@ for _noisy in ("httpx", "httpcore", "websockets", "uvicorn.access"):
 
 # Retention is the user's setting, not ours: unset means keep everything,
 # and a value of 0 disables the sweep rather than deleting the lot. The
-# default is deliberately absent — a self-hoster who wants their history
-# aged out has to say so.
+# default is deliberately absent on every deployment — a run record stays
+# so it is there when the user comes back to it, including on another device.
 RETENTION_DAYS_ENV = "BROTTO_RETENTION_DAYS"
 RETENTION_SWEEP_SECONDS = 3600
-
-# The hosted relay's default. A self-hoster's disk is their own data and
-# nothing expires until they ask; ours is an ephemeral dyno where every
-# beta transcript would otherwise persist for the life of the filesystem
-# with nobody deciding that. An explicit setting always wins, including 0.
-HOSTED_RETENTION_DAYS = 30.0
 
 
 def retention_days() -> float | None:
     """Configured retention in days, or None when the sweep is off."""
     raw = os.environ.get(RETENTION_DAYS_ENV, "").strip()
     if not raw:
-        return HOSTED_RETENTION_DAYS if auth_mode() == "jwt" else None
+        return None
     try:
         days = float(raw)
     except ValueError:
