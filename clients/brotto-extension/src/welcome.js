@@ -316,7 +316,7 @@ async function postAuth(path, payload) {
     body: JSON.stringify(payload),
   });
   const body = await res.json().catch(() => null);
-  return { ok: res.ok, body };
+  return { ok: res.ok, status: res.status, body };
 }
 
 function showCodeEntry() {
@@ -347,9 +347,11 @@ async function requestCode() {
   setCloudStatus("Sending");
   let body = null;
   let ok = false;
+  let status = 0;
   try {
     const res = await postAuth("/v1/auth/request-code", { email });
     ok = res.ok;
+    status = res.status;
     body = res.body;
   } catch {
     setCloudStatus("Could not reach the server", "bad");
@@ -363,6 +365,20 @@ async function requestCode() {
     return;
   }
   hideCodeEntry();
+  // Non-200 before the reason vocabulary: the roster answers always ride
+  // HTTP 200, so anything else is infrastructure, not the address.
+  if (status === 429) {
+    setCloudStatus("Too many attempts — wait a few minutes and try again", "bad");
+    return;
+  }
+  if (status >= 500) {
+    setCloudStatus("Brotto Cloud had a problem sending the code — try again in a moment", "bad");
+    return;
+  }
+  if (ok && body && body.reason === "try_again") {
+    setCloudStatus("The code could not be stored — try again in a moment", "bad");
+    return;
+  }
   if (ok && body && body.reason === "not_on_list") {
     prefillWaitlist(email);
     setCloudStatus("That address is not in the closed beta yet — leave it below and we'll write if a place opens");
