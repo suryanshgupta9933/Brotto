@@ -24,6 +24,7 @@ const $skip = document.getElementById("skipBtn");
 const $serverUrl = document.getElementById("serverUrl");
 const $agentSecret = document.getElementById("agentSecret");
 const $provider = document.getElementById("provider");
+const $providerTrigger = document.getElementById("providerTrigger");
 const $providerStatus = document.getElementById("providerStatus");
 const $providerRetryBtn = document.getElementById("providerRetryBtn");
 const $model = document.getElementById("model");
@@ -36,6 +37,7 @@ const $cloudEmail = document.getElementById("cloudEmail");
 const $cloudCode = document.getElementById("cloudCode");
 const $cloudCodeField = document.getElementById("cloudCodeField");
 const $sendCodeBtn = document.getElementById("sendCodeBtn");
+const $sendCodeRow = document.getElementById("sendCodeRow");
 const $resendCodeBtn = document.getElementById("resendCodeBtn");
 const $serverUrlHint = document.getElementById("serverUrlHint");
 const $waitlistBlock = document.getElementById("waitlistBlock");
@@ -165,10 +167,18 @@ function setProviderStatus(text, tone) {
   $providerStatus.className = tone ? `hint ${tone}` : "hint";
 }
 
+// The host select is display:none; the trigger is what the user sees. One
+// writer for both, so a loading or empty list cannot leave a live button
+// pointing at a control with nothing in it.
+function setProviderDisabled(off) {
+  $provider.disabled = off;
+  if ($providerTrigger) $providerTrigger.disabled = off;
+}
+
 async function loadCatalog() {
   const base = $serverUrl.value.trim() || DEFAULT_SERVER;
   catalogBase = base;
-  $provider.disabled = true;
+  setProviderDisabled(true);
   $providerRetryBtn.hidden = true;
   setProviderStatus("Reading the model list from your server.");
   catalog = await brottoModelCatalog.load(base);
@@ -191,12 +201,13 @@ function renderProviders() {
     none.value = "";
     none.textContent = "No providers";
     $provider.appendChild(none);
-    $provider.disabled = true;
+    setProviderDisabled(true);
     $providerRetryBtn.hidden = false;
     setProviderStatus("Your server's model list came back empty.", "bad");
+    providerDd && providerDd.sync();
     return;
   }
-  $provider.disabled = false;
+  setProviderDisabled(false);
   // `offline` is `load()`'s own word for "this is the cached or built-in
   // list, not your server's", and it is the only signal the caller gets that
   // the fetch did not land. It is true whenever a provider here is stale.
@@ -207,6 +218,9 @@ function renderProviders() {
     $providerRetryBtn.hidden = true;
     setProviderStatus("");
   }
+  // Repainting the options leaves the trigger naming whatever was there
+  // before — sync pushes the host's new value into the box.
+  providerDd && providerDd.sync();
   populateModels();
 }
 
@@ -225,6 +239,19 @@ function populateModels() {
   if (!document.activeElement || document.activeElement !== $model) $model.value = "";
 }
 $provider.addEventListener("change", populateModels);
+
+// Same Ink & Rule dropdown as Settings' provider picker — one component in
+// dropdown.js. The hidden <select> stays the value host finish() reads; the
+// trigger is what the user sees. Choosing an row writes the host and fires
+// its `change`, so populateModels above keeps working untouched.
+const providerDd = $provider && attachDropdown({
+  root: document.getElementById("providerDd"),
+  trigger: $providerTrigger,
+  list: document.getElementById("providerList"),
+  getOptions: () => Array.from($provider.children).map((o) => ({ value: o.value, label: o.textContent || o.value })),
+  getValue: () => $provider.value,
+  setValue: (v) => { $provider.value = v; $provider.dispatchEvent(new Event("change")); },
+});
 
 // A dead server address, or a wrong key, is the mistake here that costs the
 // user a confused first task — so say so now rather than on their first send.
@@ -293,12 +320,18 @@ async function postAuth(path, payload) {
 }
 
 function showCodeEntry() {
+  // Send code is a one-way step: the button that produced the code box goes
+  // with it, so the screen asks one question at a time. Restored by
+  // hideCodeEntry on any path that does not produce a box — a refused
+  // address, a failed send — so a dead end never strands the button.
+  if ($sendCodeRow) $sendCodeRow.hidden = true;
   $cloudCodeField.hidden = false;
   $resendCodeBtn.hidden = false;
   $cloudCode.focus();
 }
 
 function hideCodeEntry() {
+  if ($sendCodeRow) $sendCodeRow.hidden = false;
   $cloudCodeField.hidden = true;
   $resendCodeBtn.hidden = true;
   $cloudCode.value = "";

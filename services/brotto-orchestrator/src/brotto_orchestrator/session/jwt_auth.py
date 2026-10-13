@@ -287,9 +287,17 @@ CODE_TTL_MINUTES = 10
 #: would be this one being *looser* than the route's.
 SIGN_IN_MAX_ATTEMPTS = 5
 
-#: Lifetime of the access token `exchange_login_code` signs. One hour, which
-#: is what Supabase issued and what everything downstream already assumed.
-TOKEN_TTL_SECONDS = 3600
+#: Lifetime of the access token `exchange_login_code` signs. Thirty days.
+#:
+#: It was one hour — "what Supabase issued" — but there is no refresh path:
+#: the wizard stores the access token and the only way to mint another is a
+#: new emailed code. One hour meant every cloud user hit a dead token on any
+#: panel reopen after lunch, and the 404 read as a rejected AGENT_SECRET.
+#: Expiry is not the authorization boundary here anyway: `ensure_on_roster`
+#: runs on every `_approved` route and at task start, so a revoked account is
+#: refused instantly regardless of `exp`. Same durability as a self-hoster's
+#: AGENT_SECRET, which never expires.
+TOKEN_TTL_SECONDS = 30 * 24 * 3600
 
 #: The user agent is a browser identifying itself or it is not kept. The table
 #: refuses anything past 512 (`sign_in_events_agent_bounded`); `clean_version`

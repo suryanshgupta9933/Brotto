@@ -1,12 +1,15 @@
-// The waitlist, in the two places it lives: the panel's Settings and the
-// wizard. One function in each file, extracted by brace matching and run
-// against a fake fetch, so this cannot pass while the real one is broken.
+// The waitlist, in the wizard. One function, extracted by brace matching and
+// run against a fake fetch, so this cannot pass while the real one is broken.
 //
 // `POST /v1/waitlist` takes an address and an OPTIONAL `name`, and answers
 // `{"ok": true}` for a new address and for one already on the list alike —
 // deliberately, so the route cannot be asked who is on it. Two consequences
 // this pins: the body carries the name the moment the field exists, and the
 // sentence after a 200 is the same one for both outcomes.
+//
+// The panel's Settings copy is gone with the Connection section: the wizard
+// is the one place to change server, key or account, and the waitlist is part
+// of that. Asserted as an absence at the bottom.
 //
 //   node scripts/test-waitlist.test.js
 
@@ -202,34 +205,38 @@ async function runSurface(label, src) {
 }
 
 (async () => {
-  await runSurface("panel", sidepanel);
   await runSurface("wizard", welcome);
 
-  // ── The shape both surfaces agree on ───────────────────────────────────
-  // The server answers this route only when `auth_mode` is `jwt`, and each
-  // surface reveals its cloud block on exactly that answer — so the markup
+  // ── The shape the wizard draws ─────────────────────────────────────────
+  // The server answers this route only when `auth_mode` is `jwt`, and the
+  // wizard reveals its cloud block on exactly that answer — so the markup
   // has to sit inside it. A waitlist form anywhere else posts to a 404.
-  for (const [label, html, openId] of [
-    ["panel", panelHtml, 'id="cloudSignIn"'],
-    ["wizard", welcomeHtml, 'id="cloudFields"'],
-  ]) {
-    const open = html.indexOf(openId);
+  {
+    const html = welcomeHtml;
+    const open = html.indexOf('id="cloudFields"');
     const block = html.indexOf('id="waitlistBlock"');
-    check(`${label}: the waitlist lives inside the cloud-only block, and after it`,
+    check("wizard: the waitlist lives inside the cloud-only block, and after it",
       open > -1 && block > open, `cloud@${open} waitlist@${block}`);
-    check(`${label}: it asks for a name, an email, and offers one button`,
+    check("wizard: it asks for a name, an email, and offers one button",
       /id="waitlistName"[\s\S]{0,120}maxlength="64"/.test(html)
       && /id="waitlistEmail"/.test(html) && /id="waitlistJoinBtn"/.test(html));
-    check(`${label}: the name reads as optional on screen, not only in the route`,
+    check("wizard: the name reads as optional on screen, not only in the route",
       /for="waitlistName">\s*Name \(optional\)/.test(html));
   }
 
-  // Both surfaces post through their own `postAuth`, which is the same
-  // function the exchange uses — so a waitlist signup cannot drift into
-  // carrying a credential the route never asked for.
-  check("both post through the shared auth helper, not a second fetch call site",
-    code(sidepanel).includes("await postAuth('/v1/waitlist'")
-    && code(welcome).includes('await postAuth("/v1/waitlist"'));
+  // The panel's copy is gone with the Connection section. The wizard is the
+  // path; a second waitlist in Settings would be a second writer for the same
+  // three fields and a form that posts to a 404 outside the cloud block.
+  check("panel: the waitlist is deleted, not hidden",
+    !panelHtml.includes('id="waitlistBlock"') && !/waitlistJoinBtn|waitlistEmail|waitlistName/.test(panelHtml));
+  check("panel: no waitlist JS left behind",
+    !/joinWaitlist|prefillWaitlist|setWaitlistStatus|rememberAccountName/.test(sidepanel));
+
+  // The wizard posts through `postAuth`, the same helper the exchange uses —
+  // so a waitlist signup cannot drift into carrying a credential the route
+  // never asked for.
+  check("wizard: posts through the shared auth helper, not a second fetch call site",
+    code(welcome).includes('await postAuth("/v1/waitlist"'));
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");
   process.exit(failures ? 1 : 0);

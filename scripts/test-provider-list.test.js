@@ -65,18 +65,24 @@ function check(name, cond, detail) {
   console.log(`FAIL ${name}${detail ? `\n     ${detail}` : ""}`);
 }
 
-/** The four functions that draw the control, plus the little DOM they use. */
+/** The functions that draw the control, plus the little DOM they use. */
 function rig({ serverUrl, catalogue }) {
   const select = { value: "", disabled: false, textContent: "", options: [], appendChild(o) { this.options.push(o); } };
+  const trigger = { disabled: false };
   const status = { textContent: "", className: "" };
   const retry = { hidden: false };
   const asked = [];
   const sandbox = {
     $serverUrl: { value: serverUrl },
     $provider: select,
+    $providerTrigger: trigger,
     $providerStatus: status,
     $providerRetryBtn: retry,
     $model: { value: "" },
+    // The shared dropdown is a separate file; this test is about the list,
+    // not the open/close, so a sync stub is enough and still catches the
+    // "trigger left live over an empty host" case via setProviderDisabled.
+    providerDd: { sync() {} },
     DEFAULT_SERVER: "http://localhost:8000",
     catalog: null,
     catalogBase: "",
@@ -91,13 +97,14 @@ function rig({ serverUrl, catalogue }) {
     },
   };
   vm.createContext(sandbox);
-  for (const fn of ["setProviderStatus", "loadCatalog", "renderProviders", "populateModels"]) {
+  for (const fn of ["setProviderStatus", "setProviderDisabled", "loadCatalog", "renderProviders", "populateModels"]) {
     vm.runInContext(extract(welcome, fn), sandbox);
   }
   return {
     sandbox,
     asked,
     select,
+    trigger,
     status,
     retry,
     labels: () => select.options.map((o) => o.textContent),
@@ -119,7 +126,8 @@ const CATALOGUE = {
   await live.run();
   check("the select is filled from the catalogue that came back",
     live.labels().join(",") === "Anthropic,OpenAI", live.labels().join(","));
-  check("and it is usable, not a disabled placeholder", live.select.disabled === false);
+  check("and it is usable, not a disabled placeholder",
+    live.select.disabled === false && live.trigger.disabled === false);
   check("nothing is left saying it is loading", live.status.textContent === "", live.status.textContent);
   check("and no retry is offered when there was nothing to recover from", live.retry.hidden === true);
 
@@ -165,7 +173,8 @@ const CATALOGUE = {
   check("…and is marked bad rather than shown as a normal answer",
     /bad/.test(offline.status.className), offline.status.className);
   check("…and offers a way to try again", offline.retry.hidden === false);
-  check("but the list itself is still usable", offline.select.disabled === false && offline.labels().length === 2);
+  check("but the list itself is still usable",
+    offline.select.disabled === false && offline.trigger.disabled === false && offline.labels().length === 2);
 
   const empty = rig({ serverUrl: "http://10.0.0.5:8000", catalogue: { offline: false, providers: [] } });
   await empty.run();
@@ -175,14 +184,18 @@ const CATALOGUE = {
     /server/.test(empty.status.textContent), empty.status.textContent);
   check("…offers a retry", empty.retry.hidden === false);
   check("…and leaves the control disabled, because there is nothing to pick",
-    empty.select.disabled === true);
+    empty.select.disabled === true && empty.trigger.disabled === true);
 
   const before = rig({ serverUrl: "http://x", catalogue: CATALOGUE });
   check("and the retry button is wired to another load",
     /\$providerRetryBtn\.addEventListener\("click", \(\) => \{ void loadCatalog\(\); \}\)/.test(welcome));
   check("the markup starts in the loading state, disabled",
-    /id="provider" class="input" disabled/.test(welcomeHtml)
+    /id="provider" class="dd-native"[^>]*disabled/.test(welcomeHtml)
+      && /id="providerTrigger"[^>]*disabled/.test(welcomeHtml)
       && /<option value="" selected>Loading models…<\/option>/.test(welcomeHtml));
+  check("and it is the same dropdown component Settings uses",
+    /id="providerDd"/.test(welcomeHtml) && /id="providerList" class="dd-list"/.test(welcomeHtml)
+      && /attachDropdown/.test(welcome));
   check("and there is somewhere for the reason to be drawn",
     /id="providerStatus"/.test(welcomeHtml) && /id="providerRetryBtn"/.test(welcomeHtml));
   void before;

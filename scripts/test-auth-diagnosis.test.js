@@ -137,9 +137,20 @@ async function classify(healthStatus) {
     /r\.status === 404[\s\S]{0,400}\/health/.test(panel));
   // Opening the panel probes /health, which is unauthenticated — so with a
   // wrong key the pill goes green and the user finds out on their first task.
-  check("the panel says so on open, not only on the first task",
-    /authed\.status === 404[\s\S]{0,400}AGENT_SECRET/.test(panel),
+  // Two dialects off the same 404: a self-hoster's refused secret, and a
+  // cloud sign-in the relay will not honour any more (expired, or never
+  // valid for the account). The cloud dialect must never say AGENT_SECRET —
+  // that user has no agent secret, and Settings no longer has the field.
+  check("the panel diagnoses a refused credential on open, not on the first task",
+    /authed\.status === 404/.test(panel) && /rejected AGENT_SECRET/.test(panel),
     "a green pill on a server that refuses every call the extension makes");
+  check("cloud mode says the sign-in expired and points at the wizard",
+    /state\.authMode === 'jwt'[\s\S]{0,1200}Sign-in expired/.test(panel)
+    && /sign-in has expired — open Set up Brotto/.test(panel));
+  check("an expired cloud token is cleared so the footer can offer the wizard again",
+    /state\.authMode === 'jwt'[\s\S]{0,1200}delete cleaned\.agentSecret/.test(panel)
+    && /paintSetupFooter\(\{\}\)/.test(panel),
+    "a dead token left in the slot keeps the footer on Sign out for a session that does not exist");
 
   // ── The wizard ─────────────────────────────────────────────────────────
   // Storing the secret in `settings` is what makes the second-run silent: it

@@ -13,155 +13,6 @@ const $modelStatus = document.getElementById('model-save-status');
 const $modelVisionBadge = document.getElementById('modelVisionBadge');
 const $modelContextWindow = document.getElementById('modelContextWindow');
 
-// ── Ink & Rule dropdown ──────────────────────────────────────────────────
-// One control, two instances: provider and the model
-// field's suggestion list. The value host is always the element the rest of
-// this file already reads — a real <select> for the first two, the free-text
-// <input> for the third — so choosing an option writes `host.value` and fires
-// that element's own `change`, and every existing listener keeps working.
-// The component owns only the listbox.
-//
-// Selection is carried by a check glyph and by aria-selected, never by colour:
-// the system is monochrome, so a tint is not a channel.
-
-const DROPDOWNS = [];
-// Set while choose() pushes a value into its host. The model host is an
-// <input>, so writing it emits an `input` event, and the model list's own
-// "user is typing, offer suggestions" handler would immediately reopen what
-// was just closed.
-let dropdownWriting = false;
-
-function attachDropdown({ root, trigger, list, getOptions, getValue, setValue, editable }) {
-  let active = -1;
-
-  function paint() {
-    const value = getValue();
-    list.textContent = '';
-    const options = getOptions();
-    sync();
-    options.forEach((opt, i) => {
-      const selected = opt.value === value;
-      const row = document.createElement('li');
-      row.className = 'dd-option';
-      row.id = `${list.id}-opt-${i}`;
-      row.dataset.value = opt.value;
-      row.setAttribute('role', 'option');
-      row.setAttribute('aria-selected', selected ? 'true' : 'false');
-      const check = document.createElement('span');
-      check.className = 'dd-check';
-      check.setAttribute('aria-hidden', 'true');
-      check.textContent = selected ? '✓' : '';
-      const label = document.createElement('span');
-      label.className = 'dd-option-label';
-      label.textContent = opt.label;
-      row.appendChild(check);
-      row.appendChild(label);
-      row.addEventListener('click', () => choose(i));
-      list.appendChild(row);
-    });
-    active = -1;
-  }
-
-  // The box shows the host's current value. Nothing else writes that text, so
-  // a value set straight on the host — hydrateSettingsPanel, the save handler,
-  // a restored config — has to be pushed into the label by hand.
-  function sync() {
-    const slot = trigger.querySelector('.dd-value');
-    if (!slot) return;
-    const row = getOptions().find((o) => o.value === getValue());
-    slot.textContent = row ? row.label : (getValue() || '—');
-  }
-
-  function setActive(i) {
-    const rows = list.children;
-    if (active >= 0 && rows[active]) rows[active].classList.remove('active');
-    active = i;
-    if (!rows[active]) return;
-    rows[active].classList.add('active');
-    // The DOM focus stays on the trigger so Tab keeps working and Escape has
-    // somewhere to go; aria-activedescendant is what a screen reader reads.
-    trigger.setAttribute('aria-activedescendant', rows[active].id);
-    if (rows[active].scrollIntoView) rows[active].scrollIntoView({ block: 'nearest' });
-  }
-
-  function move(delta) {
-    const n = list.children.length;
-    if (!n) return;
-    const from = active < 0 ? (delta > 0 ? -1 : 0) : active;
-    setActive((from + delta + n) % n);
-  }
-
-  function open() {
-    for (const other of DROPDOWNS) if (other !== api) other.close();
-    paint();
-    list.hidden = false;
-    root.classList.add('open');
-    trigger.setAttribute('aria-expanded', 'true');
-    const current = getOptions().findIndex((o) => o.value === getValue());
-    if (current >= 0) setActive(current);
-  }
-
-  function close() {
-    list.hidden = true;
-    root.classList.remove('open');
-    trigger.setAttribute('aria-expanded', 'false');
-    trigger.removeAttribute('aria-activedescendant');
-    active = -1;
-  }
-
-  function choose(i) {
-    const row = list.children[i];
-    if (!row) return;
-    const value = row.dataset.value;
-    close();
-    dropdownWriting = true;
-    try {
-      setValue(value);
-    } finally {
-      dropdownWriting = false;
-    }
-    // The trigger's label was last painted by open() — from the value *before*
-    // this choice. Nothing between here and the next open re-reads it, so the
-    // box kept naming the provider the user had just replaced. One sync per
-    // component covers every host, which is why it lives here and not in the
-    // caller's change handler.
-    sync();
-  }
-
-  trigger.addEventListener('click', () => (list.hidden ? open() : close()));
-  trigger.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !list.hidden) {
-      // Close without selecting. The value host is untouched, so a select
-      // stays where it was and a typed model id survives.
-      e.preventDefault();
-      e.stopPropagation();
-      close();
-      return;
-    }
-    if (e.key === 'Tab') { close(); return; }
-    // Space only means "select" on a closed-over-a-value control. On the model
-    // box it is a character, and swallowing it would make half of every model
-    // id untypeable the moment the list is open.
-    if (editable && e.key === ' ') return;
-    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (list.hidden) { open(); return; }
-      if (e.key === 'Enter' || e.key === ' ') { choose(active); return; }
-      move(e.key === 'ArrowDown' ? 1 : -1);
-    }
-  });
-  // Keep the pointer from moving focus off the trigger on press, which would
-  // blur it and let a second dropdown open.
-  list.addEventListener('mousedown', (e) => e.preventDefault());
-  document.addEventListener('click', (e) => {
-    if (!root.contains(e.target)) close();
-  });
-
-  const api = { open, close, paint, sync, isOpen: () => !list.hidden };
-  DROPDOWNS.push(api);
-  return api;
-}
-
 // The catalogue comes from GET /v1/models (see model_catalog.js), but it is
 // SEEDED with that file's offline FALLBACK rather than left null until the
 // fetch resolves. Null-for-the-fetch left the provider <select> with zero
@@ -731,8 +582,6 @@ const settingsBtn  = document.getElementById('settingsBtn');
 const settingsOverlay = document.getElementById('settingsOverlay');
 const settingsPanel   = document.getElementById('settingsPanel');
 const settingsClose   = document.getElementById('settingsClose');
-const plannerUrlSetting = document.getElementById('plannerUrlSetting');
-const agentSecretSetting = document.getElementById('agentSecretSetting');
 
 // Preserved DOM IDs for background.ts compatibility
 const plannerUrlEl    = document.getElementById('plannerUrl');
@@ -824,27 +673,10 @@ settingsOverlay.addEventListener('click', (e) => {
 // `http://`, a case difference each read as self-host. The server knows which
 // one it is, so it says.
 //
-// `jwt` is the cloud. Its sign-in yields a Supabase access token that is
-// written into `settings.agentSecret` — the same slot, the same `Bearer`
-// header, the same reader as a self-hoster's AGENT_SECRET. Nothing below
-// parses that token or branches on which kind it is.
+// `jwt` is the cloud. A cloud access token lives in `settings.agentSecret` —
+// the same slot, the same `Bearer` header, the same reader as a self-hoster's
+// AGENT_SECRET. Nothing here parses that token or branches on which kind it is.
 const CLOUD_SERVER_URL = 'https://agent.brotto.dev';
-
-const SELF_HOST_HINT = 'Where Brotto sends your tasks. Leave this alone unless you run your own Brotto server.';
-const HOSTED_HINT = 'Brotto Cloud. Your address is fixed; run your own server to point it somewhere else.';
-
-const cloudSignIn = document.getElementById('cloudSignIn');
-const cloudEmail = document.getElementById('cloudEmail');
-const cloudCode = document.getElementById('cloudCode');
-const cloudCodeField = document.getElementById('cloudCodeField');
-const cloudCodeBtn = document.getElementById('cloudCodeBtn');
-const cloudResendBtn = document.getElementById('cloudResendBtn');
-const cloudSignInBtn = document.getElementById('cloudSignInBtn');
-const cloudSignOutBtn = document.getElementById('cloudSignOutBtn');
-const agentSecretField = document.getElementById('agentSecretField');
-const waitlistEmail = document.getElementById('waitlistEmail');
-const waitlistName = document.getElementById('waitlistName');
-const waitlistJoinBtn = document.getElementById('waitlistJoinBtn');
 
 // `res.json()` on a body that is not JSON must not throw into the caller:
 // the init path reads a throw as "server unreachable", which is the one
@@ -859,310 +691,41 @@ async function readAuthMode(res) {
   }
 }
 
-// The address can change under us — the user edits the field in Settings —
-// so the mode is re-derived rather than remembered from panel open.
+// The mode is re-derived from the server, never remembered. The wizard is
+// the only place an address is written now, but the value still comes from
+// storage and can change under us, so each probe reads the field that
+// `serverBase()` reads.
 async function refreshAuthMode() {
-  const base = (plannerUrlSetting.value || '').trim().replace(/\/$/, '');
+  const base = (plannerUrlEl.value || '').trim().replace(/\/$/, '');
   try {
     const res = await fetch(`${base}/health`, { method: 'GET' });
     state.authMode = res.ok ? await readAuthMode(res) : null;
   } catch {
     state.authMode = null;
   }
-  applyAuthMode();
+  paintEditionTag();
   return state.authMode;
 }
 
-function applyAuthMode() {
-  if (!plannerUrlSetting) return;
-  const cloud = state.authMode === 'jwt';
-  if (cloud && !plannerUrlSetting.value.trim()) plannerUrlSetting.value = CLOUD_SERVER_URL;
-  plannerUrlSetting.readOnly = cloud;
-  plannerUrlSetting.classList.toggle('input--readonly', cloud);
-  const hint = document.getElementById('serverAddressHint');
-  if (hint) hint.textContent = cloud ? HOSTED_HINT : SELF_HOST_HINT;
-  if (agentSecretField) agentSecretField.hidden = cloud;
-  if (cloudSignIn) cloudSignIn.hidden = !cloud;
-  if (cloudEmail) cloudEmail.value = cloud ? cloudEmail.value : '';
-  if (!cloud) hideCloudCodeEntry();
-  renderCloudSignInStatus();
-}
+// ── The edition, named in the header ───────────────────────────────────────
+const editionTag = document.getElementById('editionTag');
 
-plannerUrlSetting.addEventListener('input', () => {
-  plannerUrlEl.value = plannerUrlSetting.value;
-  // The mode describes the address that WAS there, not the one just typed.
-  // Probing per keystroke is a request per character, so it is dropped here
-  // and re-derived on blur — and until then the field is editable, which is
-  // what someone pasting their own localhost must find.
-  state.authMode = null;
-  applyAuthMode();
-});
-plannerUrlSetting.addEventListener('blur', () => { void refreshAuthMode(); });
-
-// ── Cloud sign-in ─────────────────────────────────────────────────────────
-// The wizard's own two calls, restated where a user can reach them after
-// install. The token goes back into `settings.agentSecret`, so the Save
-// button, `authHeaders()` and the service worker need to know nothing about
-// which kind of token is in there.
-function setCloudStatus(text, tone) {
-  const el = document.getElementById('cloudSignInStatus');
-  if (!el) return;
-  // textContent, not innerHTML: the email in this line is typed text, and
-  // the panel's rule is that no unescaped string reaches innerHTML.
-  el.textContent = text || '';
-  el.className = tone ? `settings-hint ${tone}` : 'settings-hint';
-}
-
-// Signed in means the slot holds a token; signed out means it is empty. The
-// slot is the record, so this reads storage rather than a separate flag.
-async function cloudSignedIn() {
-  const stored = await chrome.storage.local.get('settings');
-  const secret = stored.settings && typeof stored.settings.agentSecret === 'string'
-    ? stored.settings.agentSecret.trim()
-    : '';
-  return secret.length > 0;
-}
-
-function renderCloudSignInStatus() {
-  if (!cloudSignIn || state.authMode !== 'jwt') return;
-  void cloudSignedIn().then((signedIn) => {
-    if (state.authMode !== 'jwt') return;
-    if (signedIn) {
-      hideCloudCodeEntry();
-      if (cloudCodeBtn) cloudCodeBtn.hidden = true;
-    } else if (cloudCodeBtn) {
-      cloudCodeBtn.hidden = false;
-    }
-    setCloudStatus(signedIn ? 'Signed in to Brotto Cloud.' : 'Signed out — send yourself a code to sign in.', signedIn ? 'ok' : '');
-  });
-}
-
-async function storeAgentSecret(value) {
-  const stored = await chrome.storage.local.get('settings');
-  // The spread, not explicit keys: `settings` carries fields written elsewhere
-  // (approved_domains, agentSecretOrigin), and an allowlist here would drop
-  // every one of them the moment a user signed in.
-  // agentSecretOrigin is what binds the value to the server that issued it —
-  // on the cloud path that is a real account identity, and the service worker
-  // now refuses to send it anywhere else (see credential.js).
-  await chrome.storage.local.set({
-    settings: {
-      ...(stored.settings || {}),
-      agentSecret: value,
-      agentSecretOrigin: serverBase(),
-    },
-  });
-  if (agentSecretSetting) agentSecretSetting.value = value;
-}
-
-async function postAuth(path, payload) {
-  const res = await fetch(`${serverBase()}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const body = await res.json().catch(() => null);
-  return { ok: res.ok, body };
-}
-
-// The code box is revealed by the user's own click and by nothing else.
-// Revealed because the user asked for a code and one is on its way — not by
-// typing an address, and never when the answer is that no mail is coming.
-function showCloudCodeEntry() {
-  if (cloudCodeField) cloudCodeField.hidden = false;
-  if (cloudCode) cloudCode.focus();
-}
-
-function hideCloudCodeEntry() {
-  if (cloudCodeField) cloudCodeField.hidden = true;
-  if (cloudCode) cloudCode.value = '';
-}
-
-// `POST /v1/auth/request-code` answers `{"sent": true}` or
-// `{"sent": false, "reason": "not_on_list" | "pending" | "revoked" | "try_again"}`
-// — always HTTP 200. The server says which; this maps it to one sentence and
-// decides whether a code box is any use.
-async function requestSignInCode() {
-  const email = cloudEmail.value.trim();
-  if (!email) { setCloudStatus('Enter the email you signed up with.', 'bad'); return; }
-  setCloudStatus('Sending…');
-  let body = null;
-  let ok = false;
-  try {
-    const res = await postAuth('/v1/auth/request-code', { email });
-    ok = res.ok;
-    body = res.body;
-  } catch {
-    setCloudStatus('Could not reach the server.', 'bad');
-    return;
-  }
-  if (ok && body && body.sent === true) {
-    showCloudCodeEntry();
-    setCloudStatus(`A code is on its way to ${email} — it can take a minute.`, 'ok');
-    return;
-  }
-  hideCloudCodeEntry();
-  if (ok && body && body.reason === 'not_on_list') {
-    prefillWaitlist(email);
-    setCloudStatus('That address is not in the closed beta yet — leave it below and we\'ll write if a place opens.');
-    return;
-  }
-  if (ok && body && body.reason === 'pending') {
-    setCloudStatus('You\'re on the list but not admitted yet — watch your inbox, we\'ll write.');
-    return;
-  }
-  if (ok && body && body.reason === 'revoked') {
-    setCloudStatus('That address was withdrawn from the beta.', 'bad');
-    return;
-  }
-  setCloudStatus('That address could not be sent a code.', 'bad');
-}
-
-async function exchangeSignInCode() {
-  const email = cloudEmail.value.trim();
-  const code = cloudCode.value.trim();
-  if (!email) { setCloudStatus('Enter the email you signed up with.', 'bad'); return false; }
-  if (cloudCodeField && cloudCodeField.hidden) { setCloudStatus('Send yourself a code first.', 'bad'); return false; }
-  if (!/^\d{6}$/.test(code)) { setCloudStatus('That code should be six digits.', 'bad'); return false; }
-  setCloudStatus('Signing in…');
-  let token = null;
-  let waitlisted = false;
-  try {
-    const { ok, body } = await postAuth('/v1/auth/exchange', { email, code });
-    if (ok && body && typeof body.access_token === 'string') token = body.access_token;
-    // `approved` is additive and is a REPORT, not the gate: an unlisted
-    // address and an unreachable control plane both come back as a valid
-    // token, a 200 and `false`. So it is only ever read after a token
-    // exists, it is compared against `false` rather than truthiness — a
-    // server too old to send the field must not read as a refusal — and it
-    // never decides whether the token is stored. The token is real, so it
-    // goes in the slot either way: when the operator approves this address
-    // later, the install starts working with nobody signing in again, and
-    // `cloudSignedIn()` stays "the slot is non-empty" with no second flag
-    // beside it that could disagree.
-    if (token && body.approved === false) waitlisted = true;
-  } catch { /* the sentence below is the user-facing failure */ }
-  if (!token) {
-    setCloudStatus('That code did not work. Send another and try again.', 'bad');
-    return false;
-  }
-  await storeAgentSecret(token);
-  cloudCode.value = '';
-  if (waitlisted) {
-    // They have just proved they control this address by completing the code
-    // exchange, which is exactly why offering the waitlist HERE is consented
-    // rather than a capture. Offered, never sent: the button is theirs. The
-    // sign-in is real, so the panel goes back to work either way.
-    prefillWaitlist(email);
-    setCloudStatus('Signed in, but Brotto Cloud is a closed beta and this address is not on the list yet.');
-    hideCloudCodeEntry();
-    return true;
-  }
-  hideCloudCodeEntry();
-  setCloudStatus('Signed in to Brotto Cloud.', 'ok');
-  await greetOnSignIn();
-  return true;
-}
-
-// The only name Brotto holds is one the user typed on the waitlist form, so
-// that is the only source a greeting may read. It comes out of the same
-// `settings` object rather than a variable of its own, so there is no second
-// copy to fall out of step with a sign-out.
-async function storedAccountName() {
-  const stored = await chrome.storage.local.get('settings');
-  const name = stored.settings && stored.settings.accountName;
-  return typeof name === 'string' ? name.trim() : '';
-}
-
-// Signing in ends the sign-in: the overlay closes and the composer is
-// offered, because a Settings panel over a working account is the one screen
-// with nothing left to do on it. The greeting rides the toast rather than a
-// screen of its own — a card here would be one more thing to dismiss before
-// the user could ask for anything.
-async function greetOnSignIn() {
-  const name = await storedAccountName();
-  settingsOverlay.classList.remove('open');
-  toast(name ? `Signed in. Welcome, ${name}.` : 'Signed in to Brotto Cloud.', name ? 'greet' : undefined, 3200);
-  goalEl.focus();
-}
-
-// ── The waitlist ──────────────────────────────────────────────────────────
-// One form, three ways in: this panel's Settings, the wizard, and the refusal
-// above. `POST /v1/waitlist` takes an address and an optional name and answers
-// `{"ok": true}` for a new address and for one already on the list alike —
-// deliberately, so the route cannot be asked who is on it. So the sentence
-// after a 200 is true for both, and is never "you're on the list".
-function setWaitlistStatus(text, tone) {
-  const el = document.getElementById('waitlistStatus');
-  if (!el) return;
-  // textContent for the same reason setCloudStatus is: the address here was
-  // typed, and the panel's rule covers a settings hint as much as a card.
-  el.textContent = text || '';
-  el.className = tone ? `settings-hint ${tone}` : 'settings-hint';
-}
-
-// The block is always there in Settings — somebody with no idea a closed beta
-// exists has to be able to reach it from where they are — so "offering" it is
-// the prefill, not a reveal. It never overwrites an address already typed.
-function prefillWaitlist(email) {
-  if (email && waitlistEmail && !waitlistEmail.value.trim()) waitlistEmail.value = email;
-}
-
-async function joinWaitlist() {
-  const email = waitlistEmail.value.trim();
-  const name = waitlistName ? waitlistName.value.trim() : '';
-  if (!email) { setWaitlistStatus('Enter the address to reach.', 'bad'); return false; }
-  setWaitlistStatus('Adding you to the list…');
-  try {
-    // No credential, and none asked for: this route is the only one on the
-    // relay that answers a caller holding none.
-    const { ok } = await postAuth('/v1/waitlist', { email, name });
-    if (!ok) {
-      setWaitlistStatus('That did not go through — try again in a few minutes.', 'bad');
-      return false;
-    }
-    // They gave us the name here, so this is the one place it is worth
-    // keeping: it is what a later sign-in greets them by. Written through
-    // the same spread every other settings writer uses, so a field written
-    // elsewhere in the session is not dropped by it.
-    if (name) await rememberAccountName(name);
-    setWaitlistStatus(`Thanks. If a place opens, we'll email ${email}.`, 'ok');
-    return true;
-  } catch {
-    setWaitlistStatus('Could not reach the server — try again later.', 'bad');
-    return false;
+// Beta on Brotto Cloud, Self-hosted on your own server — painted from the
+// same /health answer `serverBase()` reads, never from the typed address.
+// Unreachable leaves it hidden: an edition claimed with no server behind it
+// is a lie the tag would make permanent.
+function paintEditionTag() {
+  if (!editionTag) return;
+  if (state.authMode === 'jwt') {
+    editionTag.textContent = 'Beta';
+    editionTag.hidden = false;
+  } else if (state.authMode === 'open' || state.authMode === 'secret') {
+    editionTag.textContent = 'Self-hosted';
+    editionTag.hidden = false;
+  } else {
+    editionTag.hidden = true;
   }
 }
-
-// The one name Brotto holds is one the user typed here, so this is the only
-// place worth writing it down. It rides the `settings` spread every other
-// writer uses, so it cannot drop a field somebody else added.
-async function rememberAccountName(name) {
-  const stored = await chrome.storage.local.get('settings');
-  await chrome.storage.local.set({
-    settings: { ...(stored.settings || {}), accountName: name },
-  });
-}
-
-// Signing out is not "clear the field". A stale token in the slot is a
-// server that refuses every call with a 404 — which reads exactly like a
-// wrong AGENT_SECRET, and the user goes looking in a .env that never
-// existed. So the way out is the way in: back through the wizard, which
-// asks which Brotto this is.
-async function signOutOfCloud() {
-  await storeAgentSecret('');
-  await chrome.sidePanel.setOptions({ path: 'welcome.html' });
-}
-
-if (cloudCodeBtn) cloudCodeBtn.addEventListener('click', () => { void requestSignInCode(); });
-// Same call, second button: the address is already in the field and the code
-// is already on its way somewhere the user may have deleted. Asking again is
-// the whole of the recovery, and a separate "resend" flow would be a second
-// place for it to be wrong.
-if (cloudResendBtn) cloudResendBtn.addEventListener('click', () => { void requestSignInCode(); });
-if (cloudSignInBtn) cloudSignInBtn.addEventListener('click', () => { void exchangeSignInCode(); });
-if (cloudSignOutBtn) cloudSignOutBtn.addEventListener('click', () => { void signOutOfCloud(); });
-if (waitlistJoinBtn) waitlistJoinBtn.addEventListener('click', () => { void joinWaitlist(); });
 
 // ── Session history ────────────────────────────────────────────────────────
 const historyBtn     = document.getElementById('historyBtn');
@@ -1951,30 +1514,49 @@ function loginOutcome(p) {
 // SW only reads `get("settings")`, so this is the seed for that key).
 const blacklistSetting    = document.getElementById('blacklistSetting');
 const saveSettingsBtn     = document.getElementById('saveSettingsBtn');
-const refreshPolicyBtn    = document.getElementById('refreshPolicyBtn');
 const notifyBlockingSetting = document.getElementById('notifyBlockingSetting');
 const notifyResultsSetting  = document.getElementById('notifyResultsSetting');
 const contextSuggestionsSetting = document.getElementById('contextSuggestionsSetting');
 const contextBadge = document.getElementById('contextBadge');
 const replaySetupBtn        = document.getElementById('replaySetupBtn');
 
+// One footer button, two jobs. On Brotto Cloud with a token in the slot it
+// offers Sign out; everywhere else it is Set up Brotto, which reopens the
+// wizard. Both facts are needed — the mode says the server is cloud, the
+// token's presence says someone signed in — and the markup default stays
+// "Set up Brotto" (the settings test pins it) until storage and /health
+// have both answered.
+function paintSetupFooter(s) {
+  if (!replaySetupBtn) return;
+  const signedIn = state.authMode === 'jwt' && !!(s && s.agentSecret);
+  replaySetupBtn.dataset.signout = signedIn ? '1' : '';
+  replaySetupBtn.textContent = signedIn ? 'Sign out' : 'Set up Brotto';
+}
+
 // setOptions re-points the panel; it has no gesture requirement, so the
 // wizard replaces this page on the next open rather than in a new tab.
+// Sign-out clears the one slot the wizard fills and falls back to this
+// same button — no second sign-in surface, and the wizard stays the only
+// writer of serverUrl/agentSecret.
 if (replaySetupBtn) {
-  replaySetupBtn.addEventListener('click', () => {
+  replaySetupBtn.addEventListener('click', async () => {
+    if (replaySetupBtn.dataset.signout === '1') {
+      const cur = (await chrome.storage.local.get('settings')).settings || {};
+      const settings = { ...cur };
+      delete settings.agentSecret;
+      delete settings.agentSecretOrigin;
+      await chrome.storage.local.set({ settings });
+      paintSetupFooter(settings);
+      toast('Signed out');
+      return;
+    }
     void chrome.sidePanel.setOptions({ path: 'welcome.html' });
   });
 }
 
-// ponytail: on Settings open, confirm the server is reachable so the
-// footer can say whether these settings are grounded in a live server or
-// are sitting in a local cache against a dead one.
 settingsBtn.addEventListener('click', async () => {
-  plannerUrlSetting.value = plannerUrlEl.value || 'http://localhost:8000';
-  await refreshAuthMode();
   await hydrateSettingsPanel();
   settingsOverlay.classList.add('open');
-  renderVerifyStatus();
 });
 
 // ponytail: the pill names the model, and the model is set in Settings —
@@ -1994,31 +1576,7 @@ async function hydrateSettingsPanel() {
   // yesterday's blacklist while the SW ships today's.
   const stored = await chrome.storage.local.get('settings');
   const s = stored.settings || {};
-  const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
 
-  // Reachability probe for the footer. Nothing the user edits comes from
-  // here — and nothing is written under a caller key either, so this call
-  // carries no `user_id`: it is the one place the extension would hand out
-  // a stable per-install identifier for a response it does not read. The
-  // policy save below is the caller that actually needs one.
-  let effective = null;
-  try {
-    const r = await fetch(`${base}/v1/policy`, { headers: await authHeaders() });
-    if (r.ok) effective = await r.json();
-  } catch (e) {
-    console.warn('[brotto] could not reach server for policy check:', e);
-  }
-  // Track when we last successfully verified policy with the server.
-  // Used to render a "Last verified N seconds ago" footer so the user
-  // knows whether the sidepanel is grounded in fresh server state or
-  // showing stale local data.
-  state.lastVerifiedAt = effective ? Date.now() : (state.lastVerifiedAt || null);
-  state.serverReachable = !!effective;
-
-  // The blacklist comes from LOCAL storage — chrome.storage.local is what
-  // the SW ships on the next task_start, so that is what the field has to
-  // show. The server fetch above is a reachability probe, not a second
-  // source of truth.
   const localBlacklist = Array.isArray(s.blacklist) ? s.blacklist : [];
   if (notifyBlockingSetting) notifyBlockingSetting.checked = s.notifyBlocking !== false;
   if (notifyResultsSetting) notifyResultsSetting.checked = s.notifyResults !== false;
@@ -2031,60 +1589,7 @@ async function hydrateSettingsPanel() {
   if (contextSuggestionsSetting) contextSuggestionsSetting.checked = s.contextSuggestions === true;
 
   blacklistSetting.value = localBlacklist.join('\n');
-}
-
-// ponytail: Q1 — refresh from server without re-opening Settings.
-// Re-runs the same hydration flow so the user sees the latest
-// effective policy without a full panel reopen.
-if (refreshPolicyBtn) {
-  refreshPolicyBtn.addEventListener('click', async () => {
-    refreshPolicyBtn.disabled = true;
-    const original = refreshPolicyBtn.textContent;
-    refreshPolicyBtn.textContent = '↻ Refreshing…';
-    try {
-      await hydrateSettingsPanel();
-      renderVerifyStatus();
-      refreshPolicyBtn.textContent = '✓ Refreshed';
-    } catch {
-      refreshPolicyBtn.textContent = '⚠ Refresh failed';
-    } finally {
-      setTimeout(() => {
-        refreshPolicyBtn.textContent = original;
-        refreshPolicyBtn.disabled = false;
-      }, 1500);
-    }
-  });
-}
-
-// ponytail: footer that tells the user whether the sidepanel's policy
-// view is grounded in fresh server state, stale, or local-only. Re-render
-// on save (server just confirmed) and on every settings open.
-function renderVerifyStatus() {
-  const el = document.getElementById('settingsVerifyStatus');
-  if (!el) return;
-  el.classList.remove('ok', 'stale', 'off');
-  if (!state.serverReachable) {
-    el.classList.add('off');
-    el.innerHTML = '';
-    const dot = document.createElement('span'); dot.className = 'dot';
-    const txt = document.createTextNode('Server unreachable — your edits are saved locally and will sync when it returns.');
-    el.appendChild(dot); el.appendChild(txt);
-    return;
-  }
-  if (!state.lastVerifiedAt) {
-    el.classList.add('stale');
-    el.textContent = 'Verifying server…';
-    return;
-  }
-  const ageSec = Math.max(0, Math.round((Date.now() - state.lastVerifiedAt) / 1000));
-  const ageLabel = ageSec < 5 ? 'just now'
-    : ageSec < 60 ? `${ageSec}s ago`
-    : `${Math.round(ageSec / 60)}m ago`;
-  el.classList.add('ok');
-  el.innerHTML = '';
-  const dot = document.createElement('span'); dot.className = 'dot';
-  const txt = document.createTextNode(`Server confirmed · ${ageLabel}`);
-  el.appendChild(dot); el.appendChild(txt);
+  paintSetupFooter(s);
 }
 
 if (saveSettingsBtn) {
@@ -2099,29 +1604,21 @@ if (saveSettingsBtn) {
     // and that is exactly these lines.
     const blacklist = blacklistSetting.value.split('\n').map((s) => s.trim()).filter(Boolean);
     // `chrome.storage.local.set` replaces `settings` wholesale, so any key
-    // this object omits is deleted. approved_domains is written by the
-    // service worker when the user approves a site — rebuilding the object
-    // without it silently revoked every standing grant the moment anyone
-    // opened Settings and pressed Save.
+    // this object omits is deleted. The spread is what stops that: server
+    // address, agent secret, origin and account name are written by the
+    // wizard and must survive a Save of the fields this screen still owns.
+    // approved_domains is written by the service worker when the user
+    // approves a site — rebuilding the object without it silently revoked
+    // every standing grant the moment anyone opened Settings and pressed Save.
     const priorSettings = (await chrome.storage.local.get('settings')).settings || {};
-    const serverUrl = plannerUrlSetting.value || 'http://localhost:8000';
     const settings = {
-      serverUrl,
-      agentSecret: (agentSecretSetting ? agentSecretSetting.value.trim() : ''),
-      // Re-entered on this screen, against this screen's server address, so
-      // that is what issued it. Carrying the old one forward would leave a
-      // cloud token recorded against a self-host address the user just typed —
-      // and omitting the field entirely (this object replaces `settings`
-      // wholesale) would refuse the credential everywhere, including here.
-      agentSecretOrigin: serverUrl,
+      ...priorSettings,
       blacklist,
-      approved_domains: Array.isArray(priorSettings.approved_domains) ? priorSettings.approved_domains : [],
       notifyBlocking: notifyBlockingSetting ? notifyBlockingSetting.checked : true,
       notifyResults: notifyResultsSetting ? notifyResultsSetting.checked : true,
       contextSuggestions: contextSuggestionsSetting ? contextSuggestionsSetting.checked : false,
     };
     await chrome.storage.local.set({ settings });
-    plannerUrlEl.value = settings.serverUrl;
     // agentSecret is redacted, and the two policy lists are reduced to counts:
     // this line goes to a devtools console that users paste into issue
     // reports, and the domains ARE the user's browsing — the same reason the
@@ -2158,11 +1655,10 @@ if (saveSettingsBtn) {
     //    save actually reached the server (not just local storage).
     saveSettingsBtn.disabled = true;
     saveSettingsBtn.textContent = 'Saving…';
-    renderVerifyStatus();
     let serverOk = false;
     let serverNote = '';
     try {
-      const base = settings.serverUrl.replace(/\/$/, '');
+      const base = serverBase();
       const r = await fetch(`${base}/v1/policy_ack`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...await authHeaders() },
@@ -2175,7 +1671,7 @@ if (saveSettingsBtn) {
       if (!serverOk && r.status === 404) {
         try {
           serverNote = (await fetch(`${base}/health`)).ok
-            ? ' server answered but rejected AGENT_SECRET'
+            ? (state.authMode === 'jwt' ? ' sign-in expired — Set up Brotto' : ' server answered but rejected AGENT_SECRET')
             : ' server unreachable';
         } catch {
           serverNote = ' server unreachable';
@@ -2186,24 +1682,16 @@ if (saveSettingsBtn) {
       console.warn('[brotto] policy_ack http failed (server may be offline):', e);
     }
 
+    // Success is one word. The long tails ("— server confirmed", "— applies
+    // to next task") made the button wide enough to push Set up Brotto out of
+    // the footer; the outcome detail lives in the failure labels below.
     if (swOk && serverOk) {
-      // Refresh the verified timestamp so the footer shows "just now".
-      state.lastVerifiedAt = Date.now();
-      state.serverReachable = true;
-      saveSettingsBtn.textContent = taskRunning
-        ? '✓ Saved — applies to next task'
-        : '✓ Saved — server confirmed';
+      saveSettingsBtn.textContent = 'Saved';
     } else if (!swOk && serverOk) {
-      // Local + server both fine, but the SW didn't ack — suspicious.
-      // Still show success but warn the user.
-      saveSettingsBtn.textContent = taskRunning
-        ? '⚠ Saved — applies to next task (SW did not ack)'
-        : '⚠ Saved — SW did not ack (will retry on next task)';
+      saveSettingsBtn.textContent = 'Saved — SW did not ack';
     } else {
-      state.serverReachable = false;
-      saveSettingsBtn.textContent = `⚠ Saved locally —${serverNote || ' server unreachable'}`;
+      saveSettingsBtn.textContent = `Saved locally —${serverNote || ' server unreachable'}`;
     }
-    renderVerifyStatus();
     setTimeout(() => {
       saveSettingsBtn.textContent = 'Save';
       saveSettingsBtn.disabled = false;
@@ -5399,35 +4887,51 @@ goalEl.focus();
   // Save, so on a fresh open it held the localhost default and the panel probed
   // /health and fetched /v1/policy against localhost while the service worker
   // used the saved URL — the panel and the SW could disagree about which server
-  // the task was on. Hydrate both fields from storage first; everything below
-  // and every other call site reads plannerUrlEl, so this one read covers them.
+  // the task was on. Hydrate it from storage first; everything below and every
+  // other call site reads plannerUrlEl, so this one read covers them.
   const { settings } = await chrome.storage.local.get('settings');
-  if (agentSecretSetting && settings && typeof settings.agentSecret === 'string') {
-    agentSecretSetting.value = settings.agentSecret;
-  }
   const saved = (settings && typeof settings.serverUrl === 'string') ? settings.serverUrl.trim() : '';
-  if (saved) {
-    plannerUrlEl.value = saved;
-    plannerUrlSetting.value = saved;
-  }
-  applyAuthMode();
+  if (saved) plannerUrlEl.value = saved;
   const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
   try {
     const res = await fetch(url + '/health', { method: 'GET' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     // Read off the probe this path already makes rather than asking twice:
-    // `auth_mode` is what decides the Connection section, and a second
-    // /health would be a second failure to have to reason about.
+    // `auth_mode` is what `serverBase()` consults for the blank-field cloud
+    // fallback, and a second /health would be a second failure to have to
+    // reason about.
     state.authMode = (await readAuthMode(res)) || state.authMode;
-    applyAuthMode();
+    paintEditionTag();
+    paintSetupFooter(settings);
     // `/health` is unauthenticated, so it says nothing about the key — and a
     // wrong key is a 404 on every gated route. One more request here tells
     // the panel apart from a server that is not running, at the moment the
     // user is opening the panel to find out why nothing works.
     const authed = await fetch(url + '/v1/policy', { method: 'GET', headers: await authHeaders() });
     if (authed.status === 404) {
-      setConnPill('error', 'Key rejected');
-      toast('The server answered but rejected AGENT_SECRET — fix it in Settings', 'bad', 6000);
+      if (state.authMode === 'jwt') {
+        // A live Brotto Cloud refused the token in the slot — it is expired
+        // or was never valid for this account. Either way it will never work
+        // again, and leaving it there keeps the footer on "Sign out" for a
+        // session that does not exist. Clear it so the footer offers the
+        // wizard, the only place a new token comes into being. Never says
+        // "AGENT_SECRET": this user has no agent secret, and being told to
+        // fix one in a Settings screen that no longer has the field is the
+        // dead end that made this look like a total outage.
+        const cur = (await chrome.storage.local.get('settings')).settings || {};
+        if (cur.agentSecret) {
+          const cleaned = { ...cur };
+          delete cleaned.agentSecret;
+          delete cleaned.agentSecretOrigin;
+          await chrome.storage.local.set({ settings: cleaned });
+        }
+        paintSetupFooter({});
+        setConnPill('error', 'Sign-in expired');
+        toast('Your Brotto Cloud sign-in has expired — open Set up Brotto to sign in again', 'bad', 6000);
+      } else {
+        setConnPill('error', 'Key rejected');
+        toast('The server answered but rejected AGENT_SECRET — fix it in Settings', 'bad', 6000);
+      }
     }
     state.plannerUrl = url;
     // The catalogue was loaded above against whatever URL the field held
@@ -5441,7 +4945,6 @@ goalEl.focus();
     // a role:'error' message then tried to remove it with '.message-error'
     // — but appendMessage writes class "message error" (a space), so the
     // selector never matched and the notice sat in the chat forever.
-    state.serverReachable = false;
     setConnPill('error', 'Disconnected');
     toast('Server unreachable — settings still work locally', 'bad', 5000);
   }

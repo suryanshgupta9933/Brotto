@@ -31,12 +31,13 @@ const vm = require("vm");
 
 const SRC = path.join(__dirname, "..", "clients", "brotto-extension", "src");
 const panel = fs.readFileSync(path.join(SRC, "sidepanel.js"), "utf8");
+const dropdownSrc = fs.readFileSync(path.join(SRC, "dropdown.js"), "utf8");
 const catalogSrc = fs.readFileSync(path.join(SRC, "model_catalog.js"), "utf8");
 
 /** Brace-matched body of `function name(...)`. */
-function extract(name, src = panel) {
+function extract(name, src = name === "attachDropdown" ? dropdownSrc : panel) {
   const start = src.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
-  if (start < 0) throw new Error(`no function ${name} in sidepanel.js — renamed?`);
+  if (start < 0) throw new Error(`no function ${name} in ${src === dropdownSrc ? "dropdown.js" : "sidepanel.js"} — renamed?`);
   let parens = 0;
   let bodyStart = -1;
   for (let i = src.indexOf("(", start); i < src.length; i++) {
