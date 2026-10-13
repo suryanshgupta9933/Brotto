@@ -168,13 +168,21 @@ if ($modelSave) {
       : null;
     // model_config → chrome.storage.local (persists).
     // api_key → chrome.storage.session (in-memory; cleared on browser restart).
+    // The key field shows KEY_MASK when a key is stored. Typing over the
+    // mask stores the new value; leaving the mask alone keeps the stored key
+    // (write nothing); an empty field is the deliberate "use server default"
+    // clear. Never store the mask itself as a credential.
+    const typedKey = $modelKey.value.trim();
+    const keyOp = typedKey && typedKey !== KEY_MASK
+      ? chrome.storage.local.set({ modelApiKey: typedKey })
+      : typedKey
+        ? Promise.resolve()
+        : chrome.storage.local.remove('modelApiKey');
     await Promise.all([
       chrome.storage.local.set({
         modelConfig: { provider, model, context_window: ctx, base_url: baseUrl },
       }),
-      $modelKey.value.trim()
-        ? chrome.storage.local.set({ modelApiKey: $modelKey.value.trim() })
-        : chrome.storage.local.remove('modelApiKey'),
+      keyOp,
     ]);
     setModelPill(model);
     // A re-pasted key is usually a *different* key, and the pre-flight cache
@@ -254,8 +262,16 @@ function fitModelPill() {
   modelPillName.classList.toggle('marquee', copy.offsetWidth > modelPillName.clientWidth);
 }
 
+// Shown in place of a stored API key: the field must look occupied when it
+// is, or a user re-pastes on every visit. type=password already hides the
+// value; this is only the "something is saved here" signal.
+const KEY_MASK = '••••••••';
+
 async function hydrateModelSettings() {
   const stored = await chrome.storage.local.get('modelConfig');
+  // Second read, not an array get: the extraction tests' storage fake (and
+  // clarity about two independent keys) both prefer one key per call.
+  const keyStored = await chrome.storage.local.get('modelApiKey');
   const raw = stored.modelConfig;
   // The stored shape has been flat since the migration in model_config.ts;
   // the nested form is what a pre-migration install left behind. Reading
@@ -285,8 +301,11 @@ async function hydrateModelSettings() {
   } else {
     setModelPill(null);
   }
-  // Don't re-hydrate the API key field — it's in chrome.storage.session
-  // and we deliberately don't surface it in the UI (no plaintext display).
+  // Never echo the key itself — only the mask, and only while the user has
+  // not started typing (same modelSettingsEdited guard as the form fields).
+  if (!modelSettingsEdited) {
+    $modelKey.value = keyStored.modelApiKey ? KEY_MASK : '';
+  }
 }
 // ── Pre-flight: can this browser run anything at all?
 //
@@ -1546,8 +1565,10 @@ if (replaySetupBtn) {
       delete settings.agentSecret;
       delete settings.agentSecretOrigin;
       await chrome.storage.local.set({ settings });
-      paintSetupFooter(settings);
-      toast('Signed out');
+      // Navigate the open panel, not just the next open: reverting the
+      // button leaves the user on a Settings screen that no longer describes
+      // their state. The wizard is the only writer of these fields.
+      window.location.assign('welcome.html');
       return;
     }
     void chrome.sidePanel.setOptions({ path: 'welcome.html' });

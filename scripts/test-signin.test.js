@@ -248,6 +248,22 @@ function json(okStatus, body) {
   check("a refused request reveals nothing",
     asked.$cloudCodeField.hidden === true && asked.$resendCodeBtn.hidden === true,
     "a box the user can fill when no mail is coming is worse than no box");
+  // The roster always answers 200; a 429 is the rate limiter, and burying it
+  // under the generic sentence sends the user to retype an address that was
+  // never the problem.
+  check("a rate limit says so instead of blaming the address",
+    /Too many attempts/i.test(asked.statusText), asked.statusText);
+
+  const again = rig(welcome, "requestCode", json(200, { sent: false, reason: "try_again" }), { codeFieldHidden: true });
+  await again.requestCode();
+  check("an admitted address whose code could not be stored says try again",
+    /try again in a moment/i.test(again.statusText) && again.$cloudCodeField.hidden === true,
+    again.statusText);
+
+  const busted = rig(welcome, "requestCode", json(502, { detail: "unavailable" }), { codeFieldHidden: true });
+  await busted.requestCode();
+  check("a 5xx is cloud trouble, not a bad email",
+    /Brotto Cloud had a problem/i.test(busted.statusText), busted.statusText);
   const dropped = rig(welcome, "requestCode", async () => { throw new Error("network down"); }, { codeFieldHidden: true });
   await dropped.requestCode();
   check("and neither does one that never reached the server",

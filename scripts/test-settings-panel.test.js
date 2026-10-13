@@ -467,6 +467,9 @@ function main() {
     check("sign-out clears both halves of the credential",
       /delete settings\.agentSecret\b/.test(sidepanel) && /delete settings\.agentSecretOrigin/.test(sidepanel),
       "a leftover origin would bind a future secret to this account");
+    check("sign-out opens the wizard in the panel that is already open",
+      /delete settings\.agentSecretOrigin[\s\S]{0,400}location\.assign\('welcome\.html'\)/.test(sidepanel),
+      "reverting the button leaves the user on a Settings screen that no longer describes them");
     check("hydrate repaints the footer from storage on every open",
       /paintSetupFooter\(s\)/.test(sidepanel));
   }

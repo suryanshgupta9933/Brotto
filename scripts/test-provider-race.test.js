@@ -244,6 +244,9 @@ function openPanel(stored) {
     $modelContextWindow: { textContent: "", title: "" },
     $modelVisionBadge: { hidden: true, dataset: {}, textContent: "" },
     modelSettingsEdited: false,
+    // Free variables the brace-matched hydrate/save bodies close over.
+    KEY_MASK: '••••••••',
+    $modelKey: { value: "" },
     dropdownWriting: false,
     modelDd: null,
     // initModelSettings repaints the provider trigger itself, so the /health
