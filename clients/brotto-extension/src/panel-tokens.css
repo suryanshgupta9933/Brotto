@@ -143,3 +143,90 @@
   /* Motion — 120ms flat, matching the reference's instant idiom */
   --t: 120ms;
 }
+
+/* ─── Dropdown (Ink & Rule) ───────────────────────────────────────────
+   One component, every instance: the settings provider picker and the
+   wizard's step-4 provider are the same markup and the same attachDropdown
+   in dropdown.js. The value host is always the element the caller already
+   reads — a real <select> or a free-text <input> — so choosing an option
+   writes `.value` and every existing listener keeps working.
+
+   The native <select> is display:none: the widget below carries the
+   combobox semantics, and leaving the UA widget focusable would put two
+   tab stops and two keyboard models on one field. */
+.dd { position: relative; }
+.dd-native { display: none; }
+
+/* `.input` sets the box; this only re-voices the value in mono. It is
+   `.input.dd-trigger` rather than `.dd-trigger` so it wins over a later
+   `.input` rule at equal specificity in the page sheet. */
+.input.dd-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+}
+.dd-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A drawn triangle, not a glyph — the same rule the checkbox and the
+   markdown task box follow. It points down when closed and flips when the
+   list is open, so the state is legible without colour. */
+.dd-caret {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--ink-2);
+  transition: transform var(--t);
+}
+.dd.open .dd-caret { transform: rotate(180deg); }
+
+/* The list hangs off the control's own bottom edge with its top border
+   dropped, so it reads as the control opening rather than as a card
+   floating above the page. No shadow — there isn't one in this system. */
+.dd-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 5;
+  max-height: 210px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--paper);
+  border: 1px solid var(--rule-2);
+  border-top: 0;
+}
+.dd-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.dd-option + .dd-option { border-top: 1px solid var(--rule); }
+.dd-option:hover, .dd-option.active { background: var(--paper-2); color: var(--ink); }
+.dd-option-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Selection is a check, not a tint. The system is monochrome, so a colour
+   difference is not an available channel; and a 9px slot of whitespace is
+   what keeps every row's label on the same x. */
+.dd-check { flex: 0 0 9px; width: 9px; color: var(--ink); }

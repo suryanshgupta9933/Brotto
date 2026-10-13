@@ -172,15 +172,16 @@ const refusalFor = async (settings, url) =>
   console.log("\nthe writer records what the reader needs");
 
   // The guard is only reachable if something writes the origin. The wizard's
-  // finish() and the panel's storeAgentSecret() are both owned by brotto-panel
-  // and both already know the issuing server; without the write this whole file
-  // reduces every cloud user to the legacy branch.
+  // finish() is the one writer — the panel's Connection section, including
+  // storeAgentSecret(), is gone — and it already knows the issuing server.
+  // Without the write this whole file reduces every cloud user to the legacy
+  // branch.
   const writesOrigin = (src) => /agentSecretOrigin/.test(src);
-  check("the panel's cloud sign-in records the origin next to the token",
-    writesOrigin(fs.readFileSync(
+  check("the panel has no second writer left to disagree with the wizard",
+    !/function storeAgentSecret/.test(fs.readFileSync(
       path.join(__dirname, "..", "clients", "brotto-extension", "src", "sidepanel.js"), "utf8")),
-    "brotto-panel: storeAgentSecret() must set agentSecretOrigin: <the server it just signed in to>");
-  check("the wizard's finish() does the same",
+    "one writer, one origin; a second storeAgentSecret is a second shape to keep in step");
+  check("the wizard's finish() records the origin next to the token",
     writesOrigin(fs.readFileSync(
       path.join(__dirname, "..", "clients", "brotto-extension", "src", "welcome.js"), "utf8")),
     "brotto-panel: finish() must set agentSecretOrigin: server");
