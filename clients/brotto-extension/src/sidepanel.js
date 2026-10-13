@@ -1671,7 +1671,7 @@ if (saveSettingsBtn) {
       if (!serverOk && r.status === 404) {
         try {
           serverNote = (await fetch(`${base}/health`)).ok
-            ? ' server answered but rejected AGENT_SECRET'
+            ? (state.authMode === 'jwt' ? ' sign-in expired — Set up Brotto' : ' server answered but rejected AGENT_SECRET')
             : ' server unreachable';
         } catch {
           serverNote = ' server unreachable';
@@ -4909,8 +4909,29 @@ goalEl.focus();
     // user is opening the panel to find out why nothing works.
     const authed = await fetch(url + '/v1/policy', { method: 'GET', headers: await authHeaders() });
     if (authed.status === 404) {
-      setConnPill('error', 'Key rejected');
-      toast('The server answered but rejected AGENT_SECRET — fix it in Settings', 'bad', 6000);
+      if (state.authMode === 'jwt') {
+        // A live Brotto Cloud refused the token in the slot — it is expired
+        // or was never valid for this account. Either way it will never work
+        // again, and leaving it there keeps the footer on "Sign out" for a
+        // session that does not exist. Clear it so the footer offers the
+        // wizard, the only place a new token comes into being. Never says
+        // "AGENT_SECRET": this user has no agent secret, and being told to
+        // fix one in a Settings screen that no longer has the field is the
+        // dead end that made this look like a total outage.
+        const cur = (await chrome.storage.local.get('settings')).settings || {};
+        if (cur.agentSecret) {
+          const cleaned = { ...cur };
+          delete cleaned.agentSecret;
+          delete cleaned.agentSecretOrigin;
+          await chrome.storage.local.set({ settings: cleaned });
+        }
+        paintSetupFooter({});
+        setConnPill('error', 'Sign-in expired');
+        toast('Your Brotto Cloud sign-in has expired — open Set up Brotto to sign in again', 'bad', 6000);
+      } else {
+        setConnPill('error', 'Key rejected');
+        toast('The server answered but rejected AGENT_SECRET — fix it in Settings', 'bad', 6000);
+      }
     }
     state.plannerUrl = url;
     // The catalogue was loaded above against whatever URL the field held
