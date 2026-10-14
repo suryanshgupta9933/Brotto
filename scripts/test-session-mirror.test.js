@@ -102,6 +102,7 @@ check("a missing source does not take the merge down", () => {
 function fakeStore(mirror) {
   return {
     list: async () => mirror || [],
+    namespaceFor: (base) => String(base || ""),
     get: async () => null,
     put: async () => true,
     remove: async () => true,
@@ -114,8 +115,8 @@ function entriesFor(serverBehaviour, mirror, local = []) {
   // mirrorRows and mergeHistory are both free identifiers inside
   // historyEntries, so both have to be handed in — stubbing the merge away
   // would test a union that never runs.
-  const realMirrorRows = new Function("brottoSessionStore", "panelStatus",
-    `return (${sliceFunction("mirrorRows")});`)(store, (s) => s || "done");
+  const realMirrorRows = new Function("brottoSessionStore", "panelStatus", "serverBase",
+    `return (${sliceFunction("mirrorRows")});`)(store, (s) => s || "done", () => "https://server");
   const fn = new Function("brottoSessionStore", "listSessions", "mirrorRows", "mergeHistory",
     "panelStatus", "serverBase", "authHeaders", "fetch",
     `return (${sliceFunction("historyEntries")});`)(
@@ -174,6 +175,7 @@ const fails = async () => { throw new Error("network down"); };
     const fakeStore = {
       get: async (id) => (id === "m1" ? { schema_version: 2, tasks: [] } : null),
       list: async () => [],
+      namespaceFor: (b) => String(b || ""),
     };
     const fn = new Function("brottoSessionStore", "serverBase", "authHeaders", "fetch",
       `return (${sliceFunction("fetchAudit")});`)(
@@ -184,7 +186,7 @@ const fails = async () => { throw new Error("network down"); };
   });
 
   await run("fetchAudit still prefers the server's copy", async () => {
-    const fakeStore = { get: async () => ({ from: "mirror" }) };
+    const fakeStore = { get: async () => ({ from: "mirror" }), namespaceFor: (b) => String(b || "") };
     const fn = new Function("brottoSessionStore", "serverBase", "authHeaders", "fetch",
       `return (${sliceFunction("fetchAudit")});`)(
       fakeStore, () => "https://server", async () => ({}),
@@ -194,7 +196,7 @@ const fails = async () => { throw new Error("network down"); };
   });
 
   await run("fetchAudit throws only when no copy exists anywhere", async () => {
-    const fakeStore = { get: async () => null };
+    const fakeStore = { get: async () => null, namespaceFor: (b) => String(b || "") };
     const fn = new Function("brottoSessionStore", "serverBase", "authHeaders", "fetch",
       `return (${sliceFunction("fetchAudit")});`)(
       fakeStore, () => "https://server", async () => ({}), fails);

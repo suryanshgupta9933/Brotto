@@ -941,8 +941,12 @@ function mergeHistory(...sources) {
   return out.sort((a, b) => time(b.startedAt) - time(a.startedAt));
 }
 
+// The mirror is scoped to the address every other server call uses — never a
+// comparison against a constant, never the credential. Inlined rather than
+// wrapped in a helper so the store's own namespace rule is read at each site.
 async function mirrorRows() {
-  return (await brottoSessionStore.list()).map((r) => ({
+  const ns = brottoSessionStore.namespaceFor(serverBase());
+  return (await brottoSessionStore.list(ns)).map((r) => ({
     task: r.task || '(no task text)',
     status: panelStatus(r.status),
     steps: r.steps,
@@ -1166,7 +1170,7 @@ async function deleteAllSessions() {
   if (!ok) return;
   await saveSessions([]);
   await noteDeleted(sessions.map((s) => s.session_id));
-  await brottoSessionStore.clear();
+  await brottoSessionStore.clear(brottoSessionStore.namespaceFor(serverBase()));
   await renderHistory();
   try {
     const res = await fetch(`${serverBase()}/v1/sessions`, {
@@ -1278,6 +1282,7 @@ async function mirrorSession(sessionId, { status, steps } = {}) {
   try {
     const doc = await fetchAudit(sessionId);
     await brottoSessionStore.put(sessionId, doc, {
+      namespace: brottoSessionStore.namespaceFor(serverBase()),
       task: (state.lastGoal || '').trim(),
       status,
       steps: steps ?? state.stepCount ?? null,
@@ -1303,7 +1308,7 @@ async function fetchAudit(sessionId) {
       if (doc && doc.found !== false) return doc;
     }
   } catch { /* fall through to the mirror */ }
-  const mirrored = await brottoSessionStore.get(sessionId);
+  const mirrored = await brottoSessionStore.get(sessionId, brottoSessionStore.namespaceFor(serverBase()));
   if (mirrored) return mirrored;
   throw new Error(`no copy of session ${sessionId}`);
 }

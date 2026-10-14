@@ -191,6 +191,7 @@ const sandbox = {
   // what the mirror contributes.
   brottoSessionStore: {
     list: async () => [],
+    namespaceFor: (base) => String(base || ""),
     get: async () => null,
     put: async () => true,
     remove: async () => true,
