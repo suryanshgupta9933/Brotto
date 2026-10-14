@@ -905,15 +905,23 @@ function panelStatus(status) {
   return SERVER_STATUS[status] || status || 'done';
 }
 
-// Three sources, most authoritative first, deduped by session id. The server
-// wins because it is the only copy with the real elapsed time and the loop's
-// own status vocabulary; the mirror fills in rows a restarted dyno no longer
-// has; `local` is the floor, because rows written before the panel knew any
-// session id live only there.
+// Three sources, most authoritative first, deduped by session id and sorted
+// newest first. The server wins because it is the only copy with the real
+// elapsed time and the loop's own status vocabulary; the mirror fills in rows
+// a restarted dyno no longer has; `local` is the floor, because rows written
+// before the panel knew any session id live only there.
 //
 // A row with no session_id cannot be deduped against another, and two such
 // rows that share a start time are the same conversation seen twice — the
 // replay in saveSession's comment is exactly that case.
+//
+// The sort is here rather than in each source because concatenating three
+// ordered lists is not an ordered list. Each source sorts itself — the server
+// by mtime, the mirror by `started_at` string — but the union interleaves
+// them, and a history whose order depends on which source answered read as
+// random. `startedAt` is an ISO string or a ms epoch, so compare numerically
+// when either side is a number and lexically otherwise; rows with no time at
+// all sink rather than lead.
 function mergeHistory(...sources) {
   const seen = new Set();
   const out = [];
@@ -925,7 +933,12 @@ function mergeHistory(...sources) {
       out.push(row);
     }
   }
-  return out;
+  const time = (v) => {
+    if (v == null || v === '') return -Infinity;
+    const n = Number(v);
+    return Number.isFinite(n) && String(v).trim() !== '' ? n : Date.parse(v);
+  };
+  return out.sort((a, b) => time(b.startedAt) - time(a.startedAt));
 }
 
 async function mirrorRows() {
