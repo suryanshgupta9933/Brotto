@@ -148,15 +148,23 @@ await store.put("cloud-run", { goal: "book a flight" }, {
   check("clearing one namespace leaves the other intact",
     sandbox.rows.has("cloud-run") && !sandbox.rows.has("self-run"));
 
+  // ── Remove is scoped too: the reads hide a foreign row, and an ungated
+  //    delete would destroy it anyway, so the read fix would be undone by the
+  //    write path.
+  check("deleting a row from the wrong server is refused",
+    (await store.remove("cloud-run", nsFor(SELF))) === false && sandbox.rows.has("cloud-run"));
+  check("…and deleting the same row as its own server does delete it",
+    (await store.remove("cloud-run", nsFor(CLOUD))) === true && !sandbox.rows.has("cloud-run"));
+  check("a pre-namespace row is not deletable by any server",
+    (await store.remove("legacy-run", nsFor(SELF))) === false && sandbox.rows.has("legacy-run"));
+  sandbox.rows.delete("legacy-run");
+
   // ── The panel passes the namespace on every read and write ─────────────
   {
     // Every store call must carry a namespace. One that does not is the bug
     // this whole file is about, and it would read clean in review.
-    // `remove` is exempt and the exclusion is stated: it deletes the row the
-    // user just clicked, which came out of the scoped list — deleting is not
-    // disclosure. `list(ns)` carries it through a local.
+    // `list(ns)` carries it through a local.
     for (const call of sidepanel.match(/brottoSessionStore\.[a-z]+\([^)]*\)/g) || []) {
-      if (call.startsWith("brottoSessionStore.remove")) continue;
       check(`namespaced: ${call.slice(0, 60)}`,
         /namespaceFor\(/.test(call) || /list\(ns\)/.test(call), call);
     }

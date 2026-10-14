@@ -147,12 +147,21 @@ async function get(sessionId, ns) {
   }
 }
 
-async function remove(sessionId) {
-  if (!sessionId) return;
+// Scoped exactly like the reads, and this is not a disclosure question but a
+// destruction one: the read filter hides another server's row, and an ungated
+// delete would destroy it anyway, so the read fix would be undone by the write
+// path. The caller gets `false` for "not ours, left alone" so it can tell a
+// deletion from a refusal.
+async function remove(sessionId, ns) {
+  if (!sessionId) return false;
   try {
+    const row = await tx('readonly', (store) => store.get(sessionId));
+    if (!inNamespace(row, ns)) return false;
     await tx('readwrite', (store) => store.delete(sessionId));
+    return true;
   } catch (err) {
     console.warn('[brotto] session mirror delete failed:', err);
+    return false;
   }
 }
 

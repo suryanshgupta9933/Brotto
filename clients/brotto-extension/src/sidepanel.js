@@ -1198,7 +1198,9 @@ async function deleteSession(entry) {
   // The mirror is a third copy and it is the only one that survives the
   // server's disk, so deleting the row and the server file while leaving it
   // behind would mean "deleted" is the one outcome the user cannot verify.
-  if (entry.session_id) await brottoSessionStore.remove(entry.session_id);
+  if (entry.session_id) {
+    await brottoSessionStore.remove(entry.session_id, brottoSessionStore.namespaceFor(serverBase()));
+  }
   // The row goes from the panel first. A server that is down, or a secret
   // that is wrong, must not leave the user staring at a button that does
   // nothing — and the row is the half they can see.
