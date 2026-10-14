@@ -8,6 +8,8 @@ fold, so `price_usage` must take the counts separately.
 
 from __future__ import annotations
 
+import pytest
+
 from brotto_orchestrator.model.catalog import PROVIDER_CATALOG, Pricing
 from brotto_orchestrator.model.pricing import lookup, price_usage
 
@@ -143,3 +145,35 @@ def test_a_long_tier_is_never_cheaper_than_the_base_rate():
             assert p.input_per_mtok_long >= p.input_per_mtok, f"{pid}/{m.id}"
             assert p.output_per_mtok_long >= p.output_per_mtok, f"{pid}/{m.id}"
             assert p.cache_read_per_mtok_long >= p.cache_read_per_mtok, f"{pid}/{m.id}"
+
+
+def test_a_stated_rate_prices_a_model_the_catalogue_has_no_entry_for():
+    """`custom` carries no models at all, so before a user could state a rate
+    every OpenAI-compatible run ended at cost_usd=None — including the ones
+    where they do pay."""
+    from brotto_orchestrator.model.pricing import user_rates
+
+    rates = user_rates(0.50, 1.50)
+    assert rates is not None
+    cost = price_usage(rates, input_tokens=1_000_000, output_tokens=1_000_000)
+    assert cost == pytest.approx(2.00)
+
+
+def test_a_cached_token_costs_the_stated_input_rate_not_zero():
+    from brotto_orchestrator.model.pricing import user_rates
+
+    rates = user_rates(2.00, 8.00)
+    assert rates is not None
+    cached = price_usage(rates, cache_read=1_000_000)
+    assert cached == pytest.approx(2.00), "a cache read is not free"
+
+
+def test_an_unstated_rate_stays_unpriced():
+    from brotto_orchestrator.model.pricing import user_rates
+
+    assert user_rates(None, None) is None
+    # Half a rate prices nothing, and guessing the other half is the same
+    # confidently-wrong number as pricing the model at zero.
+    assert user_rates(0.50, None) is None
+    assert user_rates(None, 0.50) is None
+    assert price_usage(user_rates(None, None), input_tokens=1_000_000) is None

@@ -58,9 +58,19 @@ def _from_env() -> tuple[ModelConfig, UserCredentials] | None:
     # AGENT_BASE_URL is the provider-neutral name; ANTHROPIC_BASE_URL is read
     # first for the configs that predate it.
     base_url = os.getenv("AGENT_BASE_URL") or os.getenv("ANTHROPIC_BASE_URL")
+
+    def _rate(name: str) -> float | None:
+        # Stated or absent — never defaulted. A rate nobody published stays
+        # None so `TaskResult.cost_usd` does, which is what a budget cap needs.
+        raw = os.getenv(name)
+        return None if raw in (None, "") else float(raw)
+
     creds = UserCredentials(api_key=api_key, base_url=base_url)
     return ModelConfig(
-        provider=provider, model=model_id, context_window=context_window, base_url=base_url
+        provider=provider, model=model_id, context_window=context_window,
+        base_url=base_url,
+        input_per_mtok=_rate("AGENT_INPUT_PER_MTOK"),
+        output_per_mtok=_rate("AGENT_OUTPUT_PER_MTOK"),
     ), creds
 
 

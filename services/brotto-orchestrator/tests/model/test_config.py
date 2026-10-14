@@ -42,3 +42,34 @@ def test_user_credentials_redact_in_repr():
 def test_from_dict_rejects_unknown_field():
     with pytest.raises(ValueError, match="unknown"):
         ModelConfig.from_dict({"provider": "anthropic", "model": "x", "context_window": 1000, "extra": True})
+
+def test_stated_rates_round_trip_through_the_saved_file():
+    """store.py persists this dataclass, so the per-user JSON is where a
+    self-hoster states a rate with no extension and no account."""
+    cfg = ModelConfig(provider="custom", model="qwen2.5-coder:7b", context_window=32_768,
+                      base_url="http://gpu-box.lan:8000/v1",
+                      input_per_mtok=0.0, output_per_mtok=0.0)
+    assert ModelConfig.from_dict(cfg.to_dict()) == cfg
+
+
+def test_half_a_rate_is_rejected():
+    with pytest.raises(ValueError, match="both input_per_mtok"):
+        ModelConfig(provider="custom", model="x", context_window=1000,
+                    input_per_mtok=1.0)
+    with pytest.raises(ValueError, match="both input_per_mtok"):
+        ModelConfig(provider="custom", model="x", context_window=1000,
+                    output_per_mtok=1.0)
+
+
+def test_a_negative_rate_is_rejected():
+    with pytest.raises(ValueError, match="input_per_mtok"):
+        ModelConfig(provider="custom", model="x", context_window=1000,
+                    input_per_mtok=-1.0, output_per_mtok=1.0)
+
+
+def test_zero_is_a_stated_rate_not_an_absent_one():
+    """A box the user runs themselves genuinely costs $0.00 — but it is their
+    statement, not our guess, so it prices rather than reading as unknown."""
+    cfg = ModelConfig(provider="custom", model="local", context_window=1000,
+                      input_per_mtok=0.0, output_per_mtok=0.0)
+    assert cfg.input_per_mtok == 0.0

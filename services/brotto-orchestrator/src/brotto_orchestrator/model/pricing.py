@@ -14,7 +14,7 @@ counts separately and they do not overlap.
 
 from __future__ import annotations
 
-from brotto_orchestrator.model.catalog import PROVIDER_CATALOG, ModelInfo
+from brotto_orchestrator.model.catalog import PROVIDER_CATALOG, ModelInfo, Pricing
 
 _MTOK = 1_000_000
 
@@ -32,8 +32,25 @@ def lookup(provider: str, model_id: str) -> ModelInfo | None:
     return None
 
 
+def user_rates(
+    input_per_mtok: float | None, output_per_mtok: float | None
+) -> Pricing | None:
+    """The rates a user stated for a model the catalogue has no entry for.
+
+    Cached tokens are input tokens and a self-run box publishes no separate
+    cache rate, so they bill at the stated input rate. Pricing them at $0.00
+    would be the same confidently-wrong number as pricing the whole model at
+    zero, and the consumer is a budget cap. Returns None when either rate is
+    absent — a half-stated rate prices nothing, and "not priced" survives to
+    `TaskResult.cost_usd` unchanged.
+    """
+    if input_per_mtok is None or output_per_mtok is None:
+        return None
+    return Pricing(input_per_mtok, output_per_mtok, input_per_mtok, input_per_mtok)
+
+
 def price_usage(
-    info: ModelInfo | None,
+    info: ModelInfo | Pricing | None,
     *,
     input_tokens: int = 0,
     output_tokens: int = 0,
@@ -43,9 +60,9 @@ def price_usage(
     """USD, or None when the price is unknown. None is a supported answer: a
     visibly absent cost beats a confidently wrong one, because the consumer of
     this number is a budget cap."""
-    if info is None or info.pricing is None:
+    p = info.pricing if isinstance(info, ModelInfo) else info
+    if p is None:
         return None
-    p = info.pricing
     # Past the threshold the vendor re-rates the *whole* request, not just the
     # tokens over the line, so the choice is made once on total input.
     long_context = (

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from brotto_orchestrator.agent import harness
 from brotto_orchestrator.agent.audit import AuditTrail
 from brotto_orchestrator.model import pricing
@@ -107,3 +109,60 @@ def test_pro_prices_the_model_it_actually_ran_on(monkeypatch):
     assert info is not None
     assert price_usage(info, input_tokens=1_000, output_tokens=0,
                        cache_read=0, cache_write=0) > 0
+
+
+def _deps(cfg):
+    deps = SimpleNamespace()
+    deps._model_config = cfg
+    return deps
+
+
+def test_a_custom_model_costs_what_the_user_said_it_costs(monkeypatch):
+    """`custom` carries no models, so before this a self-hoster on a vLLM box
+    got cost_usd=None on every run — including the ones they are billed for.
+    Their own stated rate is the only number available and it is not a guess."""
+    from brotto_orchestrator.model.config import ModelConfig
+
+    monkeypatch.setattr(harness, "_PRO_ENABLED", True)
+    cfg = ModelConfig(provider="custom", model="qwen2.5-coder:7b",
+                      context_window=32_768, base_url="http://gpu-box.lan:8000/v1",
+                      input_per_mtok=0.50, output_per_mtok=1.50)
+    cost = price_usage(harness._catalog_for(_deps(cfg)),
+                       input_tokens=1_000_000, output_tokens=1_000_000)
+    assert cost == pytest.approx(2.00)
+
+
+def test_an_unstated_custom_model_stays_unpriced(monkeypatch):
+    """None survives end to end. It is the answer when nobody published a
+    rate, and pricing it at zero is the confidently-wrong number the whole
+    `float | None` exists to avoid."""
+    from brotto_orchestrator.model.config import ModelConfig
+
+    monkeypatch.setattr(harness, "_PRO_ENABLED", True)
+    cfg = ModelConfig(provider="custom", model="qwen2.5-coder:7b",
+                      context_window=32_768)
+    assert harness._catalog_for(_deps(cfg)) is None
+    assert price_usage(harness._catalog_for(_deps(cfg)), input_tokens=1_000) is None
+
+
+def test_a_stated_rate_never_shadows_a_catalogue_rate(monkeypatch):
+    """The catalogue is verified off each vendor's own pricing page; a rate
+    typed into the panel is not. The lookup wins."""
+    from brotto_orchestrator.model.config import ModelConfig
+
+    monkeypatch.setattr(harness, "_PRO_ENABLED", True)
+    known = ModelConfig(provider="anthropic", model="claude-sonnet-4-5",
+                        context_window=200_000,
+                        input_per_mtok=99.0, output_per_mtok=99.0)
+    got = harness._catalog_for(_deps(known))
+    assert got is not None and got.pricing is not None
+    assert price_usage(got, input_tokens=1_000_000) != pytest.approx(99.0)
+
+
+def test_the_free_build_still_sees_no_price_at_all(monkeypatch):
+    from brotto_orchestrator.model.config import ModelConfig
+
+    monkeypatch.setattr(harness, "_PRO_ENABLED", False)
+    cfg = ModelConfig(provider="custom", model="local", context_window=8_000,
+                      input_per_mtok=0.5, output_per_mtok=0.5)
+    assert harness._catalog_for(_deps(cfg)) is None

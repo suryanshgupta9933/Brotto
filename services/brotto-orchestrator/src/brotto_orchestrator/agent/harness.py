@@ -23,7 +23,7 @@ from pydantic_ai.exceptions import (
 
 from brotto_orchestrator.cdp.extension_relay import TabUnreachable
 from brotto_orchestrator.model.config import UserCredentials
-from brotto_orchestrator.model.pricing import lookup as _price_lookup, price_usage
+from brotto_orchestrator.model.pricing import lookup as _price_lookup, price_usage, user_rates
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
 from brotto_orchestrator.model.resolver import resolve_model_config
 
@@ -1497,15 +1497,19 @@ def _catalog_for(deps: AgentDeps):
     `_plan_step` sets that attribute only on the branch that builds a real
     provider model. The scripted/test path deliberately never resolves one —
     there is nothing to bill — and calling the resolver there would raise on
-    a run that has no model to raise about. None also covers a model the
-    catalog has no entry for; only that one is a pricing gap.
+    a run that has no model to raise about. A model the catalog has no entry
+    for falls back to the rates the user stated on their own config, and None
+    survives to the cost only when they stated none.
     """
     if not _PRO_ENABLED:
         return None
     cfg = getattr(deps, "_model_config", None)
     if cfg is None:
         return None
-    return _price_lookup(cfg.provider, cfg.model)
+    known = _price_lookup(cfg.provider, cfg.model)
+    return known if known is not None else user_rates(
+        cfg.input_per_mtok, cfg.output_per_mtok
+    )
 
 
 async def _plan_step(

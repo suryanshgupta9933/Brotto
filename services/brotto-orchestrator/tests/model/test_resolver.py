@@ -18,7 +18,8 @@ def no_env(monkeypatch):
     # ANTHROPIC_BASE_URL pins every resolved config to it, which silently
     # rewrites what a test thinks it asserted.
     for k in ("AGENT_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-              "AGENT_BASE_URL", "ANTHROPIC_BASE_URL", "BROTTO_FORCE_ENV_MODEL"):
+              "AGENT_BASE_URL", "ANTHROPIC_BASE_URL", "BROTTO_FORCE_ENV_MODEL",
+              "AGENT_INPUT_PER_MTOK", "AGENT_OUTPUT_PER_MTOK"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -180,3 +181,21 @@ def test_a_per_user_config_keeps_its_base_url_across_reloads(tmp_model_dir: Path
     out_cfg, out_creds = resolve_model_config("127.0.0.1", None, UserCredentials(api_key="sk-persisted", base_url=None))
     assert out_cfg.base_url == "http://gpu-box.lan:8000/v1"
     assert out_creds.base_url == "http://gpu-box.lan:8000/v1"
+
+
+def test_env_stated_rates_reach_the_resolved_config(tmp_model_dir: Path, no_env, monkeypatch):
+    """The extensionless self-host path: no panel, no account, .env only."""
+    monkeypatch.setenv("AGENT_MODEL", "custom:qwen2.5-coder:7b")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    monkeypatch.setenv("AGENT_BASE_URL", "http://gpu-box.lan:8000/v1")
+    monkeypatch.setenv("AGENT_INPUT_PER_MTOK", "0.50")
+    monkeypatch.setenv("AGENT_OUTPUT_PER_MTOK", "1.50")
+    cfg, _ = resolve_model_config("127.0.0.1", None, None)
+    assert (cfg.input_per_mtok, cfg.output_per_mtok) == (0.50, 1.50)
+
+
+def test_no_env_rates_leave_the_cost_unpriced(tmp_model_dir: Path, no_env, monkeypatch):
+    monkeypatch.setenv("AGENT_MODEL", "custom:qwen2.5-coder:7b")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    cfg, _ = resolve_model_config("127.0.0.1", None, None)
+    assert cfg.input_per_mtok is None and cfg.output_per_mtok is None
