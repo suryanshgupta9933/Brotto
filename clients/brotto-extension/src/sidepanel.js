@@ -3578,14 +3578,12 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
     toolbar.className = 'final-answer-toolbar';
 
     if (finalAnswer) {
-      // ponytail: copy includes the task + the final answer in a clean
-      // markdown-style block. The user said "Show prompts as well when
-      // copied the response" — the task is the prompt they sent, so
-      // including it makes the copy self-contained when shared.
-      const copyText = state.lastGoal
-        ? `**Task:** ${state.lastGoal}\n\n**Response:**\n${finalAnswer}`
-        : finalAnswer;
-      const copyBtn = makeIconBtn(LUCIDE_ICONS.copy, 'Copy', async (ev) => {
+      // The task alone, not the answer too. Copying the answer was a
+      // "self-contained when shared" choice; what the operator actually wants
+      // is the prompt, so re-running it elsewhere is one paste. The answer is
+      // a click away in the chat either way.
+      const copyText = state.lastGoal || finalAnswer;
+      const copyBtn = makeIconBtn(LUCIDE_ICONS.copy, 'Copy task', async (ev) => {
         ev.stopPropagation();
         try {
           await navigator.clipboard.writeText(copyText);
