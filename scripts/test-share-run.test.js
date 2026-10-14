@@ -60,9 +60,19 @@ function renderButtons(role) {
   const s = makeSand(role);
   vm.createContext(s);
   vm.runInContext(extract("escapeHtml"), s);
+  vm.runInContext(extract("copyWithFallback"), s);
   vm.runInContext(extract("appendMessage"), s);
   s.appendMessage({ role, text: "", finalAnswer: "here it is" });
   return s;
+}
+
+function boot(s) {
+  vm.createContext(s);
+  vm.runInContext(extract("escapeHtml"), s);
+  vm.runInContext(extract("copyWithFallback"), s);
+  vm.runInContext(extract("appendMessage"), s);
+  s.appendMessage({ role: "done", text: "", finalAnswer: "x" });
+  return (s.__buttons || []).find((b) => b.label === "Share this run");
 }
 
 function makeSand(role) {
@@ -72,7 +82,8 @@ function makeSand(role) {
       tagName: tag, className: "", innerHTML: "", textContent: "", value: "",
       children: [], style: {}, attrs: {},
       appendChild: (c) => (node.children.push(c), c && c.__isButton && buttons.push(c), node),
-      setAttribute() {}, addEventListener() {}, remove() {},
+      setAttribute() {}, addEventListener() {}, remove() {}, select() {},
+      removeChild() {},
       querySelector: () => null, classList: { add() {}, remove() {} },
     };
     return node;
@@ -80,13 +91,14 @@ function makeSand(role) {
   const opened = [];
   const clip = [];
   const toasts = [];
+  const execs = [];
   const s = {
     LUCIDE_ICONS: icons,
     FEEDBACK_URL: feedbackUrl,
     MAX_TASK_CHARS: 1000,
     state: { lastGoal: "book the flight to Lisbon", taskId: "t1" },
     messagesEl: { appendChild() {}, querySelector: () => null },
-    document: { createElement: el, execCommand() {}, body: el("body") },
+    document: { createElement: el, execCommand: () => { execs.push(1); return s.__clipMode === "fallback"; }, body: el("body") },
     chrome: {
       tabs: { create: (o) => opened.push(o.url) },
       storage: { local: { get: async () => ({}), set: async () => {} } },
@@ -95,12 +107,20 @@ function makeSand(role) {
     makeIconBtn: (icon, label, onClick) => ({ icon, label, onClick, className: "", __isButton: true }),
     retryLastTask() {}, stopSpinner() {},
     toast: (t) => toasts.push(String(t)),
-    navigator: { clipboard: { writeText: (t) => { clip.push(t); return Promise.resolve(); } } },
+    navigator: { clipboard: { writeText: (t) => {
+      clip.push(t);
+      // 'ok' | 'fallback' | 'dead' — 'fallback'/'dead' are what a panel that
+      // has lost focus actually sees: the async API refuses and only the
+      // textarea path can save it.
+      return s.__clipMode === "ok" ? Promise.resolve() : Promise.reject(new Error("no clipboard"));
+    } } },
     setTimeout() {}, clearTimeout() {}, setInterval() {}, clearInterval() {},
     __opened: opened,
     __clip: clip,
     __toasts: toasts,
     __buttons: buttons,
+    __execs: execs,
+    __clipMode: "ok",
   };
   return s;
 }
@@ -148,12 +168,8 @@ function makeSand(role) {
     // on a page — so it must be quoted and escaped, not interpolated raw.
     {
       const nasty = makeSand("done");
-      vm.createContext(nasty);
       nasty.state.lastGoal = '<!-- owned -->\n[x](http://evil.test) **bold**';
-      vm.runInContext(extract("escapeHtml"), nasty);
-      vm.runInContext(extract("appendMessage"), nasty);
-      nasty.appendMessage({ role: "done", text: "", finalAnswer: "x" });
-      const btn = (nasty.__buttons || []).find((b) => b.label === "Share this run");
+      const btn = boot(nasty);
       btn.onClick({ stopPropagation() {} });
       await new Promise((r) => setTimeout(r, 0));
       const body = nasty.__clip[0] || "";
@@ -165,18 +181,75 @@ function makeSand(role) {
     // Bound the length: the body is pasted into a third-party form.
     {
       const long = makeSand("done");
-      vm.createContext(long);
       long.state.lastGoal = "z".repeat(9000);
-      vm.runInContext(extract("escapeHtml"), long);
-      vm.runInContext(extract("appendMessage"), long);
-      long.appendMessage({ role: "done", text: "", finalAnswer: "x" });
-      const btn = (long.__buttons || []).find((b) => b.label === "Share this run");
+      const btn = boot(long);
       btn.onClick({ stopPropagation() {} });
       await new Promise((r) => setTimeout(r, 0));
       check("the task is length-bounded", (long.__clip[0] || "").length < 3000,
         String((long.__clip[0] || "").length));
     }
   }
+
+  // ── The tab opens only after a confirmed write ─────────────────────────
+  // The order used to be tabs.create() then writeText(). When the write
+  // refused, the user was already on an empty public composer and was told to
+  // copy a draft that had never been written anywhere — it exists only in the
+  // variable whose write threw.
+  {
+    const dead = makeSand("done");
+    dead.__clipMode = "dead";
+    const btn = boot(dead);
+    btn.onClick({ stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 0));
+    check("a failed copy opens no tab", dead.__opened.length === 0,
+      JSON.stringify(dead.__opened));
+    check("the fallback was tried before giving up", dead.__execs.length === 1,
+      String(dead.__execs.length));
+    check("the failure toast says the draft was not copied",
+      dead.__toasts.some((t) => /not copied/i.test(t)), JSON.stringify(dead.__toasts));
+    check("the failure toast does not point at a draft on screen",
+      !dead.__toasts.some((t) => /from the run above/i.test(t)),
+      JSON.stringify(dead.__toasts));
+  }
+  {
+    const ok = makeSand("done");
+    ok.__clipMode = "ok";
+    const btn = boot(ok);
+    btn.onClick({ stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 0));
+    check("a confirmed copy opens the tab", ok.__opened.length === 1,
+      JSON.stringify(ok.__opened));
+    check("the success toast comes after the tab", ok.__toasts.length === 1);
+  }
+  {
+    // The async clipboard API refuses in a panel that has lost focus; the
+    // textarea path is the only thing that works there. A write that lands on
+    // it is still a confirmed write.
+    const fb = makeSand("done");
+    fb.__clipMode = "fallback";
+    const btn = boot(fb);
+    btn.onClick({ stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 0));
+    check("the execCommand fallback still opens the tab", fb.__opened.length === 1,
+      JSON.stringify(fb.__opened));
+    check("the fallback copy carries the draft",
+      /book the flight to Lisbon/.test(fb.__clip[0] || ""), String(fb.__clip[0]));
+  }
+
+  // ── One copy path, not two ─────────────────────────────────────────────
+  // The Copy-task button already had the textarea fallback; the share flow
+  // wrote its own copy inline. Two implementations of "put this on the
+  // clipboard" is how the fallback gets fixed in one and not the other.
+  check("there is exactly one copy helper", (panel.match(/async function copyWithFallback\(/g) || []).length === 1);
+  check("no textarea + execCommand fallback lives anywhere else",
+    (panel.match(/execCommand\('copy'\)/g) || []).length === 1);
+  check("the Copy-task button goes through the helper",
+    /copyWithFallback\(copyText\)/.test(extract("appendMessage")));
+  check("the share flow goes through the same helper",
+    /copyWithFallback\(body\)/.test(extract("appendMessage")));
+  check("the share flow writes before it opens the tab",
+    extract("appendMessage").indexOf("copyWithFallback(body)")
+      < extract("appendMessage").indexOf("chrome.tabs.create({ url: FEEDBACK_URL })"));
 
   // ── No unescaped innerHTML on this path ────────────────────────────────
   const doneSrc = extract("appendMessage");

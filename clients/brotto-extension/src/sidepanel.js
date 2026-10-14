@@ -3687,6 +3687,29 @@ function renderFacts(finalAnswer) {
   return `<div class="facts">${lines.join('')}</div>`;
 }
 
+// ponytail: one copy path. The async clipboard API is unavailable in a panel
+// that has lost focus (and on a http:// page), so the textarea + execCommand
+// fallback is not defensive slop — it is the only thing that works half the
+// time. Returns whether the text is actually on the clipboard, because a
+// caller that hands the user a destination needs a confirmed write before it
+// opens it; the old copy button ignored this and showed a tick either way.
+async function copyWithFallback(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    document.body.removeChild(ta);
+    return ok;
+  }
+}
+
 function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   // Remove empty state on first real message
   const empty = messagesEl.querySelector('.empty-state');
@@ -3747,17 +3770,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
       const copyText = state.lastGoal || finalAnswer;
       const copyBtn = makeIconBtn(LUCIDE_ICONS.copy, 'Copy task', async (ev) => {
         ev.stopPropagation();
-        try {
-          await navigator.clipboard.writeText(copyText);
-        } catch {
-          const ta = document.createElement('textarea');
-          ta.value = copyText;
-          ta.style.cssText = 'position:fixed;opacity:0';
-          document.body.appendChild(ta);
-          ta.select();
-          try { document.execCommand('copy'); } catch {}
-          document.body.removeChild(ta);
-        }
+        await copyWithFallback(copyText);
         copyBtn.classList.add('clicked');
         setTimeout(() => copyBtn.classList.remove('clicked'), 1200);
       });
@@ -3776,7 +3789,7 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
     // cloud-only gate would skip exactly them. Nothing about the panel's
     // edition is read here on purpose; the destination is the same link either
     // way.
-    const shareBtn = makeIconBtn(LUCIDE_ICONS.share, 'Share this run', (ev) => {
+    const shareBtn = makeIconBtn(LUCIDE_ICONS.share, 'Share this run', async (ev) => {
       ev.stopPropagation();
       // The task is the user's content and it never goes in a URL. A query
       // string lands in history, in the address bar of the tab we open, and
@@ -3800,10 +3813,17 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
         '',
         '_Self-hosted, cloud, or both?_',
       ].filter(Boolean).join('\n');
+      // Write first, open second. Opening the tab before the write dropped the
+      // user onto an empty public composer whenever the clipboard refused, and
+      // told them to copy a draft that only ever existed in the variable that
+      // failed to write — it is not on screen. Same helper as the Copy-task
+      // button, so the two copy paths cannot drift apart again.
+      if (!await copyWithFallback(body)) {
+        toast('Could not reach your clipboard — the draft was not copied', 'bad', 5000);
+        return;
+      }
       chrome.tabs.create({ url: FEEDBACK_URL });
-      navigator.clipboard.writeText(body).then(
-        () => toast('Draft on your clipboard — paste it into the Discussions page'),
-        () => toast('Could not reach your clipboard — copy the draft from the run above', 'bad', 5000));
+      toast('Draft on your clipboard — paste it into the Discussions page');
     });
     toolbar.appendChild(shareBtn);
 
