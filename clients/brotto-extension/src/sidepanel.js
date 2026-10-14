@@ -1313,9 +1313,13 @@ async function deleteSession(entry) {
   // The mirror is a third copy and it is the only one that survives the
   // server's disk, so deleting the row and the server file while leaving it
   // behind would mean "deleted" is the one outcome the user cannot verify.
-  if (entry.session_id) {
-    await brottoSessionStore.remove(entry.session_id, brottoSessionStore.namespaceFor(serverBase()));
-  }
+  // false means "not ours, left alone" — a row written under a different
+  // server address. Ignoring it reported a clean delete for a transcript
+  // that is still in this browser, which is the one outcome the user cannot
+  // see. One honest line, not a settings screen.
+  const mirroredOut = entry.session_id
+    ? await brottoSessionStore.remove(entry.session_id, brottoSessionStore.namespaceFor(serverBase()))
+    : true;
   // The row goes from the panel first. A server that is down, or a secret
   // that is wrong, must not leave the user staring at a button that does
   // nothing — and the row is the half they can see.
@@ -1328,7 +1332,12 @@ async function deleteSession(entry) {
       headers: await authHeaders(),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    toast('Deleted from the server');
+    if (!mirroredOut) {
+      toast('Deleted from the server, but this browser kept its own copy — '
+        + 'if you have used more than one server address, clear the other', 'bad', 7000);
+    } else {
+      toast('Deleted from the server');
+    }
   } catch {
     toast('Removed here, but the server did not answer — this one may still be on disk',
       'bad', 6000);
@@ -3769,10 +3778,21 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
     // way.
     const shareBtn = makeIconBtn(LUCIDE_ICONS.share, 'Share this run', (ev) => {
       ev.stopPropagation();
-      const task = (state.lastGoal || '').trim();
-      const title = task ? `A run: ${task.slice(0, 80)}` : 'A run';
+      // The task is the user's content and it never goes in a URL. A query
+      // string lands in history, in the address bar of the tab we open, and
+      // in the destination's request log — none of which the user chose. The
+      // clipboard is theirs, so the draft goes there and the tab opens bare.
+      //
+      // Quoted and escaped, because this body is read by a maintainer and the
+      // text is whatever the agent saw on a page. escapeHtml neuters `<!--`,
+      // `<a href>` and the rest; the punctuation pass then makes the Markdown
+      // markers inert, and a `> ` per line makes the whole thing a quote.
+      const task = (state.lastGoal || '').trim().slice(0, 2000);
+      const quoted = task.split('\n')
+        .map((l) => (l ? `> ${escapeHtml(l).replace(/([\\`*_{}[\]()#+\-!])/g, '\\$1')}` : '>'))
+        .join('\n');
       const body = [
-        task ? `**What I asked Brotto to do**\n\n${task}` : '',
+        task ? `**What I asked Brotto to do**\n\n${quoted}` : '',
         '',
         '**How it went**',
         '',
@@ -3780,9 +3800,10 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
         '',
         '_Self-hosted, cloud, or both?_',
       ].filter(Boolean).join('\n');
-      const url = `${FEEDBACK_URL}?title=${encodeURIComponent(title)}`
-        + `&body=${encodeURIComponent(body)}`;
-      chrome.tabs.create({ url });
+      chrome.tabs.create({ url: FEEDBACK_URL });
+      navigator.clipboard.writeText(body).then(
+        () => toast('Draft on your clipboard — paste it into the Discussions page'),
+        () => toast('Could not reach your clipboard — copy the draft from the run above', 'bad', 5000));
     });
     toolbar.appendChild(shareBtn);
 

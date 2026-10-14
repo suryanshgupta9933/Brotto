@@ -59,6 +59,7 @@ const feedbackUrl = panel.match(/const FEEDBACK_URL = '([^']+)'/)[1];
 function renderButtons(role) {
   const s = makeSand(role);
   vm.createContext(s);
+  vm.runInContext(extract("escapeHtml"), s);
   vm.runInContext(extract("appendMessage"), s);
   s.appendMessage({ role, text: "", finalAnswer: "here it is" });
   return s;
@@ -77,6 +78,8 @@ function makeSand(role) {
     return node;
   };
   const opened = [];
+  const clip = [];
+  const toasts = [];
   const s = {
     LUCIDE_ICONS: icons,
     FEEDBACK_URL: feedbackUrl,
@@ -90,9 +93,13 @@ function makeSand(role) {
     },
     renderMarkdown: (t) => String(t),
     makeIconBtn: (icon, label, onClick) => ({ icon, label, onClick, className: "", __isButton: true }),
-    retryLastTask() {}, stopSpinner() {}, toast() {},
+    retryLastTask() {}, stopSpinner() {},
+    toast: (t) => toasts.push(String(t)),
+    navigator: { clipboard: { writeText: (t) => { clip.push(t); return Promise.resolve(); } } },
     setTimeout() {}, clearTimeout() {}, setInterval() {}, clearInterval() {},
     __opened: opened,
+    __clip: clip,
+    __toasts: toasts,
     __buttons: buttons,
   };
   return s;
@@ -124,29 +131,50 @@ function makeSand(role) {
   check("mid-task, the share control is not there",
     !midLabels.includes("Share this run"), midLabels.join(", "));
 
-  // ── The task reaches the link, encoded ─────────────────────────────────
+  // ── The task never leaves the browser except via the clipboard ─────────
   const share = (done.__buttons || []).find((b) => b.label === "Share this run");
   if (share) {
     share.onClick({ stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 0));   // the clipboard write is a promise
     const url = done.__opened[0];
     check("clicking it opens exactly one tab", done.__opened.length === 1);
-    check("the tab is the Discussions composer", url && url.startsWith(feedbackUrl));
-    check("the task text is in the query string", url.includes("book%20the%20flight"));
-    check("a raw space or quote never reaches the URL", !/[ "'<>]/.test(url));
-    // The prefill is a URL parameter, so a task containing `&` or `#` cannot
-    // truncate or re-point the link — this is the whole reason it is encoded.
+    check("the tab is the bare Discussions composer, no query string",
+      url === feedbackUrl, String(url));
+    check("no task text reaches the URL", !/book|flight/i.test(String(url)));
+    check("the draft is on the clipboard", /book the flight to Lisbon/.test(done.__clip[0] || ""));
+    check("the user is told where it went", (done.__toasts || []).some((t) => /clipboard/i.test(t)),
+      JSON.stringify(done.__toasts));
+    // The body is read by a maintainer, and the text is whatever the agent saw
+    // on a page — so it must be quoted and escaped, not interpolated raw.
     {
       const nasty = makeSand("done");
       vm.createContext(nasty);
-      nasty.state.lastGoal = 'a&b=1#x "quoted" <script>';
+      nasty.state.lastGoal = '<!-- owned -->\n[x](http://evil.test) **bold**';
+      vm.runInContext(extract("escapeHtml"), nasty);
       vm.runInContext(extract("appendMessage"), nasty);
       nasty.appendMessage({ role: "done", text: "", finalAnswer: "x" });
       const btn = (nasty.__buttons || []).find((b) => b.label === "Share this run");
       btn.onClick({ stopPropagation() {} });
-      const u = nasty.__opened[0];
-      check("a task with &, #, quotes and tags cannot break out of the param",
-        u.includes(encodeURIComponent('a&b=1#x "quoted" <script>')));
-      check("…and the tag never becomes markup", !u.includes("<script>"));
+      await new Promise((r) => setTimeout(r, 0));
+      const body = nasty.__clip[0] || "";
+      check("every line of the task is quoted", body.includes(String.raw`> &lt;\!\-\- owned \-\-&gt;`), body);
+      check("a link in the task never becomes a link", !/\[x\]\(http/.test(body));
+      check("a comment in the task never becomes a comment", !/<!-- owned -->/.test(body));
+      check("markers in the task cannot bold anything", !/\*\*bold\*\*/.test(body));
+    }
+    // Bound the length: the body is pasted into a third-party form.
+    {
+      const long = makeSand("done");
+      vm.createContext(long);
+      long.state.lastGoal = "z".repeat(9000);
+      vm.runInContext(extract("escapeHtml"), long);
+      vm.runInContext(extract("appendMessage"), long);
+      long.appendMessage({ role: "done", text: "", finalAnswer: "x" });
+      const btn = (long.__buttons || []).find((b) => b.label === "Share this run");
+      btn.onClick({ stopPropagation() {} });
+      await new Promise((r) => setTimeout(r, 0));
+      check("the task is length-bounded", (long.__clip[0] || "").length < 3000,
+        String((long.__clip[0] || "").length));
     }
   }
 
