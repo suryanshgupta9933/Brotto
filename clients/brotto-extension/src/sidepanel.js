@@ -2422,7 +2422,12 @@ async function resetForNewTask() {
   setOutcome(null);
   state.taskInFlight = false;
   clearMessages();
-  stopTimer();
+  // clearTimer, not stopTimer: stop preserves the base time so the finished
+  // run's elapsed time stays on screen. A reset has no finished run to
+  // preserve, and leaving state.startTime set meant the replay guard
+  // (`startedAt && !state.startTime`) refused to rebase — so the next run's
+  // clock counted from the *previous* run's start and ran for hours.
+  clearTimer();
   setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Ready' : 'Ready');
 }
 
@@ -2602,8 +2607,24 @@ function clearTimer() {
   if (timerActiveEl) timerActiveEl.textContent = '0.0s';
 }
 
+// Seconds alone stop being readable at about a minute — "83.0s" is a number
+// the reader has to convert, and a slow run is exactly the one worth reading.
+// Under a minute the tenths still carry information (a step is ~30s, so the
+// difference between 12.0 and 12.9 is the difference between a fetch and a
+// stall); above it they are noise on a field three characters wide.
+function formatElapsed(ms) {
+  const elapsed = Math.max(0, ms);
+  const total = Math.floor(elapsed / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return `${h}h${m}m${s}s`;
+  if (m) return `${m}m${s}s`;
+  return (elapsed / 1000).toFixed(1) + 's';
+}
+
 function renderElapsed() {
-  const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
+  const elapsed = formatElapsed(Date.now() - state.startTime);
   if (timerEl) timerEl.textContent = elapsed;
   if (timerActiveEl) timerActiveEl.textContent = elapsed;
 }
