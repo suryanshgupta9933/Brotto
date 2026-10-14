@@ -1659,6 +1659,14 @@
      record in chrome.storage.local, so it is here on first paint. -->
 <div id="modelCheckBanner" class="model-check-banner" role="status" hidden></div>
 
+<!-- ── Server-unreachable banner ───────────────────────────────────
+     The sibling of the model-check banner, in the same place and the
+     same shape: a standing condition above the composer. Shown only when
+     /health did not answer AND the user finished setup — someone who
+     skipped it is on their way to the wizard, not reading a card about a
+     server they already know is not running yet. -->
+<div id="serverBanner" class="model-check-banner" role="status" hidden></div>
+
 <!-- ── Input area ────────────────────────────────────────────────── -->
 <section id="inputArea">
   <div class="input-row">

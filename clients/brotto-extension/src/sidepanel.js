@@ -786,14 +786,87 @@ async function readAuthMode(res) {
 // `serverBase()` reads.
 async function refreshAuthMode() {
   const base = (plannerUrlEl.value || '').trim().replace(/\/$/, '');
+  let ok = false;
   try {
     const res = await fetch(`${base}/health`, { method: 'GET' });
-    state.authMode = res.ok ? await readAuthMode(res) : null;
+    ok = res.ok;
+    state.authMode = ok ? await readAuthMode(res) : null;
   } catch {
     state.authMode = null;
   }
+  // The one reachability signal there is, from the one probe the panel already
+  // makes. `authMode` alone cannot say unreachable from "asked and got no
+  // auth_mode back", and it is null while the probe is in flight — a card that
+  // appears on null would flash on every panel open. This is the settled
+  // answer to "did /health answer", and nothing pings a second endpoint.
+  state.serverReachable = ok;
   paintEditionTag();
+  paintServerBanner();
   return state.authMode;
+}
+
+// ── "Server not reachable", the sibling of the model-not-set banner ────────
+//
+// Same place, same shape and same CSS as the model-check banner: a standing
+// condition above the composer, not part of what happened in a run.
+//
+// The distinction this card has to keep straight is the one the wizard created.
+// "I skipped setup, the server is not running yet" is not "I am set up and my
+// server is down" — the first is a user who already knows, and telling them
+// about it every session is noise that teaches them to ignore the card. So
+// `settings.setupDeferred` — one flag, written by the wizard's Skip and by
+// nothing else — is the whole of it. No setup state machine.
+//
+// It also stays hidden until setup was completed at all: a browser that never
+// answered the wizard is on its way to welcome.html, not reading a card.
+async function paintServerBanner() {
+  const $banner = document.getElementById('serverBanner');
+  if (!$banner) return;
+  if (state.serverReachable !== false) { $banner.hidden = true; return; }
+  if (state.setupDeferred || state.setupIncomplete) { $banner.hidden = true; return; }
+  $banner.textContent = '';
+  const title = document.createElement('div');
+  title.className = 'model-check-banner-title';
+  title.textContent = 'Your Brotto server is not answering';
+  $banner.append(title);
+  const body = document.createElement('div');
+  body.className = 'model-check-banner-body md';
+  const base = serverBase();
+  body.innerHTML = renderMarkdown(
+    `Brotto cannot reach \`${base}\`. Nothing will run until it does — start your `
+    + 'orchestrator, or point Brotto at a different address.');
+  $banner.append(body);
+  const fix = document.createElement('button');
+  fix.type = 'button';
+  fix.className = 'btn model-check-banner-fix';
+  fix.textContent = 'Set up Brotto';
+  fix.addEventListener('click', () => { void chrome.sidePanel.setOptions({ path: 'welcome.html' }); });
+  $banner.append(fix);
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'btn model-check-banner-fix';
+  retry.textContent = 'Try again';
+  // Re-probing is the whole of the re-check policy: on panel open, and when
+  // the user says they have started the server. A timer here would ping an
+  // address that has not changed since the open, and the /health probe is
+  // already made for every send that matters.
+  retry.addEventListener('click', async () => {
+    retry.disabled = true;
+    await refreshAuthMode();
+    retry.disabled = false;
+  });
+  $banner.append(retry);
+  $banner.hidden = false;
+}
+
+// Reads the two setup facts once per panel open. `onboarded` is written by the
+// wizard on Start and on Skip alike, so it cannot tell them apart; the Skip
+// flag can. One read, one place.
+async function loadSetupState() {
+  const { settings } = await chrome.storage.local.get('settings');
+  state.setupDeferred = !!settings?.setupDeferred;
+  state.setupIncomplete = !settings?.onboarded;
+  paintServerBanner();
 }
 
 // ── The edition, named in the header ───────────────────────────────────────
@@ -1885,6 +1958,12 @@ const state = {
   startTime: 0,
   stepCount: 0,
   pendingClarifyId: null,
+  // Whether /health answered on the last settled probe — null until it has.
+  serverReachable: null,
+  // The wizard's Skip wrote `setupDeferred`, and `onboarded` is absent until
+  // Start or Skip. Read once per open by loadSetupState().
+  setupDeferred: false,
+  setupIncomplete: false,
   // The server's session id, from `task_started`. History rows carry it so a
   // click can fetch the session document the run actually produced.
   sessionId: null,
@@ -5045,8 +5124,19 @@ goalEl.focus();
   // the task was on. Hydrate it from storage first; everything below and every
   // other call site reads plannerUrlEl, so this one read covers them.
   const { settings } = await chrome.storage.local.get('settings');
+  // Setup was never completed. Every way into this page — the toolbar action,
+  // a reloaded extension, a cleared profile — lands here, and an empty panel
+  // whose composer cannot reach anything is the one outcome worse than the
+  // wizard. `onboarded` is written by the wizard on Start and on Skip alike, so
+  // it answers "did they finish" and not "did they finish properly"; the
+  // completion check stays exactly as coarse as the flag that records it.
+  if (!settings?.onboarded) {
+    window.location.replace('welcome.html');
+    return;
+  }
   const saved = (settings && typeof settings.serverUrl === 'string') ? settings.serverUrl.trim() : '';
   if (saved) plannerUrlEl.value = saved;
+  await loadSetupState();
   const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
   try {
     const res = await fetch(url + '/health', { method: 'GET' });
@@ -5056,7 +5146,11 @@ goalEl.focus();
     // fallback, and a second /health would be a second failure to have to
     // reason about.
     state.authMode = (await readAuthMode(res)) || state.authMode;
+    // The probe this path already makes is the one reachability signal there
+    // is; no second ping for the banner.
+    state.serverReachable = true;
     paintEditionTag();
+    paintServerBanner();
     paintSetupFooter(settings);
     // `/health` is unauthenticated, so it says nothing about the key — and a
     // wrong key is a 404 on every gated route. One more request here tells
@@ -5099,6 +5193,10 @@ goalEl.focus();
     // — but appendMessage writes class "message error" (a space), so the
     // selector never matched and the notice sat in the chat forever.
     toast('Server unreachable — settings still work locally', 'bad', 5000);
+    // …and the standing card, which outlives the toast. `serverReachable` is
+    // false only here, so the banner cannot claim an outage that stopped.
+    state.serverReachable = false;
+    paintServerBanner();
   }
   // Last, so it runs whether or not the health probe succeeded: the panel
   // still needs its fallback lines when the server is down.

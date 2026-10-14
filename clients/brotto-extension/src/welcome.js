@@ -492,7 +492,7 @@ async function joinWaitlist() {
   }
 }
 
-async function finish() {
+async function finish(deferred = false) {
   const server = $serverUrl.value.trim() || DEFAULT_SERVER;
   const provider = $provider.value;
   const model = $model.value.trim();
@@ -524,6 +524,11 @@ async function finish() {
         // anywhere else (see credential.js).
         agentSecretOrigin: server,
         onboarded: true,
+        // Skip is the one path that reaches finish() without a working
+        // server, and it is the only way the panel can tell "I know my
+        // server is not up yet" from "my server went down". One flag,
+        // written here and read by exactly one banner.
+        setupDeferred: !!deferred,
       },
       modelConfig: { provider, model, context_window: keepCtx },
     }),
@@ -568,7 +573,7 @@ $next.addEventListener("click", async () => {
 // saved this way, and it catches it in one sentence at the first send.
 $skip.addEventListener("click", () => {
   $next.disabled = true;
-  void finish();
+  void finish(true);
 });
 
 // The radio that opens the wizard. Cloud is the default and self-host is the
