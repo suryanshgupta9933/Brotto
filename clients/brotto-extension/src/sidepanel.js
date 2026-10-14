@@ -650,6 +650,15 @@ void refreshModelCheckBanner();
 // trigger a confirm() before send; matching server warning at the same
 // threshold (defense in depth). Not a hard block — the user is the
 // final authority on what they want the agent to do.
+// Where a run can be shared. A GitHub Discussions post with the task
+// prefilled, because it needs nothing from us: no account, no endpoint, no
+// operator, and the same link whether the reader runs the cloud relay or a
+// server on their own laptop. The alternative — posting to an endpoint we
+// host — would have made the prompt useless for the self-hosted install, and
+// would have made a panel that claims page text never leaves the machine
+// phone home.
+const FEEDBACK_URL = 'https://github.com/suryanshgupta9933/Brotto/discussions/new';
+
 const MAX_TASK_CHARS = 1000;
 
 // ── Settings panel ────────────────────────────────────────────────────────
@@ -1873,8 +1882,7 @@ function escapeHtml(s) {
 // the .final-answer-icon-btn CSS can recolor on hover / clicked.
 const LUCIDE_ICONS = {
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>',
-  thumbsUp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H7a2 2 0 0 1-2-1.88V11.88a2 2 0 0 1 2-2.12l4.32-4.32A2 2 0 0 1 13 4.83V9a2 2 0 0 0 2 2.88z"/></svg>',
-  thumbsDown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H17a2 2 0 0 1 2 1.88v8.24a2 2 0 0 1-2 2.12l-4.32 4.32A2 2 0 0 1 11 19.17V15a2 2 0 0 0-2-2.88z"/></svg>',
+  share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98"/><path d="m15.41 6.51-6.82 3.98"/></svg>',
   retry: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>',
 };
 
@@ -1893,17 +1901,6 @@ function makeIconBtn(svgContent, title, onClick) {
 // no telemetry and the orchestrator never sees it. It exists so the rating
 // survives a panel close, and the button tooltips say as much rather than
 // implying a feedback channel that doesn't exist.
-function recordFeedback(kind) {
-  try {
-    const stored = JSON.parse(localStorage.getItem('brotto-feedback') || '[]');
-    stored.push({
-      kind,
-      task: state.lastGoal || '',
-      timestamp: Date.now(),
-    });
-    localStorage.setItem('brotto-feedback', JSON.stringify(stored));
-  } catch {}
-}
 
 // ponytail: re-run the same task under a new session. Resets the chat
 // then re-sends the last goal using the same message type the initial
@@ -3604,11 +3601,9 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
       bubble.appendChild(fa);
     }
 
-    // ponytail: bottom toolbar with feedback icons. Four icons — Copy,
-    // Good (thumbs up), Bad (thumbs down), Retry — give the user a
-    // single place to copy the answer, rate it, or re-run the same
-    // task under a new session. The "Task completed · N steps" caption
-    // is gone — the icon row replaces it.
+    // ponytail: bottom toolbar. Copy task, Share this run, Retry — one
+    // place to take the task away, send the run somewhere real, or re-run
+    // it under a new session.
     const toolbar = document.createElement('div');
     toolbar.className = 'final-answer-toolbar';
 
@@ -3637,31 +3632,36 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
       toolbar.appendChild(copyBtn);
     }
 
-    // ponytail: good/bad ratings are persistent and mutually exclusive.
-    // Click toggles its own state — clicking the other deactivates the
-    // first. The .rated-good / .rated-bad classes stay until the user
-    // clicks again to clear.
-    const goodBtn = makeIconBtn(LUCIDE_ICONS.thumbsUp, 'Good response — saved on this device only', () => {
-      if (goodBtn.classList.contains('rated-good')) {
-        goodBtn.classList.remove('rated-good');
-        return;
-      }
-      badBtn.classList.remove('rated-bad');
-      goodBtn.classList.add('rated-good');
-      recordFeedback('good');
+    // ponytail: share the run, rather than rate it and drop it. The old
+    // thumbs-up/down wrote a line into localStorage that nothing ever read —
+    // a control that looked like it was reporting and was not. This one ends
+    // somewhere real.
+    //
+    // GitHub Discussions with the task prefilled, not an endpoint we run: it
+    // needs no account, no backend and no operator, and it is identical for a
+    // self-hosted install and the cloud relay — which is the whole point,
+    // because a self-hoster is the user this most needs to hear from and a
+    // cloud-only gate would skip exactly them. Nothing about the panel's
+    // edition is read here on purpose; the destination is the same link either
+    // way.
+    const shareBtn = makeIconBtn(LUCIDE_ICONS.share, 'Share this run', (ev) => {
+      ev.stopPropagation();
+      const task = (state.lastGoal || '').trim();
+      const title = task ? `A run: ${task.slice(0, 80)}` : 'A run';
+      const body = [
+        task ? `**What I asked Brotto to do**\n\n${task}` : '',
+        '',
+        '**How it went**',
+        '',
+        '<!-- What worked, what did not, what you had to fix by hand. -->',
+        '',
+        '_Self-hosted, cloud, or both?_',
+      ].filter(Boolean).join('\n');
+      const url = `${FEEDBACK_URL}?title=${encodeURIComponent(title)}`
+        + `&body=${encodeURIComponent(body)}`;
+      chrome.tabs.create({ url });
     });
-    toolbar.appendChild(goodBtn);
-
-    const badBtn = makeIconBtn(LUCIDE_ICONS.thumbsDown, 'Bad response — saved on this device only', () => {
-      if (badBtn.classList.contains('rated-bad')) {
-        badBtn.classList.remove('rated-bad');
-        return;
-      }
-      goodBtn.classList.remove('rated-good');
-      badBtn.classList.add('rated-bad');
-      recordFeedback('bad');
-    });
-    toolbar.appendChild(badBtn);
+    toolbar.appendChild(shareBtn);
 
     const retryBtn = makeIconBtn(LUCIDE_ICONS.retry, 'Retry', () => {
       retryLastTask();

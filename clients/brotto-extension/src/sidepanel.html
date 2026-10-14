@@ -1313,11 +1313,8 @@
     }
     .final-answer-icon-btn svg { width: 13px; height: 13px; display: block; }
     .final-answer-icon-btn:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-    /* .clicked is the 1.2s copy confirmation flash, before any rating. */
-    .final-answer-icon-btn.rated-good,
-    .final-answer-icon-btn.clicked  { border-color: var(--ok); color: var(--ok); }
-    .final-answer-icon-btn.rated-good:hover { background: var(--ok); color: var(--paper); }    .final-answer-icon-btn.rated-bad { border-color: var(--bad); color: var(--bad); }
-    .final-answer-icon-btn.rated-bad:hover { background: var(--bad); color: var(--paper); }
+    /* .clicked is the 1.2s copy confirmation flash. */
+    .final-answer-icon-btn.clicked { border-color: var(--ok); color: var(--ok); }
 
     /* ─── Markdown: chat-scaled, not document-scaled ────────────────────
        Scoped to `.md`, which every renderMarkdown() host carries, so the
