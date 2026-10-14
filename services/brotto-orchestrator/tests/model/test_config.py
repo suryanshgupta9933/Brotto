@@ -65,6 +65,21 @@ def test_a_negative_rate_is_rejected():
     with pytest.raises(ValueError, match="input_per_mtok"):
         ModelConfig(provider="custom", model="x", context_window=1000,
                     input_per_mtok=-1.0, output_per_mtok=1.0)
+    with pytest.raises(ValueError, match="output_per_mtok"):
+        ModelConfig(provider="custom", model="x", context_window=1000,
+                    input_per_mtok=1.0, output_per_mtok=-1.0)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_rate_is_rejected(bad):
+    """`nan < 0` is False, so the range check alone let it through and out as
+    `cost_usd=nan` — which defeats a budget cap rather than failing it."""
+    with pytest.raises(ValueError, match="input_per_mtok"):
+        ModelConfig(provider="custom", model="x", context_window=1000,
+                    input_per_mtok=bad, output_per_mtok=1.0)
+    with pytest.raises(ValueError, match="output_per_mtok"):
+        ModelConfig(provider="custom", model="x", context_window=1000,
+                    input_per_mtok=1.0, output_per_mtok=bad)
 
 
 def test_zero_is_a_stated_rate_not_an_absent_one():

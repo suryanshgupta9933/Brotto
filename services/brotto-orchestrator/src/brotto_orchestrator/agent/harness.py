@@ -23,7 +23,12 @@ from pydantic_ai.exceptions import (
 
 from brotto_orchestrator.cdp.extension_relay import TabUnreachable
 from brotto_orchestrator.model.config import UserCredentials
-from brotto_orchestrator.model.pricing import lookup as _price_lookup, price_usage, user_rates
+from brotto_orchestrator.model.pricing import (
+    lookup as _price_lookup,
+    is_unenforceable,
+    price_usage,
+    user_rates,
+)
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
 from brotto_orchestrator.model.resolver import resolve_model_config
 
@@ -1919,12 +1924,22 @@ class AgentHarness:
             # ceiling, it is no ceiling, and the failure would otherwise be
             # silent for the whole run. Said once, here, before any of it.
             _cfg = getattr(deps, "_model_config", None)
-            if _cfg is not None and _catalog_for(deps) is None:
+            _price = _catalog_for(deps) if _cfg is not None else None
+            if _cfg is not None and _price is None:
                 log.warning(
                     "[%s] BROTTO_MAX_TASK_COST_USD=%.2f is set but %s:%s is "
                     "not in the catalog, so no step can be priced and the "
                     "ceiling will not fire", deps.user_id, _MAX_TASK_COST_USD,
                     _cfg.provider, _cfg.model)
+            elif is_unenforceable(_price):
+                # A free local box is not a mistake and its $0.00 is the honest
+                # cost — but a ceiling the operator set cannot be exceeded by
+                # zero, so say that rather than let the cap read as enforced.
+                log.warning(
+                    "[%s] BROTTO_MAX_TASK_COST_USD=%.2f is set but %s:%s is "
+                    "stated at $0.00 per Mtok, so every step prices at zero and "
+                    "the ceiling will not fire",
+                    deps.user_id, _MAX_TASK_COST_USD, _cfg.provider, _cfg.model)
 
         if not await deps.cdp.ping():
             return TaskResult(

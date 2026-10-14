@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import replace
 
@@ -62,8 +63,20 @@ def _from_env() -> tuple[ModelConfig, UserCredentials] | None:
     def _rate(name: str) -> float | None:
         # Stated or absent — never defaulted. A rate nobody published stays
         # None so `TaskResult.cost_usd` does, which is what a budget cap needs.
+        # A malformed one fails here, naming the variable, rather than reaching
+        # the cap as nan (which `nan < 0` accepts) or as a silent unpriceable.
         raw = os.getenv(name)
-        return None if raw in (None, "") else float(raw)
+        if raw in (None, ""):
+            return None
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ValueError(
+                f"{name}={raw!r} is not a number"
+            ) from None
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name}={raw!r} must be a finite, non-negative number")
+        return value
 
     creds = UserCredentials(api_key=api_key, base_url=base_url)
     return ModelConfig(

@@ -49,6 +49,15 @@ def user_rates(
     return Pricing(input_per_mtok, output_per_mtok, input_per_mtok, input_per_mtok)
 
 
+def is_unenforceable(info: ModelInfo | Pricing | None) -> bool:
+    """Whether every rate is $0.00 — a truthful cost that a spend ceiling set
+    against it can never exceed. Distinct from `None` (not priced) because the
+    cost is honest here; it is the *cap* that is unreachable, and the operator
+    is the one who has to know that."""
+    p = info.pricing if isinstance(info, ModelInfo) else info
+    return p is not None and not any(p.rates(long_context=False))
+
+
 def price_usage(
     info: ModelInfo | Pricing | None,
     *,

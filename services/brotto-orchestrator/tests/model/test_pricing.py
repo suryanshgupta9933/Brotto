@@ -177,3 +177,16 @@ def test_an_unstated_rate_stays_unpriced():
     assert user_rates(0.50, None) is None
     assert user_rates(None, 0.50) is None
     assert price_usage(user_rates(None, None), input_tokens=1_000_000) is None
+
+
+def test_an_all_zero_rate_is_truthful_but_unenforceable():
+    """A local box genuinely costs the user $0.00, so `cost_usd=0.00` is the
+    honest answer. The *cap* is what cannot work, which is why this is a
+    separate question from `None` (not priced)."""
+    from brotto_orchestrator.model.pricing import is_unenforceable, user_rates
+
+    assert price_usage(user_rates(0.0, 0.0), input_tokens=1_000_000,
+                       output_tokens=1_000_000) == 0.0
+    assert is_unenforceable(user_rates(0.0, 0.0)) is True
+    assert is_unenforceable(user_rates(0.50, 0.0)) is False
+    assert is_unenforceable(None) is False

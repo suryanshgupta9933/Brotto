@@ -199,3 +199,14 @@ def test_no_env_rates_leave_the_cost_unpriced(tmp_model_dir: Path, no_env, monke
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
     cfg, _ = resolve_model_config("127.0.0.1", None, None)
     assert cfg.input_per_mtok is None and cfg.output_per_mtok is None
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "-1.0", "free"])
+def test_a_malformed_env_rate_fails_loudly(tmp_model_dir: Path, no_env, monkeypatch, raw):
+    """The env path is where a bad .env value enters; `float("nan")` parses,
+    so only an explicit check stops it reaching the budget cap as `cost_usd=nan`."""
+    monkeypatch.setenv("AGENT_MODEL", "custom:qwen2.5-coder:7b")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    monkeypatch.setenv("AGENT_INPUT_PER_MTOK", raw)
+    with pytest.raises(ValueError, match="AGENT_INPUT_PER_MTOK"):
+        resolve_model_config("127.0.0.1", None, None)

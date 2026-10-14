@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -36,8 +37,16 @@ class ModelConfig:
             raise ValueError(
                 "state both input_per_mtok and output_per_mtok, or neither"
             )
-        if self.input_per_mtok is not None and self.input_per_mtok < 0:
-            raise ValueError("input_per_mtok must be non-negative")
+        # Symmetric, and finite-checked: `nan < 0` is False, so a bare `< 0`
+        # lets a NaN rate through into Pricing and out as `cost_usd=nan`,
+        # which defeats the budget cap instead of failing it. A stated rate is
+        # a number or it is a mistake.
+        for name, rate in (
+            ("input_per_mtok", self.input_per_mtok),
+            ("output_per_mtok", self.output_per_mtok),
+        ):
+            if rate is not None and (not math.isfinite(rate) or rate < 0):
+                raise ValueError(f"{name} must be a finite, non-negative number")
         if self.base_url is not None:
             # Client-supplied, so an unchecked value is a request-forgery
             # primitive: point the server at an internal host and it will POST
