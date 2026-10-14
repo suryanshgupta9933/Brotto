@@ -176,6 +176,44 @@ this number is a budget cap. Rates were read off each vendor's pricing page on
 2026-10-01 and must be re-checked before any of them is shown to a user. Local
 inference is the one zero that is certain rather than unknown.
 
+**A model the catalogue cannot name can still state its own rate.** `custom`
+carries an empty model tuple and `openrouter` a single synthetic one, so
+`pricing.lookup` returned `None` for every free-text id — a self-hoster on a
+vLLM box got `cost_usd=None` on every run, including the ones their provider
+bills. `ModelConfig` gains optional `input_per_mtok` / `output_per_mtok` (USD
+per million tokens), reachable from `.env` as `AGENT_INPUT_PER_MTOK` /
+`AGENT_OUTPUT_PER_MTOK` and from the per-user JSON `store.py` already
+persists. **The panel sends nothing new** for this; the extensionless self-host
+path works unchanged, and the same two fields carry a self-hoster's context
+window through `modelConfig.context_window`.
+
+Four rules, all of them load-bearing:
+
+- **A catalogue rate always beats a stated one.** `_catalog_for` falls back to
+  the stated rate only when the catalogue has none — the catalogue is read off
+  each vendor's own pricing page and a typed rate is not.
+- **Cached tokens bill at the stated input rate.** A cache read is not free, and
+  pricing it at zero is the same confidently-wrong number as pricing the whole
+  model at zero.
+- **Both fields or neither.** Half a rate prices nothing, so a lone field is
+  rejected, and both-absent stays the honest "not priced" `TaskResult.cost_usd`
+  already was. `None` is never rendered as `$0.00`.
+- **A stated rate is range-checked symmetrically and must be finite.** `nan < 0`
+  is False, so a bare `< 0` let a NaN through into `Pricing` and out as
+  `cost_usd=nan` — which defeats the budget cap rather than failing it.
+  `resolver._rate()` raises naming the variable, so a malformed
+  `AGENT_INPUT_PER_MTOK` says its own name.
+
+**A `$0.00` rate is a truthful cost, and an unenforceable cap.** A local box
+genuinely costs the user nothing per token, and calling that "unpriced" would be
+a lie in the other direction — so it stands. What is broken is the ceiling:
+`BROTTO_MAX_TASK_COST_USD` cannot be exceeded by zero. `pricing.
+is_unenforceable()` detects it and the harness warns **at task start**, because
+the operator is the one who has to know their cap is not live.
+`is_unenforceable()` is deliberately distinct from `price_usage` returning
+`None`: the cost is honest, it is the cap that is unreachable. Pinned by
+`tests/test_task_cost.py` and `tests/model/test_pricing.py`.
+
 **A `0.0` cache-write rate is "not published", not "free".** Google charges per
 hour of cache storage rather than per write, Groq publishes no write rate at all,
 and MiniMax publishes none for M3. The write field is a required float, so
@@ -213,6 +251,19 @@ cannot express "one of these, or your own" — which also deleted the
 free-text id falls back to the provider's *smallest* known window, because it
 becomes `window/20` of AX-tree budget and an invented 1M would overrun the real
 window and 400 on the next step. Pinned by `scripts/test-model-config.test.js`.
+
+**That fallback is now something the user can overrule.** For a provider with
+`accepts_any_model` the catalogue can only offer a fallback, so the same 128k
+answer sized the AX-tree budget for every model on a 32k vLLM box and on a 1M
+one alike. Settings shows a context-window input beside the base-URL field,
+under the same rule that shows that field, persisted onto the
+`modelConfig.context_window` that already exists. `effectiveContextWindow()`
+uses the typed value only when the provider applies and it parses to a positive
+finite number — empty, `32k`, `0`, `-5` and `abc` all fall back to the
+catalogue, because a persisted `0` would size the budget to nothing. **The
+wizard no longer overwrites a stated window with its own 128k fallback**: a
+number the user typed outranks the only answer the catalogue can give, and
+re-running the wizard must not silently write the fallback back over it.
 
 The base-URL box and the API-key box are shown per provider, not always. A field
 left visible for a provider that ignores it is a lie about what the user has to
