@@ -268,7 +268,7 @@ function openPanel(stored) {
   sandbox.modelCatalog = vm.runInContext(seed[1], sandbox);
 
   for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
-                    "renderModelFacts", "hydrateModelSettings", "initModelSettings"]) {
+                    "renderModelFacts", "hydrateModelSettings", "initModelSettings", "repaintKeyField"]) {
     vm.runInContext(extract(fn), sandbox);
   }
   // The synchronous populate the panel does at module scope, before any fetch.

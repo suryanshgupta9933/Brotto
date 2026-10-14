@@ -279,7 +279,7 @@ async function main() {
     const { els, store, sandbox } = panel(fetchImpl, stored);
     vm.runInContext(catalogSrc, sandbox);
     for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
-                      "renderModelFacts", "initModelSettings", "hydrateModelSettings"]) {
+                      "renderModelFacts", "initModelSettings", "hydrateModelSettings", "repaintKeyField"]) {
       vm.runInContext(extract(fn), sandbox);
     }
     // The click handler, registered the way the file registers it.

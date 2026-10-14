@@ -185,6 +185,7 @@ if ($modelSave) {
       keyOp,
     ]);
     setModelPill(model);
+    void repaintKeyField();
     // A re-pasted key is usually a *different* key, and the pre-flight cache
     // only knows whether some key was present — it cannot tell them apart
     // without hashing a secret to find out. Dropping the pass here is exact,
@@ -266,6 +267,26 @@ function fitModelPill() {
 // is, or a user re-pastes on every visit. type=password already hides the
 // value; this is only the "something is saved here" signal.
 const KEY_MASK = '••••••••';
+
+// The key field is a pure function of what is actually in storage, repainted
+// by reading storage — never by a writer announcing its own change. There are
+// three writers of `modelApiKey` on three code paths (this file's Save, the
+// worker's `setStoredModelConfig`, and the wizard), and each one used to leave
+// the field showing KEY_MASK with nothing behind it. That is not cosmetic:
+// Save treats the mask as "key unchanged, write nothing", so pressing it then
+// stored nothing and the user was stuck with a field lying about a key that no
+// longer existed. Repainting from the truth is the only fix that covers the
+// writers we cannot see from here.
+//
+// A value that is neither the mask nor empty is a draft the user is typing, and
+// is left alone: re-opening Settings must not eat what they pasted.
+async function repaintKeyField() {
+  if (!$modelKey) return;
+  const current = $modelKey.value;
+  if (current && current !== KEY_MASK) return;
+  const stored = await chrome.storage.local.get('modelApiKey');
+  $modelKey.value = stored.modelApiKey ? KEY_MASK : '';
+}
 
 async function hydrateModelSettings() {
   const stored = await chrome.storage.local.get('modelConfig');
@@ -1577,6 +1598,10 @@ if (replaySetupBtn) {
 
 settingsBtn.addEventListener('click', async () => {
   await hydrateSettingsPanel();
+  // Opening Settings is the moment the field must agree with storage. The
+  // wizard and the worker both write `modelApiKey` from outside this file, so
+  // a key removed while the panel was closed can only be picked up by a read.
+  await repaintKeyField();
   settingsOverlay.classList.add('open');
 });
 
