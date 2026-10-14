@@ -223,11 +223,15 @@ function check(name, cond, detail) {
   console.log(`FAIL ${name}${detail ? `\n     ${detail}` : ""}`);
 }
 
+// The flight is the newest run, so it is the first row whichever source
+// answered — the assertions below name rows by position, and the panel sorts
+// the merged list newest-first regardless of arrival order (see
+// test-history-sort.test.js).
 const SESSIONS = [
   { task: "find the cheapest flight", status: "done", steps: 4, elapsed: "2m",
-    startedAt: 1, session_id: "aaa", task_count: 1 },
+    startedAt: 2, session_id: "aaa", task_count: 1 },
   { task: "star brotto-ui", status: "done", steps: 2, elapsed: "30s",
-    startedAt: 2, session_id: "bbb", task_count: 1 },
+    startedAt: 1, session_id: "bbb", task_count: 1 },
 ];
 
 function reset(sessions = SESSIONS) {
