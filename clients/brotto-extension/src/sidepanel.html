@@ -1735,6 +1735,13 @@
         <input id="model-base-url" class="input" type="url" placeholder="https://api.example.com/v1" autocomplete="off" />
       </div>
 
+      <div class="field hidden" id="modelContextWindowSetting">
+        <label class="lbl" for="model-context-window">Context window (tokens)</label>
+        <input id="model-context-window" class="input" type="number" min="1" step="1000"
+               placeholder="128000" autocomplete="off" />
+        <p class="settings-hint">How many tokens the model takes. The AX-tree budget is sized from this, so too small truncates a run and too large overruns the real window.</p>
+      </div>
+
       <div class="field" id="modelKeySetting">
         <label class="lbl" for="model-api-key">API key</label>
         <input id="model-api-key" class="input" type="password" placeholder="Leave blank to use server default" autocomplete="off" />

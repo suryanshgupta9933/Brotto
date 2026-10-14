@@ -223,6 +223,8 @@ async function main() {
       // itself, so the /health path — which awaits it with no .then — stops
       // leaving them describing the previous provider's catalogue.
       modelContextWindow: el({ title: "" }),
+      modelContextWindowSetting: el({ className: "hidden" }),
+      modelContextWindowInput: el({ value: "" }),
       modelVisionBadge: el({ hidden: true, dataset: {} }),
     };
     const store = storage();
@@ -268,6 +270,8 @@ async function main() {
       $modelSave: els["model-save"],
       $modelStatus: els["model-save-status"],
       $modelContextWindow: els.modelContextWindow,
+      $modelContextWindowSetting: els.modelContextWindowSetting,
+      $modelContextWindowInput: els.modelContextWindowInput,
       $modelVisionBadge: els.modelVisionBadge,
     });
     return { els, store, sandbox };
@@ -279,7 +283,7 @@ async function main() {
     const { els, store, sandbox } = panel(fetchImpl, stored);
     vm.runInContext(catalogSrc, sandbox);
     for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
-                      "renderModelFacts", "initModelSettings", "hydrateModelSettings", "repaintKeyField"]) {
+                      "effectiveContextWindow", "renderModelFacts", "initModelSettings", "hydrateModelSettings", "repaintKeyField"]) {
       vm.runInContext(extract(fn), sandbox);
     }
     // The click handler, registered the way the file registers it.

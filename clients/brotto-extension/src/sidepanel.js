@@ -12,6 +12,8 @@ const $modelSave = document.getElementById('model-save');
 const $modelStatus = document.getElementById('model-save-status');
 const $modelVisionBadge = document.getElementById('modelVisionBadge');
 const $modelContextWindow = document.getElementById('modelContextWindow');
+const $modelContextWindowSetting = document.getElementById('modelContextWindowSetting');
+const $modelContextWindowInput = document.getElementById('model-context-window');
 
 // The catalogue comes from GET /v1/models (see model_catalog.js), but it is
 // SEEDED with that file's offline FALLBACK rather than left null until the
@@ -56,6 +58,16 @@ function populateModelOptions() {
       $modelBaseUrl.value = provider.default_base_url || '';
     }
   }
+  // The context window is the other per-provider fact: a provider with a
+  // fixed catalogue knows every model's window, so a box asking the user for
+  // it would be asking them to look up something the panel already knows. Only
+  // a provider that takes any model id has no answer to offer — for those the
+  // only honest default is the catalogue's SMALLEST_KNOWN_WINDOW, which
+  // under-fills a 1M model and over-fills a 32k one, and the AX-tree budget is
+  // sized from this number.
+  if ($modelContextWindowSetting) {
+    $modelContextWindowSetting.classList.toggle('hidden', !provider?.accepts_any_model);
+  }
 }
 
 function populateProviders() {
@@ -95,6 +107,13 @@ function renderModelFacts() {
     $modelContextWindow.title = modelId && !entry
       ? `${modelId} is not in the catalogue — showing the smallest window this provider is known to have`
       : '';
+    // Prefill the editable window with what the catalogue reports, so the box
+    // is never empty of meaning — but only until the user touches it, and
+    // never over a number they typed.
+    if ($modelContextWindowInput && !modelSettingsEdited && !$modelContextWindowInput.value && modelId) {
+      $modelContextWindowInput.value =
+        brottoModelCatalog.contextWindow(modelCatalog, $modelProvider?.value, modelId);
+    }
   }
 
   if (!$modelVisionBadge) return;
@@ -108,6 +127,23 @@ function renderModelFacts() {
   $modelVisionBadge.hidden = !modelId;
   $modelVisionBadge.dataset.vision = entry?.vision ? 'yes' : 'no';
   $modelVisionBadge.textContent = entry?.vision ? 'VISION' : 'vision unverified';
+}
+
+// The window the run is actually planned against. The user's number wins when
+// the field is showing and the field holds a number; anything else — a field
+// that does not apply, an empty box, a half-typed one, `0`, a stray "32k" —
+// falls back to the catalogue. Falling back matters more than it looks: a
+// persisted 0 sizes the AX-tree budget to nothing and every run ends on the
+// first observation.
+function effectiveContextWindow(provider, model) {
+  const known = brottoModelCatalog.contextWindow(modelCatalog, provider, model);
+  if (!currentProvider()?.accepts_any_model || !$modelContextWindowInput) return known;
+  const typed = Number($modelContextWindowInput.value.trim());
+  return Number.isFinite(typed) && typed > 0 ? Math.floor(typed) : known;
+}
+
+if ($modelContextWindowInput) {
+  $modelContextWindowInput.addEventListener('input', () => { modelSettingsEdited = true; });
 }
 
 if ($modelProvider) {
@@ -159,7 +195,7 @@ if ($modelSave) {
     const model = $modelName.value.trim();
     if (!provider || !model) return;
     const providerInfo = currentProvider();
-    const ctx = brottoModelCatalog.contextWindow(modelCatalog, provider, model);
+    const ctx = effectiveContextWindow(provider, model);
     // base_url rides on modelConfig, not on the key, so a self-hosted or
     // OpenRouter user does not re-paste it every browser restart the way
     // they re-paste the key.
@@ -315,6 +351,12 @@ async function hydrateModelSettings() {
       // field existed should land on the provider's default, not on a stale
       // value the user typed for a different provider.
       if ($modelBaseUrl && cfg.base_url) $modelBaseUrl.value = cfg.base_url;
+      // Same rule: a stored window is this user's own answer for a model the
+      // catalogue cannot describe. Nothing to refill when there is none — the
+      // prefill in renderModelFacts puts the catalogue's number in.
+      if ($modelContextWindowInput && cfg.context_window > 0) {
+        $modelContextWindowInput.value = cfg.context_window;
+      }
     }
     // The pill stays outside the guard on purpose: it names the model this
     // browser last *saved*, which is storage's answer whatever is on screen.

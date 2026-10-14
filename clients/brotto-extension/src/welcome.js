@@ -506,7 +506,13 @@ async function finish() {
   // is the friction this field exists to remove. On the cloud path it holds
   // a bearer token rather than an AGENT_SECRET, which is the point: one
   // slot, one header, and nothing that has to be told which it is.
-  const saved = await chrome.storage.local.get("settings");
+  const saved = await chrome.storage.local.get(["settings", "modelConfig"]);
+  // A window the user stated in Settings outranks this file's answer: for a
+  // provider that takes any model id the catalogue can only offer a fallback,
+  // and re-running the wizard must not silently write that fallback back over
+  // a number they typed.
+  const prevCtx = Number(saved.modelConfig?.context_window);
+  const keepCtx = Number.isFinite(prevCtx) && prevCtx > 0 ? prevCtx : ctx;
   await Promise.all([
     chrome.storage.local.set({
       settings: {
@@ -519,7 +525,7 @@ async function finish() {
         agentSecretOrigin: server,
         onboarded: true,
       },
-      modelConfig: { provider, model, context_window: ctx },
+      modelConfig: { provider, model, context_window: keepCtx },
     }),
     key ? chrome.storage.local.set({ modelApiKey: key }) : Promise.resolve(),
   ]);
