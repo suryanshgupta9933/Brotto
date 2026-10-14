@@ -636,8 +636,6 @@ const timerActiveEl   = document.getElementById('timerActive');
 const newTaskBtn      = document.getElementById('newTaskBtn');
 const outcomeCell     = document.getElementById('outcomeCell');
 const connectionMeta  = document.getElementById('connectionMeta');
-const statusPill      = document.getElementById('statusPill');
-const connLabelEl     = document.getElementById('connLabel');
 
 // A failure saved yesterday is a failure today. Read it back before anything
 // can be sent, so the banner is standing before the user's first keystroke
@@ -2603,18 +2601,6 @@ function setPhase(phase, message) {
   if (phase === 'paused' && !stopping) setOutcome('awaiting_human');
   else if (phase === 'executing' && outcomeCell?.dataset.state === 'waiting') setOutcome('running');
   if (message) connectionMeta.textContent = message;
-  // ponytail: Bug 2 — drive the header connection pill from phase.
-  // Mid-task disconnects are handled separately via `case 'disconnected'`
-  // (Bug 3) which uses setConnPill directly.
-  if (phase === 'connected' || phase === 'executing' || phase === 'paused' || phase === 'done') {
-    setConnPill('connected', 'Connected');
-  } else if (phase === 'connecting') {
-    setConnPill(null, 'Connecting…');
-  } else if (phase === 'error') {
-    setConnPill('error', 'Disconnected');
-  } else {
-    setConnPill(null, 'Idle');
-  }
 }
 
 function clearTimer() {
@@ -2879,17 +2865,6 @@ function failureNote(reason, detail) {
 // the first send (ensureConnected), so the explicit connect step had no
 // button and no caller — it went when the dead startTask went, and its only
 // other listener was bound to a #connectBtn that is not in the document.
-
-// ponytail: Bug 2 — visible connection indicator. Dot-only — state
-// conveyed by colour (green/amber/red) + the title-attribute tooltip.
-// Driven by WS lifecycle events from background.ts.
-function setConnPill(stateName, tooltipLabel) {
-  if (!statusPill) return;
-  statusPill.classList.remove('connected', 'reconnecting', 'error');
-  if (stateName) statusPill.classList.add(stateName);
-  if (connLabelEl) connLabelEl.textContent = tooltipLabel;
-  statusPill.title = `Connection: ${tooltipLabel}`;
-}
 
 // ponytail: transient notice for events that leave no other trace. One
 // element at a time — a second toast replaces the first rather than
@@ -4546,7 +4521,6 @@ function handleEvent(message) {
     // the existing task_failed handler. Here we just update the
     // connection pill; nothing else needs to happen on this event.
     case 'disconnected':
-      setConnPill(null, 'Idle');
       // A socket that dies mid-task reports nothing through task_failed
       // unless the background got far enough to synthesise it, and the
       // outcome cell is the only place that would have said so — it was
@@ -4568,7 +4542,6 @@ function handleEvent(message) {
     // / Idle), and the retry count is live information: one toast replacing
     // the next restates it in place rather than stacking six identical lines.
     case 'server_unreachable':
-      setConnPill('reconnecting', 'Reconnecting');
       toast(
         `Server unreachable — retrying (${message.attempt ?? '?'}/${message.of ?? '?'})`,
         'bad',
@@ -5009,10 +4982,8 @@ goalEl.focus();
           await chrome.storage.local.set({ settings: cleaned });
         }
         paintSetupFooter({});
-        setConnPill('error', 'Sign-in expired');
         toast('Your Brotto Cloud sign-in has expired — open Set up Brotto to sign in again', 'bad', 6000);
       } else {
-        setConnPill('error', 'Key rejected');
         toast('The server answered but rejected AGENT_SECRET — fix it in Settings', 'bad', 6000);
       }
     }
@@ -5028,7 +4999,6 @@ goalEl.focus();
     // a role:'error' message then tried to remove it with '.message-error'
     // — but appendMessage writes class "message error" (a space), so the
     // selector never matched and the notice sat in the chat forever.
-    setConnPill('error', 'Disconnected');
     toast('Server unreachable — settings still work locally', 'bad', 5000);
   }
   // Last, so it runs whether or not the health probe succeeded: the panel

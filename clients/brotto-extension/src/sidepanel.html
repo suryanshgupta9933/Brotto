@@ -1258,40 +1258,6 @@
       margin-top: 7px;
     }
 
-    /* ─── Status pill: a square, not a dot ────────────────────────────── */
-    /* The state is written out, not just tinted. A 8px square is invisible
-       to anyone who can't separate the two hues, and a hover-only tooltip
-       reaches nobody on touch and is easy to miss on desktop. One mono word
-       costs ~46px and the header has it at every width the wordmark is
-       still shown at. */
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      height: 14px;
-      background: transparent;
-      border: 0;
-      padding: 0;
-      cursor: help;
-      flex-shrink: 0;
-    }
-    .status-pill .dot {
-      width: 8px;
-      height: 8px;
-      background: var(--ink-3);
-      display: block;
-      flex-shrink: 0;
-      transition: background var(--t);
-    }
-    .status-pill .conn-label {
-      font-family: var(--font-mono);
-      font-size: 9.5px;
-      font-weight: 500;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--ink-2);
-      white-space: nowrap;
-    }
     /* The page-context badge. Inverted against the header so it reads as an
        event rather than as another piece of chrome — the header is all
        low-contrast ink on paper, and a disclosure that looks like the
@@ -1313,14 +1279,6 @@
       flex-shrink: 0;
     }
     .context-badge[hidden] { display: none; }
-    /* Below 340px the wordmark is already hidden, so the label can go too
-       and the dot carries the state. */
-    @media (max-width: 340px) {
-      .status-pill .conn-label { display: none; }
-    }
-    .status-pill.connected    .dot { background: var(--ink); }
-    .status-pill.reconnecting .dot { background: var(--wait); animation: pulse 1.4s ease-in-out infinite; }
-    .status-pill.error        .dot { background: var(--bad); }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50%      { opacity: 0.25; }
@@ -1587,7 +1545,6 @@
       /* the `.blocking` forms are (0,2,0) and would outrank the bare
          selectors above, so they have to be named here too */
       .approval-card.blocking, .clarify-card.blocking,
-      .status-pill.reconnecting .dot,
       #outcomeCell[data-state="working"] .outcome-mark,
       .toast,
       .toast.leaving,
@@ -1607,17 +1564,6 @@
     <img id="brandLogo" class="brand-logo" src="assets/logo.svg" alt="">
     <span class="brand-name">Brotto</span>
     <span id="editionTag" class="edition-tag" hidden></span>
-  </div>
-
-  <!-- ponytail: Bug 2 — visible connection indicator. Three states via
-       the .connected / .reconnecting / .error classes on .status-pill.
-       Dot-only — text labels were dropped (too much header chrome for
-       the available width). Hover / title attribute carries the
-       human-readable state for screen readers and curious users. -->
-  <div id="statusPill" class="status-pill" aria-live="polite"
-       title="Connection: idle">
-    <span id="statusDot" class="dot"></span>
-    <span id="connLabel" class="conn-label">Idle</span>
   </div>
 
   <!-- ponytail: the page-context badge. A setting you cannot see taking
