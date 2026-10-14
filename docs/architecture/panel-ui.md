@@ -167,9 +167,10 @@ finish, so a run on another machine, or one the cap pushed out, was on disk and
 invisible — and a conversation the user cannot see is a conversation they cannot
 delete. `historyEntries` returns `local` on any failure rather than an empty
 list, because a history that empties itself when the server hiccups reads as
-"your conversations are gone".
+"your conversations are gone". **The mirror half is scoped to one server** — see
+`privacy.md`, which owns that invariant.
 
-Two consequences worth naming:
+Three consequences worth naming:
 
 - **A row is matched by `session_id`, never by object identity.** A server row
   is rebuilt from the index on every open, so `filter(s => s !== row)` keeps
@@ -177,6 +178,34 @@ Two consequences worth naming:
   caller that learned this.
 - **The index has no elapsed time** — only the loop reported that — so a
   server-supplied row shows `—` where a local one shows `2m 10s`.
+- **The merged list is sorted newest-first and deduped by session id.**
+  `mergeHistory` concatenated server rows, mirrored rows and the local array in
+  that order, so the newest conversation was whichever the *first* source
+  happened to hold — usually the server's oldest — and the same run appeared
+  once per source that kept a copy. `sortHistory()` orders by `started_at`
+  descending and keeps the first row per `session_id`; the sort runs inside
+  `mergeHistory` so every caller is fixed at once. Pinned by
+  `scripts/test-history-sort.test.js`.
+
+### The list says where it came from
+
+Falling back to the mirror on every failure is right and it is also how
+"the server refused us" came to look exactly like "the server has no sessions":
+**a bad `AGENT_SECRET` is a 404 by design** (`privacy.md` owns that), so one
+wrong credential 404s `/v1/sessions`, `/v1/suggestions` and `/v1/policy` at
+once, and the list still rendered — from local copies — with nothing marking
+the difference.
+
+`historyEntries` therefore records where its rows came from —
+`server` / `rejected` (a 404) / `unreachable` (anything else) — and
+`renderHistory` raises a card above the composer through `appendFailureBubble`,
+the same failure card the model-not-set notice uses. **404 and unreachable get
+different sentences because they have different fixes**: a 404 names the
+credential, an unreachable names the server, and one sentence covering both
+sends the reader to debug the wrong machine. A card rather than a header badge,
+because the pill is gone (below) and this is a claim about a list they are
+reading rather than ambient state. Pinned by
+`scripts/test-history-source.test.js`.
 
 ## Reopening a conversation from history
 
@@ -584,15 +613,77 @@ turns four checks red and exits 1.
 The rule for the next frame author: **a server frame is either rendered, or
 listed in `IGNORED` with a reason.** There is no third state.
 
-### Header text has a width budget
+### There is no connection pill
 
-`SERVER UNREACHABLE… (RETRY 1 OF 6)` in the status pill truncated mid-word and
-pushed the rest of the header off screen. The pill carries one word —
-`Connected` / `Connecting…` / `Reconnecting` / `Disconnected` / `Idle` — and
-anything longer goes in the toast, which is full-width above the composer and is
-the same treatment as "Address copied". `toast()` replaces rather than stacks,
-which is right for a retry counter: the number updating in place is the
-information, and six stacked copies of the same line are just a slower sentence.
+The top bar carried one: a renderer, its CSS, and six mutators that repainted
+it on every phase change. It is deleted, all of it — the header keeps only the
+model pill. **Nothing was promoted into its place.**
+
+The reason is what it cost rather than what it showed. It was the panel's only
+ambient state, so every error the product had gained a voice for over the
+previous weeks — a refused credential, a failed reconnect, a model that will not
+pre-flight — was written into a strip of header text that is always visible and
+always about something else. `SERVER UNREACHABLE… (RETRY 1 OF 6)` truncated
+mid-word and pushed the rest of the header off screen; the width budget that
+fixed it (`### Header text has a width budget`, now gone with the pill) was
+maintained forever to keep a status line inside a header. A card is the panel's
+own vocabulary for "this went wrong, and here is what to do", and it costs no
+new CSS because `appendFailureBubble` already exists.
+
+**An error surfaces as a card above the composer, or as nothing.** A socket that
+reconnects on its own is not the user's problem yet, and a pill that says
+`Reconnecting` three times a minute trains the reader to skip the one surface
+that matters. Reachability that is *settled* — the answer to the `/health` probe
+the panel already makes — is `state.serverReachable`, and it has its own
+`serverBanner` mirroring the model-check banner. See `extension.md` for how that
+answer is reached. Pinned by `scripts/test-no-conn-pill.test.js`.
+
+### The API-key field is a pure function of storage
+
+Three writers of `modelApiKey` live on three paths — Settings' Save, the
+worker's `setStoredModelConfig`, and the wizard — and each one that removed the
+key left the field showing `KEY_MASK` over nothing behind it. That is not
+cosmetic: **Save treats the mask as "unchanged, write nothing"**, so pressing it
+after a removal stored nothing and the only way back was clearing the field by
+hand.
+
+`repaintKeyField()` reads storage and writes the mask or the empty string; it
+runs after Save and on opening Settings, which is also how a wizard-side removal
+reaches the panel. **Never let a writer announce its own change** — the two
+writers outside this file are exactly the ones a local repaint cannot see. A
+value that is neither the mask nor empty is a draft the user is typing and is
+left alone, or re-opening Settings would eat what they pasted.
+Pinned by `scripts/test-key-mask.test.js`.
+
+### The clock reads in the units a run is measured in
+
+`renderElapsed` printed `83.0s` — a number the reader has to convert, on the one
+run worth reading slowly. `formatElapsed` renders `1m23s` / `1h23m26s` and keeps
+the tenths **under** a minute, because a step is ~30s and there the tenths are
+the difference between a fetch and a stall.
+
+`resetForNewTask` called `stopTimer()` where it meant `clearTimer()`. The
+distinction is load-bearing: `stopTimer` deliberately preserves `state.startTime`
+so a finished run's time stays on screen, and a reset has no finished run to
+preserve — the surviving base time made the replay guard refuse to rebase, so
+the next run counted from the previous run's start. **Stopping a timer and
+clearing one are different operations; a reset clears.** Pinned by
+`scripts/test-timer.test.js`.
+
+### Sharing a run replaces the thumbs
+
+The thumbs up/down wrote a rating into `localStorage` that nothing ever read,
+so the panel looked like it was reporting feedback and was not. Deleted with
+its icons and CSS. What replaced it is a prefilled GitHub Discussions post: a
+Markdown body composed from the run, put on the **clipboard**, with the bare
+Discussions URL opened so the user pastes it. **No account, no backend, no
+operator, and the same link on self-host as on the relay.**
+
+The reason it is the clipboard and not the wire is the whole rule: task text is
+user content, and a query string would put it in a URL — referrer headers,
+history, proxies. The Markdown is fenced and escaped before it is copied, for
+the same reason `renderMarkdown` is escape-first. Pinned by
+`scripts/test-share-run.test.js`.
 
 ### The model pill is a settings button, and it is not a mode selector
 
