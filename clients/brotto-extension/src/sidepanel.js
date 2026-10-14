@@ -955,14 +955,30 @@ async function mirrorRows() {
   }));
 }
 
+// Where the last list came from. `historyEntries` falls through to the
+// IndexedDB mirror and `chrome.storage.local` on three conditions — a non-ok
+// response, a 200 with no array, and a throw — and a bad `AGENT_SECRET` is a
+// 404 *by design*, so one wrong credential 404s `/v1/sessions`,
+// `/v1/suggestions` and `/v1/policy` at once. History still rendered, from
+// local copies, and looked exactly like a server with nothing in it. The
+// panel has to be able to say which of the two it is looking at.
+let historySource = 'server';
+
 async function historyEntries() {
   const local = await listSessions();
   const mirrored = await mirrorRows();
   try {
     const res = await fetch(`${serverBase()}/v1/sessions`, { headers: await authHeaders() });
-    if (!res.ok) return mergeHistory(mirrored, local);
+    if (!res.ok) {
+      historySource = res.status === 404 ? 'rejected' : 'unreachable';
+      return mergeHistory(mirrored, local);
+    }
     const { sessions } = await res.json();
-    if (!Array.isArray(sessions)) return mergeHistory(mirrored, local);
+    if (!Array.isArray(sessions)) {
+      historySource = 'unreachable';
+      return mergeHistory(mirrored, local);
+    }
+    historySource = 'server';
     const serverRows = sessions.map((s) => ({
       task: s.task || s.title || '(no task text)',
       status: panelStatus(s.status),
@@ -978,8 +994,46 @@ async function historyEntries() {
     // every time one happened.
     return mergeHistory(serverRows, mirrored, local);
   } catch {
+    historySource = 'unreachable';
     return mergeHistory(mirrored, local);
   }
+}
+
+// The card, not a header badge: the connection pill's removal took the top bar
+// back, and this is a claim about a list the user is reading rather than
+// ambient state. Same `appendFailureBubble` the model-not-set notice uses, so
+// it is the theme's own failure card and costs no new CSS.
+//
+// The wording is the point. "Some conversations could not be loaded" is true
+// on a server that is merely down and sends the user to debug the wrong
+// machine; 404 means a *credential* was refused, which is a different thing
+// with a different fix, and the server deliberately refuses with 404 so the
+// route does not confirm it exists.
+const HISTORY_SOURCE_CARD = {
+  rejected: {
+    title: 'Conversations here are local copies',
+    body: 'The server did not answer this browser — a wrong or missing `AGENT_SECRET` '
+      + 'is refused as "no such route", which is what a stopped server looks like too. '
+      + 'Everything below is what this browser kept.',
+    footer: 'Fix the key in Settings and reopen history to load the server\'s copy.',
+  },
+  unreachable: {
+    title: 'Conversations here are local copies',
+    body: 'The server could not be reached, so this list is what your browser kept '
+      + 'rather than what the server holds.',
+    footer: 'Your conversations are not lost — they come back when the server answers.',
+  },
+};
+
+function noteHistorySource() {
+  const card = HISTORY_SOURCE_CARD[historySource];
+  if (!card) return;
+  // One notice per render, not one per row: appendFailureBubble appends, and
+  // history is rendered again on every delete and every reopen.
+  const existing = messagesEl.querySelector('.history-source-card');
+  if (existing) existing.remove();
+  const el = appendFailureBubble({ ...card });
+  el.classList.add('history-source-card');
 }
 
 // ponytail: one writer, one reader, one shape. Called from both terminal
@@ -1051,6 +1105,7 @@ function formatSessionTime(ts) {
 async function renderHistory() {
   historyList.hidden = false;
   const sessions = await historyEntries();
+  noteHistorySource();
   document.getElementById('historyDeleteAll').hidden = sessions.length === 0;
   if (sessions.length === 0) {
     const empty = document.createElement('div');

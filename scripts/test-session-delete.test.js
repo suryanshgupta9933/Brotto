@@ -185,6 +185,9 @@ const sandbox = {
   toast: (text, kind) => calls.push({ toast: text, kind }),
   confirmSettle: null,
   replaySession: async () => {},
+  // historyEntries now records where the list came from; this file is about
+  // deletes, so the notice itself is test-history-source.test.js's job.
+  noteHistorySource: () => {},
   // historyEntries unions the server's list with the IndexedDB mirror, so
   // the sandbox needs one. An empty store is the honest default here: this
   // test is about deletes, and scripts/test-session-mirror.test.js covers
