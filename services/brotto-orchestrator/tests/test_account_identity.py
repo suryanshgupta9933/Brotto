@@ -118,7 +118,7 @@ def test_an_unverifiable_token_still_signs_the_caller_in(client, monkeypatch, ho
 def test_account_route_names_the_account(client, hosted):
     resp = client.get("/v1/account", headers={"authorization": f"Bearer {_token(ALICE)}"})
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"account_id": ALICE, "approved": True}
+    assert resp.json() == {"account_id": ALICE}
 
 
 def test_account_route_answers_the_same_id_as_exchange(client, monkeypatch, hosted):
@@ -155,4 +155,4 @@ def test_self_host_answers_null_and_needs_no_credential(client):
     keeps its old server-address namespace."""
     resp = client.get("/v1/account")
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"account_id": None, "approved": False}
+    assert resp.json() == {"account_id": None}

@@ -1358,14 +1358,12 @@ async def get_account(request: Request):
     from .session.jwt_auth import Claims
 
     claims = auth.claims if isinstance(auth.claims, Claims) else None
-    # `approved` is True here by construction, not by a second read:
-    # `_approved` consulted the roster already and answered 403 for a
-    # refusal, so reaching this line *is* the approval. A member who was
-    # withdrawn never sees this route at all.
-    return JSONResponse(content={
-        "account_id": claims.sub if claims else None,
-        "approved": claims is not None,
-    })
+    # No `approved` here. `_approved` already answered 403 for a refusal, so
+    # such a field would be a constant — and one derived from the *type* of
+    # the claims object it read false for a valid `AGENT_SECRET` in secret
+    # mode, which reads as a denial that never happened. `account_id` is
+    # null in exactly the no-account case, which is all a caller needs.
+    return JSONResponse(content={"account_id": claims.sub if claims else None})
 
 
 # ---------------------------------------------------------------------------
