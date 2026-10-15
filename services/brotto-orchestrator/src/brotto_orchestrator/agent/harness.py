@@ -194,10 +194,22 @@ def _narrate(text: str | None, secret_values: list[str] | None = None) -> str | 
     out = (text or "").strip()
     if not out:
         return None
+    # No length guard. Every value here came out of a secret field, so its
+    # shortness says nothing about whether it is a secret — a 3-character
+    # password survived the old `len(v) >= 4` heuristic and went back into
+    # the prompt and the record. A short value does over-substitute in
+    # unrelated words ("ab" inside "tab"), which mangles a little narration;
+    # the alternative is a live credential on disk, and this module already
+    # trades readability for that unconditionally.
     for v in secret_values or ():
-        if len(v) >= 4:
-            out = out.replace(v, "[typed into a secret field]")
+        out = out.replace(v, "[typed into a secret field]")
     out, _counts = redact_text(out)
+    # Angle brackets out before the fence, not after: the narration is the
+    # model's words *about* page content and can quote a closing tag the page
+    # planted for it to echo. Same single-render-point strip as the suggestion
+    # page-text fence (suggest.py) — strip here, once, and never trust the
+    # value to be delimiter-free.
+    out = out.replace("<", "").replace(">", "")
     if len(out) > _NARRATION_CHARS:
         out = out[:_NARRATION_CHARS] + " …"
     return out
@@ -2877,13 +2889,24 @@ class AgentHarness:
             t_ex = time.perf_counter()
             outcomes: list[str] = []
             action_trace: list[str] = []
+            # Classify the whole batch BEFORE executing any of it. The loop
+            # below breaks early — on a terminal action, on ask_human, on
+            # scroll, once deps.result is set — so collecting typed secrets as
+            # a side effect of running them meant a type_text placed after
+            # that break executed and was never recorded: typed into the page
+            # and still in the narration. Fail-open on a secret-scrubbing path
+            # is the wrong direction, so the decision is made up front and the
+            # loop only reads it. One DOM lookup per TYPED action, not per
+            # textbox per step, unchanged.
+            redact_flags: list[bool] = []
             typed_secrets: list[str] = []
             for call in decision.actions:
-                # One DOM lookup per TYPED action, not per textbox per step.
                 redact = (call.action == "type_text"
                           and await _redact_if_secret(deps, call.action_args.get("ref", "")))
+                redact_flags.append(redact)
                 if redact:
                     typed_secrets.append(str(call.action_args.get("text") or ""))
+            for call, redact in zip(decision.actions, redact_flags):
                 rec_args, trace = _scrubbed(call, redact)
                 action_trace.append(trace)
                 t_a = time.perf_counter()

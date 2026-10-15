@@ -1,0 +1,143 @@
+"""A secret typed into a secret field must not survive into what the model
+reads back next step.
+
+The loop breaks a batch early — on a terminal action, on `ask_human`, on
+`scroll`, once `deps.result` is set — and `typed_secrets` used to be filled as
+a side effect of *executing* the batch. So a `type_text` into a secret field
+placed after that break was executed into the page and never recorded: the
+value went back into the next prompt and onto disk. A control whose coverage
+depends on execution order fails open, which is the wrong direction for a
+secret-scrubbing path. Classification now happens before execution.
+
+No live model, no key, no network.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from brotto_orchestrator.agent.context import (
+    ActionCall, AgentDecision, AgentDeps, TaskResult,
+)
+from brotto_orchestrator.agent.harness import AgentHarness
+from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
+import brotto_orchestrator.agent.harness as harness_mod
+
+
+_SECRET = "hunter2"
+
+
+class _EmptyResult:
+    usage = None
+
+
+def _deps() -> AgentDeps:
+    cdp = MagicMock()
+    cdp.ping = AsyncMock(return_value=True)
+    # Only [0:1] is a known target, so the type_text ref below is unresolvable
+    # and _redact_if_secret fails closed — the secret-field case.
+    cdp.get_targets = AsyncMock(return_value=[
+        SemanticTarget(ref_id="0:1", tag="button", role="button", name="Save")])
+    cdp.get_current_url = AsyncMock(return_value="https://example.com/account")
+    cdp.get_page_text = AsyncMock(return_value="nothing to see")
+    cdp.get_page_title = AsyncMock(return_value="Account")
+    cdp.refresh_target_map = AsyncMock()
+
+    async def ws_send(_msg: dict) -> None:
+        return None
+
+    return AgentDeps(user_id="t", task="sign in", cdp=cdp, ws_send=ws_send)
+
+
+async def _run_batch(monkeypatch, actions: list[ActionCall],
+                     thought: str) -> list:
+    """Run one step with a scripted batch; return the stored step summaries."""
+    calls: list[int] = []
+
+    async def _fake_execute(call, deps, audit=None, turn=None):
+        if call.action == "task_complete":
+            deps.result = TaskResult(status="completed", summary="ok")
+        return f"{call.action} done"
+
+    async def _fake_plan(deps, turn, agent, audit=None):
+        calls.append(1)
+        deps.result = None
+        if len(calls) > 1:
+            return AgentDecision(
+                reasoning="done", thought="done",
+                actions=[ActionCall(action="task_complete",
+                                    action_args={"summary": "ok",
+                                                 "extracted_data": None})],
+            ), 400_000, _EmptyResult()
+        return AgentDecision(reasoning=thought, thought=thought,
+                             actions=actions), 400_000, _EmptyResult()
+
+    monkeypatch.setattr(harness_mod, "_execute_action", _fake_execute)
+    monkeypatch.setattr(harness_mod, "_plan_step", _fake_plan)
+
+    deps = _deps()
+    await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+    return deps.step_summaries
+
+
+@pytest.mark.asyncio
+async def test_a_secret_typed_after_a_scroll_is_still_scrubbed(monkeypatch):
+    """The bug. The scroll break stops the batch, so the type_text after it
+    executed but was never collected — and the narration kept the value."""
+    summaries = await _run_batch(monkeypatch, [
+        ActionCall(action="scroll", action_args={"direction": "up", "amount": 300}),
+        ActionCall(action="type_text", action_args={"ref": "0:2", "text": _SECRET}),
+        ActionCall(action="task_complete",
+                   action_args={"summary": "ok", "extracted_data": None}),
+    ], f"Typed {_SECRET} into the password field after scrolling.")
+
+    assert _SECRET not in summaries[0].extracted
+    assert "[typed into a secret field]" in summaries[0].extracted
+
+
+@pytest.mark.asyncio
+async def test_a_secret_typed_after_a_terminal_action_is_still_scrubbed(monkeypatch):
+    """Same fail-open through the other break."""
+    summaries = await _run_batch(monkeypatch, [
+        ActionCall(action="task_complete",
+                   action_args={"summary": "ok", "extracted_data": None}),
+        ActionCall(action="type_text", action_args={"ref": "0:2", "text": _SECRET}),
+    ], f"Filled the form with {_SECRET}.")
+
+    assert _SECRET not in summaries[0].extracted
+
+
+@pytest.mark.asyncio
+async def test_a_legitimate_search_query_is_not_over_scrubbed(monkeypatch):
+    """The cost of the fix must be paid somewhere: a search box is not a
+    secret field, and the model's own query is its thread back to itself."""
+
+    async def _fake_execute(call, deps, audit=None, turn=None):
+        if call.action == "task_complete":
+            deps.result = TaskResult(status="completed", summary="ok")
+        return f"{call.action} done"
+
+    async def _fake_plan(deps, turn, agent, audit=None):
+        deps.result = None
+        return AgentDecision(
+            reasoning="s", thought="Searching for blue widget in the search box",
+            actions=[
+                ActionCall(action="type_text",
+                           action_args={"ref": "0:2", "text": "blue widget"}),
+                ActionCall(action="task_complete",
+                           action_args={"summary": "ok", "extracted_data": None}),
+            ],
+        ), 400_000, _EmptyResult()
+
+    monkeypatch.setattr(harness_mod, "_execute_action", _fake_execute)
+    monkeypatch.setattr(harness_mod, "_plan_step", _fake_plan)
+    # The search box is not a password box.
+    monkeypatch.setattr(harness_mod, "_redact_if_secret", AsyncMock(return_value=False))
+
+    deps = _deps()
+    await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+
+    assert "blue widget" in deps.step_summaries[0].extracted
