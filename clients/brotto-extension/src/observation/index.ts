@@ -9,15 +9,9 @@
 
 import * as dbg from "../debugger";
 import { waitForStable, pageMayStillBeMoving, Stability } from "./stability";
-import { anyCommand, enumerateSurfaces, makeRef, FrameScan, Surface } from "./surfaces";
+import { anyCommand, enumerateSurfaces, makeRef, isKeptNode, FrameScan, Surface } from "./surfaces";
 import { boxMap, GeometryResult } from "./geometry";
 import { findHiddenTargets } from "./supplement";
-
-const KEEP_ROLES = new Set([
-  "button","link","textbox","searchbox","combobox","checkbox","radio",
-  "menuitem","tab","option","switch","slider","spinbutton","gridcell",
-  "heading","dialog","alert","listitem",
-]);
 
 // Mirrors PAGE_TEXT_MAX in agent/ax_filter.py.
 const PAGE_TEXT_MAX = 20000;
@@ -68,9 +62,7 @@ export async function targetsForFrame(
     if (typeof node.nodeId === "number" && typeof node.parentId === "number") {
       parentOf.set(node.nodeId, node.parentId);
     }
-    if (node.ignored) continue;
-    const role = (node.role?.value ?? "").toLowerCase();
-    if (!KEEP_ROLES.has(role)) continue;
+    if (!isKeptNode(node)) continue;
     kept.add(node.nodeId);
   }
 
@@ -184,11 +176,11 @@ export async function extractAx(
       tabId, surface, new Set(targets.map((t: any) => t.backendNodeId)),
     ));
   }
-  // What the node cap is actually costing. `MAX_NODES_PER_FRAME` caps *raw*
-  // AX nodes, but only kept-role nodes ever become targets — so `nodes` alone
-  // cannot say whether a cap cost the model anything. `kept` is how many
-  // controls survived out of the 2000 this frame was allowed; compare it with
-  // `nodes` to see whether the slice is trimming containers or controls.
+  // What the node cap is actually costing. `MAX_NODES_PER_FRAME` caps the
+  // *kept* AX nodes, but `nodes` is the raw tree, so `nodes` alone cannot say
+  // whether a cap cost the model anything. `kept` is how many controls became
+  // targets; compare it with `nodes` to see whether the slice is trimming
+  // containers or controls.
   //
   // The number of controls lost in the discarded tail is deliberately not
   // reported: it is not knowable from what is left in hand, and a plausible
