@@ -38,12 +38,15 @@ const STORE = 'audits';
 // /health probe lands, so keying on it made every mirrored row vanish from
 // History for the moments the probe was still in flight.
 //
-// ponytail: ceiling — two cloud accounts on the same relay in one Chrome
-// profile share a namespace, because the panel cannot identify an account
-// without parsing the credential, and parsing it is the rule. Fix when the
-// relay hands out a stable per-account id the panel can read as its own field.
-function namespaceFor(base) {
-  return String(base || '').replace(/\/$/, '').toLowerCase();
+// `accountId` folds in only when there is one, and then only as an inner key:
+// the address stays the outer key. Self-host has no account and answers
+// `account_id: null`; a degraded exchange answers `""`. Both leave the
+// namespace byte-identical to what it has always been, so a self-hoster's
+// existing rows keep resolving and nothing about the pinned self-host
+// behaviour moves.
+function namespaceFor(base, accountId) {
+  const ns = String(base || '').replace(/\/$/, '').toLowerCase();
+  return accountId ? `${ns}#${accountId}` : ns;
 }
 
 let dbPromise = null;

@@ -93,7 +93,8 @@ function fakeDb() {
   const SELF = "http://localhost:8000";
   const cloudNs = storeSrc.match(/function namespaceFor\([\s\S]*?\n}/)[0];
 
-  const nsFor = (base) => vm.runInNewContext(`${cloudNs}; namespaceFor(${JSON.stringify(base)})`);
+  const nsFor = (base, accountId) =>
+    vm.runInNewContext(`${cloudNs}; namespaceFor(${JSON.stringify(base)}, ${JSON.stringify(accountId ?? null)})`);
 
   // ── The namespace itself ────────────────────────────────────────────────
   check("a trailing slash is the same server",
@@ -101,6 +102,29 @@ function fakeDb() {
   check("host case is not a different server",
     nsFor("https://Agent.Brotto.DEV") === nsFor("https://agent.brotto.dev"));
   check("two servers are two namespaces", nsFor(CLOUD) !== nsFor(SELF));
+
+  // ── The account, and the self-host string that must not move ───────────
+  // Pinned literally, not as "different from something": a self-hoster's rows
+  // were written under these exact bytes, and a self-host install has no
+  // account, so any change here silently empties their History.
+  check("self-host's namespace is the bare address, byte for byte",
+    nsFor(SELF) === "http://localhost:8000", nsFor(SELF));
+  check("…with a trailing slash, a capital host or an empty base, too",
+    nsFor(SELF + "/") === "http://localhost:8000"
+    && nsFor("HTTP://LocalHost:8000") === "http://localhost:8000"
+    && nsFor(null) === "");
+  // Every shape the server can answer with on a self-hoster's machine, all
+  // three of which mean "no account" rather than "an account called nothing".
+  for (const none of [null, "", undefined]) {
+    check(`no account (${JSON.stringify(none)}) is not a namespace change`,
+      nsFor(SELF, none) === "http://localhost:8000", nsFor(SELF, none));
+  }
+  check("two accounts on one relay are two namespaces",
+    nsFor(CLOUD, "acc-a") !== nsFor(CLOUD, "acc-b"));
+  check("the address stays the outer key",
+    nsFor(CLOUD, "acc-a").startsWith("https://agent.brotto.dev#"), nsFor(CLOUD, "acc-a"));
+  check("an account does not leak into another server's namespace",
+    nsFor(SELF, "acc-a") !== nsFor(CLOUD, "acc-a"));
 
   // ── The filter, against a real store run ────────────────────────────────
   const sandbox = { ...fakeDb(), console, globalThis: null, dbPromise: null };
@@ -169,9 +193,18 @@ await store.put("cloud-run", { goal: "book a flight" }, {
         /namespaceFor\(/.test(call) || /list\(ns\)/.test(call), call);
     }
     check("the panel stamps the namespace on write",
-      /brottoSessionStore\.put\(sessionId, doc, \{\s*namespace: brottoSessionStore\.namespaceFor\(serverBase\(\)\)/.test(sidepanel));
-    check("the namespace is the address, not the credential",
-      /brottoSessionStore\.namespaceFor\(serverBase\(\)\)/.test(sidepanel));
+      /brottoSessionStore\.put\(sessionId, doc, \{\s*namespace: brottoSessionStore\.namespaceFor\(serverBase\(\), state\.accountId\)/.test(sidepanel));
+    check("the namespace is the address plus the account id, never the credential",
+      /brottoSessionStore\.namespaceFor\(serverBase\(\), state\.accountId\)/.test(sidepanel));
+    // Every site must pass it. One that drops the second argument is a row
+    // filed under no account, which reads as history that vanished.
+    // Counted rather than matched per call: a nested `)` ends any regex that
+    // tries to capture the argument list, so the one-argument form is asserted
+    // by its absence, which is the same fact.
+    const sites = sidepanel.match(/brottoSessionStore\.namespaceFor\(/g) || [];
+    check("every namespace site carries the account id",
+      sites.length > 0 && sites.length === (sidepanel.match(/namespaceFor\(serverBase\(\), state\.accountId\)/g) || []).length,
+      `${sites.length} site(s)`);
     check("it does not key the mirror on the typed secret",
       !/namespaceFor\([^)]*agentSecret/.test(sidepanel));
   }

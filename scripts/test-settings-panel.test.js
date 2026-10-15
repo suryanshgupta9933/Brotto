@@ -428,7 +428,7 @@ function main() {
     // already exists — a new storage key here would be a second answer.
     check("the save handler persists the effective window onto the existing field",
       /const ctx = effectiveContextWindow\(/.test(sidepanel)
-      && /modelConfig:\s*\{[^}]*context_window: ctx/.test(sidepanel));
+      && /\[keys\.config\]:\s*\{[^}]*context_window: ctx/.test(sidepanel));
     check("…and no new storage key was invented for it",
       !/contextWindowInput:\s|modelContextWindow:\s/.test(sidepanel));
     // Re-running the wizard must not write its own fallback back over the
@@ -536,8 +536,11 @@ function main() {
     check("sign-out clears both halves of the credential",
       /delete settings\.agentSecret\b/.test(sidepanel) && /delete settings\.agentSecretOrigin/.test(sidepanel),
       "a leftover origin would bind a future secret to this account");
+    check("sign-out drops the account id with the credential",
+      /delete settings\.accountId/.test(sidepanel),
+      "a leftover id hands the next sign-in this account's history and settings");
     check("sign-out opens the wizard in the panel that is already open",
-      /delete settings\.agentSecretOrigin[\s\S]{0,400}location\.assign\('welcome\.html'\)/.test(sidepanel),
+      /delete settings\.accountId[\s\S]{0,400}location\.assign\('welcome\.html'\)/.test(sidepanel),
       "reverting the button leaves the user on a Settings screen that no longer describes them");
     check("hydrate repaints the footer from storage on every open",
       /paintSetupFooter\(s\)/.test(sidepanel));

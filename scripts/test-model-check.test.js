@@ -23,6 +23,7 @@ const vm = require("vm");
 
 const SRC = path.join(__dirname, "..", "clients", "brotto-extension", "src");
 const panel = fs.readFileSync(path.join(SRC, "sidepanel.js"), "utf8");
+const modelKeysSrc = fs.readFileSync(path.join(SRC, "model_keys.js"), "utf8");
 const credential = fs.readFileSync(path.join(SRC, "credential.js"), "utf8");
 const mainPy = fs.readFileSync(
   path.join(__dirname, "..", "services", "brotto-orchestrator",
@@ -135,6 +136,10 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
   vm.runInContext(extract("setModelCheckFailure"), sandbox);
   vm.runInContext(extract("failModelCheck"), sandbox);
   vm.runInContext(extract("checkModelReady"), sandbox);
+  // The real key-naming pair, so this file's key reads are the ones that ship
+  // rather than a fixture that stayed behind the split.
+  vm.runInContext(modelKeysSrc, sandbox);
+  vm.runInContext(extract("modelKeyNames"), sandbox);
   vm.runInContext(extract("deviceId"), sandbox);
   vm.runInContext(extract("authHeaders"), sandbox);
   return {
@@ -633,7 +638,7 @@ async function main() {
     const saveBody = panel.slice(saveStart, panel.indexOf("\n}", saveStart));
     const at = (n) => saveBody.indexOf(n);
     check("save writes the config before it probes",
-      at("modelConfig:") > 0 && at("modelCheckPass = null") > at("modelConfig:"));
+      at("[keys.config]:") > 0 && at("modelCheckPass = null") > at("[keys.config]:"));
     check("…drops the cached pass before probing",
       at("modelCheckPass = null") < at("await checkModelReady()"));
     // The deadlock this closes: the gate short-circuits a stored refusal so a

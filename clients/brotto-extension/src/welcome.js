@@ -305,6 +305,15 @@ async function checkServer() {
 $serverUrl.addEventListener("blur", checkServer);
 $agentSecret.addEventListener("blur", checkServer);
 
+// The account uuid `exchange` named, or "". Carried from the exchange to
+// `finish()` in a variable rather than in storage, because both happen inside
+// one wizard run: write it when the token is stored, never before. "" (a
+// degraded exchange, a self-host key and Skip) has no account, and "" is what
+// leaves every namespace and storage key exactly as it was before accounts
+// existed. The id arrives as its own field — the extension never parses the
+// credential to learn who it is.
+let exchangeAccountId = "";
+
 // ── Cloud sign-in ──────────────────────────────────────────────────────────
 // A 6-digit code emailed to the user, exchanged for a bearer token that goes
 // into `settings.agentSecret` — the same slot the self-host key uses, so
@@ -409,6 +418,9 @@ async function exchangeCode() {
   try {
     const { ok, body } = await postAuth("/v1/auth/exchange", { email, code });
     if (ok && body && typeof body.access_token === "string") token = body.access_token;
+    // Opaque, and handed over rather than derived: `sub` read off the token by
+    // this file would be the credential being parsed, which is the one rule.
+    if (token && body && typeof body.account_id === "string") exchangeAccountId = body.account_id;
     // `approved` is additive and is a REPORT, not the gate: an unlisted
     // address and an unreachable control plane both come back as a valid
     // token, a 200 and `false`. Read only after a token exists, compared
@@ -506,12 +518,18 @@ async function finish(deferred = false) {
   // is the friction this field exists to remove. On the cloud path it holds
   // a bearer token rather than an AGENT_SECRET, which is the point: one
   // slot, one header, and nothing that has to be told which it is.
-  const saved = await chrome.storage.local.get(["settings", "modelConfig"]);
+  // Written on every path, not only the cloud one: a self-hoster or a Skip who
+  // is switching off a previous cloud sign-in must not keep that account's id,
+  // or the next panel open scopes itself to an account this wizard just ended.
+  // A cloud wizard run that did not exchange leaves it "", and the panel
+  // re-learns it from /v1/account on its next open.
+  const keys = brottoModelKeys(exchangeAccountId);
+  const saved = await chrome.storage.local.get(["settings", keys.config]);
   // A window the user stated in Settings outranks this file's answer: for a
   // provider that takes any model id the catalogue can only offer a fallback,
   // and re-running the wizard must not silently write that fallback back over
   // a number they typed.
-  const prevCtx = Number(saved.modelConfig?.context_window);
+  const prevCtx = Number(saved[keys.config]?.context_window);
   const keepCtx = Number.isFinite(prevCtx) && prevCtx > 0 ? prevCtx : ctx;
   await Promise.all([
     chrome.storage.local.set({
@@ -529,10 +547,13 @@ async function finish(deferred = false) {
         // server is not up yet" from "my server went down". One flag,
         // written here and read by exactly one banner.
         setupDeferred: !!deferred,
+        // No id on the self-host path and none on a degraded exchange: the same
+        // two values the panel and the worker read to pick the storage keys.
+        accountId: exchangeAccountId,
       },
-      modelConfig: { provider, model, context_window: keepCtx },
     }),
-    key ? chrome.storage.local.set({ modelApiKey: key }) : Promise.resolve(),
+    chrome.storage.local.set({ [keys.config]: { provider, model, context_window: keepCtx } }),
+    key ? chrome.storage.local.set({ [keys.apiKey]: key }) : Promise.resolve(),
   ]);
 
   // setOptions has no gesture requirement (open() does), which is the only

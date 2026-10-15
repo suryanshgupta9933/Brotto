@@ -166,6 +166,8 @@ const sandbox = {
     activeElement: null,
   },
   plannerUrlEl: { value: "http://localhost:8000" },
+  // No account: self-host, and the case every delete here is about.
+  state: { accountId: null },
   historyList,
   historyDeleteAll,
   confirmOverlay, confirmTitle, confirmBody, confirmOk, confirmCancel,

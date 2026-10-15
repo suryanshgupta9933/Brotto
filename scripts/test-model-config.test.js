@@ -18,6 +18,7 @@ const vm = require("vm");
 
 const EXT = path.join(__dirname, "..", "clients", "brotto-extension", "src");
 const sidepanel = fs.readFileSync(path.join(EXT, "sidepanel.js"), "utf8");
+const modelKeysSrc = fs.readFileSync(path.join(EXT, "model_keys.js"), "utf8");
 const catalogSrc = fs.readFileSync(path.join(EXT, "model_catalog.js"), "utf8");
 
 // Brace matching has to begin after the parameter list — a destructured
@@ -282,6 +283,10 @@ async function main() {
   async function panelWithCatalog(fetchImpl, stored) {
     const { els, store, sandbox } = panel(fetchImpl, stored);
     vm.runInContext(catalogSrc, sandbox);
+  // The real key-naming pair: a hand-written stand-in would let these pass
+    // while the shipped file reads a per-account key.
+    vm.runInContext(modelKeysSrc, sandbox);
+    vm.runInContext(extract("modelKeyNames"), sandbox);
     for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
                       "effectiveContextWindow", "renderModelFacts", "initModelSettings", "hydrateModelSettings", "repaintKeyField"]) {
       vm.runInContext(extract(fn), sandbox);
