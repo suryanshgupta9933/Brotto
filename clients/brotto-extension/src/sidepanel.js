@@ -788,6 +788,7 @@ const CLOUD_SERVER_URL = 'https://agent.brotto.dev';
 async function readAuthMode(res) {
   try {
     const body = await res.json();
+    if (body && typeof body.version === 'string') state.relayVersion = body.version;
     return body && typeof body.auth_mode === 'string' ? body.auth_mode : null;
   } catch {
     return null;

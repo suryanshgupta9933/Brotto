@@ -23,6 +23,32 @@ permissions:
   contents: read
 
 jobs:
+  # ─── Version guard: a shipped change must bump ───────────────────────
+  version-guard:
+    name: Version guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+      - name: All version sites agree
+        run: node scripts/version.js
+      - name: Shipped change requires a bump
+        # base_ref goes through env, not inline: a branch name may contain
+        # shell metacharacters and `${{ }}` expands before the shell runs.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            node scripts/version.js --shipped-diff "origin/${BASE_REF}"
+          else
+            node scripts/version.js --shipped-diff "HEAD~1"
+          fi
+
   # ─── Orchestrator: type + unit tests ────────────────────────────────
   test-orchestrator:
     name: Orchestrator tests

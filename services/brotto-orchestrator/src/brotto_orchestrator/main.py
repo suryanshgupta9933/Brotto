@@ -67,6 +67,7 @@ from fastapi.responses import JSONResponse
 from starlette.background import BackgroundTasks
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .__version__ import __version__
 from .agent.context import AgentDeps
 from .agent.harness import AgentHarness, mark_cancelled
 from .agent.redact import redact_text
@@ -251,7 +252,7 @@ async def lifespan(_app: FastAPI):
         sweeper.cancel()
 
 
-app = FastAPI(title="Brotto Orchestrator", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Brotto Orchestrator", version=__version__, lifespan=lifespan)
 
 #: The one path that belongs to another application, and so to another CORS
 #: layer. Read as a constant by the carve-out below and by the mount at the
@@ -650,7 +651,7 @@ async def health():
     return {
         "status": "ok",
         "service": "brotto-orchestrator",
-        "version": "2.0.0",
+        "version": __version__,
         "model": _MODEL,
         # Which credential UI the panel should render. Unauthenticated by
         # design, and this field is the only thing about it that is: it

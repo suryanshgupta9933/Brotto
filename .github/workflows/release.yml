@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    name: Build and publish the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Tag must equal manifest version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          MAN=$(node -p "require('./clients/brotto-extension/manifest.json').version")
+          echo "tag=$TAG manifest=$MAN"
+          test "$TAG" = "$MAN"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: All version sites agree
+        run: node scripts/version.js
+
+      - name: Install librsvg (rsvg-convert)
+        run: sudo apt-get update && sudo apt-get install -y librsvg2-bin
+
+      - name: Install and build the extension
+        working-directory: clients/brotto-extension
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npm run build
+
+      - name: Zip the store package
+        run: |
+          cd clients/brotto-extension/dist
+          zip -r "$GITHUB_WORKSPACE/brotto-extension-${GITHUB_REF_NAME}.zip" . -x '*.map'
+          unzip -l "$GITHUB_WORKSPACE/brotto-extension-${GITHUB_REF_NAME}.zip" | grep -q ' manifest.json$'
+          unzip -l "$GITHUB_WORKSPACE/brotto-extension-${GITHUB_REF_NAME}.zip" | grep -q ' background.js$'
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="/tmp/notes.md"
+          { echo "# Brotto ${GITHUB_REF_NAME}"; echo; git log --oneline -30; } > "$NOTES"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$NOTES" \
+            "brotto-extension-${GITHUB_REF_NAME}.zip"
+
+  deploy:
+    name: Deploy orchestrator to Heroku
+    needs: release
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Deploy main to the dyno
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+          HEROKU_APP_NAME: brotto-orchestrator
+        run: |
+          git remote add heroku "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${HEROKU_APP_NAME}.git"
+          git push heroku "origin/main:main"
