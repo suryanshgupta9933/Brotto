@@ -110,7 +110,11 @@ function panelRig(respond, { authMode = "jwt", stored = {} } = {}) {
   vm.runInContext(extract(sidepanel, "authHeaders"), sandbox);
   vm.runInContext(extract(sidepanel, "serverBase"), sandbox);
   vm.runInContext(extract(sidepanel, "accountScope"), sandbox);
+  vm.runInContext(extract(sidepanel, "clearAccountArtifacts"), sandbox);
+  vm.runInContext(extract(sidepanel, "dropCredential"), sandbox);
   vm.runInContext(extract(sidepanel, "learnAccountId"), sandbox);
+  vm.runInContext(extract(sidepanel, "clearAccountArtifacts"), sandbox);
+  vm.runInContext(extract(sidepanel, "dropCredential"), sandbox);
   return sandbox;
 }
 
@@ -205,6 +209,31 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
     check("self-host keeps its flat namespace, byte-identical",
       ns === "http://localhost:8000", ns);
   }
+
+  // ── Sign-out takes the account's artifacts with it ─────────────────────
+  {
+    const s = panelRig(json(200, {}), { stored: { accountId: ACCOUNT } });
+    s.local[`modelApiKey:${ACCOUNT}`] = "sk-live-secret";
+    s.local[`modelConfig:${ACCOUNT}`] = { provider: "anthropic", model: "claude" };
+    await s.dropCredential();
+    check("dropping the credential deletes the token", !s.local.settings.agentSecret);
+    check("dropping the credential deletes the account id", s.local.accountId === undefined);
+    check("dropping the credential deletes the account's saved API key",
+      s.local[`modelApiKey:${ACCOUNT}`] === undefined, JSON.stringify(Object.keys(s.local)));
+    check("dropping the credential deletes the account's model config",
+      s.local[`modelConfig:${ACCOUNT}`] === undefined);
+    check("dropping the credential clears the account's mirrored history",
+      s.brottoSessionStore.cleared.includes(`https://agent.brotto.dev#${ACCOUNT}`),
+      JSON.stringify(s.brottoSessionStore.cleared));
+    check("dropping the credential leaves the panel scoped to nothing", s.state.accountId === null);
+  }
+  check("both teardown paths run the one helper",
+    /await dropCredential\(\)/.test(code(sidepanel))
+    && (code(sidepanel).match(/dropCredential\(\)/g) || []).length === 3,
+    "the Sign out button and the expired-credential sweep, and no third copy");
+  check("no teardown path rebuilds the id list by hand",
+    !/remove\(\s*\[?\s*["'`]model(ApiKey|Config)/.test(code(sidepanel)),
+    "key names come from the modelKeys helper");
 
   // ── The wizard's half ──────────────────────────────────────────────────
   {

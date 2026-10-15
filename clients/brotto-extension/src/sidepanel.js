@@ -1505,62 +1505,6 @@ async function accountScope() {
 //
 // The wizard is not the only path: a panel opened days later holds a stored
 // token and has no exchange in this session, and without an id it cannot tell
-// whose history it is showing. It is cached on the panel, and stored as its
-// own key so no writer ever has to reconstruct the `settings` blob to record
-// one — that reconstruction is how a server-url edit used to be clobbered.
-async function learnAccountId() {
-  // Only the cloud has accounts. Asking a self-host would cost a request to
-  // learn what the mode already says.
-  if (state.authMode !== 'jwt') return;
-  if (await accountScope() !== UNNAMED_ACCOUNT) return; // named already
-  try {
-    const res = await fetch(`${serverBase()}/v1/account`, { headers: await authHeaders() });
-    if (!res.ok) return;
-    const body = await res.json();
-    const id = body && typeof body.account_id === 'string' ? body.account_id : '';
-    if (!id) return;
-    state.accountId = id;
-    await chrome.storage.local.set({ accountId: id });
-  } catch { /* no id means today's behaviour, which is the point */ }
-}
-
-// Nothing writes an account-scoped name without asking this. `state.accountId`
-// is only an optimisation in front of it, never the answer on its own: the id
-// lands in storage as its own top-level key (`accountId`, not a field inside
-// the `settings` blob — a field would mean reconstructing the whole blob after
-// an await, clobbering anything that wrote settings meanwhile), and this reads
-// it back. That is what makes the scoping independent of the network: /health
-// can be slow, open, or never answered and the panel still knows whose state
-// it is showing.
-//
-// The one case with no id anywhere is a cloud account we cannot name, and it
-// FAILS CLOSED. An unqualified namespace is the shared one — the exact
-// cross-account disclosure account scoping removes — so that case resolves to a
-// namespace nothing has ever written and History reads empty. Empty is the
-// right answer to "whose history is this?" when we cannot tell; shared is the
-// answer that hands a stranger's transcript to someone else.
-//
-// `authMode` is the discriminator and it comes from /health, never from the
-// address. Self-host keeps the flat namespace byte-identical, including while
-// its server is unreachable and the mode reads null: the residual window is a
-// cloud account with a token and no id *and* an unanswered /health, which
-// sign-in cannot produce — a healthy exchange writes the id, and a degraded one
-// refuses to store the key at all.
-const UNNAMED_ACCOUNT = 'unnamed-account';
-async function accountScope() {
-  if (state.accountId) return state.accountId;
-  const stored = await chrome.storage.local.get('accountId');
-  const id = typeof stored.accountId === 'string' ? stored.accountId : '';
-  if (id) { state.accountId = id; return id; }
-  return state.authMode === 'jwt' ? UNNAMED_ACCOUNT : null;
-}
-
-// The account behind the token in the slot, fetched over the same
-// authenticated path as every other call — no second fetch helper, no
-// `?token=`, no decoding.
-//
-// The wizard is not the only path: a panel opened days later holds a stored
-// token and has no exchange in this session, and without an id it cannot tell
 // whose history it is showing. This only ever REFINES what init already seeded
 // from storage, and only for the cloud: asking a self-host would cost a request
 // to learn what the mode already says.
@@ -1907,19 +1851,34 @@ function paintSetupFooter(s) {
   replaySetupBtn.textContent = signedIn ? 'Sign out' : 'Set up Brotto';
 }
 
-// Both teardown paths — this button and the expired-credential sweep in the
-// /health handler — run this. "Clear the slot" and "clear what the slot was for"
-// are one operation, and two copies of it will drift.
+// The artifacts a credential leaves behind. `modelApiKey:<id>` is a live
+// provider credential and `${base}#${id}` is that account's mirrored history;
+// neither is protected by the token, so both stay readable and reusable by
+// whoever signs in next. Key names come from the same helper the read path
+// uses — hand-building the strings is how one spelling drifts from the other
+// and a key survives its own sign-out.
+async function clearAccountArtifacts(accountId) {
+  if (!accountId) return;
+  const keys = brottoModelKeys(accountId);
+  await chrome.storage.local.remove([keys.apiKey, keys.config]);
+  await brottoSessionStore.clear(brottoSessionStore.namespaceFor(serverBase(), accountId));
+}
+
+// Both teardown paths — this button and the expired-token sweep in the /health
+// handler — run this. "Clear the slot" and "clear what the slot was for" are
+// one operation, and two copies of it will drift.
 async function dropCredential() {
   const stored = await chrome.storage.local.get(['settings', 'accountId']);
   const settings = { ...(stored.settings || {}) };
+  const accountId = typeof stored.accountId === 'string' ? stored.accountId : '';
   delete settings.agentSecret;
   delete settings.agentSecretOrigin;
   // Legacy shape, only if this install predates the top-level key.
   delete settings.accountId;
   await chrome.storage.local.set({ settings });
-  if (stored.accountId) await chrome.storage.local.remove('accountId');
+  if (accountId) await chrome.storage.local.remove('accountId');
   state.accountId = null;
+  await clearAccountArtifacts(accountId);
 }
 
 // setOptions re-points the panel; it has no gesture requirement, so the
