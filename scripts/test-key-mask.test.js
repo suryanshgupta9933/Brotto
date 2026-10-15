@@ -61,7 +61,10 @@ function run(store, fieldValue) {
     KEY_MASK: "••••••••",
     $modelKey,
   };
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   // The real key-naming pair, not a stand-in: the account suffix is the whole
   // point of this file's subject, and a hand-written `modelApiKey` here would
   // pass while the shipped file names a per-account key.

@@ -193,9 +193,9 @@ await store.put("cloud-run", { goal: "book a flight" }, {
         /namespaceFor\(/.test(call) || /list\(ns\)/.test(call), call);
     }
     check("the panel stamps the namespace on write",
-      /brottoSessionStore\.put\(sessionId, doc, \{\s*namespace: brottoSessionStore\.namespaceFor\(serverBase\(\), state\.accountId\)/.test(sidepanel));
+      /brottoSessionStore\.put\(sessionId, doc, \{\s*namespace: brottoSessionStore\.namespaceFor\(serverBase\(\), await accountScope\(\)/.test(sidepanel));
     check("the namespace is the address plus the account id, never the credential",
-      /brottoSessionStore\.namespaceFor\(serverBase\(\), state\.accountId\)/.test(sidepanel));
+      /brottoSessionStore\.namespaceFor\(serverBase\(\), await accountScope\(\)/.test(sidepanel));
     // Every site must pass it. One that drops the second argument is a row
     // filed under no account, which reads as history that vanished.
     // Counted rather than matched per call: a nested `)` ends any regex that
@@ -203,7 +203,11 @@ await store.put("cloud-run", { goal: "book a flight" }, {
     // by its absence, which is the same fact.
     const sites = sidepanel.match(/brottoSessionStore\.namespaceFor\(/g) || [];
     check("every namespace site carries the account id",
-      sites.length > 0 && sites.length === (sidepanel.match(/namespaceFor\(serverBase\(\), state\.accountId\)/g) || []).length,
+      // Two forms, both carrying an account: the live scope for every read and
+      // write, and the named id in clearAccountArtifacts, which is clearing a
+      // specific account on the way out rather than whatever is current.
+      sites.length > 0 && sites.length === ((sidepanel.match(/namespaceFor\(serverBase\(\), await accountScope\(\)\)/g) || []).length
+        + (sidepanel.match(/namespaceFor\(serverBase\(\), accountId\)/g) || []).length),
       `${sites.length} site(s)`);
     check("it does not key the mirror on the typed secret",
       !/namespaceFor\([^)]*agentSecret/.test(sidepanel));

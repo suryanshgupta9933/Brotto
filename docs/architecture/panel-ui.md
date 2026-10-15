@@ -733,6 +733,22 @@ silently clobbered — `learnAccountId()` did exactly that to a server-url edit.
 `welcome.js` `finish()` migrates a legacy `settings.accountId` once; the panel
 does the same on its next open.
 
+**One accessor: `accountScope()`.** Every namespace and every model-key name
+goes through it, and it answers from storage when `state.accountId` is null —
+so the scoping **cannot depend on a network call**. That was the bug: the id was
+assigned only inside `learnAccountId()`, which sits inside the `try` wrapping
+`/health` and returns early unless the mode is `jwt`, so a panel opened before
+that probe settled read the **shared** namespace — the exact cross-account
+disclosure the split removes.
+
+**With a credential and no id on the cloud, the panel fails closed.** An
+unqualified namespace is the shared one, so `accountScope()` resolves that case
+to a namespace nothing has ever written and History reads empty. Empty is the
+right answer to "whose history is this?" when we cannot tell; shared hands a
+stranger's transcript to someone else. Self-host keeps the flat namespace
+byte-identical, including while its server is unreachable, because the
+discriminator is `auth_mode` off `/health` and never the address.
+
 ### The clock reads in the units a run is measured in
 
 `renderElapsed` printed `83.0s` — a number the reader has to convert, on the one

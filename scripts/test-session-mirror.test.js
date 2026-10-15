@@ -102,6 +102,9 @@ check("a missing source does not take the merge down", () => {
 // The account id `namespaceFor` now takes a second argument for. Null here is
 // the self-host / pre-account case, which is what most of these rows are.
 const STATE = { accountId: null };
+// Every read path resolves its namespace through accountScope() rather than
+// reading state directly, so the slices below need the same accessor.
+globalThis.accountScope = async () => STATE.accountId;
 
 function fakeStore(mirror) {
   return {

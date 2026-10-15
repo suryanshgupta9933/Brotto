@@ -121,7 +121,10 @@ async function makeCatalog(fetchImpl) {
     globalThis: null,
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   vm.runInContext(catalogSrc, sandbox);
   return { api: sandbox.brottoModelCatalog, store };
 }
@@ -258,7 +261,10 @@ async function main() {
       globalThis: null,
     };
     sandbox.globalThis = sandbox;
-    vm.createContext(sandbox);
+      // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
     // The panel's element handles are module-level consts in the real file.
     Object.assign(sandbox, {
       $modelProvider: els["model-provider"],

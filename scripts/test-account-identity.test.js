@@ -109,6 +109,7 @@ function panelRig(respond, { authMode = "jwt", stored = {} } = {}) {
   vm.createContext(sandbox);
   vm.runInContext(extract(sidepanel, "authHeaders"), sandbox);
   vm.runInContext(extract(sidepanel, "serverBase"), sandbox);
+  vm.runInContext(extract(sidepanel, "accountScope"), sandbox);
   vm.runInContext(extract(sidepanel, "learnAccountId"), sandbox);
   return sandbox;
 }
@@ -170,6 +171,39 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
     await s.learnAccountId();
     check("an id already in storage costs no request",
       s.calls.length === 0 && s.state.accountId === ACCOUNT, JSON.stringify(s.calls));
+  }
+
+  // ── The scoping must not wait on a network call ───────────────────────
+  // The bug this exists for: state.accountId was assigned only inside the
+  // /health-guarded probe, so a panel opened before that probe settled read
+  // the SHARED namespace — the exact cross-account disclosure the scoping
+  // exists to stop.
+  {
+    const s = panelRig(async () => { throw new Error("health never answered"); },
+      { authMode: null, stored: { accountId: ACCOUNT } });
+    const ns = s.brottoSessionStore.namespaceFor(s.serverBase(), await s.accountScope());
+    check("an id in storage scopes the namespace with no network at all",
+      ns === `https://agent.brotto.dev#${ACCOUNT}`, ns);
+    check("…and it scopes even with authMode never probed",
+      s.state.authMode === null && (await s.accountScope()) === ACCOUNT);
+  }
+  {
+    // Credential in the slot, no id anywhere, /health answering null: the
+    // one case that must fail CLOSED rather than fall back to shared.
+    const s = panelRig(json(200, { account_id: null }));
+    const ns = s.brottoSessionStore.namespaceFor(s.serverBase(), await s.accountScope());
+    check("a token with no identifiable account fails closed, never to shared",
+      ns !== "https://agent.brotto.dev" && ns.endsWith("#unnamed-account"), ns);
+  }
+  {
+    // Self-host: a credential, but no account id — the namespace must be
+    // byte-identical to every install from before accounts existed.
+    const s = panelRig(json(200, {}), { authMode: "secret", stored: { agentSecret: "AGENT_SECRET_VALUE" } });
+    s.plannerUrlEl.value = "http://localhost:8000/";
+    s.local.settings.serverUrl = "http://localhost:8000/";
+    const ns = s.brottoSessionStore.namespaceFor(s.serverBase(), await s.accountScope());
+    check("self-host keeps its flat namespace, byte-identical",
+      ns === "http://localhost:8000", ns);
   }
 
   // ── The wizard's half ──────────────────────────────────────────────────

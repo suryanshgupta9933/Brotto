@@ -111,6 +111,9 @@ const sandbox = {
   FALLBACK_SUGGESTIONS: ['Ask Brotto anything'],
 };
 sandbox.globalThis = sandbox;
+  // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
 vm.createContext(sandbox);
 
 for (const fn of ["suggestionKey", "readSuggestionCache", "writeSuggestionCache",

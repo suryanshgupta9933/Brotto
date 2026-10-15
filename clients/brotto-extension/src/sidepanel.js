@@ -303,10 +303,10 @@ function fitModelPill() {
 // Which two storage keys hold the model config and the API key right now —
 // flat for self-host, suffixed with the account id on the cloud, so a second
 // account in this Chrome profile cannot spend the first one's key. The id comes
-// from the `accountId` storage key, which /v1/account wrote and sign-out
-// deleted; nothing here looks at the credential.
+// from `accountScope()` — the same answer the history namespace gets — and
+// nothing here looks at the credential.
 async function modelKeyNames() {
-  return brottoModelKeys((await chrome.storage.local.get('accountId')).accountId || '');
+  return brottoModelKeys(await accountScope());
 }
 
 // Shown in place of a stored API key: the field must look occupied when it
@@ -1082,7 +1082,7 @@ function mergeHistory(...sources) {
 // when /v1/account has named one. Inlined rather than wrapped in a helper so
 // the store's own namespace rule is read at each site.
 async function mirrorRows() {
-  const ns = brottoSessionStore.namespaceFor(serverBase(), state.accountId);
+  const ns = brottoSessionStore.namespaceFor(serverBase(), await accountScope());
   return (await brottoSessionStore.list(ns)).map((r) => ({
     task: r.task || '(no task text)',
     status: panelStatus(r.status),
@@ -1333,7 +1333,7 @@ async function deleteSession(entry) {
   // that is still in this browser, which is the one outcome the user cannot
   // see. One honest line, not a settings screen.
   const mirroredOut = entry.session_id
-    ? await brottoSessionStore.remove(entry.session_id, brottoSessionStore.namespaceFor(serverBase(), state.accountId))
+    ? await brottoSessionStore.remove(entry.session_id, brottoSessionStore.namespaceFor(serverBase(), await accountScope()))
     : true;
   // The row goes from the panel first. A server that is down, or a secret
   // that is wrong, must not leave the user staring at a button that does
@@ -1373,7 +1373,7 @@ async function deleteAllSessions() {
   if (!ok) return;
   await saveSessions([]);
   await noteDeleted(sessions.map((s) => s.session_id));
-  await brottoSessionStore.clear(brottoSessionStore.namespaceFor(serverBase(), state.accountId));
+  await brottoSessionStore.clear(brottoSessionStore.namespaceFor(serverBase(), await accountScope()));
   await renderHistory();
   try {
     const res = await fetch(`${serverBase()}/v1/sessions`, {
@@ -1468,6 +1468,37 @@ async function authHeaders() {
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
+// Nothing writes an account-scoped name without asking this. `state.accountId`
+// is only an optimisation in front of it, never the answer on its own: the id
+// lands in storage as its own top-level key (`accountId`, not a field inside
+// the `settings` blob — a field would mean reconstructing the whole blob after
+// an await, clobbering anything that wrote settings meanwhile), and this reads
+// it back. That is what makes the scoping independent of the network: /health
+// can be slow, open, or never answered and the panel still knows whose state
+// it is showing.
+//
+// The one case with no id anywhere is a cloud account we cannot name, and it
+// FAILS CLOSED. An unqualified namespace is the shared one — the exact
+// cross-account disclosure account scoping removes — so that case resolves to a
+// namespace nothing has ever written and History reads empty. Empty is the
+// right answer to "whose history is this?" when we cannot tell; shared is the
+// answer that hands a stranger's transcript to someone else.
+//
+// `authMode` is the discriminator and it comes from /health, never from the
+// address. Self-host keeps the flat namespace byte-identical, including while
+// its server is unreachable and the mode reads null: the residual window is a
+// cloud account with a token and no id *and* an unanswered /health, which
+// sign-in cannot produce — a healthy exchange writes the id, and a degraded one
+// refuses to store the key at all.
+const UNNAMED_ACCOUNT = 'unnamed-account';
+async function accountScope() {
+  if (state.accountId) return state.accountId;
+  const stored = await chrome.storage.local.get('accountId');
+  const id = typeof stored.accountId === 'string' ? stored.accountId : '';
+  if (id) { state.accountId = id; return id; }
+  return state.authMode === 'jwt' ? UNNAMED_ACCOUNT : null;
+}
+
 // The account behind the token in the slot, fetched over the same
 // authenticated path as every other call — no second fetch helper, no
 // `?token=`, no decoding.
@@ -1481,8 +1512,7 @@ async function learnAccountId() {
   // Only the cloud has accounts. Asking a self-host would cost a request to
   // learn what the mode already says.
   if (state.authMode !== 'jwt') return;
-  const stored = await chrome.storage.local.get('accountId');
-  if (stored.accountId) { state.accountId = stored.accountId; return; }
+  if (await accountScope() !== UNNAMED_ACCOUNT) return; // named already
   try {
     const res = await fetch(`${serverBase()}/v1/account`, { headers: await authHeaders() });
     if (!res.ok) return;
@@ -1492,6 +1522,37 @@ async function learnAccountId() {
     state.accountId = id;
     await chrome.storage.local.set({ accountId: id });
   } catch { /* no id means today's behaviour, which is the point */ }
+}
+
+// Nothing writes an account-scoped name without asking this. `state.accountId`
+// is only an optimisation in front of it, never the answer on its own: the id
+// lands in storage as its own top-level key (`accountId`, not a field inside
+// the `settings` blob — a field would mean reconstructing the whole blob after
+// an await, clobbering anything that wrote settings meanwhile), and this reads
+// it back. That is what makes the scoping independent of the network: /health
+// can be slow, open, or never answered and the panel still knows whose state
+// it is showing.
+//
+// The one case with no id anywhere is a cloud account we cannot name, and it
+// FAILS CLOSED. An unqualified namespace is the shared one — the exact
+// cross-account disclosure account scoping removes — so that case resolves to a
+// namespace nothing has ever written and History reads empty. Empty is the
+// right answer to "whose history is this?" when we cannot tell; shared is the
+// answer that hands a stranger's transcript to someone else.
+//
+// `authMode` is the discriminator and it comes from /health, never from the
+// address. Self-host keeps the flat namespace byte-identical, including while
+// its server is unreachable and the mode reads null: the residual window is a
+// cloud account with a token and no id *and* an unanswered /health, which
+// sign-in cannot produce — a healthy exchange writes the id, and a degraded one
+// refuses to store the key at all.
+const UNNAMED_ACCOUNT = 'unnamed-account';
+async function accountScope() {
+  if (state.accountId) return state.accountId;
+  const stored = await chrome.storage.local.get('accountId');
+  const id = typeof stored.accountId === 'string' ? stored.accountId : '';
+  if (id) { state.accountId = id; return id; }
+  return state.authMode === 'jwt' ? UNNAMED_ACCOUNT : null;
 }
 
 // The account behind the token in the slot, fetched over the same
@@ -1537,7 +1598,7 @@ async function mirrorSession(sessionId, { status, steps } = {}) {
   try {
     const doc = await fetchAudit(sessionId);
     await brottoSessionStore.put(sessionId, doc, {
-      namespace: brottoSessionStore.namespaceFor(serverBase(), state.accountId),
+      namespace: brottoSessionStore.namespaceFor(serverBase(), await accountScope()),
       task: (state.lastGoal || '').trim(),
       status,
       steps: steps ?? state.stepCount ?? null,
@@ -1563,7 +1624,7 @@ async function fetchAudit(sessionId) {
       if (doc && doc.found !== false) return doc;
     }
   } catch { /* fall through to the mirror */ }
-  const mirrored = await brottoSessionStore.get(sessionId, brottoSessionStore.namespaceFor(serverBase(), state.accountId));
+  const mirrored = await brottoSessionStore.get(sessionId, brottoSessionStore.namespaceFor(serverBase(), await accountScope()));
   if (mirrored) return mirrored;
   throw new Error(`no copy of session ${sessionId}`);
 }

@@ -106,7 +106,10 @@ function panelWith(handler, stored = { modelConfig: { provider: "anthropic", mod
     settingsBtn: null,
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   // The real origin binding: authHeaders() asks it before every authenticated
   // call, so a stub would leave the rule untested on the one surface this
   // file also exercises. These settings have no recorded origin and the

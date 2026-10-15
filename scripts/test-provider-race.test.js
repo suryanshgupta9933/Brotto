@@ -158,7 +158,10 @@ function openDropdown(hostValue = "anthropic") {
     DROPDOWNS: [], dropdownWriting: false,
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   vm.runInContext(extract("attachDropdown"), sandbox);
 
   let value = hostValue;
@@ -261,7 +264,10 @@ function openPanel(stored) {
     setModelPill() {},
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   vm.runInContext(catalogSrc, sandbox);
   // The panel's own seed expression, evaluated rather than assumed — otherwise
   // this test would pass with `let modelCatalog = null` back in place, because
