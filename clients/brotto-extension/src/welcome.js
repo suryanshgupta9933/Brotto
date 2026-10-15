@@ -525,6 +525,17 @@ async function finish(deferred = false) {
   // no writer ever has to reconstruct the blob from a stale snapshot to record
   // one — that is how a server-url edit used to be silently clobbered.
   const keys = brottoModelKeys(exchangeAccountId);
+  // A cloud sign-in that cannot name its account must NOT fall back to the flat
+  // key. That slot is shared by every install with no account, so writing this
+  // account's provider key there is the credential crossover the account
+  // scoping exists to stop — reached only because the exchange degraded. The
+  // token is still stored (it is the one credential we hold; the panel
+  // re-learns the id from /v1/account on its next open) and the key is not,
+  // with the user told exactly that.
+  const cloudWithoutId = edition() === "cloud" && !exchangeAccountId;
+  if (cloudWithoutId && key) {
+    toast("Signed in, but we could not identify this account, so your model key was not saved", "bad");
+  }
   const saved = await chrome.storage.local.get(["settings", keys.config]);
   // A window the user stated in Settings outranks this file's answer: for a
   // provider that takes any model id the catalogue can only offer a fallback,
@@ -555,7 +566,9 @@ async function finish(deferred = false) {
       ? chrome.storage.local.set({ accountId: exchangeAccountId })
       : chrome.storage.local.remove("accountId"),
     chrome.storage.local.set({ [keys.config]: { provider, model, context_window: keepCtx } }),
-    key ? chrome.storage.local.set({ [keys.apiKey]: key }) : Promise.resolve(),
+    cloudWithoutId || !key
+      ? Promise.resolve()
+      : chrome.storage.local.set({ [keys.apiKey]: key }),
   ]);
 
   // setOptions has no gesture requirement (open() does), which is the only

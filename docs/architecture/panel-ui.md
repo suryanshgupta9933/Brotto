@@ -752,6 +752,14 @@ stranger's transcript to someone else. Self-host keeps the flat namespace
 byte-identical, including while its server is unreachable, because the
 discriminator is `auth_mode` off `/health` and never the address.
 
+**A degraded cloud exchange does not store the model key.** `brottoModelKeys("")`
+is the *flat* slot, so a sign-in that got a token but no account id would have
+written this account's provider key into the shared one — the credential
+crossover arriving through the failure path. The token is still stored (it is
+the credential we hold, and the panel re-learns the id from `/v1/account`), the
+key is not, and the user is told: *"Signed in, but we could not identify this
+account, so your model key was not saved."*
+
 ### The clock reads in the units a run is measured in
 
 `renderElapsed` printed `83.0s` — a number the reader has to convert, on the one
