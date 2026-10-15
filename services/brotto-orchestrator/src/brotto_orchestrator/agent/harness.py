@@ -629,7 +629,24 @@ def repeat_nudge(summaries: list[StepSummary]) -> str:
     )
 
 
-def _manifest_window(entries: list, current_step: int) -> tuple[list, str]:
+def _is_degraded(entry) -> bool:
+    """True when an entry holds its digest and nothing more.
+
+    The bodies sidecar has no writer — `audit.py` names `*.pages.json` so a
+    file left by an older build still gets deleted, not because anything
+    writes it today — so a run that was interrupted and resumed loads
+    entries carrying a digest only. That is the single fact behind every
+    place the prompt has to stop promising a full body.
+
+    `body == digest` is what separates this from a page shorter than the
+    digest length: there, digest == body is the whole truth and a
+    "degraded" marker would itself be a lie.
+    """
+    return entry.digest.endswith("…") and entry.body == entry.digest
+
+
+def _manifest_window(entries: list, current_step: int,
+                     *, degraded: bool = False) -> tuple[list, str]:
     """(entries to render, note naming what was left out).
 
     Same head+tail convention as the step history (`_HISTORY_WINDOW`):
@@ -664,7 +681,9 @@ def _manifest_window(entries: list, current_step: int) -> tuple[list, str]:
         shown = here[-1:] + shown
     hidden = [e for e in gap if e not in here[-1:]]
     note = (f"  ... {len(hidden)} entries omitted ({hidden[0].id}–{hidden[-1].id}) — "
-            "recall_memory(entry_id) fetches any of them in full.")
+            + ("recall_memory(entry_id) fetches any of them; degraded ones say so."
+               if degraded else
+               "recall_memory(entry_id) fetches any of them in full."))
     return shown, note
 
 
@@ -785,9 +804,23 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     # Identity is the capture step, not the url: several entries can share a
     # url and only one of them is the page in front of the model. See
     # `_manifest_window` for why the marker is a claim about identity.
-    manifest_lines = ["### Memory manifest (recall_memory(entry_id) fetches full body)"]
+    # `degraded` is read over every entry, not only the shown ones: the gap
+    # note promises an omitted entry is fetchable, so an omitted degraded
+    # entry makes that promise false too.
+    #
+    # Conditional rather than always-on, because this header renders on every
+    # step of every run. On a live run nothing is degraded — `capture_page`
+    # holds the body it was given — and a caveat there is a false statement
+    # paid for in tokens on the step that can least afford them. The state is
+    # already detectable where `recall_memory` detects it, so the header
+    # states the real guarantee only when the real guarantee is the weaker one.
+    degraded = any(_is_degraded(e) for e in turn.scratchpad_entries)
+    manifest_lines = ["### Memory manifest (" + (
+        "recall_memory(entry_id) returns the kept body — an entry holding "
+        "only a digest says so" if degraded else
+        "recall_memory(entry_id) fetches full body") + ")"]
     windowed, gap_note = _manifest_window(
-        turn.scratchpad_entries, turn.step_number)
+        turn.scratchpad_entries, turn.step_number, degraded=degraded)
     if gap_note:
         manifest_lines.append(gap_note)
     for e in windowed:
@@ -1641,10 +1674,10 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             return "\n".join(lines) or "(empty)"
 
         elif action == "recall_memory":
-            # `id` is an accepted spelling, not just `entry_id`. The manifest
-            # header reads "recall_memory(id) fetches full body" and the
-            # auto-capture note says "recall_memory('r2')" positionally, so a
-            # model working from the manifest in front of it sends `id` — and
+            # `id` is an accepted spelling, not just `entry_id`. Both
+            # manifest headers (the degraded one names `entry_id` and the
+            # live one names it too) and the auto-capture note
+            # ("recall_memory('r2')", positionally) lead a model to send `id` — and
             # an exact-match lookup on "" reported a miss for an entry that
             # exists. Same two-spelling tolerance recall_conversation already
             # has for from_id/message_id.
@@ -1658,10 +1691,9 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             # writer, so a resumed run's entries carry digest only. Say so
             # when it happens — handed 200 chars of an 11,000-char page with
             # no marker, the model reads the fragment as the whole page and
-            # answers from it. A page shorter than the digest length is not
-            # degraded — digest == body is the whole truth there, so the
-            # marker would be a lie.
-            if entry.digest.endswith("…") and entry.body == entry.digest:
+            # answers from it. Same `_is_degraded` predicate the manifest
+            # header and gap note use, so the three cannot disagree.
+            if _is_degraded(entry):
                 where = entry.url or "an earlier page"
                 return (f"{entry.digest}\n\n[only the digest of {where} survived "
                         f"— its full text was not kept. "
