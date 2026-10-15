@@ -10,6 +10,7 @@ import uuid
 from typing import Callable, Coroutine, Any
 
 import logging
+import re
 
 # Falls back to ANTHROPIC_AUTH_TOKEN so Claude Code-style setups (Token Plan
 # / proxy auth) work without a second env var. pydantic-ai's AnthropicModel
@@ -645,6 +646,39 @@ def _is_degraded(entry) -> bool:
     return entry.digest.endswith("…") and entry.body == entry.digest
 
 
+_ENTRY_ID_RE = re.compile(r"^r(\d+)$")
+
+
+def _id_runs(entries: list) -> str:
+    """The omitted ids as contiguous runs: `r4–r19, r21–r51`.
+
+    A single `hidden[0]–hidden[-1]` range is a claim that everything between
+    the endpoints is absent, and it stops being one the moment the escape
+    hatch keeps an entry from the middle of the gap — the kept entry sits
+    between the endpoints and renders in the manifest directly above the note
+    that says it is gone. One run per unbroken stretch, so every id named is
+    genuinely not rendered.
+
+    Sorted numerically, not by position: an id inside a named range means
+    "omit me", and a run that skipped backwards would name a shown entry.
+    Anything not shaped `r<digits>` is listed on its own rather than guessed
+    at; the id generator only emits that shape, so this is a no-op today.
+    """
+    runs: list[str] = []
+    nums = sorted(int(m[1]) for m in (_ENTRY_ID_RE.match(e.id) for e in entries) if m)
+    others = sorted(e.id for e in entries if not _ENTRY_ID_RE.match(e.id))
+    lo = prev = None
+    for n in nums + [None]:  # type: ignore[list-item]
+        if prev is not None and n == prev + 1:
+            prev = n
+            continue
+        if lo is not None:
+            runs.append(f"r{lo}–r{prev}" if prev != lo else f"r{lo}")
+        lo = prev = n
+    runs.extend(others)
+    return ", ".join(runs)
+
+
 def _manifest_window(entries: list, current_step: int,
                      *, degraded: bool = False) -> tuple[list, str]:
     """(entries to render, note naming what was left out).
@@ -692,7 +726,7 @@ def _manifest_window(entries: list, current_step: int,
         # note claiming otherwise would be the false claim the note exists to
         # avoid.
         return shown, ""
-    note = (f"  ... {len(hidden)} entries omitted ({hidden[0].id}–{hidden[-1].id}) — "
+    note = (f"  ... {len(hidden)} entries omitted ({_id_runs(hidden)}) — "
             + ("recall_memory(entry_id) fetches any of them; degraded ones say so."
                if degraded else
                "recall_memory(entry_id) fetches any of them in full."))

@@ -126,3 +126,17 @@ def test_identical_entries_do_not_hide_each_other():
     shown, note = _manifest_window(es, current_step=99)
     assert note.startswith("  ... 1 entries omitted"), note
     assert len(shown) == 3 + 9 + 1
+
+
+def test_a_named_range_never_contains_an_entry_the_window_kept():
+    """The note is a claim of absence; a kept entry inside it is a lie.
+
+    The escape hatch keeps the current page out of the gap, and it can sit
+    anywhere in it. `hidden[0]–hidden[-1]` straddled it, so the manifest
+    showed an entry and then, on the next line, said that entry was gone.
+    """
+    entries = _entries(40)
+    # step 20 lands mid-gap (r4–r31), so a single range would swallow it.
+    shown, note = _manifest_window(entries, current_step=20)
+    assert "r20" in [e.id for e in shown]
+    assert "r4–r19, r21–r31" in note, note
