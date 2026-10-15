@@ -26,8 +26,9 @@ So the privacy posture is not "we do not collect your data". It is:
 | Page digests (200 chars each) | `logs/sessions/<id>.scratchpad.txt`, server | until deleted |
 | AX-tree sizes, page-text chars, changed-element chars | inside the audit document, server | until deleted |
 | Task title, action names, URLs, typed input | inside the audit document, server | until deleted |
-| Model config, `base_url` | `chrome.storage.local`, user | until cleared |
-| API key | `chrome.storage.local`, user | until the user clears it |
+| Model config, `base_url` | `chrome.storage.local`, user, under a key carrying the account id on the cloud | until cleared |
+| API key | `chrome.storage.local`, user, same account-scoped key | until the user clears it |
+| Account id (`profiles.id`, the JWT `sub`) as a **namespace component** — which local key and which mirror rows a session belongs to | `settings.accountId` in `chrome.storage.local`, user; and returned as a response field, stored in no operator table | until sign-out clears it |
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
 | Waitlist signup and the beta roster — one row per address in `beta_access`: `asked_at` + name + batch (they asked), `approved_at` (we granted), `revoked_at` (we withdrew) | `beta_access` table in Supabase, server | until the operator drops it |
@@ -859,6 +860,63 @@ caller typed. It never consults anything that knows who is in the beta.
 *The sign-in reply is a deliberate oracle* below. That is a product decision
 the owner made against the earlier uniform reply; it does not extend to the
 limiter, which still branches on neither address.
+
+## The client names an account, and it is the last local namespace
+
+The fifth thing "one operator per server" cost was not on the server at all:
+**two accounts in one Chrome profile shared every piece of local state.** The
+only separator was the server address, and on the hosted relay that is one
+string for the whole beta. History, provider, model and the saved API key were
+each one flat slot — and the key is the one that mattered, because account A's
+run paid with account B's credential. `panel-ui.md` owns the mechanism; what
+belongs here is what the identity **is** and where it is allowed to land.
+
+**`account_id` is an opaque `profiles.id` uuid — the JWT `sub` — and it is an
+identifier, not user content.** Nothing derived from an AX tree, page text, a
+URL, typed input or a task title may appear in that response or land in an
+operator table, and none does. It is written to `chrome.storage.local`
+unencrypted, which is safe precisely because it names nothing about the user:
+it is a handle they already hold for themselves. **No new table, no migration,
+no new refusal reason** — the account already existed as `profiles.id`.
+
+**It is handed over as a field because the extension never parses the
+credential.** `verify_jwt` is stdlib `hmac` and the relay signed the token
+seconds earlier, so reading the `sub` out of it costs no control-plane round
+trip. But the point is not the cost: a `sub` *decoded by the client* is the
+credential being parsed, which is the one rule the whole credential design
+rests on (see `extension.md`). A server-sent field lets the client scope local
+state without ever opening the token.
+
+**`GET /v1/account` exists because `exchange` is not enough.** A panel opened
+days later holds a stored token and has no exchange in this session, and
+without an id it cannot tell whose history it is showing. It goes through
+`_approved`, the same choke point as every other gated route and **deliberately
+including the roster**: an identity route reachable without a credential is an
+`/health`-shaped leak of every account id on the relay. So a bad credential
+answers **404, not 403**, and no credential answers 404 — the same answers as
+every other route, for the same reason.
+
+**Self-host is untouched and answers `{"account_id": null}`.** `Claims` exists
+only when a JWT authenticated; there is no account, and the client's namespace
+and storage keys are then byte-identical to what they were before accounts
+existed. Note the small asymmetry, which is deliberate on both sides: a
+*degraded* `exchange` answers `""` (the id could not be verified, and the
+caller still gets a signed-in response) while `/v1/account` answers `null` (no
+claims object). Every one of those values means "no account" to the client.
+
+**No `approved` on `/v1/account`.** `_approved` already refused, so the field
+would be a constant — and one derived from the *type* of the claims object it
+read would answer `false` for a valid `AGENT_SECRET` in secret mode, which
+reads as a denial that never happened. `account_id` is null in exactly the
+no-account case, which is all a caller needs.
+
+**Nothing is migrated from the flat key, on purpose.** A pre-change flat
+`modelApiKey` belongs to whoever was signed in when it was written and nothing
+records which, so copying it into whichever account signs in next hands that
+account a credential that may be someone else's — the exact harm the split
+exists to prevent. The cloud path ignores it and a cloud user re-pastes once.
+The cost is one re-paste, paid by people who asked for accounts, and the
+alternative is a silent cross-account credential, which is not a trade.
 
 ## The sign-in reply is a deliberate oracle
 
