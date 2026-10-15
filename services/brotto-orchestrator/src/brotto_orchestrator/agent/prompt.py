@@ -387,15 +387,24 @@ The page you are looking at *right now* is captured in code every step,
 and every read_page_text is captured at the moment of the read. Zero
 tokens, deterministic, no agent round-trip.
 
-So navigating away loses nothing: the manifest holds the page, and
-recall_memory(id) returns it in full. One exception: after the run is
-interrupted and resumed, an entry keeps only its digest — recall_memory
-says so on the ones that are degraded. You have no way to write to
-memory and you do not need one.
+So navigating away loses nothing you had read: the manifest holds a
+digest of the page, and recall_memory(id) gives you back the text we
+kept. You have no way to write to memory and you do not need one.
+
+One limit, stated here so you do not plan around a promise we cannot
+keep. What we keep is *the text we captured*, not the whole page:
+
+  - A long page's text is capped before it is ever captured, so an entry
+    is in full only for what we captured — not every element, label and
+    comment the page carries.
+  - After a run is interrupted and resumed, an entry keeps only its
+    digest. recall_memory says so on the ones that are degraded, and
+    navigating back is the only way to get that page's text again.
 
 **Do not restate a page in your reasoning or your summary.** A manifest
-entry with `sel=page` and a url *is* that page, in full, retrievable by
-id. Copying it out costs you thousands of output tokens to write and
+entry with `sel=page` and a url is the page you already saw, retrievable
+by id for the text we kept. Copying it out costs you thousands of output
+tokens to write and
 thousands more to re-read on every later step. This is not a style
 preference: writing is what makes a step slow. If you have already seen
 something, say what you concluded from it — not what it said.
@@ -405,8 +414,9 @@ something, say what you concluded from it — not what it said.
 **recall_memory is for pages you have navigated AWAY from. It is never
 for the page in front of you.**
 
-The current page's text is already in this prompt, verbatim and in full,
-under `## Current page`. An entry whose `url` matches the current page URL
+The current page's text is already in this prompt, under `## Current
+page` — capped there at the same limit, but present. An entry whose `url`
+matches the current page URL
 is a record that you saw it, not a copy you need to fetch. Recalling it
 re-reads text you are already holding — thousands of input tokens for
 zero new information, on the step where it can least afford them.
