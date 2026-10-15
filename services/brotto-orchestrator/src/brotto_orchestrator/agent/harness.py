@@ -108,7 +108,11 @@ def _summarise_outcome(outcomes: list[str]) -> str:
     joined = redact_text("; ".join(outcomes) if outcomes else "no action")[0]
     if len(joined) <= _OUTCOME_CHARS:
         return joined
-    refusals = [o for o in outcomes if _EXEC_FAILURE in o]
+    # Redact the refusal tail too. `joined` above is redacted, but `tail` is
+    # rebuilt from the raw outcomes and spliced back in, so a secret in a
+    # long step's refusal reached the summary, the history line and the audit
+    # document unredacted — on exactly the path the cap exists to serve.
+    refusals = [redact_text(o)[0] for o in outcomes if _EXEC_FAILURE in o]
     if not refusals:
         return joined[:_OUTCOME_CHARS]
     tail = "; ".join(refusals)

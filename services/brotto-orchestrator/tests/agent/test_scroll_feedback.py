@@ -466,3 +466,14 @@ async def test_a_batch_without_a_scroll_still_runs_in_full(monkeypatch):
 
     assert executed == ["type_text", "click", "task_complete"]
     assert result.status == "completed"
+
+def test_a_secret_in_a_refusal_tail_is_redacted_on_the_long_path():
+    """The cap path rebuilt `tail` from the raw outcomes and spliced it back
+    into an otherwise-redacted summary, so a long step leaked what a short one
+    caught."""
+    card = "4111 1111 1111 1111"
+    out = _summarise_outcome(
+        ["Clicked fine" * 20, f"Error executing type_text: card {card} was rejected"]
+    )
+    assert card not in out
+    assert len(out) <= _OUTCOME_CHARS
