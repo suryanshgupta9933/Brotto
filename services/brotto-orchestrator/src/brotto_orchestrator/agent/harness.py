@@ -85,6 +85,26 @@ _TERMINAL_ACTIONS = {"task_complete", "cannot_complete"}
 # arrives mid-string and a prefix test recorded it as a success.
 _EXEC_FAILURE = "Error executing"
 
+# A step's outcomes are joined and capped before they become a StepSummary.
+# Plain truncation cut from the right, so a refusal late in a multi-action
+# batch — the one outcome that explains why nothing happened — was sliced off
+# entirely and the model was left with a step that just read "no action".
+_OUTCOME_CHARS = 120
+
+
+def _summarise_outcome(outcomes: list[str]) -> str:
+    """Join a step's outcomes into the cap, without losing a refusal."""
+    joined = "; ".join(outcomes) if outcomes else "no action"
+    if len(joined) <= _OUTCOME_CHARS:
+        return joined
+    refusals = [o for o in outcomes if _EXEC_FAILURE in o]
+    if not refusals:
+        return joined[:_OUTCOME_CHARS]
+    tail = "; ".join(refusals)
+    if len(tail) >= _OUTCOME_CHARS:
+        return tail[:_OUTCOME_CHARS]
+    return (joined[: _OUTCOME_CHARS - len(tail) - 4] + " … " + tail)
+
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r"}
 
 
@@ -505,6 +525,23 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         if turn.repeat_warning else ""
     )
 
+    # A refusal carries the reason the step changed nothing — off-screen,
+    # covered, disabled — and that reason is the instruction for the next
+    # step. In the history line it is one clause among twelve, so a model
+    # reading for its next action reads past it. Derived from the summaries
+    # rather than stored, so it works identically on a resumed run.
+    refusals = [
+        part.strip()
+        for s in shown[-3:]
+        for part in str(s.outcome or "").split("; ")
+        if _EXEC_FAILURE in part
+    ]
+    refusal_section = (
+        "\n## Refused actions (why the step above changed nothing)\n"
+        + "\n".join(f"- {r}" for r in refusals) + "\n"
+        if refusals else ""
+    )
+
     # ponytail: the policy preamble is injected here, not at Agent
     # construction, so we don't need to rebuild the Agent per-task. The
     # test-helper reads `_TEST_DEPS` (a module global); the harness loop
@@ -556,7 +593,7 @@ Title: {turn.current_page_title}
 <page_content untrusted url="{turn.current_url}">
 {turn.ax_tree}
 </page_content>
-{text_section}{steer_section}{repeat_section}
+{text_section}{steer_section}{repeat_section}{refusal_section}
 ## What is your next action(s)?
 """
 
@@ -2749,10 +2786,19 @@ class AgentHarness:
                 # block (e.g. navigate to blacklisted URL).
                 if call.action in _TERMINAL_ACTIONS or call.action == "ask_human":
                     break
+                # A scroll moves the page under the refs the model planned
+                # this batch against — the harness is stateless per step, so
+                # anything after it in the batch clicks pre-scroll geometry and
+                # the relay refuses it. Recorded run a19cf208 lost steps to
+                # exactly this: scroll, then a click at coordinates captured
+                # before it. The next step observes the new viewport; this one
+                # cannot.
+                if call.action == "scroll":
+                    break
                 if deps.result is not None:
                     break
             timings["execute"] += time.perf_counter() - t_ex
-            combined_outcome = "; ".join(outcomes) if outcomes else "no action"
+            combined_outcome = _summarise_outcome(outcomes)
 
             # Memory is written in code on every step (`capture_page` runs
             # above, before the turn is built), so it is persisted every step
@@ -2766,7 +2812,7 @@ class AgentHarness:
                 step=step,
                 url=current_url,
                 action_taken="; ".join(action_trace) if action_trace else "no action",
-                outcome=combined_outcome[:120],
+                outcome=combined_outcome,
             ))
 
             # Terminal? Gate on deps.result, not on the action name. A
