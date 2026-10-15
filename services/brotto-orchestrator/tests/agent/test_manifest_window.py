@@ -93,3 +93,36 @@ def test_an_omitted_entry_is_still_recallable():
     omitted = next(e for e in sp.entries if e not in shown)
     assert sp.lookup(omitted.id) is omitted
     assert omitted.id not in [e.id for e in shown]
+
+def test_a_gap_made_only_of_the_current_page_does_not_kill_the_prompt():
+    """The whole window logic died here, on the step it ran.
+
+    Thirteen entries put the current page alone in the gap, so the escape
+    hatch kept the only entry the omission note then had to name.
+    """
+    es = _entries(13)
+    es[3] = MemoryEntry(id="r4", step=99, selector="page", around=None,
+                        digest="d", body="b", was_truncated=False,
+                        url="http://x")
+    shown, note = _manifest_window(es, current_step=99)
+    assert "r4" in [e.id for e in shown]
+    assert note == "", "nothing was omitted, so nothing is claimed to be"
+
+
+def test_identical_entries_do_not_hide_each_other():
+    """Value equality, not identity — the second bug the index pass removed.
+
+    The escape hatch used `e not in here[-1:]`, and pydantic compares by
+    value: an entry identical to the kept one in every field, id included,
+    matched it. Two identical entries in the gap therefore left `hidden`
+    empty and the note raised. One is kept and named, one is kept and named.
+    """
+    twin = MemoryEntry(id="r4", step=99, selector="page", around=None,
+                       digest="d", body="b", was_truncated=False,
+                       url="http://x")
+    es = _entries(14)
+    es[3] = twin
+    es[4] = twin.model_copy()
+    shown, note = _manifest_window(es, current_step=99)
+    assert note.startswith("  ... 1 entries omitted"), note
+    assert len(shown) == 3 + 9 + 1

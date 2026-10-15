@@ -676,10 +676,22 @@ def _manifest_window(entries: list, current_step: int,
     # and prepending every one of them turned the window into no window. The
     # most recent is the one carrying the marker. The rest stay in the gap
     # note below, so nothing is silently dropped — the note names the range.
-    here = [e for e in gap if e.selector == "page" and e.step == current_step]
-    if here:
-        shown = here[-1:] + shown
-    hidden = [e for e in gap if e not in here[-1:]]
+    # Derived from one index pass, not by filtering `shown`: `e not in here[-1:]`
+    # compared by pydantic value, so two entries identical in every field made
+    # the kept one subtract itself from the gap — and a gap of exactly the kept
+    # entry left `hidden` empty, so `hidden[0]` raised and killed prompt
+    # construction on the step. `None`, not a sentinel entry, so "nothing kept"
+    # and "kept something" cannot be confused.
+    keep = next((i for i, e in enumerate(gap)
+                 if e.selector == "page" and e.step == current_step), None)
+    if keep is not None:
+        shown = [gap[keep]] + shown
+    hidden = gap if keep is None else [e for i, e in enumerate(gap) if i != keep]
+    if not hidden:
+        # Everything in the gap survived — there is nothing omitted, and a
+        # note claiming otherwise would be the false claim the note exists to
+        # avoid.
+        return shown, ""
     note = (f"  ... {len(hidden)} entries omitted ({hidden[0].id}–{hidden[-1].id}) — "
             + ("recall_memory(entry_id) fetches any of them; degraded ones say so."
                if degraded else
