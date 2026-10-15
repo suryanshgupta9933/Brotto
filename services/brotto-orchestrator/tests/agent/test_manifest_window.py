@@ -140,3 +140,37 @@ def test_a_named_range_never_contains_an_entry_the_window_kept():
     shown, note = _manifest_window(entries, current_step=20)
     assert "r20" in [e.id for e in shown]
     assert "r4–r19, r21–r31" in note, note
+
+
+def test_an_entry_from_an_earlier_task_is_never_marked_this_page():
+    """`step` alone is not an identity: it resets for every new task.
+
+    Task 1 ends on step 4, task 2 starts and reaches step 4 again, and the
+    resumed scratchpad still carries task 1's entry. Under `e.step ==
+    current_step` the prior task's page claimed to be the page in front of the
+    model -- a wrong fact stated in the one region the model reads as
+    harness-authoritative. Both entries sit mid-run here, so the escape hatch
+    is what decides, not the head+tail window.
+    """
+    entries = _entries(22)
+    entries[5] = MemoryEntry(id="r6", step=4, selector="page", around=None,
+                             digest="task one", body="b", was_truncated=False,
+                             url="https://a.test/one", task_index=0)
+    entries[8] = MemoryEntry(id="r9", step=4, selector="page", around=None,
+                             digest="task two", body="b", was_truncated=False,
+                             url="https://a.test/two", task_index=1)
+
+    import types
+    import brotto_orchestrator.agent.harness as h
+    h._TEST_DEPS = types.SimpleNamespace(task_index=1, policy=None)
+    try:
+        prompt = _prompt_for(entries, step_number=4)
+    finally:
+        h._TEST_DEPS = None
+    marked = [ln for ln in prompt.splitlines() if "THIS PAGE" in ln]
+    assert len(marked) == 1, marked
+    assert "task two" in marked[0], marked
+
+    shown, note = _manifest_window(entries, current_step=4, current_task=1)
+    assert "r9" in [e.id for e in shown]
+    assert "r4–r8" in note, "the prior task's entry is recalled, just not current"

@@ -679,8 +679,8 @@ def _id_runs(entries: list) -> str:
     return ", ".join(runs)
 
 
-def _manifest_window(entries: list, current_step: int,
-                     *, degraded: bool = False) -> tuple[list, str]:
+def _manifest_window(entries: list, current_step: int, *, degraded: bool = False,
+                     current_task: int = 0) -> tuple[list, str]:
     """(entries to render, note naming what was left out).
 
     Same head+tail convention as the step history (`_HISTORY_WINDOW`):
@@ -717,7 +717,8 @@ def _manifest_window(entries: list, current_step: int,
     # construction on the step. `None`, not a sentinel entry, so "nothing kept"
     # and "kept something" cannot be confused.
     keep = next((i for i, e in enumerate(gap)
-                 if e.selector == "page" and e.step == current_step), None)
+                 if e.selector == "page" and e.step == current_step
+                 and e.task_index == current_task), None)
     if keep is not None:
         shown = [gap[keep]] + shown
     hidden = gap if keep is None else [e for i, e in enumerate(gap) if i != keep]
@@ -866,7 +867,8 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         "only a digest says so" if degraded else
         "recall_memory(entry_id) fetches full body") + ")"]
     windowed, gap_note = _manifest_window(
-        turn.scratchpad_entries, turn.step_number, degraded=degraded)
+        turn.scratchpad_entries, turn.step_number, degraded=degraded,
+        current_task=getattr(deps, "task_index", 0))
     if gap_note:
         manifest_lines.append(gap_note)
     for e in windowed:
@@ -874,7 +876,8 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         trunc = " [truncated]" if e.was_truncated else ""
         where = f" url={e.url}" if e.url else ""
         here = "  ← THIS PAGE, already in your prompt — do not recall" if (
-            e.selector == "page" and e.step == turn.step_number) else ""
+            e.selector == "page" and e.step == turn.step_number
+            and e.task_index == getattr(deps, "task_index", 0)) else ""
         line = (f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}"
                 f"{trunc}{here}: {e.digest}")
         manifest_lines.append(line.replace("<", "").replace(">", ""))
@@ -1669,6 +1672,8 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 digest=digest,
                 body=text,
                 was_truncated=was_truncated,
+                task_index=getattr(deps, "task_index", 0),
+                source="read_page_text",
             ))
             around_note = f" around={around!r}" if around else ""
             return (
@@ -2634,7 +2639,8 @@ class AgentHarness:
             # page text already ships in the prompt, so the model never calls
             # `read_page_text` and nothing was ever captured.
             deps.scratchpad = deps.scratchpad.capture_page(
-                url=current_url, step=step, text=page_text)
+                url=current_url, step=step, text=page_text,
+                task_index=getattr(deps, "task_index", 0))
             # ponytail: stash for the click cross-domain gate (Change 3).
             # The click handler runs inside this same step and needs to
             # compare pre-click URL to post-click URL.

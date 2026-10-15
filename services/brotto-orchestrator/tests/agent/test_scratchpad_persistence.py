@@ -167,3 +167,20 @@ def test_a_page_captured_every_step_does_not_bloat_the_audit_document():
 
     doc = json.dumps({"scratchpad": _scratchpad_dict(sp)})
     assert len(doc) < 20_000, f"audit document is {len(doc)} chars for 20 pages"
+
+
+def test_provenance_survives_the_round_trip_that_resume_depends_on():
+    """Written every step, so a field left out of `_FIELDS` is gone by step 1.
+
+    `task_index` and `source` are what decide the `THIS PAGE` marker after a
+    resume. Without them every reloaded entry is task 0 with no provenance,
+    and the run cannot tell an entry of the current task from one of the task
+    before it.
+    """
+    from brotto_orchestrator.agent.audit import _as_scratchpad
+
+    sp = Scratchpad().capture_page(url="https://a.test/x", step=4,
+                                   text="body", task_index=2)
+    back = _as_scratchpad(json.loads(json.dumps(_scratchpad_dict(sp))))
+    assert back.entries[0].task_index == 2
+    assert back.entries[0].source == "page"

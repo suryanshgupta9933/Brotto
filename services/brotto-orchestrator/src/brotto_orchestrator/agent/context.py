@@ -35,6 +35,18 @@ class MemoryEntry(BaseModel):
     # otherwise indistinguishable in the manifest, and "go back to *that*
     # page" is the whole point of keeping them.
     url: str = ""
+    # Which task of the session captured it. The bare `step` counter resets
+    # for every new task, so step 4 exists once per task in a conversation
+    # and `e.step == current_step` alone is satisfied by an entry from task 1
+    # during task 2. `THIS PAGE` is a claim to the model about which entry is
+    # the page in front of it, and a resumed run carries the prior task's
+    # entries into this one, so the claim needs both coordinates.
+    task_index: int = 0
+    # Provenance, set in code at the two capture sites and never from an
+    # action's arguments. `selector` is model-writable — read_page_text takes
+    # it as an argument — and a field the model can write is not a sound
+    # basis for a factual claim about which page an entry is.
+    source: str = ""
 
 
 DIGEST_LEN = 200
@@ -73,7 +85,8 @@ class Scratchpad(BaseModel):
         between two reads could reuse an id and silently overwrite one."""
         return f"r{len(self.entries) + 1}"
 
-    def capture_page(self, url: str, step: int, text: str) -> "Scratchpad":
+    def capture_page(self, url: str, step: int, text: str,
+                     task_index: int = 0) -> "Scratchpad":
         """Record the page the agent is currently looking at.
 
         Done in code on every step, not asked for. `page_text` already
@@ -104,6 +117,7 @@ class Scratchpad(BaseModel):
         return self.with_entry(MemoryEntry(
             id=self.next_id(), step=step, selector="page", around=None,
             digest=digest, body=body, was_truncated=False, url=url,
+            task_index=task_index, source="page",
         ))
 
     def with_entry(self, entry: MemoryEntry) -> "Scratchpad":

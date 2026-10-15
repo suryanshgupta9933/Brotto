@@ -159,7 +159,14 @@ def _scratchpad_dict(value: Scratchpad | dict) -> dict:
     # page is captured: a 20-page run measured 200KB of growth for pages that
     # were 10x smaller. Nothing reads the body off disk; the digest is what a
     # resumed run's manifest renders.
-    _FIELDS = ("id", "step", "selector", "around", "digest", "was_truncated", "url")
+    # `task_index` and `source` are provenance, not page content: without
+    # them a resumed run cannot tell which task an entry came from and every
+    # entry reloads as task 0 with no provenance at all. An entry written
+    # before this field existed reloads with neither, and is then never marked
+    # as the current page — the marker missing, rather than marking the wrong
+    # one, which is the direction that matters.
+    _FIELDS = ("id", "step", "selector", "around", "digest", "was_truncated",
+               "url", "task_index", "source")
     if isinstance(value, Scratchpad):
         return {"entries": [{k: getattr(e, k) for k in _FIELDS} for e in value.entries],
                 "notes": value.notes}
