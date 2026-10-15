@@ -294,6 +294,31 @@ minor of extension frames. Removing a `task_start` key or a frame type is a
 minor bump and a one-minor deprecation, never a patch. The grow-only set is
 pinned by `scripts/test-frame-contract.test.js`.
 
+### The CD path is proven, not just written (2026-10-15)
+
+Until this date every doc here described the release path as though it had run,
+and the only evidence it worked was that the YAML existed. It has now run once,
+clean, for `v0.2.0`:
+
+- The tag sits on merged `main` commit `0e68b66c`. The first `v0.2.0` was cut on
+  a commit that never reached `main`, whose `manifest.json` read `1.0.0` and
+  whose tree had no `release.yml` — so the tag push fired nothing at all. It was
+  deleted and re-cut.
+- `release.yml` green: tag == manifest, version agreement, build, zip, GitHub
+  Release.
+- The `deploy` job blocked in `waiting` on the `production` environment until an
+  approval was submitted. The environment had been created with
+  `HEROKU_API_KEY` but with **no required reviewers**, so nothing would have
+  gated it; that rule was added. The deploy runs unattended only after a human
+  clicks.
+- After approval, the live relay's `/health` moved from `version: "2.0.0"` (a
+  hardcoded literal PR #41 deleted) to `version: "0.2.0"`.
+- The CD-produced zip downloads flat and loadable, `manifest.json` at the root.
+
+The lesson worth keeping: **a release path that has never fired is a design,
+not a fact** — the first run found a tag pointing at a commit `main` had never
+seen, and nothing in `ci.yml` would have said so.
+
 ## Two response shapes on the auth path
 
 The sign-in path answers with a field the client had no name for before
