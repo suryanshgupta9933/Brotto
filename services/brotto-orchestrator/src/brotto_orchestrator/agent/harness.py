@@ -215,6 +215,42 @@ def _narrate(text: str | None, secret_values: list[str] | None = None) -> str | 
     return out
 
 
+def _safe_thought(decision, secret_values: list[str] | None = None) -> str | None:
+    """The model's step thought, scrubbed.
+
+    It reaches four sinks — the approval card, the WS progress frame, the
+    audit document, and the narration — and none of them were guarding it. The
+    thought is the model's own words about page content, so it can carry a
+    value read straight off the page, and the audit document is the one that
+    outlives the run. Scrubbed here rather than at each sink so a future sink
+    cannot forget.
+    """
+    return _scrub_known_secrets(decision.thought, secret_values)
+
+
+def _safe_reasoning(decision, secret_values: list[str] | None = None) -> str | None:
+    """The model's reasoning, scrubbed — same sinks, same reason as the thought.
+
+    It sits beside the thought in the audit turn record, so scrubbing only the
+    thought leaves the same value one field away. `reasoning` is the channel
+    most likely to quote page text verbatim.
+    """
+    return _scrub_known_secrets(decision.reasoning, secret_values)
+
+
+def _scrub_known_secrets(text: str | None, secret_values: list[str] | None) -> str | None:
+    """Substitute this run's typed secrets, then pattern-redact.
+
+    Order matches `_narrate`: substitution first, because these exact strings
+    are the ones `redact_text` has no rule for.
+    """
+    if not text:
+        return None
+    for v in secret_values or ():
+        text = text.replace(v, "[typed into a secret field]")
+    return redact_text(text)[0]
+
+
 def _step_note(s: StepSummary) -> str:
     """Render a step's narration fenced as untrusted, or nothing.
 
@@ -2294,6 +2330,14 @@ class AgentHarness:
 
         await _seed_starting_domain(deps)
 
+        # Every value typed into a secret field this run, accumulated. A
+        # thought is written to the audit document *before* this step's
+        # actions execute, so the step's own typed_secrets are not known yet
+        # at that sink — and `redact_text` cannot recognise an arbitrary
+        # password. A later step's thought quoting a value typed earlier is
+        # the leak this closes.
+        run_secrets: list[str] = []
+
         for step in range(first_step, self.MAX_STEPS):
             deps.step_number = step
             # Close the previous turn here rather than at each exit: every
@@ -2637,7 +2681,8 @@ class AgentHarness:
                 if step_cost is not None:
                     cost = (cost or 0.0) + step_cost
             audit.record_model(
-                a_turn, thought=decision.thought, reasoning=decision.reasoning,
+                a_turn, thought=_safe_thought(decision, run_secrets),
+                reasoning=_safe_reasoning(decision, run_secrets),
                 tokens_in=tokens_in, tokens_out=tokens_out,
                 cache_read=cache_read, cache_write=cache_write,
                 cost_usd=step_cost,
@@ -2744,7 +2789,7 @@ class AgentHarness:
                     deps, audit, turn=a_turn, kind="critical_action",
                     action=_card_label(c.action, c.action_args),
                     args=c.action_args, domain=None,
-                    reason=_REASON_CRITICAL.format(thought=decision.thought),
+                    reason=_REASON_CRITICAL.format(thought=_safe_thought(decision, run_secrets)),
                 )
                 if not approved:
                     log.warning(
@@ -2871,7 +2916,7 @@ class AgentHarness:
                     "step": step,
                     "action": lead.action,
                     "action_target": lead.action_args.get("url") if lead.action == "navigate" else None,
-                    "thought": decision.thought,
+                    "thought": _safe_thought(decision, run_secrets),
                     "url": current_url,
                     "context": context,
                 })
@@ -2906,6 +2951,10 @@ class AgentHarness:
                 redact_flags.append(redact)
                 if redact:
                     typed_secrets.append(str(call.action_args.get("text") or ""))
+            # Into the run-wide list the moment it is known, so the sinks
+            # later in this same step see it too and not only the ones after
+            # the next step begins.
+            run_secrets.extend(v for v in typed_secrets if v)
             for call, redact in zip(decision.actions, redact_flags):
                 rec_args, trace = _scrubbed(call, redact)
                 action_trace.append(trace)
@@ -2997,7 +3046,7 @@ class AgentHarness:
             # never reaches here, so it gets none — an unfinished turn
             # describes actions that may not have run.
             if decision.thought:
-                audit.add_message(role="assistant", content=decision.thought,
+                audit.add_message(role="assistant", content=_safe_thought(decision, run_secrets),
                                   task=deps.task_index, turn=a_turn)
 
         timing_report = self._log_timings(
