@@ -540,7 +540,7 @@ function main() {
       /delete settings\.accountId/.test(sidepanel),
       "a leftover id hands the next sign-in this account's history and settings");
     check("sign-out opens the wizard in the panel that is already open",
-      /delete settings\.accountId[\s\S]{0,400}location\.assign\('welcome\.html'\)/.test(sidepanel),
+      /await dropCredential\(\)[\s\S]{0,400}location\.assign\('welcome\.html'\)/.test(sidepanel),
       "reverting the button leaves the user on a Settings screen that no longer describes them");
     check("hydrate repaints the footer from storage on every open",
       /paintSetupFooter\(s\)/.test(sidepanel));

@@ -721,10 +721,17 @@ entirely and a cloud user re-pastes once, into their own slot, after which the
 two never meet. Self-host reads the flat key exactly as before, which is why
 the cost is invisible to everyone who did not ask for accounts.
 
-Sign-out and the expired-credential sweep both **delete `settings.accountId`
-with the token**. Left behind, the next sign-in as a different account would
-inherit the previous one's history and settings — the same rows, one account
-earlier.
+Sign-out and the expired-credential sweep both run one helper,
+`dropCredential()`, which **deletes the account id with the token**. Left
+behind, the next sign-in as a different account would inherit the previous
+one's history and settings — the same rows, one account earlier.
+
+**The id is its own `chrome.storage.local` key, not a field in `settings`.** A
+field means every writer reconstructs the whole blob from a snapshot taken
+before an `await`, and anything that wrote `settings` in that window is
+silently clobbered — `learnAccountId()` did exactly that to a server-url edit.
+`welcome.js` `finish()` migrates a legacy `settings.accountId` once; the panel
+does the same on its next open.
 
 ### The clock reads in the units a run is measured in
 

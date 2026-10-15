@@ -28,7 +28,7 @@ So the privacy posture is not "we do not collect your data". It is:
 | Task title, action names, URLs, typed input | inside the audit document, server | until deleted |
 | Model config, `base_url` | `chrome.storage.local`, user, under a key carrying the account id on the cloud | until cleared |
 | API key | `chrome.storage.local`, user, same account-scoped key | until the user clears it |
-| Account id (`profiles.id`, the JWT `sub`) as a **namespace component** — which local key and which mirror rows a session belongs to | `settings.accountId` in `chrome.storage.local`, user; and returned as a response field, stored in no operator table | until sign-out clears it |
+| Account id (`profiles.id`, the JWT `sub`) as a **namespace component** — which local key and which mirror rows a session belongs to | the top-level `accountId` key in `chrome.storage.local`, user (its own key, not a field in `settings`, so no writer reconstructs the blob to record one); and returned as a response field, stored in no operator table | until sign-out clears it |
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
 | Waitlist signup and the beta roster — one row per address in `beta_access`: `asked_at` + name + batch (they asked), `approved_at` (we granted), `revoked_at` (we withdrew) | `beta_access` table in Supabase, server | until the operator drops it |

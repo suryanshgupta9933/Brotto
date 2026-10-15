@@ -54,10 +54,18 @@ function modelKeys(accountId: unknown): { config: string; apiKey: string } {
     : { config: MODEL_KEY, apiKey: API_KEY_KEY };
 }
 
+// The id is its own top-level storage key, not a field in `settings` — a
+// field would mean reconstructing the whole blob to record one, which is how a
+// concurrent settings edit used to be lost. The `settings.accountId` read is a
+// legacy fallback for installs from the one build that had it there; the panel
+// migrates it on its next open.
 async function modelKeysForSettings(): Promise<{ config: string; apiKey: string }> {
-  const stored = await chrome.storage.local.get("settings");
+  const stored = await chrome.storage.local.get(["accountId", "settings"]);
   const settings = stored.settings as { accountId?: unknown } | undefined;
-  return modelKeys(settings?.accountId);
+  const id = typeof stored.accountId === "string" && stored.accountId
+    ? stored.accountId
+    : settings?.accountId;
+  return modelKeys(id);
 }
 
 function isModelConfig(v: unknown): v is ModelConfig {

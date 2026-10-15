@@ -521,8 +521,9 @@ async function finish(deferred = false) {
   // Written on every path, not only the cloud one: a self-hoster or a Skip who
   // is switching off a previous cloud sign-in must not keep that account's id,
   // or the next panel open scopes itself to an account this wizard just ended.
-  // A cloud wizard run that did not exchange leaves it "", and the panel
-  // re-learns it from /v1/account on its next open.
+  // It is its own top-level storage key rather than a field in `settings`, so
+  // no writer ever has to reconstruct the blob from a stale snapshot to record
+  // one — that is how a server-url edit used to be silently clobbered.
   const keys = brottoModelKeys(exchangeAccountId);
   const saved = await chrome.storage.local.get(["settings", keys.config]);
   // A window the user stated in Settings outranks this file's answer: for a
@@ -531,10 +532,11 @@ async function finish(deferred = false) {
   // a number they typed.
   const prevCtx = Number(saved[keys.config]?.context_window);
   const keepCtx = Number.isFinite(prevCtx) && prevCtx > 0 ? prevCtx : ctx;
+  const { accountId: _legacy, ...prevSettings } = saved.settings || {};
   await Promise.all([
     chrome.storage.local.set({
       settings: {
-        ...(saved.settings || {}),
+        ...prevSettings,
         serverUrl: server,
         agentSecret: $agentSecret.value.trim(),
         // Which server issued it. On the cloud path that value is a real
@@ -547,11 +549,11 @@ async function finish(deferred = false) {
         // server is not up yet" from "my server went down". One flag,
         // written here and read by exactly one banner.
         setupDeferred: !!deferred,
-        // No id on the self-host path and none on a degraded exchange: the same
-        // two values the panel and the worker read to pick the storage keys.
-        accountId: exchangeAccountId,
       },
     }),
+    exchangeAccountId
+      ? chrome.storage.local.set({ accountId: exchangeAccountId })
+      : chrome.storage.local.remove("accountId"),
     chrome.storage.local.set({ [keys.config]: { provider, model, context_window: keepCtx } }),
     key ? chrome.storage.local.set({ [keys.apiKey]: key }) : Promise.resolve(),
   ]);

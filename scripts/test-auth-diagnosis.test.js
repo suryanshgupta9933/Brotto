@@ -149,7 +149,7 @@ async function classify(healthStatus) {
   check("cloud mode says the sign-in expired and points at the wizard",
     /state\.authMode === 'jwt'[\s\S]{0,1200}sign-in has expired — open Set up Brotto/.test(panel));
   check("an expired cloud token is cleared so the footer can offer the wizard again",
-    /state\.authMode === 'jwt'[\s\S]{0,1200}delete cleaned\.agentSecret/.test(panel)
+    /state\.authMode === 'jwt'[\s\S]{0,1200}dropCredential\(\)/.test(panel)
     && /paintSetupFooter\(\{\}\)/.test(panel),
     "a dead token left in the slot keeps the footer on Sign out for a session that does not exist");
 

@@ -302,12 +302,11 @@ function fitModelPill() {
 
 // Which two storage keys hold the model config and the API key right now —
 // flat for self-host, suffixed with the account id on the cloud, so a second
-// account in this Chrome profile cannot spend the first one's key. Read from
-// `settings.accountId`, which /v1/account wrote and sign-out deleted; nothing
-// here looks at the credential.
+// account in this Chrome profile cannot spend the first one's key. The id comes
+// from the `accountId` storage key, which /v1/account wrote and sign-out
+// deleted; nothing here looks at the credential.
 async function modelKeyNames() {
-  const stored = await chrome.storage.local.get('settings');
-  return brottoModelKeys((stored.settings || {}).accountId);
+  return brottoModelKeys((await chrome.storage.local.get('accountId')).accountId || '');
 }
 
 // Shown in place of a stored API key: the field must look occupied when it
@@ -1475,15 +1474,15 @@ async function authHeaders() {
 //
 // The wizard is not the only path: a panel opened days later holds a stored
 // token and has no exchange in this session, and without an id it cannot tell
-// whose history it is showing. Anything that is not a usable id (self-host's
-// `null`, a degraded exchange's `""`, a 404, an unreachable server) leaves
-// `state.accountId` null, which is the pre-account behaviour by construction.
+// whose history it is showing. It is cached on the panel, and stored as its
+// own key so no writer ever has to reconstruct the `settings` blob to record
+// one — that reconstruction is how a server-url edit used to be clobbered.
 async function learnAccountId() {
-  const cur = (await chrome.storage.local.get('settings')).settings || {};
   // Only the cloud has accounts. Asking a self-host would cost a request to
   // learn what the mode already says.
   if (state.authMode !== 'jwt') return;
-  if (cur.accountId) { state.accountId = cur.accountId; return; }
+  const stored = await chrome.storage.local.get('accountId');
+  if (stored.accountId) { state.accountId = stored.accountId; return; }
   try {
     const res = await fetch(`${serverBase()}/v1/account`, { headers: await authHeaders() });
     if (!res.ok) return;
@@ -1491,8 +1490,34 @@ async function learnAccountId() {
     const id = body && typeof body.account_id === 'string' ? body.account_id : '';
     if (!id) return;
     state.accountId = id;
-    await chrome.storage.local.set({ settings: { ...cur, accountId: id } });
+    await chrome.storage.local.set({ accountId: id });
   } catch { /* no id means today's behaviour, which is the point */ }
+}
+
+// The account behind the token in the slot, fetched over the same
+// authenticated path as every other call — no second fetch helper, no
+// `?token=`, no decoding.
+//
+// The wizard is not the only path: a panel opened days later holds a stored
+// token and has no exchange in this session, and without an id it cannot tell
+// whose history it is showing. This only ever REFINES what init already seeded
+// from storage, and only for the cloud: asking a self-host would cost a request
+// to learn what the mode already says.
+async function learnAccountId() {
+  // Only the cloud has accounts.
+  if (state.authMode !== 'jwt') return;
+  if (await accountScope() !== UNNAMED_ACCOUNT) return; // named already
+  try {
+    const res = await fetch(`${serverBase()}/v1/account`, { headers: await authHeaders() });
+    if (!res.ok) return;
+    const body = await res.json();
+    const id = body && typeof body.account_id === 'string' ? body.account_id : '';
+    if (!id) return;
+    state.accountId = id;
+    // Its own key: no writer ever has to reconstruct `settings` to record an
+    // id, so the clobber window this used to have does not exist.
+    await chrome.storage.local.set({ accountId: id });
+  } catch { /* accountScope's fail-closed namespace is the answer meanwhile */ }
 }
 
 // Same base as the panel's other server calls (fetchSuggestions, settings
@@ -1821,6 +1846,21 @@ function paintSetupFooter(s) {
   replaySetupBtn.textContent = signedIn ? 'Sign out' : 'Set up Brotto';
 }
 
+// Both teardown paths — this button and the expired-credential sweep in the
+// /health handler — run this. "Clear the slot" and "clear what the slot was for"
+// are one operation, and two copies of it will drift.
+async function dropCredential() {
+  const stored = await chrome.storage.local.get(['settings', 'accountId']);
+  const settings = { ...(stored.settings || {}) };
+  delete settings.agentSecret;
+  delete settings.agentSecretOrigin;
+  // Legacy shape, only if this install predates the top-level key.
+  delete settings.accountId;
+  await chrome.storage.local.set({ settings });
+  if (stored.accountId) await chrome.storage.local.remove('accountId');
+  state.accountId = null;
+}
+
 // setOptions re-points the panel; it has no gesture requirement, so the
 // wizard replaces this page on the next open rather than in a new tab.
 // Sign-out clears the one slot the wizard fills and falls back to this
@@ -1829,14 +1869,7 @@ function paintSetupFooter(s) {
 if (replaySetupBtn) {
   replaySetupBtn.addEventListener('click', async () => {
     if (replaySetupBtn.dataset.signout === '1') {
-      const cur = (await chrome.storage.local.get('settings')).settings || {};
-      const settings = { ...cur };
-      delete settings.agentSecret;
-      delete settings.agentSecretOrigin;
-      // The id goes with the token. Left behind, the next sign-in as a
-      // different account would inherit this one's history and settings.
-      delete settings.accountId;
-      await chrome.storage.local.set({ settings });
+      await dropCredential();
       // Navigate the open panel, not just the next open: reverting the
       // button leaves the user on a Settings screen that no longer describes
       // their state. The wizard is the only writer of these fields.
@@ -5217,6 +5250,21 @@ goalEl.focus();
   // the task was on. Hydrate it from storage first; everything below and every
   // other call site reads plannerUrlEl, so this one read covers them.
   const { settings } = await chrome.storage.local.get('settings');
+  // Seed the account id BEFORE the probe below, from storage alone, so a panel
+  // opened while /health is slow — or on a server that never answers — still
+  // scopes to the right account instead of falling back to the shared
+  // namespace. `learnAccountId()` only refines what is seeded here.
+  const { accountId } = await chrome.storage.local.get('accountId');
+  if (typeof accountId === 'string' && accountId) {
+    state.accountId = accountId;
+  } else if (settings && typeof settings.accountId === 'string' && settings.accountId) {
+    // Migrate once. The id used to live inside `settings`, where recording one
+    // meant rewriting the whole blob from a pre-fetch snapshot; anyone on that
+    // build has it there, so move it to its own key and drop the old field.
+    state.accountId = settings.accountId;
+    const { accountId: _legacy, ...rest } = settings;
+    await chrome.storage.local.set({ accountId: settings.accountId, settings: rest });
+  }
   // Setup was never completed. Every way into this page — the toolbar action,
   // a reloaded extension, a cleared profile — lands here, and an empty panel
   // whose composer cannot reach anything is the one outcome worse than the
@@ -5262,13 +5310,9 @@ goalEl.focus();
         // dead end that made this look like a total outage.
         const cur = (await chrome.storage.local.get('settings')).settings || {};
         if (cur.agentSecret) {
-          const cleaned = { ...cur };
-          delete cleaned.agentSecret;
-          delete cleaned.agentSecretOrigin;
-          // Same reasoning as sign-out: an expired token names no account, so
-          // keeping the id would scope the next sign-in to this one.
-          delete cleaned.accountId;
-          await chrome.storage.local.set({ settings: cleaned });
+          // Same operation as Sign out, same helper: an expired token names no
+          // account, so the id goes, and so do the artifacts it was keeping.
+          await dropCredential();
         }
         paintSetupFooter({});
         toast('Your Brotto Cloud sign-in has expired — open Set up Brotto to sign in again', 'bad', 6000);

@@ -71,9 +71,16 @@ function panelRig(respond, { authMode = "jwt", stored = {} } = {}) {
     chrome: {
       storage: {
         local: {
-          get: async (k) => (typeof k === "string" ? (k in local ? { [k]: local[k] } : {}) : {}),
+          get: async (k) => {
+            const keys = Array.isArray(k) ? k : typeof k === "string" ? [k] : Object.keys(local);
+            const out = {};
+            for (const key of keys) if (key in local) out[key] = local[key];
+            return out;
+          },
           set: async (o) => { Object.assign(local, o); },
-          remove: async () => {},
+          remove: async (keys) => {
+            for (const key of (Array.isArray(keys) ? keys : [keys])) delete local[key];
+          },
         },
       },
     },
@@ -85,6 +92,18 @@ function panelRig(respond, { authMode = "jwt", stored = {} } = {}) {
     lastCredentialRefusal: "",
     toast() {},
     CLOUD_SERVER_URL: "https://agent.brotto.dev",
+    UNNAMED_ACCOUNT: "unnamed-account",
+    brottoModelKeys: (id) => (typeof id === "string" && id
+      ? { config: `modelConfig:${id}`, apiKey: `modelApiKey:${id}` }
+      : { config: "modelConfig", apiKey: "modelApiKey" }),
+    brottoSessionStore: {
+      cleared: [],
+      clear: async (ns) => { sandbox.brottoSessionStore.cleared.push(ns); },
+      namespaceFor: (base, id) => {
+        const ns = String(base || "").replace(/\/$/, "").toLowerCase();
+        return id ? `${ns}#${id}` : ns;
+      },
+    },
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
@@ -110,8 +129,9 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
       JSON.stringify(s.calls[0].headers));
     check("it is cached on the panel for the namespace to read",
       s.state.accountId === ACCOUNT, String(s.state.accountId));
-    check("and stored, so the service worker and the wizard can read it too",
-      s.local.settings.accountId === ACCOUNT, JSON.stringify(s.local.settings.accountId));
+    check("and stored under its own key, so no writer reconstructs the settings blob",
+      s.local.accountId === ACCOUNT && s.local.settings.accountId === undefined,
+      JSON.stringify(s.local));
   }
 
   // ── The three answers that mean "no account" ───────────────────────────
@@ -127,7 +147,8 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
     check(`${label} leaves no account on the panel`,
       s.state.accountId === null, String(s.state.accountId));
     check(`${label} leaves nothing in storage`,
-      s.local.settings.accountId === undefined, String(s.local.settings.accountId));
+      s.local.accountId === undefined && s.local.settings.accountId === undefined,
+      JSON.stringify(s.local));
   }
   {
     const s = panelRig(async () => { throw new Error("network down"); });
@@ -156,10 +177,9 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
     const exchange = extract(welcome, "exchangeCode");
     check("the exchange reads the id as its own field, not out of the token",
       /body\.account_id/.test(exchange) && !/\batob\b|jwtDecode|split\(["']\.["']\)/.test(exchange));
-    check("finish() persists it next to the credential",
-      /accountId:\s*exchangeAccountId/.test(extract(welcome, "finish")));
+    check("finish() persists it as a top-level key, not a settings field",
+      /chrome\.storage\.local\.set\(\{\s*accountId:\s*exchangeAccountId/.test(extract(welcome, "finish")));
   }
-
   // ── Absences that must not come back ───────────────────────────────────
   {
     const both = code(sidepanel) + code(welcome) + code(store);

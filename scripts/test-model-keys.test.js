@@ -138,7 +138,7 @@ check("two accounts do not share a key",
 
   // ── The migration, which is the absence ────────────────────────────────
   {
-    const s = storage({ settings: { accountId: ACCOUNT }, ...flat });
+    const s = storage({ accountId: ACCOUNT, settings: { serverUrl: "https://agent.brotto.dev" }, ...flat });
     const ctx = vm.createContext(s);
     vm.runInContext(compiled, ctx);
     const read = await vm.runInContext("getStoredModelConfig()", ctx);
@@ -162,8 +162,13 @@ check("two accounts do not share a key",
       fs.readFileSync(path.join(EXT, "welcome.js"), "utf8"))
     && /\[keys\.apiKey\]: key/.test(fs.readFileSync(path.join(EXT, "welcome.js"), "utf8")));
   check("no storage key was invented for the account-scoped pair in the panel",
-    !/modelApiKey:|modelConfig:/.test(fs.readFileSync(path.join(EXT, "sidepanel.js"), "utf8")
-      .replace(/modelApiKey:\$\{accountId\}/g, "")));
+    // Comments are stripped: the panel explains itself by naming the keys,
+    // and a check that trips on the explanation defeats the rule it states.
+    !/modelApiKey:|modelConfig:/.test(
+      fs.readFileSync(path.join(EXT, "sidepanel.js"), "utf8")
+        .replace(/^\s*\/\/.*$/gm, "")
+        .replace(/modelApiKey:\$\{accountId\}/g, "")),
+    "the panel asks modelKeys() for the name; the worker copy of the table is not repeated here");
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");
   process.exit(failures ? 1 : 0);

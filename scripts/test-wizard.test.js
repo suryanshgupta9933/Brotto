@@ -237,7 +237,7 @@ check("the wizard picks its opening radio from the stored address",
   "otherwise a signed-out cloud user lands on the self-host form, and an existing self-hoster lands on a sign-in they never asked for");
 check("and re-running the wizard overwrites the slot rather than accumulating a second one",
   /agentSecret: \$agentSecret\.value\.trim\(\)/.test(welcome)
-  && /\.\.\.\(saved\.settings \|\| \{\}\)/.test(welcome));
+  && /\.\.\.prevSettings/.test(welcome));
 
 console.log(failures ? `\n${failures} failed` : "\nall passed");
 process.exit(failures ? 1 : 0);
