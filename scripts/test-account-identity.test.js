@@ -227,6 +227,31 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
       JSON.stringify(s.brottoSessionStore.cleared));
     check("dropping the credential leaves the panel scoped to nothing", s.state.accountId === null);
   }
+  // A cloud account whose id never arrived writes and reads the sentinel
+  // namespace. Sign-out must take that bucket too, or its key and mirrored
+  // history outlive the sign-out and greet the next account to sign in.
+  {
+    const s = panelRig(json(200, {}), { authMode: "jwt", stored: { agentSecret: "cloud-token" } });
+    s.local["modelApiKey:unnamed-account"] = "sk-live-secret";
+    s.local["modelConfig:unnamed-account"] = { provider: "anthropic", model: "claude" };
+    await s.dropCredential();
+    check("sign-out clears the unnamed namespace's saved API key",
+      s.local["modelApiKey:unnamed-account"] === undefined, JSON.stringify(Object.keys(s.local)));
+    check("sign-out clears the unnamed namespace's model config",
+      s.local["modelConfig:unnamed-account"] === undefined);
+    check("sign-out clears the unnamed namespace's mirrored history",
+      s.brottoSessionStore.cleared.includes("https://agent.brotto.dev#unnamed-account"),
+      JSON.stringify(s.brottoSessionStore.cleared));
+  }
+  // Self-host resolves to no scope at all: nothing namespaced, nothing deleted.
+  {
+    const s = panelRig(json(200, {}), { authMode: "secret", stored: { agentSecret: "AGENT_SECRET_VALUE" } });
+    s.local.modelApiKey = "sk-self-hosted";
+    await s.dropCredential();
+    check("self-host sign-out leaves its flat key and history alone",
+      s.local.modelApiKey === "sk-self-hosted" && s.brottoSessionStore.cleared.length === 0,
+      JSON.stringify([s.brottoSessionStore.cleared, Object.keys(s.local)]));
+  }
   check("both teardown paths run the one helper",
     /await dropCredential\(\)/.test(code(sidepanel))
     && (code(sidepanel).match(/dropCredential\(\)/g) || []).length === 3,

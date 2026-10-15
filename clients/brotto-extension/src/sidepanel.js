@@ -1871,6 +1871,10 @@ async function dropCredential() {
   const stored = await chrome.storage.local.get(['settings', 'accountId']);
   const settings = { ...(stored.settings || {}) };
   const accountId = typeof stored.accountId === 'string' ? stored.accountId : '';
+  // Resolved before the id is dropped: afterwards accountScope() can no longer
+  // name the unnamed namespace a cloud account with no id reads and writes, so
+  // that account's key and mirrored history would outlive its own sign-out.
+  const scope = await accountScope();
   delete settings.agentSecret;
   delete settings.agentSecretOrigin;
   // Legacy shape, only if this install predates the top-level key.
@@ -1878,7 +1882,7 @@ async function dropCredential() {
   await chrome.storage.local.set({ settings });
   if (accountId) await chrome.storage.local.remove('accountId');
   state.accountId = null;
-  await clearAccountArtifacts(accountId);
+  await clearAccountArtifacts(scope);
 }
 
 // setOptions re-points the panel; it has no gesture requirement, so the
