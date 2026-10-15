@@ -578,9 +578,18 @@ still a build that knows what things cost.
 self-hosted, the key belongs to the user, and on a subscription the money is
 theirs too — a default ceiling would spend their tokens for them. Set it when
 the key is one whose bill is not theirs to decide. A non-positive or
-unparseable value arms nothing and logs a warning. A model the catalog has no
-published rate for cannot be priced, so a ceiling cannot bound it; that is
-logged once per run rather than passed over in silence.
+unparseable value arms nothing and logs a warning.
+
+**A ceiling cannot bound what nothing can price, or what nothing costs.** A
+model the catalogue has no entry for is not automatically unpriceable —
+`AGENT_INPUT_PER_MTOK` / `AGENT_OUTPUT_PER_MTOK` (or the per-user
+`logs/user_models/<ip>.json`) state a rate the catalogue lacks, and a
+**catalogue rate always beats a stated one**; `model-config.md` owns all of it.
+What still arms nothing is a model priced at `$0.00` — a local box genuinely
+costs its user nothing per token, and `BROTTO_MAX_TASK_COST_USD` cannot be
+crossed by zero. `pricing.is_unenforceable()` detects that case and the harness
+**warns at task start**, because the operator is the one who has to know their
+cap is not live. Neither case is passed over in silence.
 
 ## `BROTTO_ENV=prod` is a cost control
 `BROTTO_ENV` defaults to `dev`, and dev pre-seeds

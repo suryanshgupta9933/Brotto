@@ -23,7 +23,12 @@ from pydantic_ai.exceptions import (
 
 from brotto_orchestrator.cdp.extension_relay import TabUnreachable
 from brotto_orchestrator.model.config import UserCredentials
-from brotto_orchestrator.model.pricing import lookup as _price_lookup, price_usage
+from brotto_orchestrator.model.pricing import (
+    lookup as _price_lookup,
+    is_unenforceable,
+    price_usage,
+    user_rates,
+)
 from brotto_orchestrator.model.registry import PROVIDER_REGISTRY
 from brotto_orchestrator.model.resolver import resolve_model_config
 
@@ -413,6 +418,40 @@ def _conversation_block(messages: list[dict], *, current_task: int) -> str:
             + "\n".join(lines) + "\n")
 
 
+def repeat_nudge(summaries: list[StepSummary]) -> str:
+    """A run-control line when the last two steps say the same thing.
+
+    A stuck agent (an overlay it cannot see) re-emits near-identical
+    summaries until the step budget is gone and the run falls back to URL
+    navigation. One line in the next prompt is enough to change approach;
+    nothing here ends the run on its own — the model still gets to try
+    something different or say it cannot proceed.
+
+    ponytail: adjacent-step comparison only. General repetition detection
+    (cycles over a window) if this ever under-fires.
+    """
+    if len(summaries) < 2:
+        return ""
+    a, b = summaries[-2], summaries[-1]
+    if a.url != b.url:
+        return ""
+
+    def norm(s: StepSummary) -> set[str]:
+        return set((s.action_taken + " " + s.outcome).lower().split())
+
+    # Word overlap, not string equality: the same stuck step is reworded
+    # slightly every time ("...in the menu" / "...in the open sort menu").
+    wa, wb = norm(a), norm(b)
+    if not wa or not wb or len(wa & wb) / len(wa | wb) < 0.6:
+        return ""
+    return (
+        "The last two steps did the same thing and produced the same "
+        "result. Do not repeat it. Either do something different (another "
+        "control, another way of looking, scroll, navigate, or read the "
+        "page text) or call cannot_complete saying what you could not find."
+    )
+
+
 def _turn_to_prompt(turn: AgentTurn) -> str:
     summaries = turn.step_summaries
     if len(summaries) > _HISTORY_WINDOW:
@@ -457,6 +496,13 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     steer_section = (
         f"\n## User update (supersedes earlier intent)\n{turn.steering}\n"
         if turn.steering else ""
+    )
+
+    # Same reasoning as steering: the last thing read, so a step that went
+    # nowhere is the last thing the model is told about.
+    repeat_section = (
+        f"\n## Repeated step\n{turn.repeat_warning}\n"
+        if turn.repeat_warning else ""
     )
 
     # ponytail: the policy preamble is injected here, not at Agent
@@ -510,7 +556,7 @@ Title: {turn.current_page_title}
 <page_content untrusted url="{turn.current_url}">
 {turn.ax_tree}
 </page_content>
-{text_section}{steer_section}
+{text_section}{steer_section}{repeat_section}
 ## What is your next action(s)?
 """
 
@@ -1497,15 +1543,19 @@ def _catalog_for(deps: AgentDeps):
     `_plan_step` sets that attribute only on the branch that builds a real
     provider model. The scripted/test path deliberately never resolves one —
     there is nothing to bill — and calling the resolver there would raise on
-    a run that has no model to raise about. None also covers a model the
-    catalog has no entry for; only that one is a pricing gap.
+    a run that has no model to raise about. A model the catalog has no entry
+    for falls back to the rates the user stated on their own config, and None
+    survives to the cost only when they stated none.
     """
     if not _PRO_ENABLED:
         return None
     cfg = getattr(deps, "_model_config", None)
     if cfg is None:
         return None
-    return _price_lookup(cfg.provider, cfg.model)
+    known = _price_lookup(cfg.provider, cfg.model)
+    return known if known is not None else user_rates(
+        cfg.input_per_mtok, cfg.output_per_mtok
+    )
 
 
 async def _plan_step(
@@ -1915,12 +1965,22 @@ class AgentHarness:
             # ceiling, it is no ceiling, and the failure would otherwise be
             # silent for the whole run. Said once, here, before any of it.
             _cfg = getattr(deps, "_model_config", None)
-            if _cfg is not None and _catalog_for(deps) is None:
+            _price = _catalog_for(deps) if _cfg is not None else None
+            if _cfg is not None and _price is None:
                 log.warning(
                     "[%s] BROTTO_MAX_TASK_COST_USD=%.2f is set but %s:%s is "
                     "not in the catalog, so no step can be priced and the "
                     "ceiling will not fire", deps.user_id, _MAX_TASK_COST_USD,
                     _cfg.provider, _cfg.model)
+            elif is_unenforceable(_price):
+                # A free local box is not a mistake and its $0.00 is the honest
+                # cost — but a ceiling the operator set cannot be exceeded by
+                # zero, so say that rather than let the cap read as enforced.
+                log.warning(
+                    "[%s] BROTTO_MAX_TASK_COST_USD=%.2f is set but %s:%s is "
+                    "stated at $0.00 per Mtok, so every step prices at zero and "
+                    "the ceiling will not fire",
+                    deps.user_id, _MAX_TASK_COST_USD, _cfg.provider, _cfg.model)
 
         if not await deps.cdp.ping():
             return TaskResult(
@@ -2353,6 +2413,7 @@ class AgentHarness:
                 step_summaries=deps.step_summaries,
                 page_text=page_text,
                 steering=deps.pending_steering,
+                repeat_warning=repeat_nudge(deps.step_summaries),
             )
 
             log.info("[%s] step %d  url=%s  ax_elements=%d  memory_entries=%d",

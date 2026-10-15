@@ -86,6 +86,60 @@ const MAX_FRAMES = 12;
 const MAX_FRAME_DEPTH = 4;
 const MAX_NODES_PER_FRAME = 2000;
 
+/**
+ * The roles that ever become a target. Lives here, not in index.ts, because
+ * the node cap has to be spent on these: `getFullAXTree` returns every div,
+ * span and text node, and a positional slice of the raw array spends the whole
+ * budget on ignored wrappers and drops the tail — which is where a portal
+ * rendered at the end of `<body>` lives.
+ */
+export const KEEP_ROLES = new Set([
+  "button","link","textbox","searchbox","combobox","checkbox","radio",
+  "menuitem","tab","option","switch","slider","spinbutton","gridcell",
+  "heading","dialog","alert","listitem",
+]);
+
+/** The nodes `targetsForFrame` will actually emit. */
+export function isKeptNode(node: any): boolean {
+  if (!node || node.ignored) return false;
+  return KEEP_ROLES.has((node.role?.value ?? "").toLowerCase());
+}
+
+/**
+ * The capped kept nodes, plus the ancestors `targetsForFrame` needs to derive
+ * depth. That map is built from `axNodes` alone, so an ancestor left behind by
+ * the filter is a parent chain that stops at nothing — every surviving target
+ * on the page would report depth 0. Ancestors precede their descendants in the
+ * pre-order DFS, so walking up from a survivor can only reach nodes still in
+ * hand.
+ *
+ * Written without local type annotations, like `targetsForFrame`: this body is
+ * extracted and evaluated as plain JavaScript by
+ * `scripts/test-observation-surfaces.test.js`.
+ */
+function withKeptAncestors(kept: any[], raw: any[]): any[] {
+  const byId = new Map();
+  const parentOf = new Map();
+  for (const node of raw) {
+    byId.set(node.nodeId, node);
+    if (typeof node.nodeId === "number" && typeof node.parentId === "number") {
+      parentOf.set(node.nodeId, node.parentId);
+    }
+  }
+  const out = new Map(kept.map((n) => [n.nodeId, n]));
+  for (const node of kept) {
+    const seen = new Set();
+    let cur = parentOf.get(node.nodeId);
+    while (cur !== undefined && !out.has(cur) && !seen.has(cur)) {
+      seen.add(cur);
+      const ancestor = byId.get(cur);
+      if (ancestor) out.set(cur, ancestor);
+      cur = parentOf.get(cur);
+    }
+  }
+  return [...out.values()];
+}
+
 export interface SurfaceLimits {
   maxFrames?: number;
   maxDepth?: number;
@@ -118,12 +172,17 @@ export interface FrameScan {
   /** The frames whose tree hit MAX_NODES_PER_FRAME, so the server can say
    *  whether the truncated one was the page or an embed.
    *
-   *  `kept` is filled in by the caller once `targetsForFrame` has run, because
-   *  kept-role is not knowable here: the cap applies to *raw* AX nodes and most
-   *  of them never become targets. Gmail's main frame measured 2650 raw nodes
-   *  against a 2000 cap, so 650 went unseen every step — whether that was 650
-   *  controls or 650 generic containers is the whole accuracy question, and
-   *  `kept` is what answers it. */
+   *  `nodes` is the *raw* tree — how much CDP handed back — and the cap is on
+   *  the *kept* subset, so a frame appears here only when its kept controls
+   *  alone went over 2000. `kept` is filled in by the caller once
+   *  `targetsForFrame` has run, because kept-role is not knowable here.
+   *
+   *  These used to describe a cap on the raw array, which is what
+   *  `probe_observation_perf.py` still measures against: Gmail's main frame
+   *  read 2650 raw nodes and the old positional slice dropped the last 650,
+   *  which is the whole point — those 650 were mostly `generic` wrappers, so
+   *  the budget bought nothing and the tail (where a portal overlay lives)
+   *  went unseen. */
   cappedFrames: { frameIndex: number; url: string; crossOrigin: boolean; nodes: number; kept?: number }[];
   /** Frame ids whose `getFullAXTree` failed. */
   failed: string[];
@@ -284,7 +343,13 @@ export async function enumerateSurfaces(
       continue;
     }
     const nodes = read.nodes;
-    if (nodes.length > maxNodes) {
+    // Cap the nodes that survive the kept-role filter, not the raw array.
+    // Pre-order DFS alone does not preserve the parent chain: an ignored
+    // generic wrapper between a kept target and its kept ancestor does not
+    // survive the filter, and `targetsForFrame` walks exactly those links.
+    // Hence `withKeptAncestors` on both branches.
+    const kept = nodes.filter(isKeptNode);
+    if (kept.length > maxNodes) {
       scan.nodeCapped = true;
       // Which frame capped is the only thing that decides whether the model
       // lost something it needed: the main document going dark is a blind
@@ -295,9 +360,13 @@ export async function enumerateSurfaces(
         crossOrigin: surface.crossOrigin,
         nodes: nodes.length,
       });
-      surface.axNodes = nodes.slice(0, maxNodes);
+      surface.axNodes = withKeptAncestors(kept.slice(0, maxNodes), nodes);
     } else {
-      surface.axNodes = nodes;
+      // Not a cap, but not the raw array either: `kept` here means up to
+      // maxNodes survivors out of an arbitrarily large raw tree, so handing
+      // back `nodes` would undo the cap on the very pages that need it least.
+      // The ancestors are what `targetsForFrame` walks to derive depth.
+      surface.axNodes = withKeptAncestors(kept, nodes);
     }
   }
   return { surfaces, scan };

@@ -28,6 +28,24 @@ const DB_NAME = 'brotto-sessions';
 const DB_VERSION = 1;
 const STORE = 'audits';
 
+// Which server a mirrored row belongs to: the base address, normalised so a
+// typed trailing slash or a capital host is the same server.
+//
+// `auth_mode` is deliberately NOT part of this. It was the other candidate,
+// and it is the wrong one twice over: mode is a property of the server at an
+// address rather than of the user, so it separates nothing the address does
+// not already separate — and the panel's `state.authMode` is null until the
+// /health probe lands, so keying on it made every mirrored row vanish from
+// History for the moments the probe was still in flight.
+//
+// ponytail: ceiling — two cloud accounts on the same relay in one Chrome
+// profile share a namespace, because the panel cannot identify an account
+// without parsing the credential, and parsing it is the rule. Fix when the
+// relay hands out a stable per-account id the panel can read as its own field.
+function namespaceFor(base) {
+  return String(base || '').replace(/\/$/, '').toLowerCase();
+}
+
 let dbPromise = null;
 
 function openDb() {
@@ -65,12 +83,21 @@ function tx(mode, fn) {
 // `doc` is the audit document exactly as the server returned it — this store
 // is not where it gets reshaped, because the replay path wants the server's
 // bytes and a re-serialisation is one more way for the two copies to differ.
+//
+// `meta.namespace` is the server the document came from and is what every read
+// below filters on. The extension origin is shared by every server a user
+// points it at, so an un-namespaced store showed one account's conversations
+// under another's History — replayable, with the self-hosted server never
+// involved. `session_id` stays the keyPath: it is a uuid, so a cross-server
+// collision is not worth a DB migration, and a collision would overwrite rather
+// than disclose.
 async function put(sessionId, doc, meta = {}) {
   if (!sessionId || !doc) return false;
   try {
     await tx('readwrite', (store) => store.put({
       session_id: sessionId,
       doc,
+      ns: meta.namespace || '',
       task: meta.task || '',
       status: meta.status || '',
       steps: meta.steps ?? null,
@@ -87,12 +114,21 @@ async function put(sessionId, doc, meta = {}) {
   }
 }
 
+// A row with no namespace predates this field, so it belongs to no server and
+// is shown under none of them. Migrating it to whichever server happens to be
+// pointed at on first read would be the friendlier reading and the unsafe one:
+// that is the same disclosure this filter exists to stop, decided by which
+// address the user happened to type. A conversation the user cannot see is
+// recoverable; one shown under the wrong account is not.
+const inNamespace = (row, ns) => Boolean(ns) && row.ns === ns;
+
 // Index rows only. The document is the expensive part and the list does not
 // need it, so it is dropped here rather than in every caller.
-async function list() {
+async function list(ns) {
   try {
     const rows = await tx('readonly', (store) => store.getAll());
     return (rows || [])
+      .filter((row) => inNamespace(row, ns))
       .map(({ doc, ...meta }) => meta)
       .sort((a, b) => String(b.started_at || '').localeCompare(String(a.started_at || '')));
   } catch (err) {
@@ -101,31 +137,47 @@ async function list() {
   }
 }
 
-async function get(sessionId) {
+async function get(sessionId, ns) {
   if (!sessionId) return null;
   try {
     const row = await tx('readonly', (store) => store.get(sessionId));
-    return row ? row.doc : null;
+    return row && inNamespace(row, ns) ? row.doc : null;
   } catch {
     return null;
   }
 }
 
-async function remove(sessionId) {
-  if (!sessionId) return;
+// Scoped exactly like the reads, and this is not a disclosure question but a
+// destruction one: the read filter hides another server's row, and an ungated
+// delete would destroy it anyway, so the read fix would be undone by the write
+// path. The caller gets `false` for "not ours, left alone" so it can tell a
+// deletion from a refusal.
+async function remove(sessionId, ns) {
+  if (!sessionId) return false;
   try {
+    const row = await tx('readonly', (store) => store.get(sessionId));
+    if (!inNamespace(row, ns)) return false;
     await tx('readwrite', (store) => store.delete(sessionId));
+    return true;
   } catch (err) {
     console.warn('[brotto] session mirror delete failed:', err);
+    return false;
   }
 }
 
-async function clear() {
+// Scoped like the reads: "delete every conversation in the list" must not
+// reach rows the list never showed.
+async function clear(ns) {
   try {
-    await tx('readwrite', (store) => store.clear());
+    const rows = await tx('readonly', (store) => store.getAll());
+    const doomed = (rows || []).filter((row) => inNamespace(row, ns)).map((r) => r.session_id);
+    if (!doomed.length) return;
+    await tx('readwrite', (store) => {
+      for (const id of doomed) store.delete(id);
+    });
   } catch (err) {
     console.warn('[brotto] session mirror clear failed:', err);
   }
 }
 
-globalThis.brottoSessionStore = { put, list, get, remove, clear };
+globalThis.brottoSessionStore = { put, list, get, remove, clear, namespaceFor };

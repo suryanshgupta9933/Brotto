@@ -242,6 +242,8 @@ function openPanel(stored) {
     $modelBaseUrlSetting: { classList: { toggle() {} } },
     $modelBaseUrl: { value: "" },
     $modelContextWindow: { textContent: "", title: "" },
+    $modelContextWindowSetting: { classList: { toggle() {} } },
+    $modelContextWindowInput: { value: "" },
     $modelVisionBadge: { hidden: true, dataset: {}, textContent: "" },
     modelSettingsEdited: false,
     // Free variables the brace-matched hydrate/save bodies close over.
@@ -268,7 +270,7 @@ function openPanel(stored) {
   sandbox.modelCatalog = vm.runInContext(seed[1], sandbox);
 
   for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
-                    "renderModelFacts", "hydrateModelSettings", "initModelSettings"]) {
+                    "effectiveContextWindow", "renderModelFacts", "hydrateModelSettings", "initModelSettings", "repaintKeyField"]) {
     vm.runInContext(extract(fn), sandbox);
   }
   // The synchronous populate the panel does at module scope, before any fetch.

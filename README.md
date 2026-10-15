@@ -355,9 +355,13 @@ gets built on top of it.
   own token bill, so it costs you nothing extra to have.
 - **Routines.** Save a task as a named recipe and run it again later. Local to your machine; syncing
   a routine to a second device is a separate thing that needs an operator, and there is no operator.
-- **Per-run cost, and a ceiling on what one task may spend.** Steps priced from the catalogue after
-  every call, and a limit that ends a run at a step boundary once it crosses — after the step is
-  recorded, before its actions fire, with both amounts named in the summary.
+
+**Per-run cost and a spend ceiling already exist, behind `BROTTO_PRO`.** Every step is priced after
+the call and a limit ends the run at a step boundary once it crosses — after the step is recorded,
+before its actions fire, with both amounts named in the summary. Prices come from the catalogue; a
+model the catalogue cannot name prices off `AGENT_INPUT_PER_MTOK` / `AGENT_OUTPUT_PER_MTOK`, and one
+with no rate anywhere stays "not priced" rather than `$0.00`. It is listed here rather than above
+because the flag is off by default and a ceiling you cannot see is not a product.
 
 Two things this will never be, whatever it becomes: **Brotto does not keep your documents**, on any
 tier, and **Brotto does not mark up your tokens** — there is no margin, no credit balance and

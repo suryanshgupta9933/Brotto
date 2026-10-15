@@ -492,7 +492,7 @@ async function joinWaitlist() {
   }
 }
 
-async function finish() {
+async function finish(deferred = false) {
   const server = $serverUrl.value.trim() || DEFAULT_SERVER;
   const provider = $provider.value;
   const model = $model.value.trim();
@@ -506,7 +506,13 @@ async function finish() {
   // is the friction this field exists to remove. On the cloud path it holds
   // a bearer token rather than an AGENT_SECRET, which is the point: one
   // slot, one header, and nothing that has to be told which it is.
-  const saved = await chrome.storage.local.get("settings");
+  const saved = await chrome.storage.local.get(["settings", "modelConfig"]);
+  // A window the user stated in Settings outranks this file's answer: for a
+  // provider that takes any model id the catalogue can only offer a fallback,
+  // and re-running the wizard must not silently write that fallback back over
+  // a number they typed.
+  const prevCtx = Number(saved.modelConfig?.context_window);
+  const keepCtx = Number.isFinite(prevCtx) && prevCtx > 0 ? prevCtx : ctx;
   await Promise.all([
     chrome.storage.local.set({
       settings: {
@@ -518,8 +524,13 @@ async function finish() {
         // anywhere else (see credential.js).
         agentSecretOrigin: server,
         onboarded: true,
+        // Skip is the one path that reaches finish() without a working
+        // server, and it is the only way the panel can tell "I know my
+        // server is not up yet" from "my server went down". One flag,
+        // written here and read by exactly one banner.
+        setupDeferred: !!deferred,
       },
-      modelConfig: { provider, model, context_window: ctx },
+      modelConfig: { provider, model, context_window: keepCtx },
     }),
     key ? chrome.storage.local.set({ modelApiKey: key }) : Promise.resolve(),
   ]);
@@ -562,7 +573,7 @@ $next.addEventListener("click", async () => {
 // saved this way, and it catches it in one sentence at the first send.
 $skip.addEventListener("click", () => {
   $next.disabled = true;
-  void finish();
+  void finish(true);
 });
 
 // The radio that opens the wizard. Cloud is the default and self-host is the

@@ -12,6 +12,8 @@ const $modelSave = document.getElementById('model-save');
 const $modelStatus = document.getElementById('model-save-status');
 const $modelVisionBadge = document.getElementById('modelVisionBadge');
 const $modelContextWindow = document.getElementById('modelContextWindow');
+const $modelContextWindowSetting = document.getElementById('modelContextWindowSetting');
+const $modelContextWindowInput = document.getElementById('model-context-window');
 
 // The catalogue comes from GET /v1/models (see model_catalog.js), but it is
 // SEEDED with that file's offline FALLBACK rather than left null until the
@@ -56,6 +58,16 @@ function populateModelOptions() {
       $modelBaseUrl.value = provider.default_base_url || '';
     }
   }
+  // The context window is the other per-provider fact: a provider with a
+  // fixed catalogue knows every model's window, so a box asking the user for
+  // it would be asking them to look up something the panel already knows. Only
+  // a provider that takes any model id has no answer to offer — for those the
+  // only honest default is the catalogue's SMALLEST_KNOWN_WINDOW, which
+  // under-fills a 1M model and over-fills a 32k one, and the AX-tree budget is
+  // sized from this number.
+  if ($modelContextWindowSetting) {
+    $modelContextWindowSetting.classList.toggle('hidden', !provider?.accepts_any_model);
+  }
 }
 
 function populateProviders() {
@@ -95,6 +107,13 @@ function renderModelFacts() {
     $modelContextWindow.title = modelId && !entry
       ? `${modelId} is not in the catalogue — showing the smallest window this provider is known to have`
       : '';
+    // Prefill the editable window with what the catalogue reports, so the box
+    // is never empty of meaning — but only until the user touches it, and
+    // never over a number they typed.
+    if ($modelContextWindowInput && !modelSettingsEdited && !$modelContextWindowInput.value && modelId) {
+      $modelContextWindowInput.value =
+        brottoModelCatalog.contextWindow(modelCatalog, $modelProvider?.value, modelId);
+    }
   }
 
   if (!$modelVisionBadge) return;
@@ -108,6 +127,23 @@ function renderModelFacts() {
   $modelVisionBadge.hidden = !modelId;
   $modelVisionBadge.dataset.vision = entry?.vision ? 'yes' : 'no';
   $modelVisionBadge.textContent = entry?.vision ? 'VISION' : 'vision unverified';
+}
+
+// The window the run is actually planned against. The user's number wins when
+// the field is showing and the field holds a number; anything else — a field
+// that does not apply, an empty box, a half-typed one, `0`, a stray "32k" —
+// falls back to the catalogue. Falling back matters more than it looks: a
+// persisted 0 sizes the AX-tree budget to nothing and every run ends on the
+// first observation.
+function effectiveContextWindow(provider, model) {
+  const known = brottoModelCatalog.contextWindow(modelCatalog, provider, model);
+  if (!currentProvider()?.accepts_any_model || !$modelContextWindowInput) return known;
+  const typed = Number($modelContextWindowInput.value.trim());
+  return Number.isFinite(typed) && typed > 0 ? Math.floor(typed) : known;
+}
+
+if ($modelContextWindowInput) {
+  $modelContextWindowInput.addEventListener('input', () => { modelSettingsEdited = true; });
 }
 
 if ($modelProvider) {
@@ -159,7 +195,7 @@ if ($modelSave) {
     const model = $modelName.value.trim();
     if (!provider || !model) return;
     const providerInfo = currentProvider();
-    const ctx = brottoModelCatalog.contextWindow(modelCatalog, provider, model);
+    const ctx = effectiveContextWindow(provider, model);
     // base_url rides on modelConfig, not on the key, so a self-hosted or
     // OpenRouter user does not re-paste it every browser restart the way
     // they re-paste the key.
@@ -185,6 +221,7 @@ if ($modelSave) {
       keyOp,
     ]);
     setModelPill(model);
+    void repaintKeyField();
     // A re-pasted key is usually a *different* key, and the pre-flight cache
     // only knows whether some key was present — it cannot tell them apart
     // without hashing a secret to find out. Dropping the pass here is exact,
@@ -267,6 +304,26 @@ function fitModelPill() {
 // value; this is only the "something is saved here" signal.
 const KEY_MASK = '••••••••';
 
+// The key field is a pure function of what is actually in storage, repainted
+// by reading storage — never by a writer announcing its own change. There are
+// three writers of `modelApiKey` on three code paths (this file's Save, the
+// worker's `setStoredModelConfig`, and the wizard), and each one used to leave
+// the field showing KEY_MASK with nothing behind it. That is not cosmetic:
+// Save treats the mask as "key unchanged, write nothing", so pressing it then
+// stored nothing and the user was stuck with a field lying about a key that no
+// longer existed. Repainting from the truth is the only fix that covers the
+// writers we cannot see from here.
+//
+// A value that is neither the mask nor empty is a draft the user is typing, and
+// is left alone: re-opening Settings must not eat what they pasted.
+async function repaintKeyField() {
+  if (!$modelKey) return;
+  const current = $modelKey.value;
+  if (current && current !== KEY_MASK) return;
+  const stored = await chrome.storage.local.get('modelApiKey');
+  $modelKey.value = stored.modelApiKey ? KEY_MASK : '';
+}
+
 async function hydrateModelSettings() {
   const stored = await chrome.storage.local.get('modelConfig');
   // Second read, not an array get: the extraction tests' storage fake (and
@@ -294,6 +351,12 @@ async function hydrateModelSettings() {
       // field existed should land on the provider's default, not on a stale
       // value the user typed for a different provider.
       if ($modelBaseUrl && cfg.base_url) $modelBaseUrl.value = cfg.base_url;
+      // Same rule: a stored window is this user's own answer for a model the
+      // catalogue cannot describe. Nothing to refill when there is none — the
+      // prefill in renderModelFacts puts the catalogue's number in.
+      if ($modelContextWindowInput && cfg.context_window > 0) {
+        $modelContextWindowInput.value = cfg.context_window;
+      }
     }
     // The pill stays outside the guard on purpose: it names the model this
     // browser last *saved*, which is storage's answer whatever is on screen.
@@ -615,8 +678,6 @@ const timerActiveEl   = document.getElementById('timerActive');
 const newTaskBtn      = document.getElementById('newTaskBtn');
 const outcomeCell     = document.getElementById('outcomeCell');
 const connectionMeta  = document.getElementById('connectionMeta');
-const statusPill      = document.getElementById('statusPill');
-const connLabelEl     = document.getElementById('connLabel');
 
 // A failure saved yesterday is a failure today. Read it back before anything
 // can be sent, so the banner is standing before the user's first keystroke
@@ -631,6 +692,15 @@ void refreshModelCheckBanner();
 // trigger a confirm() before send; matching server warning at the same
 // threshold (defense in depth). Not a hard block — the user is the
 // final authority on what they want the agent to do.
+// Where a run can be shared. A GitHub Discussions post with the task
+// prefilled, because it needs nothing from us: no account, no endpoint, no
+// operator, and the same link whether the reader runs the cloud relay or a
+// server on their own laptop. The alternative — posting to an endpoint we
+// host — would have made the prompt useless for the self-hosted install, and
+// would have made a panel that claims page text never leaves the machine
+// phone home.
+const FEEDBACK_URL = 'https://github.com/suryanshgupta9933/Brotto/discussions/new';
+
 const MAX_TASK_CHARS = 1000;
 
 // ── Settings panel ────────────────────────────────────────────────────────
@@ -716,14 +786,87 @@ async function readAuthMode(res) {
 // `serverBase()` reads.
 async function refreshAuthMode() {
   const base = (plannerUrlEl.value || '').trim().replace(/\/$/, '');
+  let ok = false;
   try {
     const res = await fetch(`${base}/health`, { method: 'GET' });
-    state.authMode = res.ok ? await readAuthMode(res) : null;
+    ok = res.ok;
+    state.authMode = ok ? await readAuthMode(res) : null;
   } catch {
     state.authMode = null;
   }
+  // The one reachability signal there is, from the one probe the panel already
+  // makes. `authMode` alone cannot say unreachable from "asked and got no
+  // auth_mode back", and it is null while the probe is in flight — a card that
+  // appears on null would flash on every panel open. This is the settled
+  // answer to "did /health answer", and nothing pings a second endpoint.
+  state.serverReachable = ok;
   paintEditionTag();
+  paintServerBanner();
   return state.authMode;
+}
+
+// ── "Server not reachable", the sibling of the model-not-set banner ────────
+//
+// Same place, same shape and same CSS as the model-check banner: a standing
+// condition above the composer, not part of what happened in a run.
+//
+// The distinction this card has to keep straight is the one the wizard created.
+// "I skipped setup, the server is not running yet" is not "I am set up and my
+// server is down" — the first is a user who already knows, and telling them
+// about it every session is noise that teaches them to ignore the card. So
+// `settings.setupDeferred` — one flag, written by the wizard's Skip and by
+// nothing else — is the whole of it. No setup state machine.
+//
+// It also stays hidden until setup was completed at all: a browser that never
+// answered the wizard is on its way to welcome.html, not reading a card.
+async function paintServerBanner() {
+  const $banner = document.getElementById('serverBanner');
+  if (!$banner) return;
+  if (state.serverReachable !== false) { $banner.hidden = true; return; }
+  if (state.setupDeferred || state.setupIncomplete) { $banner.hidden = true; return; }
+  $banner.textContent = '';
+  const title = document.createElement('div');
+  title.className = 'model-check-banner-title';
+  title.textContent = 'Your Brotto server is not answering';
+  $banner.append(title);
+  const body = document.createElement('div');
+  body.className = 'model-check-banner-body md';
+  const base = serverBase();
+  body.innerHTML = renderMarkdown(
+    `Brotto cannot reach \`${base}\`. Nothing will run until it does — start your `
+    + 'orchestrator, or point Brotto at a different address.');
+  $banner.append(body);
+  const fix = document.createElement('button');
+  fix.type = 'button';
+  fix.className = 'btn model-check-banner-fix';
+  fix.textContent = 'Set up Brotto';
+  fix.addEventListener('click', () => { void chrome.sidePanel.setOptions({ path: 'welcome.html' }); });
+  $banner.append(fix);
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'btn model-check-banner-fix';
+  retry.textContent = 'Try again';
+  // Re-probing is the whole of the re-check policy: on panel open, and when
+  // the user says they have started the server. A timer here would ping an
+  // address that has not changed since the open, and the /health probe is
+  // already made for every send that matters.
+  retry.addEventListener('click', async () => {
+    retry.disabled = true;
+    await refreshAuthMode();
+    retry.disabled = false;
+  });
+  $banner.append(retry);
+  $banner.hidden = false;
+}
+
+// Reads the two setup facts once per panel open. `onboarded` is written by the
+// wizard on Start and on Skip alike, so it cannot tell them apart; the Skip
+// flag can. One read, one place.
+async function loadSetupState() {
+  const { settings } = await chrome.storage.local.get('settings');
+  state.setupDeferred = !!settings?.setupDeferred;
+  state.setupIncomplete = !settings?.onboarded;
+  paintServerBanner();
 }
 
 // ── The edition, named in the header ───────────────────────────────────────
@@ -884,15 +1027,23 @@ function panelStatus(status) {
   return SERVER_STATUS[status] || status || 'done';
 }
 
-// Three sources, most authoritative first, deduped by session id. The server
-// wins because it is the only copy with the real elapsed time and the loop's
-// own status vocabulary; the mirror fills in rows a restarted dyno no longer
-// has; `local` is the floor, because rows written before the panel knew any
-// session id live only there.
+// Three sources, most authoritative first, deduped by session id and sorted
+// newest first. The server wins because it is the only copy with the real
+// elapsed time and the loop's own status vocabulary; the mirror fills in rows
+// a restarted dyno no longer has; `local` is the floor, because rows written
+// before the panel knew any session id live only there.
 //
 // A row with no session_id cannot be deduped against another, and two such
 // rows that share a start time are the same conversation seen twice — the
 // replay in saveSession's comment is exactly that case.
+//
+// The sort is here rather than in each source because concatenating three
+// ordered lists is not an ordered list. Each source sorts itself — the server
+// by mtime, the mirror by `started_at` string — but the union interleaves
+// them, and a history whose order depends on which source answered read as
+// random. `startedAt` is an ISO string or a ms epoch, so compare numerically
+// when either side is a number and lexically otherwise; rows with no time at
+// all sink rather than lead.
 function mergeHistory(...sources) {
   const seen = new Set();
   const out = [];
@@ -904,11 +1055,20 @@ function mergeHistory(...sources) {
       out.push(row);
     }
   }
-  return out;
+  const time = (v) => {
+    if (v == null || v === '') return -Infinity;
+    const n = Number(v);
+    return Number.isFinite(n) && String(v).trim() !== '' ? n : Date.parse(v);
+  };
+  return out.sort((a, b) => time(b.startedAt) - time(a.startedAt));
 }
 
+// The mirror is scoped to the address every other server call uses — never a
+// comparison against a constant, never the credential. Inlined rather than
+// wrapped in a helper so the store's own namespace rule is read at each site.
 async function mirrorRows() {
-  return (await brottoSessionStore.list()).map((r) => ({
+  const ns = brottoSessionStore.namespaceFor(serverBase());
+  return (await brottoSessionStore.list(ns)).map((r) => ({
     task: r.task || '(no task text)',
     status: panelStatus(r.status),
     steps: r.steps,
@@ -919,14 +1079,30 @@ async function mirrorRows() {
   }));
 }
 
+// Where the last list came from. `historyEntries` falls through to the
+// IndexedDB mirror and `chrome.storage.local` on three conditions — a non-ok
+// response, a 200 with no array, and a throw — and a bad `AGENT_SECRET` is a
+// 404 *by design*, so one wrong credential 404s `/v1/sessions`,
+// `/v1/suggestions` and `/v1/policy` at once. History still rendered, from
+// local copies, and looked exactly like a server with nothing in it. The
+// panel has to be able to say which of the two it is looking at.
+let historySource = 'server';
+
 async function historyEntries() {
   const local = await listSessions();
   const mirrored = await mirrorRows();
   try {
     const res = await fetch(`${serverBase()}/v1/sessions`, { headers: await authHeaders() });
-    if (!res.ok) return mergeHistory(mirrored, local);
+    if (!res.ok) {
+      historySource = res.status === 404 ? 'rejected' : 'unreachable';
+      return mergeHistory(mirrored, local);
+    }
     const { sessions } = await res.json();
-    if (!Array.isArray(sessions)) return mergeHistory(mirrored, local);
+    if (!Array.isArray(sessions)) {
+      historySource = 'unreachable';
+      return mergeHistory(mirrored, local);
+    }
+    historySource = 'server';
     const serverRows = sessions.map((s) => ({
       task: s.task || s.title || '(no task text)',
       status: panelStatus(s.status),
@@ -942,8 +1118,46 @@ async function historyEntries() {
     // every time one happened.
     return mergeHistory(serverRows, mirrored, local);
   } catch {
+    historySource = 'unreachable';
     return mergeHistory(mirrored, local);
   }
+}
+
+// The card, not a header badge: the connection pill's removal took the top bar
+// back, and this is a claim about a list the user is reading rather than
+// ambient state. Same `appendFailureBubble` the model-not-set notice uses, so
+// it is the theme's own failure card and costs no new CSS.
+//
+// The wording is the point. "Some conversations could not be loaded" is true
+// on a server that is merely down and sends the user to debug the wrong
+// machine; 404 means a *credential* was refused, which is a different thing
+// with a different fix, and the server deliberately refuses with 404 so the
+// route does not confirm it exists.
+const HISTORY_SOURCE_CARD = {
+  rejected: {
+    title: 'Conversations here are local copies',
+    body: 'The server did not answer this browser — a wrong or missing `AGENT_SECRET` '
+      + 'is refused as "no such route", which is what a stopped server looks like too. '
+      + 'Everything below is what this browser kept.',
+    footer: 'Fix the key in Settings and reopen history to load the server\'s copy.',
+  },
+  unreachable: {
+    title: 'Conversations here are local copies',
+    body: 'The server could not be reached, so this list is what your browser kept '
+      + 'rather than what the server holds.',
+    footer: 'Your conversations are not lost — they come back when the server answers.',
+  },
+};
+
+function noteHistorySource() {
+  const card = HISTORY_SOURCE_CARD[historySource];
+  if (!card) return;
+  // One notice per render, not one per row: appendFailureBubble appends, and
+  // history is rendered again on every delete and every reopen.
+  const existing = messagesEl.querySelector('.history-source-card');
+  if (existing) existing.remove();
+  const el = appendFailureBubble({ ...card });
+  el.classList.add('history-source-card');
 }
 
 // ponytail: one writer, one reader, one shape. Called from both terminal
@@ -1015,6 +1229,7 @@ function formatSessionTime(ts) {
 async function renderHistory() {
   historyList.hidden = false;
   const sessions = await historyEntries();
+  noteHistorySource();
   document.getElementById('historyDeleteAll').hidden = sessions.length === 0;
   if (sessions.length === 0) {
     const empty = document.createElement('div');
@@ -1098,7 +1313,13 @@ async function deleteSession(entry) {
   // The mirror is a third copy and it is the only one that survives the
   // server's disk, so deleting the row and the server file while leaving it
   // behind would mean "deleted" is the one outcome the user cannot verify.
-  if (entry.session_id) await brottoSessionStore.remove(entry.session_id);
+  // false means "not ours, left alone" — a row written under a different
+  // server address. Ignoring it reported a clean delete for a transcript
+  // that is still in this browser, which is the one outcome the user cannot
+  // see. One honest line, not a settings screen.
+  const mirroredOut = entry.session_id
+    ? await brottoSessionStore.remove(entry.session_id, brottoSessionStore.namespaceFor(serverBase()))
+    : true;
   // The row goes from the panel first. A server that is down, or a secret
   // that is wrong, must not leave the user staring at a button that does
   // nothing — and the row is the half they can see.
@@ -1111,7 +1332,12 @@ async function deleteSession(entry) {
       headers: await authHeaders(),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    toast('Deleted from the server');
+    if (!mirroredOut) {
+      toast('Deleted from the server, but this browser kept its own copy — '
+        + 'if you have used more than one server address, clear the other', 'bad', 7000);
+    } else {
+      toast('Deleted from the server');
+    }
   } catch {
     toast('Removed here, but the server did not answer — this one may still be on disk',
       'bad', 6000);
@@ -1132,7 +1358,7 @@ async function deleteAllSessions() {
   if (!ok) return;
   await saveSessions([]);
   await noteDeleted(sessions.map((s) => s.session_id));
-  await brottoSessionStore.clear();
+  await brottoSessionStore.clear(brottoSessionStore.namespaceFor(serverBase()));
   await renderHistory();
   try {
     const res = await fetch(`${serverBase()}/v1/sessions`, {
@@ -1244,6 +1470,7 @@ async function mirrorSession(sessionId, { status, steps } = {}) {
   try {
     const doc = await fetchAudit(sessionId);
     await brottoSessionStore.put(sessionId, doc, {
+      namespace: brottoSessionStore.namespaceFor(serverBase()),
       task: (state.lastGoal || '').trim(),
       status,
       steps: steps ?? state.stepCount ?? null,
@@ -1269,7 +1496,7 @@ async function fetchAudit(sessionId) {
       if (doc && doc.found !== false) return doc;
     }
   } catch { /* fall through to the mirror */ }
-  const mirrored = await brottoSessionStore.get(sessionId);
+  const mirrored = await brottoSessionStore.get(sessionId, brottoSessionStore.namespaceFor(serverBase()));
   if (mirrored) return mirrored;
   throw new Error(`no copy of session ${sessionId}`);
 }
@@ -1577,6 +1804,10 @@ if (replaySetupBtn) {
 
 settingsBtn.addEventListener('click', async () => {
   await hydrateSettingsPanel();
+  // Opening Settings is the moment the field must agree with storage. The
+  // wizard and the worker both write `modelApiKey` from outside this file, so
+  // a key removed while the panel was closed can only be picked up by a read.
+  await repaintKeyField();
   settingsOverlay.classList.add('open');
 });
 
@@ -1736,6 +1967,12 @@ const state = {
   startTime: 0,
   stepCount: 0,
   pendingClarifyId: null,
+  // Whether /health answered on the last settled probe — null until it has.
+  serverReachable: null,
+  // The wizard's Skip wrote `setupDeferred`, and `onboarded` is absent until
+  // Start or Skip. Read once per open by loadSetupState().
+  setupDeferred: false,
+  setupIncomplete: false,
   // The server's session id, from `task_started`. History rows carry it so a
   // click can fetch the session document the run actually produced.
   sessionId: null,
@@ -1777,8 +2014,7 @@ function escapeHtml(s) {
 // the .final-answer-icon-btn CSS can recolor on hover / clicked.
 const LUCIDE_ICONS = {
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>',
-  thumbsUp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H7a2 2 0 0 1-2-1.88V11.88a2 2 0 0 1 2-2.12l4.32-4.32A2 2 0 0 1 13 4.83V9a2 2 0 0 0 2 2.88z"/></svg>',
-  thumbsDown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H17a2 2 0 0 1 2 1.88v8.24a2 2 0 0 1-2 2.12l-4.32 4.32A2 2 0 0 1 11 19.17V15a2 2 0 0 0-2-2.88z"/></svg>',
+  share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98"/><path d="m15.41 6.51-6.82 3.98"/></svg>',
   retry: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>',
 };
 
@@ -1797,17 +2033,6 @@ function makeIconBtn(svgContent, title, onClick) {
 // no telemetry and the orchestrator never sees it. It exists so the rating
 // survives a panel close, and the button tooltips say as much rather than
 // implying a feedback channel that doesn't exist.
-function recordFeedback(kind) {
-  try {
-    const stored = JSON.parse(localStorage.getItem('brotto-feedback') || '[]');
-    stored.push({
-      kind,
-      task: state.lastGoal || '',
-      timestamp: Date.now(),
-    });
-    localStorage.setItem('brotto-feedback', JSON.stringify(stored));
-  } catch {}
-}
 
 // ponytail: re-run the same task under a new session. Resets the chat
 // then re-sends the last goal using the same message type the initial
@@ -2397,7 +2622,12 @@ async function resetForNewTask() {
   setOutcome(null);
   state.taskInFlight = false;
   clearMessages();
-  stopTimer();
+  // clearTimer, not stopTimer: stop preserves the base time so the finished
+  // run's elapsed time stays on screen. A reset has no finished run to
+  // preserve, and leaving state.startTime set meant the replay guard
+  // (`startedAt && !state.startTime`) refused to rebase — so the next run's
+  // clock counted from the *previous* run's start and ran for hours.
+  clearTimer();
   setPhase(state.plannerUrl ? 'connected' : 'idle', state.plannerUrl ? 'Ready' : 'Ready');
 }
 
@@ -2555,18 +2785,6 @@ function setPhase(phase, message) {
   if (phase === 'paused' && !stopping) setOutcome('awaiting_human');
   else if (phase === 'executing' && outcomeCell?.dataset.state === 'waiting') setOutcome('running');
   if (message) connectionMeta.textContent = message;
-  // ponytail: Bug 2 — drive the header connection pill from phase.
-  // Mid-task disconnects are handled separately via `case 'disconnected'`
-  // (Bug 3) which uses setConnPill directly.
-  if (phase === 'connected' || phase === 'executing' || phase === 'paused' || phase === 'done') {
-    setConnPill('connected', 'Connected');
-  } else if (phase === 'connecting') {
-    setConnPill(null, 'Connecting…');
-  } else if (phase === 'error') {
-    setConnPill('error', 'Disconnected');
-  } else {
-    setConnPill(null, 'Idle');
-  }
 }
 
 function clearTimer() {
@@ -2577,8 +2795,24 @@ function clearTimer() {
   if (timerActiveEl) timerActiveEl.textContent = '0.0s';
 }
 
+// Seconds alone stop being readable at about a minute — "83.0s" is a number
+// the reader has to convert, and a slow run is exactly the one worth reading.
+// Under a minute the tenths still carry information (a step is ~30s, so the
+// difference between 12.0 and 12.9 is the difference between a fetch and a
+// stall); above it they are noise on a field three characters wide.
+function formatElapsed(ms) {
+  const elapsed = Math.max(0, ms);
+  const total = Math.floor(elapsed / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return `${h}h${m}m${s}s`;
+  if (m) return `${m}m${s}s`;
+  return (elapsed / 1000).toFixed(1) + 's';
+}
+
 function renderElapsed() {
-  const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
+  const elapsed = formatElapsed(Date.now() - state.startTime);
   if (timerEl) timerEl.textContent = elapsed;
   if (timerActiveEl) timerActiveEl.textContent = elapsed;
 }
@@ -2815,17 +3049,6 @@ function failureNote(reason, detail) {
 // the first send (ensureConnected), so the explicit connect step had no
 // button and no caller — it went when the dead startTask went, and its only
 // other listener was bound to a #connectBtn that is not in the document.
-
-// ponytail: Bug 2 — visible connection indicator. Dot-only — state
-// conveyed by colour (green/amber/red) + the title-attribute tooltip.
-// Driven by WS lifecycle events from background.ts.
-function setConnPill(stateName, tooltipLabel) {
-  if (!statusPill) return;
-  statusPill.classList.remove('connected', 'reconnecting', 'error');
-  if (stateName) statusPill.classList.add(stateName);
-  if (connLabelEl) connLabelEl.textContent = tooltipLabel;
-  statusPill.title = `Connection: ${tooltipLabel}`;
-}
 
 // ponytail: transient notice for events that leave no other trace. One
 // element at a time — a second toast replaces the first rather than
@@ -3464,6 +3687,29 @@ function renderFacts(finalAnswer) {
   return `<div class="facts">${lines.join('')}</div>`;
 }
 
+// ponytail: one copy path. The async clipboard API is unavailable in a panel
+// that has lost focus (and on a http:// page), so the textarea + execCommand
+// fallback is not defensive slop — it is the only thing that works half the
+// time. Returns whether the text is actually on the clipboard, because a
+// caller that hands the user a destination needs a confirmed write before it
+// opens it; the old copy button ignored this and showed a tick either way.
+async function copyWithFallback(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    document.body.removeChild(ta);
+    return ok;
+  }
+}
+
 function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   // Remove empty state on first real message
   const empty = messagesEl.querySelector('.empty-state');
@@ -3510,66 +3756,76 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
       bubble.appendChild(fa);
     }
 
-    // ponytail: bottom toolbar with feedback icons. Four icons — Copy,
-    // Good (thumbs up), Bad (thumbs down), Retry — give the user a
-    // single place to copy the answer, rate it, or re-run the same
-    // task under a new session. The "Task completed · N steps" caption
-    // is gone — the icon row replaces it.
+    // ponytail: bottom toolbar. Copy task, Share this run, Retry — one
+    // place to take the task away, send the run somewhere real, or re-run
+    // it under a new session.
     const toolbar = document.createElement('div');
     toolbar.className = 'final-answer-toolbar';
 
     if (finalAnswer) {
-      // ponytail: copy includes the task + the final answer in a clean
-      // markdown-style block. The user said "Show prompts as well when
-      // copied the response" — the task is the prompt they sent, so
-      // including it makes the copy self-contained when shared.
-      const copyText = state.lastGoal
-        ? `**Task:** ${state.lastGoal}\n\n**Response:**\n${finalAnswer}`
-        : finalAnswer;
-      const copyBtn = makeIconBtn(LUCIDE_ICONS.copy, 'Copy', async (ev) => {
+      // The task alone, not the answer too. Copying the answer was a
+      // "self-contained when shared" choice; what the operator actually wants
+      // is the prompt, so re-running it elsewhere is one paste. The answer is
+      // a click away in the chat either way.
+      const copyText = state.lastGoal || finalAnswer;
+      const copyBtn = makeIconBtn(LUCIDE_ICONS.copy, 'Copy task', async (ev) => {
         ev.stopPropagation();
-        try {
-          await navigator.clipboard.writeText(copyText);
-        } catch {
-          const ta = document.createElement('textarea');
-          ta.value = copyText;
-          ta.style.cssText = 'position:fixed;opacity:0';
-          document.body.appendChild(ta);
-          ta.select();
-          try { document.execCommand('copy'); } catch {}
-          document.body.removeChild(ta);
-        }
+        await copyWithFallback(copyText);
         copyBtn.classList.add('clicked');
         setTimeout(() => copyBtn.classList.remove('clicked'), 1200);
       });
       toolbar.appendChild(copyBtn);
     }
 
-    // ponytail: good/bad ratings are persistent and mutually exclusive.
-    // Click toggles its own state — clicking the other deactivates the
-    // first. The .rated-good / .rated-bad classes stay until the user
-    // clicks again to clear.
-    const goodBtn = makeIconBtn(LUCIDE_ICONS.thumbsUp, 'Good response — saved on this device only', () => {
-      if (goodBtn.classList.contains('rated-good')) {
-        goodBtn.classList.remove('rated-good');
+    // ponytail: share the run, rather than rate it and drop it. The old
+    // thumbs-up/down wrote a line into localStorage that nothing ever read —
+    // a control that looked like it was reporting and was not. This one ends
+    // somewhere real.
+    //
+    // GitHub Discussions with the task prefilled, not an endpoint we run: it
+    // needs no account, no backend and no operator, and it is identical for a
+    // self-hosted install and the cloud relay — which is the whole point,
+    // because a self-hoster is the user this most needs to hear from and a
+    // cloud-only gate would skip exactly them. Nothing about the panel's
+    // edition is read here on purpose; the destination is the same link either
+    // way.
+    const shareBtn = makeIconBtn(LUCIDE_ICONS.share, 'Share this run', async (ev) => {
+      ev.stopPropagation();
+      // The task is the user's content and it never goes in a URL. A query
+      // string lands in history, in the address bar of the tab we open, and
+      // in the destination's request log — none of which the user chose. The
+      // clipboard is theirs, so the draft goes there and the tab opens bare.
+      //
+      // Quoted and escaped, because this body is read by a maintainer and the
+      // text is whatever the agent saw on a page. escapeHtml neuters `<!--`,
+      // `<a href>` and the rest; the punctuation pass then makes the Markdown
+      // markers inert, and a `> ` per line makes the whole thing a quote.
+      const task = (state.lastGoal || '').trim().slice(0, 2000);
+      const quoted = task.split('\n')
+        .map((l) => (l ? `> ${escapeHtml(l).replace(/([\\`*_{}[\]()#+\-!])/g, '\\$1')}` : '>'))
+        .join('\n');
+      const body = [
+        task ? `**What I asked Brotto to do**\n\n${quoted}` : '',
+        '',
+        '**How it went**',
+        '',
+        '<!-- What worked, what did not, what you had to fix by hand. -->',
+        '',
+        '_Self-hosted, cloud, or both?_',
+      ].filter(Boolean).join('\n');
+      // Write first, open second. Opening the tab before the write dropped the
+      // user onto an empty public composer whenever the clipboard refused, and
+      // told them to copy a draft that only ever existed in the variable that
+      // failed to write — it is not on screen. Same helper as the Copy-task
+      // button, so the two copy paths cannot drift apart again.
+      if (!await copyWithFallback(body)) {
+        toast('Could not reach your clipboard — the draft was not copied', 'bad', 5000);
         return;
       }
-      badBtn.classList.remove('rated-bad');
-      goodBtn.classList.add('rated-good');
-      recordFeedback('good');
+      chrome.tabs.create({ url: FEEDBACK_URL });
+      toast('Draft on your clipboard — paste it into the Discussions page');
     });
-    toolbar.appendChild(goodBtn);
-
-    const badBtn = makeIconBtn(LUCIDE_ICONS.thumbsDown, 'Bad response — saved on this device only', () => {
-      if (badBtn.classList.contains('rated-bad')) {
-        badBtn.classList.remove('rated-bad');
-        return;
-      }
-      goodBtn.classList.remove('rated-good');
-      badBtn.classList.add('rated-bad');
-      recordFeedback('bad');
-    });
-    toolbar.appendChild(badBtn);
+    toolbar.appendChild(shareBtn);
 
     const retryBtn = makeIconBtn(LUCIDE_ICONS.retry, 'Retry', () => {
       retryLastTask();
@@ -4484,7 +4740,6 @@ function handleEvent(message) {
     // the existing task_failed handler. Here we just update the
     // connection pill; nothing else needs to happen on this event.
     case 'disconnected':
-      setConnPill(null, 'Idle');
       // A socket that dies mid-task reports nothing through task_failed
       // unless the background got far enough to synthesise it, and the
       // outcome cell is the only place that would have said so — it was
@@ -4506,7 +4761,6 @@ function handleEvent(message) {
     // / Idle), and the retry count is live information: one toast replacing
     // the next restates it in place rather than stacking six identical lines.
     case 'server_unreachable':
-      setConnPill('reconnecting', 'Reconnecting');
       toast(
         `Server unreachable — retrying (${message.attempt ?? '?'}/${message.of ?? '?'})`,
         'bad',
@@ -4911,8 +5165,19 @@ goalEl.focus();
   // the task was on. Hydrate it from storage first; everything below and every
   // other call site reads plannerUrlEl, so this one read covers them.
   const { settings } = await chrome.storage.local.get('settings');
+  // Setup was never completed. Every way into this page — the toolbar action,
+  // a reloaded extension, a cleared profile — lands here, and an empty panel
+  // whose composer cannot reach anything is the one outcome worse than the
+  // wizard. `onboarded` is written by the wizard on Start and on Skip alike, so
+  // it answers "did they finish" and not "did they finish properly"; the
+  // completion check stays exactly as coarse as the flag that records it.
+  if (!settings?.onboarded) {
+    window.location.replace('welcome.html');
+    return;
+  }
   const saved = (settings && typeof settings.serverUrl === 'string') ? settings.serverUrl.trim() : '';
   if (saved) plannerUrlEl.value = saved;
+  await loadSetupState();
   const url = plannerUrlEl.value.trim() || 'http://localhost:8000';
   try {
     const res = await fetch(url + '/health', { method: 'GET' });
@@ -4922,7 +5187,11 @@ goalEl.focus();
     // fallback, and a second /health would be a second failure to have to
     // reason about.
     state.authMode = (await readAuthMode(res)) || state.authMode;
+    // The probe this path already makes is the one reachability signal there
+    // is; no second ping for the banner.
+    state.serverReachable = true;
     paintEditionTag();
+    paintServerBanner();
     paintSetupFooter(settings);
     // `/health` is unauthenticated, so it says nothing about the key — and a
     // wrong key is a 404 on every gated route. One more request here tells
@@ -4947,10 +5216,8 @@ goalEl.focus();
           await chrome.storage.local.set({ settings: cleaned });
         }
         paintSetupFooter({});
-        setConnPill('error', 'Sign-in expired');
         toast('Your Brotto Cloud sign-in has expired — open Set up Brotto to sign in again', 'bad', 6000);
       } else {
-        setConnPill('error', 'Key rejected');
         toast('The server answered but rejected AGENT_SECRET — fix it in Settings', 'bad', 6000);
       }
     }
@@ -4966,8 +5233,11 @@ goalEl.focus();
     // a role:'error' message then tried to remove it with '.message-error'
     // — but appendMessage writes class "message error" (a space), so the
     // selector never matched and the notice sat in the chat forever.
-    setConnPill('error', 'Disconnected');
     toast('Server unreachable — settings still work locally', 'bad', 5000);
+    // …and the standing card, which outlives the toast. `serverReachable` is
+    // false only here, so the banner cannot claim an outage that stopped.
+    state.serverReachable = false;
+    paintServerBanner();
   }
   // Last, so it runs whether or not the health probe succeeded: the panel
   // still needs its fallback lines when the server is down.

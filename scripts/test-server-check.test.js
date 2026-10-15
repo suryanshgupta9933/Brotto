@@ -117,7 +117,7 @@ check("a finished wizard is not re-shown: onboarded gates the wizard page",
   "without this, inverting the default would re-ask every existing install");
 check("and finish() is what sets it — including on Skip",
   /onboarded: true/.test(welcome)
-  && /\$skip\.addEventListener\("click"[\s\S]{0,120}void finish\(\)/.test(welcome),
+  && /\$skip\.addEventListener\("click"[\s\S]{0,120}void finish\(true\)/.test(welcome),
   "'Skip is a real answer' only holds if Skip also writes onboarded");
 
 (async () => {

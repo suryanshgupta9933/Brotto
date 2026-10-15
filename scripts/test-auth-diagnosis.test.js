@@ -144,9 +144,10 @@ async function classify(healthStatus) {
   check("the panel diagnoses a refused credential on open, not on the first task",
     /authed\.status === 404/.test(panel) && /rejected AGENT_SECRET/.test(panel),
     "a green pill on a server that refuses every call the extension makes");
+  // The toast is the signal; the header pill it used to shadow is gone
+  // (scripts/test-no-conn-pill.test.js).
   check("cloud mode says the sign-in expired and points at the wizard",
-    /state\.authMode === 'jwt'[\s\S]{0,1200}Sign-in expired/.test(panel)
-    && /sign-in has expired — open Set up Brotto/.test(panel));
+    /state\.authMode === 'jwt'[\s\S]{0,1200}sign-in has expired — open Set up Brotto/.test(panel));
   check("an expired cloud token is cleared so the footer can offer the wizard again",
     /state\.authMode === 'jwt'[\s\S]{0,1200}delete cleaned\.agentSecret/.test(panel)
     && /paintSetupFooter\(\{\}\)/.test(panel),

@@ -155,6 +155,41 @@ background run ends. And the document is stored **verbatim**, because the replay
 path wants the server's bytes and re-serialising is one more way for the two
 copies to differ. Pinned by `scripts/test-session-mirror.test.js`.
 
+**2b. The mirror is one server's, not the browser's.** `brotto-sessions` lives
+in the extension origin, which every server a user ever points the panel at
+shares. `historyEntries` unions mirrored rows into History on every path, so a
+profile that used the cloud relay and was then pointed at a self-hosted server
+showed the **cloud account's conversations** in the self-host History —
+replayable, with that server never involved. The rule 2 failure is not "logs/"
+this time; it is one operator's transcripts arriving under another's.
+
+Rows are stamped with the server address on write and filtered on every read —
+`list`, `get`, and `clear`, because "delete every conversation in the list" must
+not reach rows the list never showed. `namespaceFor(base)` normalises a typed
+trailing slash and case, so two spellings of one address are one server.
+
+**`auth_mode` is deliberately not part of the namespace.** It was the other
+candidate and it is the wrong one twice: mode is a property of the server at an
+address rather than of the user, so it separates nothing the address does not
+already separate — and `state.authMode` is null until the `/health` probe lands,
+so keying on it made every row vanish from History for as long as the probe was
+in flight.
+
+**Rows written before this existed are shown under no server, and are not
+migrated.** Backfilling them onto whichever address happens to be pointed at on
+first read would be the friendlier reading and the unsafe one: it is the same
+disclosure this filter exists to stop, decided by which address the user happened
+to type. A conversation the user cannot see is recoverable; one shown under the
+wrong account is not. `inNamespace(row, ns)` requires a non-empty namespace, so
+an unstamped row is invisible rather than misfiled.
+
+`ponytail:` the ceiling is real and named — **the namespace is a server address,
+not an account**, so two cloud accounts on one relay in one Chrome profile share
+it, because the panel cannot identify an account without parsing the credential
+and parsing it is forbidden. Fix when the relay issues a stable per-account id the
+panel can read as its own field. Pinned by
+`scripts/test-mirror-namespace.test.js`.
+
 **3. Redaction is not a privacy boundary.** `is_secret_field` runs at audit-write
 time and catches *typed* secrets. It does not catch the page. What keeps the
 page off disk is not redaction — it is that the write path for page content was
@@ -517,6 +552,16 @@ Two codes, deliberately. A **bad key is 404** — 403 confirms the route is wort
 probing, and this server holds the user's transcripts. A **403** means the
 credential is real and the *account* is not on the roster: an answer about an
 account, not about a probe.
+
+**The panel now says which one it got, and it is the only place this is visible.**
+One wrong credential 404s `/v1/sessions`, `/v1/suggestions` and `/v1/policy` at
+once, so History fell back to the local mirror on all three and a refused
+browser looked like a server with nothing in it. `historyEntries` records the
+source and `renderHistory` raises a card naming the credential specifically
+(`panel-ui.md` owns the wording and why 404 and unreachable are separated). A
+404 here is a statement about the *caller's credential*, not an enumeration of
+routes — which is why the card says "the server did not answer this browser"
+and never names a route.
 
 The ownership-scoped reads (`GET /v1/sessions`, `GET /v1/sessions/{id}/audit`,
 `DELETE …`) are roster-gated too. They were briefly exempted, on the reasoning

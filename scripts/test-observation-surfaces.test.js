@@ -64,6 +64,8 @@ const BODIES = {
   makeRef: extract(surfacesSrc, "makeRef"),
   originOf: extract(surfacesSrc, "originOf"),
   pooled: extract(surfacesSrc, "pooled"),
+  isKeptNode: extract(surfacesSrc, "isKeptNode"),
+  withKeptAncestors: extract(surfacesSrc, "withKeptAncestors"),
   targetsForFrame: extract(indexSrc, "targetsForFrame"),
   propUrl: extract(indexSrc, "propUrl"),
 };
@@ -77,9 +79,9 @@ const CONSTS = {
 // KEEP_ROLES is a multi-line Set, so the single-line const reader won't take
 // it. Sliced from source rather than restated here: a role that silently
 // dropped out of the set would quietly flatten every depth-0 test below.
-const KEEP_ROLES_START = indexSrc.indexOf("const KEEP_ROLES");
-if (KEEP_ROLES_START < 0) throw new Error("no KEEP_ROLES in index.ts — renamed?");
-const KEEP_ROLES_SRC = indexSrc.slice(KEEP_ROLES_START, indexSrc.indexOf("]);", KEEP_ROLES_START) + 2);
+const KEEP_ROLES_START = surfacesSrc.indexOf("const KEEP_ROLES");
+if (KEEP_ROLES_START < 0) throw new Error("no KEEP_ROLES in surfaces.ts — renamed?");
+const KEEP_ROLES_SRC = surfacesSrc.slice(KEEP_ROLES_START, surfacesSrc.indexOf("]);", KEEP_ROLES_START) + 2);
 
 // The wrapper every case runs in: the extracted bodies, bound to a fake dbg.
 function moduleFor(dbgImpl) {
@@ -97,6 +99,8 @@ function moduleFor(dbgImpl) {
        const selectFrames = (function (frameTree, limits) { ${BODIES.selectFrames} });
        const enumerateSurfaces = (async function (tabId, limits) { ${BODIES.enumerateSurfaces} });
        const KEEP_ROLES = ${KEEP_ROLES_SRC.replace('const KEEP_ROLES = ', '')};
+       const isKeptNode = (function (node) { ${BODIES.isKeptNode} });
+       const withKeptAncestors = (function (kept, raw) { ${BODIES.withKeptAncestors} });
        const propUrl = (function (node) { ${BODIES.propUrl} });
        const targetsForFrame = (async function (tabId, surface, boxes, blockedMap) { ${BODIES.targetsForFrame} });
        return { makeRef, originOf, selectFrames, enumerateSurfaces, targetsForFrame };
@@ -142,6 +146,7 @@ function axNode(role, name, opts = {}) {
     role: { value: role },
     name: { value: name },
     ...(opts.backendId !== undefined ? { backendDOMNodeId: opts.backendId } : {}),
+    ...(opts.ignored ? { ignored: true } : {}),
     ...(properties.length ? { properties } : {}),
   };
 }
@@ -485,6 +490,129 @@ function check(name, cond, detail) {
     check("…naming the frame that capped", scan.cappedFrames.length === 1
       && scan.cappedFrames[0].frameIndex === 0 && scan.cappedFrames[0].nodes === 2500,
       `cappedFrames was ${JSON.stringify(scan.cappedFrames)}`);
+  }
+
+  // 7. THE CAP SPENT ON WRAPPERS. `getFullAXTree` returns every div, span and
+  //    text node; a select-menu overlay is a portal at the end of <body>, so a
+  //    positional slice of the raw array drops it on a page where ignored
+  //    wrappers alone exhaust the budget. GitHub's repository sort menu was
+  //    invisible to the agent for exactly this reason.
+  {
+    const overlayDialog = axNode("dialog", "Select order", { nodeId: 1 });
+    const raw = [overlayDialog];
+    // 2500 ignored wrappers — the budget's worth of noise, on its own enough
+    // to blow a 2000-node cap before the overlay is ever considered.
+    for (let i = 0; i < 2500; i++) {
+      raw.push(axNode("generic", "wrapper" + i, { nodeId: i + 2, parentId: 1, ignored: true }));
+    }
+    raw.push(axNode("menuitem", "Last updated", { nodeId: 9001, parentId: 1 }));
+    raw.push(axNode("menuitem", "Stars", { nodeId: 9002, parentId: 1 }));
+
+    const mod5 = moduleFor(async (_t, cmd) => {
+      if (cmd.method === "Page.getFrameTree") return { frameTree: frameNode("root") };
+      return { nodes: raw };
+    });
+    const { surfaces, scan } = await mod5.enumerateSurfaces(7);
+    const targets = await mod5.targetsForFrame(7, surfaces[0]);
+
+    check("an overlay at the end of <body> survives a raw tree over the cap",
+      targets.some((t) => t.name === "Stars"),
+      `targets were ${JSON.stringify(targets.map((t) => t.name))}`);
+    check("every menuitem in the overlay is present",
+      targets.filter((t) => t.role === "menuitem").length === 2,
+      `got ${targets.filter((t) => t.role === "menuitem").length} menuitems`);
+    check("the overlay keeps its kept ancestor, so depth survives the filter",
+      targets.filter((t) => t.role === "menuitem").every((t) => t.parent === "0:1"),
+      `parents were ${JSON.stringify(targets.filter((t) => t.role === "menuitem").map((t) => t.parent))}`);
+    check("no ignored wrapper became a target",
+      targets.every((t) => t.role !== "generic"),
+      `a wrapper leaked through`);
+    check("a tree over the raw cap but under the kept cap is not reported as capped",
+      scan.nodeCapped === false && scan.cappedFrames.length === 0,
+      `scan was ${JSON.stringify(scan)}`);
+  }
+
+  // 8. THE SAME CHAIN ON THE UNCAPPED PATH. Case 7 hangs the overlay's
+  //    menuitems off the dialog directly, so its kept ancestor is the direct
+  //    parent and the walk needs nothing from `withKeptAncestors`. Real pages
+  //    do not do that: the kept target sits inside an ignored `generic`
+  //    wrapper, and `targetsForFrame` builds its `parentOf` map from `axNodes`
+  //    alone. A wrapper dropped by the filter stops the walk at nothing and
+  //    the server indents every such target at depth 0 — on *every* page under
+  //    the cap, not just the capped ones. The raw tree here is 3 kept nodes
+  //    against a 2000 budget, so this is the `else` branch.
+  {
+    const raw = [
+      axNode("dialog", "Filters", { nodeId: 1 }),
+      // The wrapper: ignored, so it never survives `isKeptNode`, but it is the
+      // only link from the button to the dialog.
+      axNode("generic", "row wrapper", { nodeId: 2, parentId: 1, ignored: true }),
+      axNode("button", "Apply", { nodeId: 3, parentId: 2 }),
+    ];
+    const mod6 = moduleFor(async (_t, cmd) => {
+      if (cmd.method === "Page.getFrameTree") return { frameTree: frameNode("root") };
+      return { nodes: raw };
+    });
+    const { surfaces, scan } = await mod6.enumerateSurfaces(7);
+    check("three kept nodes are nowhere near the cap", scan.nodeCapped === false,
+      `scan.nodeCapped was ${scan.nodeCapped}`);
+    check("the ignored wrapper is not re-emitted as a target",
+      !(await mod6.targetsForFrame(7, surfaces[0])).some((t) => t.role === "generic"),
+      "a wrapper leaked through");
+
+    const targets = await mod6.targetsForFrame(7, surfaces[0]);
+    const apply = targets.find((t) => t.name === "Apply");
+    check("a button under an ignored wrapper still resolves its kept ancestor",
+      apply && apply.parent === "0:1",
+      `Apply's parent was ${JSON.stringify(apply && apply.parent)}, targets were ${JSON.stringify(targets.map((t) => [t.name, t.parent]))}`);
+
+    // What the server actually does with it: indent by walking `parent`.
+    const parent = {};
+    for (const t of targets) parent[t.ref] = t.parent;
+    let depth = 0, cur = apply.parent;
+    while (cur !== undefined) { depth++; cur = parent[cur]; }
+    check("…so the server indents it at depth 1, not 0", depth === 1, `depth was ${depth}`);
+  }
+
+  // 9. THE SAME BUG WITH THE NODES `getFullAXTree` ACTUALLY RETURNS. Case 7
+  //    marks its wrappers `ignored`, and Chrome does not hand ignored nodes
+  //    back from `getFullAXTree` at all — so on the real page the budget was
+  //    spent on nodes that are *not* ignored and simply are not kept roles:
+  //    `generic` containers and `StaticText`. Same overflow, same dropped
+  //    tail, and this is the one that reproduces the operator's report. The
+  //    portal overlay (React/Vue append it to the end of `<body>`, so it is
+  //    last in document-order DFS) is past the 2000 mark and gone.
+  {
+    const raw = [axNode("main", "feed", { nodeId: 1 })];
+    // 2100 unignored, unkept-role nodes: the wrappers a dense page really has.
+    for (let i = 0; i < 2100; i++) {
+      const role = i % 2 ? "generic" : "StaticText";
+      raw.push(axNode(role, "w" + i, { nodeId: i + 2, parentId: 1 }));
+    }
+    // …and the open sort menu, at the very end of <body>.
+    raw.push(axNode("dialog", "Sort repositories", { nodeId: 9001, parentId: 1 }));
+    raw.push(axNode("menuitem", "Last updated", { nodeId: 9002, parentId: 9001 }));
+    raw.push(axNode("menuitem", "Most stars", { nodeId: 9003, parentId: 9001 }));
+
+    const mod7 = moduleFor(async (_t, cmd) => {
+      if (cmd.method === "Page.getFrameTree") return { frameTree: frameNode("root") };
+      return { nodes: raw };
+    });
+    const { surfaces, scan } = await mod7.enumerateSurfaces(7);
+    const targets = await mod7.targetsForFrame(7, surfaces[0]);
+
+    check("2103 raw nodes is under the kept cap, so nothing was capped",
+      scan.nodeCapped === false && scan.cappedFrames.length === 0,
+      `scan was ${JSON.stringify(scan)}`);
+    check("the open overlay at the end of <body> reaches the model",
+      ["Last updated", "Most stars"].every((n) => targets.some((t) => t.name === n)),
+      `targets were ${JSON.stringify(targets.map((t) => t.name))}`);
+    check("its kept ancestor is kept, so the server indents the menuitems at 1",
+      targets.filter((t) => t.role === "menuitem").every((t) => t.parent === "0:9001"),
+      `parents were ${JSON.stringify(targets.map((t) => [t.name, t.parent]))}`);
+    check("no wrapper became a target — the budget was spent, nothing leaked",
+      targets.every((t) => t.role !== "generic" && t.role !== "StaticText"),
+      "a wrapper leaked through");
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

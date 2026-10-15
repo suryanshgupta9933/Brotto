@@ -393,9 +393,35 @@ function json(okStatus, body) {
     sinks.filter((v) => !(v.startsWith("renderMarkdown(") || /^['"]/.test(v) || ALLOWED.includes(v))).join(" | "));
 
   // ── Nothing new was asked of the browser ───────────────────────────────
+  // The panel now opens one external tab — the public Discussions composer a
+  // user can send a finished run to. That is an ordinary https link with no
+  // extension page and no chrome.identity behind it, which is what this guard
+  // is about: a *magic* link would hand the browser a capability we then owe
+  // an identity permission and a reopened store review. Assert the hazard, not
+  // the absence of any tab.
+  // The shorthand `{ url }` is as legal as `{ url: url }`. Matching only the
+  // longhand meant a rewrite to the other shape returns an EMPTY array, and
+  // `.every()` on an empty array is true — the guard passed with nothing
+  // checked, which is the one thing it exists to prevent. Match both, then
+  // assert there was something to check.
+  const tabOpens = [...code(sidepanel).matchAll(
+    /chrome\.tabs\.create\(\{\s*(?:url:\s*([^,}]+)|url\})/g)].map((m) => (m[1] || 'url').trim());
   check("no deep link is followed",
-    !/chrome\.runtime\.getURL|chrome\.tabs\.create/.test(welcome + sidepanel),
+    !/chrome\.runtime\.getURL/.test(welcome + sidepanel)
+      && tabOpens.every((u) => !/^['"]chrome-extension:/.test(u)),
     "a magic link needs chrome.identity and a reopened store review; the code is the reason neither exists");
+  check("the panel does open a tab at all — the guard above is not vacuous",
+    tabOpens.length > 0,
+    "no chrome.tabs.create found; every check below would pass on nothing");
+  check("every tab the panel opens is the bare Discussions link, with no query string",
+    tabOpens.every((u) => /^\s*(?:FEEDBACK_URL|url)\s*$/.test(u)),
+    tabOpens.join(" | "));
+  check("no task text travels in the opened URL",
+    !/chrome\.tabs\.create\([\s\S]{0,120}encodeURIComponent/.test(code(sidepanel)),
+    "a query string puts the user's task in history and in the destination's request log");
+  check("the wizard opens no tab of its own",
+    !/chrome\.tabs\.create/.test(welcome),
+    "the wizard runs before the panel exists; a tab it opens is an unguarded one");
   check("no permission was added to the manifest",
     !/identity/.test(fs.readFileSync(path.join(ROOT, "clients", "brotto-extension", "manifest.json"), "utf8")));
   check("the wizard's code input is numeric and six wide",

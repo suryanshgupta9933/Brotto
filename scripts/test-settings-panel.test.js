@@ -196,6 +196,13 @@ function panel() {
     $modelName: el({ tagName: "INPUT", id: "model-name" }),
     $modelVisionBadge: el({ id: "modelVisionBadge", hidden: true }),
     $modelContextWindow: el({ id: "modelContextWindow" }),
+    $modelContextWindowSetting: el({ id: "modelContextWindowSetting",
+                                     _classes: new Set(["field", "hidden"]) }),
+    $modelContextWindowInput: el({ tagName: "INPUT", id: "model-context-window" }),
+    $modelNameOptions: el({ tagName: "DATALIST", id: "model-name-options" }),
+    $modelBaseUrlSetting: el({ id: "modelBaseUrlSetting" }),
+    $modelBaseUrl: el({ tagName: "INPUT", id: "model-base-url" }),
+    modelSettingsEdited: false,
     ROOT: root, TRIGGER: trigger, LIST: list,
     DROPDOWNS: [],
     dropdownWriting: false,
@@ -203,7 +210,8 @@ function panel() {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(catalogSrc, sandbox);
-  for (const fn of ["currentProvider", "attachDropdown", "renderModelFacts"]) {
+  for (const fn of ["currentProvider", "attachDropdown", "renderModelFacts",
+                    "populateModelOptions", "effectiveContextWindow"]) {
     vm.runInContext(extract(fn), sandbox);
   }
   const dd = vm.runInContext(`attachDropdown({
@@ -367,6 +375,67 @@ function main() {
     vm.runInContext("renderModelFacts()", sandbox);
     check("an empty field renders no window and hides the badge",
       ctx.textContent === "" && badge.hidden === true);
+  }
+
+  // ── The editable context window ─────────────────────────────────────────
+  //
+  // A provider with a fixed catalogue knows every model's window, so asking is
+  // asking them to look up something the panel has. A provider that takes any
+  // model id has no answer to offer, and its fallback under-fills a 1M model
+  // and over-fills a 32k one — while the AX-tree budget is sized from it.
+  {
+    const { sandbox } = panel();
+    const setting = sandbox.$modelContextWindowSetting;
+    const input = sandbox.$modelContextWindowInput;
+
+    vm.runInContext("populateModelOptions()", sandbox);
+    check("a fixed-endpoint provider shows no context-window box",
+      setting._classes.has("hidden") === true);
+
+    sandbox.$modelProvider.value = "custom";
+    vm.runInContext("populateModelOptions()", sandbox);
+    check("a provider that takes any model id shows it",
+      setting._classes.has("hidden") === false);
+
+    sandbox.$modelName.value = "qwen2.5-coder:7b";
+    vm.runInContext("renderModelFacts()", sandbox);
+    check("it is prefilled with the effective window, never empty of meaning",
+      Number(input.value) === 128000, input.value);
+
+    // Round-trip: a number the user typed is the number the save persists.
+    input.value = "32768";
+    check("a stated window wins over the catalogue fallback",
+      vm.runInContext("effectiveContextWindow('custom','qwen2.5-coder:7b')", sandbox) === 32768);
+
+    // And a number that is not a number never becomes zero. A persisted 0
+    // sizes the AX budget to nothing and every run dies on step one.
+    for (const [typed, why] of [["", "empty"], ["32k", "a suffixed number"], ["0", "zero"],
+                                ["-5", "negative"], ["abc", "letters"]]) {
+      input.value = typed;
+      const got = vm.runInContext("effectiveContextWindow('custom','qwen2.5-coder:7b')", sandbox);
+      check(`"${typed}" (${why}) falls back to the catalogue rather than persisting it`,
+        got === 128000, String(got));
+    }
+
+    // A provider whose models are documented does not consult the box at all,
+    // even with a stale number left in it from a previous provider.
+    input.value = "32768";
+    sandbox.$modelProvider.value = "anthropic";
+    check("a documented model sizes itself from the catalogue, not the box",
+      vm.runInContext("effectiveContextWindow('anthropic','claude-sonnet-5-5')", sandbox) === 1000000);
+
+    // The save handler persists what the helper returns, onto the field that
+    // already exists — a new storage key here would be a second answer.
+    check("the save handler persists the effective window onto the existing field",
+      /const ctx = effectiveContextWindow\(/.test(sidepanel)
+      && /modelConfig:\s*\{[^}]*context_window: ctx/.test(sidepanel));
+    check("…and no new storage key was invented for it",
+      !/contextWindowInput:\s|modelContextWindow:\s/.test(sidepanel));
+    // Re-running the wizard must not write its own fallback back over the
+    // number the user typed in Settings.
+    const wizard = fs.readFileSync(path.join(EXT, "welcome.js"), "utf8");
+    check("the wizard keeps a stated window instead of overwriting it with its fallback",
+      /context_window: keepCtx/.test(wizard) && /const prevCtx = Number\(/.test(wizard));
   }
 
   // ── The offline fallback carries the same shape ──────────────────────────

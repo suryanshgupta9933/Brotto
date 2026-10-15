@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import replace
 
@@ -58,9 +59,31 @@ def _from_env() -> tuple[ModelConfig, UserCredentials] | None:
     # AGENT_BASE_URL is the provider-neutral name; ANTHROPIC_BASE_URL is read
     # first for the configs that predate it.
     base_url = os.getenv("AGENT_BASE_URL") or os.getenv("ANTHROPIC_BASE_URL")
+
+    def _rate(name: str) -> float | None:
+        # Stated or absent — never defaulted. A rate nobody published stays
+        # None so `TaskResult.cost_usd` does, which is what a budget cap needs.
+        # A malformed one fails here, naming the variable, rather than reaching
+        # the cap as nan (which `nan < 0` accepts) or as a silent unpriceable.
+        raw = os.getenv(name)
+        if raw in (None, ""):
+            return None
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ValueError(
+                f"{name}={raw!r} is not a number"
+            ) from None
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name}={raw!r} must be a finite, non-negative number")
+        return value
+
     creds = UserCredentials(api_key=api_key, base_url=base_url)
     return ModelConfig(
-        provider=provider, model=model_id, context_window=context_window, base_url=base_url
+        provider=provider, model=model_id, context_window=context_window,
+        base_url=base_url,
+        input_per_mtok=_rate("AGENT_INPUT_PER_MTOK"),
+        output_per_mtok=_rate("AGENT_OUTPUT_PER_MTOK"),
     ), creds
 
 
