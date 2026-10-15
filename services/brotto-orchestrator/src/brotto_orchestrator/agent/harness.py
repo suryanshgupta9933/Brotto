@@ -2886,6 +2886,11 @@ class AgentHarness:
                 url=current_url,
                 action_taken="; ".join(action_trace) if action_trace else "no action",
                 outcome=combined_outcome,
+                # The loop is stateless per step, so this is the model's own
+                # thread back to itself. `extracted` was rendered into both
+                # the history block and recall_steps and had no writer, so a
+                # multi-part plan named at step 6 was gone by step 12.
+                extracted=decision.thought or decision.reasoning or None,
             ))
 
             # Terminal? Gate on deps.result, not on the action name. A

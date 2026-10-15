@@ -230,6 +230,51 @@ def test_the_system_prompt_says_the_current_page_is_already_captured():
     assert "do not restate a page" in low
 
 
+def test_no_section_tells_the_model_to_write_to_memory():
+    """The write action left `ActionCall`; four sections still asked for it.
+
+    `<memory_rules>` says plainly "you cannot write to it", and
+    `<stagnation_and_failure>`, `<convergence>`, `<navigation_and_exploration>`
+    and `<complex_task_approach>` each told the model to record something
+    there. An instruction to use an action that does not resolve is not a
+    no-op: it is the model budgeting its planning against a tool it does not
+    have, which is what the 27-step GitHub runs show.
+    """
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+
+    low = _flat(SYSTEM_PROMPT)
+    for phrase in (
+        "to your memory", "in your memory", "in memory", "from memory",
+        "read your memory",
+    ):
+        assert phrase not in low, f"prompt still instructs a memory write: {phrase!r}"
+
+
+def test_the_step_history_is_named_as_the_only_carrier_between_steps():
+    """The loop is stateless per step. `thought` and `reasoning` are the only
+    two things the model produces, and neither reached the next prompt — the
+    step history lines carried the action and its outcome and nothing else, so
+    a plan named at step 6 was gone by step 12 (three GitHub runs, one form,
+    four parts). The prompt now says so, and says what does carry."""
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+
+    low = _flat(SYSTEM_PROMPT)
+    assert "all that carries from one step to the next" in low
+
+
+def test_a_step_carries_the_models_own_narration_into_the_history():
+    """`StepSummary.extracted` was rendered into the history block and into
+    `recall_steps` and had no writer anywhere — a dead door that reads as a
+    finished feature. It is now written."""
+    from brotto_orchestrator.agent.context import StepSummary
+
+    s = StepSummary(step=1, url="u", action_taken="click", outcome="ok",
+                    extracted="Checking the second branch name field")
+    line = f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}"
+    line += f" [extracted: {s.extracted}]"
+    assert "second branch name field" in line
+
+
 # ── a recalled page must not look complete when it isn't ────────────────
 
 
