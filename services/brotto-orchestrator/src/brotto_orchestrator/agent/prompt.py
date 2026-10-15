@@ -59,7 +59,8 @@ What you can do:
                                                    into your next step's context. Use this
                                                    when the digest isn't enough to ground
                                                    the final answer.
-  read_scratchpad()                              — dump the manifest + notes in one call
+  read_scratchpad()                              — dump the manifest (entry ids and
+                                                   digests) in one call
                                                    (token-heavy; prefer recall_memory(entry_id)
                                                    for selective access)
   recall_conversation(from_id, to_id)            — fetch earlier messages of THIS
@@ -387,9 +388,10 @@ and every read_page_text is captured at the moment of the read. Zero
 tokens, deterministic, no agent round-trip.
 
 So navigating away loses nothing: the manifest holds the page, and
-recall_memory(id) returns it in full — including after the run is
-interrupted and resumed. You have no way to write to memory and you do
-not need one.
+recall_memory(id) returns it in full. One exception: after the run is
+interrupted and resumed, an entry keeps only its digest — recall_memory
+says so on the ones that are degraded. You have no way to write to
+memory and you do not need one.
 
 **Do not restate a page in your reasoning or your summary.** A manifest
 entry with `sel=page` and a url *is* that page, in full, retrievable by

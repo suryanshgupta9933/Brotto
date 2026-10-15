@@ -1547,13 +1547,13 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 available = [e.id for e in deps.scratchpad.entries]
                 return (f"{_EXEC_FAILURE} recall_memory: memory entry "
                         f"{entry_id!r} not found. Available: {available}")
-            # Bodies are persisted now, so this is the legacy path: a session
-            # whose sidecar predates the pages file, or one whose bodies file
-            # went missing. Say so when it happens — handed 200 chars of an
-            # 11,000-char page with no marker, the model reads the fragment as
-            # the whole page and answers from it. A page shorter than the
-            # digest length is not degraded — digest == body is the whole truth
-            # there, so the marker would be a lie.
+            # No page text is written to disk — the bodies sidecar has no
+            # writer, so a resumed run's entries carry digest only. Say so
+            # when it happens — handed 200 chars of an 11,000-char page with
+            # no marker, the model reads the fragment as the whole page and
+            # answers from it. A page shorter than the digest length is not
+            # degraded — digest == body is the whole truth there, so the
+            # marker would be a lie.
             if entry.digest.endswith("…") and entry.body == entry.digest:
                 where = entry.url or "an earlier page"
                 return (f"{entry.digest}\n\n[only the digest of {where} survived "

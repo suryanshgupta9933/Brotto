@@ -693,15 +693,6 @@ const newTaskBtn      = document.getElementById('newTaskBtn');
 const outcomeCell     = document.getElementById('outcomeCell');
 const connectionMeta  = document.getElementById('connectionMeta');
 
-// A failure saved yesterday is a failure today. Read it back before anything
-// can be sent, so the banner is standing before the user's first keystroke
-// rather than appearing after their first refusal.
-//
-// This sits below `plannerUrlEl` on purpose: modelCheckSig reads it, and a
-// call above the declaration is one await away from being a TDZ ReferenceError
-// that `void` swallows — a banner that silently never loads.
-void refreshModelCheckBanner();
-
 // ponytail: soft length cap on user task input. Tasks over this many chars
 // trigger a confirm() before send; matching server warning at the same
 // threshold (defense in depth). Not a hard block — the user is the
@@ -2101,6 +2092,16 @@ const state = {
   // and it leaves the namespace exactly as it was before accounts existed.
   accountId: null,
 };
+
+// A failure saved yesterday is a failure today. Read it back before anything
+// can be sent, so the banner is standing before the user's first keystroke
+// rather than appearing after their first refusal.
+//
+// This sits below both `plannerUrlEl` and `state` on purpose: modelCheckSig
+// reads the former and modelKeyNames → accountScope reads state.accountId. A
+// call above either declaration is one await away from being a TDZ
+// ReferenceError that `void` swallows — a banner that silently never loads.
+void refreshModelCheckBanner();
 
 let timerInterval = null;
 let timerPausedAt = 0;

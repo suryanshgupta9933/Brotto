@@ -9,9 +9,11 @@ into a per-step one: a 15-step run on Gmail holds ~15 pages of ~11K chars, so
 the document grows by ~165KB and is rewritten in full on every step.
 
 The record keeps what a resume needs to *list* memory — id, step, selector,
-url and the digest the manifest renders. The bodies go to a separate JSON
-sidecar, written by the same call, so a resumed run recalls whole pages
-rather than 200-char fragments.
+url and the digest the manifest renders. The body is dropped, not moved: the
+bodies sidecar has no writer, so a resumed run recalls the 200-char digest and
+`recall_memory` marks it as degraded. Dropping it here is still right — it is
+the difference between a document that grows ~165KB over a 15-step Gmail run
+and one that does not, and a full body is re-readable by navigating back.
 """
 
 import json
