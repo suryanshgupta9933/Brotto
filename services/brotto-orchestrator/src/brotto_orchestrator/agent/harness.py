@@ -168,6 +168,54 @@ def _refusal_line(part: str) -> str:
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r"}
 
 
+# A step's narration (`extracted`) is the model's own thread back to itself —
+# the loop is stateless per step, so this and the summaries are the whole
+# history. Capped for the same reason `outcome` is: the history block is
+# assembled ahead of the AX tree and an uncapped narration crowds out the page
+# the model has to act on. _HISTORY_WINDOW bounds the block, so 12 × this is
+# the worst case.
+_NARRATION_CHARS = 300
+
+
+# ponytail: one construction point for `extracted`, not a StepSummary.build().
+# Four of the five StepSummary(...) sites write no narration at all (refusal
+# and crash-recovery rows); the live loop is the only writer. Add a factory
+# when a second writer appears.
+def _narrate(text: str | None, secret_values: list[str] | None = None) -> str | None:
+    """Scrub and cap a step's narration before it is stored.
+
+    Redaction is the point, not a nicety: the loop redacts typed secrets
+    before the model ever sees them, and narration quoting one back would put
+    exactly that back into the next prompt and into the record. Values typed
+    into secret fields this step are substituted first — those exact strings
+    are about to come back from the page anyway, so echoing them is noise even
+    where redaction would have caught them.
+    """
+    out = (text or "").strip()
+    if not out:
+        return None
+    for v in secret_values or ():
+        if len(v) >= 4:
+            out = out.replace(v, "[typed into a secret field]")
+    out, _counts = redact_text(out)
+    if len(out) > _NARRATION_CHARS:
+        out = out[:_NARRATION_CHARS] + " …"
+    return out
+
+
+def _step_note(s: StepSummary) -> str:
+    """Render a step's narration fenced as untrusted, or nothing.
+
+    The narration is the model's own words *about page content* and can quote
+    it verbatim — including text the page wrote to look like an instruction.
+    Unfenced in the history block it reads as harness-authored fact.
+    """
+    if not s.extracted:
+        return ""
+    return (f"\n  <step_note untrusted model-narration step=\"{s.step}\">\n"
+            f"  {s.extracted}\n  </step_note>")
+
+
 def _unescape(text: str) -> str:
     """Turn literal backslash-escapes in model prose into real characters.
 
@@ -542,8 +590,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         skipped = 0
 
     history_lines = [
-        f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}"
-        + (f" [extracted: {s.extracted}]" if s.extracted else "")
+        f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}{_step_note(s)}"
         for s in shown
     ]
     if skipped:
@@ -1516,8 +1563,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 return (f"No steps in range {lo}-{hi}. This task has steps "
                         f"{summaries[0].step}-{summaries[-1].step}.")
             text = "\n".join(
-                f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}"
-                + (f" [extracted: {s.extracted}]" if s.extracted else "")
+                f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}{_step_note(s)}"
                 for s in got)
             if len(text) > _CONV_RECALL_CHARS:
                 text = text[:_CONV_RECALL_CHARS] + "\n…[range too large, narrow it]"
@@ -2831,10 +2877,13 @@ class AgentHarness:
             t_ex = time.perf_counter()
             outcomes: list[str] = []
             action_trace: list[str] = []
+            typed_secrets: list[str] = []
             for call in decision.actions:
                 # One DOM lookup per TYPED action, not per textbox per step.
                 redact = (call.action == "type_text"
                           and await _redact_if_secret(deps, call.action_args.get("ref", "")))
+                if redact:
+                    typed_secrets.append(str(call.action_args.get("text") or ""))
                 rec_args, trace = _scrubbed(call, redact)
                 action_trace.append(trace)
                 t_a = time.perf_counter()
@@ -2890,7 +2939,11 @@ class AgentHarness:
                 # thread back to itself. `extracted` was rendered into both
                 # the history block and recall_steps and had no writer, so a
                 # multi-part plan named at step 6 was gone by step 12.
-                extracted=decision.thought or decision.reasoning or None,
+                # _narrate redacts and caps it: it quotes page content (and
+                # may quote what was just typed), and it is read back inside
+                # the prompt as if the harness wrote it.
+                extracted=_narrate(
+                    decision.thought or decision.reasoning, typed_secrets),
             ))
 
             # Terminal? Gate on deps.result, not on the action name. A
