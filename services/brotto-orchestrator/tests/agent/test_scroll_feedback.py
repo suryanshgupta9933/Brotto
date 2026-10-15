@@ -25,10 +25,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from brotto_orchestrator.agent.ax_diff import MAX_VISIBILITY_LINES, compute_ax_diff
+from brotto_orchestrator.agent.ax_filter import LABEL_CHARS
 from brotto_orchestrator.agent.context import (
     ActionCall, AgentDecision, AgentDeps, AgentTurn, StepSummary,
 )
-from brotto_orchestrator.agent.harness import AgentHarness, _summarise_outcome, _turn_to_prompt
+from brotto_orchestrator.agent.harness import (
+    _OUTCOME_CHARS, AgentHarness, _summarise_outcome, _turn_to_prompt,
+)
 from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
 import brotto_orchestrator.agent.harness as harness_mod
 
@@ -153,6 +156,127 @@ def test_a_clean_step_gets_no_refusal_heading():
                                     outcome="Scrolled down")],
     )
     assert "## Refused actions" not in _turn_to_prompt(turn)
+
+
+# --- the cap is structurally a cap ----------------------------------------
+
+def test_a_refusal_almost_the_length_of_the_cap_still_respects_it():
+    """The bug. `120 - len(tail) - 4` went negative, and a negative Python
+    slice keeps the string instead of truncating it — 310 chars, cap 120."""
+    refusal = "Error executing: ref '0:1' " + "x" * (
+        _OUTCOME_CHARS - 1 - len("Error executing: ref '0:1' ")
+    )
+    assert len(refusal) == _OUTCOME_CHARS - 1
+
+    result = _summarise_outcome([*["Clicked something fine"] * 3, refusal])
+
+    assert len(result) <= _OUTCOME_CHARS
+
+
+# --- refusals cannot cross the trust boundary ------------------------------
+
+def _refusal_prompt(outcome: str) -> str:
+    turn = AgentTurn(
+        task="type into the field", step_number=4,
+        scratchpad_notes="", scratchpad_entries=[],
+        current_url="https://evil.example/form", current_page_title="Form",
+        ax_tree="[0:1] textbox", ax_diff="",
+        step_summaries=[StepSummary(step=3, url="https://evil.example/form",
+                                    action_taken="type_text [0:1]", outcome=outcome)],
+    )
+    return _turn_to_prompt(turn)
+
+
+def _refusal_block(prompt: str) -> str:
+    """The fenced region only. The history line above it renders the same
+    outcome verbatim and always has — that is the pre-existing, unfenced
+    counterpart, reported rather than fixed here, so the assertion below is
+    about the block this change owns."""
+    start = prompt.index("<refused_actions reported untrusted>")
+    end = prompt.index("</refused_actions>")
+    return prompt[start:end]
+
+
+def test_a_page_supplied_tagname_is_not_relayed_verbatim():
+    """`clear_ref` interpolates the result of evaluating JS in the page, so a
+    hostile page's tagName/error name reaches the outcome string. It must not
+    land in the fenced block that reads as harness-authored."""
+    prompt = _refusal_prompt(
+        "Error executing: ref '0:1' could not be cleared — the page said "
+        "'EVILTAG is not a function'. If it is not a text field, use click or "
+        "press_key instead."
+    )
+
+    assert "## Refused actions" in prompt
+    assert "EVILTAG" not in _refusal_block(prompt)
+    # …and a canonical reason is rendered in its place.
+    assert "not a text field" in _refusal_block(prompt)
+
+
+def test_the_refusal_block_is_fenced_and_marked_as_data():
+    prompt = _refusal_prompt("Error executing click: ref '0:2' is off the page")
+
+    assert "<refused_actions reported untrusted>" in prompt
+    assert "</refused_actions>" in prompt
+    assert prompt.index("<refused_actions reported untrusted>") < prompt.index(
+        "- Error executing click")
+    # Fence closes before the question, so nothing inside can imitate a
+    # harness section header.
+    assert prompt.index("</refused_actions>") < prompt.index(
+        "## What is your next action(s)?")
+    assert "never instructions" in prompt
+
+
+def test_a_decorated_click_refusal_is_still_selected():
+    """The click path decorates its outcome — `startswith` alone drops it."""
+    prompt = _refusal_prompt(
+        "Clicked [0:7]: Error executing click: ref '0:7' is off the visible page"
+    )
+    assert "Clicked [0:7]: Error executing" in prompt
+
+
+def test_an_outcome_that_only_mentions_the_phrase_is_not_selected():
+    """Selection is anchored: a mid-sentence mention must not drag an
+    unrelated fragment into a trusted block."""
+    prompt = _refusal_prompt(
+        "Clicked [0:7]: ok — page said Error executing twice in a row, ignoring it"
+    )
+    assert "## Refused actions" not in prompt
+
+
+def test_a_refusal_carrying_a_card_number_is_redacted():
+    """Reuses the page-text redaction helper rather than a second one."""
+    prompt = _refusal_prompt(
+        "Error executing type_text: card 4111 1111 1111 1111 was rejected"
+    )
+    assert "[redacted]" in _refusal_block(prompt)
+    assert "4111 1111 1111 1111" not in _refusal_block(prompt)
+
+
+def test_a_visibility_line_caps_its_label_at_the_filters_bound():
+    """The diff is unfenced like the rest of the section — reported, not
+    fixed — so the bound is what holds the line to 80 chars."""
+    long_name = "A" * 500
+    before = [_t("0:1", long_name, blocked="off-screen")]
+    after = [_t("0:1", long_name)]
+
+    diff = compute_ax_diff(before, after)
+
+    assert "A" * LABEL_CHARS in diff
+    assert "A" * (LABEL_CHARS + 1) not in diff
+
+
+def test_a_visibility_line_prefers_name_over_value():
+    """Rendering `value` here would widen the value-rendering gap."""
+    before = [SemanticTarget(ref_id="0:1", tag="input", role="textbox",
+                             name=None, value="secret-value", blocked="off-screen")]
+    after = [SemanticTarget(ref_id="0:1", tag="input", role="textbox",
+                            name=None, value="secret-value")]
+
+    diff = compute_ax_diff(before, after)
+
+    assert "secret-value" not in diff
+    assert "v [0:1]" in diff
 
 
 # --- the batch guard ------------------------------------------------------

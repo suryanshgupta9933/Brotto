@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .ax_filter import LABEL_CHARS
+
 if TYPE_CHECKING:
     from ..dev.ax_tree_extractor import SemanticTarget
 
@@ -80,7 +82,13 @@ def compute_ax_diff(
 
     vis_hidden = 0
     for old, new in visibility[:MAX_VISIBILITY_LINES]:
-        label = new.name or str(new.value)
+        # Page-supplied text, uncapped and unfenced like every other diff line
+        # — the diff section as a whole is still an open item (reported, not
+        # fixed). Capped at ax_filter's bound, and name-only: rendering
+        # `value` here would widen the value-rendering gap, which is a separate
+        # disclosure. A value-only target still gets its line, labelled, so a
+        # scroll past it does not go unreported.
+        label = (new.name or "(no name)")[:LABEL_CHARS]
         note = _visibility_note(old.blocked, new.blocked)
         lines.append(f"  v [{new.ref_id}] {new.role} \"{label}\" — {note}")
     if len(visibility) > MAX_VISIBILITY_LINES:
