@@ -629,7 +629,7 @@ def repeat_nudge(summaries: list[StepSummary]) -> str:
     )
 
 
-def _manifest_window(entries: list, current_url: str) -> tuple[list, str]:
+def _manifest_window(entries: list, current_step: int) -> tuple[list, str]:
     """(entries to render, note naming what was left out).
 
     Same head+tail convention as the step history (`_HISTORY_WINDOW`):
@@ -642,16 +642,28 @@ def _manifest_window(entries: list, current_url: str) -> tuple[list, str]:
     The current page's entry always survives even if the window would drop
     it, because its line carries the "do not recall" marker that has been
     worth more than its 200 chars.
+
+    Identity is `step`, not url. The marker is a factual claim to the model
+    about which entry is the page it is looking at, and url equality does
+    not decide that: a reload, an SPA route swap, or a site serving one path
+    across a run leaves several entries sharing a url, and every one of them
+    would claim to be the current page. `e.step == current_step` is decided
+    at capture time and cannot drift.
     """
     if len(entries) <= _MANIFEST_WINDOW:
         return entries, ""
     tail = _MANIFEST_WINDOW - 3
     shown = entries[:3] + entries[-tail:]
     gap = entries[3:len(entries) - tail]
-    here = [e for e in gap if e.url and e.url == current_url]
+    # One, not all: a run that revisits a url accumulates matching entries,
+    # and prepending every one of them turned the window into no window. The
+    # most recent is the one carrying the marker. The rest stay in the gap
+    # note below, so nothing is silently dropped — the note names the range.
+    here = [e for e in gap if e.selector == "page" and e.step == current_step]
     if here:
-        shown = here + shown
-    note = (f"  ... {len(gap)} entries omitted ({gap[0].id}–{gap[-1].id}) — "
+        shown = here[-1:] + shown
+    hidden = [e for e in gap if e not in here[-1:]]
+    note = (f"  ... {len(hidden)} entries omitted ({hidden[0].id}–{hidden[-1].id}) — "
             "recall_memory(entry_id) fetches any of them in full.")
     return shown, note
 
@@ -766,12 +778,16 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     # trusting url/selector/digest to be delimiter-free, which is the same
     # single-point defence `_safe_thought` applies before `<step_note>`.
     #
-    # The entry whose url is the current page is marked as such. Left
-    # unmarked it reads as a skill to load and the model loads it — a live
-    # Gmail run did exactly that on step 0 of a "summarise the inbox" task,
-    # re-reading ~11K chars the prompt was already carrying in full.
+    # The entry captured on this step is the current page, and is marked as
+    # such. Left unmarked it reads as a skill to load and the model loads it
+    # — a live Gmail run did exactly that on step 0 of a "summarise the
+    # inbox" task, re-reading ~11K chars the prompt was already carrying.
+    # Identity is the capture step, not the url: several entries can share a
+    # url and only one of them is the page in front of the model. See
+    # `_manifest_window` for why the marker is a claim about identity.
     manifest_lines = ["### Memory manifest (recall_memory(entry_id) fetches full body)"]
-    windowed, gap_note = _manifest_window(turn.scratchpad_entries, turn.current_url)
+    windowed, gap_note = _manifest_window(
+        turn.scratchpad_entries, turn.step_number)
     if gap_note:
         manifest_lines.append(gap_note)
     for e in windowed:
@@ -779,7 +795,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         trunc = " [truncated]" if e.was_truncated else ""
         where = f" url={e.url}" if e.url else ""
         here = "  ← THIS PAGE, already in your prompt — do not recall" if (
-            e.url and e.url == turn.current_url) else ""
+            e.selector == "page" and e.step == turn.step_number) else ""
         line = (f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}"
                 f"{trunc}{here}: {e.digest}")
         manifest_lines.append(line.replace("<", "").replace(">", ""))

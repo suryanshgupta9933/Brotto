@@ -168,10 +168,28 @@ def test_the_manifest_names_the_url_of_each_captured_page():
 
 
 def test_the_entry_for_the_page_in_front_of_you_says_do_not_recall():
-    sp = Scratchpad().capture_page(url="https://a.test/inbox", step=0, text="the inbox")
+    # step must match the rendered step_number: the harness captures and
+    # builds the turn from one `step` variable, and identity — not url — is
+    # what decides which entry is the page in front of the model.
+    sp = Scratchpad().capture_page(url="https://a.test/inbox", step=1, text="the inbox")
     p = _prompt(scratchpad_entries=list(sp.entries), current_url="https://a.test/inbox")
     assert "do not recall" in p.lower()
     assert "https://a.test/inbox" in p
+
+
+def test_an_entry_from_an_earlier_step_at_the_same_url_is_not_marked_current():
+    """A reload leaves the url unchanged and the entry stale.
+
+    Under url equality it claimed to be the page in front of the model, and
+    so told it not to recall a page it has not read this step.
+    """
+    sp = Scratchpad().capture_page(url="https://a.test/inbox", step=1, text="the inbox")
+    sp = sp.capture_page(url="https://a.test/inbox", step=7, text="reloaded")
+    p = _prompt(scratchpad_entries=list(sp.entries),
+                current_url="https://a.test/inbox", step_number=7)
+    lines = [ln for ln in p.splitlines() if ln.startswith("- `r")]
+    assert "do not recall" not in lines[0].lower(), "the stale entry was marked current"
+    assert "do not recall" in lines[1].lower(), "the current page was left unmarked"
 
 
 def test_an_earlier_page_is_still_recallable():
