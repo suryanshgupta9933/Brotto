@@ -729,6 +729,15 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     # Memory manifest: small per-entry digest. Full bodies are loaded on
     # demand via recall_memory(id).
     #
+    # Fenced as untrusted like every other page-derived surface in this
+    # prompt (`<page_content>`, `<page_text>`, `<step_note>`). A digest is
+    # the first 200 characters of page text verbatim, so unfenced it put
+    # page-controlled text at the top of the prompt inside the one section
+    # that reads as harness-authored inventory — exactly where an injection
+    # wants to sit. Angle brackets stripped at the render point rather than
+    # trusting url/selector/digest to be delimiter-free, which is the same
+    # single-point defence `_safe_thought` applies before `<step_note>`.
+    #
     # The entry whose url is the current page is marked as such. Left
     # unmarked it reads as a skill to load and the model loads it — a live
     # Gmail run did exactly that on step 0 of a "summarise the inbox" task,
@@ -740,9 +749,14 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         where = f" url={e.url}" if e.url else ""
         here = "  ← THIS PAGE, already in your prompt — do not recall" if (
             e.url and e.url == turn.current_url) else ""
-        manifest_lines.append(
-            f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}{trunc}{here}: {e.digest}")
-    manifest_section = "\n".join(manifest_lines) + "\n"
+        line = (f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}"
+                f"{trunc}{here}: {e.digest}")
+        manifest_lines.append(line.replace("<", "").replace(">", ""))
+    manifest_section = (
+        '<memory_manifest untrusted page-digests>\n'
+        + "\n".join(manifest_lines)
+        + "\n</memory_manifest>\n"
+    )
 
     return f"""{policy_prefix}{conv_section}## Task
 {turn.task}
