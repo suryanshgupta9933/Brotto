@@ -94,8 +94,18 @@ _OUTCOME_CHARS = 120
 
 
 def _summarise_outcome(outcomes: list[str]) -> str:
-    """Join a step's outcomes into the cap, without losing a refusal."""
-    joined = "; ".join(outcomes) if outcomes else "no action"
+    """Join a step's outcomes into the cap, without losing a refusal.
+
+    Redaction happens here, at the one point every outcome passes through on
+    its way into a `StepSummary`, rather than at a rendering site. An outcome
+    carries page-supplied text (`clear_ref` interpolates the result of
+    evaluating JS in the page), and three consumers read the stored summary —
+    the history line, `recall_steps`, and the audit document — so redacting at
+    any one of them left the other two holding the raw text. `redact_text` is
+    idempotent (the replacement marker matches no rule), so callers that
+    redact again — `_refusal_line` — are not mangling anything.
+    """
+    joined = redact_text("; ".join(outcomes) if outcomes else "no action")[0]
     if len(joined) <= _OUTCOME_CHARS:
         return joined
     refusals = [o for o in outcomes if _EXEC_FAILURE in o]
@@ -123,15 +133,33 @@ _REFUSAL_RE = re.compile(rf"^(?:Clicked \[[^\]]*\]: )?{_EXEC_FAILURE}")
 _PAGE_ECHO = "the page said"
 
 
+# Anything after the echo is page-supplied, and so are the `##` and the angle
+# brackets a page could use to close the fence or imitate a harness section
+# once that text is rendered. Neutralised at the one render point, so the
+# fence holds whatever the page said.
+_DELIMS = str.maketrans({"<": "‹", ">": "›", "#": ""})
+
+
+def _strip_page_echo(text: str) -> str:
+    """Drop everything from `the page said` on, and render a canonical reason.
+
+    Applied to the WHOLE outcome *before* it is split on `"; "`, not per
+    part. The page controls the text after the echo and can put `"; "` in it,
+    so a per-part strip left the tail of a page fragment sitting behind a
+    harness-owned `Error executing:` prefix: the split had already happened,
+    so the prefix test could not see the page text that had been split off it.
+    """
+    if _PAGE_ECHO not in text:
+        return text
+    return (
+        text.split(_PAGE_ECHO)[0].rstrip(" .—-,:")
+        + " — the page rejected the operation (not a text field)"
+    )
+
+
 def _refusal_line(part: str) -> str:
     """One refusal, page-supplied fragments removed and secrets redacted."""
-    part = part.strip()
-    if _PAGE_ECHO in part:
-        part = (
-            part.split(_PAGE_ECHO)[0].rstrip(" .—-,:")
-            + " — the page rejected the operation (not a text field)"
-        )
-    return redact_text(part)[0]
+    return redact_text(_strip_page_echo(part.strip()).translate(_DELIMS))[0]
 
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r"}
 
@@ -564,7 +592,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     refusals = [
         _refusal_line(part)
         for s in shown[-3:]
-        for part in str(s.outcome or "").split("; ")
+        for part in _strip_page_echo(str(s.outcome or "")).split("; ")
         if _REFUSAL_RE.match(part.strip())
     ]
     # Fenced, and said to be data. These strings come back from the relay and
