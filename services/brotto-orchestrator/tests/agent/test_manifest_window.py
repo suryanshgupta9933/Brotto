@@ -14,7 +14,7 @@ from brotto_orchestrator.agent.harness import _manifest_window, _turn_to_prompt
 def _entries(n: int, url=lambda i: f"https://a.test/{i}") -> list[MemoryEntry]:
     return [MemoryEntry(id=f"r{i}", step=i, selector="page", around=None,
                         digest=f"page {i}", body=f"body {i}",
-                        was_truncated=False, url=url(i))
+                        was_truncated=False, url=url(i), source="page")
             for i in range(1, n + 1)]
 
 
@@ -103,7 +103,7 @@ def test_a_gap_made_only_of_the_current_page_does_not_kill_the_prompt():
     es = _entries(13)
     es[3] = MemoryEntry(id="r4", step=99, selector="page", around=None,
                         digest="d", body="b", was_truncated=False,
-                        url="http://x")
+                        url="http://x", source="page")
     shown, note = _manifest_window(es, current_step=99)
     assert "r4" in [e.id for e in shown]
     assert note == "", "nothing was omitted, so nothing is claimed to be"
@@ -119,7 +119,7 @@ def test_identical_entries_do_not_hide_each_other():
     """
     twin = MemoryEntry(id="r4", step=99, selector="page", around=None,
                        digest="d", body="b", was_truncated=False,
-                       url="http://x")
+                       url="http://x", source="page")
     es = _entries(14)
     es[3] = twin
     es[4] = twin.model_copy()
@@ -155,10 +155,12 @@ def test_an_entry_from_an_earlier_task_is_never_marked_this_page():
     entries = _entries(22)
     entries[5] = MemoryEntry(id="r6", step=4, selector="page", around=None,
                              digest="task one", body="b", was_truncated=False,
-                             url="https://a.test/one", task_index=0)
+                             url="https://a.test/one", task_index=0,
+                             source="page")
     entries[8] = MemoryEntry(id="r9", step=4, selector="page", around=None,
                              digest="task two", body="b", was_truncated=False,
-                             url="https://a.test/two", task_index=1)
+                             url="https://a.test/two", task_index=1,
+                             source="page")
 
     import types
     import brotto_orchestrator.agent.harness as h
@@ -174,3 +176,20 @@ def test_an_entry_from_an_earlier_task_is_never_marked_this_page():
     shown, note = _manifest_window(entries, current_step=4, current_task=1)
     assert "r9" in [e.id for e in shown]
     assert "r4–r8" in note, "the prior task's entry is recalled, just not current"
+
+
+def test_a_model_writable_selector_cannot_claim_the_page_marker():
+    """`read_page_text` takes its selector as an argument, so the model can
+    put the word "page" on any entry it creates. A field the model writes is
+    not a sound basis for a claim to the model about what it is looking at;
+    provenance comes from `source`, which only the harness writes."""
+    forged = MemoryEntry(id="r9", step=99, selector="page", around=None,
+                         digest="a slice the model asked for", body="b",
+                         was_truncated=False, url="https://a.test/two",
+                         source="read_page_text")
+    entries = _entries(22)
+    entries[8] = forged
+    prompt = _prompt_for(entries, step_number=99)
+    assert "THIS PAGE" not in prompt
+    shown, _ = _manifest_window(entries, current_step=99)
+    assert "r9" not in [e.id for e in shown]

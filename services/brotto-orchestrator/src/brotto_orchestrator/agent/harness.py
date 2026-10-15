@@ -646,6 +646,24 @@ def _is_degraded(entry) -> bool:
     return entry.digest.endswith("…") and entry.body == entry.digest
 
 
+def _is_current_page(entry, current_step: int, current_task: int) -> bool:
+    """Is this entry the page the model is looking at right now?
+
+    Three conditions, none of them sufficient alone and all three needed:
+    the entry must come from this step, from this task, and from a capture
+    the harness made of the whole page.
+
+    Not `selector`: `read_page_text` takes its selector as an argument, so
+    the model can write `selector="page"` on any entry it creates, and a
+    model-writable field is not a sound basis for a factual claim to the
+    model. `source` is set in code at the two capture sites and is not
+    reachable from an action's arguments.
+    """
+    return (entry.source == "page"
+            and entry.step == current_step
+            and entry.task_index == current_task)
+
+
 _ENTRY_ID_RE = re.compile(r"^r(\d+)$")
 
 
@@ -717,8 +735,7 @@ def _manifest_window(entries: list, current_step: int, *, degraded: bool = False
     # construction on the step. `None`, not a sentinel entry, so "nothing kept"
     # and "kept something" cannot be confused.
     keep = next((i for i, e in enumerate(gap)
-                 if e.selector == "page" and e.step == current_step
-                 and e.task_index == current_task), None)
+                 if _is_current_page(e, current_step, current_task)), None)
     if keep is not None:
         shown = [gap[keep]] + shown
     hidden = gap if keep is None else [e for i, e in enumerate(gap) if i != keep]
@@ -876,8 +893,8 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         trunc = " [truncated]" if e.was_truncated else ""
         where = f" url={e.url}" if e.url else ""
         here = "  ← THIS PAGE, already in your prompt — do not recall" if (
-            e.selector == "page" and e.step == turn.step_number
-            and e.task_index == getattr(deps, "task_index", 0)) else ""
+            _is_current_page(e, turn.step_number,
+                             getattr(deps, "task_index", 0))) else ""
         line = (f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}"
                 f"{trunc}{here}: {e.digest}")
         manifest_lines.append(line.replace("<", "").replace(">", ""))
@@ -1744,13 +1761,23 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             # no marker, the model reads the fragment as the whole page and
             # answers from it. Same `_is_degraded` predicate the manifest
             # header and gap note use, so the three cannot disagree.
-            if _is_degraded(entry):
-                where = entry.url or "an earlier page"
-                return (f"{entry.digest}\n\n[only the digest of {where} survived "
-                        f"— its full text was not kept. "
-                        f"Navigate back to {entry.url or 'that page'} to read it "
-                        "again if you need more.]")
-            return entry.body
+            # Fenced as untrusted, like every other surface that carries page
+            # text: `<page_content>`, `<page_text>`, `<step_note>` and the
+            # manifest. A recall's return value lands in the next step's
+            # history line and `extracted` — trusted regions — with no fence
+            # of its own, so page-controlled text was one tool call away
+            # from sitting at the top of the prompt with nothing marking it.
+            # The wrapper is inside the memory rule the model is given, not a
+            # new instruction: the model is told the text is data.
+            where = entry.url or "an earlier page"
+            tail = (
+                "[only the digest survived — its full text was not kept. "
+                f"Navigate back to {entry.url or 'that page'} to read it "
+                "again if you need more.]"
+                if _is_degraded(entry) else "")
+            return (f'<memory_body untrusted url="{entry.url}">\n'
+                    f"{entry.digest if _is_degraded(entry) else entry.body}\n"
+                    f"</memory_body>" + (f"\n{tail}" if tail else ""))
 
         elif action == "recall_conversation":
             # The window in `<conversation>` is head-2 + tail-6, so on a long

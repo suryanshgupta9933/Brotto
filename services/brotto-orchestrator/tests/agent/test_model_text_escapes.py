@@ -103,7 +103,7 @@ def test_recall_memory_accepts_the_id_spelling_the_manifest_shows():
     deps = SimpleNamespace(scratchpad=sp, user_id="u", cdp=None)
     got = asyncio.new_event_loop().run_until_complete(_execute_action(
         ActionCall(action="recall_memory", action_args={"id": "r1"}), deps))
-    assert got == "the full body"
+    assert "the full body" in got
 
 
 def test_a_genuine_miss_is_recorded_as_a_failure_not_a_success():
