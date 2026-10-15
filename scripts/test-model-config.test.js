@@ -18,6 +18,7 @@ const vm = require("vm");
 
 const EXT = path.join(__dirname, "..", "clients", "brotto-extension", "src");
 const sidepanel = fs.readFileSync(path.join(EXT, "sidepanel.js"), "utf8");
+const modelKeysSrc = fs.readFileSync(path.join(EXT, "model_keys.js"), "utf8");
 const catalogSrc = fs.readFileSync(path.join(EXT, "model_catalog.js"), "utf8");
 
 // Brace matching has to begin after the parameter list — a destructured
@@ -120,7 +121,10 @@ async function makeCatalog(fetchImpl) {
     globalThis: null,
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   vm.runInContext(catalogSrc, sandbox);
   return { api: sandbox.brottoModelCatalog, store };
 }
@@ -223,6 +227,8 @@ async function main() {
       // itself, so the /health path — which awaits it with no .then — stops
       // leaving them describing the previous provider's catalogue.
       modelContextWindow: el({ title: "" }),
+      modelContextWindowSetting: el({ className: "hidden" }),
+      modelContextWindowInput: el({ value: "" }),
       modelVisionBadge: el({ hidden: true, dataset: {} }),
     };
     const store = storage();
@@ -238,6 +244,9 @@ async function main() {
       },
       chrome: store.chrome, fetch: fetchImpl,
       setModelPill() {}, brottoModelCatalog: null, setTimeout,
+      // Module-level const in sidepanel.js; the extraction is brace-matched,
+      // so the sandbox has to declare it like any other free variable.
+      KEY_MASK: '••••••••',
       // The one guard hydrateModelSettings reads. Left undefined it throws, and
       // a throwing guard would make every hydration below look like a no-op.
       modelSettingsEdited: false,
@@ -252,7 +261,10 @@ async function main() {
       globalThis: null,
     };
     sandbox.globalThis = sandbox;
-    vm.createContext(sandbox);
+      // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
     // The panel's element handles are module-level consts in the real file.
     Object.assign(sandbox, {
       $modelProvider: els["model-provider"],
@@ -265,6 +277,8 @@ async function main() {
       $modelSave: els["model-save"],
       $modelStatus: els["model-save-status"],
       $modelContextWindow: els.modelContextWindow,
+      $modelContextWindowSetting: els.modelContextWindowSetting,
+      $modelContextWindowInput: els.modelContextWindowInput,
       $modelVisionBadge: els.modelVisionBadge,
     });
     return { els, store, sandbox };
@@ -275,8 +289,12 @@ async function main() {
   async function panelWithCatalog(fetchImpl, stored) {
     const { els, store, sandbox } = panel(fetchImpl, stored);
     vm.runInContext(catalogSrc, sandbox);
+  // The real key-naming pair: a hand-written stand-in would let these pass
+    // while the shipped file reads a per-account key.
+    vm.runInContext(modelKeysSrc, sandbox);
+    vm.runInContext(extract("modelKeyNames"), sandbox);
     for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
-                      "renderModelFacts", "initModelSettings", "hydrateModelSettings"]) {
+                      "effectiveContextWindow", "renderModelFacts", "initModelSettings", "hydrateModelSettings", "repaintKeyField"]) {
       vm.runInContext(extract(fn), sandbox);
     }
     // The click handler, registered the way the file registers it.
@@ -375,6 +393,39 @@ async function main() {
     check("a config saved before base_url existed still loads",
       els["model-name"].value === "claude-sonnet-5-5");
     check("…and does not resurrect a stale base URL", els["model-base-url"].value === "");
+  }
+
+  // ── The key field looks occupied when it is ──────────────────────────────
+  // An empty box reads "nothing saved", so a user re-pastes every visit. The
+  // field must show a mask, never the key — and saving the mask must not
+  // overwrite the stored credential with bullets.
+  {
+    const { els, store, ctx } = await panelWithCatalog(ok, {
+      provider: "anthropic", model: "claude-sonnet-5-5", context_window: 1000000,
+    });
+    store.local.modelApiKey = "sk-stored";
+    await ctx.initModelSettings("http://box:8000");
+    check("a saved key fills the field with the mask, not blank and not the key",
+      els["model-api-key"].value === "••••••••" && els["model-api-key"].value !== "sk-stored",
+      JSON.stringify(els["model-api-key"].value));
+    await els["model-save"].handlers.click();
+    check("saving without touching the mask keeps the real key",
+      store.local.modelApiKey === "sk-stored", String(store.local.modelApiKey));
+    els["model-api-key"].value = "sk-new";
+    await els["model-save"].handlers.click();
+    check("typing over the mask stores the new key",
+      store.local.modelApiKey === "sk-new", String(store.local.modelApiKey));
+    els["model-api-key"].value = "";
+    await els["model-save"].handlers.click();
+    check("an empty field is the deliberate clear",
+      !("modelApiKey" in store.local));
+  }
+  {
+    const { els, ctx } = await panelWithCatalog(ok, {
+      provider: "anthropic", model: "claude-sonnet-5-5", context_window: 1000000,
+    });
+    await ctx.initModelSettings("http://box:8000");
+    check("no key stored, no mask", els["model-api-key"].value === "");
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

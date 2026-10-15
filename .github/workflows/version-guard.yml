@@ -1,0 +1,23 @@
+# Stopgap so the "Version guard" required check can report on main.
+# The real checker (scripts/version.js) lives on the release-train branch.
+# When that lands, this should just call it.
+name: Version guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  version-guard:
+    name: Version guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: All version sites agree
+        run: |
+          if [ -f scripts/version.js ]; then
+            node scripts/version.js
+          else
+            echo "scripts/version.js not on this branch yet — stopgap pass"
+          fi

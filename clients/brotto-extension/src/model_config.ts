@@ -31,6 +31,43 @@ export interface StoredModelConfig {
 const MODEL_KEY = "modelConfig";
 const API_KEY_KEY = "modelApiKey";
 
+// Where the config and the key live for the account in `settings.accountId`.
+//
+// With an id, both carry it: two cloud accounts in one Chrome profile shared
+// one flat slot, and the key was the one that mattered — account A's run paid
+// with account B's credential. Without an id they are the flat keys, byte for
+// byte what every self-hoster's install already uses.
+//
+// **No migration.** A flat key written before this change belongs to whoever
+// was signed in then and nothing records which, so moving it into whichever
+// account signs in next would hand that account a credential that may be
+// someone else's — the exact harm this exists to remove. The cloud path
+// ignores the flat key; a cloud user re-pastes once into their own slot and
+// the two never meet again. Self-host reads the flat key exactly as before.
+//
+// This is the worker-side copy of model_keys.js's `modelKeys` (the worker is a
+// TS bundle, the panel a plain script, so they cannot share one function);
+// scripts/test-model-keys.test.js runs both against one table.
+function modelKeys(accountId: unknown): { config: string; apiKey: string } {
+  return typeof accountId === "string" && accountId
+    ? { config: `${MODEL_KEY}:${accountId}`, apiKey: `${API_KEY_KEY}:${accountId}` }
+    : { config: MODEL_KEY, apiKey: API_KEY_KEY };
+}
+
+// The id is its own top-level storage key, not a field in `settings` — a
+// field would mean reconstructing the whole blob to record one, which is how a
+// concurrent settings edit used to be lost. The `settings.accountId` read is a
+// legacy fallback for installs from the one build that had it there; the panel
+// migrates it on its next open.
+async function modelKeysForSettings(): Promise<{ config: string; apiKey: string }> {
+  const stored = await chrome.storage.local.get(["accountId", "settings"]);
+  const settings = stored.settings as { accountId?: unknown } | undefined;
+  const id = typeof stored.accountId === "string" && stored.accountId
+    ? stored.accountId
+    : settings?.accountId;
+  return modelKeys(id);
+}
+
 function isModelConfig(v: unknown): v is ModelConfig {
   return !!v && typeof v === "object"
     && typeof (v as ModelConfig).provider === "string"
@@ -38,11 +75,14 @@ function isModelConfig(v: unknown): v is ModelConfig {
 }
 
 export async function getStoredModelConfig(): Promise<StoredModelConfig> {
-  const stored = await chrome.storage.local.get([MODEL_KEY, API_KEY_KEY]);
-  const m = stored[MODEL_KEY] as unknown;
-  const k = stored[API_KEY_KEY];
+  const keys = await modelKeysForSettings();
+  const stored = await chrome.storage.local.get([keys.config, keys.apiKey]);
+  const m = stored[keys.config] as unknown;
+  const k = stored[keys.apiKey];
 
-  // Migration: old shape is `{ model_config: {...}, api_key: "..." }`.
+  // Migration: old shape is `{ model_config: {...}, api_key: "..." }`, and it
+  // only ever sat under the flat key — a self-hoster's, since the wizard wrote
+  // it before accounts existed.
   if (m && typeof m === "object" && !isModelConfig(m)) {
     const old = m as { model_config?: unknown; api_key?: unknown };
     const migrated = isModelConfig(old.model_config) ? old.model_config : null;
@@ -50,11 +90,11 @@ export async function getStoredModelConfig(): Promise<StoredModelConfig> {
     // Re-save in new layout and drop the legacy blob. Idempotent.
     await Promise.all([
       migrated
-        ? chrome.storage.local.set({ [MODEL_KEY]: migrated })
-        : chrome.storage.local.remove(MODEL_KEY),
+        ? chrome.storage.local.set({ [keys.config]: migrated })
+        : chrome.storage.local.remove(keys.config),
       oldKey
-        ? chrome.storage.local.set({ [API_KEY_KEY]: oldKey })
-        : chrome.storage.local.remove(API_KEY_KEY),
+        ? chrome.storage.local.set({ [keys.apiKey]: oldKey })
+        : chrome.storage.local.remove(keys.apiKey),
     ]);
     return { model_config: migrated, api_key: oldKey };
   }
@@ -66,10 +106,11 @@ export async function getStoredModelConfig(): Promise<StoredModelConfig> {
 }
 
 export async function setStoredModelConfig(value: StoredModelConfig): Promise<void> {
+  const keys = await modelKeysForSettings();
   await Promise.all([
-    chrome.storage.local.set({ [MODEL_KEY]: value.model_config }),
+    chrome.storage.local.set({ [keys.config]: value.model_config }),
     value.api_key
-      ? chrome.storage.local.set({ [API_KEY_KEY]: value.api_key })
-      : chrome.storage.local.remove(API_KEY_KEY),
+      ? chrome.storage.local.set({ [keys.apiKey]: value.api_key })
+      : chrome.storage.local.remove(keys.apiKey),
   ]);
 }

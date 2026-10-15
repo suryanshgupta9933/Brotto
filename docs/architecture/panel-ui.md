@@ -167,9 +167,10 @@ finish, so a run on another machine, or one the cap pushed out, was on disk and
 invisible — and a conversation the user cannot see is a conversation they cannot
 delete. `historyEntries` returns `local` on any failure rather than an empty
 list, because a history that empties itself when the server hiccups reads as
-"your conversations are gone".
+"your conversations are gone". **The mirror half is scoped to one server** — see
+`privacy.md`, which owns that invariant.
 
-Two consequences worth naming:
+Three consequences worth naming:
 
 - **A row is matched by `session_id`, never by object identity.** A server row
   is rebuilt from the index on every open, so `filter(s => s !== row)` keeps
@@ -177,6 +178,34 @@ Two consequences worth naming:
   caller that learned this.
 - **The index has no elapsed time** — only the loop reported that — so a
   server-supplied row shows `—` where a local one shows `2m 10s`.
+- **The merged list is sorted newest-first and deduped by session id.**
+  `mergeHistory` concatenated server rows, mirrored rows and the local array in
+  that order, so the newest conversation was whichever the *first* source
+  happened to hold — usually the server's oldest — and the same run appeared
+  once per source that kept a copy. `sortHistory()` orders by `started_at`
+  descending and keeps the first row per `session_id`; the sort runs inside
+  `mergeHistory` so every caller is fixed at once. Pinned by
+  `scripts/test-history-sort.test.js`.
+
+### The list says where it came from
+
+Falling back to the mirror on every failure is right and it is also how
+"the server refused us" came to look exactly like "the server has no sessions":
+**a bad `AGENT_SECRET` is a 404 by design** (`privacy.md` owns that), so one
+wrong credential 404s `/v1/sessions`, `/v1/suggestions` and `/v1/policy` at
+once, and the list still rendered — from local copies — with nothing marking
+the difference.
+
+`historyEntries` therefore records where its rows came from —
+`server` / `rejected` (a 404) / `unreachable` (anything else) — and
+`renderHistory` raises a card above the composer through `appendFailureBubble`,
+the same failure card the model-not-set notice uses. **404 and unreachable get
+different sentences because they have different fixes**: a 404 names the
+credential, an unreachable names the server, and one sentence covering both
+sends the reader to debug the wrong machine. A card rather than a header badge,
+because the pill is gone (below) and this is a claim about a list they are
+reading rather than ambient state. Pinned by
+`scripts/test-history-source.test.js`.
 
 ## Reopening a conversation from history
 
@@ -420,14 +449,17 @@ a card.
 "revoked" | "try_again"}`, always HTTP 200. Both surfaces map those to one
 sentence each and only open the code box on `sent: true` — the box is still
 the user's click asking for a code, and it stays shut when the server says no
-mail is coming. `welcome.js` `requestCode` and `sidepanel.js`
-`requestSignInCode` carry the same four-way mapping.
+mail is coming. **The wizard is the only caller of both `request-code` and
+`exchange`**: sign-in is wizard-only, so there is no second surface left to
+drift from the mapping.
 
 ## `approved` is a report, and the token is stored either way
 
-`POST /v1/auth/exchange` answers `{access_token, approved}`. Both surfaces read
-the field the same way — `sidepanel.js:992` and `welcome.js:246` — and every
-part of that is load-bearing.
+`POST /v1/auth/exchange` answers `{access_token, approved, account_id}`.
+**The wizard is now the only caller** — sign-in moved to the wizard, so
+`welcome.js` `exchangeCode` reads `approved` at `welcome.js:429` and
+`sidepanel.js` has no `exchange` call at all. The rule below is about how the
+one reader treats the field, not about two agreeing readers.
 
 **It is additive, so it is compared against `false`, never by truthiness.** A
 relay too old to send the field omits it, and an omitted field is *not* a
@@ -584,15 +616,179 @@ turns four checks red and exits 1.
 The rule for the next frame author: **a server frame is either rendered, or
 listed in `IGNORED` with a reason.** There is no third state.
 
-### Header text has a width budget
+### There is no connection pill
 
-`SERVER UNREACHABLE… (RETRY 1 OF 6)` in the status pill truncated mid-word and
-pushed the rest of the header off screen. The pill carries one word —
-`Connected` / `Connecting…` / `Reconnecting` / `Disconnected` / `Idle` — and
-anything longer goes in the toast, which is full-width above the composer and is
-the same treatment as "Address copied". `toast()` replaces rather than stacks,
-which is right for a retry counter: the number updating in place is the
-information, and six stacked copies of the same line are just a slower sentence.
+The top bar carried one: a renderer, its CSS, and six mutators that repainted
+it on every phase change. It is deleted, all of it — the header keeps only the
+model pill. **Nothing was promoted into its place.**
+
+The reason is what it cost rather than what it showed. It was the panel's only
+ambient state, so every error the product had gained a voice for over the
+previous weeks — a refused credential, a failed reconnect, a model that will not
+pre-flight — was written into a strip of header text that is always visible and
+always about something else. `SERVER UNREACHABLE… (RETRY 1 OF 6)` truncated
+mid-word and pushed the rest of the header off screen; the width budget that
+fixed it (`### Header text has a width budget`, now gone with the pill) was
+maintained forever to keep a status line inside a header. A card is the panel's
+own vocabulary for "this went wrong, and here is what to do", and it costs no
+new CSS because `appendFailureBubble` already exists.
+
+**An error surfaces as a card above the composer, or as nothing.** A socket that
+reconnects on its own is not the user's problem yet, and a pill that says
+`Reconnecting` three times a minute trains the reader to skip the one surface
+that matters. Reachability that is *settled* — the answer to the `/health` probe
+the panel already makes — is `state.serverReachable`, and it has its own
+`serverBanner` mirroring the model-check banner. See `extension.md` for how that
+answer is reached. Pinned by `scripts/test-no-conn-pill.test.js`.
+
+### The API-key field is a pure function of storage
+
+Three writers of the model-API-key slot live on three paths — Settings' Save,
+the worker's `setStoredModelConfig`, and the wizard — and each one that removed
+the
+key left the field showing `KEY_MASK` over nothing behind it. That is not
+cosmetic: **Save treats the mask as "unchanged, write nothing"**, so pressing it
+after a removal stored nothing and the only way back was clearing the field by
+hand.
+
+`repaintKeyField()` reads storage and writes the mask or the empty string; it
+runs after Save and on opening Settings, which is also how a wizard-side removal
+reaches the panel. **Never let a writer announce its own change** — the two
+writers outside this file are exactly the ones a local repaint cannot see. A
+value that is neither the mask nor empty is a draft the user is typing and is
+left alone, or re-opening Settings would eat what they pasted.
+Pinned by `scripts/test-key-mask.test.js`.
+
+## Local state is scoped by account, and only when there is one
+
+Two cloud accounts in one Chrome profile shared **everything local**, because
+the only separator was the server address — and the address is the same for
+every account on the hosted relay. History, provider, model and the saved API
+key were one flat slot each. The key is the one that mattered: account A's run
+silently paid with account B's credential.
+
+The relay now names the account — `account_id` on `POST /v1/auth/exchange`,
+and on an authenticated `GET /v1/account` for a panel opened days later that
+holds a stored token and has no exchange in this session (`privacy.md` owns
+the route; `conversation.md` the two response shapes). **`state.accountId` is
+that field, and nothing else.** It is never read off the token: decoding a
+credential is the rule the whole design refuses, and a server that hands an id
+over *as a field* is what makes scoping possible without breaking it.
+
+### The self-host namespace must not move, and is pinned literally
+
+`namespaceFor(base, accountId)` folds the id in as an **inner** key — the
+address stays the outer one, `${ns}#${accountId}` — and **only when there is
+one**. Every shape the server can answer with on a self-hoster's machine means
+"no account", not "an account called nothing": `/v1/account` answers
+`account_id: null`, a degraded `exchange` answers `""`, a 404 or an unreachable
+server leaves it unset. All of them leave the namespace **byte-identical** to
+what it has always been, because a self-hoster's mirrored rows were written
+under those exact bytes and any change silently empties their History.
+
+That is why `scripts/test-mirror-namespace.test.js` pins the literal string
+rather than "different from something":
+
+```js
+check("self-host's namespace is the bare address, byte for byte",
+  nsFor(SELF) === "http://localhost:8000", nsFor(SELF));
+```
+
+All six panel call sites pass `state.accountId` explicitly rather than letting
+the store read storage, so the rule is visible at each site instead of being
+inferred from module state. An account never leaks into another server's
+namespace either — `namespaceFor(self, "acc-a") !== namespaceFor(cloud,
+"acc-a")` is asserted, because the id means nothing without its address.
+
+### The model config and the key carry the account too, and nothing migrates
+
+`model_keys.js` (panel and wizard) and `model_config.ts` (the worker) hold one
+`modelKeys(accountId)` each: `modelConfig:<id>` / `modelApiKey:<id>` with an id,
+the flat `modelConfig` / `modelApiKey` without one. **Self-host is on the flat
+keys, byte for byte what every install before accounts used** — the same
+invariance as the namespace, for the same reason.
+
+The worker is a TS bundle and the panel a plain script, so they cannot share
+one function. `scripts/test-model-keys.test.js` runs both against one table
+because two copies of a namespace rule that must agree is how one drifts.
+
+**Nothing is migrated, and that is the decision, not an oversight.** A flat
+`modelApiKey` written before this change belongs to whoever was signed in when
+it was written and **nothing records which**. Copying it into whichever account
+signs in next hands that account a credential that may be someone else's —
+exactly the harm the split removes. So the cloud path ignores the flat key
+entirely and a cloud user re-pastes once, into their own slot, after which the
+two never meet. Self-host reads the flat key exactly as before, which is why
+the cost is invisible to everyone who did not ask for accounts.
+
+Sign-out and the expired-credential sweep both run one helper,
+`dropCredential()`, which **deletes the account id with the token** *and the
+account's artifacts*: `modelApiKey:<id>`, `modelConfig:<id>` and the mirror
+namespace `${base}#${id}`. Left behind, the next sign-in as a different
+account would inherit the previous one's history and settings, and the previous
+one's provider key would sit on disk as a live credential with nothing left to
+name it.
+
+**The id is its own `chrome.storage.local` key, not a field in `settings`.** A
+field means every writer reconstructs the whole blob from a snapshot taken
+before an `await`, and anything that wrote `settings` in that window is
+silently clobbered — `learnAccountId()` did exactly that to a server-url edit.
+`welcome.js` `finish()` migrates a legacy `settings.accountId` once; the panel
+does the same on its next open.
+
+**One accessor: `accountScope()`.** Every namespace and every model-key name
+goes through it, and it answers from storage when `state.accountId` is null —
+so the scoping **cannot depend on a network call**. That was the bug: the id was
+assigned only inside `learnAccountId()`, which sits inside the `try` wrapping
+`/health` and returns early unless the mode is `jwt`, so a panel opened before
+that probe settled read the **shared** namespace — the exact cross-account
+disclosure the split removes.
+
+**With a credential and no id on the cloud, the panel fails closed.** An
+unqualified namespace is the shared one, so `accountScope()` resolves that case
+to a namespace nothing has ever written and History reads empty. Empty is the
+right answer to "whose history is this?" when we cannot tell; shared hands a
+stranger's transcript to someone else. Self-host keeps the flat namespace
+byte-identical, including while its server is unreachable, because the
+discriminator is `auth_mode` off `/health` and never the address.
+
+**A degraded cloud exchange does not store the model key.** `brottoModelKeys("")`
+is the *flat* slot, so a sign-in that got a token but no account id would have
+written this account's provider key into the shared one — the credential
+crossover arriving through the failure path. The token is still stored (it is
+the credential we hold, and the panel re-learns the id from `/v1/account`), the
+key is not, and the user is told: *"Signed in, but we could not identify this
+account, so your model key was not saved."*
+
+### The clock reads in the units a run is measured in
+
+`renderElapsed` printed `83.0s` — a number the reader has to convert, on the one
+run worth reading slowly. `formatElapsed` renders `1m23s` / `1h23m26s` and keeps
+the tenths **under** a minute, because a step is ~30s and there the tenths are
+the difference between a fetch and a stall.
+
+`resetForNewTask` called `stopTimer()` where it meant `clearTimer()`. The
+distinction is load-bearing: `stopTimer` deliberately preserves `state.startTime`
+so a finished run's time stays on screen, and a reset has no finished run to
+preserve — the surviving base time made the replay guard refuse to rebase, so
+the next run counted from the previous run's start. **Stopping a timer and
+clearing one are different operations; a reset clears.** Pinned by
+`scripts/test-timer.test.js`.
+
+### Sharing a run replaces the thumbs
+
+The thumbs up/down wrote a rating into `localStorage` that nothing ever read,
+so the panel looked like it was reporting feedback and was not. Deleted with
+its icons and CSS. What replaced it is a prefilled GitHub Discussions post: a
+Markdown body composed from the run, put on the **clipboard**, with the bare
+Discussions URL opened so the user pastes it. **No account, no backend, no
+operator, and the same link on self-host as on the relay.**
+
+The reason it is the clipboard and not the wire is the whole rule: task text is
+user content, and a query string would put it in a URL — referrer headers,
+history, proxies. The Markdown is fenced and escaped before it is copied, for
+the same reason `renderMarkdown` is escape-first. Pinned by
+`scripts/test-share-run.test.js`.
 
 ### The model pill is a settings button, and it is not a mode selector
 

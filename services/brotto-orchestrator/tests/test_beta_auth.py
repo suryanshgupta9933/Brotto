@@ -524,7 +524,11 @@ def test_exchange_returns_the_access_token(client, monkeypatch, hosted):
         "/v1/auth/exchange", json={"email": "beta@example.test", "code": "123456"}
     )
     assert resp.status_code == 200
-    assert resp.json() == {"access_token": "a.b.c", "approved": False}
+    # `account_id` is `""` here because the stubbed token does not verify
+    # — see test_account_identity.py for the verified-token path.
+    assert resp.json() == {
+        "access_token": "a.b.c", "approved": False, "account_id": "",
+    }
 
 
 async def _no_approval(token: str) -> bool:
@@ -630,7 +634,7 @@ def test_a_loopback_bind_with_no_credential_still_boots(monkeypatch):
     assert launched
 
 
-# ── retention, which the hosted relay defaults on ─────────────────────────
+# ── retention, off by default on every deployment ────────────────────────
 
 def test_retention_is_off_on_a_self_host_by_default(monkeypatch):
     from brotto_orchestrator.main import retention_days
@@ -640,16 +644,12 @@ def test_retention_is_off_on_a_self_host_by_default(monkeypatch):
     assert retention_days() is None
 
 
-def test_the_hosted_relay_ages_sessions_out_without_being_asked(monkeypatch, hosted):
-    """An ephemeral dyno is not a self-hoster's own disk.
-
-    Every beta transcript would otherwise sit on the filesystem until the
-    filesystem died, decided by nobody.
-    """
+def test_the_hosted_relay_does_not_age_sessions_out_unless_asked(monkeypatch, hosted):
+    """A run record stays so it is there when the user comes back to it."""
     from brotto_orchestrator.main import retention_days
 
     monkeypatch.delenv("BROTTO_RETENTION_DAYS", raising=False)
-    assert retention_days() == 30.0
+    assert retention_days() is None
 
 
 def test_an_operator_setting_retention_still_wins(monkeypatch, hosted):
@@ -1360,7 +1360,11 @@ def test_a_listed_address_approves_itself_at_exchange(client, monkeypatch, hoste
     resp = client.post(
         "/v1/auth/exchange", json={"email": LISTED, "code": "123456"}
     )
-    assert resp.json() == {"access_token": _token(email=LISTED), "approved": True}
+    assert resp.json() == {
+        "access_token": _token(email=LISTED),
+        "approved": True,
+        "account_id": USER_ID,
+    }
     insert = next(c for c in calls if c["method"] == "POST" and c["path"] == "rest/v1/profiles")
     assert insert["body"] == {"id": USER_ID, "email": LISTED}
     # Insert-if-absent, not an upsert. Written as an upsert it would touch an
@@ -1691,7 +1695,11 @@ def test_an_unreachable_control_plane_leaves_the_caller_signed_in(client, monkey
     _stub_verify(monkeypatch)
     resp = client.post("/v1/auth/exchange", json={"email": LISTED, "code": "123456"})
     assert resp.status_code == 200
-    assert resp.json() == {"access_token": _token(email=LISTED), "approved": False}
+    assert resp.json() == {
+        "access_token": _token(email=LISTED),
+        "approved": False,
+        "account_id": USER_ID,
+    }
 
 
 # ── the same wall on every use path, not only at task start ──────────────

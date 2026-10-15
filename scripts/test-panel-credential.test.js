@@ -231,27 +231,13 @@ const alive = async () => ({ ok: true, status: 200 });
   // ── The writers, so the guard is reachable at all ───────────────────────
   console.log("\nand every writer records the origin the reader needs");
 
-  const stored = { approved_domains: ['example.com'] };
-  const writerSandbox = {
-    chrome: {
-      storage: {
-        local: {
-          get: async () => ({ settings: stored }),
-          set: async (o) => Object.assign(stored, o.settings),
-        },
-      },
-    },
-    serverBase: () => CLOUD,
-    agentSecretSetting: null,
-    TOKEN,
-  };
-  vm.createContext(writerSandbox);
-  vm.runInContext(extract(panel, "storeAgentSecret", { async: true }), writerSandbox);
-  await vm.runInContext("storeAgentSecret(TOKEN)", writerSandbox);
-  check("the panel's cloud sign-in records the server it signed in to",
-    stored.agentSecretOrigin === CLOUD, JSON.stringify(stored));
-  check("and keeps the fields written elsewhere — the spread is the point",
-    JSON.stringify(stored.approved_domains) === '["example.com"]', JSON.stringify(stored));
+  // `storeAgentSecret` is gone with the panel's Connection section: the
+  // wizard's `finish()` is the one writer, and it already knows the issuing
+  // server. Settings Save must not be a second writer — it must also not
+  // *drop* the origin, because `chrome.storage.local.set({settings})` replaces
+  // wholesale.
+  check("the panel has no storeAgentSecret left to disagree with the wizard",
+    !/function storeAgentSecret/.test(panel));
 
   // `finish()` writes two storage areas and calls chrome.sidePanel, so it is
   // asserted where the shape lives: the object literal it saves.
@@ -261,11 +247,11 @@ const alive = async () => ({ ok: true, status: 200 });
 
   // Settings Save replaces `settings` wholesale, so an origin it omits is a
   // credential the service worker refuses everywhere — including for the user
-  // who just pressed Save.
+  // who just pressed Save. Spreading the stored settings is what keeps it.
   const saveHandler = panel.slice(panel.indexOf("if (saveSettingsBtn)"));
-  check("Settings Save records the origin too, rather than dropping it",
-    /agentSecretOrigin:\s*serverUrl/.test(saveHandler),
-    "settings is replaced wholesale; the origin has to be in the new object");
+  check("Settings Save spreads the stored settings rather than dropping the origin",
+    /\.\.\.priorSettings/.test(saveHandler),
+    "settings is replaced wholesale; the spread is what keeps agentSecretOrigin");
 
   // ── The one-way server address ──────────────────────────────────────────
   console.log("\nand the cloud address is still one-way in, not out");

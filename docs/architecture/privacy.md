@@ -26,8 +26,9 @@ So the privacy posture is not "we do not collect your data". It is:
 | Page digests (200 chars each) | `logs/sessions/<id>.scratchpad.txt`, server | until deleted |
 | AX-tree sizes, page-text chars, changed-element chars | inside the audit document, server | until deleted |
 | Task title, action names, URLs, typed input | inside the audit document, server | until deleted |
-| Model config, `base_url` | `chrome.storage.local`, user | until cleared |
-| API key | `chrome.storage.local`, user | until the user clears it |
+| Model config, `base_url` | `chrome.storage.local`, user, under a key carrying the account id on the cloud | until cleared |
+| API key | `chrome.storage.local`, user, same account-scoped key | until the user clears it |
+| Account id (`profiles.id`, the JWT `sub`) as a **namespace component** — which local key and which mirror rows a session belongs to | the top-level `accountId` key in `chrome.storage.local`, user (its own key, not a field in `settings`, so no writer reconstructs the blob to record one); and returned as a response field, stored in no operator table | until sign-out clears it, together with that account's model key, config and mirrored rows |
 | Secure-mode policy | `logs/user_policies/*.json`, server | forever |
 | Which account owns a session (`<id>.owner`) | beside the session, server | with the session |
 | Waitlist signup and the beta roster — one row per address in `beta_access`: `asked_at` + name + batch (they asked), `approved_at` (we granted), `revoked_at` (we withdrew) | `beta_access` table in Supabase, server | until the operator drops it |
@@ -154,6 +155,41 @@ that is closed most of the time and the mirror stops recording exactly when a
 background run ends. And the document is stored **verbatim**, because the replay
 path wants the server's bytes and re-serialising is one more way for the two
 copies to differ. Pinned by `scripts/test-session-mirror.test.js`.
+
+**2b. The mirror is one server's, not the browser's.** `brotto-sessions` lives
+in the extension origin, which every server a user ever points the panel at
+shares. `historyEntries` unions mirrored rows into History on every path, so a
+profile that used the cloud relay and was then pointed at a self-hosted server
+showed the **cloud account's conversations** in the self-host History —
+replayable, with that server never involved. The rule 2 failure is not "logs/"
+this time; it is one operator's transcripts arriving under another's.
+
+Rows are stamped with the server address on write and filtered on every read —
+`list`, `get`, and `clear`, because "delete every conversation in the list" must
+not reach rows the list never showed. `namespaceFor(base)` normalises a typed
+trailing slash and case, so two spellings of one address are one server.
+
+**`auth_mode` is deliberately not part of the namespace.** It was the other
+candidate and it is the wrong one twice: mode is a property of the server at an
+address rather than of the user, so it separates nothing the address does not
+already separate — and `state.authMode` is null until the `/health` probe lands,
+so keying on it made every row vanish from History for as long as the probe was
+in flight.
+
+**Rows written before this existed are shown under no server, and are not
+migrated.** Backfilling them onto whichever address happens to be pointed at on
+first read would be the friendlier reading and the unsafe one: it is the same
+disclosure this filter exists to stop, decided by which address the user happened
+to type. A conversation the user cannot see is recoverable; one shown under the
+wrong account is not. `inNamespace(row, ns)` requires a non-empty namespace, so
+an unstamped row is invisible rather than misfiled.
+
+`ponytail:` the ceiling is real and named — **the namespace is a server address,
+not an account**, so two cloud accounts on one relay in one Chrome profile share
+it, because the panel cannot identify an account without parsing the credential
+and parsing it is forbidden. Fix when the relay issues a stable per-account id the
+panel can read as its own field. Pinned by
+`scripts/test-mirror-namespace.test.js`.
 
 **3. Redaction is not a privacy boundary.** `is_secret_field` runs at audit-write
 time and catches *typed* secrets. It does not catch the page. What keeps the
@@ -518,6 +554,16 @@ probing, and this server holds the user's transcripts. A **403** means the
 credential is real and the *account* is not on the roster: an answer about an
 account, not about a probe.
 
+**The panel now says which one it got, and it is the only place this is visible.**
+One wrong credential 404s `/v1/sessions`, `/v1/suggestions` and `/v1/policy` at
+once, so History fell back to the local mirror on all three and a refused
+browser looked like a server with nothing in it. `historyEntries` records the
+source and `renderHistory` raises a card naming the credential specifically
+(`panel-ui.md` owns the wording and why 404 and unreachable are separated). A
+404 here is a statement about the *caller's credential*, not an enumeration of
+routes — which is why the card says "the server did not answer this browser"
+and never names a route.
+
 The ownership-scoped reads (`GET /v1/sessions`, `GET /v1/sessions/{id}/audit`,
 `DELETE …`) are roster-gated too. They were briefly exempted, on the reasoning
 that they are filtered by owner and an unapproved person owns no sessions —
@@ -814,6 +860,63 @@ caller typed. It never consults anything that knows who is in the beta.
 *The sign-in reply is a deliberate oracle* below. That is a product decision
 the owner made against the earlier uniform reply; it does not extend to the
 limiter, which still branches on neither address.
+
+## The client names an account, and it is the last local namespace
+
+The fifth thing "one operator per server" cost was not on the server at all:
+**two accounts in one Chrome profile shared every piece of local state.** The
+only separator was the server address, and on the hosted relay that is one
+string for the whole beta. History, provider, model and the saved API key were
+each one flat slot — and the key is the one that mattered, because account A's
+run paid with account B's credential. `panel-ui.md` owns the mechanism; what
+belongs here is what the identity **is** and where it is allowed to land.
+
+**`account_id` is an opaque `profiles.id` uuid — the JWT `sub` — and it is an
+identifier, not user content.** Nothing derived from an AX tree, page text, a
+URL, typed input or a task title may appear in that response or land in an
+operator table, and none does. It is written to `chrome.storage.local`
+unencrypted, which is safe precisely because it names nothing about the user:
+it is a handle they already hold for themselves. **No new table, no migration,
+no new refusal reason** — the account already existed as `profiles.id`.
+
+**It is handed over as a field because the extension never parses the
+credential.** `verify_jwt` is stdlib `hmac` and the relay signed the token
+seconds earlier, so reading the `sub` out of it costs no control-plane round
+trip. But the point is not the cost: a `sub` *decoded by the client* is the
+credential being parsed, which is the one rule the whole credential design
+rests on (see `extension.md`). A server-sent field lets the client scope local
+state without ever opening the token.
+
+**`GET /v1/account` exists because `exchange` is not enough.** A panel opened
+days later holds a stored token and has no exchange in this session, and
+without an id it cannot tell whose history it is showing. It goes through
+`_approved`, the same choke point as every other gated route and **deliberately
+including the roster**: an identity route reachable without a credential is an
+`/health`-shaped leak of every account id on the relay. So a bad credential
+answers **404, not 403**, and no credential answers 404 — the same answers as
+every other route, for the same reason.
+
+**Self-host is untouched and answers `{"account_id": null}`.** `Claims` exists
+only when a JWT authenticated; there is no account, and the client's namespace
+and storage keys are then byte-identical to what they were before accounts
+existed. Note the small asymmetry, which is deliberate on both sides: a
+*degraded* `exchange` answers `""` (the id could not be verified, and the
+caller still gets a signed-in response) while `/v1/account` answers `null` (no
+claims object). Every one of those values means "no account" to the client.
+
+**No `approved` on `/v1/account`.** `_approved` already refused, so the field
+would be a constant — and one derived from the *type* of the claims object it
+read would answer `false` for a valid `AGENT_SECRET` in secret mode, which
+reads as a denial that never happened. `account_id` is null in exactly the
+no-account case, which is all a caller needs.
+
+**Nothing is migrated from the flat key, on purpose.** A pre-change flat
+`modelApiKey` belongs to whoever was signed in when it was written and nothing
+records which, so copying it into whichever account signs in next hands that
+account a credential that may be someone else's — the exact harm the split
+exists to prevent. The cloud path ignores it and a cloud user re-pastes once.
+The cost is one re-paste, paid by people who asked for accounts, and the
+alternative is a silent cross-account credential, which is not a trade.
 
 ## The sign-in reply is a deliberate oracle
 

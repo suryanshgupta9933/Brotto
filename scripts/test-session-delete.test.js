@@ -166,6 +166,10 @@ const sandbox = {
     activeElement: null,
   },
   plannerUrlEl: { value: "http://localhost:8000" },
+  // No account: self-host, and the case every delete here is about.
+  state: { accountId: null },
+  // Every delete path resolves its namespace through accountScope() now.
+  accountScope: async () => null,
   historyList,
   historyDeleteAll,
   confirmOverlay, confirmTitle, confirmBody, confirmOk, confirmCancel,
@@ -185,12 +189,16 @@ const sandbox = {
   toast: (text, kind) => calls.push({ toast: text, kind }),
   confirmSettle: null,
   replaySession: async () => {},
+  // historyEntries now records where the list came from; this file is about
+  // deletes, so the notice itself is test-history-source.test.js's job.
+  noteHistorySource: () => {},
   // historyEntries unions the server's list with the IndexedDB mirror, so
   // the sandbox needs one. An empty store is the honest default here: this
   // test is about deletes, and scripts/test-session-mirror.test.js covers
   // what the mirror contributes.
   brottoSessionStore: {
     list: async () => [],
+    namespaceFor: (base) => String(base || ""),
     get: async () => null,
     put: async () => true,
     remove: async () => true,
@@ -223,11 +231,15 @@ function check(name, cond, detail) {
   console.log(`FAIL ${name}${detail ? `\n     ${detail}` : ""}`);
 }
 
+// The flight is the newest run, so it is the first row whichever source
+// answered — the assertions below name rows by position, and the panel sorts
+// the merged list newest-first regardless of arrival order (see
+// test-history-sort.test.js).
 const SESSIONS = [
   { task: "find the cheapest flight", status: "done", steps: 4, elapsed: "2m",
-    startedAt: 1, session_id: "aaa", task_count: 1 },
+    startedAt: 2, session_id: "aaa", task_count: 1 },
   { task: "star brotto-ui", status: "done", steps: 2, elapsed: "30s",
-    startedAt: 2, session_id: "bbb", task_count: 1 },
+    startedAt: 1, session_id: "bbb", task_count: 1 },
 ];
 
 function reset(sessions = SESSIONS) {

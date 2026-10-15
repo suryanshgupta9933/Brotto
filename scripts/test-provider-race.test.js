@@ -31,12 +31,14 @@ const vm = require("vm");
 
 const SRC = path.join(__dirname, "..", "clients", "brotto-extension", "src");
 const panel = fs.readFileSync(path.join(SRC, "sidepanel.js"), "utf8");
+const dropdownSrc = fs.readFileSync(path.join(SRC, "dropdown.js"), "utf8");
 const catalogSrc = fs.readFileSync(path.join(SRC, "model_catalog.js"), "utf8");
+const modelKeysSrc = fs.readFileSync(path.join(SRC, "model_keys.js"), "utf8");
 
 /** Brace-matched body of `function name(...)`. */
-function extract(name, src = panel) {
+function extract(name, src = name === "attachDropdown" ? dropdownSrc : panel) {
   const start = src.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
-  if (start < 0) throw new Error(`no function ${name} in sidepanel.js — renamed?`);
+  if (start < 0) throw new Error(`no function ${name} in ${src === dropdownSrc ? "dropdown.js" : "sidepanel.js"} — renamed?`);
   let parens = 0;
   let bodyStart = -1;
   for (let i = src.indexOf("(", start); i < src.length; i++) {
@@ -156,7 +158,10 @@ function openDropdown(hostValue = "anthropic") {
     DROPDOWNS: [], dropdownWriting: false,
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   vm.runInContext(extract("attachDropdown"), sandbox);
 
   let value = hostValue;
@@ -241,8 +246,13 @@ function openPanel(stored) {
     $modelBaseUrlSetting: { classList: { toggle() {} } },
     $modelBaseUrl: { value: "" },
     $modelContextWindow: { textContent: "", title: "" },
+    $modelContextWindowSetting: { classList: { toggle() {} } },
+    $modelContextWindowInput: { value: "" },
     $modelVisionBadge: { hidden: true, dataset: {}, textContent: "" },
     modelSettingsEdited: false,
+    // Free variables the brace-matched hydrate/save bodies close over.
+    KEY_MASK: '••••••••',
+    $modelKey: { value: "" },
     dropdownWriting: false,
     modelDd: null,
     // initModelSettings repaints the provider trigger itself, so the /health
@@ -254,7 +264,10 @@ function openPanel(stored) {
     setModelPill() {},
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   vm.runInContext(catalogSrc, sandbox);
   // The panel's own seed expression, evaluated rather than assumed — otherwise
   // this test would pass with `let modelCatalog = null` back in place, because
@@ -263,8 +276,12 @@ function openPanel(stored) {
   if (!seed) throw new Error("no `let modelCatalog = …` in sidepanel.js — renamed?");
   sandbox.modelCatalog = vm.runInContext(seed[1], sandbox);
 
+  // The real key-naming pair: a hand-written stand-in would let these pass
+  // while the shipped file reads a per-account key.
+  vm.runInContext(modelKeysSrc, sandbox);
+  vm.runInContext(extract("modelKeyNames"), sandbox);
   for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
-                    "renderModelFacts", "hydrateModelSettings", "initModelSettings"]) {
+                    "effectiveContextWindow", "renderModelFacts", "hydrateModelSettings", "initModelSettings", "repaintKeyField"]) {
     vm.runInContext(extract(fn), sandbox);
   }
   // The synchronous populate the panel does at module scope, before any fetch.

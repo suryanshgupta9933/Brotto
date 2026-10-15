@@ -106,8 +106,9 @@ check("no second token slot was invented",
 check("nothing parses the token's kind",
   !/access_token\.(split|\.length|startsWith|indexOf)|eyJ/.test(welcome + sidepanel),
   "a JWT has dots in it and that is not a licence to inspect it");
-check("the panel writes it through the same slot",
-  /settings:\s*\{\s*\.\.\.\(stored\.settings \|\| \{\}\),\s*agentSecret: value/.test(sidepanel));
+check("the panel reads the same slot the wizard writes",
+  /brottoCredential\.forUrl\(stored\.settings/.test(sidepanel),
+  "one slot, one reader; the panel never re-implements the lookup");
 
 // ── The wizard asks which one, first ──────────────────────────────────────
 const steps = [...welcomeHtml.matchAll(/data-step="(\d+)"/g)].map((m) => m[1]);
@@ -136,6 +137,7 @@ function applyEditionTo(selfChecked, cloudChecked, serverUrl) {
     $cloudCodeField: { hidden: false },
     $cloudCode: { value: "123456" },
     $resendCodeBtn: { hidden: false },
+    $sendCodeRow: { hidden: false },
     $serverUrl: { ...serverUrl, classList: { toggle() {} } },
     $serverUrlHint: { textContent: "" },
     edition() { return cloudChecked ? "cloud" : "self"; },
@@ -190,21 +192,23 @@ check("a blank key does not trigger the authenticated probe",
 check("and an unreachable server still says so in its own words",
   /No answer — check the address/.test(welcome));
 
-// ── The panel's Connection section ────────────────────────────────────────
-check("the secret field has an id to hide", /id="agentSecretField"/.test(panelHtml));
-check("the cloud block has an id to show", /id="cloudSignIn"/.test(panelHtml));
-check("and it starts hidden",
-  /id="cloudSignIn" hidden/.test(panelHtml),
-  "a self-hoster opening Settings must see exactly the screen they saw before");
-for (const id of ["cloudEmail", "cloudCode", "cloudCodeBtn", "cloudSignInBtn", "cloudSignOutBtn", "cloudSignInStatus"]) {
-  check(`the panel markup has #${id}`, new RegExp(`id="${id}"`).test(panelHtml));
-}
-check("every id the panel JS queries exists in the markup",
-  [...sidepanel.matchAll(/getElementById\('(cloud[A-Za-z]+|agentSecretField)'\)/g)]
-    .every((m) => panelHtml.includes(`id="${m[1]}"`)),
+// ── The panel's Connection section is gone ────────────────────────────────
+// Deleted, not hidden: the wizard is the one place to change server, key or
+// account. A hidden-but-present Connection panel is a second writer for the
+// same three fields and the seam this whole design exists to avoid.
+check("the secret field is deleted from the panel", !/id="agentSecretField"/.test(panelHtml));
+check("the cloud sign-in block is deleted from the panel", !/id="cloudSignIn"/.test(panelHtml));
+check("no leftover cloud sign-in ids in the panel",
+  !/id="cloud(Email|Code|CodeBtn|SignInBtn|SignOutBtn|SignInStatus|ResendBtn)"/.test(panelHtml));
+check("no leftover Connection ids the panel JS still queries",
+  [...sidepanel.matchAll(/getElementById\(['"](cloud[A-Za-z]+|agentSecretField|waitlist[A-Za-z]+|refreshPolicyBtn|settingsVerifyStatus)['"]\)/g)]
+    .length === 0,
   "an id the JS queries that the markup lacks is invisible in a diff");
-check("the code field is six digits wide",
-  /id="cloudCode"[\s\S]{0,80}maxlength="6"/.test(welcomeHtml + panelHtml));
+check("the wizard's code field is six digits wide",
+  /id="cloudCode"[\s\S]{0,80}maxlength="6"/.test(welcomeHtml));
+check("and the send-code row hides once a code is on its way",
+  /id="sendCodeRow"/.test(welcomeHtml) && /function showCodeEntry/.test(welcome)
+  && /\$sendCodeRow\.hidden = true/.test(welcome));
 
 // ── No new permission ─────────────────────────────────────────────────────
 // The 6-digit code exists precisely so the listing does not have to be
@@ -215,16 +219,25 @@ check("no identity permission was added", !perms.includes("identity"), perms.joi
 check("and no identity or unlimitedStorage call anywhere in the client",
   !/chrome\.identity|unlimitedStorage/.test(welcome + sidepanel));
 
-// ── Signing out ───────────────────────────────────────────────────────────
+// ── Changing account is the wizard, not a second sign-in surface ──────────
 // A stale token in the slot is a server refusing every call with a 404,
-// which reads exactly like a wrong AGENT_SECRET.
-const SIGNOUT = extract(sidepanel, "signOutOfCloud");
-check("signing out clears the slot", /storeAgentSecret\(''\)/.test(SIGNOUT));
-check("and lands back on the wizard, not on a dead token",
-  /setOptions\(\{ path: 'welcome\.html' \}\)/.test(SIGNOUT));
+// which reads exactly like a wrong AGENT_SECRET. The footer now offers
+// Sign out on cloud-with-token: it clears the slot and falls back to
+// "Set up Brotto". What must not return is a sign-IN surface in the panel
+// (the wizard is the only writer of the slot) or a `signOutOfCloud`
+// function for a second copy of the flow to disagree with. The wizard
+// still has to open on the right radio.
+check("the panel's sign-out only clears the slot; signing in stays in the wizard",
+  !/function signOutOfCloud/.test(sidepanel) && !/signOutOfCloud/.test(sidepanel)
+  && /delete settings\.agentSecret/.test(sidepanel)
+  && /'Sign out'/.test(sidepanel),
+  "the footer swap must be a clear, never a re-auth in the panel");
 check("the wizard picks its opening radio from the stored address",
   /initialEdition\(stored\.settings\?\.serverUrl\)/.test(welcome),
   "otherwise a signed-out cloud user lands on the self-host form, and an existing self-hoster lands on a sign-in they never asked for");
+check("and re-running the wizard overwrites the slot rather than accumulating a second one",
+  /agentSecret: \$agentSecret\.value\.trim\(\)/.test(welcome)
+  && /\.\.\.prevSettings/.test(welcome));
 
 console.log(failures ? `\n${failures} failed` : "\nall passed");
 process.exit(failures ? 1 : 0);

@@ -20,25 +20,30 @@ const vm = require("vm");
 const ROOT = path.join(__dirname, "..");
 const EXT = path.join(ROOT, "clients", "brotto-extension", "src");
 const sidepanel = fs.readFileSync(path.join(EXT, "sidepanel.js"), "utf8");
+const dropdownSrc = fs.readFileSync(path.join(EXT, "dropdown.js"), "utf8");
 const panelHtml = fs.readFileSync(path.join(EXT, "sidepanel.html"), "utf8");
+const tokensCss = fs.readFileSync(path.join(EXT, "panel-tokens.css"), "utf8");
 const catalogSrc = fs.readFileSync(path.join(EXT, "model_catalog.js"), "utf8");
 
 // Brace matching has to begin after the parameter list — a destructured
 // argument closes its own brace and would end the match at the signature.
 function extract(name) {
-  const start = sidepanel.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
-  if (start < 0) throw new Error(`no function ${name} in sidepanel.js — renamed?`);
+  // attachDropdown lives in dropdown.js — one component, shared with the wizard.
+  const src = name === "attachDropdown" ? dropdownSrc : sidepanel;
+  const where = src === dropdownSrc ? "dropdown.js" : "sidepanel.js";
+  const start = src.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
+  if (start < 0) throw new Error(`no function ${name} in ${where} — renamed?`);
   let parens = 0;
   let bodyStart = -1;
-  for (let i = sidepanel.indexOf("(", start); i < sidepanel.length; i++) {
-    if (sidepanel[i] === "(") parens++;
-    else if (sidepanel[i] === ")" && --parens === 0) { bodyStart = sidepanel.indexOf("{", i); break; }
+  for (let i = src.indexOf("(", start); i < src.length; i++) {
+    if (src[i] === "(") parens++;
+    else if (src[i] === ")" && --parens === 0) { bodyStart = src.indexOf("{", i); break; }
   }
   if (bodyStart < 0) throw new Error(`no body for ${name}`);
   let depth = 0;
-  for (let i = bodyStart; i < sidepanel.length; i++) {
-    if (sidepanel[i] === "{") depth++;
-    else if (sidepanel[i] === "}" && --depth === 0) return sidepanel.slice(start, i + 1);
+  for (let i = bodyStart; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) return src.slice(start, i + 1);
   }
   throw new Error(`unterminated function ${name}`);
 }
@@ -191,6 +196,13 @@ function panel() {
     $modelName: el({ tagName: "INPUT", id: "model-name" }),
     $modelVisionBadge: el({ id: "modelVisionBadge", hidden: true }),
     $modelContextWindow: el({ id: "modelContextWindow" }),
+    $modelContextWindowSetting: el({ id: "modelContextWindowSetting",
+                                     _classes: new Set(["field", "hidden"]) }),
+    $modelContextWindowInput: el({ tagName: "INPUT", id: "model-context-window" }),
+    $modelNameOptions: el({ tagName: "DATALIST", id: "model-name-options" }),
+    $modelBaseUrlSetting: el({ id: "modelBaseUrlSetting" }),
+    $modelBaseUrl: el({ tagName: "INPUT", id: "model-base-url" }),
+    modelSettingsEdited: false,
     ROOT: root, TRIGGER: trigger, LIST: list,
     DROPDOWNS: [],
     dropdownWriting: false,
@@ -198,7 +210,8 @@ function panel() {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(catalogSrc, sandbox);
-  for (const fn of ["currentProvider", "attachDropdown", "renderModelFacts"]) {
+  for (const fn of ["currentProvider", "attachDropdown", "renderModelFacts",
+                    "populateModelOptions", "effectiveContextWindow"]) {
     vm.runInContext(extract(fn), sandbox);
   }
   const dd = vm.runInContext(`attachDropdown({
@@ -364,6 +377,67 @@ function main() {
       ctx.textContent === "" && badge.hidden === true);
   }
 
+  // ── The editable context window ─────────────────────────────────────────
+  //
+  // A provider with a fixed catalogue knows every model's window, so asking is
+  // asking them to look up something the panel has. A provider that takes any
+  // model id has no answer to offer, and its fallback under-fills a 1M model
+  // and over-fills a 32k one — while the AX-tree budget is sized from it.
+  {
+    const { sandbox } = panel();
+    const setting = sandbox.$modelContextWindowSetting;
+    const input = sandbox.$modelContextWindowInput;
+
+    vm.runInContext("populateModelOptions()", sandbox);
+    check("a fixed-endpoint provider shows no context-window box",
+      setting._classes.has("hidden") === true);
+
+    sandbox.$modelProvider.value = "custom";
+    vm.runInContext("populateModelOptions()", sandbox);
+    check("a provider that takes any model id shows it",
+      setting._classes.has("hidden") === false);
+
+    sandbox.$modelName.value = "qwen2.5-coder:7b";
+    vm.runInContext("renderModelFacts()", sandbox);
+    check("it is prefilled with the effective window, never empty of meaning",
+      Number(input.value) === 128000, input.value);
+
+    // Round-trip: a number the user typed is the number the save persists.
+    input.value = "32768";
+    check("a stated window wins over the catalogue fallback",
+      vm.runInContext("effectiveContextWindow('custom','qwen2.5-coder:7b')", sandbox) === 32768);
+
+    // And a number that is not a number never becomes zero. A persisted 0
+    // sizes the AX budget to nothing and every run dies on step one.
+    for (const [typed, why] of [["", "empty"], ["32k", "a suffixed number"], ["0", "zero"],
+                                ["-5", "negative"], ["abc", "letters"]]) {
+      input.value = typed;
+      const got = vm.runInContext("effectiveContextWindow('custom','qwen2.5-coder:7b')", sandbox);
+      check(`"${typed}" (${why}) falls back to the catalogue rather than persisting it`,
+        got === 128000, String(got));
+    }
+
+    // A provider whose models are documented does not consult the box at all,
+    // even with a stale number left in it from a previous provider.
+    input.value = "32768";
+    sandbox.$modelProvider.value = "anthropic";
+    check("a documented model sizes itself from the catalogue, not the box",
+      vm.runInContext("effectiveContextWindow('anthropic','claude-sonnet-5-5')", sandbox) === 1000000);
+
+    // The save handler persists what the helper returns, onto the field that
+    // already exists — a new storage key here would be a second answer.
+    check("the save handler persists the effective window onto the existing field",
+      /const ctx = effectiveContextWindow\(/.test(sidepanel)
+      && /\[keys\.config\]:\s*\{[^}]*context_window: ctx/.test(sidepanel));
+    check("…and no new storage key was invented for it",
+      !/contextWindowInput:\s|modelContextWindow:\s/.test(sidepanel));
+    // Re-running the wizard must not write its own fallback back over the
+    // number the user typed in Settings.
+    const wizard = fs.readFileSync(path.join(EXT, "welcome.js"), "utf8");
+    check("the wizard keeps a stated window instead of overwriting it with its fallback",
+      /context_window: keepCtx/.test(wizard) && /const prevCtx = Number\(/.test(wizard));
+  }
+
   // ── The offline fallback carries the same shape ──────────────────────────
   {
     const models = (() => {
@@ -400,9 +474,11 @@ function main() {
     // it the base-URL and API-key boxes showed for every provider — a class
     // that hides nothing reads clean in review, so it needs a check.
     check(".hidden is actually defined", /\.hidden\s*\{\s*display:\s*none\s*!important;?\s*\}/.test(panelHtml));
+    // The .dd-* rules moved to panel-tokens.css so the wizard and the panel
+    // share one stylesheet for one component. Same assertion, new home.
     check("the dropdown list draws a border and never a shadow",
-      /\.dd-list\s*\{[^}]*border:\s*1px solid var\(--rule-2\)/.test(panelHtml) &&
-      !/\.dd-list\s*\{[^}]*box-shadow/.test(panelHtml));
+      /\.dd-list\s*\{[^}]*border:\s*1px solid var\(--rule-2\)/.test(tokensCss) &&
+      !/\.dd-list\s*\{[^}]*box-shadow/.test(tokensCss));
     check("the panel still forces square corners globally",
       /border-radius:\s*0\s*!important/.test(panelHtml));
     // A quiet link labelled "Replay setup" read as a replay of something
@@ -422,6 +498,54 @@ function main() {
       /\.settings-section \+ \.settings-section \{[^}]*border-top: 1px solid var\(--rule\)/.test(panelHtml));
   }
 
+  // ── The edition tag and the footer's two jobs ────────────────────────────
+  // Both are painted from state the panel already has (auth_mode from
+  // /health, the token in storage) — an absence here reads clean: a header
+  // that never says which server, a Sign out that never appears, or one
+  // that appears for a self-hoster who has nothing to sign out of.
+  {
+    check("the header carries the edition tag, hidden until /health answers",
+      /id="editionTag" class="edition-tag" hidden/.test(panelHtml));
+
+    const tagBox = { state: { authMode: null }, editionTag: { textContent: "", hidden: true } };
+    vm.createContext(tagBox);
+    vm.runInContext(extract("paintEditionTag"), tagBox);
+    tagBox.paintEditionTag();
+    check("no answer from the server, no claim in the header", tagBox.editionTag.hidden === true);
+    tagBox.state.authMode = "jwt";
+    tagBox.paintEditionTag();
+    check("cloud is Beta", tagBox.editionTag.textContent === "Beta" && tagBox.editionTag.hidden === false);
+    for (const mode of ["secret", "open"]) {
+      tagBox.state.authMode = mode;
+      tagBox.paintEditionTag();
+      check(`${mode} says Self-hosted`,
+        tagBox.editionTag.textContent === "Self-hosted" && tagBox.editionTag.hidden === false);
+    }
+
+    const footerFor = (authMode, agentSecret) => {
+      const box = { state: { authMode }, replaySetupBtn: { textContent: "Set up Brotto", dataset: {} } };
+      vm.createContext(box);
+      vm.runInContext(extract("paintSetupFooter"), box);
+      box.paintSetupFooter({ agentSecret });
+      return box.replaySetupBtn.textContent;
+    };
+    check("cloud with a token in the slot offers Sign out", footerFor("jwt", "tok") === "Sign out");
+    check("cloud without a token keeps the wizard button", footerFor("jwt", "") === "Set up Brotto");
+    check("self-host never offers Sign out", footerFor("secret", "hunter2") === "Set up Brotto");
+
+    check("sign-out clears both halves of the credential",
+      /delete settings\.agentSecret\b/.test(sidepanel) && /delete settings\.agentSecretOrigin/.test(sidepanel),
+      "a leftover origin would bind a future secret to this account");
+    check("sign-out drops the account id with the credential",
+      /delete settings\.accountId/.test(sidepanel),
+      "a leftover id hands the next sign-in this account's history and settings");
+    check("sign-out opens the wizard in the panel that is already open",
+      /await dropCredential\(\)[\s\S]{0,400}location\.assign\('welcome\.html'\)/.test(sidepanel),
+      "reverting the button leaves the user on a Settings screen that no longer describes them");
+    check("hydrate repaints the footer from storage on every open",
+      /paintSetupFooter\(s\)/.test(sidepanel));
+  }
+
   // ── The caller key is a storage key, and only the write needs one ────────
   //
   // `user_id` is a per-install uuid the browser mints for itself. The server
@@ -432,19 +556,31 @@ function main() {
   // collapse every account onto one file. It is not an identity the extension
   // gets to assert; it is the key the server files a policy under.
   {
-    const hydrate = extract("hydrateSettingsPanel");
-    const probe = hydrate.slice(hydrate.indexOf("/v1/policy`"), hydrate.indexOf("catch (e)", hydrate.indexOf("/v1/policy`")));
-    check("the Settings reachability probe sends no caller key",
-      probe.includes("/v1/policy`") && !/user_id|device_id/.test(probe),
-      probe.trim());
+    // The reachability probe is gone with the Connection section; the save
+    // that actually writes a policy is the one that still needs the key.
     const save = sidepanel.slice(
       sidepanel.indexOf("saveSettingsBtn.addEventListener('click'"),
       sidepanel.indexOf("/v1/policy_ack", sidepanel.indexOf("saveSettingsBtn.addEventListener('click'")) + 400);
-    check("…and the save that actually writes a policy still sends one",
+    check("the save that writes a policy still sends the caller key",
       /\/v1\/policy_ack[\s\S]{0,320}user_id: await deviceId\(\)/.test(save));
     check("deviceId() says what it is — a storage key, not who the user is",
       /\*storage key\*[\s\S]{0,600}async function deviceId\(/.test(sidepanel),
       "the docstring above deviceId() is what the next reader has");
+    check("save rebuilds settings from what is stored, so dropping Connection fields cannot wipe the credential",
+      /\.\.\.priorSettings/.test(save) && /blacklist/.test(save),
+      "chrome.storage.local.set({settings}) replaces wholesale");
+  }
+
+  // ── Connection is gone, not hidden ───────────────────────────────────────
+  {
+    for (const id of ["agentSecretField", "cloudSignIn", "waitlistBlock", "refreshPolicyBtn", "settingsVerifyStatus"]) {
+      check(`#${id} is deleted from the panel, not hidden`,
+        !panelHtml.includes(`id="${id}"`), `still in sidepanel.html`);
+    }
+    check("no orphan CSS for the deleted Connection surface",
+      !/\.waitlist-block|\.settings-verify|\.input--readonly|\.settings-link/.test(panelHtml));
+    check("the wizard is the way back in, and says so",
+      /id="replaySetupBtn"/.test(panelHtml) && /Set up Brotto/.test(panelHtml));
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

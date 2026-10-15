@@ -1159,12 +1159,9 @@ def _prune_orphan_owners(d: Path, cutoff: float, live: set[str]) -> int:
 
     The loop above is document-driven — it globs `*.json` — so a sidecar
     whose document is missing was invisible to it. That is not hypothetical:
-    a user who deletes the `.json` by hand strands the `.owner` beside it, and
-    on the hosted relay retention is **on by default at 30 days**, which
-    makes "we prune after 30 days" a promise these files did not keep. The
-    account id is not page text, but it is the one file that says whose
-    transcript this was, and it was outliving the retention setting by
-    default.
+    a user who deletes the `.json` by hand strands the `.owner` beside it.
+    The account id is not page text, but it is the one file that says whose
+    transcript this was, and it was outliving the document beside it.
 
     **"Nothing is left to erase" is the whole condition** — the document *and*
     every residue extension `delete` names — and it is why an age test alone

@@ -114,7 +114,26 @@
        where a truncated "Brot…" would read as a bug. */
     @media (max-width: 360px) {
       .brand-name { display: none; }
+      .edition-tag { display: none; }
     }
+
+    /* The edition: Beta on Brotto Cloud, Self-hosted on your own server.
+       The header names which server this panel is talking to without
+       opening Settings. Hidden until /health has answered. */
+    .edition-tag {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--ink-2);
+      border: 1px solid var(--rule-ink);
+      padding: 2px 5px;
+      line-height: 1;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .edition-tag[hidden] { display: none; }
 
     /* Model pill — the agent's identity, and its only activity cue. Fixed
        width so it can never crowd the wordmark or the header buttons: an
@@ -438,18 +457,6 @@
       color: var(--ink-3);
     }
 
-    /* The waitlist sits below the sign-in in the same block, so it is cut off
-       by the same hairline the section headings use. Two fields, one status
-       line, one button — no box, nothing collapsible. */
-    .waitlist-block {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 14px;
-      padding-top: 14px;
-      border-top: 1px solid var(--rule);
-    }
-
     /* ─── Session history ─────────────────────────────────────────────────
        One row per past task, newest first. A ledger line, not a card: a
        hairline between rows, no box, no radius. Identity is the task text
@@ -597,92 +604,8 @@
        `[hidden] { display: none }` loses to both of them. */
     [hidden] { display: none !important; }
 
-    /* ─── Dropdown (Ink & Rule) ───────────────────────────────────────────
-       One control, two instances: provider and the model
-       field's suggestion list. The value host is always the element the rest
-       of sidepanel.js already reads — a real <select> for the first two, the
-       free-text <input> for the third — so choosing an option writes `.value`
-       and every existing listener keeps working untouched.
-
-       The native <select> is display:none: the widget below carries the
-       combobox semantics, and leaving the UA widget focusable would put two
-       tab stops and two keyboard models on one field. */
-    .dd { position: relative; }
-    .dd-native { display: none; }
-
-    /* `.input` sets the box; this only re-voices the value in mono. It is
-       `.input.dd-trigger` rather than `.dd-trigger` because `.input` is
-       declared later in this sheet at equal specificity and would win. */
-    .input.dd-trigger {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      width: 100%;
-      text-align: left;
-      cursor: pointer;
-      font-family: var(--font-mono);
-      font-size: 11px;
-      letter-spacing: 0.04em;
-      color: var(--ink);
-    }
-    .dd-value {
-      flex: 1 1 auto;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    /* A drawn triangle, not a glyph — the same rule the checkbox and the
-       markdown task box follow. It points down when closed and flips when the
-       list is open, so the state is legible without colour. */
-    .dd-caret {
-      flex: 0 0 auto;
-      width: 0;
-      height: 0;
-      border-left: 4px solid transparent;
-      border-right: 4px solid transparent;
-      border-top: 5px solid var(--ink-2);
-      transition: transform var(--t);
-    }
-    .dd.open .dd-caret { transform: rotate(180deg); }
-
-    /* The list hangs off the control's own bottom edge with its top border
-       dropped, so it reads as the control opening rather than as a card
-       floating above the page. No shadow — there isn't one in this system. */
-    .dd-list {
-      position: absolute;
-      left: 0;
-      right: 0;
-      top: 100%;
-      z-index: 5;
-      max-height: 210px;
-      overflow-y: auto;
-      margin: 0;
-      padding: 0;
-      list-style: none;
-      background: var(--paper);
-      border: 1px solid var(--rule-2);
-      border-top: 0;
-    }
-    .dd-option {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      padding: 7px 10px;
-      font-family: var(--font-mono);
-      font-size: 11px;
-      line-height: 1.35;
-      color: var(--ink-2);
-      cursor: pointer;
-    }
-    .dd-option + .dd-option { border-top: 1px solid var(--rule); }
-    .dd-option:hover, .dd-option.active { background: var(--paper-2); color: var(--ink); }
-    .dd-option-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    /* Selection is a check, not a tint. The panel is monochrome, so a colour
-       difference is not an available channel; and a 9px slot of whitespace is
-       what keeps every row's label on the same x. */
-    .dd-check { flex: 0 0 9px; width: 9px; color: var(--ink); }
+    /* Dropdown (.dd-*) lives in panel-tokens.css — one component, shared
+       with the wizard's step-4 provider picker. */
 
     /* ─── Model facts: the vision badge and the context window ─────────── */
     .model-facts {
@@ -728,16 +651,20 @@
     .settings-hint.ok { color: var(--ok); }
     .settings-hint.bad { color: var(--bad); }
 
-    .settings-actions-row { display: flex; gap: 8px; align-items: stretch; }
+    /* Center, don't stretch: the status span beside Save model grows and
+       wraps, and stretch made the button match that height and its label
+       sat off-centre in the taller box. The button keeps its own width so a
+       status swap can never reflow it. */
+    .settings-actions-row { display: flex; gap: 8px; align-items: center; }
     /* The global reset at the top of this file zeroes padding on every
        element, UA button padding included, and `.btn` never puts it back — so
        these rendered 14px tall with the label flush against the border. Only
        the settings rows are fixed; the rest of the panel sizes its own
        buttons with `.btn-sm` and looks right. */
-    .settings-actions-row .btn { padding: 9px 14px; }
+    .settings-actions-row .btn { padding: 9px 14px; flex: 0 0 auto; min-width: 7.5em; }
 
-    /* Save is the panel's only commit, so it gets the heavy rule; Replay setup
-       is a link beside it, not a second button competing for the same weight. */
+    /* Save is the panel's only commit, so it gets the heavy rule; Set up
+       Brotto is the way back into the wizard. */
     .settings-footer {
       display: flex;
       align-items: center;
@@ -747,35 +674,6 @@
       padding-top: 13px;
     }
     .settings-footer .btn { padding: 9px 18px; }
-    .settings-link {
-      background: none;
-      border: 0;
-      border-bottom: 1px solid var(--rule-2);
-      padding: 0 0 2px;
-      font-family: var(--font-mono);
-      font-size: 9.5px;
-      font-weight: 500;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--ink-2);
-      cursor: pointer;
-      transition: color var(--t), border-color var(--t);
-    }
-    .settings-link:hover { color: var(--ink); border-bottom-color: var(--ink); }
-    .settings-link:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
-
-    /* A hosted install has one correct server address; showing it as editable
-       invites a user to break their own install with no way back. */
-    .input--readonly { background: var(--paper-3); color: var(--ink-2); cursor: not-allowed; }
-
-    .settings-verify { display: flex; align-items: center; gap: 6px; min-height: 16px; }
-    .settings-verify .dot { width: 7px; height: 7px; background: var(--ink-3); flex-shrink: 0; }
-    .settings-verify.ok    { color: var(--ok); }
-    .settings-verify.ok    .dot { background: var(--ok); }
-    .settings-verify.stale { color: var(--wait); }
-    .settings-verify.stale .dot { background: var(--wait); }
-    .settings-verify.off   { color: var(--bad); }
-    .settings-verify.off   .dot { background: var(--bad); }
 
     .policy-block-card {
       border: 1px solid var(--bad);
@@ -1360,40 +1258,6 @@
       margin-top: 7px;
     }
 
-    /* ─── Status pill: a square, not a dot ────────────────────────────── */
-    /* The state is written out, not just tinted. A 8px square is invisible
-       to anyone who can't separate the two hues, and a hover-only tooltip
-       reaches nobody on touch and is easy to miss on desktop. One mono word
-       costs ~46px and the header has it at every width the wordmark is
-       still shown at. */
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      height: 14px;
-      background: transparent;
-      border: 0;
-      padding: 0;
-      cursor: help;
-      flex-shrink: 0;
-    }
-    .status-pill .dot {
-      width: 8px;
-      height: 8px;
-      background: var(--ink-3);
-      display: block;
-      flex-shrink: 0;
-      transition: background var(--t);
-    }
-    .status-pill .conn-label {
-      font-family: var(--font-mono);
-      font-size: 9.5px;
-      font-weight: 500;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--ink-2);
-      white-space: nowrap;
-    }
     /* The page-context badge. Inverted against the header so it reads as an
        event rather than as another piece of chrome — the header is all
        low-contrast ink on paper, and a disclosure that looks like the
@@ -1415,14 +1279,6 @@
       flex-shrink: 0;
     }
     .context-badge[hidden] { display: none; }
-    /* Below 340px the wordmark is already hidden, so the label can go too
-       and the dot carries the state. */
-    @media (max-width: 340px) {
-      .status-pill .conn-label { display: none; }
-    }
-    .status-pill.connected    .dot { background: var(--ink); }
-    .status-pill.reconnecting .dot { background: var(--wait); animation: pulse 1.4s ease-in-out infinite; }
-    .status-pill.error        .dot { background: var(--bad); }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50%      { opacity: 0.25; }
@@ -1457,11 +1313,8 @@
     }
     .final-answer-icon-btn svg { width: 13px; height: 13px; display: block; }
     .final-answer-icon-btn:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-    /* .clicked is the 1.2s copy confirmation flash, before any rating. */
-    .final-answer-icon-btn.rated-good,
-    .final-answer-icon-btn.clicked  { border-color: var(--ok); color: var(--ok); }
-    .final-answer-icon-btn.rated-good:hover { background: var(--ok); color: var(--paper); }    .final-answer-icon-btn.rated-bad { border-color: var(--bad); color: var(--bad); }
-    .final-answer-icon-btn.rated-bad:hover { background: var(--bad); color: var(--paper); }
+    /* .clicked is the 1.2s copy confirmation flash. */
+    .final-answer-icon-btn.clicked { border-color: var(--ok); color: var(--ok); }
 
     /* ─── Markdown: chat-scaled, not document-scaled ────────────────────
        Scoped to `.md`, which every renderMarkdown() host carries, so the
@@ -1689,7 +1542,6 @@
       /* the `.blocking` forms are (0,2,0) and would outrank the bare
          selectors above, so they have to be named here too */
       .approval-card.blocking, .clarify-card.blocking,
-      .status-pill.reconnecting .dot,
       #outcomeCell[data-state="working"] .outcome-mark,
       .toast,
       .toast.leaving,
@@ -1708,17 +1560,7 @@
   <div class="brand">
     <img id="brandLogo" class="brand-logo" src="assets/logo.svg" alt="">
     <span class="brand-name">Brotto</span>
-  </div>
-
-  <!-- ponytail: Bug 2 — visible connection indicator. Three states via
-       the .connected / .reconnecting / .error classes on .status-pill.
-       Dot-only — text labels were dropped (too much header chrome for
-       the available width). Hover / title attribute carries the
-       human-readable state for screen readers and curious users. -->
-  <div id="statusPill" class="status-pill" aria-live="polite"
-       title="Connection: idle">
-    <span id="statusDot" class="dot"></span>
-    <span id="connLabel" class="conn-label">Idle</span>
+    <span id="editionTag" class="edition-tag" hidden></span>
   </div>
 
   <!-- ponytail: the page-context badge. A setting you cannot see taking
@@ -1817,6 +1659,14 @@
      record in chrome.storage.local, so it is here on first paint. -->
 <div id="modelCheckBanner" class="model-check-banner" role="status" hidden></div>
 
+<!-- ── Server-unreachable banner ───────────────────────────────────
+     The sibling of the model-check banner, in the same place and the
+     same shape: a standing condition above the composer. Shown only when
+     /health did not answer AND the user finished setup — someone who
+     skipped it is on their way to the wizard, not reading a card about a
+     server they already know is not running yet. -->
+<div id="serverBanner" class="model-check-banner" role="status" hidden></div>
+
 <!-- ── Input area ────────────────────────────────────────────────── -->
 <section id="inputArea">
   <div class="input-row">
@@ -1893,6 +1743,13 @@
         <input id="model-base-url" class="input" type="url" placeholder="https://api.example.com/v1" autocomplete="off" />
       </div>
 
+      <div class="field hidden" id="modelContextWindowSetting">
+        <label class="lbl" for="model-context-window">Context window (tokens)</label>
+        <input id="model-context-window" class="input" type="number" min="1" step="1000"
+               placeholder="128000" autocomplete="off" />
+        <p class="settings-hint">How many tokens the model takes. The AX-tree budget is sized from this, so too small truncates a run and too large overruns the real window.</p>
+      </div>
+
       <div class="field" id="modelKeySetting">
         <label class="lbl" for="model-api-key">API key</label>
         <input id="model-api-key" class="input" type="password" placeholder="Leave blank to use server default" autocomplete="off" />
@@ -1949,95 +1806,11 @@
       </label>
     </section>
 
-    <!-- ── Connection ────────────────────────────────────────────────── -->
-    <section class="settings-section">
-      <h3>Connection</h3>
-
-      <div class="field">
-        <label class="lbl" for="plannerUrlSetting">Server address</label>
-        <input id="plannerUrlSetting" class="input" type="url" placeholder="http://localhost:8000">
-        <p class="settings-hint" id="serverAddressHint">Where Brotto sends your tasks. Leave this alone unless you run your own Brotto server.</p>
-      </div>
-
-      <div class="field">
-        <span class="lbl">Status</span>
-        <p id="settingsVerifyStatus" class="settings-hint settings-verify">Verifying server…</p>
-      </div>
-
-      <div class="field" id="agentSecretField">
-        <label class="lbl" for="agentSecretSetting">Agent secret</label>
-        <input id="agentSecretSetting" class="input" type="password"
-               placeholder="paste your AGENT_SECRET" autocomplete="off" spellcheck="false">
-        <p class="settings-hint">The <code>AGENT_SECRET</code> from your Brotto server's <code>.env</code>. Leave this empty if you run the server on your own machine without one.</p>
-      </div>
-
-      <!-- Cloud only, and only once the server has said auth_mode is "jwt"
-           (see applyAuthMode). Both fields are the wizard's, restated where a
-           user can reach them later; the token lands in the same
-           settings.agentSecret the secret field above writes. -->
-      <div id="cloudSignIn" hidden>
-        <div class="field">
-          <label class="lbl" for="cloudEmail">Email</label>
-          <input id="cloudEmail" class="input" type="email" autocomplete="email" spellcheck="false">
-          <p class="settings-hint">We email you a 6-digit code instead of a link — no extra browser permission, nothing to approve.</p>
-        </div>
-        <div class="settings-actions-row">
-          <button id="cloudCodeBtn" class="btn" type="button">Send code</button>
-        </div>
-        <p id="cloudSignInStatus" class="settings-hint"></p>
-
-        <!-- Revealed by the user's own click, never by the server's answer.
-             `request-code` replies byte-identically for an address on the
-             beta and one that is not — the route cannot be asked who is in —
-             so there is nothing in the response to reveal on, and pretending
-             otherwise would make this screen a membership oracle. -->
-        <div id="cloudCodeField" hidden>
-          <div class="field">
-            <label class="lbl" for="cloudCode">6-digit code</label>
-            <input id="cloudCode" class="input input--code" inputmode="numeric" maxlength="6"
-                   autocomplete="one-time-code" spellcheck="false">
-          </div>
-          <div class="settings-actions-row">
-            <button id="cloudSignInBtn" class="btn btn-primary" type="button">Sign in</button>
-            <button id="cloudResendBtn" class="btn" type="button">Send another</button>
-          </div>
-        </div>
-        <div class="settings-actions-row">
-          <button id="cloudSignOutBtn" class="btn" type="button" hidden>Sign out</button>
-        </div>
-
-        <!-- The waitlist, in the same block and on the same server. It is
-             always here rather than hidden behind the refusal, because
-             somebody who has never heard of the beta has to be able to leave
-             an address from the panel they already have open. The one extra
-             affordance: an exchange that comes back `approved: false`
-             pre-fills the address it just proved they control
-             (prefillWaitlist), and offers — it never posts for them. -->
-        <div id="waitlistBlock" class="waitlist-block">
-          <span class="lbl">Not in the beta yet?</span>
-          <div class="field">
-            <label class="lbl" for="waitlistName">Name (optional)</label>
-            <input id="waitlistName" class="input" type="text" maxlength="64"
-                   autocomplete="name" spellcheck="false">
-          </div>
-          <div class="field">
-            <label class="lbl" for="waitlistEmail">Email</label>
-            <input id="waitlistEmail" class="input" type="email" autocomplete="email" spellcheck="false">
-          </div>
-          <p id="waitlistStatus" class="settings-hint"></p>
-          <div class="settings-actions-row">
-            <button id="waitlistJoinBtn" class="btn" type="button">Join the waitlist</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="settings-actions-row">
-        <button id="refreshPolicyBtn" class="btn"
-                type="button" title="Re-fetch the effective policy from the server">
-          Refresh from server
-        </button>
-      </div>
-    </section>
+    <!-- Connection is gone from Settings on purpose: server address, agent
+         secret and cloud sign-in all live in the wizard ("Set up Brotto"
+         below). The panel still reads the saved address and probes /health
+         for auth_mode — those are how it talks to a server, not a settings
+         surface. -->
 
     <!-- ── Actions ─────────────────────────────────────────────────────
          Save is the panel's only commit. Set up Brotto is a button, not the
@@ -2093,6 +1866,8 @@
 
 <script src="credential.js"></script>
 <script src="model_catalog.js"></script>
+<script src="model_keys.js"></script>
+<script src="dropdown.js"></script>
 <script src="session_store.js"></script>
 <script src="sidepanel.js"></script>
 </body>

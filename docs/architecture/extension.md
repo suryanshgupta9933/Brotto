@@ -5,10 +5,12 @@ Read before touching `clients/brotto-extension/src/{background,debugger}.ts`,
 
 ## Extension storage
 
-- `model_config` (provider, model, context_window) → `chrome.storage.local` — persists across browser restarts (not sensitive)
-- `api_key` → `chrome.storage.local` — persists across restarts by choice. It was `storage.session` (cleared on browser restart) and every restart cost the user a re-paste for no benefit: the key never leaves the device. Clearing is the user's call, from Settings.
-- The first read after an extension update runs a one-shot migration that re-saves any legacy `{modelConfig: {model_config, api_key}}` shape into the new layout
+- `model_config` (provider, model, context_window) → `chrome.storage.local` — persists across browser restarts (not sensitive). **On the cloud path the key name carries the account id** — `modelConfig:<id>` / `modelApiKey:<id>` — so two accounts in one Chrome profile cannot share a provider, a model or a credential; with no id they are the flat keys, byte-identical to every install from before accounts existed. `panel-ui.md` owns the rule and the deliberate non-migration; `model_keys.js` (panel + wizard) and `model_config.ts` (worker) are two copies pinned by one table in `scripts/test-model-keys.test.js`.
+- `api_key` → `chrome.storage.local` — persists across restarts by choice. It was `storage.session` (cleared on browser restart) and every restart cost the user a re-paste for no benefit: the key never leaves the device. Clearing is the user's call, from Settings. Account-scoped as above.
+- `accountId` (a top-level `chrome.storage.local` key, **not** a field in `settings` — a field would mean rebuilding the whole blob after an await and clobbering a concurrent settings edit; `settings.accountId` is read once as a legacy fallback and migrated). The opaque uuid `account_id` names, or absent. **Written straight from a server response and never derived from the token** — `welcome.js` `exchangeCode` takes it off the `exchange` reply and the panel re-learns it through `learnAccountId()`. It is an identifier, not user content: nothing derived from an AX tree, page text, a URL, typed input or a task title reaches it, and it lands in no operator table, so it is safe unencrypted. Sign-out and the expired-credential sweep delete it with the token, and with it that account's `modelApiKey:<id>`, `modelConfig:<id>` and mirrored rows.
+- The first read after an extension update runs a one-shot migration that re-saves any legacy `{modelConfig: {model_config, api_key}}` shape into the new layout. **That legacy blob only ever sat under the flat key** — a self-hoster's, since it predates accounts — so this migration is a self-host path and does not contradict the non-migration below it.
 - `deviceId` (one `crypto.randomUUID()`) → `chrome.storage.local`. See below; it is not a credential and nothing authenticates with it.
+- `settings.onboarded` and `settings.setupDeferred` → `chrome.storage.local`. Two booleans, one written by the wizard's Start and one by its Skip; see "Three setup facts" below for what each is allowed to decide.
 - `settings.agentSecret` → `chrome.storage.local`, and on the Brotto Cloud path it holds an **opaque Supabase access token**, not a shared secret. **The extension never parses it.** Not its length, not its prefix, not whether it looks like a JWT. One slot is why an account tier needed no new storage key and no migration, and any code that inspects the value reinstates the coupling the slot exists to remove. Both writers (the wizard, the panel's Settings) and the one reader (`agentSecret()`) treat it as a string.
 
 ## Which Brotto is this comes from `/health`, never from the URL
@@ -30,6 +32,44 @@ server, because a radio is a person's answer and `/health` is the machine's.
 Cloud writes the address into a read-only input and requires a sign-in **before
 advancing**: it is the one step in the wizard that can fail, and it fails there
 rather than writing a token nobody holds.
+
+**The same probe answers "is the server there".** `refreshAuthMode()` already
+fetches `/health` on panel open and on every address edit, so `state.
+serverReachable` is the settled answer to whether that fetch answered — no
+second ping, no new endpoint, no timer. **`authMode` cannot carry it**: it is
+null while the probe is in flight and null again when the server answers without
+an `auth_mode`, so a banner keyed on null would flash on every panel open. This
+one is `true`/`false` and never null.
+
+It renders as `serverBanner`, the sibling of the model-check banner above the
+composer — a standing condition, not part of what happened in a run — with a
+**Try again** button that re-probes and a **Set up Brotto** button that returns
+to `welcome.html`. Re-probing on demand and on panel open is the whole re-check
+policy; a timer would ping an address that has not changed since the open, and
+`/health` is already fetched for every send that matters.
+
+## Three setup facts, and only three
+
+`settings.onboarded` is written by `finish()` on Start **and on Skip**, so on
+its own it cannot tell "finished" from "deliberately not yet". The Skip path
+therefore writes exactly one more fact — **`settings.setupDeferred`**, written
+there and by nothing else, and read by exactly one banner. There is no setup
+state machine and no third state.
+
+- **The banner is silent when `setupDeferred` is set.** "My server is not up
+  yet" is not "my server went down", and repeating the first every session is
+  what teaches someone to ignore the second.
+- **The banner is also silent when `onboarded` is unset**, because a browser
+  that never answered the wizard is on its way to `welcome.html` rather than
+  reading a card.
+- **Panel boot returns to `welcome.html` whenever `onboarded` is unset.** That
+  one rule covers the toolbar action, a reloaded extension and a cleared
+  profile alike, and it is the same gate that keeps a finished setup off the
+  wizard.
+
+`loadSetupState()` reads both once per panel open and `refreshAuthMode()` calls
+`paintServerBanner()`, so the banner cannot disagree with the probe it speaks
+from. Pinned by `scripts/test-setup-state.test.js`.
 
 ## The install id is the user; the peer address never was
 
@@ -393,6 +433,21 @@ and `authedWs()` take its answer — a second read of the slot could disagree
 with the first. **Plaintext `http://` to a remote host is authorised by a
 recorded origin and nothing else**: a self-hoster on `http://192.168.x.x` is a
 supported deployment, but the address alone has never been evidence.
+
+**The account id arrives the same way: as its own field, never as a decoded
+`sub`.** `learnAccountId()` re-learns `state.accountId` on every panel open
+through ordinary `authHeaders()` — no second fetch helper, no `?token=`, no
+decode — and is **skipped entirely unless `state.authMode === 'jwt'`**, because
+asking a self-host would spend a request to learn what the mode already says.
+It runs *after* the address is stored and the credential has proved itself, so
+it is one authenticated request per panel open, not one per keystroke. A stored
+id short-circuits it. `null`, `""`, a 404, an unreachable server and a throw
+all leave it null, which **is** the pre-account behaviour by construction.
+
+Mode and identity both come from what the server says. Comparing the address
+against a hardcoded constant to decide cloud-vs-self-host — the thing
+`agentSecretOrigin` exists to remove — must not come back here: `panel-ui.md`
+owns the namespace this id scopes.
 
 **`serverIsAlive(url = serverUrl)` grew a parameter** when the panel's pre-task
 check started using it (`probe_server`). It could not reuse the module variable:

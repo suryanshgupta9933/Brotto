@@ -24,6 +24,7 @@ const $skip = document.getElementById("skipBtn");
 const $serverUrl = document.getElementById("serverUrl");
 const $agentSecret = document.getElementById("agentSecret");
 const $provider = document.getElementById("provider");
+const $providerTrigger = document.getElementById("providerTrigger");
 const $providerStatus = document.getElementById("providerStatus");
 const $providerRetryBtn = document.getElementById("providerRetryBtn");
 const $model = document.getElementById("model");
@@ -36,6 +37,7 @@ const $cloudEmail = document.getElementById("cloudEmail");
 const $cloudCode = document.getElementById("cloudCode");
 const $cloudCodeField = document.getElementById("cloudCodeField");
 const $sendCodeBtn = document.getElementById("sendCodeBtn");
+const $sendCodeRow = document.getElementById("sendCodeRow");
 const $resendCodeBtn = document.getElementById("resendCodeBtn");
 const $serverUrlHint = document.getElementById("serverUrlHint");
 const $waitlistBlock = document.getElementById("waitlistBlock");
@@ -165,10 +167,18 @@ function setProviderStatus(text, tone) {
   $providerStatus.className = tone ? `hint ${tone}` : "hint";
 }
 
+// The host select is display:none; the trigger is what the user sees. One
+// writer for both, so a loading or empty list cannot leave a live button
+// pointing at a control with nothing in it.
+function setProviderDisabled(off) {
+  $provider.disabled = off;
+  if ($providerTrigger) $providerTrigger.disabled = off;
+}
+
 async function loadCatalog() {
   const base = $serverUrl.value.trim() || DEFAULT_SERVER;
   catalogBase = base;
-  $provider.disabled = true;
+  setProviderDisabled(true);
   $providerRetryBtn.hidden = true;
   setProviderStatus("Reading the model list from your server.");
   catalog = await brottoModelCatalog.load(base);
@@ -191,12 +201,13 @@ function renderProviders() {
     none.value = "";
     none.textContent = "No providers";
     $provider.appendChild(none);
-    $provider.disabled = true;
+    setProviderDisabled(true);
     $providerRetryBtn.hidden = false;
     setProviderStatus("Your server's model list came back empty.", "bad");
+    providerDd && providerDd.sync();
     return;
   }
-  $provider.disabled = false;
+  setProviderDisabled(false);
   // `offline` is `load()`'s own word for "this is the cached or built-in
   // list, not your server's", and it is the only signal the caller gets that
   // the fetch did not land. It is true whenever a provider here is stale.
@@ -207,6 +218,9 @@ function renderProviders() {
     $providerRetryBtn.hidden = true;
     setProviderStatus("");
   }
+  // Repainting the options leaves the trigger naming whatever was there
+  // before — sync pushes the host's new value into the box.
+  providerDd && providerDd.sync();
   populateModels();
 }
 
@@ -225,6 +239,19 @@ function populateModels() {
   if (!document.activeElement || document.activeElement !== $model) $model.value = "";
 }
 $provider.addEventListener("change", populateModels);
+
+// Same Ink & Rule dropdown as Settings' provider picker — one component in
+// dropdown.js. The hidden <select> stays the value host finish() reads; the
+// trigger is what the user sees. Choosing an row writes the host and fires
+// its `change`, so populateModels above keeps working untouched.
+const providerDd = $provider && attachDropdown({
+  root: document.getElementById("providerDd"),
+  trigger: $providerTrigger,
+  list: document.getElementById("providerList"),
+  getOptions: () => Array.from($provider.children).map((o) => ({ value: o.value, label: o.textContent || o.value })),
+  getValue: () => $provider.value,
+  setValue: (v) => { $provider.value = v; $provider.dispatchEvent(new Event("change")); },
+});
 
 // A dead server address, or a wrong key, is the mistake here that costs the
 // user a confused first task — so say so now rather than on their first send.
@@ -278,6 +305,15 @@ async function checkServer() {
 $serverUrl.addEventListener("blur", checkServer);
 $agentSecret.addEventListener("blur", checkServer);
 
+// The account uuid `exchange` named, or "". Carried from the exchange to
+// `finish()` in a variable rather than in storage, because both happen inside
+// one wizard run: write it when the token is stored, never before. "" (a
+// degraded exchange, a self-host key and Skip) has no account, and "" is what
+// leaves every namespace and storage key exactly as it was before accounts
+// existed. The id arrives as its own field — the extension never parses the
+// credential to learn who it is.
+let exchangeAccountId = "";
+
 // ── Cloud sign-in ──────────────────────────────────────────────────────────
 // A 6-digit code emailed to the user, exchanged for a bearer token that goes
 // into `settings.agentSecret` — the same slot the self-host key uses, so
@@ -289,16 +325,22 @@ async function postAuth(path, payload) {
     body: JSON.stringify(payload),
   });
   const body = await res.json().catch(() => null);
-  return { ok: res.ok, body };
+  return { ok: res.ok, status: res.status, body };
 }
 
 function showCodeEntry() {
+  // Send code is a one-way step: the button that produced the code box goes
+  // with it, so the screen asks one question at a time. Restored by
+  // hideCodeEntry on any path that does not produce a box — a refused
+  // address, a failed send — so a dead end never strands the button.
+  if ($sendCodeRow) $sendCodeRow.hidden = true;
   $cloudCodeField.hidden = false;
   $resendCodeBtn.hidden = false;
   $cloudCode.focus();
 }
 
 function hideCodeEntry() {
+  if ($sendCodeRow) $sendCodeRow.hidden = false;
   $cloudCodeField.hidden = true;
   $resendCodeBtn.hidden = true;
   $cloudCode.value = "";
@@ -314,9 +356,11 @@ async function requestCode() {
   setCloudStatus("Sending");
   let body = null;
   let ok = false;
+  let status = 0;
   try {
     const res = await postAuth("/v1/auth/request-code", { email });
     ok = res.ok;
+    status = res.status;
     body = res.body;
   } catch {
     setCloudStatus("Could not reach the server", "bad");
@@ -330,6 +374,20 @@ async function requestCode() {
     return;
   }
   hideCodeEntry();
+  // Non-200 before the reason vocabulary: the roster answers always ride
+  // HTTP 200, so anything else is infrastructure, not the address.
+  if (status === 429) {
+    setCloudStatus("Too many attempts — wait a few minutes and try again", "bad");
+    return;
+  }
+  if (status >= 500) {
+    setCloudStatus("Brotto Cloud had a problem sending the code — try again in a moment", "bad");
+    return;
+  }
+  if (ok && body && body.reason === "try_again") {
+    setCloudStatus("The code could not be stored — try again in a moment", "bad");
+    return;
+  }
   if (ok && body && body.reason === "not_on_list") {
     prefillWaitlist(email);
     setCloudStatus("That address is not in the closed beta yet — leave it below and we'll write if a place opens");
@@ -360,6 +418,9 @@ async function exchangeCode() {
   try {
     const { ok, body } = await postAuth("/v1/auth/exchange", { email, code });
     if (ok && body && typeof body.access_token === "string") token = body.access_token;
+    // Opaque, and handed over rather than derived: `sub` read off the token by
+    // this file would be the credential being parsed, which is the one rule.
+    if (token && body && typeof body.account_id === "string") exchangeAccountId = body.account_id;
     // `approved` is additive and is a REPORT, not the gate: an unlisted
     // address and an unreachable control plane both come back as a valid
     // token, a 200 and `false`. Read only after a token exists, compared
@@ -443,7 +504,7 @@ async function joinWaitlist() {
   }
 }
 
-async function finish() {
+async function finish(deferred = false) {
   const server = $serverUrl.value.trim() || DEFAULT_SERVER;
   const provider = $provider.value;
   const model = $model.value.trim();
@@ -457,22 +518,63 @@ async function finish() {
   // is the friction this field exists to remove. On the cloud path it holds
   // a bearer token rather than an AGENT_SECRET, which is the point: one
   // slot, one header, and nothing that has to be told which it is.
-  const saved = await chrome.storage.local.get("settings");
+  // Written on every path, not only the cloud one: a self-hoster or a Skip who
+  // is switching off a previous cloud sign-in must not keep that account's id,
+  // or the next panel open scopes itself to an account this wizard just ended.
+  // It is its own top-level storage key rather than a field in `settings`, so
+  // no writer ever has to reconstruct the blob from a stale snapshot to record
+  // one — that is how a server-url edit used to be silently clobbered.
+  const keys = brottoModelKeys(exchangeAccountId);
+  // A cloud sign-in that cannot name its account must NOT fall back to the flat
+  // key. That slot is shared by every install with no account, so writing this
+  // account's provider key there is the credential crossover the account
+  // scoping exists to stop — reached only because the exchange degraded. The
+  // token is still stored (it is the one credential we hold; the panel
+  // re-learns the id from /v1/account on its next open) and the key is not,
+  // with the user told exactly that.
+  const cloudWithoutId = edition() === "cloud" && !exchangeAccountId;
+  if (cloudWithoutId && key) {
+    toast("Signed in, but we could not identify this account, so your model key was not saved", "bad");
+  }
+  const saved = await chrome.storage.local.get(["settings", keys.config]);
+  // A window the user stated in Settings outranks this file's answer: for a
+  // provider that takes any model id the catalogue can only offer a fallback,
+  // and re-running the wizard must not silently write that fallback back over
+  // a number they typed.
+  const prevCtx = Number(saved[keys.config]?.context_window);
+  const keepCtx = Number.isFinite(prevCtx) && prevCtx > 0 ? prevCtx : ctx;
+  const { accountId: _legacy, ...prevSettings } = saved.settings || {};
   await Promise.all([
     chrome.storage.local.set({
       settings: {
-        ...(saved.settings || {}),
+        ...prevSettings,
         serverUrl: server,
         agentSecret: $agentSecret.value.trim(),
         // Which server issued it. On the cloud path that value is a real
         // account identity, and the service worker now refuses to send it
         // anywhere else (see credential.js).
         agentSecretOrigin: server,
+        // Whether the credential just stored is an account identity rather
+        // than a self-hosted AGENT_SECRET. The panel scopes storage by this
+        // and never by a /health answer: a probe that has not run, or a server
+        // that is briefly down, must not widen an account's namespace back to
+        // the shared one.
+        accountCredential: edition() === "cloud",
         onboarded: true,
+        // Skip is the one path that reaches finish() without a working
+        // server, and it is the only way the panel can tell "I know my
+        // server is not up yet" from "my server went down". One flag,
+        // written here and read by exactly one banner.
+        setupDeferred: !!deferred,
       },
-      modelConfig: { provider, model, context_window: ctx },
     }),
-    key ? chrome.storage.local.set({ modelApiKey: key }) : Promise.resolve(),
+    exchangeAccountId
+      ? chrome.storage.local.set({ accountId: exchangeAccountId })
+      : chrome.storage.local.remove("accountId"),
+    chrome.storage.local.set({ [keys.config]: { provider, model, context_window: keepCtx } }),
+    cloudWithoutId || !key
+      ? Promise.resolve()
+      : chrome.storage.local.set({ [keys.apiKey]: key }),
   ]);
 
   // setOptions has no gesture requirement (open() does), which is the only
@@ -513,7 +615,7 @@ $next.addEventListener("click", async () => {
 // saved this way, and it catches it in one sentence at the first send.
 $skip.addEventListener("click", () => {
   $next.disabled = true;
-  void finish();
+  void finish(true);
 });
 
 // The radio that opens the wizard. Cloud is the default and self-host is the

@@ -15,13 +15,9 @@ test("task_start carries ext_version from the manifest", () => {
   assert.match(slice, /getManifest\(\)\.version/);
 });
 
-test("panel composes ext and relay into the connection title", () => {
-  assert.match(panel, /state\.relayVersion/);
-  assert.match(panel, /ext /);
-  assert.match(panel, /relay /);
-  assert.match(panel, /Connection: /);
-});
-
+// The connection pill this pair was rendered on was removed from the panel
+// (scripts/test-no-conn-pill.test.js). The capture stays; there is no UI to
+// assert. See docs/architecture/conversation.md.
 test("/health body is read for version as well as auth_mode", () => {
   assert.match(panel, /body\.version/);
 });

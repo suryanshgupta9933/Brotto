@@ -186,7 +186,7 @@
 
     /* One line for the code: the box takes what is left and Resend sits
        beside it. A stacked caption ate a whole line to say six digits. */
-    .code-row { display: flex; gap: 8px; margin-bottom: 22px; }
+    .code-row { display: flex; gap: 8px; }
     .code-row .input { flex: 1; min-width: 0; }
 
     /* Collapsed by default — the question is the control. Two fields, one
@@ -389,16 +389,21 @@
           <label for="cloudEmail">Email</label>
           <input id="cloudEmail" class="input" type="email" name="email" autocomplete="email" spellcheck="false" />
         </div>
-        <div class="actions"><button id="sendCodeBtn" class="btn" type="button">Send code</button></div>
+        <div class="actions" id="sendCodeRow"><button id="sendCodeBtn" class="btn" type="button">Send code</button></div>
 
         <!-- The code box appears only after the user has asked for a code and
              the server says one is on its way. Not on typing an email, and
              not left open when the answer is that no mail is coming. The
-             footer's Next is the submit — there is no second button here. -->
+             footer's Next is the submit — there is no second button here.
+             Send code leaves with it: one step, one question. -->
         <div id="cloudCodeField" hidden>
-          <div class="code-row">
-            <input id="cloudCode" class="input input--code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" spellcheck="false" placeholder="6-digit code" aria-label="6-digit code" />
-            <button id="resendCodeBtn" class="btn" type="button" hidden>Resend</button>
+          <div class="field">
+            <label for="cloudCode">Code</label>
+            <div class="code-row">
+              <input id="cloudCode" class="input input--code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" spellcheck="false" />
+              <button id="resendCodeBtn" class="btn" type="button" hidden>Resend</button>
+            </div>
+            <p class="hint">Check your mail for the code.</p>
           </div>
         </div>
 
@@ -426,15 +431,24 @@
       <h1 id="s4h">Bring your own key</h1>
       <p class="lede">Brotto needs a key to reach your model provider. It goes to your Brotto server and nowhere else.</p>
       <div class="field">
-        <label for="provider">Provider</label>
-        <!-- A bare <select> with no loading, empty or error state cannot
-             tell those three apart, and "still loading" and "it broke" look
-             identical for as long as the user is willing to wait. The list is
-             filled from GET /v1/models on the server the wizard is actually
-             pointed at, and every way that can fail says so here. -->
-        <select id="provider" class="input" disabled>
-          <option value="" selected>Loading models…</option>
-        </select>
+        <span class="lbl" id="providerLabel">Provider</span>
+        <!-- Same Ink & Rule dropdown as Settings' provider picker — one
+             component in dropdown.js, not a second copy. The hidden <select>
+             stays the value host that renderProviders() and finish() already
+             read; the trigger carries the combobox semantics. Loading, empty
+             and error are still three states on one line under the control. -->
+        <div class="dd" id="providerDd">
+          <select id="provider" class="dd-native" tabindex="-1" aria-hidden="true" disabled>
+            <option value="" selected>Loading models…</option>
+          </select>
+          <button type="button" id="providerTrigger" class="dd-trigger input"
+                  role="combobox" aria-expanded="false" aria-haspopup="listbox"
+                  aria-controls="providerList" aria-labelledby="providerLabel" disabled>
+            <span class="dd-value">—</span>
+            <span class="dd-caret" aria-hidden="true"></span>
+          </button>
+          <ul id="providerList" class="dd-list" role="listbox" hidden></ul>
+        </div>
         <p class="hint" id="providerStatus">Reading the model list from your server.</p>
         <div><button id="providerRetryBtn" class="btn" type="button" hidden>Try again</button></div>
       </div>
@@ -462,6 +476,8 @@
 
   <script src="credential.js"></script>
   <script src="model_catalog.js"></script>
+  <script src="model_keys.js"></script>
+  <script src="dropdown.js"></script>
   <script src="welcome.js"></script>
 </body>
 </html>

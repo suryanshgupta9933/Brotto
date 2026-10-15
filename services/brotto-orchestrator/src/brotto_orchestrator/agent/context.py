@@ -130,6 +130,10 @@ class AgentTurn(BaseModel):
     # A mid-task correction from the user, drained out of AgentDeps into the
     # next turn. Empty on every step that has not received one.
     steering: str = ""
+    # Run control, not user data: set when the last two steps said the same
+    # thing, so the model changes approach instead of repeating until the
+    # step budget runs out. Empty on every other step.
+    repeat_warning: str = ""
 
 
 class ActionCall(BaseModel):
