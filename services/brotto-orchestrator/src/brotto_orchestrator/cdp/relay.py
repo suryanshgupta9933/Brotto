@@ -11,6 +11,44 @@ from ..dev.ax_tree_extractor import SemanticTarget
 
 log = logging.getLogger(__name__)
 
+# The key names a `press_key` may carry. Closed set, shared by both relays
+# and by the harness's redaction predicate, because a validator that says one
+# thing and a consumer that does another is the exact failure
+# `is_secret_field`'s docstring forbids: the extension enforced this list
+# while the dev relay enforced nothing, and `_typed_field` used a length
+# heuristic ("one character is a literal, longer is a name") that a two-
+# character password slips straight through.
+#
+# A name Chrome cannot resolve is a no-op that still reports success, which
+# is its own failure: a model that reaches for the wrong spelling then
+# watches the field it is trying to clear refuse to clear. A recorded run
+# sent `ControlOrMeta+a` three times -- a Playwright alias -- and got three
+# rounds of "ok" with nothing pressed.
+PRESSABLE_KEYS = frozenset({
+    "Backspace", "Delete", "Enter", "Escape", "Space", "Tab",
+    "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp",
+    "End", "Home", "PageDown", "PageUp",
+})
+
+
+def is_pressable_key(key: str, modifiers: int = 0) -> bool:
+    """May this relay dispatch it?
+
+    A bare letter is rejected but a modified one is allowed: a bare letter
+    types into the focused field, which is `type_text`'s job, while
+    `Control+a` is a shortcut. `modifiers` must already be masked to the four
+    CDP bits before this -- masking afterwards means `press_key("a", 4096)`
+    satisfies the test on the truthy 4096 and then dispatches as a bare "a",
+    which types into the field, the one outcome the guard exists to prevent.
+
+    `str.isalnum()` is true for "é" and "क" too, so ASCII is checked
+    explicitly: CDP would happily dispatch a character the model had no
+    reason to name.
+    """
+    modifiers &= 0xF
+    bare_letter = len(key) == 1 and key.isascii() and key.isalnum()
+    return key in PRESSABLE_KEYS or bool(bare_letter and modifiers)
+
 # Select-all, through the DOM's own selection API. Shared by both relays so
 # dev and product clear a field the same way — a second copy of this string
 # would drift, and it is the kind of text where drifting is invisible.
@@ -147,6 +185,19 @@ class CDPRelay:
         """`modifiers` is CDP's bitmask; Playwright wants "Control+a"."""
         if not self._browser.page:
             return "no page"
+        if not is_pressable_key(key, modifiers):
+            # The rejected value is not echoed: this string is the tool's
+            # return value, which the harness writes to the audit document
+            # and hands the model in the next step's history. Naming it would
+            # write whatever was refused straight into both.
+            return (
+                "Error executing: that is not a key this client can dispatch, "
+                f"so nothing was pressed. Use one of "
+                f"{', '.join(sorted(PRESSABLE_KEYS))}, or a single letter with "
+                f"a modifiers bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8). To "
+                "replace a field's contents, just use type_text with the value "
+                "you want."
+            )
         names = [
             name
             for bit, name in ((1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift"))

@@ -31,7 +31,11 @@ async def test_a_playwright_alias_key_is_rejected_and_nothing_is_sent():
     result = await relay.press_key("ControlOrMeta+a")
 
     assert EXEC_FAILURE in result
-    assert "ControlOrMeta+a" in result
+    # The rejected value is not echoed back: this string is the tool's return
+    # value, which the harness writes to the audit document and hands the
+    # model in the next step's history. Whatever was refused goes in there
+    # verbatim otherwise.
+    assert "ControlOrMeta+a" not in result
     # The point of the test: no "ok", and nothing put on the wire that would
     # come back ok regardless of what Chrome did with it.
     relay._ws_send.assert_not_called()
@@ -60,3 +64,51 @@ async def test_a_dispatchable_key_is_forwarded_unchanged():
     sent = [c.args[0]["action"] for c in relay._ws_send.await_args_list]
     assert sent[0] == {"type": "key", "key": "Enter", "modifiers": 0}
     assert sent[1] == {"type": "key", "key": "Delete", "modifiers": 2}
+
+
+@pytest.mark.asyncio
+async def test_the_dev_relay_enforces_the_same_allowlist_as_the_extension():
+    """A validator and a consumer that disagree is how a secret gets typed.
+
+    The extension carried a key allowlist and the dev relay carried none, so
+    the same two-character "pw" was refused in product and dispatched in
+    dev. One shared constant, enforced on both sides.
+    """
+    from brotto_orchestrator.cdp.relay import CDPRelay, is_pressable_key
+
+    relay = CDPRelay.__new__(CDPRelay)
+    pressed = []
+
+    class FakePage:
+        class keyboard:
+            @staticmethod
+            async def press(k):
+                pressed.append(k)
+
+    class FakeBrowser:
+        page = FakePage()
+
+    relay._browser = FakeBrowser()
+    assert EXEC_FAILURE in await relay.press_key("pw")
+    assert pressed == [], "a refused key reached the browser"
+
+    for key in ("Enter", "Tab", "F13-not-a-key", "ab"):
+        assert is_pressable_key(key) is (key in ("Enter", "Tab")), key
+
+
+def test_a_two_character_key_is_treated_as_a_typed_literal():
+    """The length heuristic let "pw" and "ab" through as if they were names.
+
+    Anything outside the closed set is a literal as far as redaction is
+    concerned, which is the direction that does not end up in the audit
+    document.
+    """
+    from brotto_orchestrator.agent.context import ActionCall
+    from brotto_orchestrator.agent.harness import _typed_field
+
+    for key in ("p", "pw", "ab", "ControlOrMeta+a", ""):
+        assert _typed_field(ActionCall(
+            action="press_key", action_args={"key": key})) == "key", key
+    for key in ("Enter", "Escape", "Tab"):
+        assert _typed_field(ActionCall(
+            action="press_key", action_args={"key": key})) is None, key

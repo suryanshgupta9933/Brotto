@@ -24,6 +24,7 @@ from pydantic_ai.exceptions import (
 )
 
 from brotto_orchestrator.cdp.extension_relay import TabUnreachable
+from brotto_orchestrator.cdp.relay import PRESSABLE_KEYS
 from brotto_orchestrator.model.config import UserCredentials
 from brotto_orchestrator.model.pricing import (
     lookup as _price_lookup,
@@ -1128,16 +1129,26 @@ async def _redact_if_secret(deps: AgentDeps, ref: str) -> bool:
 def _typed_field(call: ActionCall) -> str | None:
     """Which arg of this call types a literal character, if it does one.
 
-    `type_text` always does. `press_key` does only for a one-character key:
-    named keys ("Enter", "ArrowDown", "F5") produce no character of their
-    own, and redacting those would mask every search submission. Anything
-    longer than a single character is a key name, not a literal — the model
-    is told the two spellings at prompt.py.
+    `type_text` always does. `press_key` does unless its key is one of the
+    names in `PRESSABLE_KEYS` -- a closed set, not a length heuristic.
+
+    The heuristic it replaces ("one character is a literal, longer is a
+    name") was wrong in the direction that costs a credential: `"pw"` or
+    `"ab"` into a password field is two characters, so it passed as a key
+    name and was written to the audit document verbatim. Inverting it makes
+    the safe answer the default -- an unknown key redacts -- and the cost is
+    only that a shortcut like `Control+a` shows as `key=REDACTED` in the
+    trace, which is not a secret and is not what the trace is for.
+
+    The set is imported from the relay, so the validator and the thing that
+    dispatches the key cannot disagree about what a key name is.
     """
     if call.action == "type_text":
         return "text"
-    if call.action == "press_key" and len(str(call.action_args.get("key") or "")) == 1:
-        return "key"
+    if call.action == "press_key":
+        key = str(call.action_args.get("key") or "")
+        if key not in PRESSABLE_KEYS:
+            return "key"
     return None
 
 
