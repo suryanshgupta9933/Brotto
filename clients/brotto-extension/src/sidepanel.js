@@ -1484,19 +1484,20 @@ async function authHeaders() {
 // right answer to "whose history is this?" when we cannot tell; shared is the
 // answer that hands a stranger's transcript to someone else.
 //
-// `authMode` is the discriminator and it comes from /health, never from the
-// address. Self-host keeps the flat namespace byte-identical, including while
-// its server is unreachable and the mode reads null: the residual window is a
-// cloud account with a token and no id *and* an unanswered /health, which
-// sign-in cannot produce — a healthy exchange writes the id, and a degraded one
-// refuses to store the key at all.
+// `settings.accountCredential` is the discriminator, and it is written by the wizard
+// at the moment it stores a cloud token — never inferred from /health. A mode
+// read is a tri-state: "not asked yet" and "server unreachable" both answer
+// null, and a transient probe failure is all it takes to widen an account's
+// scope back to the shared namespace. Self-host keeps the flat namespace
+// byte-identical because the wizard writes `false` there, which no network
+// answer can change.
 const UNNAMED_ACCOUNT = 'unnamed-account';
 async function accountScope() {
   if (state.accountId) return state.accountId;
-  const stored = await chrome.storage.local.get('accountId');
+  const stored = await chrome.storage.local.get(['accountId', 'settings']);
   const id = typeof stored.accountId === 'string' ? stored.accountId : '';
   if (id) { state.accountId = id; return id; }
-  return state.authMode === 'jwt' ? UNNAMED_ACCOUNT : null;
+  return stored.settings && stored.settings.accountCredential === true ? UNNAMED_ACCOUNT : null;
 }
 
 // The account behind the token in the slot, fetched over the same
@@ -1877,6 +1878,7 @@ async function dropCredential() {
   const scope = await accountScope();
   delete settings.agentSecret;
   delete settings.agentSecretOrigin;
+  delete settings.accountCredential;
   // Legacy shape, only if this install predates the top-level key.
   delete settings.accountId;
   await chrome.storage.local.set({ settings });

@@ -60,7 +60,7 @@ const TOKEN = "eyJhbGciOiJIUzI1NiJ9." + "A".repeat(600) + ".sig";
 // ── The panel's /v1/account probe ─────────────────────────────────────────
 function panelRig(respond, { authMode = "jwt", stored = {} } = {}) {
   const calls = [];
-  const local = { settings: { serverUrl: "https://agent.brotto.dev", agentSecret: TOKEN, ...stored }, ...stored };
+  const local = { settings: { serverUrl: "https://agent.brotto.dev", agentSecret: TOKEN, accountCredential: true, ...stored }, ...stored };
   const sandbox = {
     calls,
     local,
@@ -192,17 +192,21 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
       s.state.authMode === null && (await s.accountScope()) === ACCOUNT);
   }
   {
-    // Credential in the slot, no id anywhere, /health answering null: the
-    // one case that must fail CLOSED rather than fall back to shared.
-    const s = panelRig(json(200, { account_id: null }));
+    // Credential in the slot, no id anywhere: the one case that must fail
+    // CLOSED rather than fall back to shared — and it must fail closed even
+    // when /health never answered, since "not probed" is not "not a cloud
+    // account".
+    const s = panelRig(json(200, { account_id: null }), { authMode: null, stored: { accountCredential: true } });
     const ns = s.brottoSessionStore.namespaceFor(s.serverBase(), await s.accountScope());
     check("a token with no identifiable account fails closed, never to shared",
       ns !== "https://agent.brotto.dev" && ns.endsWith("#unnamed-account"), ns);
+    check("an unprobed server cannot widen an account back to shared",
+      s.state.authMode === null && (await s.accountScope()) === "unnamed-account");
   }
   {
     // Self-host: a credential, but no account id — the namespace must be
     // byte-identical to every install from before accounts existed.
-    const s = panelRig(json(200, {}), { authMode: "secret", stored: { agentSecret: "AGENT_SECRET_VALUE" } });
+    const s = panelRig(json(200, {}), { authMode: "secret", stored: { agentSecret: "AGENT_SECRET_VALUE", accountCredential: false } });
     s.plannerUrlEl.value = "http://localhost:8000/";
     s.local.settings.serverUrl = "http://localhost:8000/";
     const ns = s.brottoSessionStore.namespaceFor(s.serverBase(), await s.accountScope());
@@ -231,7 +235,7 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
   // namespace. Sign-out must take that bucket too, or its key and mirrored
   // history outlive the sign-out and greet the next account to sign in.
   {
-    const s = panelRig(json(200, {}), { authMode: "jwt", stored: { agentSecret: "cloud-token" } });
+    const s = panelRig(json(200, {}), { authMode: "jwt", stored: { agentSecret: "cloud-token", accountCredential: true } });
     s.local["modelApiKey:unnamed-account"] = "sk-live-secret";
     s.local["modelConfig:unnamed-account"] = { provider: "anthropic", model: "claude" };
     await s.dropCredential();
@@ -245,7 +249,7 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
   }
   // Self-host resolves to no scope at all: nothing namespaced, nothing deleted.
   {
-    const s = panelRig(json(200, {}), { authMode: "secret", stored: { agentSecret: "AGENT_SECRET_VALUE" } });
+    const s = panelRig(json(200, {}), { authMode: "secret", stored: { agentSecret: "AGENT_SECRET_VALUE", accountCredential: false } });
     s.local.modelApiKey = "sk-self-hosted";
     await s.dropCredential();
     check("self-host sign-out leaves its flat key and history alone",
@@ -267,8 +271,12 @@ const json = (status, body) => async () => ({ ok: status < 400, status, json: as
       /body\.account_id/.test(exchange) && !/\batob\b|jwtDecode|split\(["']\.["']\)/.test(exchange));
     check("finish() persists it as a top-level key, not a settings field",
       /chrome\.storage\.local\.set\(\{\s*accountId:\s*exchangeAccountId/.test(extract(welcome, "finish")));
+    check("the wizard records whether the credential it stored is an account",
+      /accountCredential:\s*edition\(\)\s*===\s*["']cloud["']/.test(extract(welcome, "finish")));
+    check("scope is never decided by a /health answer",
+      !/state\.authMode\s*===\s*["']jwt["']/.test(extract(sidepanel, "accountScope")),
+      "an unprobed or unreachable server reads as null, and null must not widen scope");
   }
-  // ── Absences that must not come back ───────────────────────────────────
   {
     const both = code(sidepanel) + code(welcome) + code(store);
     check("no surface decodes the credential",

@@ -554,6 +554,12 @@ async function finish(deferred = false) {
         // account identity, and the service worker now refuses to send it
         // anywhere else (see credential.js).
         agentSecretOrigin: server,
+        // Whether the credential just stored is an account identity rather
+        // than a self-hosted AGENT_SECRET. The panel scopes storage by this
+        // and never by a /health answer: a probe that has not run, or a server
+        // that is briefly down, must not widen an account's namespace back to
+        // the shared one.
+        accountCredential: edition() === "cloud",
         onboarded: true,
         // Skip is the one path that reaches finish() without a working
         // server, and it is the only way the panel can tell "I know my
