@@ -51,6 +51,7 @@ from .audit import (
 )
 
 _HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
+_MANIFEST_WINDOW = 12  # same convention for memory entries, in the prompt only
 
 # Per-action approval prompt reasons, surfaced to the user via WS
 # `reasoning` and to policy.log for audit.
@@ -628,6 +629,33 @@ def repeat_nudge(summaries: list[StepSummary]) -> str:
     )
 
 
+def _manifest_window(entries: list, current_url: str) -> tuple[list, str]:
+    """(entries to render, note naming what was left out).
+
+    Same head+tail convention as the step history (`_HISTORY_WINDOW`):
+    first 3 and last N, with the dropped range named. Naming which ids are
+    missing is the whole point — a model told an entry is gone with no way
+    to read it concludes it is unavailable, and it is not: every entry
+    stays on `deps.scratchpad` and `recall_memory` resolves any of them,
+    including the ones this window hides.
+
+    The current page's entry always survives even if the window would drop
+    it, because its line carries the "do not recall" marker that has been
+    worth more than its 200 chars.
+    """
+    if len(entries) <= _MANIFEST_WINDOW:
+        return entries, ""
+    tail = _MANIFEST_WINDOW - 3
+    shown = entries[:3] + entries[-tail:]
+    gap = entries[3:len(entries) - tail]
+    here = [e for e in gap if e.url and e.url == current_url]
+    if here:
+        shown = here + shown
+    note = (f"  ... {len(gap)} entries omitted ({gap[0].id}–{gap[-1].id}) — "
+            "recall_memory(entry_id) fetches any of them in full.")
+    return shown, note
+
+
 def _turn_to_prompt(turn: AgentTurn) -> str:
     summaries = turn.step_summaries
     if len(summaries) > _HISTORY_WINDOW:
@@ -743,7 +771,10 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     # Gmail run did exactly that on step 0 of a "summarise the inbox" task,
     # re-reading ~11K chars the prompt was already carrying in full.
     manifest_lines = ["### Memory manifest (recall_memory(entry_id) fetches full body)"]
-    for e in turn.scratchpad_entries:
+    windowed, gap_note = _manifest_window(turn.scratchpad_entries, turn.current_url)
+    if gap_note:
+        manifest_lines.append(gap_note)
+    for e in windowed:
         around = f" around={e.around!r}" if e.around else ""
         trunc = " [truncated]" if e.was_truncated else ""
         where = f" url={e.url}" if e.url else ""

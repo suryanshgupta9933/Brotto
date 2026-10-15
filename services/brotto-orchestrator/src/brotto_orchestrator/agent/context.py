@@ -51,10 +51,15 @@ class Scratchpad(BaseModel):
       findings, decisions, sub-question answers. This is the "narrative" the
       agent curates on top of the raw reads.
 
-    `entries` is uncapped by design — the manifest is small and the bodies
-    are loaded on demand, so growth costs almost nothing. `notes` is NOT:
-    it is echoed in full in every step's prompt, so it is the one part that
-    compounds, and it is capped.
+    `entries` is never dropped from this list — recall_memory resolves any
+    entry by id, including ones the prompt's manifest window omits. Only
+    the *rendering* is windowed (`_MANIFEST_WINDOW`, head 3 + tail N), so a
+    long run's prompt stops growing linearly against an AX-tree budget that
+    decays; the omitted range is named in the manifest so the model knows
+    to recall it. Uncapped growth was the older policy, kept while entries
+    were ~free: they are not, at ~70 tokens each.
+    `notes` is read-only legacy — nothing writes it any more, so it does
+    not compound.
     """
     entries: list[MemoryEntry] = field(default_factory=list)
     # Read-only legacy. Sidecars written before memory became a code-written
