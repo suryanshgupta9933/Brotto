@@ -1010,6 +1010,48 @@ async def _redact_if_secret(deps: AgentDeps, ref: str) -> bool:
     return is_secret_field(attrs, target.name)
 
 
+def _typed_field(call: ActionCall) -> str | None:
+    """Which arg of this call types a literal character, if it does one.
+
+    `type_text` always does. `press_key` does only for a one-character key:
+    named keys ("Enter", "ArrowDown", "F5") produce no character of their
+    own, and redacting those would mask every search submission. Anything
+    longer than a single character is a key name, not a literal — the model
+    is told the two spellings at prompt.py.
+    """
+    if call.action == "type_text":
+        return "text"
+    if call.action == "press_key" and len(str(call.action_args.get("key") or "")) == 1:
+        return "key"
+    return None
+
+
+async def _redact_press_key(deps: AgentDeps) -> bool:
+    """Is the currently focused field a password? Never raises. Fails closed.
+
+    `press_key` takes no ref, so the field it types into is whatever the
+    page last focused — and a single-character press_key is typing into
+    that field just as much as type_text is. Over-redacting a named key
+    would break every form submission, so only literal characters get here.
+
+    ponytail: no relay implements `focused_attributes()` yet, so every
+    literal character currently redacts — the safe direction, since the
+    alternative is a credential on disk. Upgrade path: implement it on
+    CDPRelay and the extension relay, and this becomes one call.
+    """
+    getter = getattr(deps.cdp, "focused_attributes", None)
+    if getter is None:
+        return True
+    try:
+        attrs = await getter()
+    except Exception as exc:  # never raise: this runs mid-typing
+        log.debug("focused-element lookup failed: %s", exc)
+        return True
+    if not isinstance(attrs, dict) or not attrs:
+        return True
+    return is_secret_field(attrs, attrs.get("accessibleName") or attrs.get("name"))
+
+
 def _step_timings(timings: dict[str, float],
                   snapshots: list[dict[str, float]]) -> dict:
     """What this step cost: the cumulative buckets minus the snapshot taken
@@ -1027,11 +1069,15 @@ def _scrubbed(call: ActionCall, redact: bool) -> tuple[dict, str]:
     The trace is built from the same dict, so scrubbing here covers the
     second write path — StepSummary.action_taken goes into the next
     step's prompt and into the resumed document.
+
+    The mask follows the argument that carries the character, so it covers
+    `press_key`'s single-character key as well as `type_text`'s text.
     """
-    if not redact or call.action != "type_text":
+    field = _typed_field(call) if redact else None
+    if field is None:
         return call.action_args, f"{call.action}({call.action_args})"
-    text = call.action_args.get("text", "")
-    args = {**call.action_args, "text": REDACTED, "text_chars": len(str(text))}
+    value = call.action_args.get(field, "")
+    args = {**call.action_args, field: REDACTED, f"{field}_chars": len(str(value))}
     return args, f"{call.action}({args})"
 
 
@@ -2991,11 +3037,21 @@ class AgentHarness:
             redact_flags: list[bool] = []
             typed_secrets: list[str] = []
             for call in decision.actions:
-                redact = (call.action == "type_text"
-                          and await _redact_if_secret(deps, call.action_args.get("ref", "")))
+                field = _typed_field(call)
+                if field is None:
+                    redact_flags.append(False)
+                    continue
+                # A ref for type_text, the focused element for press_key —
+                # both resolve to "is this a password field", and both fail
+                # closed when the answer is unavailable.
+                redact = (
+                    await _redact_if_secret(deps, call.action_args.get("ref", ""))
+                    if field == "text"
+                    else await _redact_press_key(deps)
+                )
                 redact_flags.append(redact)
                 if redact:
-                    typed_secrets.append(str(call.action_args.get("text") or ""))
+                    typed_secrets.append(str(call.action_args.get(field) or ""))
             # Into the run-wide list the moment it is known, so the sinks
             # later in this same step see it too and not only the ones after
             # the next step begins.
