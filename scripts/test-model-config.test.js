@@ -18,6 +18,7 @@ const vm = require("vm");
 
 const EXT = path.join(__dirname, "..", "clients", "brotto-extension", "src");
 const sidepanel = fs.readFileSync(path.join(EXT, "sidepanel.js"), "utf8");
+const modelKeysSrc = fs.readFileSync(path.join(EXT, "model_keys.js"), "utf8");
 const catalogSrc = fs.readFileSync(path.join(EXT, "model_catalog.js"), "utf8");
 
 // Brace matching has to begin after the parameter list — a destructured
@@ -120,7 +121,10 @@ async function makeCatalog(fetchImpl) {
     globalThis: null,
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   vm.runInContext(catalogSrc, sandbox);
   return { api: sandbox.brottoModelCatalog, store };
 }
@@ -257,7 +261,10 @@ async function main() {
       globalThis: null,
     };
     sandbox.globalThis = sandbox;
-    vm.createContext(sandbox);
+      // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
     // The panel's element handles are module-level consts in the real file.
     Object.assign(sandbox, {
       $modelProvider: els["model-provider"],
@@ -282,6 +289,10 @@ async function main() {
   async function panelWithCatalog(fetchImpl, stored) {
     const { els, store, sandbox } = panel(fetchImpl, stored);
     vm.runInContext(catalogSrc, sandbox);
+  // The real key-naming pair: a hand-written stand-in would let these pass
+    // while the shipped file reads a per-account key.
+    vm.runInContext(modelKeysSrc, sandbox);
+    vm.runInContext(extract("modelKeyNames"), sandbox);
     for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
                       "effectiveContextWindow", "renderModelFacts", "initModelSettings", "hydrateModelSettings", "repaintKeyField"]) {
       vm.runInContext(extract(fn), sandbox);

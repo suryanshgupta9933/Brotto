@@ -209,14 +209,15 @@ if ($modelSave) {
     // (write nothing); an empty field is the deliberate "use server default"
     // clear. Never store the mask itself as a credential.
     const typedKey = $modelKey.value.trim();
+    const keys = await modelKeyNames();
     const keyOp = typedKey && typedKey !== KEY_MASK
-      ? chrome.storage.local.set({ modelApiKey: typedKey })
+      ? chrome.storage.local.set({ [keys.apiKey]: typedKey })
       : typedKey
         ? Promise.resolve()
-        : chrome.storage.local.remove('modelApiKey');
+        : chrome.storage.local.remove(keys.apiKey);
     await Promise.all([
       chrome.storage.local.set({
-        modelConfig: { provider, model, context_window: ctx, base_url: baseUrl },
+        [keys.config]: { provider, model, context_window: ctx, base_url: baseUrl },
       }),
       keyOp,
     ]);
@@ -299,6 +300,15 @@ function fitModelPill() {
   modelPillName.classList.toggle('marquee', copy.offsetWidth > modelPillName.clientWidth);
 }
 
+// Which two storage keys hold the model config and the API key right now —
+// flat for self-host, suffixed with the account id on the cloud, so a second
+// account in this Chrome profile cannot spend the first one's key. The id comes
+// from `accountScope()` — the same answer the history namespace gets — and
+// nothing here looks at the credential.
+async function modelKeyNames() {
+  return brottoModelKeys(await accountScope());
+}
+
 // Shown in place of a stored API key: the field must look occupied when it
 // is, or a user re-pastes on every visit. type=password already hides the
 // value; this is only the "something is saved here" signal.
@@ -320,16 +330,18 @@ async function repaintKeyField() {
   if (!$modelKey) return;
   const current = $modelKey.value;
   if (current && current !== KEY_MASK) return;
-  const stored = await chrome.storage.local.get('modelApiKey');
-  $modelKey.value = stored.modelApiKey ? KEY_MASK : '';
+  const keys = await modelKeyNames();
+  const stored = await chrome.storage.local.get(keys.apiKey);
+  $modelKey.value = stored[keys.apiKey] ? KEY_MASK : '';
 }
 
 async function hydrateModelSettings() {
-  const stored = await chrome.storage.local.get('modelConfig');
+  const keys = await modelKeyNames();
+  const stored = await chrome.storage.local.get(keys.config);
   // Second read, not an array get: the extraction tests' storage fake (and
   // clarity about two independent keys) both prefer one key per call.
-  const keyStored = await chrome.storage.local.get('modelApiKey');
-  const raw = stored.modelConfig;
+  const keyStored = await chrome.storage.local.get(keys.apiKey);
+  const raw = stored[keys.config];
   // The stored shape has been flat since the migration in model_config.ts;
   // the nested form is what a pre-migration install left behind. Reading
   // only the nested shape meant a freshly saved config never came back, so
@@ -367,7 +379,7 @@ async function hydrateModelSettings() {
   // Never echo the key itself — only the mask, and only while the user has
   // not started typing (same modelSettingsEdited guard as the form fields).
   if (!modelSettingsEdited) {
-    $modelKey.value = keyStored.modelApiKey ? KEY_MASK : '';
+    $modelKey.value = keyStored[keys.apiKey] ? KEY_MASK : '';
   }
 }
 // ── Pre-flight: can this browser run anything at all?
@@ -512,13 +524,14 @@ async function refreshModelCheckBanner() {
   const stored = await chrome.storage.local.get('modelCheckFailure');
   const rec = stored.modelCheckFailure || null;
   if (rec) {
+    const keys = await modelKeyNames();
     const [local, session_] = await Promise.all([
-      chrome.storage.local.get('modelConfig'),
-      chrome.storage.local.get('modelApiKey'),
+      chrome.storage.local.get(keys.config),
+      chrome.storage.local.get(keys.apiKey),
     ]);
-    const raw = local.modelConfig;
+    const raw = local[keys.config];
     const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
-    const now = modelCheckSig(cfg, session_.modelApiKey || undefined);
+    const now = modelCheckSig(cfg, session_[keys.apiKey] || undefined);
     // The restart trap. A record raised under a key this browser no longer
     // holds is describing a browser that does not exist. Same for one whose
     // transient kind has aged out: the gate below would no longer honour it,
@@ -534,13 +547,14 @@ async function refreshModelCheckBanner() {
 }
 
 async function checkModelReady() {
+  const keys = await modelKeyNames();
   const [local, session_] = await Promise.all([
-    chrome.storage.local.get(['modelConfig', 'modelCheckFailure']),
-    chrome.storage.local.get('modelApiKey'),
+    chrome.storage.local.get([keys.config, 'modelCheckFailure']),
+    chrome.storage.local.get(keys.apiKey),
   ]);
-  const raw = local.modelConfig;
+  const raw = local[keys.config];
   const cfg = raw && typeof raw.provider === 'string' ? raw : raw?.model_config;
-  const apiKey = session_.modelApiKey || undefined;
+  const apiKey = session_[keys.apiKey] || undefined;
   const sig = modelCheckSig(cfg, apiKey);
   const rec = local.modelCheckFailure;
   // A stored failure for *this* config is an answer already paid for. The gate
@@ -1064,10 +1078,11 @@ function mergeHistory(...sources) {
 }
 
 // The mirror is scoped to the address every other server call uses — never a
-// comparison against a constant, never the credential. Inlined rather than
-// wrapped in a helper so the store's own namespace rule is read at each site.
+// comparison against a constant, never the credential — and to the account id
+// when /v1/account has named one. Inlined rather than wrapped in a helper so
+// the store's own namespace rule is read at each site.
 async function mirrorRows() {
-  const ns = brottoSessionStore.namespaceFor(serverBase());
+  const ns = brottoSessionStore.namespaceFor(serverBase(), await accountScope());
   return (await brottoSessionStore.list(ns)).map((r) => ({
     task: r.task || '(no task text)',
     status: panelStatus(r.status),
@@ -1318,7 +1333,7 @@ async function deleteSession(entry) {
   // that is still in this browser, which is the one outcome the user cannot
   // see. One honest line, not a settings screen.
   const mirroredOut = entry.session_id
-    ? await brottoSessionStore.remove(entry.session_id, brottoSessionStore.namespaceFor(serverBase()))
+    ? await brottoSessionStore.remove(entry.session_id, brottoSessionStore.namespaceFor(serverBase(), await accountScope()))
     : true;
   // The row goes from the panel first. A server that is down, or a secret
   // that is wrong, must not leave the user staring at a button that does
@@ -1358,7 +1373,7 @@ async function deleteAllSessions() {
   if (!ok) return;
   await saveSessions([]);
   await noteDeleted(sessions.map((s) => s.session_id));
-  await brottoSessionStore.clear(brottoSessionStore.namespaceFor(serverBase()));
+  await brottoSessionStore.clear(brottoSessionStore.namespaceFor(serverBase(), await accountScope()));
   await renderHistory();
   try {
     const res = await fetch(`${serverBase()}/v1/sessions`, {
@@ -1453,6 +1468,64 @@ async function authHeaders() {
   return secret ? { Authorization: `Bearer ${secret}` } : {};
 }
 
+// Nothing writes an account-scoped name without asking this. `state.accountId`
+// is only an optimisation in front of it, never the answer on its own: the id
+// lands in storage as its own top-level key (`accountId`, not a field inside
+// the `settings` blob — a field would mean reconstructing the whole blob after
+// an await, clobbering anything that wrote settings meanwhile), and this reads
+// it back. That is what makes the scoping independent of the network: /health
+// can be slow, open, or never answered and the panel still knows whose state
+// it is showing.
+//
+// The one case with no id anywhere is a cloud account we cannot name, and it
+// FAILS CLOSED. An unqualified namespace is the shared one — the exact
+// cross-account disclosure account scoping removes — so that case resolves to a
+// namespace nothing has ever written and History reads empty. Empty is the
+// right answer to "whose history is this?" when we cannot tell; shared is the
+// answer that hands a stranger's transcript to someone else.
+//
+// `settings.accountCredential` is the discriminator, and it is written by the wizard
+// at the moment it stores a cloud token — never inferred from /health. A mode
+// read is a tri-state: "not asked yet" and "server unreachable" both answer
+// null, and a transient probe failure is all it takes to widen an account's
+// scope back to the shared namespace. Self-host keeps the flat namespace
+// byte-identical because the wizard writes `false` there, which no network
+// answer can change.
+const UNNAMED_ACCOUNT = 'unnamed-account';
+async function accountScope() {
+  if (state.accountId) return state.accountId;
+  const stored = await chrome.storage.local.get(['accountId', 'settings']);
+  const id = typeof stored.accountId === 'string' ? stored.accountId : '';
+  if (id) { state.accountId = id; return id; }
+  return stored.settings && stored.settings.accountCredential === true ? UNNAMED_ACCOUNT : null;
+}
+
+// The account behind the token in the slot, fetched over the same
+// authenticated path as every other call — no second fetch helper, no
+// `?token=`, no decoding.
+//
+// The wizard is not the only path: a panel opened days later holds a stored
+// token and has no exchange in this session, and without an id it cannot tell
+// whose history it is showing. This only ever REFINES what init already seeded
+// from storage, and only for the cloud: asking a self-host would cost a request
+// to learn what the mode already says.
+async function learnAccountId() {
+  // Only the cloud has accounts.
+  if (state.authMode !== 'jwt') return;
+  if (await accountScope() !== UNNAMED_ACCOUNT) return; // named already
+  try {
+    const res = await fetch(`${serverBase()}/v1/account`, { headers: await authHeaders() });
+    if (!res.ok) return;
+    const body = await res.json();
+    const id = body && typeof body.account_id === 'string' ? body.account_id : '';
+    if (!id) return;
+    state.accountId = id;
+    // Its own key: no writer ever has to reconstruct `settings` to record an
+    // id, so the clobber window this used to have does not exist.
+    await chrome.storage.local.set({ accountId: id });
+  } catch { /* accountScope's fail-closed namespace is the answer meanwhile */ }
+}
+
 // Same base as the panel's other server calls (fetchSuggestions, settings
 // verify): the settings field is the source of truth, and state.plannerUrl
 // is empty until a task has connected at least once in this panel.
@@ -1470,7 +1543,7 @@ async function mirrorSession(sessionId, { status, steps } = {}) {
   try {
     const doc = await fetchAudit(sessionId);
     await brottoSessionStore.put(sessionId, doc, {
-      namespace: brottoSessionStore.namespaceFor(serverBase()),
+      namespace: brottoSessionStore.namespaceFor(serverBase(), await accountScope()),
       task: (state.lastGoal || '').trim(),
       status,
       steps: steps ?? state.stepCount ?? null,
@@ -1496,7 +1569,7 @@ async function fetchAudit(sessionId) {
       if (doc && doc.found !== false) return doc;
     }
   } catch { /* fall through to the mirror */ }
-  const mirrored = await brottoSessionStore.get(sessionId, brottoSessionStore.namespaceFor(serverBase()));
+  const mirrored = await brottoSessionStore.get(sessionId, brottoSessionStore.namespaceFor(serverBase(), await accountScope()));
   if (mirrored) return mirrored;
   throw new Error(`no copy of session ${sessionId}`);
 }
@@ -1779,6 +1852,41 @@ function paintSetupFooter(s) {
   replaySetupBtn.textContent = signedIn ? 'Sign out' : 'Set up Brotto';
 }
 
+// The artifacts a credential leaves behind. `modelApiKey:<id>` is a live
+// provider credential and `${base}#${id}` is that account's mirrored history;
+// neither is protected by the token, so both stay readable and reusable by
+// whoever signs in next. Key names come from the same helper the read path
+// uses — hand-building the strings is how one spelling drifts from the other
+// and a key survives its own sign-out.
+async function clearAccountArtifacts(accountId) {
+  if (!accountId) return;
+  const keys = brottoModelKeys(accountId);
+  await chrome.storage.local.remove([keys.apiKey, keys.config]);
+  await brottoSessionStore.clear(brottoSessionStore.namespaceFor(serverBase(), accountId));
+}
+
+// Both teardown paths — this button and the expired-token sweep in the /health
+// handler — run this. "Clear the slot" and "clear what the slot was for" are
+// one operation, and two copies of it will drift.
+async function dropCredential() {
+  const stored = await chrome.storage.local.get(['settings', 'accountId']);
+  const settings = { ...(stored.settings || {}) };
+  const accountId = typeof stored.accountId === 'string' ? stored.accountId : '';
+  // Resolved before the id is dropped: afterwards accountScope() can no longer
+  // name the unnamed namespace a cloud account with no id reads and writes, so
+  // that account's key and mirrored history would outlive its own sign-out.
+  const scope = await accountScope();
+  delete settings.agentSecret;
+  delete settings.agentSecretOrigin;
+  delete settings.accountCredential;
+  // Legacy shape, only if this install predates the top-level key.
+  delete settings.accountId;
+  await chrome.storage.local.set({ settings });
+  if (accountId) await chrome.storage.local.remove('accountId');
+  state.accountId = null;
+  await clearAccountArtifacts(scope);
+}
+
 // setOptions re-points the panel; it has no gesture requirement, so the
 // wizard replaces this page on the next open rather than in a new tab.
 // Sign-out clears the one slot the wizard fills and falls back to this
@@ -1787,11 +1895,7 @@ function paintSetupFooter(s) {
 if (replaySetupBtn) {
   replaySetupBtn.addEventListener('click', async () => {
     if (replaySetupBtn.dataset.signout === '1') {
-      const cur = (await chrome.storage.local.get('settings')).settings || {};
-      const settings = { ...cur };
-      delete settings.agentSecret;
-      delete settings.agentSecretOrigin;
-      await chrome.storage.local.set({ settings });
+      await dropCredential();
       // Navigate the open panel, not just the next open: reverting the
       // button leaves the user on a Settings screen that no longer describes
       // their state. The wizard is the only writer of these fields.
@@ -1989,6 +2093,12 @@ const state = {
   // reachable", which is treated as self-host because that is what every
   // server said before `auth_mode` existed.
   authMode: null,
+  // The account `account_id` names, or null. Never derived from the token:
+  // the relay hands it over as its own field on exchange and on /v1/account,
+  // and the extension never parses the credential. Null means "no account",
+  // which is also what every self-hoster and every degraded exchange means,
+  // and it leaves the namespace exactly as it was before accounts existed.
+  accountId: null,
 };
 
 let timerInterval = null;
@@ -3550,9 +3660,10 @@ async function fetchSuggestions(url, title, pageText = '') {
     }
 
     const base = (plannerUrlEl.value || 'http://localhost:8000').replace(/\/$/, '');
+    const keys = await modelKeyNames();
     const [local, key_] = await Promise.all([
-      chrome.storage.local.get('modelConfig'),
-      chrome.storage.local.get('modelApiKey'),
+      chrome.storage.local.get(keys.config),
+      chrome.storage.local.get(keys.apiKey),
     ]);
     const response = await fetch(`${base}/v1/suggestions`, {
       method: 'POST',
@@ -3561,8 +3672,8 @@ async function fetchSuggestions(url, title, pageText = '') {
         url,
         title,
         page_text: pageText || undefined,
-        model_config: local.modelConfig || undefined,
-        api_key: key_.modelApiKey || undefined,
+        model_config: local[keys.config] || undefined,
+        api_key: key_[keys.apiKey] || undefined,
         device_id: await deviceId(),
       }),
     });
@@ -5165,6 +5276,21 @@ goalEl.focus();
   // the task was on. Hydrate it from storage first; everything below and every
   // other call site reads plannerUrlEl, so this one read covers them.
   const { settings } = await chrome.storage.local.get('settings');
+  // Seed the account id BEFORE the probe below, from storage alone, so a panel
+  // opened while /health is slow — or on a server that never answers — still
+  // scopes to the right account instead of falling back to the shared
+  // namespace. `learnAccountId()` only refines what is seeded here.
+  const { accountId } = await chrome.storage.local.get('accountId');
+  if (typeof accountId === 'string' && accountId) {
+    state.accountId = accountId;
+  } else if (settings && typeof settings.accountId === 'string' && settings.accountId) {
+    // Migrate once. The id used to live inside `settings`, where recording one
+    // meant rewriting the whole blob from a pre-fetch snapshot; anyone on that
+    // build has it there, so move it to its own key and drop the old field.
+    state.accountId = settings.accountId;
+    const { accountId: _legacy, ...rest } = settings;
+    await chrome.storage.local.set({ accountId: settings.accountId, settings: rest });
+  }
   // Setup was never completed. Every way into this page — the toolbar action,
   // a reloaded extension, a cleared profile — lands here, and an empty panel
   // whose composer cannot reach anything is the one outcome worse than the
@@ -5210,10 +5336,9 @@ goalEl.focus();
         // dead end that made this look like a total outage.
         const cur = (await chrome.storage.local.get('settings')).settings || {};
         if (cur.agentSecret) {
-          const cleaned = { ...cur };
-          delete cleaned.agentSecret;
-          delete cleaned.agentSecretOrigin;
-          await chrome.storage.local.set({ settings: cleaned });
+          // Same operation as Sign out, same helper: an expired token names no
+          // account, so the id goes, and so do the artifacts it was keeping.
+          await dropCredential();
         }
         paintSetupFooter({});
         toast('Your Brotto Cloud sign-in has expired — open Set up Brotto to sign in again', 'bad', 6000);
@@ -5222,6 +5347,10 @@ goalEl.focus();
       }
     }
     state.plannerUrl = url;
+    // After the URL is in place (serverBase() reads the field) and after the
+    // credential has proved itself, so this is one authenticated request per
+    // panel open, not one per keystroke.
+    await learnAccountId();
     // The catalogue was loaded above against whatever URL the field held
     // then — the default, on a first open. Now that the saved server is
     // known, re-read it from there.

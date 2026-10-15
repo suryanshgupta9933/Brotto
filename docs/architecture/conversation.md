@@ -280,3 +280,35 @@ length bound are in `extension.md`.
 
 **Not verified in a browser.** The reconnect path and the offline-history
 fallback are unit-tested logic only.
+
+## Two response shapes on the auth path
+
+The sign-in path answers with a field the client had no name for before
+accounts were scoped locally. Both are documented in `privacy.md`, which owns
+what the identity is; what is here is the wire shape and the asymmetry between
+the two routes.
+
+**`POST /v1/auth/exchange` → `{access_token, approved, account_id}`.**
+`account_id` is the opaque `profiles.id` uuid, resolved from the token the
+route just minted via local `hmac` verification — no control-plane round trip
+on the sign-in path. It is additive, like `approved`: a relay too old to send
+it omits the field, and an omitted field is not a refusal. **`""` is the
+degraded answer, not `null`** — `verify_jwt` returning `None` still yields a
+signed-in 200 with an unknown id rather than a 500, and a client scoping on
+`""` falls back to its pre-account namespace. `welcome.js` reads it as a field
+and never decodes the token to get it.
+
+**`GET /v1/account` → `{"account_id": ...}`, authenticated, `null` with no
+account.** This one answers **`null`, not `""`**: there is no claims object
+outside jwt mode, and null is exactly the no-account case. It goes through
+`_approved`, so a bad credential is a **404, not 403**, and so is no
+credential — an identity route reachable unauthenticated would leak every
+account id on the relay. **No `approved` field**, deliberately: `_approved`
+already refused, so it would be a constant, and the type-derived value it was
+first written as answered `false` for a valid `AGENT_SECRET` in secret mode —
+a denial that never happened.
+
+`exchange` alone is not enough to name an account, which is why the second
+route exists: a panel opened days later holds a stored token and has no
+exchange in this session. Both shapes leave a self-hoster on the flat
+namespace — see `panel-ui.md` for the invariance and the pins.

@@ -99,6 +99,13 @@ check("a missing source does not take the merge down", () => {
 
 // Node has no IndexedDB and no chrome.*; the fakes below are the whole
 // surface these functions touch.
+// The account id `namespaceFor` now takes a second argument for. Null here is
+// the self-host / pre-account case, which is what most of these rows are.
+const STATE = { accountId: null };
+// Every read path resolves its namespace through accountScope() rather than
+// reading state directly, so the slices below need the same accessor.
+globalThis.accountScope = async () => STATE.accountId;
+
 function fakeStore(mirror) {
   return {
     list: async () => mirror || [],
@@ -115,13 +122,13 @@ function entriesFor(serverBehaviour, mirror, local = []) {
   // mirrorRows and mergeHistory are both free identifiers inside
   // historyEntries, so both have to be handed in — stubbing the merge away
   // would test a union that never runs.
-  const realMirrorRows = new Function("brottoSessionStore", "panelStatus", "serverBase",
-    `return (${sliceFunction("mirrorRows")});`)(store, (s) => s || "done", () => "https://server");
+  const realMirrorRows = new Function("brottoSessionStore", "panelStatus", "serverBase", "state",
+    `return (${sliceFunction("mirrorRows")});`)(store, (s) => s || "done", () => "https://server", STATE);
   const fn = new Function("brottoSessionStore", "listSessions", "mirrorRows", "mergeHistory",
-    "panelStatus", "serverBase", "authHeaders", "fetch",
+    "panelStatus", "serverBase", "authHeaders", "fetch", "state",
     `return (${sliceFunction("historyEntries")});`)(
       store, async () => local, realMirrorRows, mergeHistory, (s) => s || "done",
-      () => "https://server", async () => ({}), serverBehaviour);
+      () => "https://server", async () => ({}), serverBehaviour, STATE);
   return fn();
 }
 
@@ -177,10 +184,10 @@ const fails = async () => { throw new Error("network down"); };
       list: async () => [],
       namespaceFor: (b) => String(b || ""),
     };
-    const fn = new Function("brottoSessionStore", "serverBase", "authHeaders", "fetch",
+    const fn = new Function("brottoSessionStore", "serverBase", "authHeaders", "fetch", "state",
       `return (${sliceFunction("fetchAudit")});`)(
       fakeStore, () => "https://server", async () => ({}),
-      async () => ({ ok: true, json: async () => ({ found: false }) }));
+      async () => ({ ok: true, json: async () => ({ found: false }) }), STATE);
     const doc = await fn("m1");
     assert(doc && doc.schema_version === 2, `mirror was not used: ${JSON.stringify(doc)}`);
   });
@@ -190,7 +197,7 @@ const fails = async () => { throw new Error("network down"); };
     const fn = new Function("brottoSessionStore", "serverBase", "authHeaders", "fetch",
       `return (${sliceFunction("fetchAudit")});`)(
       fakeStore, () => "https://server", async () => ({}),
-      async () => ({ ok: true, json: async () => ({ from: "server" }) }));
+      async () => ({ ok: true, json: async () => ({ from: "server" }) }), STATE);
     const doc = await fn("m1");
     assert(doc.from === "server", `the mirror won: ${JSON.stringify(doc)}`);
   });
@@ -199,7 +206,7 @@ const fails = async () => { throw new Error("network down"); };
     const fakeStore = { get: async () => null, namespaceFor: (b) => String(b || "") };
     const fn = new Function("brottoSessionStore", "serverBase", "authHeaders", "fetch",
       `return (${sliceFunction("fetchAudit")});`)(
-      fakeStore, () => "https://server", async () => ({}), fails);
+      fakeStore, () => "https://server", async () => ({}), fails, STATE);
     let threw = false;
     try { await fn("m1"); } catch { threw = true; }
     assert(threw, "fetchAudit returned undefined instead of throwing");

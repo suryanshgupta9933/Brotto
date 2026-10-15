@@ -19,6 +19,7 @@ const vm = require("vm");
 
 const SRC = path.join(__dirname, "..", "clients", "brotto-extension", "src", "sidepanel.js");
 const source = fs.readFileSync(SRC, "utf8");
+const modelKeysSrc = fs.readFileSync(path.join(path.dirname(SRC), "model_keys.js"), "utf8");
 
 function extract(name) {
   const start = source.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
@@ -110,11 +111,18 @@ const sandbox = {
   FALLBACK_SUGGESTIONS: ['Ask Brotto anything'],
 };
 sandbox.globalThis = sandbox;
+  // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
 vm.createContext(sandbox);
 
 for (const fn of ["suggestionKey", "readSuggestionCache", "writeSuggestionCache",
                   "contextSuggestionsEnabled", "fetchSuggestions", "paintSuggestions"]) {
   vm.runInContext(extract(fn), sandbox);
+  // The real key-naming pair, so the model config and key this posts are the
+  // ones that ship.
+  vm.runInContext(modelKeysSrc, sandbox);
+  vm.runInContext(extract("modelKeyNames"), sandbox);
 }
 
 let failures = 0;

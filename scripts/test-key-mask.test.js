@@ -21,6 +21,7 @@ const vm = require("vm");
 
 const EXT = path.join(__dirname, "..", "clients", "brotto-extension", "src");
 const sidepanel = fs.readFileSync(path.join(EXT, "sidepanel.js"), "utf8");
+const modelKeys = fs.readFileSync(path.join(EXT, "model_keys.js"), "utf8");
 
 let failures = 0;
 function check(name, ok, detail = "") {
@@ -60,7 +61,15 @@ function run(store, fieldValue) {
     KEY_MASK: "••••••••",
     $modelKey,
   };
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
+  // The real key-naming pair, not a stand-in: the account suffix is the whole
+  // point of this file's subject, and a hand-written `modelApiKey` here would
+  // pass while the shipped file names a per-account key.
+  vm.runInContext(modelKeys, sandbox);
+  vm.runInContext(extract("modelKeyNames"), sandbox);
   vm.runInContext(extract("repaintKeyField"), sandbox);
   return { sandbox, $modelKey };
 }

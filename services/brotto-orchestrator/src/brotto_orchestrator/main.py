@@ -354,6 +354,19 @@ def _auth(request: Request) -> AuthResult:
     )
 
 
+def _verified_sub(token: str) -> str:
+    """The account uuid a token names, or `""` if it names none.
+
+    Local `hmac` verification, never a network call: the id is already in
+    the token the relay signed, and asking `profiles` for a field it owns
+    would put a control-plane round trip on the sign-in path.
+    """
+    from .session.jwt_auth import verify_jwt
+
+    claims = verify_jwt(token)
+    return claims.sub if claims else ""
+
+
 async def _approved(request: Request) -> tuple[AuthResult, JSONResponse | None]:
     """Roster membership, not just a valid signature. Auth result and any refusal.
 
@@ -1299,7 +1312,58 @@ async def exchange_login_code(request: Request, background: BackgroundTasks):
         record_sign_in_event, token, _signin_peer(request),
         request.headers.get("user-agent") or "",
     )
-    return JSONResponse(content={"access_token": token, "approved": approved})
+    return JSONResponse(content={
+        "access_token": token,
+        "approved": approved,
+        # The stable, opaque, per-account id — `profiles.id`, the `sub` of
+        # the token we just minted. Handed over *as a field* because the
+        # extension never parses the credential; a second account in the
+        # same browser has its own uuid, which is what lets the panel
+        # scope history and settings per account.
+        #
+        # Local verification, not a network call: `verify_jwt` is stdlib
+        # `hmac` and the token was signed for us seconds ago, so this is
+        # free. It is the same function `approve_at_exchange` just called
+        # on this token, so `None` means the caller still gets a signed-in
+        # response with an unknown id rather than a 500 — and an extension
+        # scoping on "" falls back to its old namespace.
+        "account_id": _verified_sub(token),
+    })
+
+
+@app.get("/v1/account")
+async def get_account(request: Request):
+    """The identity behind the credential on this request.
+
+    `exchange` is not enough to name an account: a panel opened days
+    later holds a stored token and has no exchange in this session, and
+    without an id it cannot tell whose history it is looking at. This is
+    the route that answers that.
+
+    **Gated through `_approved`, the same single choke point as every
+    other non-sign-in route**, deliberately including the roster: an
+    identity route reachable without a credential is an `/health`-shaped
+    leak of every account id on the relay. A bad credential therefore
+    answers 404, from `_approved`, not 403.
+
+    Self-host is unaffected and answers `{"account_id": null}`: a
+    self-hoster has no account, `Claims` exists only when a JWT
+    authenticated, and the extension's namespace then falls back to the
+    server address exactly as it does today.
+    """
+    auth, refusal = await _approved(request)
+    if refusal is not None:
+        return refusal
+
+    from .session.jwt_auth import Claims
+
+    claims = auth.claims if isinstance(auth.claims, Claims) else None
+    # No `approved` here. `_approved` already answered 403 for a refusal, so
+    # such a field would be a constant — and one derived from the *type* of
+    # the claims object it read false for a valid `AGENT_SECRET` in secret
+    # mode, which reads as a denial that never happened. `account_id` is
+    # null in exactly the no-account case, which is all a caller needs.
+    return JSONResponse(content={"account_id": claims.sub if claims else None})
 
 
 # ---------------------------------------------------------------------------

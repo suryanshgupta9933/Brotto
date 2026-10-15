@@ -33,6 +33,7 @@ const SRC = path.join(__dirname, "..", "clients", "brotto-extension", "src");
 const panel = fs.readFileSync(path.join(SRC, "sidepanel.js"), "utf8");
 const dropdownSrc = fs.readFileSync(path.join(SRC, "dropdown.js"), "utf8");
 const catalogSrc = fs.readFileSync(path.join(SRC, "model_catalog.js"), "utf8");
+const modelKeysSrc = fs.readFileSync(path.join(SRC, "model_keys.js"), "utf8");
 
 /** Brace-matched body of `function name(...)`. */
 function extract(name, src = name === "attachDropdown" ? dropdownSrc : panel) {
@@ -157,7 +158,10 @@ function openDropdown(hostValue = "anthropic") {
     DROPDOWNS: [], dropdownWriting: false,
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   vm.runInContext(extract("attachDropdown"), sandbox);
 
   let value = hostValue;
@@ -260,7 +264,10 @@ function openPanel(stored) {
     setModelPill() {},
   };
   sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    // Every read path resolves its account through accountScope(); these
+  // checks are all the self-host / no-account case, which is null.
+  sandbox.accountScope = async () => null;
+vm.createContext(sandbox);
   vm.runInContext(catalogSrc, sandbox);
   // The panel's own seed expression, evaluated rather than assumed — otherwise
   // this test would pass with `let modelCatalog = null` back in place, because
@@ -269,6 +276,10 @@ function openPanel(stored) {
   if (!seed) throw new Error("no `let modelCatalog = …` in sidepanel.js — renamed?");
   sandbox.modelCatalog = vm.runInContext(seed[1], sandbox);
 
+  // The real key-naming pair: a hand-written stand-in would let these pass
+  // while the shipped file reads a per-account key.
+  vm.runInContext(modelKeysSrc, sandbox);
+  vm.runInContext(extract("modelKeyNames"), sandbox);
   for (const fn of ["currentProvider", "populateModelOptions", "populateProviders",
                     "effectiveContextWindow", "renderModelFacts", "hydrateModelSettings", "initModelSettings", "repaintKeyField"]) {
     vm.runInContext(extract(fn), sandbox);
