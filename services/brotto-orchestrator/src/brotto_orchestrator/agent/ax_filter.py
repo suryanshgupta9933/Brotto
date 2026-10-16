@@ -44,6 +44,11 @@ PAGE_TEXT_MAX = 20000
 # generic containers the model never sees.
 MAX_DEPTH = 4
 
+# A target's own text is page-supplied. It is not fenced anywhere — the tree
+# and the diff both interpolate it — so every site that prints it caps it at
+# this bound. Named so ax_diff renders visibility lines under the same cap.
+LABEL_CHARS = 80
+
 # Steps over which the tree budget decays to LATE_BUDGET_FRACTION. See
 # budget_for_window for why the tree gets less useful as a task ages.
 BUDGET_DECAY_STEPS = 15
@@ -247,9 +252,9 @@ def filter_ax_targets(
         elif blocked == "occluded":
             line += " [covered]"
         if t.name:
-            line += f' "{t.name[:80]}"'
+            line += f' "{t.name[:LABEL_CHARS]}"'
         if t.value:
-            line += f' value="{str(t.value)[:80]}"'
+            line += f' value="{str(t.value)[:LABEL_CHARS]}"'
         if t.href:
             line += f"  {t.href[:160]}"
         # Append action annotation if computed

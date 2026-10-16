@@ -46,7 +46,7 @@ BETA_URL = f"{SITE}/closed-beta"
 #: address bar is a per-viewer session parameter and is deliberately dropped.
 #: **Without this the invite tells a reader to "sign in" with a copy of Brotto
 #: they may not have, in a browser with no extension to run it in.**
-CWS_URL = "https://chromewebstore.google.com/detail/brotto/mahkomofcmohephggjlfgocopgfhkggb"
+CWS_URL = "https://chromewebstore.google.com/detail/brotto/kblfiddjaeekmlpmgpgchcfbakjhflpd"
 
 #: What one admitted member gets. Stated in public copy, so it is the same
 #: number as `BROTTO_BETA_TASK_CAP` on the relay — and if that changes, this and

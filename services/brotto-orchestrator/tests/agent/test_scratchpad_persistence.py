@@ -9,9 +9,11 @@ into a per-step one: a 15-step run on Gmail holds ~15 pages of ~11K chars, so
 the document grows by ~165KB and is rewritten in full on every step.
 
 The record keeps what a resume needs to *list* memory — id, step, selector,
-url and the digest the manifest renders. The bodies go to a separate JSON
-sidecar, written by the same call, so a resumed run recalls whole pages
-rather than 200-char fragments.
+url and the digest the manifest renders. The body is dropped, not moved: the
+bodies sidecar has no writer, so a resumed run recalls the 200-char digest and
+`recall_memory` marks it as degraded. Dropping it here is still right — it is
+the difference between a document that grows ~165KB over a 15-step Gmail run
+and one that does not, and a full body is re-readable by navigating back.
 """
 
 import json
@@ -165,3 +167,20 @@ def test_a_page_captured_every_step_does_not_bloat_the_audit_document():
 
     doc = json.dumps({"scratchpad": _scratchpad_dict(sp)})
     assert len(doc) < 20_000, f"audit document is {len(doc)} chars for 20 pages"
+
+
+def test_provenance_survives_the_round_trip_that_resume_depends_on():
+    """Written every step, so a field left out of `_FIELDS` is gone by step 1.
+
+    `task_index` and `source` are what decide the `THIS PAGE` marker after a
+    resume. Without them every reloaded entry is task 0 with no provenance,
+    and the run cannot tell an entry of the current task from one of the task
+    before it.
+    """
+    from brotto_orchestrator.agent.audit import _as_scratchpad
+
+    sp = Scratchpad().capture_page(url="https://a.test/x", step=4,
+                                   text="body", task_index=2)
+    back = _as_scratchpad(json.loads(json.dumps(_scratchpad_dict(sp))))
+    assert back.entries[0].task_index == 2
+    assert back.entries[0].source == "page"

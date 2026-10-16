@@ -8,26 +8,10 @@ import uuid
 from typing import Callable, Awaitable
 
 from ..dev.ax_tree_extractor import SemanticTarget
-from .relay import SELECT_ALL_JS
+from .relay import SELECT_ALL_JS, PRESSABLE_KEYS, is_pressable_key
 
 log = logging.getLogger("brotto.ext_relay")
 
-# The keys the extension carries a CDP key code for. Anything outside this set
-# is rejected rather than forwarded: a key name Chrome cannot resolve is a
-# no-op that still reports success, and a model that reaches for the wrong
-# spelling then watches the field it is trying to clear refuse to clear. A
-# recorded run sent `ControlOrMeta+a` three times — it is a Playwright alias —
-# and got three rounds of "Pressed ControlOrMeta+a: ok" with nothing pressed.
-_PRESSABLE_KEYS = frozenset({
-    "Backspace", "Delete", "Enter", "Escape", "Space", "Tab",
-    "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp",
-    "End", "Home", "PageDown", "PageUp",
-})
-
-# One budget for a whole observation read, skipping included. A page that
-# navigates in a loop keeps the extension pushing `navigated` frames, and a
-# per-read timeout restarts on every one of them — so the wait would have no
-# ceiling at all, set by a page the model never chose to open.
 _OBSERVATION_TIMEOUT = 30.0
 
 # Observation frames that arrived unprompted. `webNavigation.onCommitted`
@@ -418,14 +402,15 @@ class ExtensionCDPRelay:
         # truthy 4096 and then be dispatched as a bare "a" — which types into
         # the field, the one outcome the guard exists to prevent.
         modifiers &= 0xF
-        # ASCII only: `str.isalnum()` is true for "é" and "क" too, and CDP
-        # would happily dispatch a character the model had no reason to name.
-        bare_letter = len(key) == 1 and key.isascii() and key.isalnum()
-        if key not in _PRESSABLE_KEYS and not (bare_letter and modifiers):
+        if not is_pressable_key(key, modifiers):
+            # Not echoed: this string is the tool's return value, which the
+            # harness writes to the audit document and hands the model in the
+            # next step's history. Naming it would write whatever was refused
+            # straight into both.
             return (
-                f"Error executing: press_key {key!r} is not a key this client can "
-                f"dispatch, so nothing was pressed. Use one of "
-                f"{', '.join(sorted(_PRESSABLE_KEYS))}, or a single letter with a "
+                "Error executing: that is not a key this client can dispatch, "
+                f"so nothing was pressed. Use one of "
+                f"{', '.join(sorted(PRESSABLE_KEYS))}, or a single letter with a "
                 f"modifiers bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8). To replace "
                 f"a field's contents, just use type_text with the value you want."
             )
