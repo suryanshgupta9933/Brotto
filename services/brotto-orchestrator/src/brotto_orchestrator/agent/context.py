@@ -1,10 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
+
+
+_SERIAL_RE = re.compile(r"^([A-Za-z]*)(\d+)$")
+
+
+def next_serial(prefix: str, ids: list[str], floor: int = 0) -> int:
+    """A serial number that is never handed out twice.
+
+    Deriving an id from a list length is only correct while nothing is ever
+    removed: drop the last entry and the next id minted is the dead one, and
+    every lookup that resolves it returns a *different* record under the same
+    id. That is a wrong answer rather than an error, which is the worst
+    failure shape here, so the length is never the source of truth.
+
+    `floor` is what this process has already handed out, so a removal inside
+    it cannot rewind the counter. The ids on hand cover the other direction: a
+    manifest restored from disk and then appended to continues past the ids
+    that manifest already contains. Existing entries are never renumbered and
+    the `r1`/`m1` format is unchanged.
+    """
+    return max(floor, max((int(m[2]) for i in ids
+                           if (m := _SERIAL_RE.match(i)) and m[1] == prefix),
+                          default=0)) + 1
 
 
 class StepSummary(BaseModel):
@@ -78,12 +102,20 @@ class Scratchpad(BaseModel):
     # page cache carry a `# NOTES` section, and the loader still parses it, but
     # nothing writes notes any more — see the class docstring.
     notes: str = ""
+    # Monotonic, and carried across `with_entry`. Not a model field: the
+    # sidecar's on-disk format must not grow a field it has never had.
+    _seq: int = PrivateAttr(default=0)
 
     def next_id(self) -> str:
         """One numbering scheme for both entry kinds. They were numbered
         independently at their two call sites, so a page capture landing
-        between two reads could reuse an id and silently overwrite one."""
-        return f"r{len(self.entries) + 1}"
+        between two reads could reuse an id and silently overwrite one.
+
+        The counter does not rewind when an entry is dropped, and it continues
+        past whatever ids the loaded manifest already carries — see
+        `next_serial`."""
+        self._seq = next_serial("r", [e.id for e in self.entries], self._seq)
+        return f"r{self._seq}"
 
     def capture_page(self, url: str, step: int, text: str,
                      task_index: int = 0) -> "Scratchpad":
@@ -121,10 +153,12 @@ class Scratchpad(BaseModel):
         ))
 
     def with_entry(self, entry: MemoryEntry) -> "Scratchpad":
-        return Scratchpad(
+        out = Scratchpad(
             entries=self.entries + [entry],
             notes=self.notes,
         )
+        out._seq = self._seq
+        return out
 
     def lookup(self, entry_id: str) -> MemoryEntry | None:
         for e in self.entries:

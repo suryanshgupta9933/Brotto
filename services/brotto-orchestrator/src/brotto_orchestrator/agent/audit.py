@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 from typing import Any, Container
 
-from .context import MemoryEntry, Scratchpad
+from .context import MemoryEntry, Scratchpad, next_serial
 
 log = logging.getLogger(__name__)
 
@@ -288,6 +288,11 @@ class AuditTrail:
         self._lock = threading.Lock()
         self._dropped = 0
         self._seq = 0
+        # Message ids are `m1`, `m2`, … minted from this, not from the list
+        # length. Deliberately separate from `_seq` above, which is the
+        # `seq` field on policy events and errors: sharing one counter would
+        # interleave the two namespaces and make the message ids jump.
+        self._msg_seq = 0
         # Which `tasks[]` entry the turns being written belong to. Stamped
         # onto every turn rather than passed in, because there is one writer
         # per run and a dozen `begin_turn` call sites that would each have to
@@ -535,7 +540,13 @@ class AuditTrail:
     def _add_message(self, *, role: str, content: str, task: int,
                      turn: int | None) -> str:
         messages = self._doc.setdefault("messages", [])
-        mid = f"m{len(messages) + 1}"
+        # Not `len(messages) + 1`. Same bug `Scratchpad.next_id` had: an id
+        # minted from a list length is reusable the moment anything is removed,
+        # and a transcript resolved by id then returns the wrong message under
+        # the same id rather than failing. See `next_serial`.
+        self._msg_seq = next_serial(
+            "m", [str(m.get("id", "")) for m in messages], self._msg_seq)
+        mid = f"m{self._msg_seq}"
         entry: dict = {"id": mid, "role": role, "at": _now()}
         _text(entry, "content", content)
         entry["task"] = task
