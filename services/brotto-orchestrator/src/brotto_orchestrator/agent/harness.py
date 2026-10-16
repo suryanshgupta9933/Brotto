@@ -265,6 +265,19 @@ def _strip_brackets(text: str) -> str:
     return text.replace("<", "").replace(">", "")
 
 
+def _one_line(text: str) -> str:
+    """`_strip_brackets`, then flatten to one line.
+
+    The attribute sites (`url=`) and the `URL:` / `Title:` lines are
+    single-line fields; a newline in either escapes its own line into the next,
+    which is the same escape as a bracket. `_history_line` deliberately does
+    *not* use this — an outcome is genuinely multi-line and reading it flat
+    would cost more than the injection is worth there (it sits inside a fence
+    whose brackets are already stripped).
+    """
+    return " ".join(_strip_brackets(text).split())
+
+
 def _step_note(s: StepSummary) -> str:
     """Render a step's narration fenced as untrusted, or nothing.
 
@@ -810,7 +823,8 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     # read-only question is answered from.
     text_section = (
         f"\n### Page text (values the tree above may not carry)\n"
-        f"<page_text untrusted url=\"{turn.current_url}\">\n{turn.page_text}\n</page_text>\n"
+        f"<page_text untrusted url=\"{_one_line(turn.current_url)}\">\n"
+        f"{turn.page_text}\n</page_text>\n"
         if turn.page_text
         else ""
     )
@@ -944,11 +958,11 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
 </step_history>
 
 ## Current page (step {turn.step_number})
-URL: {turn.current_url}
-Title: {turn.current_page_title}
+URL: {_one_line(turn.current_url)}
+Title: {_one_line(turn.current_page_title)}
 {diff_section}
 ### AX Tree (interactive elements only)
-<page_content untrusted url="{turn.current_url}">
+<page_content untrusted url="{_one_line(turn.current_url)}">
 {turn.ax_tree}
 </page_content>
 {text_section}{steer_section}{repeat_section}{refusal_section}
@@ -1809,13 +1823,16 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             # from sitting at the top of the prompt with nothing marking it.
             # The wrapper is inside the memory rule the model is given, not a
             # new instruction: the model is told the text is data.
-            where = entry.url or "an earlier page"
+            # Same rule as the three `current_url` sites in `_turn_to_prompt`:
+            # `entry.url` is whatever the page navigated to, so it cannot be
+            # trusted delimiter-free in an attribute position either.
+            url = _one_line(entry.url or "")
             tail = (
                 "[only the digest survived — its full text was not kept. "
-                f"Navigate back to {entry.url or 'that page'} to read it "
+                f"Navigate back to {url or 'that page'} to read it "
                 "again if you need more.]"
                 if _is_degraded(entry) else "")
-            return (f'<memory_body untrusted url="{entry.url}">\n'
+            return (f'<memory_body untrusted url="{url}">\n'
                     f"{entry.digest if _is_degraded(entry) else entry.body}\n"
                     f"</memory_body>" + (f"\n{tail}" if tail else ""))
 
