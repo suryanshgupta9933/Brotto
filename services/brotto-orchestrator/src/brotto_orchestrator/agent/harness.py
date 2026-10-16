@@ -164,9 +164,23 @@ def _strip_page_echo(text: str) -> str:
     )
 
 
+def _safe_outcome(text: str) -> str:
+    """An outcome's page-supplied fragments removed. One render point.
+
+    A step outcome reaches the prompt from two places — the history line and
+    the refused-actions block — and the fence is only as good as the weakest
+    of them. `test_scroll_feedback` shipped with the second hardened and the
+    first rendering the same string verbatim, which is a guard that holds only
+    where somebody remembered to apply it; the other branch's
+    `<step_history untrusted>` fence closed the trust half of that deferral, so
+    what was left was two render paths for one string. They share this now.
+    """
+    return _strip_page_echo(text).translate(_DELIMS)
+
+
 def _refusal_line(part: str) -> str:
     """One refusal, page-supplied fragments removed and secrets redacted."""
-    return redact_text(_strip_page_echo(part.strip()).translate(_DELIMS))[0]
+    return redact_text(_safe_outcome(part.strip()))[0]
 
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r"}
 
@@ -306,7 +320,7 @@ def _history_line(s: StepSummary) -> str:
     at render, so the enclosing fence cannot be closed from inside the line.
     """
     return _strip_brackets(
-        f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}"
+        f"Step {s.step} | {s.url} | {s.action_taken} → {_safe_outcome(str(s.outcome or ''))}"
     ) + _step_note(s)
 
 

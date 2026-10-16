@@ -187,13 +187,23 @@ def _refusal_prompt(outcome: str) -> str:
     return _turn_to_prompt(turn)
 
 
+_REFUSAL_OPEN = "<refused_actions reported untrusted>"
+
+
 def _refusal_block(prompt: str) -> str:
-    """The fenced region only. The history line above it renders the same
-    outcome verbatim and always has — that is the pre-existing, unfenced
-    counterpart, reported rather than fixed here, so the assertion below is
-    about the block this change owns."""
-    start = prompt.index("<refused_actions reported untrusted>")
-    end = prompt.index("</refused_actions>")
+    """The fenced region's *body*, excluding the two harness-owned tags.
+
+    Excluding them is the point: `test_a_refusal_cannot_close_its_own_fence`
+    asserts the body holds no angle bracket at all, and slicing from the start
+    of the opening tag made that unsatisfiable — the tag is itself `<...>`.
+    The guard was never broken; the slice was one token too wide.
+
+    The history line above renders the same outcome, through the same
+    `_safe_outcome`, so it is hardened too — see
+    `test_the_history_line_drops_the_page_fragment_too`.
+    """
+    start = prompt.index(_REFUSAL_OPEN) + len(_REFUSAL_OPEN)
+    end = prompt.index("</refused_actions>", start)
     return prompt[start:end]
 
 
@@ -289,6 +299,27 @@ def test_a_refusal_cannot_close_its_own_fence():
     # The fence still opens and closes where it did. (The same string also
     # appears once in the *history line*, which renders the outcome verbatim
     # and is deliberately left unfenced here — a separate decision.)
+
+
+def test_the_history_line_drops_the_page_fragment_too():
+    """The sibling render path, not a second copy of the guard.
+
+    An outcome reaches the prompt twice — inside the fenced history line and
+    inside `<refused_actions>`. Hardening only the second made the trust
+    property hold where somebody remembered to apply it, and left a hostile
+    page's text sitting in the history block for every later step. Both call
+    `_safe_outcome`, so this fails if either path is changed alone.
+    """
+    prompt = _refusal_prompt(
+        "Error executing: ref '0:1' could not be cleared — the page said "
+        "'TypeError; EVILTAG is not a function'."
+    )
+
+    history = prompt.split("## Steps completed")[1].split("## Current page")[0]
+    assert "EVILTAG" not in history
+    assert "TypeError" not in history
+    # The canonical replacement stands in, so the row still says why.
+    assert "not a text field" in history
 
 
 def test_redaction_is_idempotent_so_a_stored_outcome_is_not_mangled():
