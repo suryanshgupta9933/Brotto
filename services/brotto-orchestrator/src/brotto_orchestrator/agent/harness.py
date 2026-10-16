@@ -96,7 +96,9 @@ _EXEC_FAILURE = "Error executing"
 _OUTCOME_CHARS = 120
 
 
-def _summarise_outcome(outcomes: list[str]) -> str:
+def _summarise_outcome(
+    outcomes: list[str], secret_values: list[str] | None = None
+) -> str:
     """Join a step's outcomes into the cap, without losing a refusal.
 
     Redaction happens here, at the one point every outcome passes through on
@@ -108,14 +110,23 @@ def _summarise_outcome(outcomes: list[str]) -> str:
     idempotent (the replacement marker matches no rule), so callers that
     redact again — `_refusal_line` — are not mangling anything.
     """
-    joined = redact_text("; ".join(outcomes) if outcomes else "no action")[0]
+    # Values typed into secret fields this run are substituted first, for the
+    # same reason `_narrate` does it: `redact_text` has no rule for an
+    # arbitrary password, and the outcome is both stored and rendered back to
+    # the model. Same run-wide list, same marker, same order.
+    def _sub(text: str) -> str:
+        for v in secret_values or ():
+            text = text.replace(v, "[typed into a secret field]")
+        return text
+
+    joined = redact_text(_sub("; ".join(outcomes) if outcomes else "no action"))[0]
     if len(joined) <= _OUTCOME_CHARS:
         return joined
     # Redact the refusal tail too. `joined` above is redacted, but `tail` is
     # rebuilt from the raw outcomes and spliced back in, so a secret in a
     # long step's refusal reached the summary, the history line and the audit
     # document unredacted — on exactly the path the cap exists to serve.
-    refusals = [redact_text(o)[0] for o in outcomes if _EXEC_FAILURE in o]
+    refusals = [redact_text(_sub(o))[0] for o in outcomes if _EXEC_FAILURE in o]
     if not refusals:
         return joined[:_OUTCOME_CHARS]
     tail = "; ".join(refusals)
@@ -830,7 +841,15 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
             f"to fetch any ..."))
     history = "\n".join(history_lines) or "(none yet)"
 
-    diff_section = f"\n### What changed after last action\n{turn.ax_diff}\n" if turn.ax_diff else ""
+    # Fenced like every other page-derived block, and stripped at the same
+    # point. The diff is built from the AX tree, so it carries target names
+    # and values straight off the page — left bare it was the one block where
+    # a page could write its own heading and read as harness fact.
+    diff_section = (
+        f"\n### What changed after last action\n"
+        f"<ax_diff untrusted>\n{_strip_brackets(turn.ax_diff)}\n</ax_diff>\n"
+        if turn.ax_diff else ""
+    )
 
     # Placed after the tree, before the question: it is the last thing read,
     # and the values it carries (counts, prices, totals) are exactly what a
@@ -1714,7 +1733,14 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             result = await cdp.press_key(key, _as_int(args.get("modifiers"), 0))
             if _EXEC_FAILURE in result:
                 return result
-            return f"Pressed {key}"
+            # A single-character key is a *character entry*, so it can be a
+            # password: `press_key("q")` into a focused secret box types a
+            # credential, and the outcome is written to the audit document
+            # under logs/sessions/. The args are already masked by `_scrubbed`;
+            # this is the string that carried it. A named key ("Enter",
+            # "ArrowDown") types nothing and is worth echoing — without it the
+            # model cannot tell a committed search from a dismissed dialog.
+            return f"Pressed {key}" if len(str(key)) > 1 else "Pressed a character"
 
         elif action == "scroll":
             direction = args.get("direction", "down")
@@ -3289,7 +3315,7 @@ class AgentHarness:
                 if deps.result is not None:
                     break
             timings["execute"] += time.perf_counter() - t_ex
-            combined_outcome = _summarise_outcome(outcomes)
+            combined_outcome = _summarise_outcome(outcomes, run_secrets)
 
             # Memory is written in code on every step (`capture_page` runs
             # above, before the turn is built), so it is persisted every step
