@@ -17,7 +17,7 @@ from brotto_orchestrator.session import beta_invite, waitlist_email
 # browser address bar shows one particular signed-in viewer, so a link copied
 # out of it is still this page for everybody else — but it carries a session
 # parameter into a mail that gets forwarded, and it looks like a bug.
-CANONICAL = "https://chromewebstore.google.com/detail/brotto/mahkomofcmohephggjlfgocopgfhkggb"
+CANONICAL = "https://chromewebstore.google.com/detail/brotto/kblfiddjaeekmlpmgpgchcfbakjhflpd"
 
 
 def test_the_listing_link_is_the_canonical_one():

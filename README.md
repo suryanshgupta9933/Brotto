@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/1f6d0aca-5206-4e68-8f26-72d586323108
 ---
 
 > **One step too many, and we know it.** The extension is on the
-> [Chrome Web Store](https://chromewebstore.google.com/detail/brotto/mahkomofcmohephggjlfgocopgfhkggb)
+> [Chrome Web Store](https://chromewebstore.google.com/detail/brotto/kblfiddjaeekmlpmgpgchcfbakjhflpd)
 > — one click to install. The agent
 > loop is a server, so there are two ways in: run it yourself, which is a
 > handful of commands and stays free with no account and no cap, or use the

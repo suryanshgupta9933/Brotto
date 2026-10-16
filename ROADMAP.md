@@ -133,7 +133,7 @@ is the fix, and it is not cheap: about thirty call sites construct an
 
 ### The Chrome Web Store listing
 
-**Published 2026-10-12.** <https://chromewebstore.google.com/detail/brotto/mahkomofcmohephggjlfgocopgfhkggb>
+**Published 2026-10-12.** <https://chromewebstore.google.com/detail/brotto/kblfiddjaeekmlpmgpgchcfbakjhflpd>
 
 Rejected once before this, on 2026-10-10, for excessive keywords in the
 description — the provider list, where the policy allows five brands and the
