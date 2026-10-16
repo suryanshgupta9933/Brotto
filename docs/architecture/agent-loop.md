@@ -202,9 +202,17 @@ and leaving a mandatory verification read is the same waste on the other side of
 the token bill.
 
 So: **recall is for pages you have navigated away from, never the page in
-front of you.** `SYSTEM_PROMPT` states it, and the manifest entry whose `url`
-equals `current_url` is marked `← THIS PAGE, already in your prompt — do not
-recall` so the model does not have to infer it by comparing two URLs. An entry
+front of you.** `SYSTEM_PROMPT` states it, and the entry for the page in front
+of the model is marked `← THIS PAGE, already in your prompt — do not recall`
+so the model does not have to infer it. The marker is **identity, not url**:
+`_is_current_page` requires `source == "page"` (set in code at the capture site
+and not reachable from an action's arguments — `read_page_text` takes `selector`
+as an argument, so a model-writable field is not a sound basis for a factual
+claim to the model), `step == current_step`, and `task_index == current_task`.
+All three are needed and none suffices: `step` alone is satisfied by task 1's
+step 4 during task 2, and url equality matches several entries after a reload,
+an SPA route swap, or a site serving one path across a run — every one of them
+would claim to be the current page. An entry
 for an *earlier* page must stay unmarked — marking every entry would make
 "go back to that page" unreachable, which is what memory exists for. The stale
 note-keeping example (`GOAL PROGRESS: …`) and "read your memory at the start of
@@ -232,14 +240,19 @@ whole document, so anything serialised there is re-serialised every step.
 invisible *precisely because nothing was ever captured* — `entries=0` on every
 run. Capturing every step's page turned a latent write-amplification into a
 per-step one: 20 Gmail-shaped pages measured **200KB of document growth**. The
-record now carries id/step/selector/around/digest/was_truncated/url and not the
-body; the bodies go to the sidecar below, so nothing is lost, only moved.
+record now carries id/step/selector/around/digest/was_truncated/url/task_index/
+source and not the body. **There is nowhere for the body to go** — the digests
+are the whole persistence, and the sidecar that was meant to hold the bodies
+has had no writer since the manifest replaced it. Bodies live on
+`deps.scratchpad` for the length of the run and nowhere else; `docs/architecture/privacy.md`
+has the disk-side record of that decision.
 
-`_as_scratchpad` rebuilds the model from that dict to write the sidecar, so it
-defaults `body` to the digest — without it a resumed run loses its entire
-manifest rather than keeping the digests. The sidecar header gains a trailing
-optional `url=`, and the loader's regex makes that group optional so files
-written before `url` existed keep parsing byte-identically.
+`_as_scratchpad` rebuilds the model from that dict, so it defaults `body` to
+the digest — without it a resumed run loses its entire manifest rather than
+keeping the digests. The sidecar header gained a trailing optional `url=`, and
+the loader's regex makes that group optional so files written before `url`
+existed keep parsing byte-identically; `*.scratchpad.txt` is still the file
+current builds write.
 
 **A resumed entry recalls as its digest, and says so.** Handed 200 unmarked chars
 of an 11,000-char page, the model reads the fragment as the whole page and
@@ -256,6 +269,37 @@ switched off entirely, because 200KB of a person's inbox per twenty pages,
 unredacted, on someone else's disk is not a cost worth paying. The digest is
 what the manifest holds now and `recall_memory` says out loud when that is all
 the model got. `docs/architecture/privacy.md` has the current shape.
+
+**The manifest is windowed, and the window names what it dropped.** Uncapped
+growth was fine while entries were nearly free; at ~70 tokens each they are not,
+against an AX budget that *decays* by 30% by step 15. `_MANIFEST_WINDOW = 12`
+keeps the head 3 and the tail N and renders the omitted ids as contiguous runs
+(`r4–r19, r21–r31`). One run per unbroken stretch rather than a single
+`r4–r31`, because `recall_memory` resolves *any* entry including ones the gap
+would have covered — a kept entry sitting between the endpoints renders in the
+manifest directly under a note saying it is gone. **Nothing is dropped from
+`entries`**, only from the rendering: naming the ids is the whole point, since a
+model told an entry is gone with no way to read it concludes it is unavailable.
+The current page's entry survives the window even if it would not, because its
+line carries the "do not recall" marker. The manifest header states the *real*
+guarantee and only that one — `recall_memory(entry_id) returns the kept body` vs
+`fetches full body` — conditionally, because a caveat on a live run would be a
+false statement paid for in tokens on the step that can least afford them, and
+`degraded` is read over *every* entry, not only the shown ones, since the gap
+note promises an omitted entry is fetchable.
+
+**Everything page-derived is now fenced, and the manifest was the last one
+standing.** The prompt's `## Trust hierarchy` names `<step_history untrusted
+outcomes-including-page-evaluated>`, `<step_note untrusted>`,
+`<memory_manifest untrusted page-digests>`, `<memory_body untrusted>` and
+`<ax_diff untrusted>`. The manifest was the interesting one: a digest is the
+first 200 characters of page text *verbatim*, so unfenced it put
+page-controlled text at the top of the prompt inside the one section that reads
+as harness-authored inventory — exactly where an injection wants to sit. The AX
+diff was the last unfenced page-derived block for the same reason. Fences are
+not a parser guarantee either way; every renderer strips angle brackets from
+the values it interpolates, because trusting `url`/`selector`/`digest` to be
+delimiter-free is exactly the assumption that fails.
 
 **Left alone deliberately:** `page_text` (~3.4K tokens) sits *after* the AX tree,
 which changes every step, so it is re-prefilled uncached every step. Moving it
@@ -1049,7 +1093,8 @@ which reads as flake and is not; chase it rather than retry it.
 
 **The diff was not the missing piece.** `compute_ax_diff` has always run and
 `### What changed after last action` has always been spliced into the prompt
-(`harness.py:500`). On those steps it said `(no changes detected)` — correctly, because a
+(`harness.py:849`, now inside the `<ax_diff untrusted>` fence). On those steps it
+said `(no changes detected)` — correctly, because a
 stale tree genuinely has nothing new in it. The model was told, in plain text, that its
 click changed nothing, and clicked again. That is the same failure as not being told; a
 correct signal that gets ignored needs the underlying fault fixed, not a louder signal.

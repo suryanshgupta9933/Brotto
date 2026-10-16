@@ -383,8 +383,8 @@ Both are unconditional, and both should stay that way:
   that instruction is a behavioural control, not the boundary. Anything the model
   decides cannot change whether the redaction happened.
 - **Page text never reaches disk.** `capture_page` records a 200-character
-  digest; the `.pages.json` bodies sidecar and `Scratchpad.without_bodies()`
-  both existed only to be switched off in secure mode and are gone. A run over
+  digest; the `.pages.json` bodies sidecar had no writer left once the manifest
+  replaced it, and neither did the secure-mode-only body-stripping hook. A run over
   an authenticated session leaves a manifest of what was visited, not copies of
   what was on it. The known cost: a resumed run recalls digests, not pages.
 
