@@ -5,4 +5,4 @@ Written by scripts/release.js. Read by main.py. Never hand-edited to
 fails the build, and that is the point.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
