@@ -254,6 +254,17 @@ def _scrub_known_secrets(text: str | None, secret_values: list[str] | None) -> s
     return redact_text(text)[0]
 
 
+def _strip_brackets(text: str) -> str:
+    """Drop angle brackets, once, at every render point that opens a fence.
+
+    Never trust a page-derived value to be delimiter-free. A page that writes
+    its own closing tag into its body gets the fence closed early and the rest
+    of the line read as harness-authored fact. Strips the brackets, keeps the
+    text: it is still content the model is allowed to read.
+    """
+    return text.replace("<", "").replace(">", "")
+
+
 def _step_note(s: StepSummary) -> str:
     """Render a step's narration fenced as untrusted, or nothing.
 
@@ -264,7 +275,26 @@ def _step_note(s: StepSummary) -> str:
     if not s.extracted:
         return ""
     return (f"\n  <step_note untrusted model-narration step=\"{s.step}\">\n"
-            f"  {s.extracted}\n  </step_note>")
+            f"  {_strip_brackets(s.extracted)}\n  </step_note>")
+
+
+def _history_line(s: StepSummary) -> str:
+    """One row of the step-history block, at its single construction point.
+
+    Two render sites used to open- and close-code this shape independently —
+    the `## Steps completed` block and the `recall_steps` fetch — and a fix
+    applied to one left the other page-derived and unfenced.
+
+    Every field here can carry page text. `outcome` is the sharpest case:
+    `_summarise_outcome` joins the action return values verbatim, and
+    `read_scratchpad`, `find_element` and `recall_conversation` all return
+    page content. `url` is whatever the page navigated to and `action_taken`
+    carries the description the model wrote about it. All three are stripped
+    at render, so the enclosing fence cannot be closed from inside the line.
+    """
+    return _strip_brackets(
+        f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}"
+    ) + _step_note(s)
 
 
 def _unescape(text: str) -> str:
@@ -761,10 +791,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         shown = summaries
         skipped = 0
 
-    history_lines = [
-        f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}{_step_note(s)}"
-        for s in shown
-    ]
+    history_lines = [_history_line(s) for s in shown]
     if skipped:
         gap = summaries[3:len(summaries) - (_HISTORY_WINDOW - 3)]
         # Names WHICH steps, not just how many: "…steps omitted" gave the
@@ -898,7 +925,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
                              getattr(deps, "task_index", 0))) else ""
         line = (f"- `{e.id}` step={e.step} sel={e.selector}{around}{where}"
                 f"{trunc}{here}: {e.digest}")
-        manifest_lines.append(line.replace("<", "").replace(">", ""))
+        manifest_lines.append(_strip_brackets(line))
     manifest_section = (
         '<memory_manifest untrusted page-digests>\n'
         + "\n".join(manifest_lines)
@@ -912,7 +939,9 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
 {manifest_section}
 
 ## Steps completed
+<step_history untrusted outcomes-including-page-evaluated>
 {history}
+</step_history>
 
 ## Current page (step {turn.step_number})
 URL: {turn.current_url}
@@ -1838,9 +1867,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             if not got:
                 return (f"No steps in range {lo}-{hi}. This task has steps "
                         f"{summaries[0].step}-{summaries[-1].step}.")
-            text = "\n".join(
-                f"Step {s.step} | {s.url} | {s.action_taken} → {s.outcome}{_step_note(s)}"
-                for s in got)
+            text = "\n".join(_history_line(s) for s in got)
             if len(text) > _CONV_RECALL_CHARS:
                 text = text[:_CONV_RECALL_CHARS] + "\n…[range too large, narrow it]"
             return text
