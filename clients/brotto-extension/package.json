@@ -1,6 +1,6 @@
 {
   "name": "@brotto/browser-extension",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Brotto Browser Extension - Drives your real Chrome via the Brotto orchestrator",
   "main": "src/background.js",
   "scripts": {
