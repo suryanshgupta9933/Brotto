@@ -568,3 +568,27 @@ def test_every_provider_resolves_without_raising(no_network):
         ):
             caps = resolve(provider, model_id, **kwargs)
             assert isinstance(caps, Capabilities)
+
+def test_a_url_with_a_credential_in_it_is_not_logged(caplog):
+    """The Gemini probe authenticates with `?key=<api_key>`, so the URL is a
+    credential the moment it is built — and CodeQL flagged the three log lines
+    that print it. Every diagnostic wants the endpoint and none of them wants
+    the key, so the query string is dropped at the one place that formats a
+    URL for a log. Asserted on the *absence* of the key, which is the failure
+    mode: a log line is the copy on disk that nobody remembers to delete."""
+    secret = "sk-do-not-log-me"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/x?key={secret}"
+
+    for log_fn in (caps_mod._get_json, caps_mod._post_probe):
+        caplog.clear()
+        try:
+            log_fn(url)
+        except Exception:
+            pass  # the return value is not the point; the log line is
+        assert secret not in caplog.text
+
+    # ...and the endpoint is still there, because a diagnostic with no host is
+    # not a diagnostic.
+    assert caps_mod._safe_url(url) == (
+        "https://generativelanguage.googleapis.com/v1beta/models/x"
+    )

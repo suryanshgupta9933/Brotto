@@ -139,6 +139,21 @@ UNKNOWN = Capabilities()
 # budget, not the run itself.
 # --------------------------------------------------------------------------
 
+def _safe_url(url: str) -> str:
+    """A URL with its query string and fragment removed, for logging.
+
+    The Gemini probe authenticates with `?key=<api_key>` (see `probe_vision`),
+    so the URL is a credential the moment it is built. Every diagnostic here
+    wants the *endpoint* — which host, which path, which status — and none of
+    them wants the key, so the query goes and the rest stays. Pinned by
+    `test_a_url_with_a_credential_in_it_is_not_logged`.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}{parts.path}" if parts.netloc else parts.path
+
+
 def _get_json(
     url: str, *, headers: dict | None = None, params: dict | None = None,
     timeout: float = _METADATA_TIMEOUT,
@@ -148,11 +163,12 @@ def _get_json(
     try:
         response = httpx.get(url, headers=headers or {}, params=params, timeout=timeout)
         if response.status_code != 200:
-            log.warning("model metadata: %s -> HTTP %s", url, response.status_code)
+            log.warning("model metadata: %s -> HTTP %s",
+                        _safe_url(url), response.status_code)
             return None
         return response.json()
     except Exception as exc:  # noqa: BLE001 — any failure means "no metadata"
-        log.warning("model metadata: %s -> %s", url, type(exc).__name__)
+        log.warning("model metadata: %s -> %s", _safe_url(url), type(exc).__name__)
         return None
 
 
@@ -169,7 +185,7 @@ def _post_probe(
         response = httpx.post(url, json=body, headers=headers or {}, timeout=timeout)
         return 200 <= response.status_code < 300, response.text
     except Exception as exc:  # noqa: BLE001 — see above
-        log.warning("vision probe: %s -> %s", url, type(exc).__name__)
+        log.warning("vision probe: %s -> %s", _safe_url(url), type(exc).__name__)
         return False, ""
 
 
