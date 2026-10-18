@@ -2101,6 +2101,12 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                 elif t == "evaluate_result":
                     log.debug("[%s] ← evaluate_result  len=%d", session_id, len(incoming.get("value", "")))
                     await eval_queue.put(incoming.get("value", ""))
+                elif t == "screenshot_result":
+                    # Page content, in transit only: handed to the relay's
+                    # waiter and nowhere else. Deliberately not logged —
+                    # this frame is a picture of the user's screen, and the
+                    # log line would be a copy of it on disk.
+                    await relay.deliver_screenshot_result(incoming)
                 elif t == "get_attributes_result":
                     # Answers a get_attributes from a type_text. Without
                     # this branch it sits undelivered and every password

@@ -40,13 +40,25 @@ complete set of CDP methods the extension issues:
 | Input | `Input.dispatchMouseEvent` | Click, move, scroll |
 | Input | `Input.dispatchKeyEvent` | Typing, Enter, Control+A |
 | Page | `Page.enable` / `Page.navigate` / `Page.getFrameTree` | Navigation, and enumerating frames |
+| Page | `Page.captureScreenshot` | A JPEG of the tab you picked, for pages the accessibility tree is blind to — see below |
 | DOM | `DOM.getDocument` / `getAttributes` / `resolveNode` | Resolving a tree ref to a node |
 | DOM | `DOM.getBoxModel` / `getNodeForLocation` | Turning a node into clickable coordinates |
 | Runtime | `Runtime.evaluate` | Reading page text and stability — see below |
 
-**There is no `Page.captureScreenshot` anywhere in this extension.** The agent
-perceives the page through the Accessibility tree, not through images. It
-never screenshots, so it never has access to a picture of your screen.
+**`Page.captureScreenshot` — one place, and only on request.** The agent
+perceives the page through the Accessibility tree first, and asks for a picture
+only when that tree is empty — a `<canvas>` (Google Docs, Figma, a chart) has
+no accessibility node and no readable text, so a text-only agent cannot see it
+at all. The extension issues this command from exactly one call site, in
+`background.ts`, in response to a relay frame from your own server. It is not
+periodic and not automatic: with no task running, nothing is captured.
+
+The image is JPEG at quality 60, clipped to the visible viewport — a smaller
+image to send than PNG, and never a picture of the whole tab history or
+another window. It is sent to the Brotto server you configured and handed
+straight to the model for that step. It is **not written to disk**: not to the
+audit trail, not to a log line, not to the side panel. What the model makes of
+it may appear in its summary, exactly as page text already does.
 
 ### `Runtime.evaluate` — four places, and only one of them is the server's
 
@@ -266,13 +278,19 @@ to find them.
 See [PRIVACY.md](https://github.com/suryanshgupta9933/brotto/blob/main/PRIVACY.md) for the full statement.
 
 **Not accessed:** browsing history, bookmarks, saved passwords or cookies as a
-credential store, other extensions' data, system files. No screenshots are
-taken at any point. No third-party analytics.
+credential store, other extensions' data, system files. No other window, tab
+or screen is ever captured. No third-party analytics.
 
 **Accessed, and why:** the accessible tree and visible text of the tab you
 selected, while a task runs. Mouse and keyboard input on that tab, while a
-task runs. Your server URL and model choice, stored locally. The visible text
-of the active page, when the panel is idle and suggesting.
+task runs. A JPEG of that tab's visible viewport, while a task runs and only
+when the accessible tree came back empty. Your server URL and model choice,
+stored locally. The visible text of the active page, when the panel is idle and
+suggesting.
+
+Whether the agent *does* request a screenshot on a given step is a decision
+your server makes, and a self-hosted server running this code decides it, not
+the extension. The extension captures on request and nowhere else.
 
 **Transmission:** to the Brotto server you configured, over the relay. No
 third parties. The audit trail (`logs/sessions/`) stays on your own disk.

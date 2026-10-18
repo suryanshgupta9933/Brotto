@@ -111,6 +111,11 @@ function isLoopback(url: string): boolean {
  * server was this for?" has no safe default answer. Re-entering the key in
  * Settings records the issuer and lifts the refusal.
  */
+/** A viewport JPEG at q60 runs ~200–530 KB, so base64 is ~270–700 KB. The
+ * bound is a backstop against a page that somehow produces an enormous frame,
+ * not a tuned value; uvicorn's default `ws_max_size` is 16 MiB. */
+const MAX_SCREENSHOT_CHARS = 4_000_000;
+
 async function credentialFor(url: string): Promise<Credential> {
   const stored = await chrome.storage.local.get("settings");
   const s = stored.settings as
@@ -1517,6 +1522,43 @@ async function startRelay(
           ws!.send(JSON.stringify({ type: "evaluate_result", value: String(r.result?.value ?? "") }));
         } catch (e) {
           ws!.send(JSON.stringify({ type: "evaluate_result", value: "", error: String(e) }));
+        }
+        break;
+      }
+
+      // W1: a JPEG of the tab, for the vision fallback. `Page` is already
+      // enabled (debugger.ts:110), so this needs no new CDP domain and no new
+      // manifest permission.
+      //
+      // JPEG q60, not PNG: this image is re-sent to a vision model every step
+      // it is needed, and PNG of the same viewport is an order of magnitude
+      // more tokens for text nobody reads out of it. `clip` is left at its
+      // default — the viewport — because a full-page shot on a long document
+      // is the same pixels at n times the cost.
+      //
+      // Not forwarded to the panel: the consumer is the model, and a frame the
+      // panel has no `case` for is a run that never ends.
+      case "capture_screenshot": {
+        try {
+          if (tid === null) throw new Error("no tab attached");
+          const r = await dbg.sendCommand(tid, {
+            method: "Page.captureScreenshot",
+            params: { format: "jpeg", quality: 60 },
+          }) as { data?: unknown };
+          const data = typeof r.data === "string" ? r.data : "";
+          // A truncated base64 string decodes to a corrupt image that a vision
+          // model reads as a page, which is worse than no page. Refuse loudly.
+          if (data.length === 0 || data.length > MAX_SCREENSHOT_CHARS) {
+            ws!.send(JSON.stringify({
+              type: "screenshot_result",
+              data: "",
+              error: data.length === 0 ? "capture returned no data" : "screenshot too large",
+            }));
+          } else {
+            ws!.send(JSON.stringify({ type: "screenshot_result", data }));
+          }
+        } catch (e) {
+          ws!.send(JSON.stringify({ type: "screenshot_result", data: "", error: String(e) }));
         }
         break;
       }
