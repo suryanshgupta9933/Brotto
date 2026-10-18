@@ -496,23 +496,31 @@ def probe_vision(
     }
 
     def _call(with_image: bool) -> tuple[bool, str]:
-        """`(accepted, url)` — the URL is returned so the rejection diagnostic
-        can name the host without the caller re-deriving a string it must then
-        be trusted not to log."""
+        """`(accepted, host)`.
+
+        The host is reduced from the request URL **before** Gemini's
+        `?key=<api_key>` is appended, so the credential-bearing string never
+        leaves this function. Sanitising it further downstream — at the log
+        call, with `_safe_url` — works and reads fine, but it leaves the key
+        taint-reachable from the diagnostic to whoever reads the alert: a
+        sanitizer is an argument, not a structure. `py/clear-text-logging-
+        sensitive-data` was raised on exactly that arrangement three times
+        (alerts #41, #42, #43), once per commit that moved the log call."""
         built = _probe_request(
             provider, model_id, with_image=with_image, base_url=base_url
         )
         if built is None:
             return False, ""
         url, body, headers = built
+        host = _safe_url(url)
         if shape == "gemini":  # authenticates with a query parameter
             url = f"{url}?key={api_key}"
         accepted, _body = _post_probe(
             url, body, headers={**headers, **auth}, label=provider
         )
-        return accepted, url
+        return accepted, host
 
-    accepted, url = _call(True)
+    accepted, host = _call(True)
     if accepted:
         return True
     # The provider's body earns nothing: it is untrusted third-party text that
@@ -522,7 +530,7 @@ def probe_vision(
     # where a body would live if it were ever needed.
     log.warning(
         "vision probe rejected for %s/%s at %s (body omitted)",
-        provider, model_id, _safe_url(url),
+        provider, model_id, host,
     )
     return False if _call(False)[0] else None
 

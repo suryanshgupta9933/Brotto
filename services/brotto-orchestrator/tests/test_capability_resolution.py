@@ -625,6 +625,29 @@ def test_a_rejected_probe_logs_the_host_and_not_the_body(caplog, monkeypatch):
     assert "generativelanguage.googleapis.com" in caplog.text
 
 
+def test_the_probe_still_sends_the_key_it_no_longer_logs(caplog, monkeypatch):
+    """The rejection diagnostic takes its host from the request URL *before*
+    `?key=` is appended, so the credential never reaches the log. The half
+    that is easy to break in the other direction is the request: sanitising
+    there too would strip the credential Gemini authenticates with and the
+    probe would fail as `auth_failed` forever. Both ends of the same call are
+    asserted — the key is on the wire, and absent from the line."""
+    secret = "sk-still-sent"
+    sent: list[str] = []
+
+    def capture(url, body, **kw):
+        sent.append(url)
+        return False, ""
+
+    monkeypatch.setattr(caps_mod, "_post_probe", capture)
+    with caplog.at_level("WARNING", logger="brotto_orchestrator.model.capabilities"):
+        assert probe_vision("gemini", "gemini-x", api_key=secret) is None
+    assert caplog.records, "no log line fired — the assertion below is vacuous"
+    assert any(secret in u for u in sent), "the credential stopped being sent"
+    assert secret not in caplog.text
+    assert "generativelanguage.googleapis.com" in caplog.text
+
+
 def test_a_url_carrying_a_credential_in_the_authority_is_stripped():
     """`https://user:pass@host/path` puts the credential in the *netloc*, so a
     sanitizer that rebuilds from `netloc` keeps it. The authority here is
