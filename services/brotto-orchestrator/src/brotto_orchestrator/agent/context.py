@@ -304,6 +304,12 @@ class AgentDeps:
     scratchpad: Scratchpad = field(default_factory=Scratchpad)
     step_summaries: list[StepSummary] = field(default_factory=list)
     step_number: int = 0
+    # Screenshots handed to the model by the vision fallback, counted across
+    # the current task and reset when a task begins. The ceiling is the
+    # harness's `_MAX_CAPTURES_PER_TASK`; the counter is here rather than on
+    # the harness so `_vision_fallback` — a module function, called by tests
+    # directly — can read and bump it without a harness instance.
+    screenshots_taken: int = 0
     result: TaskResult | None = None
     # URL observed at the top of the current step, before its actions run.
     # Read by the click cross-domain gate and stamped onto TaskResult.

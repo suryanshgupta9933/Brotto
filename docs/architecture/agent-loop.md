@@ -510,14 +510,58 @@ target takes 5s to appear and we read the tree at an arbitrary instant), and
 no AX node and no page text, so the loop handed the model an empty page and
 called it a page. `_vision_fallback` (`harness.py`) is the narrow answer.
 
-**The trigger is the narrowest thing that means "we cannot see this page":
-`axTargets.length === 0` *and* blank page text.** Whitespace-only counts as
-blank — `(page_text or "").strip()`. Deliberately not "the page looked hard" and
-not "the last step failed": an image is uncacheable, so it is re-charged on
-every step of the task, and a broader trigger would spend vision tokens
-re-describing pages the tree already described perfectly well. Both halves are
-load-bearing; a page with a tree but no text is legible to us and must not cost
-a frame.
+**The trigger is relevance to the task, not a count** (`_sparse_for_task`). The
+narrowest reading — empty tree *and* blank page text — is the case the feature
+was born for and the *rare* one: a Google Sheet comes back with forty real AX
+nodes for the toolbar and the menu bar, so an empty-tree test never fires and
+the page the task is actually about stays invisible. A count cannot be the bar
+either, because 40 nodes for "fill in this spreadsheet" is as blind as 0 while
+40 nodes for "click the search box" is plenty. What separates them is whether
+anything the harness can see is *about this task* — a target named for it, or
+page text that mentions it. Blank page text is still load-bearing (`(page_text
+or "").strip()`, whitespace is blank) and so is `_PAGE_TEXT_ENOUGH`: past 400
+characters the model has prose to read and the picture is a second, uncacheable
+copy of something it already has.
+
+**The task's leading verb is not evidence, and excluding it is positional.**
+`not (words & seen)` fires on *zero* overlap, and UI chrome is named for the
+same operations task instructions are: a Sheet has **Fill**, **Copy**,
+**Paste**, **Undo**, **View**, so "fill in the spreadsheet with these values"
+matched on `fill` and the page stopped firing. The predicate is about the task's
+*subject*, and a verb in slot 0 of an instruction is the operation, never the
+subject — so `_task_relevance_words` drops the word at position 0. That is a
+**position test, not a list**: `_TASK_STOPWORDS` cannot do this job, because
+every collision arrives as a new toolbar verb and each entry the list gains is
+a word some real page already uses. A count ("one overlap is not enough") was
+rejected for the same reason — it is the same vocabulary test with a softer
+edge, and it still misfires on the second accidental overlap. Only slot 0 is
+dropped and only when it is a content word, so "what is the revenue in the
+spreadsheet" keeps every word; the asymmetry is deliberate, since a false drop
+costs money (a picture) while a missed drop costs the task.
+
+**The model cannot be the one to ask.** Making the screenshot an explicit
+action the model requests was considered and rejected, and the reason is the
+failure mode, not the cost. A model can only ask for a picture if it knows it
+cannot see — and the case this exists for is a page that *looks fine*: forty
+toolbar buttons is a rich page, and the grid missing out of it is an absence,
+the one thing a model reading a tree does not register. An ask fires on
+`<canvas>` (an empty tree is glaring) and not on a Sheet. It also costs a
+whole step, because the ask is a decision and the capture is a later step,
+where the heuristic puts the image in the *same* step beside the tree so the
+model's next judgement already has both. And D5 — model self-report is not
+evidence — points the same way: the self-report is exactly what cannot be
+trusted here, and it is the ask design's only input.
+
+**Cost is bounded explicitly, not by making the decision rarer.**
+`_MAX_CAPTURES_PER_TASK = 3`, counted on `deps.screenshots_taken` and reset at
+task start (per task, so a resume has not spent the prior task's budget). It is
+checked *before* the capture, so a run past the cap pays no round trip. Reuse
+across steps was rejected because a picture of a page the model has left is
+evidence it did not observe, and "only re-capture when stale" needs a staleness
+heuristic of exactly the kind being removed. Three is the step that lands, the
+step that acts, and one re-look. Past the cap `needed` stays `True` and the
+ordinary refusal note rides, so a bounded run reads as "unseen", never as a
+blank page.
 
 **Resolve capability before capturing.** `_vision_capability` reads
 `model/capabilities.py` and caches the answer on `deps._vision_caps` — **once
