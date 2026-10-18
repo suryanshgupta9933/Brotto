@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import os
 from enum import Enum
+from ipaddress import ip_address
+from urllib.parse import urlsplit
 
-from .domains import domain_matches, etld1
+from .domains import _normalize_pattern, domain_matches, etld1
 from .schema import Policy
 
 
@@ -62,7 +64,10 @@ class GateDecision(str, Enum):
 # The user's own blocklist still refuses regardless of the switch. That is not
 # a new list — it is `check_domain_policy` over the blacklist they already
 # wrote, and a site someone deliberately blacklisted is not one to photograph
-# because a feature got switched on.
+# because a feature got switched on. Two gaps in that shared function are
+# closed *here* rather than in `check_domain_policy`, because that one also
+# decides whether to prompt the user and `n/a` means "don't ask" there; see
+# `_host_is_blocked` and privacy.md for both.
 
 SCREENSHOT_CAPTURE_ENV = "BROTTO_VISION_CAPTURE"
 
@@ -71,6 +76,13 @@ SCREENSHOT_CAPTURE_ENV = "BROTTO_VISION_CAPTURE"
 # for the same reason `_REFUSAL_REASON` exists.
 REFUSAL_CAPTURE_OFF = "capture_not_enabled"
 REFUSAL_DOMAIN_BLOCKED = "domain_blocked"
+REFUSAL_UNKNOWN_URL = "unresolvable_url"
+
+# The hostname alphabet, minus "." (split on) and "-" is allowed by RFC 1123
+# for hostnames but is rare enough in a policy entry to be refused.
+_HOST_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz0123456789-_:"
+)
 
 
 def capture_enabled() -> bool:
@@ -94,14 +106,104 @@ def screenshot_block_reason(
     Ordered so the switch is checked first: a run with capture off should not
     be told anything about the URL's domain, and the reason string is read by
     a model.
+
+    **This gate refuses; it never falls back to "allow".** `check_domain_policy`
+    answers `n/a` for anything with no eTLD+1 — an IP literal, a single-label
+    host, garbage — and `n/a` is the right answer for the *approval* path,
+    which prompts rather than refusing. Here it was the fail-open: a run on
+    `http://192.168.1.1/` or `http://localhost:8080/` photographed a page with
+    no blocklist check in front of it at all. So the host is resolved here, and
+    a host this gate cannot name is a refusal. There is no exception: someone
+    photographing a local page has told us nothing about whether it is safe,
+    and `BROTTO_VISION_CAPTURE` is the switch that already exists for them.
     """
     if not capture_enabled():
         return REFUSAL_CAPTURE_OFF
-    if policy is not None and check_domain_policy(
-        url or "", policy
-    ) is GateDecision.BLOCK:
+    host = _raw_host(url)
+    if host is None:
+        return REFUSAL_UNKNOWN_URL
+    if policy is not None and _host_is_blocked(url, host, policy):
         return REFUSAL_DOMAIN_BLOCKED
     return None
+
+
+def _raw_host(url: str | None) -> str | None:
+    """The hostname as written, lowercased — or None if there isn't one.
+
+    Deliberately not `etld1`: this returns the *whole* host including `www.`
+    and it does not care whether the host is a registrable domain. A policy
+    entry names a host, and only the caller knows which of those two readings
+    it wants.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        host = urlsplit(url if "://" in url else f"http://{url}").hostname
+    except ValueError:
+        return None
+    host = (host or "").lower().strip(".")
+    if not host:
+        return None
+    # `urlsplit` is permissive: it will hand back "not a url" as a hostname,
+    # spaces and all. A host this gate cannot name is a refusal, and
+    # "everything that parses" is a wider set than "everything that is a
+    # host" — so spell out the two shapes we accept. No trailing/leading dot,
+    # no empty label, no whitespace, nothing outside the hostname alphabet.
+    # An IP literal is accepted by the loop and refused by the caller.
+    body = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    labels = body.split(".")
+    if any(
+        not label
+        or any(ch not in _HOST_CHARS for ch in label)
+        for label in labels
+    ):
+        return None
+    # An IP literal and a single label are both "no registered domain":
+    # `192.168.1.1` is a machine on somebody's network and `localhost` /
+    # `intranet` are names inside one. `etld1` never named either, so the
+    # blocklist was never consulted for them. Unresolvable by this gate's own
+    # definition, and refused as such.
+    if _is_ip(body) or len(labels) < 2:
+        return None
+    return host
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _host_is_blocked(url: str, host: str, policy: Policy) -> bool:
+    """The shared policy decision, plus the two gaps it cannot close here.
+
+    `check_domain_policy` is left exactly as the extension-facing callers
+    expect it — it gates an approval prompt, where `n/a` means "don't ask",
+    and its wildcard semantics are `*.bank.com` means subdomains *only*.
+    Both are wrong for a gate whose job is to refuse:
+
+      - it matches on eTLD+1 and a `www.`-stripped host, so `*.bank.com`
+        misses `www.bank.com` entirely — a user who believes a site is
+        blocked, and isn't, is worse off than one who never tried;
+      - it short-circuits to `n/a` before the blacklist is consulted, so a
+        host with no eTLD+1 was never checked against the list at all.
+
+    So the raw host is matched here as well, and a `*.suffix` entry also
+    matches `suffix` itself. Widening only ever refuses, which is the
+    direction this gate is allowed to move.
+    """
+    if check_domain_policy(url, policy) is GateDecision.BLOCK:
+        return True
+    for pattern in policy.blacklist:
+        if domain_matches(host, pattern):
+            return True
+        normalized = _normalize_pattern(pattern)
+        if normalized.startswith("*."):
+            if domain_matches(host, normalized[2:]):
+                return True
+    return False
 
 
 def check_domain_policy(url: str, policy: Policy) -> GateDecision:

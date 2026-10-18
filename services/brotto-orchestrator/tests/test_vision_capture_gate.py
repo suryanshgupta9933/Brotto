@@ -16,6 +16,7 @@ import pytest
 from brotto_orchestrator.policy.gate import (
     REFUSAL_CAPTURE_OFF,
     REFUSAL_DOMAIN_BLOCKED,
+    REFUSAL_UNKNOWN_URL,
     SCREENSHOT_CAPTURE_ENV,
     capture_enabled,
     screenshot_block_reason,
@@ -76,6 +77,32 @@ def test_a_wildcard_blocklist_entry_is_refused(monkeypatch):
         REFUSAL_DOMAIN_BLOCKED
 
 
+def test_a_wildcard_entry_also_covers_www(monkeypatch):
+    """`etld1` and `_hostname_only` both strip `www.`, and `*.bank.com` means
+    subdomains only — so the one spelling a user actually types did not match
+    the site they typed it for. A user who believes a site is blocked, and
+    isn't, is worse off than one who never tried."""
+    _on(monkeypatch)
+    assert screenshot_block_reason(
+        "https://www.bank.com/login/otp", Policy(blacklist=["*.bank.com"])
+    ) == REFUSAL_DOMAIN_BLOCKED
+
+
+def test_a_wildcard_entry_covers_the_bare_domain_too(monkeypatch):
+    _on(monkeypatch)
+    assert screenshot_block_reason(
+        "https://bank.com/", Policy(blacklist=["*.bank.com"])
+    ) == REFUSAL_DOMAIN_BLOCKED
+
+
+def test_a_wildcard_entry_still_matches_subdomains(monkeypatch):
+    """The widening is additive: nothing that matched before stopped."""
+    _on(monkeypatch)
+    assert screenshot_block_reason(
+        "https://a.b.bank.com/x", Policy(blacklist=["*.bank.com"])
+    ) == REFUSAL_DOMAIN_BLOCKED
+
+
 def test_the_switch_allows_an_ordinary_page(monkeypatch):
     _on(monkeypatch)
     assert screenshot_block_reason(BOARD, Policy()) is None
@@ -89,10 +116,41 @@ def test_the_switch_allows_an_ordinary_page_with_no_policy(monkeypatch):
     assert screenshot_block_reason(BOARD, None) is None
 
 
-def test_an_unparseable_url_is_not_gated_on_garbage(monkeypatch):
+# ── a host this gate cannot name is a refusal, not an allow ───────────────
+
+@pytest.mark.parametrize("url", [
+    "http://192.168.1.1/",          # IP literal — etld1() returns None
+    "http://10.0.0.5:8080/admin",
+    "http://[::1]:8080/",
+    "http://localhost:8080/",      # single label
+    "http://intranet/",             # single label
+    "not a url",                    # unparseable
+    "",
+    None,
+])
+def test_a_host_the_gate_cannot_name_is_refused(monkeypatch, url):
+    """`check_domain_policy` answers n/a for all of these, and n/a is right for
+    the approval path and wrong here: this gate's only answer to "I cannot
+    resolve this" is no."""
     _on(monkeypatch)
-    assert screenshot_block_reason("not a url", Policy(blacklist=["bank.com"])) \
-        is None
+    assert screenshot_block_reason(url, Policy()) == REFUSAL_UNKNOWN_URL
+
+
+def test_an_unresolvable_url_is_refused_even_with_no_policy(monkeypatch):
+    """The blocklist is the user's, but the hostname is the gate's own
+    precondition — it does not need a policy to fail closed."""
+    _on(monkeypatch)
+    assert screenshot_block_reason("http://localhost:3000/", None) == \
+        REFUSAL_UNKNOWN_URL
+
+
+def test_the_unknown_url_reason_is_refused_before_the_domain(monkeypatch):
+    """An unresolvable URL is refused whatever is on the list; the reason for
+    an unresolvable host does not depend on the user's blacklist."""
+    _on(monkeypatch)
+    assert screenshot_block_reason(
+        "http://intranet/", Policy(blacklist=["bank.com"])
+    ) == REFUSAL_UNKNOWN_URL
 
 
 # ── the reason is a closed vocabulary ──────────────────────────────────────

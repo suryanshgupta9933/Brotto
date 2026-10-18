@@ -69,8 +69,12 @@ value, including the variable being absent or misspelled, means no screenshot
 is ever captured, on any step, for any page. Independently of the switch, a
 page whose domain is on your own blocklist is refused before any capture is
 attempted, so turning the switch on cannot turn into photographing a site you
-told the agent never to touch. The extension implements neither rule and does
-not need to: it captures when it is told to, and nowhere else.
+told the agent never to touch. A `*.example.com` entry covers `example.com`
+itself as well as its subdomains, and a page with no resolvable domain at all —
+an IP address, or a single name like `localhost` — is refused too, because there
+is nothing to check against the blocklist. The extension implements none of
+these rules and does not need to: it captures when it is told to, and nowhere
+else.
 
 The image is JPEG at quality 60, clipped to the visible viewport — a smaller
 image to send than PNG, and never a picture of the whole tab history or

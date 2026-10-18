@@ -119,7 +119,14 @@ no other tab, window or screen is ever photographed.
 **A site on your own blocklist is never photographed.** Independently of the switch, a page whose
 domain you have blocked in your policy is refused before any capture is attempted — the same blocklist
 you already wrote for actions, used for this rather than a second list of "sensitive" URLs that you
-would have to maintain and trust separately.
+would have to maintain and trust separately. A `*.example.com` entry covers `example.com` itself as
+well as its subdomains, so blocking a site means blocking the site you would have typed.
+
+**A page Brotto cannot name is not photographed either.** If the URL has no registered domain — an IP
+address such as `http://192.168.1.1/`, or a single name such as `http://localhost:8080/` — there is
+no domain to check against your blocklist, so no capture is attempted. There is no exception for local
+pages: if you want to capture one, the switch above is what turns that on, and a host this gate cannot
+resolve is refused.
 
 **What a screenshot is not.** It is a single image of the visible viewport of the one tab you attached,
 taken while a task is running. It is not a recording, not a screenshot of your whole screen, and not a

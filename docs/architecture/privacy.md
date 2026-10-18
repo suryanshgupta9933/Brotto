@@ -330,20 +330,49 @@ canvas page is reported as **unseen** rather than described. A refused capture
 costs one task its eyes; an unredacted card number in a provider's logs does not
 come back.
 
-**The blocklist is reused, not duplicated.** `screenshot_block_reason` is
-`check_domain_policy` over the blacklist the user already wrote — a second
-list of "sensitive URLs" would be one more thing the user never sees and cannot
-audit, and two lists that must agree is a known failure shape in this repo (the
-mirror of one server's transcripts appearing under another's is exactly that,
-see 2b). The extension carries its own sensitive-URL pattern list at
-`debugger.ts:294` for a *different* purpose — it warns before you attach to a
-banking tab, and it is advisory; this one refuses. The reordering inside
-`screenshot_block_reason` follows the same rule the prompt-injection refusal
-uses: the switch is checked first, so a run with capture off is not told
-anything about the domain it was on.
+**The blocklist is reused, not duplicated — and reused, then widened locally.**
+`screenshot_block_reason` starts from `check_domain_policy` over the blacklist
+the user already wrote — a second list of "sensitive URLs" would be one more
+thing the user never sees and cannot audit, and two lists that must agree is a
+known failure shape in this repo (the mirror of one server's transcripts
+appearing under another's is exactly that, see 2b). The extension carries its
+own sensitive-URL pattern list at `debugger.ts:294` for a *different* purpose
+— it warns before you attach to a banking tab, and it is advisory; this one
+refuses. The reordering inside `screenshot_block_reason` follows the same rule
+the prompt-injection refusal uses: the switch is checked first, so a run with
+capture off is not told anything about the domain it was on.
+
+**But `check_domain_policy` is the wrong shape for a gate, and it fails open
+here.** It returns `n/a` for anything with no eTLD+1 — an IP literal, a single
+label like `localhost`, garbage — *before* the blacklist is consulted, and `n/a`
+is not `BLOCK`, so `http://192.168.1.1/` and `http://intranet/` were photographed
+with no list in front of them at all. And its wildcard is `*.bank.com` means
+subdomains **only**, over an eTLD+1 and a `www.`-stripped hostname, so
+`https://www.bank.com/` did not match `*.bank.com` — the one spelling a user
+actually types, for the site they typed it for. A user who believes a site is
+blocked, and is not, is worse off than one who never tried.
+
+So the widening is **local to `screenshot_block_reason`**, and that is the whole
+reason it is not upstream. `check_domain_policy` is shared with the harness's
+approval path (`harness.py:1456`, `:1599`, `:1679`, `:2983`), where `n/a` means
+*do not prompt* and a wildcard that quietly widened would move the extension's
+domain-approval behaviour — a different subsystem with its own doc and its own
+semantics. The gate therefore resolves the host itself (`urlsplit().hostname`),
+refuses outright when there is no resolvable host (`unresolvable_url`), and
+matches the raw host against the blacklist with `*.suffix` also covering
+`suffix`. Widening only ever refuses, which is the only direction this gate is
+allowed to move. Pinned by `test_the_wildcard_semantics_are_unchanged_here` in
+`tests/test_policy_gate.py`, which fails if the shared function is ever made to
+do this instead.
+
+**There is no exception for a local page.** Someone photographing
+`localhost:8080` has told us nothing about whether it is safe, and the answer to
+"I want to capture that anyway" already exists as `BROTTO_VISION_CAPTURE` — so
+the unresolvable case is a refusal, not a second switch.
 
 **What redaction's silence means for the model.** The refusal reason is a closed
-set of machine words (`capture_not_enabled`, `domain_blocked`) and the model is
+set of machine words (`capture_not_enabled`, `domain_blocked`,
+`unresolvable_url`) and the model is
 never told which — it receives one sentence, "capture was refused by policy."
 Otherwise a model could infer, from a refusal, that *this particular* URL would
 have been blocked, which turns a local policy into an oracle the user can be
