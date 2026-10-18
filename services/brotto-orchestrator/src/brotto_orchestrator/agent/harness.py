@@ -409,9 +409,9 @@ _NEVER_APPROVE = _TERMINAL_ACTIONS | _INTERNAL_ACTIONS | _QUESTION_ACTIONS
 # What the user sees in the card instead of the tool name. "click" and
 # "type_text" are developer-facing; every name that can reach a card through
 # these generic guards names a thing a person recognises doing. The coordinate
-# verbs are the exception and need no entry — `click_xy` prompts with its own
-# reason line and the crosshair frame, and `focus_xy` / `type_xy` never prompt
-# at all.
+# verbs are the exception and need no entry — all three prompt with their own
+# reason line and the crosshair frame, so the card never falls back to a tool
+# name.
 _ACTION_LABEL = {
     "navigate": "open a page",
     "click": "click something on the page",
@@ -1626,17 +1626,55 @@ def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+# What each verb is, on the card. They differ because each press is followed
+# by something different, and the user approves the whole thing.
+def _click_reason(x, y, label) -> str:
+    return (
+        f"This page is a canvas, so there is no element to click by name. "
+        f"The crosshair is at ({x},{y}) — {label}. Clicking is one blind "
+        f"click at that point."
+    )
+
+
+def _focus_reason(x, y, label) -> str:
+    return (
+        f"This page is a canvas, so there is no element to focus by name. The "
+        f"crosshair is at ({x},{y}) — {label}. Focusing is still a full "
+        f"press and release at that point: on this page that selects whatever "
+        f"a click selects there."
+    )
+
+
+def _type_reason(x, y, label) -> str:
+    return (
+        f"This page is a canvas, so there is no field to type into by name. "
+        f"The crosshair is at ({x},{y}) — {label}. Typing there is a press, "
+        f"a release, and then the text inserted at that point."
+    )
+
+
+_COORDINATE_REASONS = {
+    "click": _click_reason,
+    "focus": _focus_reason,
+    "type": _type_reason,
+}
+
+
 async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
                              *, turn: int) -> str:
     """`click_xy` / `focus_xy` / `type_xy` — one shared body, one approval.
 
     All three are the same question: is this point on a canvas the page is
     not covering, inside a viewport read now rather than from the last
-    observation? Only the click asks a human. Focus moves a caret and types
-    nothing; `type_xy` is focus plus `Input.insertText` at that same point.
-    Prompting for either would put a card in front of the user for every cell
-    of a spreadsheet — and the click is still the gated one, so nothing
-    becomes reachable that was not approved.
+    observation? And all three ask a human first, because **all three press
+    the mouse**. `focus_xy` was exempt once, on the argument that moving a
+    caret is not destructive; that was wrong. It dispatches a full
+    press/release — `extension_relay.focus_xy` sends a `click` — so on a
+    spreadsheet it selects a cell and on a drawing app, or anything with a
+    click-bound tool, it does whatever that click does, with nobody watching.
+    `type_xy` focuses with that same click before it types. A spreadsheet run
+    is approve-cell → type → approve-cell → type, and that is the price of the
+    guarantee: **there is no unapproved click in this harness.**
 
     **Every return below contains `_EXEC_FAILURE`.** `ok` is derived by
     membership, so a refusal written as a friendly sentence audits as a
@@ -1740,29 +1778,6 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
             f"({type(exc).__name__})."
         )
 
-    if verb == "focus":
-        result = await cdp.focus_xy(x, y)
-        if _EXEC_FAILURE in result:
-            return result
-        await cdp.refresh_target_map()
-        return f"Focused at ({x},{y}) — {label}"
-
-    if verb == "type":
-        # Focus and insert, in that order, at the same verified point — so it
-        # borrows `focus_xy`'s guards wholesale and adds none. The alternative
-        # shape — `focus_xy` now and a `type_text` variant with no coordinates
-        # later — is the one that types into whatever the page last focused,
-        # which is the exact failure `type_text_to_ref` guards against and the
-        # reason this is one action rather than two.
-        focused = await cdp.focus_xy(x, y)
-        if _EXEC_FAILURE in focused:
-            return focused
-        result = await cdp.type_text_at_focus(str(args.get("text") or ""))
-        if _EXEC_FAILURE in result:
-            return result
-        await cdp.refresh_target_map()
-        return f"Typed into ({x},{y}) — {label}"
-
     # Captured here, in this step: a frame replayed from the last observation
     # shows a crosshair against a layout that has since moved.
     image = await cdp.capture_screenshot()
@@ -1770,17 +1785,13 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
         return (
             f"{_EXEC_FAILURE} {action}: no screenshot of this page could be "
             f"captured, so the user would be approving a click they cannot "
-            f"see. Nothing was clicked."
+            f"see. Nothing was clicked, focused or typed."
         )
     approved = await _ask_user(
         deps, audit, turn=turn, kind="coordinate_click", action=action,
         args={"x": x, "y": y, "label": label},
         domain=domain,
-        reason=(
-            f"This page is a canvas, so there is no element to click by name. "
-            f"The crosshair is at ({x},{y}) — {label}. Clicking is one blind "
-            f"click at that point."
-        ),
+        reason=_COORDINATE_REASONS[verb](x, y, label),
         frame_extra={
             "screenshot": image,
             "viewport": {"width": width, "height": height},
@@ -1795,9 +1806,33 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
         # the loop instead of setting `deps.result`, and says so.
         return (
             f"{_EXEC_FAILURE} {action}: the user declined the click at "
-            f"({x},{y}). Nothing was clicked. That point is wrong or unsafe — "
-            f"look for a better point, or say you cannot do it."
+            f"({x},{y}). Nothing was clicked, focused or typed. That point is "
+            f"wrong or unsafe — look for a better point, or say you cannot do it."
         )
+
+    if verb == "focus":
+        result = await cdp.focus_xy(x, y)
+        if _EXEC_FAILURE in result:
+            return result
+        await cdp.refresh_target_map()
+        return f"Focused at ({x},{y}) — {label}"
+
+    if verb == "type":
+        # Focus and insert, in that order, at the same approved point — so it
+        # borrows `focus_xy`'s guards wholesale and adds none. The alternative
+        # shape — `focus_xy` now and a `type_text` variant with no coordinates
+        # later — is the one that types into whatever the page last focused,
+        # which is the exact failure `type_text_to_ref` guards against and the
+        # reason this is one action rather than two.
+        focused = await cdp.focus_xy(x, y)
+        if _EXEC_FAILURE in focused:
+            return focused
+        result = await cdp.type_text_at_focus(str(args.get("text") or ""))
+        if _EXEC_FAILURE in result:
+            return result
+        await cdp.refresh_target_map()
+        return f"Typed into ({x},{y}) — {label}"
+
     result = await cdp.click_xy(x, y)
     if _EXEC_FAILURE in result:
         return result
@@ -2568,6 +2603,7 @@ async def _vision_capability(deps: AgentDeps) -> Capabilities:
 async def _vision_fallback(
     deps: AgentDeps, targets: list, page_text: str,
     redactions: dict[str, int] | None = None,
+    run_secrets: list[str] | None = None,
 ) -> _VisionFallback:
     """Decide whether this step is handed a screenshot.
 
@@ -2584,18 +2620,31 @@ async def _vision_fallback(
     Deliberately not "the last step failed" — an image is uncacheable, so it
     is charged again on every step of the task.
 
-    **`redactions` is a veto, and the reason is that it is the one channel
-    redaction cannot reach.** `redact_text` has already run on this step's page
-    text; a non-empty result says the page holds a credential, a card number or
-    a token. The text is scrubbed going forward, but a screenshot is pixels of
-    the *raw* page — every glyph the redaction just replaced would come back,
-    rendered. So the refusal is checked before the model is even resolved,
-    because a step we are going to refuse should buy neither a resolve nor a
-    capture. It matters far more since the trigger was widened: "no text at
-    all" left almost nothing on the page to leak, and "under 400 characters"
-    is a great many pages, among them logins, payment forms and settings.
-    The gate (`policy/gate.py`) is the user's own switch; this is the harness's
-    own knowledge about this page, and it is not overridable by that switch.
+    **`redactions` and `run_secrets` are vetoes, and the reason is that
+    pixels are the one channel redaction cannot reach.** `redact_text` has
+    already run on this step's page text; a non-empty result says the page
+    holds a credential, a card number or a token. The text is scrubbed going
+    forward, but a screenshot is pixels of the *raw* page — every glyph the
+    redaction just replaced would come back, rendered. So the refusal is
+    checked before the model is even resolved, because a step we are going to
+    refuse should buy neither a resolve nor a capture. It matters far more
+    since the trigger was widened: "no text at all" left almost nothing on
+    the page to leak, and "under 400 characters" is a great many pages, among
+    them logins, payment forms and settings. The gate (`policy/gate.py`) is
+    the user's own switch; this is the harness's own knowledge about this
+    page, and it is not overridable by that switch.
+
+    **Both arguments are positive signals — "something credential-shaped was
+    found" — and neither is a negative one.** An empty `redactions` means no
+    *detector fired*; it does not mean the page is clean. `redact_text` is
+    regex over strings, so it cannot recognise an arbitrary password the agent
+    typed into a login form — and that value is in the pixels by definition,
+    on any page that later renders it. `run_secrets` is this run's list of
+    values put into fields `_typed_field` judged secret, and it is passed in
+    for exactly that hole: keying the veto on the page-text channel alone is
+    the wrong and dangerous direction. A future caller reading an empty dict as
+    clearance is a mistake this has made before; both are vetoes, and their
+    absence is not permission.
 
     **Resolve before capturing.** A capture is a round trip and ~270–700 KB on
     the wire, and a model that turns out to be able to see needs the image
@@ -2610,7 +2659,7 @@ async def _vision_fallback(
     """
     if not _sparse_for_task(deps.task, targets, page_text):
         return _VisionFallback()
-    if redactions:
+    if redactions or run_secrets:
         return _VisionFallback(
             needed=True, can_see=True,
             note=_SCREENSHOT_FAILED_NOTE.format(why=_SCREENSHOT_REDACTED_WHY),
@@ -3385,7 +3434,8 @@ class AgentHarness:
             # back empty, and `vision.can_see` is W0's tri-state answer for the
             # resolved model (`None` = unresolved, which is not a denial). A
             # blocked run branches on that and stops before the turn is built.
-            vision = await _vision_fallback(deps, targets, page_text, redactions)
+            vision = await _vision_fallback(
+                deps, targets, page_text, redactions, run_secrets)
             if vision.image:
                 log.info("[%s] step %d  screenshot attached (%d B base64)",
                          deps.user_id, step, len(vision.image))

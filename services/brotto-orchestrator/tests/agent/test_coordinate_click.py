@@ -1,9 +1,11 @@
 """A click at a point nobody verified by ref, gated on a human.
 
-`click_xy` is the only verb in the harness that acts on coordinates the
-accessibility tree never vouched for. Its whole safety story is a short list
-of refusals, so the tests are mostly about the *absences*: an arm that does
-not fire reads clean in a diff and is a wrong click on someone's spreadsheet.
+`click_xy` / `focus_xy` / `type_xy` are the only verbs in the harness that
+act on coordinates the accessibility tree never vouched for, and all three
+press the mouse, so all three ask a human first. Their whole safety story is a
+short list of refusals, so the tests are mostly about the *absences*: an arm
+that does not fire reads clean in a diff and is a wrong click on someone's
+spreadsheet.
 
 Two of them are not optional:
 
@@ -330,16 +332,31 @@ async def test_one_click_is_one_click(trail):
 # ── focus_xy ───────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_focus_needs_no_approval_and_does_not_capture(trail):
+async def test_focus_asks_the_user_because_it_is_a_click(trail):
+    """`focus_xy` dispatches a full press/release — it sends `{"type":
+    "click"}` — so on a canvas it *is* a click whatever the verb implies. On
+    a spreadsheet that selects a cell; on a drawing app it draws. There is no
+    unapproved click anywhere in the harness, so focus prompts too."""
     deps, frames, _ = _deps()
     out = await _execute_action(
         ActionCall(action="focus_xy",
                    action_args={"x": 412, "y": 288, "label": "the cell C4"}),
         deps, audit=trail, turn=1)
     assert _EXEC_FAILURE not in out
-    assert frames == [], "focusing a caret should not cost the user a card"
+    assert [f["type"] for f in frames] == ["approval_required"], frames
     deps.cdp.focus_xy.assert_awaited_once_with(412, 288)
-    deps.cdp.capture_screenshot.assert_not_awaited()
+    deps.cdp.capture_screenshot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_declined_focus_never_presses_the_mouse(trail):
+    deps, _, _ = _deps(reply="deny")
+    out = await _execute_action(
+        ActionCall(action="focus_xy",
+                   action_args={"x": 412, "y": 288, "label": "the cell C4"}),
+        deps, audit=trail, turn=1)
+    assert _EXEC_FAILURE in out
+    deps.cdp.focus_xy.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -390,14 +407,23 @@ async def test_type_focuses_then_inserts_at_the_point(trail):
 
 
 @pytest.mark.asyncio
-async def test_type_needs_no_approval(trail):
-    """Accepted deliberately: a card per cell would make the feature
-    unusable, and typing into the cell the user just saw approved is not
-    destructive in itself."""
+async def test_type_asks_the_user_once_and_types_into_what_it_focused(trail):
+    """One card, one press, then the insert. `type_xy` focuses with a click
+    before it types, so the click is the thing the user is approving."""
     deps, frames, _ = _deps()
-    await _execute_action(_type(), deps, audit=trail, turn=1)
-    assert frames == []
-    deps.cdp.capture_screenshot.assert_not_awaited()
+    out = await _execute_action(_type(), deps, audit=trail, turn=1)
+    assert _EXEC_FAILURE not in out
+    assert [f["type"] for f in frames] == ["approval_required"], frames
+    deps.cdp.capture_screenshot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_declined_type_types_nothing(trail):
+    deps, _, _ = _deps(reply="deny")
+    out = await _execute_action(_type(), deps, audit=trail, turn=1)
+    assert _EXEC_FAILURE in out
+    deps.cdp.focus_xy.assert_not_awaited()
+    deps.cdp.type_text_at_focus.assert_not_awaited()
 
 
 @pytest.mark.asyncio

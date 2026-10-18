@@ -42,6 +42,12 @@ class TabUnreachable(RuntimeError):
     """
 
 
+def _is_number(value) -> bool:
+    """JSON number, not bool and not a numeric string — the viewport bound is
+    a security decision and `"1512" < 0` is not a comparison worth trusting."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _unwrap_observation(obs: dict) -> dict:
     """The frame the extension sends when it *could not* read the page, rather
     than what it read. `main.py` puts this on the observation queue in place of
@@ -411,17 +417,46 @@ class ExtensionCDPRelay:
             data = _json.loads(str(raw))
         except (ValueError, TypeError):
             return {}
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        # `_eval_queue` is shared with `clear_ref`'s select-all and the page
+        # text reader, so a concurrent evaluate can land its answer first and
+        # this would read somebody else's. The viewport is a security decision
+        # — the bound check in `_coordinate_action` is the only thing standing
+        # between a model-chosen point and the page — so the answer must be
+        # exactly this probe's payload: those three keys, nothing else, and
+        # the two dimensions numeric. Anything else is refused, which makes
+        # the caller refuse too, which is the correct failure for a bound it
+        # cannot trust.
+        if set(data) != {"width", "height", "tag"}:
+            log.warning("[%s] probe (%d,%d) got a foreign payload %r",
+                        self._sid, x, y, sorted(data))
+            return {}
+        if not (_is_number(data["width"]) and _is_number(data["height"])):
+            return {}
+        return data
 
     async def click_xy(self, x: int, y: int) -> str:
+        # `click_xy`, not `click`. `click` (above) carries coordinates that
+        # came out of BOX_WALK and were verified twice; these are a point the
+        # model proposed and nothing vouched for. The extension branches on
+        # the type to take its bounded/untrusted path, so sending `click` here
+        # both launders an unverified point as verified and makes that branch
+        # dead code.
         log.info("[%s] click_xy (%d,%d)", self._sid, x, y)
-        await self._send_action({"type": "click", "x": int(x), "y": int(y)})
+        await self._send_action({"type": "click_xy", "x": int(x), "y": int(y)})
         return f"Clicked at ({x},{y})"
 
     async def focus_xy(self, x: int, y: int) -> str:
+        # `click_xy` on the wire, and it was always `click`: this is a full
+        # press/release at a point the model proposed. The verb implies a
+        # caret, the browser delivers a click — `background.ts` dispatches
+        # `Input.dispatchMouseEvent` either way — so it takes the untrusted
+        # branch, exactly like `click_xy` does.
         log.debug("[%s] focus_xy (%d,%d)", self._sid, x, y)
         await self._ws_send(
-            {"type": "action", "action": {"type": "click", "x": int(x), "y": int(y)}}
+            {"type": "action", "action": {"type": "click_xy", "x": int(x),
+                                          "y": int(y)}}
         )
         return f"Focused ({x},{y})"
 

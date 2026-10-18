@@ -44,16 +44,17 @@ What you can do:
                                                    means a dialog is covering the canvas:
                                                    dismiss it, do not try another point.
   focus_xy(x, y, label)                          — put the caret at a point on a canvas,
-                                                   same rules. No approval card: it types
-                                                   nothing.
+                                                   same rules and the same approval card as
+                                                   click_xy. It is a full press and release
+                                                   there: on a spreadsheet it selects a cell,
+                                                   on a drawing app it draws.
   type_xy(x, y, label, text)                      — put the caret at a point on a canvas
                                                    and type into it, in one action. Same
                                                    rules and same guards as focus_xy; use
                                                    it instead of focus_xy then type_text,
                                                    which cannot follow here because a canvas
-                                                   has no ref to name. No approval card —
-                                                   it writes into the cell the user already
-                                                   saw you click.
+                                                   has no ref to name. One card covers the
+                                                   press and the text.
   type_text(ref, text)                           — type into an input field (clears first)
   press_key(key, modifiers)                      — press a key ("Enter", "Escape", "Tab",
                                                    "ArrowDown"); optional modifier bitmask

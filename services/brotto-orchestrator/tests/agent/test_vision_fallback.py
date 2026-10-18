@@ -793,3 +793,50 @@ async def test_the_image_never_reaches_the_audit_document(monkeypatch, tmp_path)
     assert any("task_complete" in p.read_text(errors="ignore") for p in written)
     for path in written:
         assert JPEG not in path.read_text(errors="ignore"), path
+
+@pytest.mark.asyncio
+async def test_a_password_this_run_typed_vetoes_the_capture():
+    """The page-text channel alone is the wrong and dangerous direction.
+
+    `redact_text` is regex over strings; it cannot recognise an arbitrary
+    password the agent itself typed. `run_secrets` is the list of values this
+    run put into fields `_typed_field` judged secret — and a value that was
+    just typed is in the pixels by definition, on any page that later renders
+    it. So an empty `redactions` must not read as clearance here.
+    """
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in",
+                 task="fill in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Untitled", {}, ["hunter2-xyz"])
+    assert out.image == "" and out.needed is True
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert "treat it as unseen" in out.note.lower()
+
+
+@pytest.mark.asyncio
+async def test_both_signals_empty_still_captures():
+    """The other direction: the veto must not be able to refuse everything.
+
+    An empty dict means "no detector fired", not "this page is clean" — a
+    caller reading the absence as clearance is the bug this session produced
+    twice.
+    """
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in",
+                 task="fill in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Untitled", {}, [])
+    assert out.image == JPEG
+
+
+@pytest.mark.asyncio
+async def test_the_typed_secret_veto_precedes_the_capability_resolve(monkeypatch):
+    """A refusal must cost nothing: no resolve, no capture, before either."""
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in",
+                 task="fill in the spreadsheet")
+    seen: list[str] = []
+    monkeypatch.setattr(
+        harness_mod, "_vision_capability",
+        lambda d: seen.append("resolved"))
+    await _vision_fallback(deps, targets, "Untitled", {}, ["hunter2-xyz"])
+    assert seen == []
