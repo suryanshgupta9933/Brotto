@@ -6,6 +6,7 @@
 
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
+import { boundedPoint, clearCursor, drawCursor } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -658,11 +659,40 @@ function signalResume(): void {
 
 async function executeAction(tabId: number, action: any): Promise<void> {
   const t = action.type;
+  // A marker left up by an action that died mid-flight is an occluder over the
+  // element the *next* click is aimed at. Idempotent, and cheap enough to be
+  // unconditional — the clear also runs after every click, so this only ever
+  // does work when a previous action left one behind.
+  await clearCursor(tabId);
+  let drewCursor = false;
+  try {
   if (t === "navigate") {
     await dbg.sendCommand(tabId, { method: "Page.navigate", params: { url: action.url } });
     await sleep(200); // brief pause for navigation to start before readyState polling
-  } else if (t === "click") {
-    const { x, y } = action;
+  } else if (t === "click" || t === "click_xy") {
+    // Two trust classes, one dispatch. `click`'s x/y came out of BOX_WALK and
+    // were verified twice in the page — viewport, then elementFromPoint — so
+    // they are passed through. `click_xy`'s arrived as literal numbers from
+    // the wire, checked by nobody, and are re-bounded against the live
+    // viewport here before anything is dispatched. The `viewport` on that same
+    // frame is not the bound: it is the sender's idea of the viewport, from
+    // the same untrusted message.
+    const point = t === "click_xy"
+      ? await boundedPoint(tabId, action.x, action.y)
+      : { x: action.x, y: action.y };
+    if (!point) {
+      // Loud in the service-worker log; the relay finds out by observing an
+      // unchanged page, which is what a refused click is supposed to look like.
+      console.warn(`brotto: ${t} refused — (${String(action.x)}, ${String(action.y)}) is not a point in the live viewport`);
+      return;
+    }
+    const { x, y } = point;
+    // Draw, click, then the `finally` clears it. pointer-events: none means the
+    // hit test in BOX_WALK cannot see it, and the clear means a later
+    // observation is not reading a page we decorated.
+    drewCursor = true;
+    const drawn = await drawCursor(tabId, x, y, action.label ?? "");
+    if (!drawn.drawn) console.warn(`brotto: cursor not shown (${drawn.reason}) — the click still runs`);
     await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x, y, button: "left", clickCount: 1 } });
     await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x, y, button: "left", clickCount: 1 } });
     await sleep(200); // brief pause for click to register / navigation to start
@@ -709,6 +739,13 @@ async function executeAction(tabId: number, action: any): Promise<void> {
       },
     });
     await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...base } });
+  }
+  } finally {
+    // Not on a timer. The mousePressed/mouseReleased pair is dispatched with no
+    // delay, so a sub-200ms cursor is invisible, and a click that navigates
+    // makes the observation that follows throw — which is exactly how a marker
+    // outlives the action that drew it.
+    if (drewCursor) await clearCursor(tabId);
   }
 }
 
@@ -1478,6 +1515,15 @@ async function startRelay(
           type: "approval_request", id,
           reason: msg.reasoning ?? "The agent wants to perform a sensitive action.",
           action: { type: msg.action, url: msg.args?.url },
+          // A coordinate click is the one approval that cannot be judged from
+          // prose: `{x: 412, y: 288}` says nothing about what is there. These
+          // three carry the screenshot the panel draws a crosshair on, the CSS
+          // viewport the coordinates are in, and the domain. Absent on every
+          // other approval, which is why the panel treats them as optional.
+          args: msg.args,
+          screenshot: msg.screenshot,
+          viewport: msg.viewport,
+          url: msg.url,
         });
         break;
       }

@@ -4116,7 +4116,79 @@ const NON_APPROVABLE_ACTIONS = new Set([
   'recall_memory',
 ]);
 
-function appendApprovalCard({ id, reason, action, resolved }) {
+// Where the crosshair goes, as a percentage of the viewport box.
+//
+// Percentages, not pixels, and not the image's natural size: `x`/`y` and
+// `viewport` are CSS pixels while `Page.captureScreenshot` writes device
+// pixels, so any arithmetic against `naturalWidth` is off by the device scale
+// factor — and on a 2x display that is a crosshair two cells away from the one
+// the user is being asked to approve. The displayed box *is* the viewport box,
+// so a percentage of it is the same point whatever the scale factor or whatever
+// width the panel squeezes the card to. Retina and non-retina collapse to the
+// same two numbers.
+function crosshairPercent(x, y, viewport) {
+  const w = Number(viewport?.width);
+  const h = Number(viewport?.height);
+  if (!(w > 0) || !(h > 0)) return null;
+  const left = (Number(x) / w) * 100;
+  const top = (Number(y) / h) * 100;
+  return {
+    left,
+    top,
+    // A point outside the viewport is one the page cannot receive; the card
+    // says so rather than parking a crosshair off the edge of the picture.
+    outside: !Number.isFinite(left) || !Number.isFinite(top) || left < 0 || left > 100 || top < 0 || top > 100,
+  };
+}
+
+// The screenshot, the crosshair, and the label — the picture an approval for a
+// blind click has to be judged from. Returns false and appends nothing when the
+// frame carries no screenshot, which is every existing approval_required: that
+// card is byte-for-byte what it was.
+function appendApprovalTarget(card, { screenshot, viewport, args, url }) {
+  const pct = crosshairPercent(args?.x, args?.y, viewport);
+  // A base64 jpeg, nothing else. The field is untrusted and goes straight into
+  // an attribute; a data: URL with a prefix we control cannot execute, but a
+  // truncated capture should show no picture rather than a broken one.
+  if (!screenshot || typeof screenshot !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(screenshot)) return false;
+  if (!pct) return false;
+
+  const label = String(args?.label || '').trim();
+
+  // The label leads. `{x: 412, y: 288}` is not something a person can consent
+  // to; "the cell C4" is. The coordinates are the crosshair's business.
+  const target = document.createElement('div');
+  target.className = 'approval-target';
+  target.textContent = label
+    ? `Click ${label}`
+    : 'Click this point on the page';
+  card.appendChild(target);
+
+  const shot = document.createElement('div');
+  shot.className = 'approval-shot';
+  const img = document.createElement('img');
+  img.src = `data:image/jpeg;base64,${screenshot}`;
+  img.alt = label ? `Screenshot of the page, with a crosshair on ${label}` : 'Screenshot of the page';
+  img.decoding = 'async';
+  shot.appendChild(img);
+
+  const mark = document.createElement('div');
+  mark.className = pct.outside ? 'approval-cross outside' : 'approval-cross';
+  mark.style.left = `${pct.left}%`;
+  mark.style.top = `${pct.top}%`;
+  shot.appendChild(mark);
+  card.appendChild(shot);
+
+  if (pct.outside) {
+    const warn = document.createElement('div');
+    warn.className = 'approval-preview';
+    warn.textContent = `That point (${Math.round(Number(args.x))}, ${Math.round(Number(args.y))}) is outside the ${viewport.width}×${viewport.height} page.`;
+    card.appendChild(warn);
+  }
+  return true;
+}
+
+function appendApprovalCard({ id, reason, action, resolved, screenshot, viewport, args, url }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
@@ -4152,6 +4224,10 @@ function appendApprovalCard({ id, reason, action, resolved }) {
   header.appendChild(badge);
   card.appendChild(header);
 
+  // Before the reason, because it is what the user is approving: the picture
+  // and the named target first, then why the agent wants it.
+  appendApprovalTarget(card, { screenshot, viewport, args, url });
+
   if (reason) {
     const body = document.createElement('div');
     body.className = 'approval-body';
@@ -4164,11 +4240,14 @@ function appendApprovalCard({ id, reason, action, resolved }) {
   // a step, not something the user asked about or can act on. The reason line
   // above already says what the agent wants, so the name repeated it at best;
   // with no url there is nothing left worth a line.
-  if (action?.url) {
+  // A coordinate click carries no `action.url` — the page it is aimed at is
+  // top-level on the frame — so both spellings are read here.
+  const destUrl = url || action?.url;
+  if (destUrl) {
     const preview = document.createElement('div');
     preview.className = 'approval-preview';
-    preview.textContent = action.url;
-    preview.title = action.url;
+    preview.textContent = destUrl;
+    preview.title = destUrl;
     card.appendChild(preview);
   }
 
@@ -5134,11 +5213,18 @@ function handleEvent(message) {
       clearLoginPrompt();
       setPhase('paused', 'Agent wants approval for a critical action');
       const a = message.action || {};
-      const preview = a.url ? `${a.type ?? 'action'} → ${a.url}` : (a.type ?? 'action');
+      // A `click_xy` approval is the same frame with a screenshot, a viewport
+      // and the point attached. All three are optional and all three arrive
+      // absent for every other action, which is what keeps that card identical.
+      const args = message.args || a.args || null;
       appendApprovalCard({
         id: message.id,
-        reason: message.reason || 'Brotto wants to perform an action that needs your approval.',
+        reason: message.reasoning || message.reason || 'Brotto wants to perform an action that needs your approval.',
         action: { type: a.type, url: a.url },
+        screenshot: message.screenshot,
+        viewport: message.viewport,
+        args,
+        url: message.url,
       });
       break;
     }

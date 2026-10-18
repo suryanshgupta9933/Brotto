@@ -186,6 +186,44 @@ class CDPRelay:
             )
         return "ok"
 
+    # Dev twin of the extension relay's coordinate actions — same probe, same
+    # `page.mouse` dispatch, so `/run` and the product path cannot disagree
+    # about what "the topmost element at this point" means.
+
+    async def probe_xy(self, x: int, y: int) -> dict:
+        if not self._browser.page:
+            return {}
+        import json as _json
+        expr = (
+            'JSON.stringify({width: window.innerWidth, height: window.innerHeight,'
+            f' tag: (document.elementFromPoint({int(x)}, {int(y)}) || {{}}).tagName || ""}})'
+        )
+        try:
+            raw = await self._browser.page.evaluate(expr)
+            data = _json.loads(str(raw))
+            return data if isinstance(data, dict) else {}
+        except Exception as e:  # noqa: BLE001 — best effort, {} means "refuse"
+            log.debug("probe_xy failed: %s", e)
+            return {}
+
+    async def click_xy(self, x: int, y: int) -> str:
+        if not self._browser.page:
+            return "Error executing: no page is attached"
+        await self._browser.page.mouse.click(int(x), int(y))
+        return f"Clicked at ({x},{y})"
+
+    async def focus_xy(self, x: int, y: int) -> str:
+        return await self.click_xy(x, y)
+
+    async def type_text_at_focus(self, text: str) -> str:
+        if not self._browser.page:
+            return "Error executing: no page is attached"
+        # `insert_text`, not `type`: one input event for the whole string,
+        # which is what a canvas editor wants and what per-character key
+        # events do not reach.
+        await self._browser.page.keyboard.insert_text(text)
+        return f"Typed {len(text)} characters"
+
     async def type_text_to_ref(self, ref: str, text: str) -> str:
         if ref not in self._browser.target_map:
             return f"Error executing: ref {ref!r} is not in the current target map"

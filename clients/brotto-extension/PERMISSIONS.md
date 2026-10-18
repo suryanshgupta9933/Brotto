@@ -43,7 +43,7 @@ complete set of CDP methods the extension issues:
 | Page | `Page.captureScreenshot` | A JPEG of the tab you picked, for pages the accessibility tree is blind to — see below |
 | DOM | `DOM.getDocument` / `getAttributes` / `resolveNode` | Resolving a tree ref to a node |
 | DOM | `DOM.getBoxModel` / `getNodeForLocation` | Turning a node into clickable coordinates |
-| Runtime | `Runtime.evaluate` | Reading page text and stability — see below |
+| Runtime | `Runtime.evaluate` | Reading page text and stability, and drawing the click marker — see below |
 
 **`Page.captureScreenshot` — one place, and only on request.** The agent
 perceives the page through the Accessibility tree first, and asks for a picture
@@ -88,7 +88,7 @@ matching over strings, and a JPEG is pixels — which is why it sits behind a
 switch that stays off until somebody turns it on. See
 [PRIVACY.md](https://github.com/suryanshgupta9933/brotto/blob/main/PRIVACY.md).
 
-### `Runtime.evaluate` — four places, and only one of them is the server's
+### `Runtime.evaluate` — six places, and only one of them is the server's
 
 This runs JavaScript in the page, so it is the one call here that can execute
 code rather than read state. Every call site is listed.
@@ -106,15 +106,21 @@ Because that expression arrives from the server, the *mechanism* is not
 restricted to that read — holding `AGENT_SECRET` is equivalent to holding your
 browser session. See "Known limitations".
 
-**Composed by the extension — three places, hardcoded in the bundle.** These
+**Composed by the extension — five places, hardcoded in the bundle.** These
 are not reachable by anything the server sends; they are fixed strings in the
-shipped code, and they are the ones that run on every observation:
+shipped code, and they are the ones that run without the server asking:
 
 | Site | What it evaluates | When |
 |---|---|---|
 | `observation/index.ts` | `{url, title, text: body.innerText}`, whitespace collapsed, capped at **20,000 characters** | every observation |
 | `observation/stability.ts` | installs a `MutationObserver` and reports whether the page has gone still | every observation |
 | `observation/supplement.ts` | a probe listing `aria-hidden` controls so they can be hit-tested | when the tree is supplemented |
+| `observation/pointer.ts` | draws, then removes, a `pointer-events: none` click marker and its label — label set with `textContent`, never `innerHTML`, and capped at 80 characters because it is model-authored prose | around a click, before and after the mouse event pair |
+
+The first three run on every observation; the pointer marker only runs around a
+click, and it is removed in a `finally` after the mouse event pair rather than
+on a timer — a click that navigates throws on the observation that follows, and
+a timer is how a marker outlives the action that drew it.
 
 The supplement probe is a deliberate narrowing: locating those controls by
 hit-test would need a broader privilege than one bounded `Runtime.evaluate`,

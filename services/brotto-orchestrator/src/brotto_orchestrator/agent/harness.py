@@ -51,6 +51,8 @@ from ..policy.gate import (
     check_domain_policy,
     check_first_time_seen,
     screenshot_block_reason,
+    capture_enabled,
+    SCREENSHOT_CAPTURE_ENV,
 )
 from ..policy.domains import etld1
 from .prompt import SYSTEM_PROMPT, policy_preamble
@@ -405,8 +407,11 @@ _ASK_REPLY_PREFIX = "User replied: "
 _NEVER_APPROVE = _TERMINAL_ACTIONS | _INTERNAL_ACTIONS | _QUESTION_ACTIONS
 
 # What the user sees in the card instead of the tool name. "click" and
-# "type_text" are developer-facing; these are the only action names that can
-# reach a card, and every one of them is a thing a person recognises doing.
+# "type_text" are developer-facing; every name that can reach a card through
+# these generic guards names a thing a person recognises doing. The coordinate
+# verbs are the exception and need no entry — `click_xy` prompts with its own
+# reason line and the crosshair frame, and `focus_xy` / `type_xy` never prompt
+# at all.
 _ACTION_LABEL = {
     "navigate": "open a page",
     "click": "click something on the page",
@@ -1063,7 +1068,7 @@ def _turn_to_input(turn: AgentTurn) -> str | list:
 
 async def _ask_user(deps: AgentDeps, audit, *, turn: int, kind: str,
                     action: str, args: dict, domain: str | None,
-                    reason: str) -> bool:
+                    reason: str, frame_extra: dict | None = None) -> bool:
     """Raise one prompt, wait for the answer, record it. True = approved.
 
     Seven sites were doing this by hand — send, block on the queue,
@@ -1072,13 +1077,22 @@ async def _ask_user(deps: AgentDeps, audit, *, turn: int, kind: str,
     instead. `login_required` deliberately does NOT use this: its
     timeout continues the loop rather than aborting, and its "skip"
     aborts, which is a contract this signature does not have.
+
+    **`frame_extra` goes into the WebSocket frame and nowhere else.** The
+    audit call above takes `args` and only `args`; a screenshot is page
+    content and belongs in transit, never on disk under `logs/sessions/`.
+    Merging it after `record_prompt` is the whole mechanism — there is no
+    second audit call and no second place it could leak through.
     """
     pid = audit.record_prompt(turn, kind=kind, action=action, args=args,
                               domain=domain, reason=reason)
-    await deps.ws_send({
+    frame = {
         "type": "approval_required", "action": action, "args": args,
         "reasoning": reason,
-    })
+    }
+    if frame_extra:
+        frame.update(frame_extra)
+    await deps.ws_send(frame)
     t0 = time.perf_counter()
     reply = await deps.human_input_queue.get()
     wait_ms = int((time.perf_counter() - t0) * 1000)
@@ -1269,7 +1283,7 @@ def _typed_field(call: ActionCall) -> str | None:
     The set is imported from the relay, so the validator and the thing that
     dispatches the key cannot disagree about what a key name is.
     """
-    if call.action == "type_text":
+    if call.action in ("type_text", "type_xy"):
         return "text"
     if call.action == "press_key":
         key = str(call.action_args.get("key") or "")
@@ -1588,6 +1602,209 @@ async def _seed_starting_domain(deps: AgentDeps) -> None:
         deps.visited_domains.add(domain)
 
 
+# ── coordinate actions ────────────────────────────────────────────────────
+# A `<canvas>` has no AX node, so there is nothing for `click` to resolve and
+# nothing for `type_text` to focus. These two verbs are the way into it, and
+# `click_xy` is the only action in the harness that acts on a point nobody
+# verified by ref.
+#
+# Off unless the operator turns it on: a new capability class must not arrive
+# live on every existing install. Same posture as `capture_enabled` — only an
+# explicit spelling is on, so a stray `false`/`0` in a .env is a refusal.
+
+COORDINATE_CLICK_ENV = "BROTTO_COORDINATE_CLICK"
+
+
+def _coordinate_clicks_enabled() -> bool:
+    return os.getenv(COORDINATE_CLICK_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _is_int(value) -> bool:
+    # bool is an int subclass, and `true` is not a coordinate.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
+                             *, turn: int) -> str:
+    """`click_xy` / `focus_xy` / `type_xy` — one shared body, one approval.
+
+    All three are the same question: is this point on a canvas the page is
+    not covering, inside a viewport read now rather than from the last
+    observation? Only the click asks a human. Focus moves a caret and types
+    nothing; `type_xy` is focus plus `Input.insertText` at that same point.
+    Prompting for either would put a card in front of the user for every cell
+    of a spreadsheet — and the click is still the gated one, so nothing
+    becomes reachable that was not approved.
+
+    **Every return below contains `_EXEC_FAILURE`.** `ok` is derived by
+    membership, so a refusal written as a friendly sentence audits as a
+    successful click — which is exactly how a wrong click gets recorded as
+    clean. The policy read is inside the same guarantee: a policy object that
+    raises refuses, it does not fall through to the prompt.
+    """
+    action = call.action
+    verb = action[:-3]  # click_xy → click, focus_xy → focus, type_xy → type
+    args = call.action_args
+    cdp = deps.cdp
+
+    def refuse(detail: str) -> str:
+        return (f"{_EXEC_FAILURE} {action}: {detail} Nothing was clicked, "
+                f"focused or typed.")
+
+    if not _coordinate_clicks_enabled():
+        return refuse(
+            f"coordinate actions are off — set {COORDINATE_CLICK_ENV}=1 to enable "
+            f"them. Use the ordinary click and type_text actions instead."
+        )
+    label = str(args.get("label") or "").strip()
+    if not label:
+        # Refused rather than prompted: the human sees only the label, so a
+        # click with no label is a blind click with nothing on the card.
+        return refuse(
+            "a label is required and it is the only thing the user sees — say "
+            "what is at this point, e.g. \"the cell C4\"."
+        )
+    x, y = args.get("x"), args.get("y")
+    if not _is_int(x) or not _is_int(y):
+        return refuse(
+            f"x and y must be whole pixel coordinates, got {x!r} and {y!r}."
+        )
+
+    # One live read: the viewport the bound check uses and the element that
+    # is on top at this point. Read from the observation instead and a page
+    # that resized or a stale tree makes every check below decoration.
+    probe = await cdp.probe_xy(x, y)
+    width, height = int(probe.get("width") or 0), int(probe.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return refuse("the page's viewport could not be read.")
+    if not (0 <= x < width and 0 <= y < height):
+        return (
+            f"{_EXEC_FAILURE} {action}: ({x},{y}) is outside the "
+            f"{width}x{height} viewport — the coordinates came from a "
+            f"different view of the page. Nothing was clicked, focused or typed."
+        )
+    if str(probe.get("tag", "")).upper() != "CANVAS":
+        # Not a check on what the canvas contains — nothing can read that. It
+        # is a check that nothing is sitting on top of it, which is the one
+        # thing elementFromPoint still answers on a canvas, and the one that
+        # keeps this verb from being a net safety loss against ref `click`.
+        return (
+            f"{_EXEC_FAILURE} {action}: something other than the canvas is on "
+            f"top at ({x},{y}). Dismiss the dialog or panel covering it, then "
+            f"try again. Nothing was clicked, focused or typed."
+        )
+
+    domain = None
+    try:
+        # No `sensitive_actions` gate here, deliberately. The step loop has
+        # already run this action — `click_xy` included, through the same call
+        # with the same args — past `check_sensitive_action` and
+        # `check_critical_action` before `_execute_action` is reached, so the
+        # curated list is honoured upstream, and ref `click` gets no second
+        # check here either. A local copy would have refused every coordinate
+        # click on every default install: `Policy()` ships twelve patterns, so
+        # "the list is non-empty" is not an operator's opinion, it is the
+        # factory default.
+        #
+        # What that upstream gate is actually worth is worth saying plainly:
+        # it is a substring scan over model-authored prose — the verb joined
+        # to `{x, y, label}`. It catches a model that says out loud what it is
+        # about to do, and nothing else. A model that clicks a delete button
+        # and calls it "the cell C4" walks straight past it. The crosshair
+        # screenshot on the approval card below is what stands in front of
+        # that, not this scan.
+        url = await cdp.get_current_url()
+        domain = etld1(url)
+        # The approval prompt shows a screenshot with a crosshair on it, so a
+        # run that may not capture cannot ask at all. Checked as its own
+        # switch rather than by borrowing `screenshot_block_reason`'s refusal,
+        # which answers `capture_not_enabled` first and would block every
+        # coordinate click on a default install with no legible cause.
+        if not capture_enabled():
+            return refuse(
+                "a coordinate click needs viewport capture, because the "
+                f"approval shows a screenshot. Set {SCREENSHOT_CAPTURE_ENV} "
+                "to enable it."
+            )
+        # And the domain itself may still be off limits for photography.
+        if screenshot_block_reason(url, deps.policy):
+            return refuse(
+                "screenshots are not permitted on this page, so the user "
+                "could not see what they were approving."
+            )
+    except Exception as exc:  # noqa: BLE001 — a policy read that throws refuses
+        return refuse(
+            f"the policy for this click could not be checked "
+            f"({type(exc).__name__})."
+        )
+
+    if verb == "focus":
+        result = await cdp.focus_xy(x, y)
+        if _EXEC_FAILURE in result:
+            return result
+        await cdp.refresh_target_map()
+        return f"Focused at ({x},{y}) — {label}"
+
+    if verb == "type":
+        # Focus and insert, in that order, at the same verified point — so it
+        # borrows `focus_xy`'s guards wholesale and adds none. The alternative
+        # shape — `focus_xy` now and a `type_text` variant with no coordinates
+        # later — is the one that types into whatever the page last focused,
+        # which is the exact failure `type_text_to_ref` guards against and the
+        # reason this is one action rather than two.
+        focused = await cdp.focus_xy(x, y)
+        if _EXEC_FAILURE in focused:
+            return focused
+        result = await cdp.type_text_at_focus(str(args.get("text") or ""))
+        if _EXEC_FAILURE in result:
+            return result
+        await cdp.refresh_target_map()
+        return f"Typed into ({x},{y}) — {label}"
+
+    # Captured here, in this step: a frame replayed from the last observation
+    # shows a crosshair against a layout that has since moved.
+    image = await cdp.capture_screenshot()
+    if not image:
+        return (
+            f"{_EXEC_FAILURE} {action}: no screenshot of this page could be "
+            f"captured, so the user would be approving a click they cannot "
+            f"see. Nothing was clicked."
+        )
+    approved = await _ask_user(
+        deps, audit, turn=turn, kind="coordinate_click", action=action,
+        args={"x": x, "y": y, "label": label},
+        domain=domain,
+        reason=(
+            f"This page is a canvas, so there is no element to click by name. "
+            f"The crosshair is at ({x},{y}) — {label}. Clicking is one blind "
+            f"click at that point."
+        ),
+        frame_extra={
+            "screenshot": image,
+            "viewport": {"width": width, "height": height},
+            "url": url,
+        },
+    )
+    if not approved:
+        # Deny is information, not a dead end. Unlike a denied navigation or a
+        # denied sensitive action — statements about the plan, where aborting
+        # is right — a declined crosshair is a statement about one pixel, and
+        # the model's next move is usually a better one. So this returns to
+        # the loop instead of setting `deps.result`, and says so.
+        return (
+            f"{_EXEC_FAILURE} {action}: the user declined the click at "
+            f"({x},{y}). Nothing was clicked. That point is wrong or unsafe — "
+            f"look for a better point, or say you cannot do it."
+        )
+    result = await cdp.click_xy(x, y)
+    if _EXEC_FAILURE in result:
+        return result
+    await cdp.refresh_target_map()
+    return f"Clicked at ({x},{y}) — {label}: {result}"
+
+
 async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                           turn: int = -1) -> str:
     """Execute a single action. Returns outcome string."""
@@ -1758,6 +1975,12 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                     # task to the same domain don't re-prompt.
                     deps.visited_domains.add(target_domain)
             return f"Clicked [{args['ref']}]: {result}"
+
+        elif action in ("click_xy", "focus_xy", "type_xy"):
+            if audit is None:
+                return (f"{_EXEC_FAILURE} {action}: no audit document is "
+                        f"attached, so an approval could not be recorded.")
+            return await _coordinate_action(call, deps, audit, turn=turn)
 
         elif action == "type_text":
             # focus/clear used to be fire-and-forget, so a ref that resolved to
@@ -3678,7 +3901,12 @@ class AgentHarness:
                     continue
                 # A ref for type_text, the focused element for press_key —
                 # both resolve to "is this a password field", and both fail
-                # closed when the answer is unavailable.
+                # closed when the answer is unavailable. `type_xy` has no ref
+                # and no DOM field behind it, so the lookup is "" and the
+                # answer is always "redact" — the same place `press_key`'s
+                # literal characters already sit, and the safe direction: a
+                # canvas can be a password widget and nothing here can tell
+                # it from a spreadsheet cell.
                 redact = (
                     await _redact_if_secret(deps, call.action_args.get("ref", ""))
                     if field == "text"

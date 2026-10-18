@@ -1125,6 +1125,49 @@
       white-space: nowrap;
     }
 
+    /* An approval for a click on a canvas. The screenshot is unredacted page
+       content by construction — nothing can redact pixels — so it lives and
+       dies with the card: no cache, no background, one copy in the DOM.
+       .approval-shot is the viewport box; the crosshair is a percentage of it,
+       so it stays on the same point whatever the panel squeezes the card to. */
+    .approval-target {
+      font-size: 13px;
+      line-height: 1.5;
+      margin-bottom: 8px;
+      word-break: break-word;
+    }
+    .approval-shot {
+      position: relative;
+      display: block;
+      width: 100%;
+      margin-bottom: 10px;
+      border: 1px solid var(--rule-2);
+      background: var(--paper-2);
+    }
+    .approval-shot img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    /* Two crossed rules in a square, drawn with borders so nothing here gets a
+       radius. The negative margins centre it on the point. */
+    .approval-cross {
+      position: absolute;
+      width: 22px;
+      height: 22px;
+      margin: -11px 0 0 -11px;
+      border: 1px solid var(--ink);
+      pointer-events: none;
+    }
+    .approval-cross::before, .approval-cross::after {
+      content: '';
+      position: absolute;
+      background: var(--ink);
+    }
+    .approval-cross::before { left: 50%; top: 0; width: 1px; height: 100%; margin-left: -0.5px; }
+    .approval-cross::after  { top: 50%; left: 0; height: 1px; width: 100%; margin-top: -0.5px; }
+    .approval-cross.outside { opacity: 0.35; }
+
     .inline-log {
       font-family: var(--font-mono);
       font-size: 10.5px;

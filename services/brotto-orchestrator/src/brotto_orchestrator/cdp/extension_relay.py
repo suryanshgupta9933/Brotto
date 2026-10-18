@@ -383,6 +383,57 @@ class ExtensionCDPRelay:
             )
         return f"Cleared [{ref}]"
 
+    # ── coordinate actions ──────────────────────────────────────────────
+    # A `<canvas>` has no AX node, so there is no ref to click and no
+    # `type_text` without focus. `probe_xy` is the one live read that makes a
+    # blind point safe to ask a human about: the viewport it bounds against
+    # and the topmost element at that point, which is what proves nothing is
+    # covering the canvas. One round trip, because a stale viewport read here
+    # would make every bound below decoration.
+
+    _PROBE_XY_JS = (
+        'JSON.stringify({width: window.innerWidth, height: window.innerHeight,'
+        ' tag: (document.elementFromPoint(%d, %d) || {}).tagName || ""})'
+    )
+
+    async def probe_xy(self, x: int, y: int) -> dict:
+        """Live viewport and topmost tag at (x, y). {} on any failure."""
+        import json as _json
+        await self._ws_send(
+            {"type": "evaluate", "expression": self._PROBE_XY_JS % (int(x), int(y))}
+        )
+        try:
+            raw = await asyncio.wait_for(self._eval_queue.get(), timeout=15)
+        except asyncio.TimeoutError:
+            log.error("[%s] timed out probing (%d,%d)", self._sid, x, y)
+            return {}
+        try:
+            data = _json.loads(str(raw))
+        except (ValueError, TypeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def click_xy(self, x: int, y: int) -> str:
+        log.info("[%s] click_xy (%d,%d)", self._sid, x, y)
+        await self._send_action({"type": "click", "x": int(x), "y": int(y)})
+        return f"Clicked at ({x},{y})"
+
+    async def focus_xy(self, x: int, y: int) -> str:
+        log.debug("[%s] focus_xy (%d,%d)", self._sid, x, y)
+        await self._ws_send(
+            {"type": "action", "action": {"type": "click", "x": int(x), "y": int(y)}}
+        )
+        return f"Focused ({x},{y})"
+
+    async def type_text_at_focus(self, text: str) -> str:
+        """Insert into whatever holds focus. No ref, so no locate guard — the
+        harness focused a point it had just probed and bounds-checked, and the
+        extension dispatches this as `Input.insertText`, the call a canvas
+        editor already expects."""
+        log.info("[%s] type_text_at_focus len=%d", self._sid, len(text))
+        await self._send_action({"type": "type", "text": text})
+        return f"Typed {len(text)} characters"
+
     async def type_text_to_ref(self, ref: str, text: str) -> str:
         # Types into whatever holds focus, so an unresolvable ref means the
         # text lands in some *other* field. Guard before dispatching.
