@@ -187,9 +187,11 @@ deciding that. **An explicit setting always wins, including `0`.**
 
 ## `BROTTO_VISION_CAPTURE` opens the one channel redaction cannot see
 
-When a page's accessibility tree *and* its visible text are both empty — a
-`<canvas>`, a chart, Google Docs — the agent has nothing to read, and with this
-set it asks the extension for a JPEG of the visible viewport.
+When nothing the browser can read is about the task — a `<canvas>`, a chart,
+Google Docs, a spreadsheet whose grid has no accessibility representation — the
+agent has nothing to work from, and with this set it asks the extension for a
+JPEG of the visible viewport. That is broader than an empty page: a page with a
+full toolbar and a couple of hundred characters of chrome photographs too.
 
 ```
 BROTTO_VISION_CAPTURE=on     # capture

@@ -305,11 +305,23 @@ honest about this has to say **no coverage**, not partial coverage, so
 `PRIVACY.md` now carries it as a third carve-out beside the accessibility tree
 rather than leaving it inside the sentence that promises redaction.
 
+**A step whose redaction found something does not get a screenshot.** The gate
+is asked after `redact_text` reported a hit on that step, and it refuses. It is
+worth being exact about what that buys, because it reads stronger than it is:
+it is a guard on the **text** channel, so it cannot fire for a secret that exists
+only as pixels — which is precisely the canvas case the screenshot exists for. A
+card number drawn into a `<canvas>` is invisible to the redactor, produces no
+hit, and so photographs. What the guard does buy is the honest middle case: a
+page that *also* exposed the secret as a string — a field label, a paragraph, a
+table cell — is not photographed on top of it. It narrows the class; it does
+not close it.
+
 **The rule is default refusal, and the reasoning is that a denylist cannot be
 completed.** The alternative shape — a list of URL patterns where capture is
 refused — reads like the obvious fix and is untestable here, for a specific
-reason. The trigger that reaches this gate is *the accessibility tree came back
-empty and the page text with it*, and that is a fact about how a page is
+reason. The trigger that reaches this gate is *nothing the harness can see is
+about the task it was given* (see `_sparse_for_task` in `agent-loop.md`), and
+that is a fact about how a page is
 **implemented**, not about how sensitive it is. Google Docs, Figma and a hostile
 canvas page are byte-identical to that predicate. A chart and an OTP rendered
 on a canvas are the same page to anything that inspects the URL, so no URL shape

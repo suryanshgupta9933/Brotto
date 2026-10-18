@@ -553,8 +553,14 @@ evidence — points the same way: the self-report is exactly what cannot be
 trusted here, and it is the ask design's only input.
 
 **Cost is bounded explicitly, not by making the decision rarer.**
-`_MAX_CAPTURES_PER_TASK = 3`, counted on `deps.screenshots_taken` and reset at
-task start (per task, so a resume has not spent the prior task's budget). It is
+`_MAX_CAPTURES_PER_TASK = 3`, counted on `deps.screenshots_taken` — a field on
+`AgentDeps`, which is what makes it **per task**. The `deps.screenshots_taken =
+0` line in `run()` that once reset it there is gone: its premise was that a
+resume moves to the next task, and `resume_from` is never passed by any caller.
+`resume=True` reopens the same document under the same `task_id` and continues
+the *same* task, so the old reset bought nothing and the counter was per run in
+practice — a client that reconnected could buy a fresh budget of three images on
+every reconnect, which is the opposite of what a per-task cap is for. It is
 checked *before* the capture, so a run past the cap pays no round trip. Reuse
 across steps was rejected because a picture of a page the model has left is
 evidence it did not observe, and "only re-capture when stale" needs a staleness

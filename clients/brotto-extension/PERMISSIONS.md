@@ -322,7 +322,7 @@ or screen is ever captured. No third-party analytics.
 **Accessed, and why:** the accessible tree and visible text of the tab you
 selected, while a task runs. Mouse and keyboard input on that tab, while a
 task runs. A JPEG of that tab's visible viewport, while a task runs and only
-when the accessible tree *and* the visible page text both came back empty —
+when nothing the browser can read is about the task you gave —
 **and only if screenshot capture is switched on on your server, which it is
 not by default.** Your server URL and model choice, stored locally. The
 visible text of the active page, when the panel is idle and suggesting.

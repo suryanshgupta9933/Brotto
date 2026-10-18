@@ -98,10 +98,12 @@ token that appears in a field's label or value rather than in body text will rea
 unredacted.
 
 **A screenshot is not redacted at all, and nothing in this policy claims otherwise.**
-There is a third channel, and it is the one with no coverage whatsoever. When a page's accessibility
-tree *and* its visible text both come back empty — a chart, a drawing canvas, Google Docs, Figma — the
-agent has nothing to read, and if your server has screenshot capture enabled it asks the extension for a
-JPEG of the visible viewport of the tab you attached. `redact_text` is pattern matching over strings. A
+There is a third channel, and it is the one with no coverage whatsoever. When nothing the browser can
+read is about the task you gave — a chart, a drawing canvas, Google Docs, Figma, a spreadsheet whose grid
+the browser has no way to describe and whose toolbar it describes perfectly — the agent has nothing to
+work from, and if your server has screenshot capture enabled it asks the extension for a
+JPEG of the visible viewport of the tab you attached. That is broader than an empty page: a page with a
+full toolbar and a couple of hundred characters of chrome photographs too. `redact_text` is pattern matching over strings. A
 JPEG is pixels, so there is nothing for it to match: a payment card number, a one-time code or an account
 balance rendered into a canvas reaches your model provider whole, where the same content in page text
 would have been replaced with `[redacted]`. This is not partial coverage or best-effort coverage. It is
