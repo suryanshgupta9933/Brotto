@@ -80,35 +80,50 @@ REFUSAL_UNKNOWN_URL = "unresolvable_url"
 
 # Rightmost labels that name a network, not a place on the public internet.
 # `len(labels) < 2` below already refuses `localhost` and `intranet`; these are
-# the same names wearing a second label, so without this set `nas.home`,
-# `wiki.internal` and `db.corp` walked straight through and were capturable —
-# which is the entire class `_raw_host` exists to refuse.
+# the same names wearing a second label, so without this set `printer.local` and
+# `gw.home.arpa` walked straight through and were capturable — which is the
+# entire class `_raw_host` exists to refuse.
 #
-# RFC 2606 / 6761 reserved (`test`, `invalid`, `example`, `localhost`) sit
-# alongside the internal-use suffixes people actually type. `home.arpa` and
-# bare `arpa` are both listed because RFC 8375 names the former and the second
-# label is not always present.
+# **Every entry is one an RFC reserves, with one deliberate exception.** That is
+# the admission rule, and it is stated because the set used to be nearly twice
+# this long and the difference was the point. Alongside the RFC 2606 / 6761
+# reserved names (`test`, `invalid`, `example`, `localhost`), mDNS `.local`
+# (RFC 6762), `home.arpa` (RFC 8375), bare `arpa` (IANA infrastructure), and
+# `.onion` (RFC 7686), this set once also carried `internal`, `intranet`,
+# `lan`, `home` and `corp` — plausible words people type on a LAN, and nothing
+# more. They were added in rounds rather than derived, and they fail the bar: a
+# reserved label *cannot* name a public site, so refusing one costs no
+# legitimate capture and closes the case for good; a guessed one might, so it
+# refuses a real host on the strength of a typing habit and leaves the class
+# behind it just as open.
+#
+# The exception is `dev`, which is a delegated TLD and not a reserved name. It
+# is here because it is *our* TLD — `_FIRST_PARTY_HOSTS` below is the only
+# `.dev` host this gate will name, and `box.dev` was the LAN name that
+# deleting it re-opened. That cost was accepted deliberately rather than by
+# accident: the alternative to granting our own relay by exact host was
+# deleting the label, which widens the hole for every `.dev` name everywhere
+# to unblock the one host we operate. One refused label is a smaller and more
+# visible trade than one un-refused TLD.
+#
+# `localhost` is redundant with the `len(labels) < 2` check above and is kept
+# only because deleting it would make the set read as though the single-label
+# rule and this one were describing different things.
 #
 # A curated set, not a public-suffix list: the question is never "is this
-# registrable", only "is this a name inside somebody's network", and a PSL
-# would be a ~10k-entry table imported to answer a yes/no that only ever
-# refuses. `domains.MULTI_PART_SUFFIXES` is not a TLD set and cannot be
+# registrable", only "is this a name this gate has no business photographing",
+# and a PSL would be a ~10k-entry table imported to answer a yes/no that only
+# ever refuses. `domains.MULTI_PART_SUFFIXES` is not a TLD set and cannot be
 # extended into one without that table.
-#
-# `dev` was here and was wrong. It is a delegated TLD, not a special-use
-# name — RFC 6761 reserves `.test`, `.example`, `.invalid` and `.localhost`,
-# not `.dev` — so a registrable host ended up on the refuse side, and one of
-# them is our own relay: `agent.brotto.dev` is what the first-run wizard and
-# the fallback UI point at. The trade is real and is the reason: `_raw_host`
-# reads labels, so a `box.dev` on a LAN is indistinguishable from a
-# registrable `.dev` and now resolves too. A name inside somebody's network
-# is refused when it is special-use or a single label; one resolvable name on
-# a LAN is the user's own network and their own blocklist. Losing that case
-# costs a LAN host — keeping it costs a shipped one.
 _INTERNAL_SUFFIXES = frozenset({
-    "local", "localhost", "internal", "intranet", "lan", "home", "corp",
-    "home.arpa", "arpa", "onion", "test", "invalid", "example",
+    "local", "localhost", "test", "invalid", "example",
+    "arpa", "home.arpa", "onion", "dev",
 })
+
+# Registrable hosts we operate, exempt from the suffix rule below so the
+# first-run wizard's own relay stays capturable. Narrow on purpose: a TLD is
+# not exempted because one host on it is ours.
+_FIRST_PARTY_HOSTS = frozenset({"agent.brotto.dev"})
 
 # The hostname alphabet, minus "." (split on) and "-" is allowed by RFC 1123
 # for hostnames but is rare enough in a policy entry to be refused.
@@ -197,8 +212,15 @@ def _raw_host(url: str | None) -> str | None:
     # definition, and refused as such.
     if _is_ip(body) or len(labels) < 2:
         return None
-    # `host` is already case-folded above, so `nas.HOME` is compared as
-    # `nas.home` and cannot slip past on spelling.
+    # Checked before the suffix rule, and on the exact host rather than as a
+    # suffix grant: `agent.brotto.dev` is ours, `sub.agent.brotto.dev` and
+    # `evil.brotto.dev` are not, and nothing needs `*.brotto.dev` today. It is
+    # the fix for a `dev` that was deleted from the set below to unblock the
+    # relay — that fixed one host and re-opened every `.dev` on a LAN.
+    if host in _FIRST_PARTY_HOSTS:
+        return host
+    # `host` is already case-folded above, so `printer.LOCAL` is compared as
+    # `printer.local` and cannot slip past on spelling.
     if any(host == s or host.endswith("." + s) for s in _INTERNAL_SUFFIXES):
         return None
     return host

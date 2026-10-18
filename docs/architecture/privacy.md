@@ -373,58 +373,66 @@ the unresolvable case is a refusal, not a second switch.
 **Two labels is not a registered domain, and the first version of that check
 thought it was.** `_raw_host` refused an IP literal and a single label, on the
 reasoning that both are names inside somebody's network — which is true, and
-incomplete for the same reason `check_domain_policy` was. `http://nas.home/`,
-`http://wiki.internal/`, `http://router.lan/` and `http://db.corp/` have two
-labels each, passed straight through, and were photographed with no list in
-front of them. The fix is a deny set of special-use and internal suffixes
-(`local`, `localhost`, `internal`, `intranet`, `lan`, `home`, `corp`,
-`home.arpa`, `arpa`, `onion`, plus the RFC 2606/6761 reserved `test`,
-`invalid`, `example`), matched as a suffix against the
-already-case-folded host so `nas.HOME` cannot slip past on spelling. It returns
-`None`, so these raise the *existing* `unresolvable_url` refusal — no new
-reason, nothing new in the closed vocabulary the model reads.
+incomplete for the same reason `check_domain_policy` was. `http://printer.local/`
+and `http://gw.home.arpa/` have two labels each, passed straight through, and
+were photographed with no list in front of them. The fix is a deny set of
+special-use suffixes, matched as a suffix against the already-case-folded host
+so `printer.LOCAL` cannot slip past on spelling. It returns `None`, so these
+raise the *existing* `unresolvable_url` refusal — no new reason, nothing new
+in the closed vocabulary the model reads.
 
-**`dev` was in that set, and it was wrong in the direction that costs.** `.dev`
-is a delegated TLD, not a special-use name — RFC 6761 reserves `.test`,
-`.example`, `.invalid` and `.localhost` and does not mention `.dev` — so a
-registrable host landed on the refuse side of a gate whose only answer is
-*refuse*. One of them is `agent.brotto.dev`, which is **ours**: the first-run
-wizard and the fallback UI both point at it. That is the third time this host
-has cost something, and the same lesson each time — it shipped and nothing
-that reads the name reads the suffix (263, 516).
+**The set's admission rule is that an RFC reserves the label, and it was
+enforced against the set itself.** The rule is what makes the set defensible
+rather than a list that accreted: a reserved label *cannot* name a public site,
+so refusing one costs no legitimate capture and closes the case for good. Five
+entries did not meet it — `internal`, `intranet`, `lan`, `home` and `corp` —
+and they are gone. They were plausible words people type on a LAN and nothing
+more; each one refuses a potentially registrable host on the strength of a
+typing habit while leaving the class behind it just as open. They were added in
+rounds rather than derived, and reviewing the set is how that showed up.
 
-The trade is real, and it is why the fix is a removal rather than a special
-case for our own domain. `_raw_host` reads labels, so a `box.dev` on a LAN and
-a registrable `.dev` are the same string to it; one of them now resolves. That
-is accepted rather than special-cased because the two costs are unequal: a name
-inside a network is refused when it is special-use or a single label, and one
-resolvable `.dev` on a LAN is the user's own network with their own blocklist
-in front of it — whereas the alternative refuses a shipped host in production.
-`test_our_own_relay_resolves_with_the_switch_on` is the control that was red
-before this change, and `box.dev` is out of
-`test_an_internal_suffix_is_refused` for the same reason.
+**`dev` is the one entry that is not RFC-reserved, and it is in on purpose.**
+`.dev` is a delegated TLD, so by the rule above it does not belong. It is here
+because it is *our* TLD. `agent.brotto.dev` is the first-run wizard's and the
+fallback UI's relay, and it has now cost something three times, always the same
+way — it shipped and nothing that reads the name reads the suffix (263, 516).
+
+The first fix for that was to **delete `dev` from the set**, and it was the
+wrong shape. A gate whose only answer is *refuse* refuses one registrable host
+just as readily as a LAN box, and deleting the label unblocked our relay by
+re-opening every `.dev` name on every LAN — `box.dev` walked straight through,
+and CodeQL's security reviewer flagged the widening correctly. The shape that
+holds is the narrow one: `dev` stays refused, and the relay is granted by
+**exact host** through `_FIRST_PARTY_HOSTS`, checked before the suffix loop.
+Exact, not a suffix — `sub.agent.brotto.dev` and `evil.brotto.dev` are refused
+and so is bare `brotto.dev`, because a grant reachable by walking left or right
+off it is a suffix grant wearing a hostname. Nothing needs `*.brotto.dev`
+today.
+
+The cost of this shape is one refused label where a real TLD is concerned, and
+that is the smaller and more visible trade: a `box.dev` on a LAN is refused, but
+the alternative was a `.dev` TLD with no gate on it at all, chosen to unblock
+the one host we operate. Pinned by
+`test_the_first_party_grant_does_not_leak`, which is four URLs that all had to
+be red first.
+
+**DNS resolution is deliberately not used instead.** Deciding `.dev` by lookup
+was the other suggestion, and it is declined on the same grounds as before: a
+resolver on a refuse-only gate turns a transient timeout into an ambiguous
+refusal, and it puts a synchronous network round-trip inside the agent loop on
+a path whose premise is that capture is cheap and fails closed on its own
+evidence. Refusing by name covers the ground that matters — `192.168.1.1`,
+`localhost` and `printer.local` are all caught before any I/O.
 
 **A curated set, not a public-suffix list.** The alternative is requiring the
 rightmost label to be a real public suffix, which closes the whole class rather
 than a list of it, and `domains.MULTI_PART_SUFFIXES` is not a TLD set and
 cannot be extended into one without importing a ~10k-entry PSL. That is the
-wrong trade for a gate whose only answer here is *refuse*: the set below is
-complete for the names that occur in practice, and a PSL would be a permanent
-dependency and a data file to keep current in exchange for entries that all
-resolve to the same answer. Pinned by `test_an_internal_suffix_is_refused`, and
+wrong trade for a gate whose only answer here is *refuse*: every entry in the
+set resolves to the same answer, so the table buys nothing a curated set and its
+citations do not. Pinned by `test_an_internal_suffix_is_refused`, and
 by `test_a_public_host_is_still_allowed_when_the_switch_is_on` beside it —
 a deny list that refused everything would pass every other case in the file.
-
-**DNS is deliberately not resolved.** Refusing `127.0.0.1` and `10.0.0.1` by
-lookup instead of by name is the other suggestion that arrived with this, and
-it is declined: it puts a synchronous network round-trip inside the agent loop
-on every capture attempt, on a path whose whole premise is that capture must
-be cheap and must fail closed on its own evidence. A lookup that times out is a
-new failure mode that looks like "the user's page is unusual", and refusing on
-it would turn a transient DNS hiccup into a refused capture. Refusing by name
-covers the ground that matters — `192.168.1.1`, `localhost` and `nas.home` are
-all caught before any I/O — and the addresses reachable only by a public name
-pointing inward are the case a hostname check was never going to catch anyway.
 
 **What redaction's silence means for the model.** The refusal reason is a closed
 set of machine words (`capture_not_enabled`, `domain_blocked`,

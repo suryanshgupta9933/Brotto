@@ -173,25 +173,20 @@ def test_the_switch_is_checked_before_the_domain(monkeypatch):
 # ── an internal name is not a public one, however many labels it has ───────
 
 @pytest.mark.parametrize("url", [
-    "http://nas.home/",       # two labels, and still a machine on a LAN
-    "http://wiki.internal/",
-    "http://router.lan/",
-    "http://db.corp/",
-    "http://nas.HOME/",       # case-folded before the comparison
-    "http://x.onion/",
-    "http://printer.local/",
-    "http://host.invalid/",
-    "http://gw.home.arpa/",
+    "http://box.dev/",        # the regression: `dev` is back in the deny set
+    "http://x.onion/",        # RFC 7686
+    "http://printer.local/",  # RFC 6762 mDNS
+    "http://host.invalid/",   # RFC 2606
+    "http://host.test/",      # RFC 2606
+    "http://printer.LOCAL/",  # case-folded before the comparison
+    "http://gw.home.arpa/",   # RFC 8375
+    "http://in-addr.arpa/",   # bare `arpa`; the second label is not always
+                              # the one RFC 8375 names
 ])
 def test_an_internal_suffix_is_refused(monkeypatch, url):
-    """`len(labels) < 2` refused `localhost` but let `nas.home` through, and
-    a name inside somebody's network is the same thing wearing a second
-    label. Refused for the same reason and with the same reason string.
-
-    `box.dev` used to be in this list and is not any more: `.dev` is a
-    delegated TLD, and refusing it also refused `agent.brotto.dev`, which is
-    ours. See `test_our_own_relay_resolves_with_the_switch_on` for the trade
-    this makes, which is that a `.dev` name on a LAN now resolves too."""
+    """`len(labels) < 2` refused `localhost` but let `printer.local` through,
+    and a name inside somebody's network is the same thing wearing a second
+    label. Refused for the same reason and with the same reason string."""
     _on(monkeypatch)
     assert screenshot_block_reason(url, Policy()) == REFUSAL_UNKNOWN_URL
 
@@ -199,10 +194,8 @@ def test_an_internal_suffix_is_refused(monkeypatch, url):
 @pytest.mark.parametrize("url", [
     BOARD,
     BANK,
-    "https://www.example.com/",   # `example` is the reserved TLD, not the
-                                  # registrable one — the suffix, not a name
-    "https://agent.brotto.dev/",  # our own relay — the reason `dev` is not
-                                  # in the deny set; see the test below
+    "https://www.example.com/",  # `example` is the reserved TLD, not the
+                                 # registrable one — the suffix, not a name
 ])
 def test_a_public_host_is_still_allowed_when_the_switch_is_on(monkeypatch, url):
     """The negative control: a deny list that refused everything would pass
@@ -212,20 +205,26 @@ def test_a_public_host_is_still_allowed_when_the_switch_is_on(monkeypatch, url):
 
 
 def test_our_own_relay_resolves_with_the_switch_on(monkeypatch):
-    """`dev` is a delegated TLD, not a special-use name, and this is the cost
-    of getting that wrong in the other direction: `agent.brotto.dev` is a
-    real host that the first-run wizard and the fallback UI point at, so a
-    deny set containing `dev` refused to photograph our own relay.
-
-    The trade this makes is deliberate and has to be stated, because it is
-    not free: `_raw_host` sees only labels, so a `box.dev` on somebody's
-    network is indistinguishable from a registrable `.dev` and now resolves
-    too. The right side of that trade is to leave a real delegated TLD out —
-    one name on a LAN is a user's own network, and they have their own
-    blocklist — rather than in, where it also costs a shipped host.
-    """
+    """`agent.brotto.dev` is a real host the first-run wizard and the fallback
+    UI point at. `dev` is a delegated TLD, not a special-use name, so it is not
+    in the deny set — but a TLD is also not exempted because one host on it is
+    ours. The relay is granted by exact host instead, which is the whole fix:
+    deleting `dev` from the set fixed this one host and re-opened every `.dev`
+    name on a LAN, and `box.dev` is the case that was lost."""
     _on(monkeypatch)
     assert screenshot_block_reason("https://agent.brotto.dev/", Policy()) is None
-    # …and it is the *suffix* decision, not a special case for our domain:
-    # another registrable `.dev` host is allowed by the same rule.
-    assert screenshot_block_reason("https://someone-elses.dev/", Policy()) is None
+
+
+@pytest.mark.parametrize("url", [
+    "https://sub.agent.brotto.dev/",    # not the host, a subdomain of it
+    "https://evil.brotto.dev/",         # ours is the third label, not a suffix
+    "https://brotto.dev/",              # the registrable one level up
+    "https://someone-elses.dev/",       # someone else's `.dev` site
+])
+def test_the_first_party_grant_does_not_leak(monkeypatch, url):
+    """The grant is an exact host, not a suffix — so it cannot be reached by
+    walking left or right off it. A suffix grant here would hand every
+    `*.brotto.dev` name to the capture gate, and dropping `dev` from the deny
+    set instead would hand it every `.dev` on a LAN."""
+    _on(monkeypatch)
+    assert screenshot_block_reason(url, Policy()) == REFUSAL_UNKNOWN_URL
