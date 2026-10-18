@@ -125,6 +125,7 @@ const INVISIBLE_CP = (() => {
 })();
 const splitInvisible = eval(`(${sliceFunction("splitInvisible")})`);
 const appendApprovalValue = eval(`(${sliceFunction("appendApprovalValue")})`);
+const approvalValueUnavailable = eval(`(${sliceFunction("approvalValueUnavailable")})`);
 
 let failed = 0;
 function check(name, fn) {
@@ -634,6 +635,96 @@ check("an emoji with a ZWJ is not mangled by the list", () => {
   assert((rendered.match(/<U\+200D>/g) || []).length === 3,
     `the joiner is not named once per occurrence: ${JSON.stringify(rendered)}`);
 });
+console.log("\na write whose value cannot be shown is not a write you can approve");
+
+// The card builder itself, with the collaborators it calls supplied — the
+// three value/target helpers are the real ones, so what is under test is the
+// gate in appendApprovalCard and not a copy of it.
+function buildFullCard(frame) {
+  const doc = fakeDocument();
+  const createElement = doc.createElement;
+  // Buttons hang click listeners; the fake element has nowhere to put one.
+  doc.createElement = (tag) => {
+    const n = createElement(tag);
+    n.addEventListener = () => {};
+    n.remove = () => {};
+    n.dataset = {};
+    return n;
+  };
+  globalThis.document = doc;
+  const appended = [];
+  const messagesEl = { querySelector: () => null, appendChild: (c) => appended.push(c) };
+  const sent = [];
+  const outcomes = [];
+  const resolveCard = (card, cls, text) => {
+    card.className = "approval-card resolved";
+    outcomes.push({ cls, text });
+  };
+  const appendApprovalCard = new Function(
+    "messagesEl", "NON_APPROVABLE_ACTIONS", "sendMessage", "console",
+    "appendApprovalTarget", "appendApprovalValue", "approvalValueUnavailable",
+    "resolveCard", "decisionLabel",
+    `return (${sliceFunction("appendApprovalCard")})`,
+  )(messagesEl, new Set(), (m) => { sent.push(m); return Promise.resolve({ success: true }); },
+    console, appendApprovalTarget, appendApprovalValue, approvalValueUnavailable,
+    resolveCard, (d) => String(d));
+  appendApprovalCard(frame);
+  const card = appended[0];
+  return { card, sent, outcomes };
+}
+const actionsIn = (card) => card && findEl(card, hasClass("approval-actions"));
+
+// Replay's shape: the audit masked the value and left `text_chars` behind.
+const MASKED = { x: 412, y: 288, label: "the cell C4", text: "[redacted]", text_chars: 5700 };
+
+check("a type_xy whose value is unavailable carries no Approve", () => {
+  const { card, outcomes, sent } = buildFullCard({
+    id: 7, reason: "the text shown below this card", action: { type: "type_xy" },
+    screenshot: JPEG, viewport: LAPTOP, args: MASKED, url: "https://docs.google.com/",
+  });
+  assert(card, "the card was not rendered at all — the user is left with nothing");
+  assert(!actionsIn(card), "the card still has an action row — it is answerable");
+  assert(outcomes.length === 1, `expected one decision line, got ${outcomes.length}`);
+  assert(/not recorded/i.test(outcomes[0].text) && /nothing to review/i.test(outcomes[0].text),
+    `the card does not say why: ${JSON.stringify(outcomes[0].text)}`);
+  // The server is ACK'd so a pending id is not left holding a reply nobody can
+  // send — the same reason NON_APPROVABLE_ACTIONS denies rather than drops.
+  assert(sent.length === 1 && sent[0].approved === false,
+    `the server was not told: ${JSON.stringify(sent)}`);
+});
+
+check("a value lost with no length recorded is still denied", () => {
+  // `text_chars` is the producer's flag, not the only signal: a mask literal
+  // with no count is the same failure.
+  const { card, outcomes } = buildFullCard({
+    id: 8, action: { type: "type_xy" }, screenshot: JPEG, viewport: LAPTOP,
+    args: { x: 1, y: 1, label: "the cell", text: "[redacted typed secret]" },
+  });
+  assert(!actionsIn(card), "a masked value with no text_chars is still approvable");
+  assert(outcomes.length === 1, "the denial line is missing");
+});
+
+check("a type_xy with a real value is still fully approvable", () => {
+  // The regression guard. The gate must cost nothing on the live path, where
+  // the frame carries the value and no `text_chars`.
+  const { card, sent, outcomes } = buildFullCard({
+    id: 9, reason: "the text shown below this card", action: { type: "type_xy" },
+    screenshot: JPEG, viewport: LAPTOP, args: TYPE_ARGS, url: "https://docs.google.com/",
+  });
+  assert(actionsIn(card), "a normal type_xy card lost its Approve/Deny");
+  assert(card.textContent.includes("Q3 reconciliation note."), "the value is no longer on the card");
+  assert(outcomes.length === 0, `the live card was pre-resolved: ${JSON.stringify(outcomes)}`);
+  assert(sent.length === 0, "the server was ACKed before the user answered");
+});
+
+check("a click_xy is untouched by the value gate", () => {
+  const { card } = buildFullCard({
+    id: 10, action: { type: "click_xy" }, screenshot: JPEG, viewport: LAPTOP, args: ARGS,
+    url: "https://docs.google.com/",
+  });
+  assert(actionsIn(card), "a click_xy lost its Approve/Deny");
+});
+
 console.log("\nthe regression that matters: every other approval is untouched");
 
 check("an approval with no screenshot renders the ordinary card", () => {

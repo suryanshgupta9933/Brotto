@@ -4256,6 +4256,11 @@ function splitInvisible(value) {
 // screenshot, and it coerces anything non-null: the server types
 // `str(args.get("text") or "")`, so a `text: 123` from a model would otherwise
 // be invisible here and typed as "123" — consent for a write nobody read.
+function approvalValueUnavailable(args) {
+  const raw = args?.text == null ? null : String(args.text);
+  return raw === null || args?.text_chars != null || /^\[redacted[^\]]*\]$/.test(raw);
+}
+
 function appendApprovalValue(card, args, action) {
   if (args?.text == null && action?.type !== 'type_xy') return;
   const raw = args?.text == null ? null : String(args.text);
@@ -4268,9 +4273,7 @@ function appendApprovalValue(card, args, action) {
   // carries the real value and no `text_chars`, so it still renders in full.
   // The mask test is whole-string, so a value that merely *starts* with the
   // word — "[redacted] is what it says" — is still real text that gets typed.
-  const unavailable = raw === null
-    || args?.text_chars != null
-    || /^\[redacted[^\]]*\]$/.test(raw);
+  const unavailable = approvalValueUnavailable(args);
 
   const value = document.createElement('div');
   value.className = 'approval-value';
@@ -4388,6 +4391,25 @@ function appendApprovalCard({ id, reason, action, resolved, screenshot, viewport
 
   if (resolved) {
     resolveCard(card, 'approval-decision', decisionLabel(resolved));
+    messagesEl.appendChild(card);
+    return;
+  }
+
+  // A `type_xy` whose value cannot be rendered is a write nobody can read, and
+  // an Approve button on it is one-tap consent to text that was never on
+  // screen — the exact failure this block exists to prevent. So the card stays
+  // and says why, but it is not answerable. The live frame carries the real
+  // value and no `text_chars`, so this cannot fire where the user is typing;
+  // it is the belt to that braces, on the surface where it would be visible.
+  //
+  // Denied rather than suppressed (unlike NON_APPROVABLE_ACTIONS above) so the
+  // user can see what was asked and why it cannot be agreed to, and the
+  // server's queue is still ACKed so a pending id is never left hanging.
+  if (action?.type === 'type_xy' && approvalValueUnavailable(args)) {
+    if (id) void sendMessage({ type: 'submit_approval', id, approved: false });
+    resolveCard(card, 'approval-decision',
+      'Not approvable — the text this would type was not recorded for this run, '
+      + 'so there is nothing to review. Approving it would authorise an unseen value.');
     messagesEl.appendChild(card);
     return;
   }
