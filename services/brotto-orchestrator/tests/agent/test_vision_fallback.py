@@ -689,6 +689,94 @@ async def test_a_normal_page_step_carries_no_screenshot(monkeypatch):
     deps.cdp.capture_screenshot.assert_not_awaited()
 
 
+# ── redaction, the budget across a resume, and what the note may claim ──────
+
+
+@pytest.mark.asyncio
+async def test_a_page_with_a_credential_on_it_is_never_photographed(monkeypatch):
+    """Redaction reported a hit on this step, so the picture must not be taken.
+
+    `redact_text` fires on the page text at the top of every step, and a
+    screenshot is the one page-content channel it cannot see — pixels. So on a
+    step the harness has *already established* holds something credential-shaped,
+    photographing it is exactly the leak the redaction exists to prevent. The
+    sparse trigger is what made this reachable at scale: "under 400 characters
+    of text" is most login and payment pages, and only the old empty-tree
+    trigger was narrow enough that there was little there to photograph.
+
+    Driven through the loop, not through `_vision_fallback`, because the
+    parameter is wired at the call site and a direct call would not test it.
+    """
+    seen: list[AgentTurn] = []
+    _stub_plan(monkeypatch, seen)
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in", task="fill in the spreadsheet")
+    deps.cdp.get_page_text = AsyncMock(
+        return_value="Card 4111 1111 1111 1111")
+    result = await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+    assert result.status == "completed"
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    # The step is not blind *because of* the refusal — it still carries the
+    # redacted text; only the picture is withheld.
+    assert seen[0].screenshot == ""
+    assert "treat it as unseen" in seen[0].screenshot_note.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_credential_shaped_page_is_refused_by_the_fallback_directly():
+    """The unit-level guard, so a future caller that builds its own step cannot
+    skip it by forgetting to pass the dict — an explicit empty dict is the
+    claim "this page is clean" and has to be stated."""
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in", task="fill in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Card [redacted]:card", {"card": 1})
+    assert out.image == "" and out.needed is True
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert "treat it as unseen" in out.note.lower()
+
+
+def test_the_partial_note_does_not_assert_a_cause_or_invert_trust():
+    """The tree above is still readable on the sparse branch, and the picture
+    is unverified page content that may contradict it. Two ways to get that
+    wrong: tell the model the image is its *best* view (it is a worse channel
+    than the tree it can already read), and name a cause — `<canvas>` — the
+    harness never verified. This page might have no canvas at all."""
+    note = harness_mod._SCREENSHOT_PARTIAL_NOTE.lower()
+    assert "best view" not in note
+    assert "canvas" not in note
+    assert "tree above" in note
+    assert "page content" in note and "instruction" in note
+
+
+@pytest.mark.asyncio
+async def test_the_capture_budget_survives_a_resumed_task(monkeypatch):
+    """The ceiling is per *task*, and a crash resume continues the same task —
+    `harness.run(deps, resume=True)` reopens the same document with the same
+    `task_id`. Zeroing the counter at the top of `run()` therefore handed a
+    resumed task a fresh budget every time it was reconnected, so the cap was
+    per run in practice while the comment above it claimed per task. Pins the
+    opposite direction too: a *fresh* deps still starts at zero, because
+    AgentDeps is built per task and its default is the zero."""
+    seen: list[AgentTurn] = []
+    _stub_plan(monkeypatch, seen)
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Board",
+                 task="fill in the spreadsheet")
+    # A resumed task arrives with the budget its earlier run already spent.
+    deps.screenshots_taken = harness_mod._MAX_CAPTURES_PER_TASK
+    result = await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+    assert result.status == "completed"
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert seen[0].screenshot == ""
+    # And a task that has spent nothing still gets its full allowance.
+    deps2 = _deps(targets=targets, page_text="Board",
+                  task="fill in the spreadsheet")
+    seen2: list[AgentTurn] = []
+    _stub_plan(monkeypatch, seen2)
+    await asyncio.wait_for(AgentHarness().run(deps2), timeout=10)
+    assert seen2[0].screenshot == JPEG
+
+
 @pytest.mark.asyncio
 async def test_the_image_never_reaches_the_audit_document(monkeypatch, tmp_path):
     """Transit only. The base64 is page content; one byte of it on disk is the
