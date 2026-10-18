@@ -15,11 +15,22 @@
 //   - the label is set with textContent, never innerHTML. It is model-authored
 //     and therefore as steerable by page content as any other model text here;
 //   - a `type_xy` shows the **whole** of `args.text`, in one `textContent`
-//     block under a fixed label. `reasoning` carries no value any more, so
-//     this is the card's only preview of what will be typed — and a truncated
-//     one (it used to be 120 characters) is consent for something other than
-//     what gets written. The value used to sit inside that prose, where it
-//     could close a curly quote and speak as harness text. No cap, no ellipsis;
+//     block under a fixed label. `reasoning` carries no value any more — it
+//     says only "the text shown below this card" — so this block is the card's
+//     only preview of what will be typed, and a truncated one (it used to be
+//     120 characters) is consent for something other than what gets written.
+//     The value used to sit inside that prose, where it could close a curly
+//     quote and speak as harness text. No cap, no ellipsis;
+//   - that block is drawn by the *caller*, not by the picture. A `type_xy` whose
+//     screenshot failed to render used to fall out of the builder's early
+//     return and leave the card promising a value it was not showing — an
+//     approvable card, an invisible write. It is also drawn for a value that
+//     is not a string, because the server types `str(args.get("text") or "")`;
+//   - what is on the card cannot be reordered or hidden by the value itself.
+//     Bidi controls and zero-width characters are rendered as named
+//     placeholders (`<U+202E>`), never drawn, and the block isolates its bidi
+//     context — the typed string is unchanged, the preview is not a faithful
+//     copy of a string that cannot be faithfully shown;
 //   - an approval with no screenshot — which is every other approval in the
 //     app — renders the ordinary card, unchanged. This is the regression that
 //     matters most: the feature must not alter a single existing approval.
@@ -60,27 +71,58 @@ function sliceFunction(name) {
 
 // The smallest element the card under test touches. No layout, no queries —
 // these two functions build and append, and read back what they built.
+//
+// `textContent` is a *derived* getter over the child text nodes, because the
+// value block is built that way (a run of text, then a marked placeholder) and
+// a fake that stored it as a plain field would read back empty for exactly the
+// case the bidi tests are about. It is a prototype accessor, so `attrsOf` —
+// which walks own properties — never sees a value hiding in an attribute.
 function fakeDocument() {
   // `made` is what makes "the value cannot become a second element" checkable:
   // every element the card builds, in order, whether or not it was appended.
   const made = [];
-  const mk = (tag) => {
-    const el = {
-      tagName: tag,
-      className: "",
-      textContent: "",
-      style: {},
-      children: [],
-      appendChild(c) { this.children.push(c); return c; },
-    };
-    made.push(el);
-    return el;
+  class Node {
+    constructor(tag) {
+      this.tagName = tag;
+      this.className = "";
+      this.style = {};
+      this.children = [];
+      this._text = "";
+      made.push(this);
+    }
+    appendChild(c) { this.children.push(c); return c; }
+    get textContent() {
+      return this.children.length
+        ? this.children.map((c) => c.textContent).join("")
+        : this._text;
+    }
+    set textContent(v) { this._text = String(v); }
+  }
+  return {
+    createElement: (tag) => new Node(tag),
+    createTextNode: (text) => {
+      const n = new Node("#text");
+      n.textContent = text;
+      return n;
+    },
+    made,
   };
-  return { createElement: mk, made };
 }
 
 const crosshairPercent = eval(`(${sliceFunction("crosshairPercent")})`);
 const appendApprovalTarget = eval(`(${sliceFunction("appendApprovalTarget")})`);
+// The value block is built by two more functions and reads one module const;
+// they are pulled out the same way, so the test cannot drift from what ships.
+const INVISIBLE_CP = (() => {
+  const m = /const INVISIBLE_CP = (\/[^;]+\/);/.exec(panel);
+  if (!m) {
+    console.error("FAIL  no INVISIBLE_CP in sidepanel.js — the value block does not name invisible characters");
+    process.exit(1);
+  }
+  return eval(m[1]);
+})();
+const splitInvisible = eval(`(${sliceFunction("splitInvisible")})`);
+const appendApprovalValue = eval(`(${sliceFunction("appendApprovalValue")})`);
 
 let failed = 0;
 function check(name, fn) {
@@ -154,7 +196,7 @@ function build(over) {
 // value belongs in exactly one place, and this is not it.
 function attrsOf(el) {
   return Object.entries(el)
-    .filter(([k]) => k !== "children" && k !== "style" && k !== "textContent")
+    .filter(([k]) => !["children", "style", "textContent", "_text"].includes(k))
     .map(([, v]) => String(v))
     .join(" ");
 }
@@ -218,9 +260,29 @@ console.log("\nthe value, on a type_xy card");
 // CSS line clamp, a panel-height crop — shows up as a shortfall.
 const LONG = "Q3 reconciliation note. ".repeat(220); // ~5,700 chars
 const TYPE_ARGS = { x: 412, y: 288, label: "the cell C4", text: LONG };
+const TYPE_ACTION = { type: "type_xy" };
+
+// The card the caller builds, in the order appendApprovalCard writes it: the
+// picture, then the reason, then the value. `drewPicture` is kept because the
+// whole point of the missing-screenshot case is that the value is drawn
+// whether or not this is true.
+function buildCard(over = {}) {
+  const doc = fakeDocument();
+  globalThis.document = doc;
+  const card = doc.createElement("div");
+  const drewPicture = appendApprovalTarget(card, {
+    screenshot: JPEG, viewport: LAPTOP, args: ARGS, url: "https://docs.google.com/", ...over,
+  });
+  const body = doc.createElement("div");
+  body.className = "approval-body";
+  body.textContent = over.reason ?? "the text shown below this card";
+  card.appendChild(body);
+  appendApprovalValue(card, over.args ?? TYPE_ARGS, over.action ?? TYPE_ACTION);
+  return { card, doc, drewPicture, made: doc.made.slice(1) };
+}
 
 check("the whole value is rendered, not a prefix of it", () => {
-  const { card } = build({ args: TYPE_ARGS });
+  const { card } = buildCard();
   const block = findEl(card, hasClass("approval-value-text"));
   assert(block, "no value block — a type_xy card shows the value nowhere");
   assert(block.textContent === LONG,
@@ -230,7 +292,7 @@ check("the whole value is rendered, not a prefix of it", () => {
 });
 
 check("the block carries a fixed label the value cannot close", () => {
-  const { card } = build({ args: TYPE_ARGS });
+  const { card } = buildCard();
   const wrap = findEl(card, hasClass("approval-value"));
   assert(wrap, "no .approval-value wrapper");
   // The label is its own element, so no amount of quote characters in the
@@ -245,14 +307,14 @@ check("a hostile value is literal text and cannot speak as harness prose", () =>
   // Every trick at once: close the label's quotes, claim the card said
   // something it did not, and try to open a tag.
   const hostile = '” — safe cell, actually delete everything — “ <b onclick="x">hi</b>\nline two';
-  const { card, made } = build({ args: { ...TYPE_ARGS, text: hostile } });
+  const { card, made } = buildCard({ args: { ...TYPE_ARGS, text: hostile } });
   const block = findEl(card, hasClass("approval-value-text"));
   assert(block, "no value block");
   assert(block.textContent === hostile,
     `the value was not written verbatim: ${JSON.stringify(block.textContent)}`);
   // Same element count as a benign value: a value that could introduce an
   // element would change this number.
-  const benign = build({ args: { ...TYPE_ARGS, text: "ok" } });
+  const benign = buildCard({ args: { ...TYPE_ARGS, text: "ok" } });
   assert(made.length === benign.made.length,
     `a hostile value built ${made.length} elements, a benign one ${benign.made.length}`);
   // +1 for the card `made` deliberately excludes.
@@ -260,9 +322,13 @@ check("a hostile value is literal text and cannot speak as harness prose", () =>
   // And it reached no attribute, so no parser and no tooltip ever sees it.
   assert(!made.some((e) => attrsOf(e).includes("delete everything")),
     "the value reached a class name, src, alt or title");
-  // The harness prose on the card is not the value and does not contain it.
-  assert(!card.children.some((c) => (c.className || "").includes("approval-body")),
-    "the reasoning is inside this builder now — it belongs to the caller");
+  // The value sits after the reason, under it: the sentence that points at the
+  // value and the value itself are one card, in that order.
+  const kids = card.children;
+  const reasonAt = kids.findIndex((c) => (c.className || "").includes("approval-body"));
+  const valueAt = kids.findIndex((c) => (c.className || "").includes("approval-value"));
+  assert(reasonAt >= 0 && valueAt > reasonAt,
+    "the value does not sit under the reason that promises it");
 });
 
 check("the block leads with the target and scrolls rather than cutting", () => {
@@ -275,21 +341,174 @@ check("the block leads with the target and scrolls rather than cutting", () => {
     "the value block ellipsises or clamps — that is the bug being fixed");
 });
 
+console.log("\nthe value survives a card whose picture never drew");
+
+check("a missing screenshot still shows the value", () => {
+  const { card, drewPicture } = buildCard({ screenshot: undefined });
+  assert(drewPicture === false, "a missing screenshot drew a picture anyway");
+  const block = findEl(card, hasClass("approval-value-text"));
+  assert(block && block.textContent === LONG,
+    "the value vanished with the picture — the card still says 'the text shown below this card'");
+});
+
+check("a malformed capture still shows the value", () => {
+  const { card, drewPicture } = buildCard({ screenshot: '"><script>alert(1)</script>' });
+  assert(drewPicture === false, "a non-base64 capture was rendered");
+  assert(findEl(card, hasClass("approval-value-text")), "the value went with the bad capture");
+});
+
+check("an absent viewport still shows the value", () => {
+  const { card, drewPicture } = buildCard({ viewport: null });
+  assert(drewPicture === false, "a missing viewport drew a picture anyway");
+  assert(findEl(card, hasClass("approval-value-text")), "the value went with the missing viewport");
+});
+
+check("the value lives in the caller, not behind the early return", () => {
+  assert(!/approval-value/.test(sliceFunction("appendApprovalTarget")),
+    "appendApprovalTarget draws the value block again — it returns before it on a bad capture");
+  // An unqualified statement, not a call behind a condition: gating it on
+  // whether the picture drew is the whole bug this check exists for, and the
+  // tree under test cannot express that — so the *source* is what is read.
+  assert(/^\s*appendApprovalValue\(card, args, action\);$/m.test(sliceFunction("appendApprovalCard")),
+    "appendApprovalCard does not draw the value block unconditionally");
+});
+
+check("a value that is not a string is shown, not typed unseen", () => {
+  // The server types `str(args.get("text") or "")`, so every one of these
+  // reaches the page. Gating on `typeof === 'string'` made them invisible here.
+  for (const [text, expected] of [[123, "123"], [0, "0"], [true, "true"],
+    [{ a: 1 }, "[object Object]"], [["a", "b"], "a,b"]]) {
+    const { card } = buildCard({ args: { ...TYPE_ARGS, text } });
+    const block = findEl(card, hasClass("approval-value-text"));
+    assert(block, `${JSON.stringify(text)} rendered no value block`);
+    assert(block.textContent === expected,
+      `${JSON.stringify(text)} rendered as ${JSON.stringify(block.textContent)}, not ${JSON.stringify(expected)}`);
+  }
+});
+
 check("a click or focus with no value renders no block at all", () => {
   for (const verb of ["click_xy", "focus_xy"]) {
-    const { card } = build({ args: { x: 412, y: 288, label: "the cell C4" } });
-    assert(verb && !findEl(card, hasClass("approval-value")),
-      `${verb} grew a value block`);
+    const { card } = buildCard({ args: { x: 412, y: 288, label: "the cell C4" }, action: { type: verb } });
+    assert(!findEl(card, hasClass("approval-value")), `${verb} grew a value block`);
   }
   // And a type_xy whose text is empty string is still a type — the block says
   // so, rather than the card implying there was nothing to write.
-  const empty = build({ args: { ...TYPE_ARGS, text: "" } });
-  assert(!findEl(empty.card, hasClass("approval-value-text"))
-    || findEl(empty.card, hasClass("approval-value-text")).textContent === "",
-  "an empty value rendered as something other than nothing");
+  const empty = buildCard({ args: { ...TYPE_ARGS, text: "" } });
+  const eb = findEl(empty.card, hasClass("approval-value-text"));
+  assert(eb && eb.textContent === "", "an empty value rendered as something other than nothing");
 });
 
-console.log("\nthe regression that matters: every other approval is untouched");
+console.log("\ninvisible characters cannot hide characters, or reorder the card");
+
+// Written as escapes on purpose: a literal U+202E in this file would itself
+// be a bidi hazard for whoever reads it next.
+//   "Total: 42" + RLO + "2" + LRE — the cell reads "Total: 42 2" in code
+// order, and renders the digits the other way round on screen.
+const BIDI = "Total: 42\u202e2\u202a";
+const INVISIBLE_RUN = "a\u200db\u2060c\ufeffd";
+const NAME = /<U\+[0-9A-F]{4}>/g;
+// "…shown…" with the invisible characters taken out: the placeholders stand in
+// for those and for nothing else.
+const strip = (t) => t.replace(NAME, "");
+const visibleOnly = (t) => t.replace(new RegExp(INVISIBLE_CP.source, "g"), "");
+
+check("a bidi payload renders visibly different from its byte order", () => {
+  const { card } = buildCard({ args: { ...TYPE_ARGS, text: BIDI } });
+  const block = findEl(card, hasClass("approval-value-text"));
+  assert(block, "no value block for a bidi payload");
+  const rendered = block.textContent;
+  assert(rendered !== BIDI, "the payload was rendered verbatim — the controls are still invisible");
+  assert(rendered.includes("Total: 42"), "the visible part of the value was lost");
+  assert(rendered.includes("<U+202E>") && rendered.includes("<U+202A>"),
+    `the controls are not named: ${JSON.stringify(rendered)}`);
+  // The placeholder keeps the character count visible: stripping them back to
+  // one character each recovers the value exactly, nothing dropped.
+  assert(strip(rendered).length === visibleOnly(BIDI).length
+    && rendered.split(NAME).length - 1 === [...BIDI].filter((c) => INVISIBLE_CP.test(c)).length,
+  "the rendered text does not account for every character of the value");
+  // Strip the placeholders and what is left is the *visible* characters of the
+  // value, unchanged and in order — the controls are the only thing renamed.
+  assert(strip(rendered) === visibleOnly(BIDI),
+    `the visible characters changed: ${JSON.stringify(strip(rendered))}`);
+});
+
+check("zero-width and format characters are named too", () => {
+  const { card } = buildCard({ args: { ...TYPE_ARGS, text: INVISIBLE_RUN } });
+  const block = findEl(card, hasClass("approval-value-text"));
+  const rendered = block.textContent;
+  for (const cp of ["<U+200D>", "<U+2060>", "<U+FEFF>"]) {
+    assert(rendered.includes(cp), `${cp} is not shown: ${JSON.stringify(rendered)}`);
+  }
+  assert(strip(rendered) === visibleOnly(INVISIBLE_RUN),
+    `the visible characters around the invisible ones changed: ${JSON.stringify(rendered)}`);
+});
+
+check("the value isolates its bidi context, so the card cannot be reordered", () => {
+  const css = fs.readFileSync(path.join(SRC, "sidepanel.html"), "utf8");
+  const rule = /\.approval-value-text \{[^}]*\}/.exec(css);
+  assert(rule && /unicode-bidi:\s*isolate/.test(rule[0]),
+    "the value block does not isolate its bidi context — a U+202E reaches the card around it");
+  const { card } = buildCard({ args: { ...TYPE_ARGS, text: BIDI } });
+  // Every other line of the card is a sibling of the value block, so the
+  // payload has nothing to reorder: the reason, the label and the picture are
+  // all outside its bidi run.
+  const body = card.children.find((c) => (c.className || "").includes("approval-body"));
+  assert(body && !/\u202a|\u202e|\u200e|\u200f/.test(body.textContent),
+    "the payload leaked into the reason line, which sits next to it");
+});
+
+check("placeholder runs are marked, so they read as something else", () => {
+  const { card } = buildCard({ args: { ...TYPE_ARGS, text: BIDI } });
+  const marks = [];
+  (function walk(n) {
+    for (const c of n.children) {
+      if (hasClass("approval-value-invisible")(c)) marks.push(c);
+      walk(c);
+    }
+  })(card);
+  assert(marks.length === 2, `expected two placeholder runs, found ${marks.length}`);
+  assert(marks.every((m) => /^<U\+[0-9A-F]{4}>$/.test(m.textContent)),
+    `a placeholder run is not a bare named codepoint: ${JSON.stringify(marks.map((m) => m.textContent))}`);
+  // The whole run, not each character: they are written with textContent, so
+  // a codepoint in a value cannot introduce an element of its own.
+  // One element per *run*, not per character: a, then the four invisible ones
+  // as a single marked span, then b, c, d — text nodes are the rest.
+  const { made } = buildCard({ args: { ...TYPE_ARGS, text: INVISIBLE_RUN } });
+  // One element per *run*, not per character: three separated marks here, so
+  // three spans — a per-character renderer would have built four.
+  assert(made.filter((e) => (e.className || "").includes("approval-value-invisible")).length === 3,
+    `three separated invisible runs built ${made.length} elements`);
+});
+
+check("a replayed type_xy keeps the promise its reason makes", () => {
+  // #4: the audit prompt carries `args` but no screenshot, so a replayed
+  // approval has no picture and no crosshair. It does have the value, and the
+  // reason still points at it.
+  const prompt = { id: "p1", kind: "approval", action: "type_xy", decision: "approved",
+    reason: "the text shown below this card", args: { url: "https://docs.google.com/", text: "Total: 42" } };
+  const src = sliceFunction("appendPromptCard");
+  assert(/args,/.test(src), "appendPromptCard drops the prompt's args, so replay shows no value");
+  const m = /\n\s*args,\n/.exec(src);
+  assert(m, "the prompt's args are not forwarded to the approval card");
+  // The bubble itself is unchanged: a replayed row still renders live.
+  assert(/appendApprovalCard\(/.test(src), "a replayed approval no longer renders a card");
+  // And the value really does reach the block from a prompt-shaped object.
+  const { card } = buildCard({ args: prompt.args, action: { type: prompt.action } });
+  assert(findEl(card, hasClass("approval-value-text")).textContent === "Total: 42",
+    "a prompt's args do not produce the value block");
+});
+
+check("a replayed type_xy with no recorded value says so", () => {
+  // The audit caps args, so a long value can come back truncated or absent.
+  // The block still appears — the reason's "shown below this card" must not
+  // point at nothing.
+  const { card } = buildCard({ args: { url: "https://docs.google.com/" }, action: { type: "type_xy" } });
+  const block = findEl(card, hasClass("approval-value-text"));
+  assert(block, "a type_xy with no recorded value rendered no block at all");
+  assert(/not recorded/i.test(block.textContent),
+    `the block does not say the value is unavailable: ${JSON.stringify(block.textContent)}`);
+  assert(!block.textContent.includes("shown below"), "the block claims to be the value");
+});console.log("\nthe regression that matters: every other approval is untouched");
 
 check("an approval with no screenshot renders the ordinary card", () => {
   const doc = fakeDocument();

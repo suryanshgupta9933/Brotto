@@ -578,6 +578,40 @@ async def test_a_failed_focus_types_nothing(trail):
     deps.cdp.type_text_at_focus.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [123, ["4", "2"], {"value": "42"}, None, 4.2, True])
+async def test_a_value_that_is_not_a_string_refuses(trail, bad):
+    """Approve-a-write-you-cannot-see.
+
+    The panel gates its value block on `typeof args?.text === 'string'`, so a
+    non-string produced a card with *no value on it* — which a human can
+    approve — and then `str(...)` typed a value nobody was shown. This is
+    refused, not coerced, for the same reason a `bool` is not a coordinate
+    two checks earlier: `type_xy` writes into the user's own document, and
+    silently reinterpreting the model's argument is the wrong direction.
+    """
+    deps, frames, _ = _deps()
+    out = await _execute_action(_type(bad), deps, audit=trail, turn=TURN)
+    assert _EXEC_FAILURE in out, out
+    deps.cdp.focus_xy.assert_not_awaited()
+    deps.cdp.type_text_at_focus.assert_not_awaited()
+    assert frames == [], "a card was raised for a value nobody could read"
+    # The refusal names the *type* it got, never the value — this string is
+    # written to the audit document.
+    assert type(bad).__name__ in out, out
+
+
+@pytest.mark.asyncio
+async def test_a_refused_value_never_reaches_the_frame(trail, tmp_path):
+    """The frame is the only place the value is ever shown. A refusal that
+    still put it there would put the model back on disk's side of the fence."""
+    deps, frames, _ = _deps()
+    await _execute_action(_type({"value": "hunter2"}), deps, audit=trail, turn=TURN)
+    assert frames == []
+    text = "".join(p.read_text() for p in tmp_path.glob("*.json"))
+    assert "hunter2" not in text
+
+
 # ── the page moves while the human reads the card ──────────────────────────
 
 def _moving_page(second: dict):
@@ -751,6 +785,12 @@ async def test_the_typed_value_still_never_reaches_the_audit_document(
     # Masked, not absent: the document keeps the fact and the length.
     assert prompts[0]["args"]["text"] == harness_mod.REDACTED
     assert prompts[0]["args"]["text_chars"] == 7
+    # And the reason records the length too, as a length. There is no card in
+    # a JSON file, so the audit copy must not talk about one — but the count
+    # the code computes is the one fact about the value a reader may keep.
+    reason = prompts[0]["reason"]
+    assert "7 characters" in reason, reason
+    assert "card" not in reason, reason
 
     text = "".join(p.read_text() for p in tmp_path.glob("*.json"))
     for part in ("hunter2", "hunter", "nter2"):

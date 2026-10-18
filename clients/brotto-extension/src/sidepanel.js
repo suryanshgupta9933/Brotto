@@ -1808,6 +1808,13 @@ function appendPromptCard(p) {
     id: p.id,
     reason: p.reason || 'Brotto wanted approval for this action.',
     action: { type: p.action, url: args.url },
+    // The audit prompt carries `args` but no screenshot, so a replayed
+    // `type_xy` has no picture and no crosshair — it never had them. It does
+    // have the value, and the reason still points at it, so it is forwarded:
+    // dropping it left a card saying "the text shown below this card" with
+    // nothing below it. Rows replay into live chat bubbles; that is unchanged,
+    // the bubble just keeps the promise this time.
+    args,
     resolved: p.decision || 'denied',
   });
 }
@@ -4145,6 +4152,12 @@ function crosshairPercent(x, y, viewport) {
 // blind click has to be judged from. Returns false and appends nothing when the
 // frame carries no screenshot, which is every existing approval_required: that
 // card is byte-for-byte what it was.
+//
+// It deliberately knows nothing about the *value* a `type_xy` writes. That
+// block belongs to the caller: this function bails out before drawing anything
+// when the capture failed, and a value that is only drawn here would leave a
+// card promising "the text shown below this card" with nothing below it —
+// approvable, and unreadable.
 function appendApprovalTarget(card, { screenshot, viewport, args, url }) {
   const pct = crosshairPercent(args?.x, args?.y, viewport);
   // A base64 jpeg, nothing else. The field is untrusted and goes straight into
@@ -4179,37 +4192,6 @@ function appendApprovalTarget(card, { screenshot, viewport, args, url }) {
   shot.appendChild(mark);
   card.appendChild(shot);
 
-  // The text this click will write, on `type_xy`, in full.
-  //
-  // `reasoning` used to be the only preview, capped at 120 characters, so a
-  // human could approve 120 characters and have 4,000 land in the cell — and
-  // because the value sat inside that sentence's curly quotes, a value could
-  // close them and speak as harness prose on a consent surface. The server no
-  // longer puts the value in `reasoning` at all; it arrives here in `args.text`
-  // untruncated, and the panel's job is to show all of it.
-  //
-  // So: no cap, no ellipsis, no "show more" — what the user reads is the whole
-  // of what gets written, and a long value scrolls. `textContent` and nothing
-  // else: the value is arbitrary text, steerable by whatever the page fed the
-  // model, and this is the one surface where it must not be able to speak.
-  // The label is its own element, so no value can close it.
-  if (typeof args?.text === 'string') {
-    const value = document.createElement('div');
-    value.className = 'approval-value';
-
-    const valueLabel = document.createElement('div');
-    valueLabel.className = 'approval-value-label';
-    valueLabel.textContent = 'Text typed there — the whole value, exactly as it will be written:';
-    value.appendChild(valueLabel);
-
-    const valueText = document.createElement('div');
-    valueText.className = 'approval-value-text';
-    valueText.textContent = args.text;
-    value.appendChild(valueText);
-
-    card.appendChild(value);
-  }
-
   if (pct.outside) {
     const warn = document.createElement('div');
     warn.className = 'approval-preview';
@@ -4217,6 +4199,90 @@ function appendApprovalTarget(card, { screenshot, viewport, args, url }) {
     card.appendChild(warn);
   }
   return true;
+}
+
+// Codepoints that draw nothing but act on their neighbours: the bidi
+// controls (U+202A–U+202E, U+2066–U+2069, U+200E/U+200F, U+061C) can reverse
+// the card *around* the value — the human approves "Total: 12" while the
+// pixels read "Total: 21" — and the zero-width/format set (U+200B–U+200D,
+// U+2060, U+FEFF) can hide characters outright. The full original string is
+// what gets typed either way, so the panel has to *show* them rather than
+// render them faithfully.
+const INVISIBLE_CP = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u200b-\u200d\u2060\ufeff]/;
+
+// Splits a value into runs of ordinary text and runs of invisible characters.
+// Only used to decide element boundaries — every run is still written with
+// textContent, so no part of the value can introduce markup.
+function splitInvisible(value) {
+  const runs = [];
+  let buf = '';
+  let hidden = false;
+  for (const ch of value) {
+    const isHidden = INVISIBLE_CP.test(ch);
+    if (isHidden !== hidden) {
+      if (buf) runs.push({ text: buf, hidden });
+      buf = '';
+      hidden = isHidden;
+    }
+    buf += ch;
+  }
+  if (buf) runs.push({ text: buf, hidden });
+  return runs;
+}
+
+// The text a `type_xy` will write, on the card, in full — the only preview of
+// it, because `reasoning` deliberately carries no part of the value.
+//
+// `reasoning` used to be the preview, capped at 120 characters, so a human
+// could approve 120 characters and have 4,000 land in the cell — and because
+// the value sat inside that sentence's curly quotes it could close them and
+// speak as harness prose on a consent surface. The server no longer puts the
+// value in `reasoning`; it says only "the text shown below this card", which
+// makes this block the promise the card has to keep.
+//
+// So it is drawn for every frame carrying a value, whatever happened to the
+// screenshot, and it coerces anything non-null: the server types
+// `str(args.get("text") or "")`, so a `text: 123` from a model would otherwise
+// be invisible here and typed as "123" — consent for a write nobody read.
+function appendApprovalValue(card, args, action) {
+  if (args?.text == null && action?.type !== 'type_xy') return;
+  const raw = args?.text == null ? null : String(args.text);
+
+  const value = document.createElement('div');
+  value.className = 'approval-value';
+
+  const valueLabel = document.createElement('div');
+  valueLabel.className = 'approval-value-label';
+  valueLabel.textContent = 'Text typed there — the whole value, exactly as it will be written:';
+  value.appendChild(valueLabel);
+
+  const valueText = document.createElement('div');
+  valueText.className = 'approval-value-text';
+  if (raw === null) {
+    // A replayed `type_xy` whose args lost their text (the audit caps them).
+    // The block still appears, and says so, rather than leaving the reason's
+    // "shown below this card" pointing at nothing.
+    valueText.className = 'approval-value-text unavailable';
+    valueText.textContent = 'This value was not recorded for this run.';
+  } else {
+    for (const run of splitInvisible(raw)) {
+      if (!run.hidden) {
+        valueText.appendChild(document.createTextNode(run.text));
+        continue;
+      }
+      // Named, not dropped: the placeholder keeps the character count visible
+      // and makes the reordering attempt legible instead of silent.
+      const span = document.createElement('span');
+      span.className = 'approval-value-invisible';
+      span.textContent = [...run.text]
+        .map((c) => `<U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}>`)
+        .join('');
+      valueText.appendChild(span);
+    }
+  }
+  value.appendChild(valueText);
+
+  card.appendChild(value);
 }
 
 function appendApprovalCard({ id, reason, action, resolved, screenshot, viewport, args, url }) {
@@ -4265,6 +4331,13 @@ function appendApprovalCard({ id, reason, action, resolved, screenshot, viewport
     body.textContent = reason;
     card.appendChild(body);
   }
+
+  // Right under the reason it belongs to, and *outside* appendApprovalTarget:
+  // that reason is the sentence promising the value ("the text shown below
+  // this card"), so the two must appear together on every surface that can
+  // draw one — including a `type_xy` whose screenshot never rendered, which
+  // is still an approvable card.
+  appendApprovalValue(card, args, action);
 
   // The destination, never the action's internal name. It read
   // `_policy_navigation → https://github.com`, which is the harness's label for

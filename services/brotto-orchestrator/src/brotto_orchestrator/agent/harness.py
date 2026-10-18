@@ -1652,7 +1652,7 @@ def _focus_reason(x, y, label) -> str:
     )
 
 
-def _type_reason(x, y, label, text=None) -> str:
+def _type_reason(x, y, label) -> str:
     # The user must see what is about to be written, and `text` reaches the
     # frame — so the panel renders the whole value itself. Two things must not
     # happen here.
@@ -1677,6 +1677,22 @@ def _type_reason(x, y, label, text=None) -> str:
         f"The crosshair is at ({x},{y}) — {label}. Typing there is a press, "
         f"a release, and then the text shown below this card inserted at "
         f"that point."
+    )
+
+
+def _type_audit_reason(x, y, label, chars: int) -> str:
+    """The same action, written for the document rather than the card.
+
+    There is no card in a JSON file, so the prose above cannot be reused
+    here: it would tell a reader of `logs/sessions/` that a value is shown
+    a few lines below a card they will never see. The length is the one
+    fact about a redacted value a reader may keep, so the audit copy states
+    it and states nothing else about the value.
+    """
+    return (
+        f"This page is a canvas, so there is no field to type into by name. "
+        f"The crosshair is at ({x},{y}) — {label}. Typing there is a press, "
+        f"a release, and then {chars} characters inserted at that point."
     )
 
 
@@ -1771,6 +1787,22 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
     if not _is_int(x) or not _is_int(y):
         return refuse(
             f"x and y must be whole pixel coordinates, got {x!r} and {y!r}."
+        )
+    # One derivation of the value, checked once, used by both the frame and
+    # the dispatch below — the two were separate readings of one argument,
+    # which is the shape of "approved `None`, typed `\"\"`".
+    #
+    # Refused rather than coerced, for the same reason a bool is not a
+    # coordinate above. The panel gates its value block on
+    # `typeof args?.text === 'string'`, so a non-string raised a card with no
+    # value on it — approvable — and then `str(...)` typed something into the
+    # user's document that nobody on that card had been shown. Coercing fixes
+    # the panel and leaves the consent surface as wrong as it was. The type
+    # name, never the value: this string is written to disk.
+    typed = args.get("text")
+    if verb == "type" and not isinstance(typed, str):
+        return refuse(
+            f"text must be a string, got {type(typed).__name__}."
         )
 
     # One live read: the viewport the bound check uses and the element that
@@ -1876,13 +1908,11 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
     audit_args: dict = frame_args
     frame_reason: str | None = None
     if verb == "type":
-        frame_args["text"] = args.get("text")
+        frame_args["text"] = typed
         audit_args, _ = _scrubbed(call, True)
-        frame_reason = _COORDINATE_REASONS["type"](x, y, label,
-                                                    args.get("text"))
-        audit_reason = _COORDINATE_REASONS["type"](
-            x, y, label,
-            f"{audit_args['text']} ({audit_args['text_chars']} characters)")
+        frame_reason = _COORDINATE_REASONS["type"](x, y, label)
+        audit_reason = _type_audit_reason(x, y, label,
+                                          audit_args["text_chars"])
     else:
         audit_reason = _COORDINATE_REASONS[verb](x, y, label)
     approved = await _ask_user(
@@ -1983,7 +2013,7 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
         focused = await cdp.focus_xy(x, y)
         if _EXEC_FAILURE in focused:
             return focused
-        result = await cdp.type_text_at_focus(str(args.get("text") or ""))
+        result = await cdp.type_text_at_focus(typed)
         if _EXEC_FAILURE in result:
             return result
         await cdp.refresh_target_map()

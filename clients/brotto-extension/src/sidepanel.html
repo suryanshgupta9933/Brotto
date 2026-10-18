@@ -1193,6 +1193,22 @@
       overflow-wrap: anywhere;
       max-height: 220px;
       overflow-y: auto;
+      /* The value's own bidi context cannot escape this block, so an embedded
+         U+202E reorders the characters *inside* the value — which are already
+         shown as visible placeholders — and never the card around it. */
+      unicode-bidi: isolate;
+    }
+    /* A character the panel refuses to draw is named, never dropped. */
+    .approval-value-invisible {
+      font-family: var(--font-mono);
+      color: var(--ink-2);
+      background: var(--paper);
+      border: 1px solid var(--rule-2);
+      padding: 0 2px;
+    }
+    .approval-value-text.unavailable {
+      font-style: italic;
+      color: var(--ink-2);
     }
 
     .inline-log {
