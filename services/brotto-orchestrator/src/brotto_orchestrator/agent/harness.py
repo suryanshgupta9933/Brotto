@@ -1033,10 +1033,19 @@ def _turn_to_input(turn: AgentTurn) -> str | list:
     the note in the prompt body left it thousands of tokens away with the
     question as its nearest neighbour, which is the shape the AX envelope
     avoids by being welded to the tree it wraps.
+
+    When there is no image the note is still delivered, as the last part:
+    a refused or failed capture is a sentence the model has to read, and
+    dropping it renders the refusal as a silently blank page. A turn with
+    neither an image nor a note is an ordinary turn and stays a bare `str`.
     """
     prompt = _turn_to_prompt(turn)
+    note = turn.screenshot_note
     if not turn.screenshot:
-        return prompt
+        # A refused or failed capture arrives here as `screenshot=""` plus a
+        # note. Dropping the note made the refusal indistinguishable from a
+        # blank page: the task failed for a reason the model was never told.
+        return [prompt, note] if note else prompt
     return [
         prompt,
         turn.screenshot_note,

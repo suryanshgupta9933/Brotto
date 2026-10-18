@@ -285,6 +285,28 @@ def test_no_screenshot_means_the_prompt_is_unchanged():
     assert "Screenshot" not in _turn_to_prompt(turn)
 
 
+def test_a_refused_capture_still_tells_the_model_it_saw_nothing():
+    """The regression this file exists to prevent: `_VisionFallback.note` was
+    asserted on in every other test here, and the note was still dropped on the
+    floor by `_turn_to_input`, so a refused capture read to the model as a
+    blank page and the task failed for no stated reason. Assert on what the
+    model receives, not on the NamedTuple."""
+    turn = AgentTurn(
+        task="read the board", step_number=1, scratchpad_entries=[],
+        current_url="https://example.com/board", current_page_title="Board",
+        ax_tree="[1] button Send", ax_diff="", step_summaries=[],
+        screenshot="",
+        screenshot_note=harness_mod._SCREENSHOT_FAILED_NOTE.format(
+            why=harness_mod._SCREENSHOT_REFUSED_WHY),
+    )
+    parts = _turn_to_input(turn)
+    assert isinstance(parts, list) and len(parts) == 2
+    assert parts[0] == _turn_to_prompt(turn)
+    assert parts[1] == turn.screenshot_note
+    # still not interpolated into the prompt body — adjacency, not position
+    assert turn.screenshot_note not in parts[0]
+
+
 def test_the_screenshot_note_is_its_own_part_immediately_before_the_image():
     """Adjacency is the defence, and it did not hold where the note used to be.
 
@@ -399,6 +421,31 @@ async def test_the_loop_hands_the_image_to_the_turn(monkeypatch):
     assert result.status == "completed"
     assert seen[0].screenshot == JPEG
     assert seen[0].screenshot_note
+
+
+@pytest.mark.asyncio
+async def test_a_refused_capture_reaches_the_model_through_the_loop(monkeypatch):
+    """End to end, and at the level that was masked: the gate is off, the
+    loop escalates anyway, and what `_plan_step` hands the model must carry the
+    refusal. Both `_plan_step` call sites pass `_turn_to_input`'s result
+    straight to `agent.run` with no string handling, so rendering it here is
+    what the model gets."""
+    monkeypatch.setenv(SCREENSHOT_CAPTURE_ENV, "")
+    seen: list = []
+
+    async def _fake_plan(deps, turn, agent, audit=None):
+        # exactly what the real _plan_step does with the turn
+        seen.append(_turn_to_input(turn))
+        return _COMPLETE, 400_000, _EmptyResult()
+
+    monkeypatch.setattr(harness_mod, "_plan_step", _fake_plan)
+    deps = _deps()
+    result = await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+    assert result.status == "completed"
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    parts = seen[0]
+    assert isinstance(parts, list) and len(parts) == 2
+    assert "treat it as unseen" in parts[1].lower()
 
 
 @pytest.mark.asyncio

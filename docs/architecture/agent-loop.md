@@ -546,6 +546,17 @@ tokens away with the question as its neighbour, which is the shape the AX
 envelope avoids by being welded to the tree it wraps. An image carries no
 wrapper and no delimiters at all: it is pixels, so there is nothing to bracket.
 
+**With no image, the note is still delivered.** A refused or failed capture
+arrives as `screenshot=""` plus a non-empty `screenshot_note`, and the same
+`_turn_to_input` returns `[prompt, note]` — the note is the last part, the
+image-last rule holds vacuously, and a turn with *neither* is an ordinary turn
+and stays a bare `str`. This was a real regression, not a hypothetical: the
+no-image branch returned the bare prompt, so the refusal note never reached the
+model and a refused capture read as a silently blank page — the task failed for
+a reason nothing stated. Asserting on `_VisionFallback.note` could not catch it,
+because that is the level at which the note is always present; the tests assert
+on the rendered input, including one driven through the loop.
+
 **The base64 is transit only.** It goes on the turn, into the prompt, to the
 provider. Not the audit document, not a step summary, not a log line — the one
 log carries a byte count and nothing else. Redaction does not apply to it (see
