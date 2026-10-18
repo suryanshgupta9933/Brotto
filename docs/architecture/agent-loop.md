@@ -504,6 +504,71 @@ nodes, no text, a product decision rather than a fix), `GAP_TIMING` (the
 target takes 5s to appear and we read the tree at an arbitrary instant), and
 `GAP_RENDER` (present, in the tree, and past the character budget).
 
+### When the page is a canvas, the fallback is a picture
+
+`GAP_UNREACHABLE` above is the fixture that used to be a dead end: a canvas has
+no AX node and no page text, so the loop handed the model an empty page and
+called it a page. `_vision_fallback` (`harness.py`) is the narrow answer.
+
+**The trigger is the narrowest thing that means "we cannot see this page":
+`axTargets.length === 0` *and* blank page text.** Whitespace-only counts as
+blank — `(page_text or "").strip()`. Deliberately not "the page looked hard" and
+not "the last step failed": an image is uncacheable, so it is re-charged on
+every step of the task, and a broader trigger would spend vision tokens
+re-describing pages the tree already described perfectly well. Both halves are
+load-bearing; a page with a tree but no text is legible to us and must not cost
+a frame.
+
+**Resolve capability before capturing.** `_vision_capability` reads
+`model/capabilities.py` and caches the answer on `deps._vision_caps` — **once
+per run, never on the loop**, because the model cannot change mid-task and the
+loop's hot path should not pay a metadata round trip. It goes through
+`warm_async`, never `resolve(..., allow_network=True)`: the network tiers are a
+4s call and a real probe request. The order matters — a capture is ~270–700 KB
+on the wire, so capturing first and discarding afterwards is the expensive
+order. The scripted/test paths short-circuit to "needed, no model" so `/run` and
+every harness test never reach for a frame the fake relay cannot answer.
+
+**A catalogue `vision=False` means *not documented*, not *cannot see*.** So
+only `True` short-circuits; `False` and `None` both fall through, and the
+resolver's probe can still earn a real `False`. Unknown therefore arrives as
+**unresolved, which is not a denial** — the run proceeds to a refusal rather
+than to a stop. The two are rendered differently on purpose: `False` is a fact
+about the model, `None` is our own ignorance and is not the user's fault.
+
+**The image rides as a real `BinaryContent` part, image last.**
+`_turn_to_input` returns a list, not a string: `[prompt, screenshot_note,
+BinaryImage(…)]`. The harness-authored trust note is its **own part immediately
+before the image**, and the image is **last**, so nothing page-derived can
+follow the trust statement — the nearest neighbour of a boundary has to be the
+thing being bounded. Putting the note in the prompt body left it thousands of
+tokens away with the question as its neighbour, which is the shape the AX
+envelope avoids by being welded to the tree it wraps. An image carries no
+wrapper and no delimiters at all: it is pixels, so there is nothing to bracket.
+
+**With no image, the note is still delivered.** A refused or failed capture
+arrives as `screenshot=""` plus a non-empty `screenshot_note`, and the same
+`_turn_to_input` returns `[prompt, note]` — the note is the last part, the
+image-last rule holds vacuously, and a turn with *neither* is an ordinary turn
+and stays a bare `str`. This was a real regression, not a hypothetical: the
+no-image branch returned the bare prompt, so the refusal note never reached the
+model and a refused capture read as a silently blank page — the task failed for
+a reason nothing stated. Asserting on `_VisionFallback.note` could not catch it,
+because that is the level at which the note is always present; the tests assert
+on the rendered input, including one driven through the loop.
+
+**The base64 is transit only.** It goes on the turn, into the prompt, to the
+provider. Not the audit document, not a step summary, not a log line — the one
+log carries a byte count and nothing else. Redaction does not apply to it (see
+`privacy.md`, "A screenshot is a gate, not a redaction pass"), which is why
+capture is off unless the operator turns it on. A refused capture and a failed
+capture reach the model as the same sentence — the page is unseen, say so,
+do not guess — so a run moves on rather than stalling the step. And a domain on
+the user's blocklist is refused before any capture is attempted.
+
+Pinned by `tests/agent/test_vision_fallback.py`, `tests/test_capability_resolution.py`
+and `tests/test_vision_capture_gate.py`.
+
 ### Frames — a bounded union, and a ref that has to be composite
 
 `observation/surfaces.ts` walks `Page.getFrameTree` and calls

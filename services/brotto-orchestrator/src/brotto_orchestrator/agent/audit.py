@@ -1005,6 +1005,23 @@ def delete(session_id: str, *, dir: Path | None = None,
 
     def _unlink(names: list[str]) -> None:
         nonlocal removed
+        # The second guard, under the first. `_is_document_stem` is what makes
+        # a traversal unreachable; this is the check that proves it, on every
+        # unlink, in the one shape a path-injection scan accepts: normalise the
+        # path, then require it to be inside the root. Both halves are load-
+        # bearing for the analysis and only the first is load-bearing for us —
+        # `basename` below has already removed every separator, so containment
+        # holds by construction. What this buys is the property a reader of the
+        # sink is owed: the path reaching `unlink` was checked to be in here.
+        #
+        # Which is why `normpath` and not `realpath` on the candidate: the
+        # scan wants a normalisation of the *tainted* value, and `realpath`
+        # would follow a session document that is itself a symlink and point
+        # the unlink at whatever it references. `normpath` is textual, so it
+        # collapses `..` and leaves links alone. The directory is the other
+        # way round — `realpath`, because a user's `logs/sessions` is often a
+        # symlink and the comparison has to be against where it really is.
+        root = os.path.realpath(d)
         for name in names:
             # pages.json has no writer — page text stopped reaching disk — but
             # `read` and `list_sessions` already name it, and a sidecar written
@@ -1014,20 +1031,32 @@ def delete(session_id: str, *, dir: Path | None = None,
             # `list_sessions` globs `*.json` and would never show it, which is
             # exactly why it has to be named here rather than swept: the user
             # is told the session is erased, and this would be what is left.
-            try:
-                (d / name).unlink()
-                removed = True
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
+            target = os.path.normpath(os.path.join(root, name))
+            if target.startswith(root + os.sep):
+                try:
+                    Path(target).unlink()
+                    removed = True
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    failed.append(name)
+                    log.warning("audit: could not remove %s/%s: %s", d, name, exc)
+            else:
+                # Unreachable while `_is_document_stem` holds, and reported
+                # rather than skipped: a caller announcing an erasure it did
+                # not perform is one log line from lying to the user.
                 failed.append(name)
-                log.warning("audit: could not remove %s/%s: %s", d, name, exc)
+                log.warning("audit: refusing to remove %s: outside %s", name, d)
 
     # `_is_document_stem` above is the real guard: a session id with a
-    # separator or a dot never reaches here. `os.path.basename` is the
-    # sanitizer CodeQL models — `_is_document_stem` is a predicate it does not
-    # understand — so it is applied once here, where the names are built, and
-    # every join below is untainted rather than each sink carrying its own.
+    # separator or a dot never reaches here. `os.path.basename` is applied once
+    # too, so a name is a name at every join rather than only at the guard.
+    # It is not, contrary to what this comment used to say, a sanitizer CodeQL
+    # models — measured against 2.27.2, the version that raised the alert, a
+    # `basename` here leaves the sink reported, which is what the containment
+    # check in `_unlink` is for. The predicate is still what makes a traversal
+    # unreachable; that check is what makes it provable to the one tool that
+    # asserts on sinks nobody enumerated.
     stem = os.path.basename(session_id)
     names = [f"{stem}{ext}" for ext in _SESSION_EXT]
     # The owner sidecars go last, and only if everything before them went. An

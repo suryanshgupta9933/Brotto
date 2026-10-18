@@ -40,13 +40,53 @@ complete set of CDP methods the extension issues:
 | Input | `Input.dispatchMouseEvent` | Click, move, scroll |
 | Input | `Input.dispatchKeyEvent` | Typing, Enter, Control+A |
 | Page | `Page.enable` / `Page.navigate` / `Page.getFrameTree` | Navigation, and enumerating frames |
+| Page | `Page.captureScreenshot` | A JPEG of the tab you picked, for pages the accessibility tree is blind to — see below |
 | DOM | `DOM.getDocument` / `getAttributes` / `resolveNode` | Resolving a tree ref to a node |
 | DOM | `DOM.getBoxModel` / `getNodeForLocation` | Turning a node into clickable coordinates |
 | Runtime | `Runtime.evaluate` | Reading page text and stability — see below |
 
-**There is no `Page.captureScreenshot` anywhere in this extension.** The agent
-perceives the page through the Accessibility tree, not through images. It
-never screenshots, so it never has access to a picture of your screen.
+**`Page.captureScreenshot` — one place, and only on request.** The agent
+perceives the page through the Accessibility tree first, and asks for a picture
+only when that tree is empty *and* the visible page text is empty too — a
+`<canvas>` (Google Docs, Figma, a chart) has no accessibility node and no
+readable text, so a text-only agent cannot see it at all. The extension issues
+this command from exactly one call site, in `background.ts`, in response to a
+relay frame from your own server. It is not periodic and not automatic: with no
+task running, nothing is captured.
+
+**No new permission is involved.** `Page.captureScreenshot` is a CDP method on
+the session the already-declared `debugger` permission opens, so it needs
+nothing in `manifest.json` that was not already there and adds no entry to the
+review queue. It is called out here because "reads the page as text" and
+"photographs the page" are different powers, and a reviewer counting the
+permissions would not otherwise see the second one.
+
+**Your server decides, and it is off by default.** Whether this command is ever
+issued is a setting on the Brotto server — not on the extension, and not in
+this panel. Capture happens only when the operator has set
+`BROTTO_VISION_CAPTURE` explicitly (`on`, `1`, `true` or `yes`); any other
+value, including the variable being absent or misspelled, means no screenshot
+is ever captured, on any step, for any page. Independently of the switch, a
+page whose domain is on your own blocklist is refused before any capture is
+attempted, so turning the switch on cannot turn into photographing a site you
+told the agent never to touch. A `*.example.com` entry covers `example.com`
+itself as well as its subdomains, and a page with no resolvable domain at all —
+an IP address, or a single name like `localhost` — is refused too, because there
+is nothing to check against the blocklist. The extension implements none of
+these rules and does not need to: it captures when it is told to, and nowhere
+else.
+
+The image is JPEG at quality 60, clipped to the visible viewport — a smaller
+image to send than PNG, and never a picture of the whole tab history or
+another window. It is sent to the Brotto server you configured and handed
+straight to the model for that step. It is **not written to disk**: not to the
+audit trail, not to a log line, not to the side panel. What the model makes of
+it may appear in its summary, exactly as page text already does.
+
+It is also the one channel that redaction cannot reach — redaction is pattern
+matching over strings, and a JPEG is pixels — which is why it sits behind a
+switch that stays off until somebody turns it on. See
+[PRIVACY.md](https://github.com/suryanshgupta9933/brotto/blob/main/PRIVACY.md).
 
 ### `Runtime.evaluate` — four places, and only one of them is the server's
 
@@ -259,20 +299,41 @@ to find them.
    session. Secure mode and the domain blocklist are the user's, and there is
    no server-side floor.
 4. **Brotto is not protected against prompt injection** from page content.
-   Treat a hostile page as able to mislead the model.
+   Treat a hostile page as able to mislead the model. Text and accessibility
+   names are wrapped and labelled as untrusted, but that is a fence, not a
+   guarantee. **A rendered image is the residual case.** If your server has
+   screenshot capture enabled and the page draws with a `<canvas>`, the pixels
+   carry no wrapper and cannot be fenced at all: instructions can be rendered
+   as glyphs, so the agent is told in prose that the words drawn in the image
+   are page content too — but the model is still reading a picture of the page
+   and is not structurally prevented from obeying what is drawn in it. This is
+   the honest statement of what the switch buys you: capture off means a
+   canvas page is reported as unseen rather than described, which costs the run
+   its eyes and is the safer of the two failure modes.
 
 ## Privacy
 
 See [PRIVACY.md](https://github.com/suryanshgupta9933/brotto/blob/main/PRIVACY.md) for the full statement.
 
 **Not accessed:** browsing history, bookmarks, saved passwords or cookies as a
-credential store, other extensions' data, system files. No screenshots are
-taken at any point. No third-party analytics.
+credential store, other extensions' data, system files. No other window, tab
+or screen is ever captured. No third-party analytics.
 
 **Accessed, and why:** the accessible tree and visible text of the tab you
 selected, while a task runs. Mouse and keyboard input on that tab, while a
-task runs. Your server URL and model choice, stored locally. The visible text
-of the active page, when the panel is idle and suggesting.
+task runs. A JPEG of that tab's visible viewport, while a task runs and only
+when the accessible tree *and* the visible page text both came back empty —
+**and only if screenshot capture is switched on on your server, which it is
+not by default.** Your server URL and model choice, stored locally. The
+visible text of the active page, when the panel is idle and suggesting.
+
+Whether the agent *does* request a screenshot on a given step is a decision
+your server makes, and a self-hosted server running this code decides it, not
+the extension. Two things decide it in practice: the server-side
+`BROTTO_VISION_CAPTURE` switch (`on`, `1`, `true` or `yes` — anything else,
+including leaving it unset, means never), and your own domain blocklist, which
+refuses a capture regardless of the switch. The extension captures on request
+and nowhere else, and adds no setting of its own for it.
 
 **Transmission:** to the Brotto server you configured, over the relay. No
 third parties. The audit trail (`logs/sessions/`) stays on your own disk.

@@ -62,6 +62,9 @@ class ExtensionCDPRelay:
     - Server sends {type: "get_attributes", backend_node_id, ref} → extension replies
       {type: "get_attributes_result", ref, attributes: {name: value}}. Correlated by `ref`
       and resolved by the caller via deliver_attributes_result().
+    - Server sends {type: "capture_screenshot"} → extension replies
+      {type: "screenshot_result", data: "<base64 jpeg>"} or {..., error}. Resolved by
+      capture_screenshot() via deliver_screenshot_result().
     """
 
     def __init__(
@@ -79,6 +82,7 @@ class ExtensionCDPRelay:
         self._pushed_obs: dict | None = None
         self._attrs: asyncio.Queue = asyncio.Queue()
         self._pending_attrs: set[str] = set()
+        self._screenshot: asyncio.Queue = asyncio.Queue()
 
     # ---------- Internal ----------
 
@@ -417,6 +421,41 @@ class ExtensionCDPRelay:
         log.info("[%s] press_key %r modifiers=%d", self._sid, key, modifiers)
         await self._send_action({"type": "key", "key": key, "modifiers": modifiers})
         return "ok"
+
+    async def capture_screenshot(self) -> str | None:
+        """A JPEG of the attached tab, base64, or None.
+
+        The capture primitive for the vision fallback: the accessibility tree
+        is blind on `<canvas>`, where there is no node and no page text.
+
+        Transit only. The payload is page content, so it is returned to the
+        caller and never logged, stored on the relay, or written to an audit
+        document — `agent/audit.py` and its redaction are brotto-privacy's,
+        not this file's. The 30s ceiling below is `_OBSERVATION_TIMEOUT`
+        because the same JSON channel carries both, and a viewport JPEG at
+        q60 is 270–700 KB of base64 against a few KB of tree.
+        """
+        await self._ws_send({"type": "capture_screenshot"})
+        try:
+            async with asyncio.timeout(_OBSERVATION_TIMEOUT):
+                msg = await self._screenshot.get()
+        except TimeoutError:
+            log.warning("[%s] timed out waiting for screenshot_result", self._sid)
+            return None
+        error = str(msg.get("error", ""))
+        if error:
+            log.warning("[%s] screenshot capture failed: %s", self._sid, error)
+            return None
+        data = msg.get("data")
+        return data if isinstance(data, str) and data else None
+
+    async def deliver_screenshot_result(self, message: dict) -> None:
+        """Sink for an inbound screenshot_result. Keep only the newest: an
+        image is worth nothing twice, and an unbounded queue of 700 KB frames
+        is a memory ceiling waiting for a misbehaving extension."""
+        while not self._screenshot.empty():
+            self._screenshot.get_nowait()
+        self._screenshot.put_nowait(message)
 
     async def read_page_text(
         self,
