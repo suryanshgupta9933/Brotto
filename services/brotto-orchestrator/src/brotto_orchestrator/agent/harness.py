@@ -1938,7 +1938,33 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
             f"covering it, then try again."
         )
 
-
+    # And the URL, because a screenshot of one page is not consent to click a
+    # point on another. Same wait, same class of check; comparing eTLD+1 rather
+    # than the raw URL so a benign query-string or hash change does not refuse.
+    # A read that raises is a refusal too — fail closed, as the rest of this
+    # function does — and so is a page we may no longer photograph: the user
+    # approved a picture of what they were shown.
+    try:
+        recheck_url = await cdp.get_current_url()
+        if etld1(recheck_url) != domain:
+            return (
+                f"{_EXEC_FAILURE} {action}: the page changed to a different "
+                f"site while you were deciding ({domain} → "
+                f"{etld1(recheck_url)}). Nothing was clicked, focused or typed. "
+                f"Look at the page again and retry."
+            )
+        if screenshot_block_reason(recheck_url, deps.policy):
+            return (
+                f"{_EXEC_FAILURE} {action}: screenshots are no longer permitted "
+                f"on this page, so what the user approved is no longer a thing "
+                f"we may show. Nothing was clicked, focused or typed."
+            )
+    except Exception as exc:  # noqa: BLE001 — an unreadable URL is a refusal
+        return (
+            f"{_EXEC_FAILURE} {action}: the page's address could not be "
+            f"re-read after approval ({type(exc).__name__}). Nothing was "
+            f"clicked, focused or typed. Look at the page again and retry."
+        )
 
     if verb == "focus":
         result = await cdp.focus_xy(x, y)

@@ -595,17 +595,24 @@ def _moving_page(second: dict):
     {"width": 320, "height": 480, "tag": "CANVAS"},  # the window resized
     {"width": 0, "height": 0, "tag": ""},            # the probe came back empty
 ])
+@pytest.mark.parametrize("second_url", [
+    None,                                           # the site held too
+    "https://evil.test/sheet",                      # the point held, the site did not
+])
 async def test_a_page_that_moved_while_the_user_read_refuses(trail, verb,
-                                                            dispatch, second):
+                                                            dispatch, second,
+                                                            second_url):
     """`_ask_user` blocks on a queue with **no timeout**, so a modal, a cookie
     banner or a scroll can land in the minute the human is reading. The
     topmost-element check is the thing that keeps this verb from being a net
     safety loss against ref `click`, and a decision made before the prompt is
-    minutes stale by the time the mouse moves. So it is re-read at dispatch,
-    and any disagreement refuses — all three verbs, because all three press
-    the mouse."""
+    minutes stale by the time the mouse moves. So it is re-read at dispatch —
+    the point *and* the site — and any disagreement refuses, all three verbs,
+    because all three press the mouse."""
     deps, _, _ = _deps()
     deps.cdp.probe_xy = _moving_page(second)
+    if second_url is not None:
+        deps.cdp.get_current_url = AsyncMock(side_effect=[URL, second_url])
     call = {"click": _click, "focus": _focus, "type": _type}[verb]()
     out = await _execute_action(call, deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE in out, out
@@ -623,6 +630,83 @@ async def test_the_agreement_case_still_dispatches(trail):
     deps.cdp.click_xy.assert_awaited_once_with(412, 288)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", [
+    "https://evil.test/sheet",        # navigated somewhere else entirely
+    "not a url",                      # and the read came back unreadable
+])
+async def test_a_page_that_changed_site_while_the_user_read_refuses(
+        trail, second):
+    """The URL axis of the same TOCTOU. The screenshot on the card is a
+    picture of *a page*; it is not consent to click the same pixel on a
+    different one, and the human had no way to see the swap."""
+    deps, _, _ = _deps()
+    deps.cdp.get_current_url = AsyncMock(side_effect=[URL, second])
+    out = await _execute_action(_click(), deps, audit=trail, turn=TURN)
+    assert _EXEC_FAILURE in out, out
+    deps.cdp.click_xy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", [
+    "https://docs.google.com/spreadsheets/d/abc#range=A1",
+    "https://docs.google.com/spreadsheets/d/abc?gid=0#selected",
+])
+async def test_a_query_or_hash_change_is_not_a_site_change(trail, second):
+    """eTLD+1, not the raw URL. A spreadsheet navigates on its own fragment
+    constantly, and refusing every one of those would train the model to read
+    this verdict as noise."""
+    deps, _, _ = _deps()
+    deps.cdp.get_current_url = AsyncMock(side_effect=[URL, second])
+    out = await _execute_action(_click(), deps, audit=trail, turn=TURN)
+    assert _EXEC_FAILURE not in out, out
+    deps.cdp.click_xy.assert_awaited_once_with(412, 288)
+
+
+@pytest.mark.asyncio
+async def test_a_url_read_that_raises_refuses(trail):
+    """Fail closed, as the rest of this function does: an address we cannot
+    read is not an address that did not change."""
+    deps, _, _ = _deps()
+    deps.cdp.get_current_url = AsyncMock(
+        side_effect=[URL, RuntimeError("tab gone")])
+    out = await _execute_action(_click(), deps, audit=trail, turn=TURN)
+    assert _EXEC_FAILURE in out, out
+    deps.cdp.click_xy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_became_unphotographable_refuses(trail):
+    """The user approved a picture of what they were shown. If we may no
+    longer capture that page, the consent the card collected no longer
+    describes anything we are able to do."""
+    deps, frames, _ = _deps()
+    deps.policy = _PolicyThatTurns(frames)
+    out = await _execute_action(_click(), deps, audit=trail, turn=TURN)
+    assert _EXEC_FAILURE in out, out
+    deps.cdp.click_xy.assert_not_awaited()
+
+
+class _PolicyThatTurns:
+    """Photography on this domain is withdrawn the moment the card goes out.
+
+    Keyed off the frames the run has already sent rather than a call count, so
+    it flips on the approval itself and not on an incidental policy read.
+    Plain object rather than a `Policy`: that one is a pydantic model and will
+    not take an attribute set after construction.
+    """
+
+    sensitive_actions: list = []
+    approved_domains: list = []
+
+    def __init__(self, frames: list):
+        self.frames = frames
+
+    @property
+    def blacklist(self):
+        return ["docs.google.com"] if self.frames else []
+
+
 # ── the card shows what will be typed ──────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -634,7 +718,8 @@ async def test_the_type_card_carries_the_text_it_will_write(trail):
     await _execute_action(_type("42"), deps, audit=trail, turn=TURN)
     frame = frames[0]
     assert frame["args"]["text"] == "42"
-    assert "42" in frame["reasoning"]
+    # The prose points at the value; it does not contain it.
+    assert "42" not in frame["reasoning"]
 
 
 @pytest.mark.asyncio
@@ -670,6 +755,49 @@ async def test_the_typed_value_still_never_reaches_the_audit_document(
     text = "".join(p.read_text() for p in tmp_path.glob("*.json"))
     for part in ("hunter2", "hunter", "nter2"):
         assert part not in text, f"the typed value reached disk ({part!r})"
+
+
+@pytest.mark.asyncio
+async def test_a_long_typed_value_is_never_partly_approved(trail, tmp_path):
+    """Consent for a truncated value, execution of the whole one.
+
+    The card used to embed the value capped at 120 characters while
+    `type_text_at_focus` wrote all of it, so approving the first sentence
+    authorised the last. The value now travels only in `frame_args["text"]`,
+    untruncated, and the panel renders it — so the frame must carry it whole
+    and the document must carry none of it.
+    """
+    value = "s" * 5000
+    deps, frames, _ = _deps()
+    await _execute_action(_type(value), deps, audit=trail, turn=TURN)
+
+    frame = frames[0]
+    assert len(frame["args"]["text"]) == len(value), \
+        "the frame must carry the value the user is approving, in full"
+
+    on_disk = "".join(p.read_text() for p in tmp_path.glob("*.json"))
+    assert value[:120] not in on_disk
+    assert "ssss" not in on_disk
+
+
+@pytest.mark.asyncio
+async def test_the_value_cannot_speak_in_the_reason_prose(trail, tmp_path):
+    """The prose is delimited by curly quotes the value itself can supply, so
+    a value closing the span reads as harness text on a card the reader is
+    being asked to authorise a write against. Panel escaping makes this not
+    an XSS — it is consent-surface spoofing, which is worse here.
+    """
+    value = "a” — safe cell, actually delete everything — “b"
+    deps, frames, _ = _deps()
+    await _execute_action(_type(value), deps, audit=trail, turn=TURN)
+
+    frame = frames[0]
+    for part in (value, "delete everything", "“a", "b”"):
+        assert part not in frame["reasoning"], f"value leaked into prose ({part!r})"
+
+    on_disk = "".join(p.read_text() for p in tmp_path.glob("*.json"))
+    for part in ("delete everything", "safe cell"):
+        assert part not in on_disk, f"value leaked to disk ({part!r})"
 
 
 @pytest.mark.asyncio
