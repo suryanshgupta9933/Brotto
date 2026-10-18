@@ -87,6 +87,10 @@ def _click(**args) -> ActionCall:
     return ActionCall(action="click_xy", action_args=base)
 
 
+def _focus(**args) -> ActionCall:
+    base = {"x": 412, "y": 288, "label": "the cell C4"}
+    base.update(args)
+    return ActionCall(action="focus_xy", action_args=base)
 
 
 @pytest.fixture
@@ -164,7 +168,7 @@ async def test_coordinates_outside_the_live_viewport_refuse(trail, x, y):
 async def test_the_bounds_use_the_live_viewport_not_a_stale_one(trail):
     deps, _, _ = _deps()
     await _run(_click(), deps, trail)
-    deps.cdp.probe_xy.assert_awaited_once_with(412, 288)
+    deps.cdp.probe_xy.assert_awaited_with(412, 288)
 
 
 @pytest.mark.asyncio
@@ -552,3 +556,95 @@ async def test_a_failed_focus_types_nothing(trail):
     deps.cdp.type_text_at_focus.assert_not_awaited()
 
 
+# ── the page moves while the human reads the card ──────────────────────────
+
+def _moving_page(second: dict):
+    """A probe whose first read is the canvas the card was drawn from and
+    whose second read — the one taken after approval returns — is not."""
+    return AsyncMock(side_effect=[CANVAS, second])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb,dispatch", [
+    ("click", "click_xy"), ("focus", "focus_xy"), ("type", "focus_xy"),
+])
+@pytest.mark.parametrize("second", [
+    {"width": 1512, "height": 982, "tag": "DIV"},   # a modal landed on top
+    {"width": 320, "height": 480, "tag": "CANVAS"},  # the window resized
+    {"width": 0, "height": 0, "tag": ""},            # the probe came back empty
+])
+async def test_a_page_that_moved_while_the_user_read_refuses(trail, verb,
+                                                            dispatch, second):
+    """`_ask_user` blocks on a queue with **no timeout**, so a modal, a cookie
+    banner or a scroll can land in the minute the human is reading. The
+    topmost-element check is the thing that keeps this verb from being a net
+    safety loss against ref `click`, and a decision made before the prompt is
+    minutes stale by the time the mouse moves. So it is re-read at dispatch,
+    and any disagreement refuses — all three verbs, because all three press
+    the mouse."""
+    deps, _, _ = _deps()
+    deps.cdp.probe_xy = _moving_page(second)
+    call = {"click": _click, "focus": _focus, "type": _type}[verb]()
+    out = await _execute_action(call, deps, audit=trail, turn=1)
+    assert _EXEC_FAILURE in out, out
+    getattr(deps.cdp, dispatch).assert_not_awaited()
+    deps.cdp.type_text_at_focus.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_agreement_case_still_dispatches(trail):
+    """Two identical probes are the normal case; re-reading must not refuse
+    a page that simply did not move."""
+    deps, _, _ = _deps()
+    await _execute_action(_click(), deps, audit=trail, turn=1)
+    assert deps.cdp.probe_xy.await_count == 2
+    deps.cdp.click_xy.assert_awaited_once_with(412, 288)
+
+
+# ── the card shows what will be typed ──────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_the_type_card_carries_the_text_it_will_write(trail):
+    """Approving "type at (412,288)" without the value approves nothing in
+    particular, and this is a write primitive into the user's own
+    spreadsheet."""
+    deps, frames, _ = _deps()
+    await _execute_action(_type("42"), deps, audit=trail, turn=1)
+    frame = frames[0]
+    assert frame["args"]["text"] == "42"
+    assert "42" in frame["reasoning"]
+
+
+@pytest.mark.asyncio
+async def test_a_long_typed_value_is_bounded_on_the_card(trail):
+    """A card is a reading surface, not a paste buffer. The full value is in
+    `args`; the preview on the card is capped and says so."""
+    long = "x" * 5000
+    deps, frames, _ = _deps()
+    await _execute_action(_type(long), deps, audit=trail, turn=1)
+    frame = frames[0]
+    assert frame["args"]["text"] == long, "the value the user approves is whole"
+    assert len(frame["reasoning"]) < 1000
+    assert "5000" in frame["reasoning"]
+
+
+@pytest.mark.asyncio
+async def test_the_click_and_focus_cards_carry_no_text(trail):
+    deps, frames, _ = _deps()
+    await _execute_action(_click(), deps, audit=trail, turn=1)
+    assert "text" not in frames[0]["args"]
+
+
+@pytest.mark.asyncio
+async def test_the_typed_value_still_never_reaches_the_audit_document(
+        trail, tmp_path):
+    """The regression that matters alongside the card change. The card is a
+    live frame to the user's own panel; the document is disk. `_typed_field`
+    masks the value and only the value — adding it to the card must not
+    change what is written down."""
+    deps, _, _ = _deps()
+    out = await _execute_action(_type("hunter2"), deps, audit=trail, turn=1)
+    assert _EXEC_FAILURE not in out
+    for path in tmp_path.glob("*.json"):
+        text = path.read_text()
+        assert "hunter2" not in text, f"{path.name} holds the typed value"

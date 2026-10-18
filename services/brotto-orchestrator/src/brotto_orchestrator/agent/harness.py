@@ -1645,11 +1645,24 @@ def _focus_reason(x, y, label) -> str:
     )
 
 
-def _type_reason(x, y, label) -> str:
+_TYPE_PREVIEW_CHARS = 120
+
+
+def _type_reason(x, y, label, text=None) -> str:
+    # The card must show what is about to be written. Approving "type at
+    # (412,288)" without the value approves nothing in particular, and this is
+    # a write primitive into the user's own document. The preview is capped
+    # because a card is a reading surface, not a paste buffer — the whole value
+    # is in the frame's `args`, which is where the user is approving it.
+    value = str(text or "")
+    shown = value if len(value) <= _TYPE_PREVIEW_CHARS else (
+        f"{value[:_TYPE_PREVIEW_CHARS]}… ({len(value)} characters in total)"
+    )
     return (
         f"This page is a canvas, so there is no field to type into by name. "
         f"The crosshair is at ({x},{y}) — {label}. Typing there is a press, "
-        f"a release, and then the text inserted at that point."
+        f"a release, and then this text inserted at that point: "
+        f"“{shown}”"
     )
 
 
@@ -1837,11 +1850,20 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
             f"this click cannot be shown to the user, because {why} The user "
             f"cannot approve a click they cannot see."
         )
+    # The value goes on the card and nowhere else. `_typed_field` still masks
+    # it in the action record and so in the document and the step summary: the
+    # card is a live frame to the user's own panel, on the user's own machine,
+    # carrying a value about to be written into the user's own page beside a
+    # screenshot of that page. The human cannot judge the write without it.
+    frame_args: dict = {"x": x, "y": y, "label": label}
+    if verb == "type":
+        frame_args["text"] = args.get("text")
     approved = await _ask_user(
         deps, audit, turn=turn, kind="coordinate_click", action=action,
-        args={"x": x, "y": y, "label": label},
+        args=frame_args,
         domain=domain,
-        reason=_COORDINATE_REASONS[verb](x, y, label),
+        reason=(_COORDINATE_REASONS["type"](x, y, label, args.get("text"))
+                if verb == "type" else _COORDINATE_REASONS[verb](x, y, label)),
         frame_extra={
             "screenshot": image,
             "viewport": {"width": width, "height": height},
@@ -1858,6 +1880,34 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
             f"{_EXEC_FAILURE} {action}: the user declined the click at "
             f"({x},{y}). Nothing was clicked, focused or typed. That point is "
             f"wrong or unsafe — look for a better point, or say you cannot do it."
+        )
+
+    # Re-read the point now, not only before the prompt. `_ask_user` blocks on
+    # `human_input_queue.get()` with **no timeout**, so a modal, a cookie banner
+    # or a scroll can land in the minute the human is reading — and the
+    # topmost-element check above is a decision about the page as it was when
+    # they *started* reading. Dispatching on that is a TOCTOU on the safety
+    # decision, and all three verbs need it because all three press the mouse.
+    #
+    # Any disagreement refuses rather than re-prompting. Re-prompting would be
+    # a better experience — a second card on a page the user can now see — but
+    # it is a second ask inside one step on a point nobody vouched for, and the
+    # refusal is the correct direction: the model re-probes next step and says
+    # why.
+    recheck = await cdp.probe_xy(x, y)
+    rw, rh = int(recheck.get("width") or 0), int(recheck.get("height") or 0)
+    if not (rw > 0 and rh > 0 and 0 <= x < rw and 0 <= y < rh):
+        return (
+            f"{_EXEC_FAILURE} {action}: the page moved while you were deciding "
+            f"— ({x},{y}) is now outside its {rw}x{rh} viewport. Nothing was "
+            f"clicked, focused or typed. Look at the page again and retry."
+        )
+    if str(recheck.get("tag", "")).upper() != "CANVAS":
+        return (
+            f"{_EXEC_FAILURE} {action}: something other than the canvas is on "
+            f"top at ({x},{y}) now — the page changed while you were deciding. "
+            f"Nothing was clicked, focused or typed. Dismiss the dialog or panel "
+            f"covering it, then try again."
         )
 
     if verb == "focus":
