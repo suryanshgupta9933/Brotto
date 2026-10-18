@@ -899,6 +899,26 @@ function maybeNotify(event: Record<string, unknown>): void {
   }
   if (t === "approval_request") {
     const id = String(event.id ?? "");
+    // `viewport` is set only on a coordinate approval (harness.py is the one
+    // caller that passes frame_extra). That is the one approval a sentence
+    // cannot carry: `{x: 412, y: 288}` names nothing, and for a `type_xy` the
+    // reasoning deliberately omits the value, pointing at a card instead. The
+    // panel is the only surface that draws the screenshot, the crosshair and
+    // the value — so a notification offering Approve here is one tap of
+    // consent to something the user has not seen. Tell them, and point them at
+    // the panel. No buttons: Chrome fires onButtonClicked only for a button
+    // that exists, so the resolver stays pending and the card can still answer.
+    if (event.viewport) {
+      notify(`approval:${id}`, {
+        title: "Brotto needs your approval",
+        message:
+          "Open the Brotto panel to see and approve this. It is a click or a " +
+          "text insertion at a specific point on the page, which has to be " +
+          "looked at before it is allowed.",
+        blocking: true,
+      });
+      return;
+    }
     notify(`approval:${id}`, {
       title: "Brotto needs your approval",
       message: String(event.reason || "Confirm this action to let the task continue."),
