@@ -4179,6 +4179,37 @@ function appendApprovalTarget(card, { screenshot, viewport, args, url }) {
   shot.appendChild(mark);
   card.appendChild(shot);
 
+  // The text this click will write, on `type_xy`, in full.
+  //
+  // `reasoning` used to be the only preview, capped at 120 characters, so a
+  // human could approve 120 characters and have 4,000 land in the cell — and
+  // because the value sat inside that sentence's curly quotes, a value could
+  // close them and speak as harness prose on a consent surface. The server no
+  // longer puts the value in `reasoning` at all; it arrives here in `args.text`
+  // untruncated, and the panel's job is to show all of it.
+  //
+  // So: no cap, no ellipsis, no "show more" — what the user reads is the whole
+  // of what gets written, and a long value scrolls. `textContent` and nothing
+  // else: the value is arbitrary text, steerable by whatever the page fed the
+  // model, and this is the one surface where it must not be able to speak.
+  // The label is its own element, so no value can close it.
+  if (typeof args?.text === 'string') {
+    const value = document.createElement('div');
+    value.className = 'approval-value';
+
+    const valueLabel = document.createElement('div');
+    valueLabel.className = 'approval-value-label';
+    valueLabel.textContent = 'Text typed there — the whole value, exactly as it will be written:';
+    value.appendChild(valueLabel);
+
+    const valueText = document.createElement('div');
+    valueText.className = 'approval-value-text';
+    valueText.textContent = args.text;
+    value.appendChild(valueText);
+
+    card.appendChild(value);
+  }
+
   if (pct.outside) {
     const warn = document.createElement('div');
     warn.className = 'approval-preview';

@@ -1168,6 +1168,33 @@
     .approval-cross::after  { top: 50%; left: 0; height: 1px; width: 100%; margin-top: -0.5px; }
     .approval-cross.outside { opacity: 0.35; }
 
+    /* The value a `type_xy` will write — the whole of it, because what the
+       user approves has to be what lands in the cell. Set with textContent, so
+       it is verbatim: mono, and newlines preserved, because this is a literal
+       and not a sentence. Capped in *height* and scrollable, never clipped: an
+       ellipsis here would restore exactly the bug this block exists to fix. */
+    .approval-value {
+      border: 1px solid var(--rule-2);
+      background: var(--paper-2);
+      margin-bottom: 12px;
+    }
+    .approval-value-label {
+      font-size: 11px;
+      line-height: 1.4;
+      padding: 7px 9px 0;
+      color: var(--ink-2);
+    }
+    .approval-value-text {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      line-height: 1.5;
+      padding: 6px 9px 9px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+
     .inline-log {
       font-family: var(--font-mono);
       font-size: 10.5px;

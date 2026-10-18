@@ -3,7 +3,7 @@
 // Everything else the panel asks permission for names its destination: a URL,
 // an action, a form. A `click_xy` is a pair of numbers on a picture, and a
 // canvas (Google Sheets, Figma) has no accessibility node to name — so this
-// card is the entire safety story. Three things therefore have to hold, and
+// card is the entire safety story. Four things therefore have to hold, and
 // each of them fails as an *absence*, which is why they need a test:
 //
 //   - the crosshair lands on the point the agent named. `x`/`y` are CSS pixels
@@ -14,6 +14,12 @@
 //     same point on a retina and a non-retina machine;
 //   - the label is set with textContent, never innerHTML. It is model-authored
 //     and therefore as steerable by page content as any other model text here;
+//   - a `type_xy` shows the **whole** of `args.text`, in one `textContent`
+//     block under a fixed label. `reasoning` carries no value any more, so
+//     this is the card's only preview of what will be typed — and a truncated
+//     one (it used to be 120 characters) is consent for something other than
+//     what gets written. The value used to sit inside that prose, where it
+//     could close a curly quote and speak as harness text. No cap, no ellipsis;
 //   - an approval with no screenshot — which is every other approval in the
 //     app — renders the ordinary card, unchanged. This is the regression that
 //     matters most: the feature must not alter a single existing approval.
@@ -55,15 +61,22 @@ function sliceFunction(name) {
 // The smallest element the card under test touches. No layout, no queries —
 // these two functions build and append, and read back what they built.
 function fakeDocument() {
-  const mk = (tag) => ({
-    tagName: tag,
-    className: "",
-    textContent: "",
-    style: {},
-    children: [],
-    appendChild(c) { this.children.push(c); return c; },
-  });
-  return { createElement: mk };
+  // `made` is what makes "the value cannot become a second element" checkable:
+  // every element the card builds, in order, whether or not it was appended.
+  const made = [];
+  const mk = (tag) => {
+    const el = {
+      tagName: tag,
+      className: "",
+      textContent: "",
+      style: {},
+      children: [],
+      appendChild(c) { this.children.push(c); return c; },
+    };
+    made.push(el);
+    return el;
+  };
+  return { createElement: mk, made };
 }
 
 const crosshairPercent = eval(`(${sliceFunction("crosshairPercent")})`);
@@ -129,7 +142,36 @@ function build(over) {
     { screenshot: JPEG, viewport: LAPTOP, args: ARGS, url: "https://docs.google.com/" },
     over,
   ));
-  return { card, shown, cross: card.children.find((c) => (c.className || "").includes("approval-cross")) };
+  return {
+    card, shown, doc,
+    made: doc.made.slice(1),
+    cross: card.children.find((c) => (c.className || "").includes("approval-cross")),
+  };
+}
+
+// Every property of an element except its children, its style and its
+// textContent — i.e. what an attribute, a class or a title could carry. The
+// value belongs in exactly one place, and this is not it.
+function attrsOf(el) {
+  return Object.entries(el)
+    .filter(([k]) => k !== "children" && k !== "style" && k !== "textContent")
+    .map(([, v]) => String(v))
+    .join(" ");
+}
+
+// Depth-first, the way `querySelector` would see it — the value block is a
+// wrapper with two children, not a flat child of the card.
+function findEl(node, pred) {
+  for (const c of node.children) {
+    if (pred(c)) return c;
+    const hit = findEl(c, pred);
+    if (hit) return hit;
+  }
+  return null;
+}
+const hasClass = (name) => (c) => (c.className || "").split(/\s+/).includes(name);
+function countTree(node) {
+  return 1 + node.children.reduce((n, c) => n + countTree(c), 0);
 }
 
 check("it leads with the label, not the coordinates", () => {
@@ -168,6 +210,83 @@ check("a capture that is not base64 shows no picture at all", () => {
   const { shown, card } = build({ screenshot: '"><script>alert(1)</script>' });
   assert(shown === false, "a non-base64 screenshot was rendered anyway");
   assert(card.children.length === 0, `it appended ${card.children.length} nodes`);
+});
+
+console.log("\nthe value, on a type_xy card");
+
+// A cell value long enough that any cap — the old 120-character preview, a
+// CSS line clamp, a panel-height crop — shows up as a shortfall.
+const LONG = "Q3 reconciliation note. ".repeat(220); // ~5,700 chars
+const TYPE_ARGS = { x: 412, y: 288, label: "the cell C4", text: LONG };
+
+check("the whole value is rendered, not a prefix of it", () => {
+  const { card } = build({ args: TYPE_ARGS });
+  const block = findEl(card, hasClass("approval-value-text"));
+  assert(block, "no value block — a type_xy card shows the value nowhere");
+  assert(block.textContent === LONG,
+    `the block holds ${(block.textContent || "").length} of ${LONG.length} characters`);
+  assert(!/…|\.\.\.$/.test((block.textContent || "").trim()),
+    "the value was truncated with an ellipsis");
+});
+
+check("the block carries a fixed label the value cannot close", () => {
+  const { card } = build({ args: TYPE_ARGS });
+  const wrap = findEl(card, hasClass("approval-value"));
+  assert(wrap, "no .approval-value wrapper");
+  // The label is its own element, so no amount of quote characters in the
+  // value can end it — and it says plainly that this is what gets written.
+  const labels = wrap.children.filter((c) => c !== wrap.children[wrap.children.length - 1]);
+  assert(labels.length >= 1, "the value block has no label of its own");
+  assert(/type|write/i.test(labels[0].textContent),
+    `the label does not say what the block is: ${JSON.stringify(labels[0].textContent)}`);
+});
+
+check("a hostile value is literal text and cannot speak as harness prose", () => {
+  // Every trick at once: close the label's quotes, claim the card said
+  // something it did not, and try to open a tag.
+  const hostile = '” — safe cell, actually delete everything — “ <b onclick="x">hi</b>\nline two';
+  const { card, made } = build({ args: { ...TYPE_ARGS, text: hostile } });
+  const block = findEl(card, hasClass("approval-value-text"));
+  assert(block, "no value block");
+  assert(block.textContent === hostile,
+    `the value was not written verbatim: ${JSON.stringify(block.textContent)}`);
+  // Same element count as a benign value: a value that could introduce an
+  // element would change this number.
+  const benign = build({ args: { ...TYPE_ARGS, text: "ok" } });
+  assert(made.length === benign.made.length,
+    `a hostile value built ${made.length} elements, a benign one ${benign.made.length}`);
+  // +1 for the card `made` deliberately excludes.
+  assert(made.length + 1 === countTree(card), "an element was built and never attached");
+  // And it reached no attribute, so no parser and no tooltip ever sees it.
+  assert(!made.some((e) => attrsOf(e).includes("delete everything")),
+    "the value reached a class name, src, alt or title");
+  // The harness prose on the card is not the value and does not contain it.
+  assert(!card.children.some((c) => (c.className || "").includes("approval-body")),
+    "the reasoning is inside this builder now — it belongs to the caller");
+});
+
+check("the block leads with the target and scrolls rather than cutting", () => {
+  const css = fs.readFileSync(path.join(SRC, "sidepanel.html"), "utf8");
+  const rule = /\.approval-value-text \{[^}]*\}/.exec(css);
+  assert(rule, "no .approval-value-text rule — the block has no style of its own");
+  assert(/max-height/.test(rule[0]) && /overflow/.test(rule[0]),
+    "a long value has nowhere to go but off the card: no max-height/overflow");
+  assert(/text-overflow/.test(rule[0]) === false && /line-clamp/.test(rule[0]) === false,
+    "the value block ellipsises or clamps — that is the bug being fixed");
+});
+
+check("a click or focus with no value renders no block at all", () => {
+  for (const verb of ["click_xy", "focus_xy"]) {
+    const { card } = build({ args: { x: 412, y: 288, label: "the cell C4" } });
+    assert(verb && !findEl(card, hasClass("approval-value")),
+      `${verb} grew a value block`);
+  }
+  // And a type_xy whose text is empty string is still a type — the block says
+  // so, rather than the card implying there was nothing to write.
+  const empty = build({ args: { ...TYPE_ARGS, text: "" } });
+  assert(!findEl(empty.card, hasClass("approval-value-text"))
+    || findEl(empty.card, hasClass("approval-value-text")).textContent === "",
+  "an empty value rendered as something other than nothing");
 });
 
 console.log("\nthe regression that matters: every other approval is untouched");

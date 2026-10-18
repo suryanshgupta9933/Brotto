@@ -1652,24 +1652,31 @@ def _focus_reason(x, y, label) -> str:
     )
 
 
-_TYPE_PREVIEW_CHARS = 120
-
-
 def _type_reason(x, y, label, text=None) -> str:
-    # The card must show what is about to be written. Approving "type at
-    # (412,288)" without the value approves nothing in particular, and this is
-    # a write primitive into the user's own document. The preview is capped
-    # because a card is a reading surface, not a paste buffer — the whole value
-    # is in the frame's `args`, which is where the user is approving it.
-    value = str(text or "")
-    shown = value if len(value) <= _TYPE_PREVIEW_CHARS else (
-        f"{value[:_TYPE_PREVIEW_CHARS]}… ({len(value)} characters in total)"
-    )
+    # The user must see what is about to be written, and `text` reaches the
+    # frame — so the panel renders the whole value itself. Two things must not
+    # happen here.
+    #
+    # One: this prose must not contain the value. It used to embed a 120-char
+    # preview while the dispatch typed all of it, so approving the card
+    # approved a truncated value and the page received the rest — consent for
+    # one thing, execution of another.
+    #
+    # Two: it must not contain *any* of the value. The span is delimited by
+    # curly quotes the value itself can supply, so a value that closes it
+    # reads as harness prose on the card the user is authorising a write
+    # against. Panel escaping makes that not an XSS; it is consent-surface
+    # spoofing, which is worse for a card like this.
+    #
+    # So the prose describes the action and points at the value, which
+    # travels in exactly one field. No cap is needed: there is nothing here to
+    # truncate, and refusing a long value would push the model at a paste
+    # rather than fix the mismatch.
     return (
         f"This page is a canvas, so there is no field to type into by name. "
         f"The crosshair is at ({x},{y}) — {label}. Typing there is a press, "
-        f"a release, and then this text inserted at that point: "
-        f"“{shown}”"
+        f"a release, and then the text shown below this card inserted at "
+        f"that point."
     )
 
 
