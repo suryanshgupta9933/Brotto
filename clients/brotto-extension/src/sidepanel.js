@@ -4205,10 +4205,22 @@ function appendApprovalTarget(card, { screenshot, viewport, args, url }) {
 // controls (U+202A–U+202E, U+2066–U+2069, U+200E/U+200F, U+061C) can reverse
 // the card *around* the value — the human approves "Total: 12" while the
 // pixels read "Total: 21" — and the zero-width/format set (U+200B–U+200D,
-// U+2060, U+FEFF) can hide characters outright. The full original string is
-// what gets typed either way, so the panel has to *show* them rather than
+// U+2060, U+FEFF) can hide characters outright. The rest are invisible by
+// width or by category: the soft hyphen (U+00AD) and the Hangul fillers
+// (U+115F, U+1160, U+3164, U+FFA0, U+FFFA) vanish at any line position, the invisible
+// math operators (U+2061–U+2064) and the deprecated format set
+// (U+206A–U+206F) hide and reorder like the bidi controls do, U+FE00–U+FE0F
+// select a glyph the card cannot render, and the tag block
+// (U+E0000–U+E007F) is invisible text by definition.
+//
+// Enumerated rather than inverted on purpose: "treat everything outside
+// L/N/P/S as invisible" would placeholder U+200D, which is a legitimate
+// zero-width joiner *inside* an emoji sequence — and that inversion mangles
+// ordinary emoji on a consent surface.
+//
+// The full original string is what gets typed either way, so the panel has to *show* them rather than
 // render them faithfully.
-const INVISIBLE_CP = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u200b-\u200d\u2060\ufeff]/;
+const INVISIBLE_CP = /[\u00ad\u034f\u2061-\u2064\u206a-\u206f\u115f\u1160\u3164\uffa0\ufffa\ufe00-\ufe0f\u{E0000}-\u{E007F}\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u200b-\u200d\u2060\ufeff]/u;
 
 // Splits a value into runs of ordinary text and runs of invisible characters.
 // Only used to decide element boundaries — every run is still written with
@@ -4247,23 +4259,42 @@ function splitInvisible(value) {
 function appendApprovalValue(card, args, action) {
   if (args?.text == null && action?.type !== 'type_xy') return;
   const raw = args?.text == null ? null : String(args.text);
+  // Replay hands us the *audit document's* args, and `_scrubbed` masks the
+  // value there: `text` becomes REDACTED alongside a `text_chars` length. The
+  // card would otherwise render the mask as though it were the value, under
+  // a heading promising the whole of it. `text_chars` is the producer's own
+  // "there was a value and it was longer than what you see" flag, so its
+  // presence — or a literal mask string — means not available. The live frame
+  // carries the real value and no `text_chars`, so it still renders in full.
+  // The mask test is whole-string, so a value that merely *starts* with the
+  // word — "[redacted] is what it says" — is still real text that gets typed.
+  const unavailable = raw === null
+    || args?.text_chars != null
+    || /^\[redacted[^\]]*\]$/.test(raw);
 
   const value = document.createElement('div');
   value.className = 'approval-value';
 
   const valueLabel = document.createElement('div');
   valueLabel.className = 'approval-value-label';
-  valueLabel.textContent = 'Text typed there — the whole value, exactly as it will be written:';
+  // The heading is the promise the card has to keep, so it is worded per
+  // branch: one that is true whether or not the value is there.
+  valueLabel.textContent = unavailable
+    ? 'Text typed there — not recorded for this run:'
+    : 'Text typed there — the whole value, exactly as it will be written:';
   value.appendChild(valueLabel);
 
   const valueText = document.createElement('div');
   valueText.className = 'approval-value-text';
-  if (raw === null) {
-    // A replayed `type_xy` whose args lost their text (the audit caps them).
-    // The block still appears, and says so, rather than leaving the reason's
-    // "shown below this card" pointing at nothing.
+  if (unavailable) {
+    // A replayed `type_xy` whose value was masked by the audit (or lost to
+    // the cap). The block still appears, and says so, rather than leaving the
+    // reason's "shown below this card" pointing at nothing.
     valueText.className = 'approval-value-text unavailable';
-    valueText.textContent = 'This value was not recorded for this run.';
+    const chars = Number(args?.text_chars);
+    valueText.textContent = Number.isFinite(chars) && chars > 0
+      ? `This value was not recorded for this run (${chars} characters).`
+      : 'This value was not recorded for this run.';
   } else {
     for (const run of splitInvisible(raw)) {
       if (!run.hidden) {

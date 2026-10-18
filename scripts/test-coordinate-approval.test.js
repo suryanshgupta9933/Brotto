@@ -114,7 +114,9 @@ const appendApprovalTarget = eval(`(${sliceFunction("appendApprovalTarget")})`);
 // The value block is built by two more functions and reads one module const;
 // they are pulled out the same way, so the test cannot drift from what ships.
 const INVISIBLE_CP = (() => {
-  const m = /const INVISIBLE_CP = (\/[^;]+\/);/.exec(panel);
+  // The flag is part of the literal: an astral range like U+E0000–U+E007F
+  // only means one codepoint under /u.
+  const m = /const INVISIBLE_CP = (\/[^;]+\/[a-z]*)/.exec(panel);
   if (!m) {
     console.error("FAIL  no INVISIBLE_CP in sidepanel.js — the value block does not name invisible characters");
     process.exit(1);
@@ -406,11 +408,15 @@ console.log("\ninvisible characters cannot hide characters, or reorder the card"
 // order, and renders the digits the other way round on screen.
 const BIDI = "Total: 42\u202e2\u202a";
 const INVISIBLE_RUN = "a\u200db\u2060c\ufeffd";
-const NAME = /<U\+[0-9A-F]{4}>/g;
+// `{4,}` rather than `{4}`: a supplementary-plane codepoint needs 5–6 hex
+// digits, and `codePointAt(0).toString(16).padStart(4, '0')` does not clip it.
+const NAME = /<U\+[0-9A-F]{4,}>/g;
 // "…shown…" with the invisible characters taken out: the placeholders stand in
 // for those and for nothing else.
 const strip = (t) => t.replace(NAME, "");
-const visibleOnly = (t) => t.replace(new RegExp(INVISIBLE_CP.source, "g"), "");
+// Rebuilt with the same flags it ships with: under /u the astral range means
+// one codepoint, and without it the source does not even compile.
+const visibleOnly = (t) => t.replace(new RegExp(INVISIBLE_CP.source, `${INVISIBLE_CP.flags}g`), "");
 
 check("a bidi payload renders visibly different from its byte order", () => {
   const { card } = buildCard({ args: { ...TYPE_ARGS, text: BIDI } });
@@ -508,7 +514,127 @@ check("a replayed type_xy with no recorded value says so", () => {
   assert(/not recorded/i.test(block.textContent),
     `the block does not say the value is unavailable: ${JSON.stringify(block.textContent)}`);
   assert(!block.textContent.includes("shown below"), "the block claims to be the value");
-});console.log("\nthe regression that matters: every other approval is untouched");
+});
+
+check("a replayed type_xy does not render the redaction mask as the value", () => {
+  // What replay actually hands over: `_scrubbed` writes the mask into
+  // `args.text` and the real length into `args.text_chars`. So the card was
+  // drawing "[redacted:password]" under a heading promising the whole value.
+  for (const mask of ["[redacted]", "[redacted:password]"]) {
+    const { card } = buildCard({
+      args: { x: 412, y: 288, label: "the cell C4", text: mask, text_chars: 7 },
+      action: { type: "type_xy" },
+    });
+    const block = findEl(card, hasClass("approval-value-text"));
+    assert(block, `${mask} rendered no value block at all`);
+    assert(!block.textContent.includes("redacted"),
+      `${JSON.stringify(block.textContent)} shows the mask as though it were the value`);
+    assert(/not recorded/i.test(block.textContent),
+      `${JSON.stringify(block.textContent)} does not say the value is unavailable`);
+    assert(/7/.test(block.textContent), "the recorded length is dropped even though the audit kept it");
+    assert(block.className.includes("unavailable"), "the block is not marked unavailable");
+    // The heading is the promise; it must not promise what this block does
+    // not show.
+    const label = findEl(card, hasClass("approval-value-label"));
+    assert(label, "no label above the value block");
+    assert(!/whole value|exactly as it will be written/.test(label.textContent),
+      `the heading still promises the value: ${JSON.stringify(label.textContent)}`);
+  }
+});
+
+check("a live type_xy still renders the real value in full", () => {
+  // The other side of the same gate: the live frame carries the raw value and
+  // no `text_chars`, and it must be untouched.
+  const raw = "Total: 42";
+  const { card } = buildCard({ args: { x: 412, y: 288, label: "the cell C4", text: raw } });
+  const block = findEl(card, hasClass("approval-value-text"));
+  assert(block.textContent === raw, `the live value rendered as ${JSON.stringify(block.textContent)}`);
+  const label = findEl(card, hasClass("approval-value-label"));
+  assert(/whole value, exactly as it will be written/.test(label.textContent),
+    `the live heading lost its promise: ${JSON.stringify(label.textContent)}`);
+});
+
+check("a literal value that merely starts with a bracket is still shown", () => {
+  // The mask test is a prefix match, so it must not swallow ordinary typing.
+  for (const text of ["[redacted] is a literal string", "[Redacted]"]) {
+    const { card } = buildCard({ args: { x: 412, y: 288, label: "c", text } });
+    const block = findEl(card, hasClass("approval-value-text"));
+    assert(block.textContent === text,
+      `${JSON.stringify(text)} rendered as ${JSON.stringify(block.textContent)}`);
+  }
+});
+
+console.log("\nthe enumerated invisible set covers the rest of the well-known invisibles");
+
+// One entry per newly enumerated range. Each value is the range's character
+// between two ordinary ones, so "is it named?" and "did anything else change?"
+// are the same assertion.
+const NEW_RANGES = [
+  ["soft hyphen U+00AD", "\u00ad"],
+  ["combining grapheme joiner U+034F", "\u034f"],
+  ["invisible math operator U+2061–U+2064", "\u2061"],
+  ["deprecated format U+206A–U+206F", "\u206a"],
+  ["Hangul filler U+115F", "\u115f"],
+  ["Hangul filler U+1160", "\u1160"],
+  ["Hangul filler U+3164", "\u3164"],
+  ["halfwidth Hangul filler U+FFA0", "\uffa0"],
+  ["Hangul filler U+FFFA", "\ufffa"],
+  ["variation selector U+FE00–U+FE0F", "\ufe00"],
+  ["tag block U+E0000–U+E007F", "\u{E0061}"],
+];
+
+for (const [name, cp] of NEW_RANGES) {
+  check(`${name} is named, not drawn`, () => {
+    const value = `a${cp}b`;
+    const { card } = buildCard({ args: { ...TYPE_ARGS, text: value } });
+    const rendered = findEl(card, hasClass("approval-value-text")).textContent;
+    assert(rendered !== value, "the character was rendered verbatim — it is still invisible");
+    assert(rendered.startsWith("a") && rendered.endsWith("b"),
+      `the visible characters around it changed: ${JSON.stringify(rendered)}`);
+    assert(strip(rendered) === `ab`,
+      `stripping the placeholders did not recover the visible characters: ${JSON.stringify(rendered)}`);
+    const hex = cp.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+    assert(rendered.includes(`<U+${hex}>`),
+      `it is not named by codepoint: ${JSON.stringify(rendered)} wanted <U+${hex}>`);
+  });
+}
+
+check("a supplementary-plane placeholder names the whole codepoint", () => {
+  // U+E0061 is astral: two UTF-16 units, so the pairing of the range with
+  // `codePointAt` is the claim to verify rather than assume. A per-surrogate
+  // read would produce U+DBC1 here and a mangled name.
+  const value = "a\u{E0061}b";
+  const { card } = buildCard({ args: { ...TYPE_ARGS, text: value } });
+  const rendered = findEl(card, hasClass("approval-value-text")).textContent;
+  assert(rendered.includes("<U+E0061>"),
+    `the astral codepoint is not named in full: ${JSON.stringify(rendered)}`);
+  assert(!/<U\+DBC1>/.test(rendered), "the placeholder names one surrogate, not the codepoint");
+  assert(strip(rendered) === "ab", `the visible characters changed: ${JSON.stringify(rendered)}`);
+});
+
+check("an emoji with a ZWJ is not mangled by the list", () => {
+  // The regression guard against inverting the rule. U+200D is inside an emoji
+  // sequence and is also, correctly, an invisible placeholder — the emoji
+  // themselves must survive as text either way.
+  const family = "\u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466}";
+  const { card } = buildCard({ args: { ...TYPE_ARGS, text: family } });
+  const rendered = findEl(card, hasClass("approval-value-text")).textContent;
+  for (const ch of family) {
+    if (ch === "‍") continue;
+    assert(rendered.includes(ch),
+      `the emoji lost ${ch.codePointAt(0).toString(16)}: ${JSON.stringify(rendered)}`);
+  }
+  // Stripping the placeholders recovers every emoji, in order and unmangled:
+  // the joiner itself is named rather than drawn, but it is not substituted for
+  // and nothing else is lost. This is what inverting the rule would break —
+  // it would also have named the joiner, but only by mangling every emoji that
+  // the list legitimately leaves alone.
+  assert(strip(rendered) === family.replace(/‍/g, ""),
+    `the emoji did not survive intact: ${JSON.stringify(rendered)}`);
+  assert((rendered.match(/<U\+200D>/g) || []).length === 3,
+    `the joiner is not named once per occurrence: ${JSON.stringify(rendered)}`);
+});
+console.log("\nthe regression that matters: every other approval is untouched");
 
 check("an approval with no screenshot renders the ordinary card", () => {
   const doc = fakeDocument();
