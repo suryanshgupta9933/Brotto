@@ -87,6 +87,8 @@ def _click(**args) -> ActionCall:
     return ActionCall(action="click_xy", action_args=base)
 
 
+
+
 @pytest.fixture
 def trail(tmp_path):
     t = AuditTrail("sess", dir=tmp_path)
@@ -307,6 +309,91 @@ async def test_the_screenshot_never_reaches_the_audit_document(trail, tmp_path):
         assert "screenshot" not in json.dumps(prompts)
 
 
+# ── the same vetoes the vision fallback has ────────────────────────────────
+#
+# This verb captures a screenshot too, and a second capture path with its own
+# (shorter) guard list is how the coordinate click came to photograph a page
+# holding a password the agent had typed earlier in the run. Both checks below
+# are the vision fallback's, and they are checked before the round trip, not
+# after — a capture that is going to be discarded is 270–700 KB spent to learn
+# nothing.
+
+@pytest.mark.asyncio
+async def test_a_credential_shaped_page_is_not_photographed(trail):
+    """`run_secrets` non-empty: the agent put a value into a field it judged
+    secret earlier in this run, and those pixels are the user's own page. The
+    approval card is built from a JPEG that would carry it back to them."""
+    deps, frames, _ = _deps()
+    out = await _execute_action(_click(), deps, audit=trail, turn=1,
+                                run_secrets=["hunter2"])
+    assert _EXEC_FAILURE in out
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert frames == []
+    deps.cdp.click_xy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_redactions_alone_veto_the_capture_too(trail):
+    """The other signal, and it is the weaker one: `redact_text` fired on this
+    page's text. Either is enough — a veto is a veto, not a majority."""
+    deps, frames, _ = _deps()
+    out = await _execute_action(_click(), deps, audit=trail, turn=1,
+                                redactions={"credit_card": 1})
+    assert _EXEC_FAILURE in out
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert frames == []
+
+
+@pytest.mark.asyncio
+async def test_past_the_capture_cap_it_refuses_without_the_round_trip(trail):
+    """`screenshots_taken` is a per-task budget shared with the vision
+    fallback. This path used to spend from it without counting, so every
+    coordinate click bought an uncacheable full-page JPEG on someone else's
+    budget. The check is *before* the capture: past the cap, nothing is
+    fetched, because the user cannot be shown a picture of what they are
+    approving and we will not pay to find that out twice."""
+    deps, frames, _ = _deps()
+    deps.screenshots_taken = harness_mod._MAX_CAPTURES_PER_TASK
+    out = await _execute_action(_click(), deps, audit=trail, turn=1)
+    assert _EXEC_FAILURE in out
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert frames == []
+    deps.cdp.click_xy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_capture_is_charged_to_the_task_budget(trail):
+    deps, _, _ = _deps()
+    before = deps.screenshots_taken
+    await _execute_action(_click(), deps, audit=trail, turn=1)
+    assert deps.screenshots_taken == before + 1
+
+
+@pytest.mark.asyncio
+async def test_a_declined_click_still_counts_its_capture(trail):
+    """The bytes were spent before the human answered, so the budget says so.
+    Otherwise a run that pings between approve and deny pays for free."""
+    deps, _, _ = _deps(reply="no")
+    before = deps.screenshots_taken
+    await _execute_action(_click(), deps, audit=trail, turn=1)
+    assert deps.screenshots_taken == before + 1
+
+
+@pytest.mark.asyncio
+async def test_the_veto_is_not_defeated_by_the_frame_still_carrying_it(trail):
+    """The approval frame keeps its `screenshot` field on the happy path; the
+    veto is what keeps the bytes off that frame on the bad path. A fix that
+    dropped the image from the frame would pass the assertions above and take
+    the human's ability to judge the click with it."""
+    deps, frames, _ = _deps()
+    await _execute_action(_click(), deps, audit=trail, turn=1)
+    assert frames[0]["screenshot"] == JPEG
+    deps, frames, _ = _deps()
+    await _execute_action(_click(), deps, audit=trail, turn=1,
+                          run_secrets=["hunter2"])
+    assert all("screenshot" not in f for f in frames), frames
+
+
 @pytest.mark.asyncio
 async def test_the_click_is_never_skipped_for_an_already_visited_domain(trail):
     """`deps.visited_domains` says the user let us *visit* this site. It says
@@ -463,3 +550,5 @@ async def test_a_failed_focus_types_nothing(trail):
     out = await _execute_action(_type(), deps, audit=trail, turn=1)
     assert _EXEC_FAILURE in out
     deps.cdp.type_text_at_focus.assert_not_awaited()
+
+

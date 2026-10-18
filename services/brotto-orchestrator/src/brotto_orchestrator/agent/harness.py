@@ -1653,6 +1653,41 @@ def _type_reason(x, y, label) -> str:
     )
 
 
+async def _capture_page(deps, *, redactions=None, run_secrets=None):
+    """The one guarded, budgeted screenshot in the harness. `(image, why)`.
+
+    Two callers need pixels — `_vision_fallback`, which hands one to the
+    model, and `_coordinate_action`, which puts one on the approval card — and
+    they had independent guard lists, which is how the coordinate path came to
+    photograph a page holding a password the agent had typed earlier in the
+    run: `_vision_fallback`'s veto and cap simply were not in that function.
+    The next capture site added anywhere else will have the same bug, so the
+    veto and the budget live here and both callers go through it.
+
+    The veto is checked first and the budget is checked **before** the round
+    trip: a capture that is going to be discarded is 270–700 KB spent to learn
+    nothing. Both signals are positive — "something credential-shaped was
+    found" — and an empty dict is absence of a detector firing, not clearance.
+    Neither argument defaults to anything permissive.
+
+    Domain and capture-switch checks are *not* here: they are the caller's
+    business, they are worded differently for a card than for a note, and
+    folding them in would be the framework this helper exists to avoid.
+
+    Never raises for its own reasons; the capture may raise, and each caller
+    already has a handler.
+    """
+    if redactions or run_secrets:
+        return None, _SCREENSHOT_REDACTED_WHY
+    if deps.screenshots_taken >= _MAX_CAPTURES_PER_TASK:
+        return None, _SCREENSHOT_BUDGET_WHY
+    image = await deps.cdp.capture_screenshot()
+    if not image:
+        return None, _CAPTURE_NO_IMAGE_WHY
+    deps.screenshots_taken += 1
+    return image, None
+
+
 _COORDINATE_REASONS = {
     "click": _click_reason,
     "focus": _focus_reason,
@@ -1661,7 +1696,8 @@ _COORDINATE_REASONS = {
 
 
 async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
-                             *, turn: int) -> str:
+                             *, turn: int, redactions=None,
+                             run_secrets=None) -> str:
     """`click_xy` / `focus_xy` / `type_xy` — one shared body, one approval.
 
     All three are the same question: is this point on a canvas the page is
@@ -1780,12 +1816,26 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
 
     # Captured here, in this step: a frame replayed from the last observation
     # shows a crosshair against a layout that has since moved.
-    image = await cdp.capture_screenshot()
+    #
+    # `_capture_page` is the same guarded, budgeted capture `_vision_fallback`
+    # uses — the veto on a credential-shaped page and the per-task cap included.
+    # This function used to call `cdp.capture_screenshot()` directly, with
+    # neither, which meant a coordinate click could photograph a page holding a
+    # password this run had typed, and spend an uncacheable full-page JPEG from a
+    # budget it never incremented. Add a third capture site: go through that
+    # helper, or this bug happens again.
+    image, why = await _capture_page(
+        deps, redactions=redactions, run_secrets=run_secrets)
     if not image:
-        return (
-            f"{_EXEC_FAILURE} {action}: no screenshot of this page could be "
-            f"captured, so the user would be approving a click they cannot "
-            f"see. Nothing was clicked, focused or typed."
+        if why == _CAPTURE_NO_IMAGE_WHY:
+            return (
+                f"{_EXEC_FAILURE} {action}: no screenshot of this page could be "
+                f"captured, so the user would be approving a click they cannot "
+                f"see. Nothing was clicked, focused or typed."
+            )
+        return refuse(
+            f"this click cannot be shown to the user, because {why} The user "
+            f"cannot approve a click they cannot see."
         )
     approved = await _ask_user(
         deps, audit, turn=turn, kind="coordinate_click", action=action,
@@ -1841,8 +1891,19 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
 
 
 async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
-                          turn: int = -1) -> str:
-    """Execute a single action. Returns outcome string."""
+                          turn: int = -1, redactions=None,
+                          run_secrets=None) -> str:
+    """Execute a single action. Returns outcome string.
+
+    `redactions` and `run_secrets` are this step's credential-shaped findings
+    and the run-wide list of values typed into fields judged secret. They
+    reach one caller only — `_coordinate_action`, which captures a screenshot
+    for the approval card — and are forwarded rather than re-derived so the
+    veto it applies is the same veto the vision fallback applies. They default
+    to empty: absence of a signal is absence of permission, and a caller that
+    forgets them gets a capture that was never vetoed, so every call site
+    passes them.
+    """
     cdp = deps.cdp
     action = call.action
     args = call.action_args
@@ -2015,7 +2076,9 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             if audit is None:
                 return (f"{_EXEC_FAILURE} {action}: no audit document is "
                         f"attached, so an approval could not be recorded.")
-            return await _coordinate_action(call, deps, audit, turn=turn)
+            return await _coordinate_action(
+                call, deps, audit, turn=turn, redactions=redactions,
+                run_secrets=run_secrets)
 
         elif action == "type_text":
             # focus/clear used to be fire-and-forget, so a ref that resolved to
@@ -2573,6 +2636,14 @@ _SCREENSHOT_REFUSED_WHY = "capture was refused by policy."
 # carries no domain, no URL and no hint at *what* was found — only that the
 # page held something of that shape, which the model already knows, because the
 # redacted page text it is reading this step said `[redacted]:card`.
+# Shared by both capture callers through `_capture_page`, so the cap reads as
+# one fact rather than two different ones. To the model a bounded capture and
+# a failed one are the same fact, which is that it cannot see the page; to the
+# user it is one that we will not keep photographing their screen.
+_SCREENSHOT_BUDGET_WHY = (
+    "this task has already been shown as many screenshots as it gets."
+)
+_CAPTURE_NO_IMAGE_WHY = "the browser did not return an image"
 _SCREENSHOT_REDACTED_WHY = (
     "this page holds something credential-shaped, and a picture cannot be "
     "redacted."
@@ -2660,6 +2731,9 @@ async def _vision_fallback(
     if not _sparse_for_task(deps.task, targets, page_text):
         return _VisionFallback()
     if redactions or run_secrets:
+        # Checked before the model is resolved, and repeated inside
+        # `_capture_page` below — that helper is the shared guard, this is the
+        # one case where it is too late by the time we get there.
         return _VisionFallback(
             needed=True, can_see=True,
             note=_SCREENSHOT_FAILED_NOTE.format(why=_SCREENSHOT_REDACTED_WHY),
@@ -2693,26 +2767,19 @@ async def _vision_fallback(
                 needed=True, can_see=True,
                 note=_SCREENSHOT_FAILED_NOTE.format(why=_SCREENSHOT_REFUSED_WHY),
             )
-        # The cap is checked *before* the capture, so a run past it does not
-        # pay for the round trip and the bytes it is going to discard — the
-        # expensive order, the same one the vision resolve above avoids. The
-        # note is the ordinary one: to the model a bounded capture and a
-        # failed one are the same fact, which is that it cannot see the page.
-        if deps.screenshots_taken >= _MAX_CAPTURES_PER_TASK:
-            return _VisionFallback(
-                needed=True, can_see=True,
-                note=_SCREENSHOT_FAILED_NOTE.format(
-                    why="this task has already been shown as many "
-                        "screenshots as it gets."),
-            )
-        image = await deps.cdp.capture_screenshot()
+        # The veto and the per-task cap live in `_capture_page`, the same
+        # guarded capture `_coordinate_action` uses — one capture rule in this
+        # harness, because two call sites with two guard lists is how the
+        # coordinate path learned to photograph a password. The veto is checked
+        # again here, earlier than the helper can reach it, because a step that
+        # is going to refuse should buy neither a resolve nor a capture.
+        image, why = await _capture_page(
+            deps, redactions=redactions, run_secrets=run_secrets)
         if not image:
             return _VisionFallback(
                 needed=True, can_see=True,
-                note=_SCREENSHOT_FAILED_NOTE.format(
-                    why="the browser did not return an image"),
+                note=_SCREENSHOT_FAILED_NOTE.format(why=why),
             )
-        deps.screenshots_taken += 1
         return _VisionFallback(image=image, needed=True, can_see=True,
                                note=(_SCREENSHOT_PARTIAL_NOTE if sparse
                                      else _SCREENSHOT_OK_NOTE))
@@ -3973,7 +4040,9 @@ class AgentHarness:
                 rec_args, trace = _scrubbed(call, redact)
                 action_trace.append(trace)
                 t_a = time.perf_counter()
-                outcome = await _execute_action(call, deps, audit=audit, turn=a_turn)
+                outcome = await _execute_action(
+                    call, deps, audit=audit, turn=a_turn, redactions=redactions,
+                    run_secrets=run_secrets)
                 # `outcome` goes to disk here *and* to the model in the next
                 # step's prompt, so an ask_human reply is scrubbed for the
                 # record only — the model still gets the answer it needs.

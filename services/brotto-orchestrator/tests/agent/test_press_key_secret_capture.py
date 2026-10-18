@@ -36,7 +36,7 @@ async def _recorded(monkeypatch, actions: list[ActionCall]) -> list[dict]:
     docs: list = []
     calls: list[int] = []
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         if call.action == "task_complete":
             deps.result = TaskResult(status="completed", summary="ok")
         return f"{call.action} done"

@@ -63,7 +63,7 @@ async def _run_batch(monkeypatch, actions: list[ActionCall],
     """
     calls: list[int] = []
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         if call.action == "task_complete":
             deps.result = TaskResult(status="completed", summary="ok")
         return f"{call.action} done"
@@ -124,7 +124,7 @@ async def test_a_legitimate_search_query_is_not_over_scrubbed(monkeypatch):
     """The cost of the fix must be paid somewhere: a search box is not a
     secret field, and the model's own query is its thread back to itself."""
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         if call.action == "task_complete":
             deps.result = TaskResult(status="completed", summary="ok")
         return f"{call.action} done"
@@ -164,7 +164,7 @@ async def test_a_secret_quoted_back_later_never_reaches_the_audit_document(monke
     """
     calls: list[int] = []
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         if call.action == "task_complete":
             deps.result = TaskResult(status="completed", summary="ok")
         return f"{call.action} done"
