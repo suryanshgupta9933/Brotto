@@ -80,7 +80,8 @@ When you start a task, the extension sends to the orchestrator:
    provider. It holds it in memory for the duration of the task.
 2. **The page you are looking at**, as the machine sees it: the page URL, the page title, the
    accessibility tree of interactive elements (role, accessible name, value, and a stable reference for
-   each), and visible page text when the task calls for it.
+   each), visible page text when the task calls for it, and — only if you have enabled screenshot
+   capture on your server — a JPEG of the visible viewport, for pages that have neither.
 
 **Page text is redacted before it is sent.** Before any page text reaches the model, the orchestrator
 removes credentials, API keys, bearer tokens, payment card numbers and government identifiers, replacing
@@ -95,6 +96,38 @@ The list above runs on the page-text channel only. The tree — the roles, label
 listed in the previous section, and the channel the model mostly reads — is passed through as it is. A
 token that appears in a field's label or value rather than in body text will reach your provider
 unredacted.
+
+**A screenshot is not redacted at all, and nothing in this policy claims otherwise.**
+There is a third channel, and it is the one with no coverage whatsoever. When a page's accessibility
+tree *and* its visible text both come back empty — a chart, a drawing canvas, Google Docs, Figma — the
+agent has nothing to read, and if your server has screenshot capture enabled it asks the extension for a
+JPEG of the visible viewport of the tab you attached. `redact_text` is pattern matching over strings. A
+JPEG is pixels, so there is nothing for it to match: a payment card number, a one-time code or an account
+balance rendered into a canvas reaches your model provider whole, where the same content in page text
+would have been replaced with `[redacted]`. This is not partial coverage or best-effort coverage. It is
+no coverage, and the honest way to describe it is that the one channel the redaction cannot touch is the
+one that carries whatever was drawn on the screen.
+
+**Capture is off unless you turn it on.** It is a server setting, not a panel setting: your
+self-hosted orchestrator takes a screenshot only when `BROTTO_VISION_CAPTURE` is explicitly set to `on`,
+`1`, `true` or `yes`. Any other value — including a typo, `false`, or the variable being absent — means
+no screenshot is ever captured, on any step, for any page. If you never set it, this whole section
+describes something your install cannot do. When you do set it, the extension is told when to capture by
+your own server and captures on request and nowhere else: with no task running, nothing is captured, and
+no other tab, window or screen is ever photographed.
+
+**A site on your own blocklist is never photographed.** Independently of the switch, a page whose
+domain you have blocked in your policy is refused before any capture is attempted — the same blocklist
+you already wrote for actions, used for this rather than a second list of "sensitive" URLs that you
+would have to maintain and trust separately.
+
+**What a screenshot is not.** It is a single image of the visible viewport of the one tab you attached,
+taken while a task is running. It is not a recording, not a screenshot of your whole screen, and not a
+history of what you have looked at. It is not written to disk by Brotto — not to the audit trail, not to
+a log, not to the side panel — and it is not retained anywhere by us. What the model then writes about
+what it saw appears in its summary exactly as page-derived text already does. On the hosted relay the
+switch is the operator's rather than yours, which is the same relationship the rest of this section has
+to the rest of the orchestrator.
 
 The orchestrator then sends **the page observations to the model provider you selected**. Brotto ships
 with Anthropic, OpenAI, MiniMax, Gemini, OpenRouter, DeepSeek and Groq, and can be pointed at a

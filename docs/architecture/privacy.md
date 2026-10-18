@@ -294,6 +294,61 @@ Note that deletion is scoped to sessions. `logs/user_policies/` and
 file is the one holding the approved-sites list. The README's Privacy section now says so, but
 there is still no "delete everything" path.
 
+## A screenshot is a gate, not a redaction pass
+
+`Page.captureScreenshot` added a third channel of page content, and it is the
+only one the redaction does not merely weaken — it does not reach it at all.
+`redact_text` is pattern matching over strings; a JPEG is pixels. A card number,
+an OTP or a balance drawn into a `<canvas>` reaches the provider whole, where
+the same characters in page text would have become `[redacted]`. Anything
+honest about this has to say **no coverage**, not partial coverage, so
+`PRIVACY.md` now carries it as a third carve-out beside the accessibility tree
+rather than leaving it inside the sentence that promises redaction.
+
+**The rule is default refusal, and the reasoning is that a denylist cannot be
+completed.** The alternative shape — a list of URL patterns where capture is
+refused — reads like the obvious fix and is untestable here, for a specific
+reason. The trigger that reaches this gate is *the accessibility tree came back
+empty and the page text with it*, and that is a fact about how a page is
+**implemented**, not about how sensitive it is. Google Docs, Figma and a hostile
+canvas page are byte-identical to that predicate. A chart and an OTP rendered
+on a canvas are the same page to anything that inspects the URL, so no URL shape
+distinguishes them. A pattern list against that is a denylist over an open-ended
+threat, and its failure mode is the dangerous kind: it would be untestable for
+completeness while reading in review as if it were complete — the same shape as
+the security-control paragraph `PERMISSIONS.md` used to carry and had to retract.
+
+**Default-off puts the proof on the safe side.** Capture is a *new egress
+channel*, and every other channel here is either redacted unconditionally or
+explicitly asked for. Those are different claims: redaction having no off switch
+only ever narrows what leaves, while a new channel having no off switch widens
+it. So the switch is the user's, on their own server, and off until they set it
+— `BROTTO_VISION_CAPTURE` accepts only `on`/`1`/`true`/`yes`, and anything
+unparseable is a refusal, the same safe reading as `AGENT_SECRET` and
+`BROTTO_RETENTION_DAYS`. The cost is real and is the price: until it is on, a
+canvas page is reported as **unseen** rather than described. A refused capture
+costs one task its eyes; an unredacted card number in a provider's logs does not
+come back.
+
+**The blocklist is reused, not duplicated.** `screenshot_block_reason` is
+`check_domain_policy` over the blacklist the user already wrote — a second
+list of "sensitive URLs" would be one more thing the user never sees and cannot
+audit, and two lists that must agree is a known failure shape in this repo (the
+mirror of one server's transcripts appearing under another's is exactly that,
+see 2b). The extension carries its own sensitive-URL pattern list at
+`debugger.ts:294` for a *different* purpose — it warns before you attach to a
+banking tab, and it is advisory; this one refuses. The reordering inside
+`screenshot_block_reason` follows the same rule the prompt-injection refusal
+uses: the switch is checked first, so a run with capture off is not told
+anything about the domain it was on.
+
+**What redaction's silence means for the model.** The refusal reason is a closed
+set of machine words (`capture_not_enabled`, `domain_blocked`) and the model is
+never told which — it receives one sentence, "capture was refused by policy."
+Otherwise a model could infer, from a refusal, that *this particular* URL would
+have been blocked, which turns a local policy into an oracle the user can be
+probed through.
+
 ## Where this is going: local-first
 
 The target is that the orchestrator holds **no session history at all**.
