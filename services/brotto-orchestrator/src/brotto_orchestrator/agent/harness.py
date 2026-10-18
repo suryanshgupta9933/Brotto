@@ -1068,7 +1068,9 @@ def _turn_to_input(turn: AgentTurn) -> str | list:
 
 async def _ask_user(deps: AgentDeps, audit, *, turn: int, kind: str,
                     action: str, args: dict, domain: str | None,
-                    reason: str, frame_extra: dict | None = None) -> bool:
+                    reason: str, frame_extra: dict | None = None,
+                    frame_args: dict | None = None,
+                    frame_reason: str | None = None) -> bool:
     """Raise one prompt, wait for the answer, record it. True = approved.
 
     Seven sites were doing this by hand — send, block on the queue,
@@ -1078,17 +1080,22 @@ async def _ask_user(deps: AgentDeps, audit, *, turn: int, kind: str,
     timeout continues the loop rather than aborting, and its "skip"
     aborts, which is a contract this signature does not have.
 
-    **`frame_extra` goes into the WebSocket frame and nowhere else.** The
-    audit call above takes `args` and only `args`; a screenshot is page
-    content and belongs in transit, never on disk under `logs/sessions/`.
-    Merging it after `record_prompt` is the whole mechanism — there is no
-    second audit call and no second place it could leak through.
+    **`frame_extra`, `frame_args` and `frame_reason` go into the WebSocket
+    frame and nowhere else.** The audit call above takes `args` and `reason`
+    and only those; a screenshot is page content and a typed value is the
+    user's keystrokes, and both belong in transit, never on disk under
+    `logs/sessions/`. Merging `frame_extra` after `record_prompt` is the whole
+    mechanism for the first — there is no second audit call and no second
+    place it could leak through. The other two are the same split for text
+    the card must show: default `None` means the audit copy is what is
+    recorded, so every call site that does not pass them is unchanged.
     """
     pid = audit.record_prompt(turn, kind=kind, action=action, args=args,
                               domain=domain, reason=reason)
     frame = {
-        "type": "approval_required", "action": action, "args": args,
-        "reasoning": reason,
+        "type": "approval_required", "action": action,
+        "args": args if frame_args is None else frame_args,
+        "reasoning": reason if frame_reason is None else frame_reason,
     }
     if frame_extra:
         frame.update(frame_extra)
@@ -1850,20 +1857,34 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
             f"this click cannot be shown to the user, because {why} The user "
             f"cannot approve a click they cannot see."
         )
-    # The value goes on the card and nowhere else. `_typed_field` still masks
-    # it in the action record and so in the document and the step summary: the
-    # card is a live frame to the user's own panel, on the user's own machine,
-    # carrying a value about to be written into the user's own page beside a
-    # screenshot of that page. The human cannot judge the write without it.
+    # Two copies, because the panel and the document are different surfaces.
+    # The card is a live frame to the user's own panel, on the user's own
+    # machine, carrying a value about to be written into the user's own page
+    # beside a screenshot of that page — the human cannot judge the write
+    # without it. The document is disk, and `_typed_field` already masks the
+    # value on the action-record path, so the prompt record takes the *same*
+    # masked args and a length-only reason. Without the split the raw value
+    # reached `logs/sessions/` twice: once in `args`, once inside the prose.
     frame_args: dict = {"x": x, "y": y, "label": label}
+    audit_args: dict = frame_args
+    frame_reason: str | None = None
     if verb == "type":
         frame_args["text"] = args.get("text")
+        audit_args, _ = _scrubbed(call, True)
+        frame_reason = _COORDINATE_REASONS["type"](x, y, label,
+                                                    args.get("text"))
+        audit_reason = _COORDINATE_REASONS["type"](
+            x, y, label,
+            f"{audit_args['text']} ({audit_args['text_chars']} characters)")
+    else:
+        audit_reason = _COORDINATE_REASONS[verb](x, y, label)
     approved = await _ask_user(
         deps, audit, turn=turn, kind="coordinate_click", action=action,
-        args=frame_args,
+        args=audit_args,
         domain=domain,
-        reason=(_COORDINATE_REASONS["type"](x, y, label, args.get("text"))
-                if verb == "type" else _COORDINATE_REASONS[verb](x, y, label)),
+        reason=audit_reason,
+        frame_args=frame_args,
+        frame_reason=frame_reason,
         frame_extra={
             "screenshot": image,
             "viewport": {"width": width, "height": height},
@@ -1909,6 +1930,8 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
             f"Nothing was clicked, focused or typed. Dismiss the dialog or panel "
             f"covering it, then try again."
         )
+
+
 
     if verb == "focus":
         result = await cdp.focus_xy(x, y)

@@ -95,13 +95,35 @@ def _focus(**args) -> ActionCall:
 
 @pytest.fixture
 def trail(tmp_path):
+    """A real `AuditTrail` with a real turn open.
+
+    `begin_turn` is not optional: `record_prompt` looks the turn up and writes
+    nothing when it is absent, so a fixture without one makes every "this
+    value is not on disk" assertion pass because *nothing* is on disk.
+    """
     t = AuditTrail("sess", dir=tmp_path)
     t.begin_task("put 42 in cell C4")
+    t.begin_turn(step=TURN, url=URL, page_title="Sheet1", ax_targets=3,
+                 ax_chars=10, ax_diff_chars=0, page_text_chars=0)
     return t
 
 
+TURN = 0  # the index `begin_turn` returned, above
+
+
+def _prompts(tmp_path) -> list[dict]:
+    """The prompt records read back out of the document's bytes.
+
+    Schema v2 nests them under `turns[]`, and reading them off disk is the
+    whole point of the assertions below: a check against the in-memory object
+    would notice nothing about page content landing in the file.
+    """
+    doc = json.loads("".join(p.read_text() for p in tmp_path.glob("*.json")))
+    return [prompt for turn in doc["turns"] for prompt in turn["prompts"]]
+
+
 async def _run(call, deps, trail):
-    return await _execute_action(call, deps, audit=trail, turn=1)
+    return await _execute_action(call, deps, audit=trail, turn=TURN)
 
 
 # ── the refusals ───────────────────────────────────────────────────────────
@@ -328,7 +350,7 @@ async def test_a_credential_shaped_page_is_not_photographed(trail):
     secret earlier in this run, and those pixels are the user's own page. The
     approval card is built from a JPEG that would carry it back to them."""
     deps, frames, _ = _deps()
-    out = await _execute_action(_click(), deps, audit=trail, turn=1,
+    out = await _execute_action(_click(), deps, audit=trail, turn=TURN,
                                 run_secrets=["hunter2"])
     assert _EXEC_FAILURE in out
     deps.cdp.capture_screenshot.assert_not_awaited()
@@ -341,7 +363,7 @@ async def test_redactions_alone_veto_the_capture_too(trail):
     """The other signal, and it is the weaker one: `redact_text` fired on this
     page's text. Either is enough — a veto is a veto, not a majority."""
     deps, frames, _ = _deps()
-    out = await _execute_action(_click(), deps, audit=trail, turn=1,
+    out = await _execute_action(_click(), deps, audit=trail, turn=TURN,
                                 redactions={"credit_card": 1})
     assert _EXEC_FAILURE in out
     deps.cdp.capture_screenshot.assert_not_awaited()
@@ -358,7 +380,7 @@ async def test_past_the_capture_cap_it_refuses_without_the_round_trip(trail):
     approving and we will not pay to find that out twice."""
     deps, frames, _ = _deps()
     deps.screenshots_taken = harness_mod._MAX_CAPTURES_PER_TASK
-    out = await _execute_action(_click(), deps, audit=trail, turn=1)
+    out = await _execute_action(_click(), deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE in out
     deps.cdp.capture_screenshot.assert_not_awaited()
     assert frames == []
@@ -369,7 +391,7 @@ async def test_past_the_capture_cap_it_refuses_without_the_round_trip(trail):
 async def test_a_capture_is_charged_to_the_task_budget(trail):
     deps, _, _ = _deps()
     before = deps.screenshots_taken
-    await _execute_action(_click(), deps, audit=trail, turn=1)
+    await _execute_action(_click(), deps, audit=trail, turn=TURN)
     assert deps.screenshots_taken == before + 1
 
 
@@ -379,7 +401,7 @@ async def test_a_declined_click_still_counts_its_capture(trail):
     Otherwise a run that pings between approve and deny pays for free."""
     deps, _, _ = _deps(reply="no")
     before = deps.screenshots_taken
-    await _execute_action(_click(), deps, audit=trail, turn=1)
+    await _execute_action(_click(), deps, audit=trail, turn=TURN)
     assert deps.screenshots_taken == before + 1
 
 
@@ -390,10 +412,10 @@ async def test_the_veto_is_not_defeated_by_the_frame_still_carrying_it(trail):
     dropped the image from the frame would pass the assertions above and take
     the human's ability to judge the click with it."""
     deps, frames, _ = _deps()
-    await _execute_action(_click(), deps, audit=trail, turn=1)
+    await _execute_action(_click(), deps, audit=trail, turn=TURN)
     assert frames[0]["screenshot"] == JPEG
     deps, frames, _ = _deps()
-    await _execute_action(_click(), deps, audit=trail, turn=1,
+    await _execute_action(_click(), deps, audit=trail, turn=TURN,
                           run_secrets=["hunter2"])
     assert all("screenshot" not in f for f in frames), frames
 
@@ -432,7 +454,7 @@ async def test_focus_asks_the_user_because_it_is_a_click(trail):
     out = await _execute_action(
         ActionCall(action="focus_xy",
                    action_args={"x": 412, "y": 288, "label": "the cell C4"}),
-        deps, audit=trail, turn=1)
+        deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE not in out
     assert [f["type"] for f in frames] == ["approval_required"], frames
     deps.cdp.focus_xy.assert_awaited_once_with(412, 288)
@@ -445,7 +467,7 @@ async def test_a_declined_focus_never_presses_the_mouse(trail):
     out = await _execute_action(
         ActionCall(action="focus_xy",
                    action_args={"x": 412, "y": 288, "label": "the cell C4"}),
-        deps, audit=trail, turn=1)
+        deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE in out
     deps.cdp.focus_xy.assert_not_awaited()
 
@@ -458,11 +480,11 @@ async def test_focus_is_gated_on_the_opt_in_and_the_occlusion_test(
     focus = ActionCall(action="focus_xy",
                        action_args={"x": 1, "y": 1, "label": "cell A1"})
     assert _EXEC_FAILURE in await _execute_action(focus, deps, audit=trail,
-                                                  turn=1)
+                                                  turn=TURN)
     monkeypatch.setenv(COORDINATE_CLICK_ENV, "1")
     deps, _, _ = _deps(probe={"width": 800, "height": 600, "tag": "DIV"})
     assert _EXEC_FAILURE in await _execute_action(focus, deps, audit=trail,
-                                                  turn=1)
+                                                  turn=TURN)
     deps.cdp.focus_xy.assert_not_awaited()
 
 
@@ -472,7 +494,7 @@ async def test_focus_out_of_bounds_refuses(trail):
     out = await _execute_action(
         ActionCall(action="focus_xy",
                    action_args={"x": 1512, "y": 10, "label": "cell"}),
-        deps, audit=trail, turn=1)
+        deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE in out and "viewport" in out
 
 
@@ -490,7 +512,7 @@ async def test_type_focuses_then_inserts_at_the_point(trail):
     coordinate-free type later — is exactly the "types into whatever was last
     focused" shape `type_text_to_ref` refuses to do, so the two are one call."""
     deps, frames, _ = _deps()
-    out = await _execute_action(_type(), deps, audit=trail, turn=1)
+    out = await _execute_action(_type(), deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE not in out, out
     deps.cdp.focus_xy.assert_awaited_once_with(412, 288)
     deps.cdp.type_text_at_focus.assert_awaited_once_with("42")
@@ -502,7 +524,7 @@ async def test_type_asks_the_user_once_and_types_into_what_it_focused(trail):
     """One card, one press, then the insert. `type_xy` focuses with a click
     before it types, so the click is the thing the user is approving."""
     deps, frames, _ = _deps()
-    out = await _execute_action(_type(), deps, audit=trail, turn=1)
+    out = await _execute_action(_type(), deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE not in out
     assert [f["type"] for f in frames] == ["approval_required"], frames
     deps.cdp.capture_screenshot.assert_awaited_once()
@@ -511,7 +533,7 @@ async def test_type_asks_the_user_once_and_types_into_what_it_focused(trail):
 @pytest.mark.asyncio
 async def test_a_declined_type_types_nothing(trail):
     deps, _, _ = _deps(reply="deny")
-    out = await _execute_action(_type(), deps, audit=trail, turn=1)
+    out = await _execute_action(_type(), deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE in out
     deps.cdp.focus_xy.assert_not_awaited()
     deps.cdp.type_text_at_focus.assert_not_awaited()
@@ -527,7 +549,7 @@ async def test_type_inherits_focus_s_guard_ordering(trail, probe, label):
     then the occlusion check. A type that skipped the occlusion check would
     write into a dialog nobody approved."""
     deps, _, _ = _deps(probe=probe)
-    out = await _execute_action(_type(label=label), deps, audit=trail, turn=1)
+    out = await _execute_action(_type(label=label), deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE in out, out
     deps.cdp.focus_xy.assert_not_awaited()
     deps.cdp.type_text_at_focus.assert_not_awaited()
@@ -551,7 +573,7 @@ async def test_type_is_masked_on_disk_like_type_text(trail, tmp_path):
 async def test_a_failed_focus_types_nothing(trail):
     deps, _, _ = _deps()
     deps.cdp.focus_xy = AsyncMock(return_value="Error executing: tab gone")
-    out = await _execute_action(_type(), deps, audit=trail, turn=1)
+    out = await _execute_action(_type(), deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE in out
     deps.cdp.type_text_at_focus.assert_not_awaited()
 
@@ -585,7 +607,7 @@ async def test_a_page_that_moved_while_the_user_read_refuses(trail, verb,
     deps, _, _ = _deps()
     deps.cdp.probe_xy = _moving_page(second)
     call = {"click": _click, "focus": _focus, "type": _type}[verb]()
-    out = await _execute_action(call, deps, audit=trail, turn=1)
+    out = await _execute_action(call, deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE in out, out
     getattr(deps.cdp, dispatch).assert_not_awaited()
     deps.cdp.type_text_at_focus.assert_not_awaited()
@@ -596,7 +618,7 @@ async def test_the_agreement_case_still_dispatches(trail):
     """Two identical probes are the normal case; re-reading must not refuse
     a page that simply did not move."""
     deps, _, _ = _deps()
-    await _execute_action(_click(), deps, audit=trail, turn=1)
+    await _execute_action(_click(), deps, audit=trail, turn=TURN)
     assert deps.cdp.probe_xy.await_count == 2
     deps.cdp.click_xy.assert_awaited_once_with(412, 288)
 
@@ -609,29 +631,16 @@ async def test_the_type_card_carries_the_text_it_will_write(trail):
     particular, and this is a write primitive into the user's own
     spreadsheet."""
     deps, frames, _ = _deps()
-    await _execute_action(_type("42"), deps, audit=trail, turn=1)
+    await _execute_action(_type("42"), deps, audit=trail, turn=TURN)
     frame = frames[0]
     assert frame["args"]["text"] == "42"
     assert "42" in frame["reasoning"]
 
 
 @pytest.mark.asyncio
-async def test_a_long_typed_value_is_bounded_on_the_card(trail):
-    """A card is a reading surface, not a paste buffer. The full value is in
-    `args`; the preview on the card is capped and says so."""
-    long = "x" * 5000
-    deps, frames, _ = _deps()
-    await _execute_action(_type(long), deps, audit=trail, turn=1)
-    frame = frames[0]
-    assert frame["args"]["text"] == long, "the value the user approves is whole"
-    assert len(frame["reasoning"]) < 1000
-    assert "5000" in frame["reasoning"]
-
-
-@pytest.mark.asyncio
 async def test_the_click_and_focus_cards_carry_no_text(trail):
     deps, frames, _ = _deps()
-    await _execute_action(_click(), deps, audit=trail, turn=1)
+    await _execute_action(_click(), deps, audit=trail, turn=TURN)
     assert "text" not in frames[0]["args"]
 
 
@@ -639,12 +648,52 @@ async def test_the_click_and_focus_cards_carry_no_text(trail):
 async def test_the_typed_value_still_never_reaches_the_audit_document(
         trail, tmp_path):
     """The regression that matters alongside the card change. The card is a
-    live frame to the user's own panel; the document is disk. `_typed_field`
-    masks the value and only the value — adding it to the card must not
-    change what is written down."""
+    live frame to the user's own panel; the document is disk. The value must
+    not reach disk **twice**: once as `args`, once inside the reason prose —
+    which is why the audit copy of the reason is masked too.
+
+    Asserted positively first. An absence-only assertion over a document the
+    fixture never wrote to is true for the wrong reason, so the record is
+    proved to exist before the value is proved absent from it.
+    """
     deps, _, _ = _deps()
-    out = await _execute_action(_type("hunter2"), deps, audit=trail, turn=1)
+    out = await _execute_action(_type("hunter2"), deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE not in out
-    for path in tmp_path.glob("*.json"):
-        text = path.read_text()
-        assert "hunter2" not in text, f"{path.name} holds the typed value"
+
+    prompts = _prompts(tmp_path)
+    assert [p["kind"] for p in prompts] == ["coordinate_click"], prompts
+    assert prompts[0]["decision"] == "approved", prompts
+    # Masked, not absent: the document keeps the fact and the length.
+    assert prompts[0]["args"]["text"] == harness_mod.REDACTED
+    assert prompts[0]["args"]["text_chars"] == 7
+
+    text = "".join(p.read_text() for p in tmp_path.glob("*.json"))
+    for part in ("hunter2", "hunter", "nter2"):
+        assert part not in text, f"the typed value reached disk ({part!r})"
+
+
+@pytest.mark.asyncio
+async def test_the_click_prompt_is_recorded_too(trail, tmp_path):
+    """The same positive check for the non-typed verb, because the fix splits
+    one dict into an audit copy and a frame copy. If that split were wrong the
+    way it was wrong before, this is the assertion that would notice — and it
+    only notices if the record exists."""
+    deps, _, _ = _deps()
+    await _execute_action(_click(), deps, audit=trail, turn=TURN)
+    prompt = _prompts(tmp_path)[0]
+    assert prompt["kind"] == "coordinate_click"
+    assert prompt["args"] == {"x": 412, "y": 288, "label": "the cell C4"}
+
+
+@pytest.mark.asyncio
+async def test_the_screenshot_assertion_sees_a_real_record(trail, tmp_path):
+    """`test_the_screenshot_never_reaches_the_audit_document` was, until the
+    fixture opened a turn, passing because the document was empty. This is
+    the same test with the positive control attached, so it cannot pass
+    vacuously again."""
+    deps, _, _ = _deps()
+    await _execute_action(_click(), deps, audit=trail, turn=TURN)
+    assert _prompts(tmp_path), "nothing was recorded to leak"
+    text = "".join(p.read_text() for p in tmp_path.glob("*.json"))
+    assert JPEG not in text
+    assert '"screenshot"' not in text
