@@ -569,27 +569,80 @@ def test_every_provider_resolves_without_raising(no_network):
             caps = resolve(provider, model_id, **kwargs)
             assert isinstance(caps, Capabilities)
 
-def test_a_credential_is_never_logged(caplog):
+def test_a_credential_is_never_logged(caplog, monkeypatch):
     """Gemini authenticates with `?key=<api_key>`, so a URL is a credential the
     moment it is built — and CodeQL flagged the three lines that printed one.
     The diagnostics now name the vendor instead of the endpoint, which is what
     they were for. Asserted on the *absence* of the key, which is the failure
-    mode: a log line is the copy on disk nobody remembers to delete."""
+    mode: a log line is the copy on disk nobody remembers to delete.
+
+    Each seam is called with its real signature and **every assertion is
+    positive** — an empty `caplog` would make every "the secret is absent"
+    below vacuously true, which is the way this test was weak before: wrapped
+    in a bare `except` it asserted nothing at all. The transport is stubbed to
+    a refusal, so the branch under test is the real one and not a socket."""
+    import httpx
+
+    def refused(*a, **kw):
+        raise httpx.ConnectError("stubbed — this test must not open a socket")
+
+    monkeypatch.setattr(httpx, "post", refused)
+    monkeypatch.setattr(httpx, "get", refused)
     secret = "sk-do-not-log-me"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/x?key={secret}"
 
     caplog.clear()
-    # both helpers are total — a refused connection is an answer, not a raise —
-    # and either way they land in the branch that logs.
-    caps_mod._post_probe(
-        "http://127.0.0.1:1/x?key=" + secret, {},
-        label="gemini", timeout=0.5,
-    )
+    caps_mod._post_probe(url, {}, label="gemini", timeout=0.5)
+    assert caplog.records, "the rejection branch never ran — assertions below are vacuous"
     assert secret not in caplog.text
     assert "gemini" in caplog.text  # a diagnostic with no vendor is not one
 
     caplog.clear()
-    caps_mod._get_json(
-        "http://127.0.0.1:1/x?key=" + secret, label="gemini", timeout=0.5
-    )
+    caps_mod._get_json(url, label="gemini", timeout=0.5)
+    assert caplog.records, "the failure branch never ran — assertions below are vacuous"
     assert secret not in caplog.text
+    assert "gemini" in caplog.text
+
+
+def test_a_rejected_probe_logs_the_host_and_not_the_body(caplog, monkeypatch):
+    """The provider's error text is untrusted third-party prose: it can quote
+    back the base URL, the resolved hostname, or a fragment of the key. The
+    only fact an operator acts on is *which endpoint rejected the image*, so
+    the line carries the host — the negative control, because a sanitizer that
+    quietly returned nothing would pass every absence assertion — and drops
+    the body entirely rather than redacting it."""
+    secret = "sk-probe-secret"
+    body_text = f"400 rejected by https://generativelanguage.googleapis.com/?key={secret}"
+
+    monkeypatch.setattr(caps_mod, "_post_probe", lambda url, body, **kw: (False, body_text))
+    with caplog.at_level("WARNING", logger="brotto_orchestrator.model.capabilities"):
+        assert probe_vision("gemini", "gemini-x", api_key=secret) is None
+    assert caplog.records, "no log line fired — every assertion below is vacuous"
+    assert secret not in caplog.text
+    assert body_text not in caplog.text
+    # Negative control: the host is still there, so this is a sanitizer and
+    # not a mute.
+    assert "generativelanguage.googleapis.com" in caplog.text
+
+
+def test_a_url_carrying_a_credential_in_the_authority_is_stripped():
+    """`https://user:pass@host/path` puts the credential in the *netloc*, so a
+    sanitizer that rebuilds from `netloc` keeps it. The authority here is
+    rebuilt from the parsed host, and the path goes with it — for a `custom`
+    base_url the path is whatever the user typed and can be a token."""
+    assert caps_mod._safe_url("https://user:pass@host.example/v1/chat") == \
+        "https://host.example"
+    assert caps_mod._safe_url("https://host.example:8443/v1/models") == \
+        "https://host.example:8443"
+    assert caps_mod._safe_url("http://box:8000") == "http://box:8000"  # port kept
+
+
+def test_a_malformed_url_still_produces_a_string():
+    """`urlsplit` raises on an unclosed IPv6 bracket and `.port` raises on a
+    non-numeric port — and this helper is called from inside `except` handlers
+    on paths that promise to be total. A raise here would escape at exactly the
+    moment the code is already failing."""
+    assert caps_mod._safe_url("http://[::1/x") == "<unparseable>"
+    assert caps_mod._safe_url("http://host:notaport/x") == "<unparseable>"
+    assert caps_mod._safe_url("") == "<no-host>"
+    assert caps_mod._safe_url("not a url at all") == "<no-host>"

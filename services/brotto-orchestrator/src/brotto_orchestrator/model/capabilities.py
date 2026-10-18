@@ -46,6 +46,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, replace
+from urllib.parse import urlsplit
 from pathlib import Path
 
 from brotto_orchestrator.model import catalog, pricing as pricing_mod
@@ -179,6 +180,34 @@ def _post_probe(
     except Exception as exc:  # noqa: BLE001 — see above
         log.warning("vision probe: %s -> %s", label, type(exc).__name__)
         return False, ""
+
+
+def _safe_url(url: str) -> str:
+    """The vendor's host, and nothing else. **Never raises.**
+
+    A URL carries three credentials, not one: the query (Gemini's `?key=`),
+    the userinfo (`user:pass@`) and — for a `custom` base_url, where the URL is
+    whatever the user typed — a path that can itself be a token. So the
+    authority is rebuilt from the parsed host and port and everything else is
+    dropped. Keeping the host is the point: a diagnostic that cannot say which
+    endpoint answered is not a diagnostic.
+
+    `urlsplit` raises `ValueError` on malformed input and `.port` raises on a
+    non-numeric one, and this runs from inside `except` handlers on paths that
+    promise to be total — so the whole body is guarded and a bad URL degrades
+    to a placeholder instead of escaping at the moment the code is already
+    failing. Pinned by `test_a_malformed_url_still_produces_a_string`.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        if not host:
+            return "<no-host>"
+        # `.port` is a property and raises; read it inside the guard.
+        port = parts.port
+        return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
+    except Exception:  # noqa: BLE001 — totality is the whole contract here
+        return "<unparseable>"
 
 
 # --------------------------------------------------------------------------
@@ -467,6 +496,9 @@ def probe_vision(
     }
 
     def _call(with_image: bool) -> tuple[bool, str]:
+        """`(accepted, url)` — the URL is returned so the rejection diagnostic
+        can name the host without the caller re-deriving a string it must then
+        be trusted not to log."""
         built = _probe_request(
             provider, model_id, with_image=with_image, base_url=base_url
         )
@@ -475,15 +507,23 @@ def probe_vision(
         url, body, headers = built
         if shape == "gemini":  # authenticates with a query parameter
             url = f"{url}?key={api_key}"
-        return _post_probe(url, body, headers={**headers, **auth}, label=provider)
+        accepted, _body = _post_probe(
+            url, body, headers={**headers, **auth}, label=provider
+        )
+        return accepted, url
 
-    accepted, text = _call(True)
+    accepted, url = _call(True)
     if accepted:
         return True
-    # Provider text goes to the log and no further: this body can carry the
-    # base URL, the resolved hostname, or a fragment of the key, and the only
-    # thing a caller can act on is the tri-state.
-    log.warning("vision probe rejected for %s/%s: %s", provider, model_id, text[:200])
+    # The provider's body earns nothing: it is untrusted third-party text that
+    # can carry the base URL, the resolved hostname or a fragment of the key,
+    # and the only thing a caller can act on is the tri-state. Log the
+    # classification and the host, and let `log.debug` below the log level be
+    # where a body would live if it were ever needed.
+    log.warning(
+        "vision probe rejected for %s/%s at %s (body omitted)",
+        provider, model_id, _safe_url(url),
+    )
     return False if _call(False)[0] else None
 
 
