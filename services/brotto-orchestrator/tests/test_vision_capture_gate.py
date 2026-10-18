@@ -181,13 +181,17 @@ def test_the_switch_is_checked_before_the_domain(monkeypatch):
     "http://x.onion/",
     "http://printer.local/",
     "http://host.invalid/",
-    "http://box.dev/",
     "http://gw.home.arpa/",
 ])
 def test_an_internal_suffix_is_refused(monkeypatch, url):
     """`len(labels) < 2` refused `localhost` but let `nas.home` through, and
     a name inside somebody's network is the same thing wearing a second
-    label. Refused for the same reason and with the same reason string."""
+    label. Refused for the same reason and with the same reason string.
+
+    `box.dev` used to be in this list and is not any more: `.dev` is a
+    delegated TLD, and refusing it also refused `agent.brotto.dev`, which is
+    ours. See `test_our_own_relay_resolves_with_the_switch_on` for the trade
+    this makes, which is that a `.dev` name on a LAN now resolves too."""
     _on(monkeypatch)
     assert screenshot_block_reason(url, Policy()) == REFUSAL_UNKNOWN_URL
 
@@ -197,9 +201,31 @@ def test_an_internal_suffix_is_refused(monkeypatch, url):
     BANK,
     "https://www.example.com/",   # `example` is the reserved TLD, not the
                                   # registrable one — the suffix, not a name
+    "https://agent.brotto.dev/",  # our own relay — the reason `dev` is not
+                                  # in the deny set; see the test below
 ])
 def test_a_public_host_is_still_allowed_when_the_switch_is_on(monkeypatch, url):
     """The negative control: a deny list that refused everything would pass
     every case above it."""
     _on(monkeypatch)
     assert screenshot_block_reason(url, Policy()) is None
+
+
+def test_our_own_relay_resolves_with_the_switch_on(monkeypatch):
+    """`dev` is a delegated TLD, not a special-use name, and this is the cost
+    of getting that wrong in the other direction: `agent.brotto.dev` is a
+    real host that the first-run wizard and the fallback UI point at, so a
+    deny set containing `dev` refused to photograph our own relay.
+
+    The trade this makes is deliberate and has to be stated, because it is
+    not free: `_raw_host` sees only labels, so a `box.dev` on somebody's
+    network is indistinguishable from a registrable `.dev` and now resolves
+    too. The right side of that trade is to leave a real delegated TLD out —
+    one name on a LAN is a user's own network, and they have their own
+    blocklist — rather than in, where it also costs a shipped host.
+    """
+    _on(monkeypatch)
+    assert screenshot_block_reason("https://agent.brotto.dev/", Policy()) is None
+    # …and it is the *suffix* decision, not a special case for our domain:
+    # another registrable `.dev` host is allowed by the same rule.
+    assert screenshot_block_reason("https://someone-elses.dev/", Policy()) is None

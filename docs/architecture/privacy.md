@@ -379,10 +379,30 @@ labels each, passed straight through, and were photographed with no list in
 front of them. The fix is a deny set of special-use and internal suffixes
 (`local`, `localhost`, `internal`, `intranet`, `lan`, `home`, `corp`,
 `home.arpa`, `arpa`, `onion`, plus the RFC 2606/6761 reserved `test`,
-`invalid`, `example`, and `dev`), matched as a suffix against the
+`invalid`, `example`), matched as a suffix against the
 already-case-folded host so `nas.HOME` cannot slip past on spelling. It returns
 `None`, so these raise the *existing* `unresolvable_url` refusal — no new
 reason, nothing new in the closed vocabulary the model reads.
+
+**`dev` was in that set, and it was wrong in the direction that costs.** `.dev`
+is a delegated TLD, not a special-use name — RFC 6761 reserves `.test`,
+`.example`, `.invalid` and `.localhost` and does not mention `.dev` — so a
+registrable host landed on the refuse side of a gate whose only answer is
+*refuse*. One of them is `agent.brotto.dev`, which is **ours**: the first-run
+wizard and the fallback UI both point at it. That is the third time this host
+has cost something, and the same lesson each time — it shipped and nothing
+that reads the name reads the suffix (263, 516).
+
+The trade is real, and it is why the fix is a removal rather than a special
+case for our own domain. `_raw_host` reads labels, so a `box.dev` on a LAN and
+a registrable `.dev` are the same string to it; one of them now resolves. That
+is accepted rather than special-cased because the two costs are unequal: a name
+inside a network is refused when it is special-use or a single label, and one
+resolvable `.dev` on a LAN is the user's own network with their own blocklist
+in front of it — whereas the alternative refuses a shipped host in production.
+`test_our_own_relay_resolves_with_the_switch_on` is the control that was red
+before this change, and `box.dev` is out of
+`test_an_internal_suffix_is_refused` for the same reason.
 
 **A curated set, not a public-suffix list.** The alternative is requiring the
 rightmost label to be a real public suffix, which closes the whole class rather

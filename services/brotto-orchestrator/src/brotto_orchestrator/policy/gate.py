@@ -94,9 +94,20 @@ REFUSAL_UNKNOWN_URL = "unresolvable_url"
 # would be a ~10k-entry table imported to answer a yes/no that only ever
 # refuses. `domains.MULTI_PART_SUFFIXES` is not a TLD set and cannot be
 # extended into one without that table.
+#
+# `dev` was here and was wrong. It is a delegated TLD, not a special-use
+# name — RFC 6761 reserves `.test`, `.example`, `.invalid` and `.localhost`,
+# not `.dev` — so a registrable host ended up on the refuse side, and one of
+# them is our own relay: `agent.brotto.dev` is what the first-run wizard and
+# the fallback UI point at. The trade is real and is the reason: `_raw_host`
+# reads labels, so a `box.dev` on a LAN is indistinguishable from a
+# registrable `.dev` and now resolves too. A name inside somebody's network
+# is refused when it is special-use or a single label; one resolvable name on
+# a LAN is the user's own network and their own blocklist. Losing that case
+# costs a LAN host — keeping it costs a shipped one.
 _INTERNAL_SUFFIXES = frozenset({
     "local", "localhost", "internal", "intranet", "lan", "home", "corp",
-    "home.arpa", "arpa", "onion", "test", "invalid", "example", "dev",
+    "home.arpa", "arpa", "onion", "test", "invalid", "example",
 })
 
 # The hostname alphabet, minus "." (split on) and "-" is allowed by RFC 1123
