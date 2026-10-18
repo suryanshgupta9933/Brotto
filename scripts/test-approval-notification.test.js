@@ -50,14 +50,16 @@ function sliceFunction(name) {
   throw new Error(`unterminated function ${name}`);
 }
 
-// Strip just enough TypeScript for eval: parameter/return annotations and the
-// two `as` casts in these two functions. Nothing else is type syntax.
+// Strip just enough TypeScript for eval: parameter/return annotations and `as`
+// type assertions. Nothing else is type syntax. The assertion strip is generic
+// rather than per-cast, so adding a cast in background.ts does not silently
+// break every check in this file with a parse error.
 function js(fn) {
   return fn
     .replace(/function maybeNotify\(event: Record<string, unknown>\): void/, "function maybeNotify(event)")
     .replace(/function notify\(id: string, spec: NotificationSpec\): void/, "function notify(id, spec)")
     .replace(/event\.type as string/g, "event.type")
-    .replace(/ as chrome\.notifications\.NotificationOptions<true>/g, "");
+    .replace(/ as [A-Za-z_$][\w$.<>, |]*(?=[,;)\]])/g, "");
 }
 
 // Runs maybeNotify over a recording chrome.notifications stub and returns
@@ -111,15 +113,32 @@ function titles(opts) {
 
 console.log("a coordinate approval is not answerable from the notification");
 
+// The coordinate case is identified by the ACTION, not by `viewport`. Every
+// fixture that leaned on `viewport` to mean "coordinate" let a whole class of
+// bug through: any path that dropped that one optional sibling field put the
+// Approve button back and the blind one-tap approve returned silently. So the
+// primary fixture below carries no `viewport` at all — under the old gate it
+// fails open, which is the whole point of it.
 const coordinate = {
   type: "approval_request",
   id: "approval-1",
   reason: "a press, a release, and then the text shown below this card inserted at that point",
   action: { type: "type_xy" },
-  args: { text: "quarterly revenue" },
+  args: { text: "quarterly revenue", x: 412, y: 288 },
   screenshot: "data:image/jpeg;base64,AAAA",
-  viewport: { width: 1280, height: 800 },
   url: "https://example.com/sheet",
+};
+
+// The other direction: `viewport` present, nothing about the action itself
+// coordinate-shaped. That signal is still a trigger on its own, so the buttons
+// stay withheld here too.
+const viewportOnly = {
+  type: "approval_request",
+  id: "approval-3",
+  reason: "This will submit your credit card details to example.com.",
+  action: { type: "submit_form", url: "https://example.com/pay" },
+  args: { url: "https://example.com/pay" },
+  viewport: { width: 1280, height: 800 },
 };
 
 const ordinary = {
@@ -171,7 +190,25 @@ check("an ordinary approval keeps the server's own sentence", () => {
   );
 });
 
-check("login_required and clarify_request are untouched by the coordinate rule", () => {
+check("coordinates in args withhold the buttons with no viewport at all", () => {
+  const noViewport = notificationsFor({
+    ...coordinate,
+    id: "approval-2",
+    action: { type: "mystery_verb" },
+    args: { x: 412, y: 288 },
+  })[0];
+  assert(titles(noViewport.opts).length === 0,
+    `a coordinate action was dropped only for a missing viewport: ${JSON.stringify(titles(noViewport.opts))}`);
+});
+
+check("a prose action carrying viewport still withholds the buttons", () => {
+  const [n] = notificationsFor(viewportOnly);
+  assert(n.id === "approval:approval-3", `wrong id: ${n.id}`);
+  assert(titles(n.opts).length === 0,
+    `viewport alone stopped suppressing: ${JSON.stringify(titles(n.opts))}`);
+});
+
+check("an ordinary approval_request still gets Approve / Not now", () => {
   const login = notificationsFor({ type: "login_required", domain: "example.com" })[0];
   assert(!login.opts.buttons, "login_required grew buttons");
   assert(/example\.com/.test(login.opts.message), `login message lost its domain: ${login.opts.message}`);

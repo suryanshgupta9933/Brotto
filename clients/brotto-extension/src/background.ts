@@ -899,16 +899,34 @@ function maybeNotify(event: Record<string, unknown>): void {
   }
   if (t === "approval_request") {
     const id = String(event.id ?? "");
-    // `viewport` is set only on a coordinate approval (harness.py is the one
-    // caller that passes frame_extra). That is the one approval a sentence
-    // cannot carry: `{x: 412, y: 288}` names nothing, and for a `type_xy` the
-    // reasoning deliberately omits the value, pointing at a card instead. The
-    // panel is the only surface that draws the screenshot, the crosshair and
-    // the value — so a notification offering Approve here is one tap of
-    // consent to something the user has not seen. Tell them, and point them at
-    // the panel. No buttons: Chrome fires onButtonClicked only for a button
-    // that exists, so the resolver stays pending and the card can still answer.
-    if (event.viewport) {
+    // A coordinate approval is the one a sentence cannot carry: `{x: 412,
+    // y: 288}` names nothing, and for a `type_xy` the reasoning deliberately
+    // omits the value, pointing at a card instead. The panel is the only
+    // surface that draws the screenshot, the crosshair and the value — so a
+    // notification offering Approve here is one tap of consent to something
+    // the user has not seen. Tell them, and point them at the panel. No
+    // buttons: Chrome fires onButtonClicked only for a button that exists, so
+    // the resolver stays pending and the card can still answer.
+    //
+    // No "Show panel" button either. `chrome.sidePanel.open()` needs a user
+    // gesture, and whether a notification click counts as one cannot be
+    // verified without a real browser — building a button on that assumption
+    // is worse than an honest dead end.
+    //
+    // Classified from the action itself, never from one optional sibling
+    // field. `viewport` used to be the whole test, so any path that dropped it
+    // on a coordinate approval restored the Approve button and the blind
+    // one-tap approve came back. Every signal is a trigger and they OR
+    // together, so an omission can only ever *reduce* what a user is offered.
+    // `args.text` alone is deliberately NOT a trigger: `type_text` carries it
+    // too, and that approval is ordinary.
+    const args = (event.args || {}) as Record<string, unknown>;
+    const actionType = (event.action as Record<string, unknown> | undefined)?.type;
+    const atAPoint =
+      (typeof actionType === "string" && actionType.endsWith("_xy")) ||
+      args.x !== undefined ||
+      args.y !== undefined;
+    if (atAPoint || event.viewport) {
       notify(`approval:${id}`, {
         title: "Brotto needs your approval",
         message:
