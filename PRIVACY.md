@@ -131,6 +131,14 @@ blocklist, so no capture is attempted. Those are the suffixes reserved for priva
 pages: if you want to capture one, the switch above is what turns that on, and a host this gate cannot
 resolve is refused.
 
+**`.dev` is refused too, including our own relay.** `.dev` is a delegated TLD rather than a reserved
+name, so a page on it is refused even though it may well be a public site — including
+`agent.brotto.dev`, the hosted relay this policy is partly about. We accept that trade: a task pointed
+at a page Brotto cannot render as text and that lives on a `.dev` host loses its screenshot, rather
+than the gate carrying an exemption for one hostname of ours. Telling a delegated TLD from a private
+network name would mean looking the host up on every capture, and we would rather refuse than add that
+wait.
+
 **What a screenshot is not.** It is a single image of the visible viewport of the one tab you attached,
 taken while a task is running. It is not a recording, not a screenshot of your whole screen, and not a
 history of what you have looked at. It is not written to disk by Brotto — not to the audit trail, not to

@@ -204,27 +204,15 @@ def test_a_public_host_is_still_allowed_when_the_switch_is_on(monkeypatch, url):
     assert screenshot_block_reason(url, Policy()) is None
 
 
-def test_our_own_relay_resolves_with_the_switch_on(monkeypatch):
-    """`agent.brotto.dev` is a real host the first-run wizard and the fallback
-    UI point at. `dev` is a delegated TLD, not a special-use name, so it is not
-    in the deny set — but a TLD is also not exempted because one host on it is
-    ours. The relay is granted by exact host instead, which is the whole fix:
-    deleting `dev` from the set fixed this one host and re-opened every `.dev`
-    name on a LAN, and `box.dev` is the case that was lost."""
-    _on(monkeypatch)
-    assert screenshot_block_reason("https://agent.brotto.dev/", Policy()) is None
-
-
 @pytest.mark.parametrize("url", [
-    "https://sub.agent.brotto.dev/",    # not the host, a subdomain of it
-    "https://evil.brotto.dev/",         # ours is the third label, not a suffix
-    "https://brotto.dev/",              # the registrable one level up
-    "https://someone-elses.dev/",       # someone else's `.dev` site
+    "https://agent.brotto.dev/",   # our own relay, refused like any `.dev`
+    "https://box.dev/",            # the LAN name `dev` was re-added for
 ])
-def test_the_first_party_grant_does_not_leak(monkeypatch, url):
-    """The grant is an exact host, not a suffix — so it cannot be reached by
-    walking left or right off it. A suffix grant here would hand every
-    `*.brotto.dev` name to the capture gate, and dropping `dev` from the deny
-    set instead would hand it every `.dev` on a LAN."""
+def test_our_own_relay_is_refused_too(monkeypatch, url):
+    """`agent.brotto.dev` was granted by exact host, and the grant is gone. It
+    was a name-based grant on a channel that cannot be redacted, and removing
+    it is the cheap direction: the refusal costs one task its eyes on a canvas
+    page. Telling a delegated TLD from a LAN name would mean resolving DNS on
+    the agent hot path to save one screenshot, and that trade is worse."""
     _on(monkeypatch)
     assert screenshot_block_reason(url, Policy()) == REFUSAL_UNKNOWN_URL

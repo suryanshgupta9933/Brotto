@@ -98,13 +98,14 @@ REFUSAL_UNKNOWN_URL = "unresolvable_url"
 # behind it just as open.
 #
 # The exception is `dev`, which is a delegated TLD and not a reserved name. It
-# is here because it is *our* TLD — `_FIRST_PARTY_HOSTS` below is the only
-# `.dev` host this gate will name, and `box.dev` was the LAN name that
-# deleting it re-opened. That cost was accepted deliberately rather than by
-# accident: the alternative to granting our own relay by exact host was
-# deleting the label, which widens the hole for every `.dev` name everywhere
-# to unblock the one host we operate. One refused label is a smaller and more
-# visible trade than one un-refused TLD.
+# is here anyway, and **our own relay is refused with it**: `agent.brotto.dev`
+# is not capturable. That was the other trade, and it is the one taken — a
+# name-based grant on a channel that cannot be redacted is the wrong shape, and
+# the refusal is the cheap direction because the cost is one task losing its
+# eyes on a canvas page, which this module's header already names as the
+# acceptable failure. The alternative — resolving DNS to tell a delegated TLD
+# from a LAN name — was made and recorded, and it is a blocking lookup on the
+# agent hot path to save one screenshot. A bad trade.
 #
 # `localhost` is redundant with the `len(labels) < 2` check above and is kept
 # only because deleting it would make the set read as though the single-label
@@ -119,11 +120,6 @@ _INTERNAL_SUFFIXES = frozenset({
     "local", "localhost", "test", "invalid", "example",
     "arpa", "home.arpa", "onion", "dev",
 })
-
-# Registrable hosts we operate, exempt from the suffix rule below so the
-# first-run wizard's own relay stays capturable. Narrow on purpose: a TLD is
-# not exempted because one host on it is ours.
-_FIRST_PARTY_HOSTS = frozenset({"agent.brotto.dev"})
 
 # The hostname alphabet, minus "." (split on) and "-" is allowed by RFC 1123
 # for hostnames but is rare enough in a policy entry to be refused.
@@ -212,13 +208,6 @@ def _raw_host(url: str | None) -> str | None:
     # definition, and refused as such.
     if _is_ip(body) or len(labels) < 2:
         return None
-    # Checked before the suffix rule, and on the exact host rather than as a
-    # suffix grant: `agent.brotto.dev` is ours, `sub.agent.brotto.dev` and
-    # `evil.brotto.dev` are not, and nothing needs `*.brotto.dev` today. It is
-    # the fix for a `dev` that was deleted from the set below to unblock the
-    # relay — that fixed one host and re-opened every `.dev` on a LAN.
-    if host in _FIRST_PARTY_HOSTS:
-        return host
     # `host` is already case-folded above, so `printer.LOCAL` is compared as
     # `printer.local` and cannot slip past on spelling.
     if any(host == s or host.endswith("." + s) for s in _INTERNAL_SUFFIXES):

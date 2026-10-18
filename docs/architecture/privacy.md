@@ -393,36 +393,33 @@ rounds rather than derived, and reviewing the set is how that showed up.
 
 **`dev` is the one entry that is not RFC-reserved, and it is in on purpose.**
 `.dev` is a delegated TLD, so by the rule above it does not belong. It is here
-because it is *our* TLD. `agent.brotto.dev` is the first-run wizard's and the
-fallback UI's relay, and it has now cost something three times, always the same
-way — it shipped and nothing that reads the name reads the suffix (263, 516).
+because deleting it once did not work: a gate whose only answer is *refuse*
+refuses one registrable host just as readily as a LAN box, so `agent.brotto.dev`
+— the first-run wizard's and the fallback UI's relay — was the one thing the
+gate stood in the way of, and removing the label unblocked it by re-opening
+every `.dev` name on every LAN. `box.dev` walked straight through, and CodeQL's
+security reviewer flagged the widening correctly.
 
-The first fix for that was to **delete `dev` from the set**, and it was the
-wrong shape. A gate whose only answer is *refuse* refuses one registrable host
-just as readily as a LAN box, and deleting the label unblocked our relay by
-re-opening every `.dev` name on every LAN — `box.dev` walked straight through,
-and CodeQL's security reviewer flagged the widening correctly. The shape that
-holds is the narrow one: `dev` stays refused, and the relay is granted by
-**exact host** through `_FIRST_PARTY_HOSTS`, checked before the suffix loop.
-Exact, not a suffix — `sub.agent.brotto.dev` and `evil.brotto.dev` are refused
-and so is bare `brotto.dev`, because a grant reachable by walking left or right
-off it is a suffix grant wearing a hostname. Nothing needs `*.brotto.dev`
-today.
+**Our own relay is therefore refused, and that is now the deliberate trade.**
+An intermediate version granted it by exact host through `_FIRST_PARTY_HOSTS`;
+that grant is gone. A name-based exemption on a channel that cannot be redacted
+is the wrong shape — the screenshot is a bitmap, nothing downstream can strip a
+host out of it — and the reviewer's finding was accepted over the case for
+keeping it. The cost is one task losing its eyes on a canvas page pointed at
+`agent.brotto.dev`, which is the acceptable failure this gate's own header names.
+Deleting the exemption is the cheap direction: it can only ever refuse more.
 
-The cost of this shape is one refused label where a real TLD is concerned, and
-that is the smaller and more visible trade: a `box.dev` on a LAN is refused, but
-the alternative was a `.dev` TLD with no gate on it at all, chosen to unblock
-the one host we operate. Pinned by
-`test_the_first_party_grant_does_not_leak`, which is four URLs that all had to
-be red first.
+Pinned by `test_our_own_relay_is_refused_too`, which asserts `agent.brotto.dev`
+**and** `box.dev` both red.
 
 **DNS resolution is deliberately not used instead.** Deciding `.dev` by lookup
-was the other suggestion, and it is declined on the same grounds as before: a
-resolver on a refuse-only gate turns a transient timeout into an ambiguous
-refusal, and it puts a synchronous network round-trip inside the agent loop on
-a path whose premise is that capture is cheap and fails closed on its own
-evidence. Refusing by name covers the ground that matters — `192.168.1.1`,
-`localhost` and `printer.local` are all caught before any I/O.
+was the other suggestion, and it is declined: a resolver on a refuse-only gate
+turns a transient timeout into an ambiguous refusal, and it puts a synchronous
+network round-trip inside the agent loop on a path whose premise is that capture
+is cheap and fails closed on its own evidence. A blocking lookup on the agent
+hot path to save one screenshot is a bad trade. Refusing by name covers the
+ground that matters — `192.168.1.1`, `localhost` and `printer.local` are all
+caught before any I/O.
 
 **A curated set, not a public-suffix list.** The alternative is requiring the
 rightmost label to be a real public suffix, which closes the whole class rather
