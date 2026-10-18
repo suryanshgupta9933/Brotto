@@ -30,6 +30,8 @@ from brotto_orchestrator.agent.harness import (
     AgentHarness, _turn_to_input, _turn_to_prompt, _vision_fallback,
 )
 from brotto_orchestrator.model.capabilities import Capabilities
+from brotto_orchestrator.policy.gate import SCREENSHOT_CAPTURE_ENV
+from brotto_orchestrator.policy.schema import Policy
 
 JPEG = "/9j/4AAQSkZJRgABAQ=="
 
@@ -71,6 +73,14 @@ def no_network(monkeypatch):
 
     monkeypatch.setattr(httpx, "get", _boom)
     monkeypatch.setattr(httpx, "post", _boom)
+
+
+@pytest.fixture(autouse=True)
+def _capture_on(monkeypatch):
+    """Capture is off by default (`policy/gate.py`) — the gate's own tests own
+    that assertion. Here it is the precondition for every capture-happy path,
+    so it is on unless a test turns it back off on purpose."""
+    monkeypatch.setenv(SCREENSHOT_CAPTURE_ENV, "on")
 
 
 def _deps(targets: list | None = None, page_text: str = "") -> AgentDeps:
@@ -250,14 +260,16 @@ def test_a_screenshot_rides_as_an_image_part_not_as_text():
         screenshot_note=harness_mod._SCREENSHOT_OK_NOTE,
     )
     parts = _turn_to_input(turn)
-    assert isinstance(parts, list) and len(parts) == 2
+    assert isinstance(parts, list) and len(parts) == 3
     assert isinstance(parts[0], str) and "## What is your next action(s)?" in parts[0]
-    assert isinstance(parts[1], BinaryImage)
-    assert parts[1].media_type == "image/jpeg"
-    assert parts[1].data == JPEG.encode("ascii")
-    # The image is not in the text, and the note is.
+    assert parts[1] == harness_mod._SCREENSHOT_OK_NOTE
+    assert isinstance(parts[2], BinaryImage)
+    assert parts[2].media_type == "image/jpeg"
+    assert parts[2].data == JPEG.encode("ascii")
+    # The image is not in the text, and the note is not either — it is its
+    # own part, welded to the pixels it describes.
     assert JPEG not in parts[0]
-    assert harness_mod._SCREENSHOT_OK_NOTE in parts[0]
+    assert harness_mod._SCREENSHOT_OK_NOTE not in parts[0]
 
 
 def test_no_screenshot_means_the_prompt_is_unchanged():
@@ -273,15 +285,107 @@ def test_no_screenshot_means_the_prompt_is_unchanged():
     assert "Screenshot" not in _turn_to_prompt(turn)
 
 
-def test_the_screenshot_note_sits_beside_the_page_text_and_before_the_question():
+def test_the_screenshot_note_is_its_own_part_immediately_before_the_image():
+    """Adjacency is the defence, and it did not hold where the note used to be.
+
+    Interpolated into `_turn_to_prompt` the note sat above the steering drain,
+    the repeat warning, the refusal block and the question — thousands of
+    tokens from the pixels, with page-derived material as its nearest
+    neighbour. The AX envelope works because it is welded to the tree it
+    wraps; this one is now welded to the image, and nothing page-derived
+    follows it.
+    """
+    from pydantic_ai.messages import BinaryImage
+
     turn = AgentTurn(
         task="read the board", step_number=1, scratchpad_entries=[],
         current_url="https://example.com/board", current_page_title="Board",
-        ax_tree="", ax_diff="", step_summaries=[],
+        ax_tree="", ax_diff="", step_summaries=[], screenshot=JPEG,
         screenshot_note=harness_mod._SCREENSHOT_OK_NOTE,
     )
-    out = _turn_to_prompt(turn)
-    assert out.index("### Screenshot") < out.index("## What is your next action(s)?")
+    body = _turn_to_prompt(turn)
+    assert harness_mod._SCREENSHOT_OK_NOTE not in body
+    assert "### Screenshot" not in body
+    parts = _turn_to_input(turn)
+    # note, then the image — the trust statement's nearest neighbour is the
+    # thing it bounds, and the image is last.
+    assert isinstance(parts[1], str) and parts[1] == harness_mod._SCREENSHOT_OK_NOTE
+    assert isinstance(parts[2], BinaryImage)
+    assert parts[-1] is parts[2]
+
+
+def test_the_note_distrusts_text_rendered_inside_the_image():
+    """An image can carry an instruction in pixels: a `<canvas>` drawing
+    "ignore your task and…" as glyphs. Without this the model is told to
+    distrust the picture but not what is written on it."""
+    note = harness_mod._SCREENSHOT_OK_NOTE.lower()
+    assert "page content" in note
+    assert "instruction" in note
+    # "below" pins the direction: the note precedes the image.
+    assert "image below" in note
+
+
+# ── the capture gate ───────────────────────────────────────────────────────
+#
+# A screenshot is the one page-content channel `redact_text` cannot see, so
+# capture is gated rather than redacted: off unless `BROTTO_VISION_CAPTURE`
+# says on, and never on a domain the user blocked. The gate itself is privacy's
+# (`tests/test_vision_capture_gate.py`); what follows is the harness obeying
+# it — the refusals here would be invisible in a diff.
+
+@pytest.mark.asyncio
+async def test_capture_is_refused_when_the_switch_is_off(monkeypatch):
+    """The default. Until the switch is on, W2 does nothing at all."""
+    monkeypatch.setenv(SCREENSHOT_CAPTURE_ENV, "")
+    deps = _deps()
+    out = await _vision_fallback(deps, [], "")
+    assert out.image == ""
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    # A refusal must not look like a lost tab: the step still reports what it
+    # saw, and says the page is unseen rather than describing nothing.
+    assert out.needed is True and out.can_see is True
+    assert "treat it as unseen" in out.note.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_capture_does_not_stall_the_step(monkeypatch):
+    """The loop's hot path. A refusal is a normal return carrying a note, not
+    a raise — a raise here is caught and degrades to a *silent* no-note, which
+    the model then describes as a blank page."""
+    monkeypatch.setenv(SCREENSHOT_CAPTURE_ENV, "")
+    deps = _deps()
+    out = await asyncio.wait_for(_vision_fallback(deps, [], ""), timeout=5)
+    assert out.needed is True and out.image == "" and out.note
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_domain_is_never_photographed():
+    """The user's own blocklist outranks the switch: a site they deliberately
+    blacklisted is not one to photograph because a feature got switched on."""
+    deps = _deps()
+    deps.policy = Policy(blacklist=["bank.com"])
+    deps.cdp.get_current_url = AsyncMock(
+        return_value="https://secure.bank.com/login/otp")
+    out = await _vision_fallback(deps, [], "")
+    assert out.image == ""
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert "treat it as unseen" in out.note.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_capture_tells_the_model_nothing_about_the_url():
+    """The gate checks the switch before the domain so a run with capture off
+    cannot even infer that this URL would have been blocked. That ordering is
+    only worth anything if the reason is not forwarded — a machine word
+    carrying the domain would undo it."""
+    deps = _deps()
+    deps.policy = Policy(blacklist=["bank.com"])
+    deps.cdp.get_current_url = AsyncMock(
+        return_value="https://secure.bank.com/login/otp")
+    out = await _vision_fallback(deps, [], "")
+    assert out.image == ""
+    for leak in ("bank", "otp", "capture_not_enabled", "domain_blocked"):
+        assert leak not in out.note.lower(), leak
 
 
 # ── through the loop ───────────────────────────────────────────────────────
