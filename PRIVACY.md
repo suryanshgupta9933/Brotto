@@ -123,10 +123,12 @@ would have to maintain and trust separately. A `*.example.com` entry covers `exa
 well as its subdomains, so blocking a site means blocking the site you would have typed.
 
 **A page Brotto cannot name is not photographed either.** If the URL has no registered domain — an IP
-address such as `http://192.168.1.1/`, or a single name such as `http://localhost:8080/` — there is
-no domain to check against your blocklist, so no capture is attempted. There is no exception for local
-pages: if you want to capture one, the switch above is what turns that on, and a host this gate cannot
-resolve is refused.
+address such as `http://192.168.1.1/`, a single name such as `http://localhost:8080/`, or a name inside
+a private network such as `http://nas.home/` — there is no public domain to check against your
+blocklist, so no capture is attempted. The internal and reserved suffixes are matched as a suffix and
+case is ignored, so `http://nas.HOME/` is refused the same as `http://nas.home/`. There is no exception
+for local pages: if you want to capture one, the switch above is what turns that on, and a host this
+gate cannot resolve is refused.
 
 **What a screenshot is not.** It is a single image of the visible viewport of the one tab you attached,
 taken while a task is running. It is not a recording, not a screenshot of your whole screen, and not a

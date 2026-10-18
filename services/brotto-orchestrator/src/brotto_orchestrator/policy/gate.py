@@ -78,6 +78,27 @@ REFUSAL_CAPTURE_OFF = "capture_not_enabled"
 REFUSAL_DOMAIN_BLOCKED = "domain_blocked"
 REFUSAL_UNKNOWN_URL = "unresolvable_url"
 
+# Rightmost labels that name a network, not a place on the public internet.
+# `len(labels) < 2` below already refuses `localhost` and `intranet`; these are
+# the same names wearing a second label, so without this set `nas.home`,
+# `wiki.internal` and `db.corp` walked straight through and were capturable —
+# which is the entire class `_raw_host` exists to refuse.
+#
+# RFC 2606 / 6761 reserved (`test`, `invalid`, `example`, `localhost`) sit
+# alongside the internal-use suffixes people actually type. `home.arpa` and
+# bare `arpa` are both listed because RFC 8375 names the former and the second
+# label is not always present.
+#
+# A curated set, not a public-suffix list: the question is never "is this
+# registrable", only "is this a name inside somebody's network", and a PSL
+# would be a ~10k-entry table imported to answer a yes/no that only ever
+# refuses. `domains.MULTI_PART_SUFFIXES` is not a TLD set and cannot be
+# extended into one without that table.
+_INTERNAL_SUFFIXES = frozenset({
+    "local", "localhost", "internal", "intranet", "lan", "home", "corp",
+    "home.arpa", "arpa", "onion", "test", "invalid", "example", "dev",
+})
+
 # The hostname alphabet, minus "." (split on) and "-" is allowed by RFC 1123
 # for hostnames but is rare enough in a policy entry to be refused.
 _HOST_CHARS = frozenset(
@@ -164,6 +185,10 @@ def _raw_host(url: str | None) -> str | None:
     # blocklist was never consulted for them. Unresolvable by this gate's own
     # definition, and refused as such.
     if _is_ip(body) or len(labels) < 2:
+        return None
+    # `host` is already case-folded above, so `nas.HOME` is compared as
+    # `nas.home` and cannot slip past on spelling.
+    if any(host == s or host.endswith("." + s) for s in _INTERNAL_SUFFIXES):
         return None
     return host
 

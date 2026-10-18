@@ -370,6 +370,42 @@ do this instead.
 "I want to capture that anyway" already exists as `BROTTO_VISION_CAPTURE` — so
 the unresolvable case is a refusal, not a second switch.
 
+**Two labels is not a registered domain, and the first version of that check
+thought it was.** `_raw_host` refused an IP literal and a single label, on the
+reasoning that both are names inside somebody's network — which is true, and
+incomplete for the same reason `check_domain_policy` was. `http://nas.home/`,
+`http://wiki.internal/`, `http://router.lan/` and `http://db.corp/` have two
+labels each, passed straight through, and were photographed with no list in
+front of them. The fix is a deny set of special-use and internal suffixes
+(`local`, `localhost`, `internal`, `intranet`, `lan`, `home`, `corp`,
+`home.arpa`, `arpa`, `onion`, plus the RFC 2606/6761 reserved `test`,
+`invalid`, `example`, and `dev`), matched as a suffix against the
+already-case-folded host so `nas.HOME` cannot slip past on spelling. It returns
+`None`, so these raise the *existing* `unresolvable_url` refusal — no new
+reason, nothing new in the closed vocabulary the model reads.
+
+**A curated set, not a public-suffix list.** The alternative is requiring the
+rightmost label to be a real public suffix, which closes the whole class rather
+than a list of it, and `domains.MULTI_PART_SUFFIXES` is not a TLD set and
+cannot be extended into one without importing a ~10k-entry PSL. That is the
+wrong trade for a gate whose only answer here is *refuse*: the set below is
+complete for the names that occur in practice, and a PSL would be a permanent
+dependency and a data file to keep current in exchange for entries that all
+resolve to the same answer. Pinned by `test_an_internal_suffix_is_refused`, and
+by `test_a_public_host_is_still_allowed_when_the_switch_is_on` beside it —
+a deny list that refused everything would pass every other case in the file.
+
+**DNS is deliberately not resolved.** Refusing `127.0.0.1` and `10.0.0.1` by
+lookup instead of by name is the other suggestion that arrived with this, and
+it is declined: it puts a synchronous network round-trip inside the agent loop
+on every capture attempt, on a path whose whole premise is that capture must
+be cheap and must fail closed on its own evidence. A lookup that times out is a
+new failure mode that looks like "the user's page is unusual", and refusing on
+it would turn a transient DNS hiccup into a refused capture. Refusing by name
+covers the ground that matters — `192.168.1.1`, `localhost` and `nas.home` are
+all caught before any I/O — and the addresses reachable only by a public name
+pointing inward are the case a hostname check was never going to catch anyway.
+
 **What redaction's silence means for the model.** The refusal reason is a closed
 set of machine words (`capture_not_enabled`, `domain_blocked`,
 `unresolvable_url`) and the model is

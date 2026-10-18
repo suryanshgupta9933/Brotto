@@ -169,3 +169,37 @@ def test_the_switch_is_checked_before_the_domain(monkeypatch):
     including that this particular URL would have been blocked."""
     reason = screenshot_block_reason(BANK, Policy(blacklist=["bank.com"]))
     assert reason == REFUSAL_CAPTURE_OFF
+
+# ── an internal name is not a public one, however many labels it has ───────
+
+@pytest.mark.parametrize("url", [
+    "http://nas.home/",       # two labels, and still a machine on a LAN
+    "http://wiki.internal/",
+    "http://router.lan/",
+    "http://db.corp/",
+    "http://nas.HOME/",       # case-folded before the comparison
+    "http://x.onion/",
+    "http://printer.local/",
+    "http://host.invalid/",
+    "http://box.dev/",
+    "http://gw.home.arpa/",
+])
+def test_an_internal_suffix_is_refused(monkeypatch, url):
+    """`len(labels) < 2` refused `localhost` but let `nas.home` through, and
+    a name inside somebody's network is the same thing wearing a second
+    label. Refused for the same reason and with the same reason string."""
+    _on(monkeypatch)
+    assert screenshot_block_reason(url, Policy()) == REFUSAL_UNKNOWN_URL
+
+
+@pytest.mark.parametrize("url", [
+    BOARD,
+    BANK,
+    "https://www.example.com/",   # `example` is the reserved TLD, not the
+                                  # registrable one — the suffix, not a name
+])
+def test_a_public_host_is_still_allowed_when_the_switch_is_on(monkeypatch, url):
+    """The negative control: a deny list that refused everything would pass
+    every case above it."""
+    _on(monkeypatch)
+    assert screenshot_block_reason(url, Policy()) is None
