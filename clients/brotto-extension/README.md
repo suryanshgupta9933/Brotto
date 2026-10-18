@@ -61,22 +61,13 @@ This is the security argument, and it is structural rather than a promise:
   model text becomes executed code.
 - **`Runtime.evaluate` runs only fixed, locally-defined snippets** written in this repository, to read
   DOM attributes and focused-element state. It never evaluates a string that arrived over the wire.
-- **It screenshots the attached tab only when your server asks for one.** There is exactly one
-  `Page.captureScreenshot` call site, in `background.ts`, answering a relay frame. The agent asks for a
-  picture only when the page's accessibility tree *and* its visible text are both empty — a
-  `<canvas>`, which has neither. **Capture is off by default on the server** and is not turned on by
-  this extension: without `BROTTO_VISION_CAPTURE=on` in the orchestrator's environment, no frame is ever
-  issued, whatever the model asks for. A domain on your own blocklist is never photographed, whatever
-  the switch says. The image is JPEG, clipped to the visible viewport, sent to the server you
-  configured and handed to the model for that step; it is **never written to disk** — not to the audit
-  trail, not to a log line, not to the side panel. And it is the one channel the redaction described in
-  the [Privacy policy](../../PRIVACY.md) cannot reach, which is exactly why it is off by default.
+- **It takes no screenshots.** There is no `Page.captureScreenshot` call anywhere in the source.
 
 ## CDP commands used
 
 `Accessibility.enable` / `Accessibility.disable` / `Accessibility.getFullAXTree` · `DOM.getDocument` /
 `getBoxModel` / `getAttributes` / `getNodeForLocation` / `resolveNode` · `Input.dispatchMouseEvent` /
-`Input.dispatchKeyEvent` · `Page.enable` / `Page.navigate` / `Page.getFrameTree` / `Page.captureScreenshot` · `Runtime.evaluate` /
+`Input.dispatchKeyEvent` · `Page.enable` / `Page.navigate` / `Page.getFrameTree` · `Runtime.evaluate` /
 `Runtime.callFunctionOn`
 
 ## Browser support

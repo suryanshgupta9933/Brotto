@@ -64,17 +64,6 @@ def test_ip_address_returns_n_a():
     assert check_domain_policy("http://1.2.3.4/foo", p) == GateDecision.N_A
 
 
-def test_the_wildcard_semantics_are_unchanged_here():
-    """The vision gate widens `*.bank.com` to cover `bank.com` for *itself*
-    rather than changing this function, because this one also decides whether
-    to prompt the user. `*.bank.com` still means subdomains only here, so the
-    approval path the extension depends on does not move."""
-    p = Policy(blacklist=["*.bank.com"])
-    assert check_domain_policy("https://www.bank.com/x", p) == GateDecision.ALLOW
-    assert check_domain_policy("https://bank.com/x", p) == GateDecision.ALLOW
-    assert check_domain_policy("https://a.bank.com/x", p) == GateDecision.BLOCK
-
-
 def test_blacklist_url_form_normalized():
     """Pasting `https://evil.com/` into the UI matches `evil.com` hostname."""
     p = Policy(blacklist=["https://evil.com/"])

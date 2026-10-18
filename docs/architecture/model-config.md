@@ -1,6 +1,6 @@
 # Model adapter, dev mode, and key resolution
 
-Read before touching `model/{config,catalog,registry,store,resolver,pricing,capabilities}.py`,
+Read before touching `model/{config,catalog,registry,store,resolver,pricing}.py`,
 `main.py`'s dev-mode env defaults, or anything about which model runs a task.
 
 ## Model adapter
@@ -38,106 +38,6 @@ tree, so a genuinely smaller window is the honest budget for a task that should
 landed on a 4.5-era model. `gpt-5.6`'s rates are promotional — OpenAI says
 Sol's hold "at least through November 21, 2026".
 
-### 1.1 Capability resolution — models outside the catalogue
-
-`model/capabilities.py`. A user can select any model string (`custom` with a
-LAN endpoint, `openrouter/auto`, an env `provider:model` pair), and for an id
-outside `PROVIDER_CATALOG` Brotto used to know nothing: no window, no price, no
-vision — permanently, on every run. Three consequences shipped with that: an
-unknown window sizes the AX-tree budget to `MAX_CHARS` (6000) because
-`budget_for_window(None)` returns the floor, `_catalog_for()` returns `None` so
-`BROTTO_MAX_TASK_COST_USD` **can never fire**, and there is no consumer of
-`ModelInfo.vision` anywhere outside `catalog.py`.
-
-Four tiers, in order, **never optimistic**:
-
-1. **the curated catalogue** — authoritative, and what every existing model
-   already got. A catalogue entry is never merged with a network answer.
-2. **the vendor's own metadata API** — one function per vendor that has one:
-   OpenRouter (`/api/v1/models`, no auth, edge-cached), Anthropic
-   (`/v1/models`, `max_input_tokens` is an int *or* null and
-   `capabilities.image_input` is always present, so read `.supported` and never
-   treat presence as true), DeepSeek (`/models`, `context_window` +
-   `input_modalities`), Gemini (`/v1beta/models`, **paginated** — `pageSize`
-   caps at 1000 and the rest sits behind `nextPageToken`, so one page
-   truncates silently and reads as "no such model"), and `custom`
-   (`{base_url}/v1/models`).
-3. **the probe** — one message, one 1×1 PNG, `max_tokens: 1`, only where tier
-   2 gave no vision answer.
-4. **a conservative default** — `None` for the window, `None` (never `0.0`)
-   for the price, `None` for vision.
-
-**Three tier-2 calls are deliberately not made.** OpenAI and Groq's
-`GET /v1/models` returns `id`/`object`/`created`/`owned_by` and nothing else,
-so the round trip cannot answer the question; both go straight to the probe.
-MiniMax's `/v1/models` is undocumented, so parsing it defensively means
-inventing a contract — and every MiniMax model Brotto ships is curated
-anyway, so an unknown MiniMax id is an operator typo, not a model we need to
-describe. It also goes to the probe.
-
-**The probe's answer is tri-state and only one arm records anything.** Gemini
-answers `400 INVALID_ARGUMENT` both for a text-only model and for a payload it
-considers malformed, so the status alone cannot tell "not multimodal" from "I
-sent something wrong". The probe therefore sends the *same* message twice —
-once with the image part, once without — and only a rejection the **text-only
-control accepts** counts as a `False`. A 401, a 429, a 5xx, a timeout, a
-refused connection and a malformed response all leave vision `None` and record
-nothing. That is the whole safety of the design: a wrong `False` is a
-confident lie that is cached for a month and then withholds an image from
-every future run of a model that would have taken it.
-
-**`custom` is a community convention, not a standard.** vLLM, LM Studio and
-llama.cpp implement something close; anything else answers however it likes.
-So the call to a user-supplied host is capped at 4s, every transport error is
-tier 4, the response shape is not assumed, and the window field is read from
-four spellings (`context_length`, `context_window`, `max_model_len`,
-`num_ctx`) because that is the same fact written four ways.
-
-**Price is the dangerous field and only OpenRouter supplies it.** Token counts
-are measurable for every model (`RunUsage.input_tokens` works across all eight
-adapters); the $/Mtok multiplier is not, and no other vendor exposes it. A
-`None` survives to `TaskResult.cost_usd` and renders as "no cost" — `audit.py`
-and `tests/test_task_cost.py` pin "no rate means no key", and a `0.0` here
-would both defeat the budget cap and render a reassuring `$0.00`. A `0.0`
-cache-write rate stays the meaning it has everywhere else: not published, not
-free, so a write bills at the input rate (the same choice
-`pricing.user_rates` makes).
-
-**The cache is a sidecar file, not a field on `ModelConfig`.**
-`ModelConfig.from_dict` raises `ValueError` on an unknown field and
-`store.load_user_config` swallows it into `log.warning` + `return None` — so a
-cache field on the config would silently make every already-saved config
-unreadable for every existing user, one invisible log line each. It is
-therefore a separate JSON file beside the per-user config directory
-(`logs/user_model_caps`, overridable with `BROTTO_USER_MODEL_CAPS_DIR`), keyed
-by the same per-install identity as the config and sanitised by the same
-`_safe_filename`. TTL is 30 days. **Only a learned fact is written** — a
-`None` is not a fact, and a cached unknown would be indistinguishable from a
-real answer once the vendor recovered. This is the first server-written file
-under that directory; the config file itself stays extension-owned with one
-write site (`main.py`'s `save_user_config`).
-
-**Nothing here may block a task.** `resolve()` is catalogue + cache only and
-performs no I/O, so it is safe on the task-start and per-step path; the network
-tiers run behind `warm()`, and `warm_async` runs them off the event loop,
-because a metadata call is a 4s round trip and a probe is a real request.
-Every vendor call is wrapped so any failure at any tier degrades to tier 4,
-and the resolver catches broadly around itself — a capability lookup is an
-optimisation, and a run that raises inside it loses the task.
-
-**`vision` has its consumer; the cap warning does not.** `resolve()`/`warm_async()`
-are called once per run from `harness._vision_capability`, cached on `AgentDeps`,
-and their `vision` answer is what gates the screenshot — see `_vision_fallback`.
-The **cap warning is still unbuilt**, so a model resolved at tier 2 or 3 is used
-for its window and priced at `None` without saying so. One precedence rule for
-whoever writes it, because it is the easy thing to get backwards: a rate §1.1
-discovered from a vendor's own
-API outranks a rate the user **typed** (a typed rate is a guess; the API is
-the vendor's own number) and is still outranked by the curated catalogue. So
-the order is catalogue → §1.1 → `ModelConfig.input_per_mtok`, with `None`
-falling through to `cost_usd=None` as it does today. Pinned by
-`tests/test_capability_resolution.py`.
-
 ### Vision
 
 `ModelInfo.vision` is a plain bool and it is set only where a vendor says so.
@@ -154,28 +54,9 @@ it. So a `False` is a reason for the vision fallback to check before it sends a
 frame, not a proof it should skip the model. Set it when the vendor documents
 it; do not set it on a hunch.
 
-The field is on the wire (`GET /v1/models`) and `model/capabilities.py` now
-resolves it for a model the catalogue does not name — with a **tri-state**, so
-the catalogue's documented-not `False` arrives as §1.1's `None` rather than as a
-denial. **`harness._vision_fallback` is that consumer**: it resolves once per
-run and captures only when the answer is a positive `True`, so `False` and
-`None` both reach the model as a refusal and differ only in which reason is
-named. Pinned by `test_models_ship_whether_they_take_an_image`,
-`tests/test_capability_resolution.py` and `tests/agent/test_vision_fallback.py`.
-
-**The resolver short-circuits on a positive fact only.** The bool that carries
-"not documented" would otherwise be read as a denial, so a catalogue
-`vision=False` is treated as *unresolved*: it falls through to the cache and
-then to the network tiers, where the probe can earn a real `False` with its
-text-only control. `deepseek-v4-pro` is the reason this matters — the one
-model in the catalogue recorded as text-only is one probe away from a fact,
-and reported as `None` it is `None` forever. `context_window` and `pricing`
-stay catalogue-authoritative at every tier (read off the vendor's published
-page, not a guess), so a merged result names both origins:
-`source == "catalog+probe"`. A probe can never overturn a catalogue `True` —
-that entry returns immediately — so the residual risk stays one-directional:
-we may send a frame to a text-only model, never gate a frame out of a model
-that takes one.
+The field is on the wire (`GET /v1/models`) and nothing consumes it yet — the
+fallback that selects on it is §1.1, which is not written. Pinned by
+`test_models_ship_whether_they_take_an_image`.
 
 
 **Dispatch is on the vendor's request shape (`api_shape`), never on its id.**

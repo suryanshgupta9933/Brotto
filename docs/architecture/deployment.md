@@ -185,37 +185,6 @@ is their own data and nothing expires until they ask; an ephemeral dyno would
 otherwise keep every beta transcript for the life of the filesystem with nobody
 deciding that. **An explicit setting always wins, including `0`.**
 
-## `BROTTO_VISION_CAPTURE` opens the one channel redaction cannot see
-
-When a page's accessibility tree *and* its visible text are both empty — a
-`<canvas>`, a chart, Google Docs — the agent has nothing to read, and with this
-set it asks the extension for a JPEG of the visible viewport.
-
-```
-BROTTO_VISION_CAPTURE=on     # capture
-BROTTO_VISION_CAPTURE=true   # same
-BROTTO_VISION_CAPTURE=false  # refused
-BROTTO_VISION_CAPTURE=0      # refused
-BROTTO_VISION_CAPTURE=yes    # capture
-BROTTO_VISION_CAPTURE        # unset — refused
-```
-
-**Off unless explicitly on**, and only those four spellings turn it on. That is
-the same safe reading as `AGENT_SECRET` and `BROTTO_RETENTION_DAYS`: a stray
-`BROTTO_VISION_CAPTURE=false` in a `.env` is a *refusal*, and anything
-unparseable is off rather than a decision somebody meant. The asymmetry is the
-point — capture is a **new egress channel**, where redaction having no off
-switch only ever narrows what leaves.
-
-It is unset everywhere by default, self-host and relay alike, so a fresh
-install cannot photograph anything. The user's own domain blocklist refuses a
-capture regardless of this switch, and the domain check is deliberately second,
-so a run with capture off is not told anything about the URL it was on.
-
-Do **not** set it in the deployment `.env` beside `docker-compose.yml` on the
-operator's behalf. The reasoning — and the case for a URL denylist having been
-rejected — is in `privacy.md`, "A screenshot is a gate, not a redaction pass".
-
 ## The hosted relay
 
 The same image, the same extension, one build. `agent.brotto.dev` is a Heroku
@@ -247,7 +216,6 @@ stray `AGENT_SECRET` first.**
 | `BROTTO_WAITLIST_BATCH` | optional | Label stamped on waitlist signups, so the operator can tell which invite round a row went out in. Empty by default |
 | `RESEND_API_KEY` | optional | Sends the waitlist confirmation. **Unset means no mail is ever sent**, and the route behaves exactly as it did before the feature existed |
 | `RESEND_FROM` | optional | Defaults to `Brotto <hello@brotto.dev>`. Also supplies `reply_to` and `List-Unsubscribe` |
-| `BROTTO_VISION_CAPTURE` | optional | **Leave it unset on the relay.** When set, a canvas page the tree cannot read is photographed and sent unredacted to the provider; the operator cannot see it per user, cannot bound it per user, and every per-user policy is only a domain blocklist |
 
 All four Supabase values are in Project Settings → API, and none of them belong
 in `.env.example` — which is why that file ships them **commented out**, which

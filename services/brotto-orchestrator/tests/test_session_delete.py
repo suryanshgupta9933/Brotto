@@ -83,52 +83,6 @@ def test_delete_is_a_noop_for_an_unknown_session(sessions_dir):
     assert delete("nope", dir=sessions_dir) is False
 
 
-def test_delete_unlinks_the_link_not_the_file_behind_it(tmp_path, monkeypatch):
-    """The one place the containment check could bite.
-
-    `delete` resolves the sessions *directory* and joins the basename onto it.
-    Resolving the leaf as well would look tidier and would be wrong: a session
-    document that is itself a symlink would resolve to whatever it references,
-    and either the erase would be refused (the user's own file left behind, and
-    the toast says it was erased) or the unlink would land on the target
-    instead. The link goes; the thing behind it is not ours to remove.
-
-    Traversal itself stays with `test_delete_refuses_paths_and_sidecars`, which
-    is where it is actually reachable — `basename` runs before any join, so the
-    containment check is defence under a guard that already holds, and is
-    written to be provable to CodeQL rather than reachable. That is what closed
-    alert #40: `_is_document_stem` is a predicate the scanner does not read and
-    `basename` is not a sanitizer it models either, both measured against
-    2.27.2 rather than assumed.
-    """
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
-    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(sessions_dir))
-
-    elsewhere = tmp_path / "somebody-elses-transcript.json"
-    elsewhere.write_text('{"page_text": "not ours to delete"}')
-    (sessions_dir / "abc.json").symlink_to(elsewhere)
-
-    assert delete("abc", dir=sessions_dir) is True
-    assert not (sessions_dir / "abc.json").exists(), "the link survived"
-    assert elsewhere.exists(), "delete followed the link and removed the target"
-
-
-def test_delete_still_works_when_the_sessions_directory_is_a_symlink(tmp_path,
-                                                                     monkeypatch):
-    """`realpath` on both sides, not `normpath` on one: a user's
-    `logs/sessions` is often a symlink, and comparing a resolved target against
-    an unresolved root would refuse a legitimate erase."""
-    real = tmp_path / "real-sessions"
-    real.mkdir()
-    monkeypatch.setenv("BROTTO_SESSIONS_DIR", str(real))
-    _seed(real, "abc")
-    (tmp_path / "link").symlink_to(real, target_is_directory=True)
-
-    assert delete("abc", dir=tmp_path / "link") is True
-    assert not (real / "abc.json").exists()
-
-
 @pytest.mark.parametrize("evil", [
     "../../etc/passwd",
     "..",

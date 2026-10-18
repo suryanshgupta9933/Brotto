@@ -180,19 +180,6 @@ class AgentTurn(BaseModel):
     # a read_page_text call: the accessibility tree routinely omits the values
     # a question is actually about (a star count, a price, a total).
     page_text: str = ""
-    # A base64 JPEG of the viewport, captured only on a step where perception
-    # came back empty AND the resolved model can see. Empty on every other
-    # step, and empty whenever it could not be captured — `screenshot_note`
-    # then carries the reason the model needs, because a silent "" is a
-    # blank page the model may describe.
-    #
-    # Page content, and the third channel after `page_text` and the AX tree.
-    # `redact_text` matches *typed* strings and knows nothing about pixels, so
-    # nothing here is redacted — which is why this field never reaches
-    # `agent/audit.py`, a step summary, or any log line. It lives on the turn
-    # for one step and dies with it.
-    screenshot: str = ""
-    screenshot_note: str = ""
     # A mid-task correction from the user, drained out of AgentDeps into the
     # next turn. Empty on every step that has not received one.
     steering: str = ""
