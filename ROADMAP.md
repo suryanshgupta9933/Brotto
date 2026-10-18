@@ -69,6 +69,18 @@ automation on an unmeasured loop is the failure mode that costs the most.
 
 ### Pro: the paid half, and what it hangs off
 
+> **Revised 2026-10-18.** The shape below was written when Pro was assumed to
+> need no operator. `decisions/2026-10-18-pro-boundary-cloud-split-and-monetisation.md`
+> supersedes it: Apache 2.0 §2 makes in-repo runtime gating **legally void**, so
+> Pro code moves to a **separate closed repository** (`brotto-cloud`) and this
+> repository stays the complete free product (`brotto-core`). The extension stays
+> **one** Store artefact and picks its backend at connect time. Pro now sells
+> **time, concurrency and memory** — Cloud Vault, batch mode, unattended
+> scheduling, cost governance, remote dispatch — in a **$20–30/mo band treated as
+> a hypothesis**. The rule that replaces "needs no operator" is stronger and
+> simpler: **Pro must be something you operate, not something you wrote.** The
+> original table is kept below as the record of what it replaced.
+
 **Pro does not exist yet and there is nothing to buy.** What follows is the
 shape it is planned to take, and it is narrower than
 `docs/product/launch-roadmap.md` §3 because that document was written for a
@@ -96,15 +108,20 @@ so it needs no extra spend to be worth having.
 robustness, and idle-page suggestions. Those are quality and trust; charging for
 them would say the free build is the broken one.
 
-**Built and gated.** Per-run cost and the per-task ceiling are the two things
-that exist. The free build has the code and cannot reach it: `BROTTO_PRO` is
-unset, `_catalog_for` returns `None`, and since that is the loop's only route
-to a price, nothing is priced, `TaskResult.cost_usd` stays `None` and the panel
-draws no cost. `BROTTO_MAX_TASK_COST_USD` without `BROTTO_PRO` is refused with a
-warning rather than half-honoured — a free build that can be capped is still a
-build that knows what things cost. What Pro still needs is a way to switch the
-flag on that is not "edit the compose file", and whatever that mechanism is, it
-is the only thing standing between the pricing and a stranger's key.
+**Built and gated — and the gate is not protection.** Per-run cost and the
+per-task ceiling are the two things that exist. The free build has the code and
+cannot reach it: `BROTTO_PRO` is unset, `_catalog_for` returns `None`, and since
+that is the loop's only route to a price, nothing is priced, `TaskResult.cost_usd`
+stays `None` and the panel draws no cost. `BROTTO_MAX_TASK_COST_USD` without
+`BROTTO_PRO` is refused with a warning rather than half-honoured — a free build
+that can be capped is still a build that knows what things cost.
+
+**This flag is a capability switch and nothing more.** Apache 2.0 §2 is an
+irrevocable, perpetual, royalty-free grant that includes the right to prepare
+derivative works and distribute them, so a self-hoster holding this source holds
+an absolute right to comment the flag out, delete the check, or fork and expose
+the endpoint. `BROTTO_PRO`, `model/pricing.py` and the per-turn pricing call are
+scheduled to **leave this repository**, not to be secured inside it.
 
 ### The cache-read anomaly — settled 2026-10-05, needs one live run to confirm
 
@@ -190,11 +207,14 @@ a way to watch a handful of people use it, and the kill criterion is unchanged.
 carry the operational detail, and `PRIVACY.md` discloses the relay in as many
 words as the self-hosted default gets.
 
-Pro sells compounding and throughput — multi-tab parallelism, a speed pack,
-local routines — and **never custody**. The rule that survives: if a Pro
-feature can be phrased as "we keep your data", it is not a Pro feature. **The
-test every future Pro feature has to pass is that none of them needs an
-operator**, because that is what would reopen the hosted tier closed above.
+Pro sells **time, concurrency and memory** — Cloud Vault, batch mode, unattended
+scheduling, cost governance, remote dispatch — and **never custody, never tokens**.
+The rule that survives (2026-10-18, superseding "none of them needs an
+operator"): if a Pro feature can be phrased as "we keep your data", it is not a
+Pro feature, and **if a competent self-hoster can rebuild it in a weekend it is
+not Pro either** — it gets opened and monetised via support instead. **Pro must
+be something you operate, not something you wrote**, and it must never live in
+this Apache-2.0 repository, where the licence already gave it away.
 
 **Free-tier task caps.** There are none, and there never were any in code. On a
 box the user runs, against a key the user owns, a cap spends the user's tokens

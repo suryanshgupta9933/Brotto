@@ -139,53 +139,45 @@ UNKNOWN = Capabilities()
 # budget, not the run itself.
 # --------------------------------------------------------------------------
 
-def _safe_url(url: str) -> str:
-    """A URL with its query string and fragment removed, for logging.
-
-    The Gemini probe authenticates with `?key=<api_key>` (see `probe_vision`),
-    so the URL is a credential the moment it is built. Every diagnostic here
-    wants the *endpoint* — which host, which path, which status — and none of
-    them wants the key, so the query goes and the rest stays. Pinned by
-    `test_a_url_with_a_credential_in_it_is_not_logged`.
-    """
-    from urllib.parse import urlsplit
-
-    parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}{parts.path}" if parts.netloc else parts.path
-
-
 def _get_json(
-    url: str, *, headers: dict | None = None, params: dict | None = None,
-    timeout: float = _METADATA_TIMEOUT,
+    url: str, *, label: str, headers: dict | None = None,
+    params: dict | None = None, timeout: float = _METADATA_TIMEOUT,
 ) -> dict | None:
+    """`label` is what the diagnostics name, never the URL.
+
+    Gemini authenticates with `?key=<api_key>` in the query — so a URL is a
+    credential the moment it is built, and every diagnostic that printed one
+    wrote the user's key into the log file. The label says *which vendor*
+    failed, which is what the line was for anyway. Pinned by
+    `test_a_credential_is_never_logged`.
+    """
     import httpx
 
     try:
         response = httpx.get(url, headers=headers or {}, params=params, timeout=timeout)
         if response.status_code != 200:
-            log.warning("model metadata: %s -> HTTP %s",
-                        _safe_url(url), response.status_code)
+            log.warning("model metadata: %s -> HTTP %s", label, response.status_code)
             return None
         return response.json()
     except Exception as exc:  # noqa: BLE001 — any failure means "no metadata"
-        log.warning("model metadata: %s -> %s", _safe_url(url), type(exc).__name__)
+        log.warning("model metadata: %s -> %s", label, type(exc).__name__)
         return None
 
 
 def _post_probe(
-    url: str, body: dict, *, headers: dict | None = None,
+    url: str, body: dict, *, label: str, headers: dict | None = None,
     timeout: float = _PROBE_TIMEOUT,
 ) -> tuple[bool, str]:
     """`(accepted, body_text)`. Never raises: a dead server and a rejected
     payload are the same answer here, and the probe's control request is what
-    tells them apart."""
+    tells them apart. `label` for the same reason as `_get_json`."""
     import httpx
 
     try:
         response = httpx.post(url, json=body, headers=headers or {}, timeout=timeout)
         return 200 <= response.status_code < 300, response.text
     except Exception as exc:  # noqa: BLE001 — see above
-        log.warning("vision probe: %s -> %s", _safe_url(url), type(exc).__name__)
+        log.warning("vision probe: %s -> %s", label, type(exc).__name__)
         return False, ""
 
 
@@ -208,7 +200,7 @@ def _openrouter(model_id: str, base_url: str | None, api_key: str | None):
     and edge-cached with `cache-control: public, max-age=120`, so a long local
     TTL costs nothing and cannot burn a user's quota."""
     root = (base_url or "https://openrouter.ai/api/v1").rstrip("/")
-    payload = _get_json(f"{root}/models")
+    payload = _get_json(f"{root}/models", label="openrouter")
     if not payload:
         return None
     wanted = model_id.strip("/").lower()
@@ -262,6 +254,7 @@ def _anthropic_api(model_id: str, base_url: str | None, api_key: str | None):
     root = (base_url or _SHAPE_ROOT["anthropic"]).rstrip("/")
     payload = _get_json(
         f"{root}/v1/models",
+        label="anthropic",
         headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
     )
     for entry in (payload or {}).get("data") or []:
@@ -286,6 +279,7 @@ def _deepseek_api(model_id: str, base_url: str | None, api_key: str | None):
     root = (base_url or "https://api.deepseek.com").rstrip("/")
     payload = _get_json(
         root if root.endswith("/models") else f"{root}/models",
+        label="deepseek",
         headers={"Authorization": f"Bearer {api_key}"},
     )
     for entry in (payload or {}).get("data") or []:
@@ -317,7 +311,7 @@ def _gemini_api(model_id: str, base_url: str | None, api_key: str | None):
         params: dict[str, object] = {"key": api_key, "pageSize": 1000}
         if page_token:
             params["pageToken"] = page_token
-        payload = _get_json(f"{root}/v1beta/models", params=params)
+        payload = _get_json(f"{root}/v1beta/models", params=params, label="gemini")
         if not payload:
             return None
         for entry in payload.get("models") or []:
@@ -351,6 +345,7 @@ def _custom_api(model_id: str, base_url: str | None, api_key: str | None):
     root = base_url.rstrip("/")
     payload = _get_json(
         root if root.endswith("/v1/models") else f"{root}/v1/models",
+        label="custom",
         headers={"Authorization": f"Bearer {api_key}"} if api_key else None,
     )
     for entry in (payload or {}).get("data") or []:
@@ -480,7 +475,7 @@ def probe_vision(
         url, body, headers = built
         if shape == "gemini":  # authenticates with a query parameter
             url = f"{url}?key={api_key}"
-        return _post_probe(url, body, headers={**headers, **auth})
+        return _post_probe(url, body, headers={**headers, **auth}, label=provider)
 
     accepted, text = _call(True)
     if accepted:

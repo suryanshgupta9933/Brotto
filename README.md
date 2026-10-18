@@ -343,25 +343,43 @@ why.
 
 **There is no Pro to buy today.** Nothing in this section is available, and the free build you get
 from this repository is the whole product as it stands. It is written down so the direction is
-visible, not so you can go looking for a button. Brotto stays Apache 2.0 and open — Pro is what
-gets built on top of it.
+visible, not so you can go looking for a button. Brotto stays Apache 2.0 and open.
 
-**Planned, and not built:**
+**Revised 2026-10-18 — the shape changed.** Pro is no longer "a flag in this repository". Apache 2.0
+§2 is irrevocable and includes the right to fork and redistribute, so **gating Pro code inside this
+repository is legally void** — anyone holding the source may comment out the check or expose the
+endpoint themselves. Pro code therefore belongs in a **separate closed repository**, and this repo
+stays the complete free product: `brotto-core`, Apache 2.0, with the AX-tree perception, the harness
+loop, the action set and local session logging all of it present and free. The Chrome extension stays
+**one** Store artefact and picks its backend at connect time — `localhost` for self-host, the hosted
+gateway for cloud. Full record:
+`docs/product/decisions/2026-10-18-pro-boundary-cloud-split-and-monetisation.md`.
 
-- **Multi-tab parallelism.** Brotto works one tab at a time today. Pro is several tasks running at
-  once across tabs.
-- **A speed pack.** Fewer seconds per step on the same model — larger observation budgets, prompt
-  caching that actually engages, and cheaper models routed well. It pays for itself out of your
-  own token bill, so it costs you nothing extra to have.
-- **Routines.** Save a task as a named recipe and run it again later. Local to your machine; syncing
-  a routine to a second device is a separate thing that needs an operator, and there is no operator.
+**Planned, and not built** (Pro scope, restated 2026-10-18 — **time, concurrency and memory**,
+never tokens):
+
+- **Encrypted Cloud Vault.** Cross-device sync of custom prompts, site playbooks and long-term agent
+  memory. Execution stays local; the state is yours and portable.
+- **High-throughput batch mode.** One prompt across N URLs, in the background.
+- **Unattended automations.** Scheduled triggers and watch conditions.
+- **Cost governance.** Real-time token-spend dashboards and hard ceilings.
+- **Remote dispatch.** Send a task to a home machine running Chrome.
+
+Price band **$20–30/mo**, treated as a hypothesis until there is traction. Nothing is on sale and no
+payment rail exists yet.
+
+The rule that survives all of it: **Pro must be something you operate, not something you wrote.** If a
+competent self-hoster can rebuild it in a weekend, it is not Pro — or it gets opened and monetised via
+support instead.
 
 **Per-run cost and a spend ceiling already exist, behind `BROTTO_PRO`.** Every step is priced after
 the call and a limit ends the run at a step boundary once it crosses — after the step is recorded,
 before its actions fire, with both amounts named in the summary. Prices come from the catalogue; a
 model the catalogue cannot name prices off `AGENT_INPUT_PER_MTOK` / `AGENT_OUTPUT_PER_MTOK`, and one
 with no rate anywhere stays "not priced" rather than `$0.00`. It is listed here rather than above
-because the flag is off by default and a ceiling you cannot see is not a product.
+because the flag is off by default and a ceiling you cannot see is not a product. **`BROTTO_PRO` is a
+capability switch, not protection** — under Apache 2.0 it gates what the shipped default does and
+nothing else. It is scheduled to leave this repository entirely; see the decision above.
 
 Two things this will never be, whatever it becomes: **Brotto does not keep your documents**, on any
 tier, and **Brotto does not mark up your tokens** — there is no margin, no credit balance and
