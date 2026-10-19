@@ -97,6 +97,15 @@ const SCALE = 0.5;
  *  and costs nothing but local CPU. */
 const FORMAT = "png";
 
+/** Cap on `<canvas>` elements enumerated per observation. 64 is far above any
+ *  real page — Sheets, Docs, Figma and Canva have one or two each — and keeps
+ *  the probe payload in the low kilobytes. It is a bound on attacker-controlled
+ *  input on a per-step hot path, so it is enforced twice: once in the page
+ *  expression (before any `getBoundingClientRect` is read) and once on the
+ *  consumer side (the expression is a string; the first thing a page can try
+ *  to break). */
+const MAX_CANVASES = 64;
+
 export interface Tile { x: number; y: number; w: number; h: number; pct: number }
 export interface Delta { changed: boolean; tiles: Tile[] }
 
@@ -223,7 +232,8 @@ const PAGE_EXPRESSION =
   "x+=c.measureText(a.value.slice(0,a.selectionStart)).width;}" +
   "out.push({x:x,y:b.top,w:2,h:b.height||16});}}catch(e){}" +
   "var canv=[];try{var cs2=document.getElementsByTagName('canvas');" +
-  "for(var i=0;i<cs2.length;i++){var cr=cs2[i].getBoundingClientRect();" +
+  "var lim=cs2.length<" + MAX_CANVASES + "?cs2.length:" + MAX_CANVASES + ";" +
+  "for(var i=0;i<lim;i++){var cr=cs2[i].getBoundingClientRect();" +
   "if(cr.width>0&&cr.height>0)canv.push({x:cr.left,y:cr.top,w:cr.width,h:cr.height});}}catch(e){}" +
   "return {caret:out,canvases:canv,vw:window.innerWidth,vh:window.innerHeight};})()";
 
@@ -237,7 +247,9 @@ async function pageProbe(tabId: number): Promise<{ caret: any[]; canvases: any[]
     if (!v || typeof v !== "object") return null;
     return {
       caret: Array.isArray((v as any).caret) ? (v as any).caret : [],
-      canvases: Array.isArray((v as any).canvases) ? (v as any).canvases : [],
+      canvases: Array.isArray((v as any).canvases)
+        ? (v as any).canvases.slice(0, MAX_CANVASES)
+        : [],
       vw: Number((v as any).vw) || 0,
       vh: Number((v as any).vh) || 0,
     };

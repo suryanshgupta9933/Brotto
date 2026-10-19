@@ -26,13 +26,22 @@ const source = fs.readFileSync(SRC, "utf8");
 function extract(name) {
   const start = source.search(new RegExp(`^(export )?(async )?function ${name}\\(`, "m"));
   if (start < 0) throw new Error(`no function ${name} in delta.ts — renamed?`);
-  const open = source.indexOf("{", start);
-  // Any brace in the signature means the first `{` is not the body — an inline
-  // object type in a parameter is enough, and it is not a syntax error here:
-  // it silently extracts `reset?: boolean` as the function body.
-  if (/[{}]/.test(source.slice(start, open))) {
-    throw new Error(`${name}'s signature has braces in it; extraction would match the wrong one`);
+  // The body brace is the first `{` after the parameter list — but a return
+  // type annotation (`: Promise<{ caret: any[] }>`) opens braces of its own, so
+  // skip anything nested inside `<...>` on the way there.
+  const paramsEnd = source.indexOf(")", start);
+  let angle = 0;
+  let open = -1;
+  for (let i = paramsEnd + 1; i < source.length; i++) {
+    const c = source[i];
+    if (c === "<") angle++;
+    else if (c === ">") angle--;
+    else if (c === "{" && angle === 0) { open = i; break; }
+    // A return type may carry `;` and `{` of its own (`: Promise<{ caret: any[] }>`),
+    // so only terminate outside the type — otherwise the brace inside it wins.
+    else if ((c === ";" || c === "\n\n") && angle === 0) break;
   }
+  if (open < 0) throw new Error(`no body brace found for ${name}`);
   let depth = 0;
   for (let i = open; i < source.length; i++) {
     if (source[i] === "{") depth++;
@@ -46,6 +55,18 @@ function extractConst(name) {
   if (start < 0) throw new Error(`no const ${name} in delta.ts — renamed?`);
   const line = source.slice(start, source.indexOf("\n", start));
   return line.slice(line.indexOf("=") + 1).replace(/;\s*$/, "").trim();
+}
+
+/** For a const built by `+` concatenation across lines: everything up to the
+ *  first `;` that ends a line. */
+function extractConstMultiline(name) {
+  // Tolerant of a wrapped initializer — prettier moves the `=` to the next line
+  // when the value is long, which is exactly the consts this is for.
+  const start = source.search(new RegExp(`^const ${name}\\s*=`, "m"));
+  if (start < 0) throw new Error(`no const ${name} in delta.ts — renamed?`);
+  const m = /;$/m.exec(source.slice(start));
+  if (!m) throw new Error(`${name} is not a line-terminated const`);
+  return source.slice(source.indexOf("=", start) + 1, start + m.index).trim();
 }
 
 const NUMBERS = {
@@ -496,6 +517,54 @@ function check(name, cond, detail) {
     ], VW, VH);
     check("the largest canvas is the one reported",
       Math.abs(biggest - 0.5) < 1e-9, `got ${biggest}`);
+  }
+
+  // ── The canvas enumeration is bounded, in the page and on the way in ──────
+  // A page can put a thousand `<canvas>` elements in the DOM; the probe walks
+  // them once per step. Both bounds are asserted against the REAL pageProbe
+  // body and the REAL expression, not a hand-copy, so the bound cannot drift.
+  console.log("\ncanvas enumeration bound");
+  {
+    const MAX_CANVASES = vm.runInNewContext(extractConst("MAX_CANVASES"));
+    const PAGE_EXPRESSION = vm.runInNewContext(
+      `(function (MAX_CANVASES) { return ${extractConstMultiline("PAGE_EXPRESSION")}; })(${MAX_CANVASES})`);
+
+    check("the in-page expression caps its own loop",
+      PAGE_EXPRESSION.includes("cs2.length<" + MAX_CANVASES), PAGE_EXPRESSION);
+
+    // The page hands back more rects than the cap allows anyway — which is
+    // exactly what a page that rewrites the expression's surroundings would do.
+    const many = Array.from({ length: 500 }, () => ({ x: 0, y: 0, w: 10, h: 10 }));
+    const probe = async (value) => {
+      const ctx = { Array, Number, PAGE_EXPRESSION: "", dbg: { sendCommand: async () => ({ result: { value } }) } };
+      vm.createContext(ctx);
+      // esbuild strips types without reading them; `vm` is plain JS, so the
+      // casts have to come off by hand or the body will not parse.
+      const body = extract("pageProbe").replace(/\s+as\s+(any|\{(?:[^{}]|\{[^{}]*\})*\})/g, "");
+      await vm.runInContext(
+        `const MAX_CANVASES = ${MAX_CANVASES};
+         async function pageProbe(tabId) { ${body} }
+         (async () => { pageResult = await pageProbe(1); })()`,
+        ctx);
+      return ctx.pageResult;
+    };
+
+    const over = await probe({ caret: [], canvases: many, vw: 1000, vh: 1000 });
+    check("an oversized rect list is sliced to the cap",
+      over.canvases.length === MAX_CANVASES, `got ${over.canvases.length}`);
+
+    const under = await probe({ caret: [], canvases: many.slice(0, 3), vw: 1000, vh: 1000 });
+    check("a list under the cap is untouched",
+      under.canvases.length === 3, `got ${under.canvases.length}`);
+
+    const malformed = await probe({ caret: [], canvases: { length: 9999 }, vw: 1000, vh: 1000 });
+    check("a non-array canvases value is empty, not a length",
+      Array.isArray(malformed.canvases) && malformed.canvases.length === 0,
+      `got ${JSON.stringify(malformed.canvases)}`);
+
+    // The bound must not change the answer for a page within it.
+    check("the bound leaves a full-viewport canvas fully covered",
+      computeCanvasCovered((await probe({ caret: [], canvases: [{ x: 0, y: 0, w: 800, h: 600 }], vw: 800, vh: 600 })).canvases, 800, 600) === 1);
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");
