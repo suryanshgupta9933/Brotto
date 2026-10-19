@@ -1727,6 +1727,17 @@ async def _capture_page(deps, *, redactions=None, run_secrets=None):
     image = await deps.cdp.capture_screenshot()
     if not image:
         return None, _CAPTURE_NO_IMAGE_WHY
+    if not _is_encoded_image(image):
+        # A payload the provider cannot decode is a guaranteed 400 on the
+        # turn, which kills the step instead of degrading it. The length
+        # check on the extension side does not cover this: it proves the
+        # string is whole, not that it is an image.
+        # Length and shape only — the payload is page content and has no
+        # business in a log line.
+        log.warning("[%s] capture returned %d chars that are not an image "
+                    "(data_url=%s)", deps.user_id, len(image),
+                    image[:11] == "data:image/")
+        return None, _CAPTURE_NOT_IMAGE_WHY
     deps.screenshots_taken += 1
     return image, None
 
@@ -2780,6 +2791,16 @@ _SCREENSHOT_BUDGET_WHY = (
     "this task has already been shown as many screenshots as it gets."
 )
 _CAPTURE_NO_IMAGE_WHY = "the browser did not return an image"
+_CAPTURE_NOT_IMAGE_WHY = "the browser returned something that is not an image"
+# Every provider sniffs the first bytes to pick a decoder, so a payload that
+# does not open with a JPEG/PNG/GIF/WebP header fails the turn outright rather
+# than degrading — which is why this is checked rather than caught.
+_IMAGE_PREFIXES = ("/9j/", "iVBORw0KGgo", "R0lGOD", "UklGR")
+
+
+def _is_encoded_image(data: str) -> bool:
+    """True when `data` opens with a header a provider's decoder will sniff."""
+    return data[:16].startswith(_IMAGE_PREFIXES)
 _SCREENSHOT_REDACTED_WHY = (
     "this page holds something credential-shaped, and a picture cannot be "
     "redacted."

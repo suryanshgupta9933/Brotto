@@ -393,6 +393,19 @@ async def test_a_failed_capture_reaches_the_model_as_a_refusal_to_see():
 
 
 @pytest.mark.asyncio
+async def test_a_payload_that_is_not_an_image_never_reaches_the_model():
+    """A provider sniffs the first bytes to pick a decoder and fails the whole
+    turn when it cannot, so a corrupt capture costs a step unless it is caught
+    here. The extension checks length; length is not decodability."""
+    deps = _deps()
+    deps.cdp.capture_screenshot = AsyncMock(
+        return_value="data:image/jpeg;base64," + JPEG)
+    out = await _vision_fallback(deps, [], "")
+    assert out.image == ""
+    assert "not an image" in out.note.lower()
+
+
+@pytest.mark.asyncio
 async def test_an_exception_is_not_a_stall():
     """The loop's hot path: a raise here loses the run, not the screenshot."""
     deps = _deps()
