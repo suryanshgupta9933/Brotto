@@ -731,6 +731,19 @@ task start, on tab close and on detach. The permission disclosure for all of
 this is `PERMISSIONS.md`, because a CWS reviewer counting screenshots should
 find the second call stated rather than discover it.
 
+**It is *not* independent of `BROTTO_VISION_CAPTURE`, which is the correction
+to the sentence above.** The extension computes the delta unconditionally — it
+does not know the policy, deliberately, so the server stays the authority — but
+`ExtensionCDPRelay.get_page_delta` asks `screenshot_block_reason` first and
+returns `None` if it says no. With the switch unset, the default, there is no
+delta either. The veto is the harness's verbatim `redactions or run_secrets`,
+the same one `_capture_page` applies to the picture: a delta is read off the
+same pixels a screenshot of that page is refused over, and letting it through a
+different route would be the bypass the gate exists to prevent. Pixels are the
+one channel redaction cannot reach (see `privacy.md`, "A screenshot is a gate,
+not a redaction pass"), and an empty `redactions` still means no detector fired,
+never that the page is clean.
+
 #### Two things this does not do yet, and neither is settled
 
 **The threshold is calibrated against synthetic pixels only, and needs pinning
@@ -750,6 +763,58 @@ caret is **not** masked and registers as a change every time it blinks. That is
 deliberately not patched with a per-product cursor table — a table keyed on
 Google Sheets is the kind of fix that stops working the week Google restyles, and
 it is worse than the honest gap.
+
+### `canvasCovered` — how much of the viewport a canvas occupies
+
+The delta above tells the harness *whether* pixels moved. It cannot tell the
+harness *before* anything moves that the page is one where the accessibility
+tree is worthless, because a Google Sheet's tree is rich and plausible — the
+toolbar, the menu bar, forty real nodes — and the missing grid is an absence,
+which no diff can report. `canvasCovered` is that signal: **the fraction of the
+viewport occupied by the largest topmost `<canvas>`, in `[0, 1]`** — one
+number, no pixels, no new frame type, no second round trip.
+
+**It is computed in the page pass that already exists.** The caret probe is a
+`Runtime.evaluate` the delta path ran every step anyway; the canvas enumeration
+was added to that same expression and rides the same result.
+`captureObservation` spreads it into the observation beside `delta`, and the
+server reads it off the same cached frame
+(`ExtensionCDPRelay.get_canvas_covered`, clamped to `[0, 1]`, `None` for a bool
+or anything non-numeric).
+
+**The question asked is what the canvas *occupies*, not what is on top of
+it.** It is `getBoundingClientRect()` area intersected with the viewport — so a
+grid scrolled half off-screen reports what it actually shows — and
+deliberately **not** `elementFromPoint` sampling. Sampling asks "is the canvas
+the topmost thing at this pixel", and a grid's own overlay divs would answer
+that over much of the surface and undercount it. Rects cannot be fooled that
+way, and they cost one `getBoundingClientRect` each.
+
+**The enumeration is bounded on both sides of the wire, and the two bounds are
+different numbers on purpose.** `SCAN_CANVASES = 512` bounds elements
+*examined*; `MAX_CANVASES = 64` bounds rects *kept*. If the kept bound were the
+only one, a page that put 64 zero-size `<canvas>` decoys ahead of its real
+full-viewport canvas would hide it — so the size test sits **inside** the loop
+(`cr.width>0 && cr.height>0 && canv.length < 64`), and a decoy is skipped
+before it can reach the kept budget. `SCAN_CANVASES` is the hard bound on work a
+page can force on a per-step hot path. It is enforced twice: once in the page
+expression and again in `pageProbe`, because the expression is a string and the
+first thing a page can try is to break it.
+
+**A missing or non-numeric value is unknown, never `0.0`.** When the DOM pass
+itself fails (tab gone, debugger detached) or the enumeration hit
+`SCAN_CANVASES` — `capped` is then set, and **`canvasCovered` is omitted from
+the observation entirely** — the field does not cross the wire at all. A `0`
+would be a claim that nothing checked, and it would be a *positive* claim:
+"this page is not a canvas", which is a fact about the page and not about our
+plumbing. The server keeps `None` on the same grounds — `_observe_canvas_covered`
+reads through `getattr`, so a relay from before the field shipped (Playwright,
+any older extension build) returns the old behaviour exactly rather than
+silently downgrading to `0.0`. `0` is a real answer only when the probe ran and
+found nothing covering the viewport.
+
+Pinned by `scripts/test-observation-delta.test.js`,
+`tests/agent/test_canvas_awareness.py` and `tests/test_page_delta.py`.
 
 ## `aria-hidden` is surfaced, not recovered
 

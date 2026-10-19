@@ -699,7 +699,41 @@ coordinate action that lands, so two misses on the way onto one canvas do not
 follow the model onto the next. The loop it closes is the one recorded below,
 "Ten clicks, four attempts, zero changes": that was this path with no ceiling.
 
-Pinned by `tests/agent/test_vision_fallback.py`, `tests/agent/test_coordinate_click.py`,
+**A canvas-dominated page is sparse unconditionally, and this is the third
+case, checked first.** The two tests above can only see what is *there*. A
+canvas page reports a rich, plausible tree — forty AX nodes on a Sheet, for the
+toolbar and the menu bar — and the grid missing out of it is exactly the thing a
+model reading that tree does not register, because a vocabulary test cannot see
+an absence. It did not fire on a real Sheets run for the reason it would not
+fire in theory: the chrome carries **Sheet1** and a **Name box**, so the page
+text always shares a content word with the task and `not (words & seen)` read
+that as "the tree has something for you". (`read_page_text around='Name'`
+succeeded on that run, so "Name" really was in the text.) So `_sparse_for_task`
+checks `_is_canvas_page(deps.canvas_covered)` **before** the page-text length
+and before the vocabulary: `canvasCovered >= _CANVAS_COVERED_FLOOR` (0.5)
+returns `True` outright, because both of the other tests report the *chrome*,
+and the chrome is not what the task is about. Half the viewport is the floor
+that separates "the app draws its content here" from "there is a chart or a
+canvas ad in the corner". The signal itself — one number, no extra round trip,
+both enumeration bounds — is `extension.md`.
+
+**Unknown is not "not a canvas".** A missing, non-numeric or unmeasurable
+`canvasCovered` leaves both tests below exactly as they were, so an extension
+build from before the field shipped behaves precisely as it did before. `0.0`
+would be the failure mode: it is a claim about the page, and nothing checked.
+
+**An empty `read_page_text` on a canvas page is not an empty page.** It is
+Brotto being unable to read the page, and the third cause of the failing Sheets
+run was the model concluding from it that the work was absent and backspacing
+over it. `read_page_text` now appends, on a canvas page and only there, that
+nothing came back *because* the content is drawn on a canvas — do not conclude
+the work is missing, do not redo or erase what you have done. The same
+discipline as the delta block below, pointed at the model instead of at the
+harness: an empty read is an absence of evidence about the page, not evidence
+about the page.
+
+Pinned by `tests/agent/test_vision_fallback.py`, `tests/agent/test_canvas_awareness.py`,
+`tests/agent/test_coordinate_click.py`,
 `tests/test_capability_resolution.py` and `tests/test_vision_capture_gate.py`.
 
 ### Frames — a bounded union, and a ref that has to be composite
@@ -1413,7 +1447,8 @@ proof of failure. That is the honest ceiling of this feature, it is why the
 reported message names what was observed rather than what it concluded, and it
 is why the two known bypasses are named in a comment beside the code rather
 than only here: a ticking clock or an animated banner keeps the fingerprint
-moving while nothing works, and a canvas never moves it at all.
+moving while nothing works, and on a canvas page the page-text term is noise
+rather than a signal — see below.
 
 **The consumer that makes the ceiling smaller is a pixel delta.** The
 accessibility tree is byte-identical across a canvas app's whole run, so the
@@ -1447,6 +1482,63 @@ The gate is `screenshot_block_reason` and is not weakened: **with
 `BROTTO_VISION_CAPTURE` unset — the default — the delta is withheld on every
 step and the feature is inert.** Turning it on also turns on viewport capture,
 which is a privacy decision, not a default to take here.
+
+#### The delta is also the stagnation *term*, and page-text length is not
+
+**On a canvas page the pixel delta replaces page-text length as the third
+progress term in `_note_stagnation`, because on such a page the length is
+noise.** A Google Sheet's `innerText` is the chrome plus the caret plus the
+search box, and it flickers every step — 10031 → 10044 → 10136 → 10030 — while
+the grid it fails to contain is untouched. A length change therefore reset the
+counter on every step, and a 23-step run never fired. The rule that replaced
+it, "drop the text-length term on a canvas page", is exactly what the docstring
+in `harness.py` used to get wrong in the other direction: an earlier version
+claimed a canvas app "never moves it at all", which was false and was written
+by us. **It moves constantly and it means nothing.** The AX diff and the URL
+still count on every page, including a canvas one.
+
+**The delta is page-derived evidence, and it inherits both ceilings.** Tiles are
+evidence only, never a targeting coordinate source (D2), and it is never a
+model self-report (D5) — the extension measures, and the server compares two
+measurements of the same page.
+
+**An unknown delta neither advances the counter nor produces a verdict.** It is
+`None` — not `False` — on the first observation, after a navigation (two
+consecutive steps: the clear fires on `onCommitted`, before the new page
+paints), after a resize, on a failed capture, and on **every** step of every
+run while `BROTTO_VISION_CAPTURE` is off, which is the default. With `value is
+None` the term is simply absent from the comparison: a URL that moved or an AX
+tree that moved still clears a standing counter, and only a real `False` counts
+as no progress. The old rule required *all three* terms to be unchanged before
+counting a step, and dropping the other two inside that branch is what let a
+23-step run be "stopped" for having navigated.
+
+**Because the delta belongs to the page, it cannot hold the loop open.** A
+caret blink, a spinner, a feed repainting for its own reasons moves pixels
+forever, so progress credited to the delta alone is bounded separately:
+`_DELTA_ONLY_STEPS = 18` consecutive steps whose *only* evidence of progress was
+the delta, on a page whose URL and AX tree never moved. Three times the ordinary
+ceiling, because a real task on a canvas app — typing, a few clicks — reaches
+its end well inside it and a page that repaints forever does not.
+
+**On that path `stagnant_steps` stays 0, and the run gets its own message.** The
+pixels genuinely did change, so counting them as stagnation would be false, and
+`_STAGNANT_MESSAGE` ("the page did not visibly change") would be a lie about
+that run twice over. `_DELTA_ONLY_MESSAGE` says what actually happened: the page
+repainted every step, nothing Brotto can read changed, so it could not tell
+whether the actions did anything and kept going anyway — the same guidance, the
+same "this may be an app Brotto can only see pixels of", and it never claims the
+user made no progress either.
+
+The three causes were one bug each and none of them was the detector: the
+screenshot never fired because the chrome matched the task's vocabulary; the
+counter never fired because the text-length term was noise; and the model erased
+its own work because an empty `read_page_text` read to it as an empty page.
+Fixing only the third would have produced a run that confidently un-does itself
+more slowly.
+
+Pinned by `tests/agent/test_stagnation_bound.py`,
+`tests/agent/test_stagnant_messages.py` and `tests/agent/test_page_delta_prompt.py`.
 
 So the earlier reading of this section — that a runtime detector is not
 shippable, because "this step changed nothing" and "this step is loading" are not
