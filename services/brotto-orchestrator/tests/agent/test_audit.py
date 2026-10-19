@@ -547,11 +547,26 @@ def test_the_shape_change_came_with_a_schema_bump():
     assert SCHEMA_VERSION == 3
 
 
-def test_action_records_are_capped_so_a_run_stays_readable(trail):
+def test_action_records_are_capped_so_a_run_stays_readable(trail, monkeypatch):
+    """Past the cap, actions stop being kept and start being counted.
+
+    The cap is moved down rather than the loop being left at 5,000: every
+    `record_action` goes through `_record`, which flushes the whole document,
+    so 5,010 records is 5,010 whole-document rewrites — quadratic in the
+    document, and it took 17 of this suite's 19 minutes in the CI job's
+    coverage configuration. The property holds at any cap and the number
+    itself is asserted below, so testing the behaviour loses nothing.
+    """
+    from brotto_orchestrator.agent import audit as audit_mod
+    assert MAX_ACTIONS_PER_SESSION == 5_000
+    monkeypatch.setattr(audit_mod, "MAX_ACTIONS_PER_SESSION", 20)
+
     turn = _seed(trail)
-    for _ in range(MAX_ACTIONS_PER_SESSION + 10):
+    for _ in range(30):
         trail.record_action(turn, action="click", args={}, outcome="",
                             ok=True, redacted=False, duration_ms=1)
-    totals = trail.document()["totals"]
-    assert totals["actions"] == MAX_ACTIONS_PER_SESSION
-    assert totals["actions_dropped"] == 10
+    doc = trail.document()
+    assert doc["totals"]["actions"] == 20
+    assert doc["totals"]["actions_dropped"] == 10
+    # The dropped ones are not kept either — that is the "readable" half.
+    assert len(doc["turns"][0]["actions"]) == 20
