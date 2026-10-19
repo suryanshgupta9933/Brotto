@@ -311,6 +311,12 @@ class AgentDeps:
     # the harness so `_vision_fallback` — a module function, called by tests
     # directly — can read and bump it without a harness instance.
     screenshots_taken: int = 0
+    # Coordinate actions that verifiably missed the target — outside the
+    # viewport, or a relay dispatch failure. Counted per task and never
+    # cleared: a dispatch that *landed* is not evidence the point was right,
+    # so clearing on it let a model alternating wrong-but-dispatching clicks
+    # never reach the ceiling. The ceiling is the harness's `_XY_MISS_LIMIT`.
+    xy_misses: int = 0
     result: TaskResult | None = None
     # URL observed at the top of the current step, before its actions run.
     # Read by the click cross-domain gate and stamped onto TaskResult.

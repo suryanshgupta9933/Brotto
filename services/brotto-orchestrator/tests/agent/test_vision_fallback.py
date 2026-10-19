@@ -888,3 +888,42 @@ async def test_the_typed_secret_veto_precedes_the_capability_resolve(monkeypatch
         lambda d: seen.append("resolved"))
     await _vision_fallback(deps, targets, "Untitled", {}, ["hunter2-xyz"])
     assert seen == []
+
+
+# ── the rule as the model reads it ──────────────────────────────────────────
+#
+# `_sparse_for_task` decides *whether* a picture rides along and the harness
+# note says what the one attached is. Neither is enough: a turn arriving with
+# no picture is indistinguishable from a page the model cannot read, unless
+# the prompt states why one is sent at all. And before this section said so,
+# it told the model to give up and ask the user on exactly the pages the
+# fallback rescues — a canvas page is the case this whole file exists for.
+#
+# A dropped instruction is an absence, and an absence reads clean in review.
+
+def test_the_prompt_states_the_condition_a_picture_is_sent_under():
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+    assert "nothing in the tree" in SYSTEM_PROMPT and \
+        "about your task" in SYSTEM_PROMPT
+
+
+def test_the_prompt_says_a_turn_without_a_picture_is_not_a_blank_page():
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+    assert "no picture came with the turn" in SYSTEM_PROMPT
+
+
+def test_the_prompt_tells_the_model_the_tree_outranks_the_picture():
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+    assert "believe the tree" in SYSTEM_PROMPT, (
+        "a canvas can be mid-render, and the picture shows a rendering state "
+        "rather than the semantic one the agent is about to act on"
+    )
+
+
+def test_the_prompt_names_the_cap():
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+    assert "at most three" in SYSTEM_PROMPT, (
+        "the prompt quotes the cap in words so it cannot drift from\n"
+        "the constant; assert here rather than importing it"
+    )
+    assert harness_mod._MAX_CAPTURES_PER_TASK == 3

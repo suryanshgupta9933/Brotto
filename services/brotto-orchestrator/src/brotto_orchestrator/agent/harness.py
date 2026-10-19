@@ -1758,6 +1758,76 @@ _COORDINATE_REASONS = {
     "type": _type_reason,
 }
 
+# How many *confirmed* geometry misses a task may make before the coordinate
+# verbs are refused. One, not zero: a mis-aimed coordinate is tens of pixels
+# rather than hundreds, and a second informed attempt lands roughly twice as
+# close, so the model's own retry measurably beats asking a person. Not two
+# either: the recorded ten-clicks-one-button run is this loop with no ceiling,
+# and a retry that can repeat is worse than the miss it was meant to fix.
+#
+# This is a per-*task* count of misses, never of attempts, and it is never
+# cleared by a dispatch that landed — see `_coordinate_action`. What it buys
+# is a ceiling on repeated *verifiable* geometry failure. What it costs: a
+# long task that makes two real aiming errors in a row, hours apart, loses its
+# coordinates for the rest of the task and has to use refs or the user.
+_XY_MISS_LIMIT = 1
+
+
+def _missed_point(deps, action: str, label: str, detail: str) -> str:
+    """A refusal the model should act on once, then stop acting on.
+
+    Three shapes, because the three states want three things and a single
+    generic "that failed" spends the next step on the wrong one:
+
+    - **first miss** — correct once, from a page it has just re-observed.
+      The loop re-observes at the top of every step, so the retry is a new
+      step with a fresh tree and a fresh `probe_xy` read, not a second
+      dispatch from geometry that has already proved wrong.
+    - **second miss** — the escalation turn. Coordinates are off after this
+      one, so the instruction is to bring the user in rather than to guess a
+      fourth time.
+    - **third and after** — terminal. This path has said everything it can
+      say; what closes the loop is not this prose but the gate at the top of
+      `_coordinate_action`, which refuses these verbs before an approval is
+      requested. A counter that only ever escalated the sentence would leave
+      a model that ignores it buying a fresh human approval every step.
+
+    Only *aiming* errors come here. A point the page is covering is a
+    different failure with a different instruction, and appending "click
+    once more, adjusted" to "dismiss what is on top of it" is a contradiction
+    the model resolves by clicking the occluded element again.
+
+    Deliberately not `_ask_user`: an interactive prompt on this path records
+    a failed action in the document, and the escalation the model is being
+    told to make is one it can make itself with `ask_human` and a question
+    the user can actually answer.
+    """
+    deps.xy_misses += 1
+    n = deps.xy_misses
+    spent = _XY_MISS_LIMIT + 1
+    head = f"{_EXEC_FAILURE} {action}: {detail} Nothing was clicked, focused " \
+           f"or typed."
+    if n <= _XY_MISS_LIMIT:
+        return (
+            f"{head} That point missed. Look at the page again — it is "
+            f"re-observed fresh at the top of this next step, so read it "
+            f"rather than repeating these coordinates — and click once more, "
+            f"adjusted. A point that lands on nothing is off by tens of "
+            f"pixels, not by the whole control."
+        )
+    if n == spent:
+        return (
+            f"{head} That point missed again, and coordinate actions are "
+            f"spent for this task. You had {spent} informed attempts and every "
+            f"one was wrong, so guessing again is what costs the run. Bring "
+            f"the user in with ask_human and ask them where {label} is."
+        )
+    return (
+        f"{head} That is miss {n} on a task that has already spent its "
+        f"{spent} coordinate attempts, so coordinate actions are refused from "
+        f"here on. Take a different route, or ask the user where {label} is."
+    )
+
 
 async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
                              *, turn: int, redactions=None,
@@ -1804,6 +1874,20 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
             "a label is required and it is the only thing the user sees — say "
             "what is at this point, e.g. \"the cell C4\"."
         )
+    if deps.xy_misses >= _XY_MISS_LIMIT + 1:
+        # The gate the refusal in `_missed_point` points at. Above the
+        # screenshot and above `_ask_user` — the model that ignores the prose
+        # and emits `click_xy` on every step is the one this exists for, and
+        # it must not be able to buy a fresh human approval by being
+        # repetitive. It reads `label`, hence its place after the label check.
+        return refuse(
+            f"coordinate actions are refused for this task. The "
+            f"{_XY_MISS_LIMIT + 1} informed attempts this task made were "
+            f"recorded as misses, so a further click here would be a guess "
+            f"the user approves without knowing it is one. Take a different "
+            f"route — a ref-based click or type_text — or use ask_human to "
+            f"ask the user where {label} is."
+        )
     x, y = args.get("x"), args.get("y")
     if not _is_int(x) or not _is_int(y):
         return refuse(
@@ -1834,21 +1918,28 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
     if width <= 0 or height <= 0:
         return refuse("the page's viewport could not be read.")
     if not (0 <= x < width and 0 <= y < height):
-        return (
-            f"{_EXEC_FAILURE} {action}: ({x},{y}) is outside the "
-            f"{width}x{height} viewport — the coordinates came from a "
-            f"different view of the page. Nothing was clicked, focused or typed."
-        )
+        # An aiming error, and the one `_missed_point` describes correctly:
+        # a fresh observation at the top of the next step may well be a
+        # different view of the page, and re-aiming is the fix.
+        return _missed_point(
+            deps, action, label,
+            f"({x},{y}) is outside the {width}x{height} viewport — the "
+            f"coordinates came from a different view of the page.")
     if str(probe.get("tag", "")).upper() != "CANVAS":
         # Not a check on what the canvas contains — nothing can read that. It
         # is a check that nothing is sitting on top of it, which is the one
         # thing elementFromPoint still answers on a canvas, and the one that
         # keeps this verb from being a net safety loss against ref `click`.
-        return (
-            f"{_EXEC_FAILURE} {action}: something other than the canvas is on "
-            f"top at ({x},{y}). Dismiss the dialog or panel covering it, then "
-            f"try again. Nothing was clicked, focused or typed."
-        )
+        #
+        # Not `_missed_point`, and it costs no budget either way. This is an
+        # occlusion, not an aiming error: retry advice would tell the model to
+        # click the same covered point, and spending the aiming budget on it
+        # would refuse coordinates for a page whose modal it was told, in
+        # this sentence, to dismiss — the fixed case would burn the budget
+        # and the model would still be right to retry after dismissing.
+        return refuse(
+            f"something other than the canvas is on top at ({x},{y}). Dismiss "
+            f"the dialog or panel covering it, then try again.")
 
     domain = None
     try:
@@ -1976,18 +2067,22 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
     recheck = await cdp.probe_xy(x, y)
     rw, rh = int(recheck.get("width") or 0), int(recheck.get("height") or 0)
     if not (rw > 0 and rh > 0 and 0 <= x < rw and 0 <= y < rh):
-        return (
-            f"{_EXEC_FAILURE} {action}: the page moved while you were deciding "
-            f"— ({x},{y}) is now outside its {rw}x{rh} viewport. Nothing was "
-            f"clicked, focused or typed. Look at the page again and retry."
-        )
+        return _missed_point(
+            deps, action, label,
+            f"the page moved while you were deciding — ({x},{y}) is now "
+            f"outside its {rw}x{rh} viewport.")
     if str(recheck.get("tag", "")).upper() != "CANVAS":
-        return (
-            f"{_EXEC_FAILURE} {action}: something other than the canvas is on "
-            f"top at ({x},{y}) now — the page changed while you were deciding. "
-            f"Nothing was clicked, focused or typed. Dismiss the dialog or panel "
-            f"covering it, then try again."
-        )
+        # The same rule as the pre-approval occlusion check above, worded the
+        # same way and costing the same: not `_missed_point`, no budget. Two
+        # sites of one predicate with two policies read as though the
+        # difference were meaningful, and the re-approval text above also told
+        # the model to aim again at a point it had just said was covered.
+        # A modal here is transient and page-controlled, so spending the
+        # aiming budget would refuse the task's later legitimate clicks over
+        # an overlay this sentence just told the model to dismiss.
+        return refuse(
+            f"something other than the canvas is on top at ({x},{y}). Dismiss "
+            f"the dialog or panel covering it, then try again.")
 
     # And the URL, because a screenshot of one page is not consent to click a
     # point on another. Same wait, same class of check; comparing eTLD+1 rather
@@ -2017,10 +2112,15 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
             f"clicked, focused or typed. Look at the page again and retry."
         )
 
+    # A dispatch that lands clears nothing. It is not evidence the point was
+    # right — the whole premise of this verb is that a coordinate lands tens
+    # of pixels off and dispatches onto the wrong element happily — so
+    # clearing the counter here let a model alternating wrong-but-dispatching
+    # clicks never reach the ceiling, which is the loop the ceiling is for.
     if verb == "focus":
         result = await cdp.focus_xy(x, y)
         if _EXEC_FAILURE in result:
-            return result
+            return _missed_point(deps, action, label, result)
         await cdp.refresh_target_map()
         return f"Focused at ({x},{y}) — {label}"
 
@@ -2033,7 +2133,7 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
         # reason this is one action rather than two.
         focused = await cdp.focus_xy(x, y)
         if _EXEC_FAILURE in focused:
-            return focused
+            return _missed_point(deps, action, label, focused)
         result = await cdp.type_text_at_focus(typed)
         if _EXEC_FAILURE in result:
             return result
@@ -2042,7 +2142,7 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
 
     result = await cdp.click_xy(x, y)
     if _EXEC_FAILURE in result:
-        return result
+        return _missed_point(deps, action, label, result)
     await cdp.refresh_target_map()
     return f"Clicked at ({x},{y}) — {label}: {result}"
 

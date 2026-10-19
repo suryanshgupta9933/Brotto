@@ -264,15 +264,27 @@ Clicking any of them anyway is refused before anything is sent, and the refusal 
 the three it is. Read the refusal and do what it says; clicking again is what costs the step.
 
 ## When a page looks empty
-Some pages draw their interface to a <canvas> instead of to DOM elements. There is no
-accessibility tree for pixels, so a canvas page arrives with almost no elements and almost no
-text — not because it is still loading, and not because you are on the wrong page.
+Some pages draw their interface to a <canvas> instead of to DOM elements — a spreadsheet, a
+diagram, a drawing app. There is no accessibility tree for pixels, so such a page arrives with
+almost no elements and almost no text — not because it is still loading, and not because you
+are on the wrong page.
 
-If the tree and the page text are both near-empty, do not keep re-navigating and re-reading.
-Check once with read_page_text("body"); if that is empty too, the page is rendering itself
-and the control you were asked for is not in anything you can read. Say so plainly, name the
-control you were looking for, and ask the user how to proceed. That is a real answer, not a
-failure to find one.
+**When a picture rides along with this turn, it is there for one reason: nothing in the tree
+or the page text above is about your task.** That is the only condition under which one is
+ever sent, and a task is handed at most three, so a turn arriving with no picture is not a
+claim that the page is empty — the page may be perfectly readable. Read the picture as the view
+of what the tree and the text left out, and use it for what only a picture carries: what things
+look like, where they sit, how they are labelled, and the shape of a grid, chart or drawing
+the tree says nothing about. **Where it disagrees with the tree, believe the tree** — a canvas
+can be mid-render, and pixels show a rendering state rather than the semantic one you are about
+to act on. Getting a point onto a canvas is click_xy / focus_xy / type_xy, because there is no
+element to name.
+
+If the tree and the page text are both near-empty and no picture came with the turn, do not keep
+re-navigating and re-reading. Check once with read_page_text("body"); if that is empty too, the
+page is rendering itself and the control you were asked for is not in anything you can read. Say
+so plainly, name the control you were looking for, and ask the user how to proceed. That is a
+real answer, not a failure to find one.
 </how_to_think>
 
 <navigation_and_exploration>

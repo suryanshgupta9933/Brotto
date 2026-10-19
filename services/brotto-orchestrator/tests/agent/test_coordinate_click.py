@@ -865,3 +865,158 @@ async def test_the_screenshot_assertion_sees_a_real_record(trail, tmp_path):
     text = "".join(p.read_text() for p in tmp_path.glob("*.json"))
     assert JPEG not in text
     assert '"screenshot"' not in text
+
+
+# ── one correction turn, then the gate ──────────────────────────────────────
+#
+# A mis-aimed coordinate is tens of pixels rather than hundreds, so the
+# model's own informed retry measurably beats asking a person — but the ten
+# `ok: true` clicks on one button in session `a7328461` are what this loop
+# becomes with no ceiling. The counter is the whole of the safety argument,
+# and an unbounded refusal reads clean in a diff, so every shape is asserted.
+
+_OCCLUDED = {"width": 1512, "height": 982, "tag": "DIV"}  # not the canvas
+
+
+def _aimed_deps():
+    """Canvas probe, relay refusing the dispatch — a *verifiable* aiming
+    miss. The old fixtures aimed their misses with a non-canvas probe, which
+    is an occlusion: those refusals no longer touch the budget, so a test
+    using one no longer reaches the ceiling at all. Each of these runs
+    reaches `_ask_user`, so the queue is stocked with spare approvals."""
+    deps, frames, queue = _deps(probe=CANVAS)
+    deps.cdp.click_xy = AsyncMock(return_value=f"{_EXEC_FAILURE} off-screen")
+    for _ in range(3):
+        queue.put_nowait("approve")
+    return deps, frames
+
+
+def _prompts_sent(frames) -> int:
+    return sum(1 for f in frames if f.get("type") == "approval_required")
+
+
+@pytest.mark.asyncio
+async def test_the_first_miss_buys_one_adjusted_retry(trail):
+    """Not zero. Zero sends every near-miss to a human, and a human is a
+    person coming back to the panel."""
+    deps, _ = _aimed_deps()
+    out = await _run(_click(), deps, trail)
+    assert _EXEC_FAILURE in out
+    assert "missed" in out and "adjusted" in out
+    assert "ask_human" not in out, "it escalated on the first miss"
+    assert deps.xy_misses == 1
+
+
+@pytest.mark.asyncio
+async def test_the_second_miss_escalates_instead_of_retrying(trail):
+    """The correction turn is spent; the next instruction is to bring the
+    user in, not to guess a third time."""
+    deps, _ = _aimed_deps()
+    await _run(_click(), deps, trail)
+    out = await _run(_click(), deps, trail)
+    assert _EXEC_FAILURE in out
+    assert "ask_human" in out and "the cell C4" in out, \
+        "the escalation does not say what to ask about"
+    assert "adjusted" not in out, "it bought a third attempt"
+    assert deps.xy_misses == 2
+
+
+@pytest.mark.asyncio
+async def test_a_spent_budget_refuses_without_prompting_or_clicking(trail):
+    """The defect this exists for: the terminal refusal was prose the caller
+    then walked straight past, so a model ignoring it got `_ask_user` again
+    every step forever. The absence is the whole fix — no prompt, no
+    screenshot, no dispatch."""
+    deps, frames = _aimed_deps()
+    for _ in range(2):
+        await _run(_click(), deps, trail)
+    assert _prompts_sent(frames) == 2, "the misses did not each prompt"
+    queued = deps.human_input_queue.qsize()
+    deps.cdp.click_xy.reset_mock()
+    deps.cdp.capture_screenshot.reset_mock()
+    out = await _run(_click(), deps, trail)
+    assert _EXEC_FAILURE in out
+    assert "refused for this task" in out
+    assert "ask_human" in out, "the refusal names no route that works"
+    deps.cdp.click_xy.assert_not_awaited()
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert _prompts_sent(frames) == 2, "it asked the user again"
+    assert deps.human_input_queue.qsize() == queued, "a reply went unconsumed"
+
+
+@pytest.mark.asyncio
+async def test_a_landed_click_does_not_clear_the_counter(trail):
+    """A dispatch that landed is not evidence the point was right — that is
+    the premise of the verb. Clearing here let a model alternating
+    wrong-but-dispatching clicks run without ever reaching the ceiling."""
+    deps, _, _ = _deps()
+    deps.xy_misses = 1
+    out = await _run(_click(), deps, trail)
+    assert _EXEC_FAILURE not in out
+    assert deps.xy_misses == 1
+
+
+@pytest.mark.asyncio
+async def test_a_missed_dispatch_is_a_miss_too(trail):
+    """The relay refusing the dispatch is the same evidence as an out-of-
+    viewport point — the click landed on nothing."""
+    deps, _ = _aimed_deps()
+    out = await _run(_click(), deps, trail)
+    assert "missed" in out and deps.xy_misses == 1
+
+
+@pytest.mark.asyncio
+async def test_an_out_of_viewport_point_is_a_miss(trail):
+    """The other verifiable aiming miss, and unlike the occlusion below it
+    buys an adjusted retry rather than only prose."""
+    deps, _, _ = _deps(probe={"width": 400, "height": 300, "tag": "CANVAS"})
+    out = await _run(_click(), deps, trail)
+    assert "outside the 400x300 viewport" in out
+    assert deps.xy_misses == 1 and "adjusted" in out
+
+
+@pytest.mark.asyncio
+async def test_an_occlusion_is_not_an_aiming_miss(trail):
+    """Nothing is on top of the point, so "click once more, adjusted" is an
+    instruction to click the covered element again — and spending the aiming
+    budget on it would refuse coordinates for the very modal this sentence
+    told the model to dismiss."""
+    deps, _, _ = _deps(probe=_OCCLUDED)
+    out = await _run(_click(), deps, trail)
+    assert _EXEC_FAILURE in out
+    assert "Dismiss the dialog or panel covering it" in out
+    assert "adjusted" not in out and "missed" not in out
+    assert deps.xy_misses == 0
+
+
+@pytest.mark.asyncio
+async def test_repeated_occlusions_do_not_spend_the_budget(trail):
+    """A modal the model cannot dismiss is a stuck page, not a spent canvas
+    budget: the ceiling must not refuse the task's later real clicks."""
+    deps, _, _ = _deps(probe=_OCCLUDED)
+    for _ in range(5):
+        await _run(_click(), deps, trail)
+    assert deps.xy_misses == 0
+    deps.cdp.probe_xy = AsyncMock(return_value=CANVAS)
+    out = await _run(_click(), deps, trail)
+    assert _EXEC_FAILURE not in out, "an occlusion cost the task its canvas"
+
+
+@pytest.mark.asyncio
+async def test_a_recheck_occlusion_is_not_an_aiming_miss(trail):
+    """The post-approval recheck is the same predicate as the check above, so
+    it is the same rule: the modal landed while the human was reading, it is
+    page-controlled and transient, and charging the aiming budget for it would
+    refuse the task's later real clicks over an overlay this sentence tells the
+    model to dismiss. The counter is the whole defect — it read 1 here while
+    the identical pre-approval refusal read 0."""
+    deps, _, _ = _deps()
+    # The pre-approval probe sees the canvas; the recheck, taken after
+    # `_ask_user` returns, sees what landed on top while the user read.
+    deps.cdp.probe_xy = AsyncMock(side_effect=[CANVAS, _OCCLUDED])
+    out = await _run(_click(), deps, trail)
+    assert _EXEC_FAILURE in out
+    assert "Dismiss the dialog or panel covering it" in out
+    assert "adjusted" not in out and "missed" not in out
+    assert deps.xy_misses == 0
+    deps.cdp.click_xy.assert_not_awaited()
