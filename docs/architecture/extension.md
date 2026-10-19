@@ -692,6 +692,65 @@ which is precisely the failure the fixtures exist to catch. The result reports
 at 2000 entries, so a join that silently stops matching is visible in the
 observation rather than inferred from a page that looks emptier than it is.
 
+## The page delta — evidence that the page moved, at ~100 bytes
+
+`observation/delta.ts` answers "did the page change, and where" every step, on
+the pages where the accessibility tree is the useless signal. A Google Sheet
+measures 71 targets / ~11 KB and is **byte-identical across 15 consecutive
+steps** no matter what the agent types, so the agent has no evidence its action
+landed and repeats. The wire shape is fixed, and the server is built against
+exactly this:
+
+```js
+delta: { changed: boolean, tiles: [ { x, y, w, h, pct } ] }  // worst first, max 5
+```
+
+Tiles are **16×16 in full-resolution viewport CSS pixels**, and `pct` is the
+tile's mean absolute luminance difference as a percentage of full scale. The
+tile size is the reason the signal is per-tile and not global: one character in
+a large mostly-white grid is ~0.01% of the pixels, so a single page-wide mean is
+swamped by whatever else moved. Tiling makes the false-negative rate depend on
+tile size rather than page size — which is what lets a cell edit register in a
+40×200 sheet. The threshold `TILE_DIFF_THRESHOLD` is absolute for the same
+reason: "% of page changed" is the most mis-set parameter in visual regression
+testing.
+
+**A tile is evidence, never a target (locked decision D2).** A tile is a region
+that *moved or changed*, which is not a claim about what is there now — the page
+repaints after the diff. Nothing in the extension may consume the coordinates
+and the server is forbidden from feeding a tile to a coordinate action.
+
+**The cost is zero tokens and zero pixels on the wire, and it is not a
+screenshot.** The capture is decoded in the extension, differenced and dropped;
+what crosses is ~100 bytes of derived integers. It is a *second*
+`Page.captureScreenshot` call per step, independent of the vision screenshot and
+of `BROTTO_VISION_CAPTURE`, and it does **not** consume the 3-per-task
+`_MAX_CAPTURES_PER_TASK` budget — that counter guards what a model sees, and no
+model sees a delta. One frame is retained per tab and cleared on navigation, on
+task start, on tab close and on detach. The permission disclosure for all of
+this is `PERMISSIONS.md`, because a CWS reviewer counting screenshots should
+find the second call stated rather than discover it.
+
+#### Two things this does not do yet, and neither is settled
+
+**The threshold is calibrated against synthetic pixels only, and needs pinning
+against real captures before it is trusted.** A real spreadsheet's noise floor
+is unmeasured — grid rendering, font rasterisation, the cell cursor — and the
+failure is symmetric: if the real floor sits *above* the threshold the feature is
+inert and the agent is back to trusting a tree that never moves; if it sits
+*below*, the delta fires on every step and carries no information. Either way
+nothing in the current code distinguishes them, and no number in this repo is
+evidence. This is an open question, not a tuning choice.
+
+**The caret mask does not cover a Google Sheets cell cursor.** It masks
+contentEditable selection rectangles and `input`/`textarea` caret positions, both
+of which the DOM can be asked about. A Sheets cell cursor is a widget-drawn
+element reachable by neither branch, so on the motivating page itself a blinking
+caret is **not** masked and registers as a change every time it blinks. That is
+deliberately not patched with a per-product cursor table — a table keyed on
+Google Sheets is the kind of fix that stops working the week Google restyles, and
+it is worse than the honest gap.
+
 ## `aria-hidden` is surfaced, not recovered
 
 An `aria-hidden` element is `ignored: true` in the AX tree and the extractor skips

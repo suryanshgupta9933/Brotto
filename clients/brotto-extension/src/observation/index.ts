@@ -12,6 +12,7 @@ import { waitForStable, pageMayStillBeMoving, Stability } from "./stability";
 import { anyCommand, enumerateSurfaces, makeRef, isKeptNode, FrameScan, Surface } from "./surfaces";
 import { boxMap, GeometryResult } from "./geometry";
 import { findHiddenTargets } from "./supplement";
+import { computeDelta } from "./delta";
 
 // Mirrors PAGE_TEXT_MAX in agent/ax_filter.py.
 const PAGE_TEXT_MAX = 20000;
@@ -311,12 +312,31 @@ export async function captureObservation(tabId: number) {
   }
 
   const observation = { url, title, pageText, axTargets, frames };
-  // `frames` and `metrics` ride the wire for free — `sendObservation` spreads
-  // the whole observation — so a truncated or cross-origin-reading step, and
-  // what the observation cost to produce, are visible in the server log and
-  // the audit without a second channel.
+
+  // "Did the page change, and where" — the signal the AX tree cannot give on a
+  // canvas-rendered page, where it stays byte-identical no matter what the
+  // agent types. Omitted entirely when there is nothing truthful to say (first
+  // frame, navigation, resize); see `observation/delta.ts` for why `changed:
+  // false` must never stand in for "not checked".
+  //
+  // Never throws into the observation: a failed delta is a missing delta.
+  // Untyped for the same reason as every other extracted body —
+  // `test-observation-rescan-guard.test.js` evals `captureObservation` as
+  // plain JavaScript and `let delta: Delta` is a syntax error there.
+  let delta;
+  try {
+    delta = await computeDelta(tabId, url);
+  } catch (e) {
+    console.warn("[brotto] page delta unavailable:", e);
+  }
+
+  // `frames`, `metrics` and `delta` ride the wire for free — `sendObservation`
+  // spreads the whole observation — so a truncated or cross-origin-reading
+  // step, what the observation cost to produce, and what moved on the page are
+  // all visible in the server log and the audit without a second channel.
   return {
     ...observation,
+    ...(delta ? { delta } : {}),
     metrics: observationMetrics(
       stability, geometry, scans, axTargets.length,
       JSON.stringify(observation).length,

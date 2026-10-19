@@ -83,12 +83,27 @@ straight to the model for that step. It is **not written to disk**: not to the
 audit trail, not to a log line, not to the side panel. What the model makes of
 it may appear in its summary, exactly as page text already does.
 
+**There is a second screenshot call, and this is where its data ends.** On
+every step the extension takes its own capture to compare against the previous
+step's — the "page delta" that tells Brotto whether the page changed and where,
+on a spreadsheet whose accessibility tree never moves. It is a second, separate
+call: it happens whether or not `BROTTO_VISION_CAPTURE` is set, and it is not
+counted against the three-screenshot-per-task limit, because no model ever sees
+it. Both captures are decoded in the extension, differenced, and dropped. **Not
+one pixel of this second capture is sent to the server, written to disk, or put
+in the audit trail** — what crosses the wire is about a hundred bytes of
+integers: a yes/no and a handful of small rectangles. One frame is held per tab
+to compare against, and it is discarded on navigation, on task start, when the
+tab closes and when the extension is detached. A caret or selection you are
+typing in is painted over before the comparison, so a blinking cursor does not
+register as a change.
+
 It is also the one channel that redaction cannot reach — redaction is pattern
 matching over strings, and a JPEG is pixels — which is why it sits behind a
 switch that stays off until somebody turns it on. See
 [PRIVACY.md](https://github.com/suryanshgupta9933/brotto/blob/main/PRIVACY.md).
 
-### `Runtime.evaluate` — six places, and only one of them is the server's
+### `Runtime.evaluate` — seven places, and only one of them is the server's
 
 This runs JavaScript in the page, so it is the one call here that can execute
 code rather than read state. Every call site is listed.
@@ -106,7 +121,7 @@ Because that expression arrives from the server, the *mechanism* is not
 restricted to that read — holding `AGENT_SECRET` is equivalent to holding your
 browser session. See "Known limitations".
 
-**Composed by the extension — five places, hardcoded in the bundle.** These
+**Composed by the extension — six places, hardcoded in the bundle.** These
 are not reachable by anything the server sends; they are fixed strings in the
 shipped code, and they are the ones that run without the server asking:
 
@@ -116,11 +131,16 @@ shipped code, and they are the ones that run without the server asking:
 | `observation/stability.ts` | installs a `MutationObserver` and reports whether the page has gone still | every observation |
 | `observation/supplement.ts` | a probe listing `aria-hidden` controls so they can be hit-tested | when the tree is supplemented |
 | `observation/pointer.ts` | draws, then removes, a `pointer-events: none` click marker and its label — label set with `textContent`, never `innerHTML`, and capped at 80 characters because it is model-authored prose | around a click, before and after the mouse event pair |
+| `observation/delta.ts` | locates the text caret: the selection rectangle of a focused `contentEditable` element, or the measured position of the cursor inside a focused `input`/`textarea`. Returns **rectangle geometry only** — an array of `{x, y, w, h}` | when a page-delta is computed and the focused element is editable |
 
 The first three run on every observation; the pointer marker only runs around a
 click, and it is removed in a `finally` after the mouse event pair rather than
 on a timer — a click that navigates throws on the observation that follows, and
-a timer is how a marker outlives the action that drew it.
+a timer is how a marker outlives the action that drew it. The caret locator runs
+once per page-delta and returns nothing at all on a page with nothing editable
+focused; it reads no text, and unlike the pointer marker its coordinates are
+never displayed — they are used only to paint over the caret before two frames
+of the page are compared.
 
 The supplement probe is a deliberate narrowing: locating those controls by
 hit-test would need a broader privilege than one bounded `Runtime.evaluate`,

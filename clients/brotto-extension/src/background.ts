@@ -6,6 +6,7 @@
 
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
+import { clearDelta } from "./observation/delta";
 import { boundedPoint, clearCursor, drawCursor } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
@@ -644,6 +645,7 @@ async function clearSession(): Promise<void> {
   waitingForLogin = false;
   currentPrompt = null;
   lastObservedUrl = "";
+  clearDelta();
 }
 
 // Send the user's reply for whichever prompt is current and clear the wait.
@@ -1811,6 +1813,8 @@ async function cleanup(): Promise<void> {
   waitingForLogin = false;
   currentPrompt = null;
   lastObservedUrl = "";
+  // The run is over: the retained page frame has no further consumer.
+  clearDelta();
   void setBadge("idle");
 }
 
@@ -1828,6 +1832,8 @@ function stopRelay(): void {
   // startRelay's mint branch, so nothing is leaked by leaving it on.
   waitingForLogin = false;
   currentPrompt = null;
+  // The run ended here, so the retained page frame has no further consumer.
+  clearDelta();
 }
 
 // ── Message handler ──────────────────────────────────────────────────────────
@@ -1877,6 +1883,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           currentPrompt = null;
           lastObservedUrl = "";
           panelLog = [];
+          // Task start is the session boundary for retained frames: a task
+          // never diffs against a frame captured during the previous one.
+          clearDelta();
 
           const goal = String(message.task ?? "").trim();
           if (!goal) { sendResponse({ success: false, error: "task is empty" }); return; }
@@ -2167,6 +2176,9 @@ chrome.tabs.onCreated.addListener((tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  // The retained page frame goes with the tab, whether or not it was the
+  // active one — it is decoded pixels held for a diff and nothing else.
+  clearDelta(tabId);
   if (tabId !== activeTabId) return;
   // Active tab closed — fall back to opener if available
   const fallback = tabStack.pop() ?? null;
@@ -2345,6 +2357,12 @@ async function initialize(): Promise<void> {
     chrome.webNavigation.onCommitted.addListener((details) => {
       if (details.frameId !== 0) return;
       if (activeTabId === null || details.tabId !== activeTabId) return;
+      // A navigation invalidates the retained frame: the next observation has
+      // nothing to diff against and must omit `delta` rather than report the
+      // whole new document as changed. `onCommitted` fires before the new page
+      // renders, so this one observation has no delta either — the step after
+      // it diffs against it.
+      clearDelta(details.tabId);
       void sendObservation(details.tabId, "navigated");
       const url = details.url ?? "";
       if (waitingForLogin && url && url !== lastObservedUrl) {

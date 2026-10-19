@@ -92,6 +92,10 @@ function harness({ stability, trees }) {
       return { targets: t.targets, frames: t.frames ?? {}, geometry: t.geometry ?? {} };
     },
     dbg: { sendCommand: async () => ({ result: { value: { url: "u", title: "t", text: "p" } } }) },
+    // The page delta is its own module with its own suite; this harness is
+    // about the rescan loop, so it stubs it. The first observation on a tab
+    // has no previous frame, so `undefined` is what the real thing returns.
+    computeDelta: async () => undefined,
     setTimeout, clearTimeout, setInterval, clearInterval,
   };
   const capture = vm.runInNewContext(
