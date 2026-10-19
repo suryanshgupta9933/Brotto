@@ -44,6 +44,54 @@ Consequences worth knowing:
   `offsetWidth > clientWidth` now. The two-copy track stays: it is what makes
   the travel seamless for a name that genuinely does not fit.
 
+### A `type_xy` card must show the value it will write
+
+`reasoning` used to be the preview of what a coordinate action types, capped at
+120 characters — so a human could approve 120 characters and have 4,000 land in
+the cell. Worse, the value sat inside that sentence's curly quotes, so a value
+containing `”` closed them and spoke as harness prose on a consent surface.
+
+The server now puts **no part of the value** in `reasoning`; it says only "the
+text shown below this card". That makes the value block the promise the card
+has to keep, so it is drawn for **every frame carrying a value, whatever
+happened to the screenshot**, and it coerces anything non-null — the server
+types `str(args.get("text") or "")`, so a `text: 123` from a model would
+otherwise be invisible on the card and typed as "123".
+
+`appendApprovalTarget` — the screenshot, crosshair and label — deliberately
+knows nothing about the value and **bails out before drawing anything** when
+the capture failed. A value drawn only inside it would leave a card promising
+"the text shown below this card" with nothing below it: approvable, and
+unreadable. The block belongs to the caller, which is why it is `appendApprovalValue`.
+
+**A replayed card must not claim to show a value it cannot render.** Replay
+draws from the audit document, where `_scrubbed` masks `text` to `REDACTED`
+alongside a `text_chars` length. Rendering the mask under a heading promising
+the whole of it is worse than showing nothing. `approvalValueUnavailable`
+treats either signal — `text_chars`, or a whole-string `/^\[redacted…\]$/`
+match — as not available, and the mask test is whole-string so a value that
+merely *starts* with the word ("[redacted] is what it says") is still real text
+that gets typed.
+
+**A missing `args` is not a masked value.** `canonical_approval` sends no args
+at all; treating that as a mask auto-denied every coordinate approval with a
+dead card. Absence of args means the heading has to say there is nothing to
+show, and nothing more.
+
+**The value is shown with `textContent`, always.** `splitInvisible` splits it
+into runs of ordinary text and runs of bidi controls, zero-width joiners,
+tag-block codepoints and the rest of `INVISIBLE_CP`, marking the hidden runs
+rather than dropping them — because **the full original string is what gets
+typed**, so the card's job is to *show* characters it cannot faithfully render,
+not to sanitise them. The set is enumerated rather than inverted for a
+concrete reason: "everything outside L/N/P/S is invisible" would placeholder
+`U+200D`, a legitimate zero-width joiner inside an emoji sequence, and would
+mangle ordinary emoji on a consent surface.
+
+Pinned by `scripts/test-coordinate-approval.test.js` (the live frame, the masked
+replay, the `text: 123` coercion and the invisible runs) and
+`scripts/test-approval-notification.test.js`.
+
 ## A card outlives the run that asked it
 
 `clearBlockingCards` deleted every unanswered prompt on a terminal event. That

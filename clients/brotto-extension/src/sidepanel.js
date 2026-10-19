@@ -657,14 +657,6 @@ const modelDd = $modelName && attachDropdown({
   editable: true,
 });
 
-// Called twice on purpose: once now so the header pill names the model
-// immediately, and again from initModelSettings once the catalogue has landed
-// and the provider select can actually hold the id this config names. The
-// second one repaints for itself now; the first still needs the facts, because
-// a value written straight to a host never tells anyone it changed.
-hydrateModelSettings().then(() => { providerDd?.sync(); renderModelFacts(); });
-initModelSettings(document.getElementById('plannerUrl')?.value || '');
-
 const messagesEl  = document.getElementById('messages');
 const emptyState   = document.getElementById('emptyState');
 const goalEl       = document.getElementById('goal');
@@ -2109,6 +2101,20 @@ const state = {
 // call above either declaration is one await away from being a TDZ
 // ReferenceError that `void` swallows — a banner that silently never loads.
 void refreshModelCheckBanner();
+
+// Called twice on purpose: once now so the header pill names the model
+// immediately, and again from initModelSettings once the catalogue has landed
+// and the provider select can actually hold the id this config names. The
+// second one repaints for itself now; the first still needs the facts, because
+// a value written straight to a host never tells anyone it changed.
+//
+// Same placement rule as the banner above, same reason: hydrateModelSettings
+// → modelKeyNames → accountScope reads state.accountId, so a call above the
+// `state` declaration is a TDZ ReferenceError one await away — and because it
+// is voided rather than awaited, it arrives as an unhandled rejection instead
+// of stopping the panel. This is the third top-level call to have done it.
+hydrateModelSettings().then(() => { providerDd?.sync(); renderModelFacts(); });
+initModelSettings(document.getElementById('plannerUrl')?.value || '');
 
 let timerInterval = null;
 let timerPausedAt = 0;
