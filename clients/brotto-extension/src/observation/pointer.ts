@@ -160,15 +160,21 @@ const MAX_LABEL = MAX_CURSOR_LABEL;
 const TARGET_PROBE = `function (x, y) {
   var el = this;
   if (!el || el.nodeType !== 1) return { ok: false, reason: "not-an-element" };
-  // The probe's realm is the *top* document, but the element may live in
-  // another one — an iframe target, which the observation finds in that frame's
-  // own tree. elementFromPoint here is the top document's, so a cross-frame
-  // point is checked in the wrong coordinate space: it either refuses a correct
-  // click or passes one aimed at the wrong element, which is the silent wrong
-  // answer this gate exists to prevent. Refuse instead. Binding the right
-  // execution context is the frame-tree work the KNOWN LIMITATION below
-  // declines, and a refusal is one wasted step where a wrong click is loss.
-  if (el.ownerDocument && el.ownerDocument !== document) {
+  // The coordinates on the wire are in the *top* frame. Establish that first,
+  // so the document below is the top document and not whatever frame this
+  // callFunctionOn happened to bind to. window.top !== window is an identity
+  // comparison — it reads a cross-origin WindowProxy and never evaluates a
+  // script in the other frame — where binding the right context properly
+  // (Page.getFrameTree plus a contextId) is the frame-tree work the KNOWN
+  // LIMITATION below declines.
+  var top = window.top;
+  if (!top || top !== window) return { ok: false, reason: "cross-frame-target" };
+  // Now that the coordinate space is the top frame's, the element must be in it
+  // too. **Unreadable is not the same document.** A falsy ownerDocument — a
+  // detached node, a synthetic object — reads as "same document" under a
+  // truthiness test and proceeds to a hit test against a node that is not in
+  // this page at all. Every failure here refuses, so compare explicitly.
+  if (!el.ownerDocument || el.ownerDocument !== document) {
     return { ok: false, reason: "cross-frame-target" };
   }
   var hit = document.elementFromPoint(x, y);

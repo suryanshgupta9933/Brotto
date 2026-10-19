@@ -90,9 +90,10 @@ SELECT_ALL_JS = (
 # guard. Not a DOM object and not a node id — an id minted per evaluation would
 # change every read, so the guard would fire on nothing; a backendNodeId would
 # be stable but is not reachable from the one `Runtime.evaluate` both relays
-# already have. `TAG#id` where the element has one, otherwise its ordinal
-# among same-tag elements, which is unique in a document and does not move
-# when focus does.
+# already have. `TAG#id` where the element has a unique id, otherwise its
+# ordinal among same-tag elements, which is unique in a document and does not
+# move when focus does. **Any path that cannot establish a unique name returns
+# `""`** — there is no bare-tag-name fallback.
 #
 # **But the page chooses the id, and a duplicated one is two elements with one
 # name.** The guard compares this string before and after the model thinks; a
@@ -103,6 +104,14 @@ SELECT_ALL_JS = (
 # `""` — unknown, which `focus_id()` reports as None and the guard refuses on.
 # Refusing costs one step; the mistake it prevents is an Enter sent to the user's
 # email draft.
+#
+# **A guard cannot be proved unique by page-supplied evidence.** The collection
+# it counts uniqueness over comes from the same document it is guarding, so
+# `getElementsByTagName` is bound once at the top — a page that swaps the
+# prototype mid-evaluate cannot change what the count is computed over. That
+# closes the *later* swap only; a prototype replaced before the evaluate starts
+# is not closed here, and closing it means `Page.createIsolatedWorld`, which is
+# the frame workstream, not a bugfix.
 #
 # The value is never sanitised further: it is compared and discarded, and it
 # never reaches a log line as user content.
@@ -117,7 +126,13 @@ FOCUS_ID_JS = (
     "  if (!a) return 'none';"
     "  if (a === document.body) return 'body';"
     "  var t = a.tagName;"
-    "  var all = document.getElementsByTagName(t);"
+    # Bound once, because `getElementsByTagName` is a page-reachable method: a
+    # page that swaps the prototype mid-evaluate would otherwise decide what
+    # `all` enumerates. Binding defeats a *later* swap, not one installed before
+    # the evaluate — an honest limit. The isolated world that would close it is
+    # the frame workstream again, not a bugfix.
+    "  var gE = document.getElementsByTagName.bind(document);"
+    "  var all = gE(t);"
     "  var i;"
     "  if (a.id) {"
     "    var n = 0;"
@@ -130,7 +145,13 @@ FOCUS_ID_JS = (
     "  for (i = 0; i < all.length; i++) {"
     "    if (all[i] === a) return t + '[' + i + ']';"
     "  }"
-    "  return t;"
+    # **A bare tag name is never a safe identity here.** Every `<div>` on the
+    # page shares one, so returning `t` compares a name many elements hold and
+    # reads a real focus move as no move — the silent wrong answer this guard
+    # exists to prevent. An element not found among its own tag list is one this
+    # evaluate cannot name uniquely, so it is unknown: `""`, which `focus_id()`
+    # turns into None and the guard refuses on.
+    "  return '';"
     "})()"
 )
 

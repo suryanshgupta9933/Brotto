@@ -63,19 +63,30 @@ function el(tag, opts = {}) {
 
 function makePage(nodes) {
   const byCoord = {};
-  for (const n of nodes) byCoord[`${n.x},${n.y}`] = n.node;
-  return {
-    document: {
-      elementFromPoint: (x, y) => byCoord[`${x},${y}`] || null,
-    },
+  const document = {
+    elementFromPoint: (x, y) => byCoord[`${x},${y}`] || null,
   };
+  // A live element carries `ownerDocument`; the probe refuses on a falsy one.
+  // A node built but never put on this page is the detached case, and it
+  // deliberately keeps no `ownerDocument` — see its own test.
+  for (const n of nodes) n.node.ownerDocument = document;
+  for (const n of nodes) byCoord[`${n.x},${n.y}`] = n.node;
+  return { document, top: true };
 }
 
 // Run the shipped snippet with `this` bound to the target, exactly as
-// `Runtime.callFunctionOn` does.
+// `Runtime.callFunctionOn` does. `page.top: false` models a probe bound to a
+// child frame, where the wire's coordinates are in some other frame's space.
+// `page.detached` leaves the target with no `ownerDocument` at all — the case
+// the guard must refuse rather than read as "this document".
 function runProbe(target, page, x, y) {
   const vm = require("vm");
-  const fn = vm.runInNewContext("(" + TARGET_PROBE + ")", { document: page.document });
+  const window = {};
+  window.top = page.top === false ? { notThisFrame: true } : window;
+  if (page.detached) delete target.ownerDocument;
+  else if (target.ownerDocument === undefined) target.ownerDocument = page.document;
+  const fn = vm.runInNewContext(
+    "(" + TARGET_PROBE + ")", { document: page.document, window });
   return fn.call(target, x, y);
 }
 
@@ -138,6 +149,43 @@ test("a target in another document refuses — the probe reads the top frame's p
   assert.equal(r.reason, "cross-frame-target");
   assert.ok(/^[a-z][a-z0-9-]{0,31}$/.test(r.reason),
     "must survive the server's _ACTION_REASON_RE clamp");
+});
+
+test("a detached element refuses — an unreadable ownerDocument is not \"this document\"", () => {
+  // The defeat: `el.ownerDocument && el.ownerDocument !== document` reads a
+  // missing ownerDocument as "same document", so a node that is not in this page
+  // at all proceeds to a hit test against the top document. This file's rule is
+  // that every failure refuses, so an unreadable value must read as unknown.
+  const detached = el("button"); // never put on the page — no ownerDocument
+  const page = makePage([{ x: 10, y: 10, node: detached }]);
+  page.detached = true;
+
+  const r = runProbe(detached, page, 10, 10);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "cross-frame-target");
+});
+
+test("a probe bound to a child frame refuses: the wire's x/y are in the top frame", () => {
+  // The defeat: comparing the element's document to the *ambient* `document`
+  // only answers "is this element in my own frame", and concludes from that
+  // that the coordinates are too. They are not — they are top-frame
+  // coordinates, and elementFromPoint would resolve them in the wrong space.
+  const btn = el("button");
+  const page = makePage([{ x: 10, y: 10, node: btn }]);
+  page.top = false;
+
+  const r = runProbe(btn, page, 10, 10);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "cross-frame-target");
+});
+
+test("the top-frame check is an identity comparison, not a cross-frame script read", () => {
+  // `window.top` on a cross-origin frame is a WindowProxy; comparing it to
+  // `window` never evaluates a script in the other frame. If the guard ever
+  // grows `.document` or a property read on `top`, it has stopped being free
+  // and has started throwing on exactly the cross-origin frames it guards.
+  assert.match(TARGET_PROBE, /top\s*!==\s*window/);
+  assert.doesNotMatch(TARGET_PROBE, /top\s*\.\s*document/);
 });
 
 test("a stale point now over a different element is refused", async () => {

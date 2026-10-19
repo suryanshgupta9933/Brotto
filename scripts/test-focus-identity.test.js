@@ -103,6 +103,56 @@ test("'none' and 'body' stay distinct from the unknown ''", () => {
   assert.equal(vm.runInNewContext(FOCUS_ID_JS, { document: { ...document, activeElement: document.body } }), "body");
 });
 
+test("an element it cannot find among its own tag list is unknown, never a bare tag name", () => {
+  // The defeat: the old fallback `return t;` returned e.g. "DIV" — a name every
+  // <div> on the page shares. A focus move between two of them then reads as no
+  // move and the keystroke goes through. There is no path that returns a name
+  // it has not proved unique.
+  const ghost = el("INPUT");
+  const document = {
+    activeElement: ghost,
+    body: el("BODY"),
+    // The collection does not contain it: a shadow-root element, or a
+    // `getElementsByTagName` that did not answer the truth.
+    getElementsByTagName: () => [],
+  };
+  assert.equal(vm.runInNewContext(FOCUS_ID_JS, { document }), "");
+});
+
+test("the constant contains no bare-tag fallback at all", () => {
+  // Cheaply pins the shape, so a well-meaning `return t;` cannot return.
+  const returns = FOCUS_ID_JS.match(/return [^;]+;/g) || [];
+  assert.ok(!returns.some((r) => /^\s*return t;/.test(r)),
+    "a bare tag name is never a safe identity for this guard");
+});
+
+test("the native is bound once, so a later prototype swap cannot change the enumeration", () => {
+  // `getElementsByTagName` is a page-reachable method and `all` is the evidence
+  // the uniqueness proof rests on, so the guard takes the native once at the
+  // top and iterates the bound copy. Honest limit: this closes a swap that
+  // happens *after* the bind, not one installed before the evaluate starts —
+  // closing that is `Page.createIsolatedWorld`, the frame workstream.
+  assert.match(FOCUS_ID_JS, /getElementsByTagName\.bind\(document\)/,
+    "the native must be bound, not called as a live method");
+
+  const order = [el("INPUT", "q"), el("INPUT", "q")];
+  const real = (t) => order.filter((e) => e.tagName === t);
+  const document = {
+    activeElement: order[0],
+    body: el("BODY"),
+    getElementsByTagName: real,
+  };
+  // The page swaps the prototype after the bind: the enumeration is unaffected.
+  let swapped = false;
+  document.getElementsByTagName = function (t) {
+    const out = real.call(document, t);
+    if (!swapped) { swapped = true; document.getElementsByTagName = () => []; }
+    return out;
+  };
+  assert.equal(vm.runInNewContext(FOCUS_ID_JS, { document }), "",
+    "the duplicate id is still seen, so the name stays unknown");
+});
+
 test("an ambiguous name is what focus_id() reports as None — the value the guard refuses on", () => {
   // The harness's guard refuses on None; "" is the only channel by which this
   // constant can reach it, so pin that "" is what a blank read becomes.
