@@ -32,6 +32,50 @@ def _relay(targets: list[dict]) -> ExtensionCDPRelay:
 FAIL_PREFIX = "Error executing"
 
 @pytest.mark.asyncio
+async def test_type_text_refuses_when_nothing_holds_focus():
+    """Session 445fc36d: a newly navigated Google Sheet has no selected cell,
+    `document.activeElement` is `body`, and `Input.insertText` is discarded —
+    but the run reported "Typed into [0:10050]" and completed on an empty
+    sheet. A ref resolving is not a place the text lands."""
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    relay.focus_id = AsyncMock(return_value="body")
+
+    out = await relay.type_text_to_ref("0:7", "Name")
+
+    assert out.startswith(FAIL_PREFIX)
+    assert "focus" in out
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_type_text_refuses_when_focus_is_unreadable():
+    """`None` is unknown, not "no focus" — the press_key guard already
+    refuses on it, and typing is no safer than a key press."""
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    relay.focus_id = AsyncMock(return_value=None)
+
+    out = await relay.type_text_to_ref("0:7", "Name")
+
+    assert out.startswith(FAIL_PREFIX)
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_type_text_names_the_focused_element_not_the_ref():
+    """The success string asserted a destination it never checked. It stays
+    a success (no `Error executing:` prefix) so `ok` is still derived true."""
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    relay.focus_id = AsyncMock(return_value="DIV[3]")
+    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+
+    out = await relay.type_text_to_ref("0:7", "Name")
+
+    assert not out.startswith(FAIL_PREFIX)
+    assert "DIV[3]" in out
+    assert "[0:7]" not in out
+
+
+@pytest.mark.asyncio
 async def test_a_ref_absent_from_the_tree_is_a_failure():
     """The whole point: a ref the model made up is a grounding failure."""
     relay = _relay([{"ref": "0:7", "role": "button", "x": 10, "y": 20}])
@@ -191,6 +235,8 @@ async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
     # clear_ref selects through the DOM rather than a key chord, so it waits on
     # the evaluate channel. The page it is aimed at is a textbox, so it answers.
     await relay._eval_queue.put("select-all")
+    # type_text also reads focus before dispatch; answer it on the same channel.
+    await relay._eval_queue.put("INPUT[0]")
 
     for method, args in (
         (relay.focus_ref, ("7",)),

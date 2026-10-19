@@ -674,9 +674,32 @@ class ExtensionCDPRelay:
         if not coords:
             log.warning("[%s] type_text_to_ref %r — %s", self._sid, ref, why)
             return f"Error executing: ref {ref!r} {why}"
-        log.info("[%s] type_text_to_ref %r  len=%d", self._sid, ref, len(text))
+        # A ref that exists is not a place text lands: the dispatch below
+        # carries no coordinates, so the text goes to `document.activeElement`
+        # and these coords are only an existence check. On a freshly
+        # navigated page nothing holds focus — `activeElement` is `body`, which
+        # discards `Input.insertText` — and the run still reports success.
+        # Session 445fc36d typed "Name"/"Age" into a new Google Sheet whose
+        # body had focus, read "Typed into [0:10050]", and completed on an
+        # empty sheet. Same condition the `press_key` guard already refuses
+        # on, one action over, and this reuses that read rather than adding a
+        # second focus primitive.
+        focus = await self.focus_id()
+        if focus is None or focus in ("body", "none"):
+            log.warning("[%s] type_text_to_ref %r — focus is %r", self._sid, ref, focus)
+            return (
+                f"Error executing: ref {ref!r} resolved, but nothing on the "
+                f"page holds focus, so nothing was typed. Click the element "
+                f"you meant to type into first, then type again."
+            )
+        log.info(
+            "[%s] type_text_to_ref %r  len=%d focus=%s", self._sid, ref, len(text), focus
+        )
         await self._send_action({"type": "type", "text": text})
-        return f"Typed into [{ref}]"
+        # Says what was done, not what was meant: the ref resolved against a
+        # different tree than the one that now has focus, so naming it here
+        # asserts a destination this method never checked.
+        return f"Typed {len(text)} characters into the focused element ({focus})"
 
     async def press_key(self, key: str, modifiers: int = 0) -> str:
         # A letter is rejected bare but allowed modified. A bare letter would
