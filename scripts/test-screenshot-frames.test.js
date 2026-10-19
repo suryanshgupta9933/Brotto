@@ -144,9 +144,11 @@ function check(ok, label, detail) {
     check(relay.includes(sig), `extension_relay.py has ${sig}`);
   }
   // The base64 must not reach a log line or the relay's cached state.
+  // Scoped to the function body, not to a run of neighbours: a region between
+  // two method names silently widens every time a method is added between them.
   const method = relay.slice(
     relay.indexOf("async def capture_screenshot"),
-    relay.indexOf("async def read_page_text"));
+    relay.indexOf("\n    async def ", relay.indexOf("async def capture_screenshot") + 1));
   check(!/log\.(info|debug|warning)\([^)]*data\b/.test(method),
     "the relay never logs the payload — the log line would be the picture on disk");
   check(!/self\._cached_obs/.test(method),
