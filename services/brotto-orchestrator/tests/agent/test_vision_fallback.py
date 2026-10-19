@@ -20,6 +20,7 @@ and `httpx` is walled at the transport layer the same way
 from __future__ import annotations
 
 import asyncio
+import base64
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -483,7 +484,12 @@ def test_a_screenshot_rides_as_an_image_part_not_as_text():
     assert parts[1] == harness_mod._SCREENSHOT_OK_NOTE
     assert isinstance(parts[2], BinaryImage)
     assert parts[2].media_type == "image/jpeg"
-    assert parts[2].data == JPEG.encode("ascii")
+    # RAW bytes, not the base64 text. `BinaryImage` encodes whatever it is
+    # given, so handing it the already-base64 capture encoded the payload
+    # twice; the provider decoded one layer, found ASCII where the magic
+    # bytes belong, and refused the turn with "unknown format".
+    assert parts[2].data == base64.b64decode(JPEG)
+    assert parts[2].data.startswith(b"\xff\xd8\xff")
     # The image is not in the text, and the note is not either — it is its
     # own part, welded to the pixels it describes.
     assert JPEG not in parts[0]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
 import time
@@ -1054,7 +1055,12 @@ def _turn_to_input(turn: AgentTurn) -> str | list:
     return [
         prompt,
         turn.screenshot_note,
-        BinaryImage(data=turn.screenshot.encode("ascii"), media_type="image/jpeg"),
+        # `turn.screenshot` is ALREADY base64; `BinaryImage` base64-encodes
+        # whatever bytes it is given, so handing it the base64 text encodes
+        # the payload a second time. The provider then decodes one layer,
+        # finds ASCII where the magic bytes should be, and refuses the turn.
+        BinaryImage(data=base64.b64decode(turn.screenshot),
+                    media_type="image/jpeg"),
     ]
 
 
