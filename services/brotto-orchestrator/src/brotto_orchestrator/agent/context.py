@@ -346,6 +346,12 @@ class AgentDeps:
     # negative. A resumed task builds a fresh `AgentDeps`, so this starts at
     # the unknown rather than at the previous run's answer.
     canvas_changed: bool | None = None
+    # Steps whose ONLY evidence of progress was the pixel delta, with the URL
+    # and the AX tree identical across all of them. The page controls that
+    # signal — a ticking clock, a blinking caret, a spinner repaints forever —
+    # so without a bound an always-animating canvas page holds the loop open
+    # indefinitely. The ceiling is the harness's `_DELTA_ONLY_STEPS`.
+    delta_only_steps: int = 0
     result: TaskResult | None = None
     # URL observed at the top of the current step, before its actions run.
     # Read by the click cross-domain gate and stamped onto TaskResult.

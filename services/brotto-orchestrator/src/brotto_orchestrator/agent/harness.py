@@ -2879,9 +2879,30 @@ def _note_stagnation(deps, url: str, text_len: int, ax_diff: str) -> bool:
         # real evidence, if there is any, does clear the counter.
         if changed:
             deps.stagnant_steps = 0
+            deps.delta_only_steps = 0
         return False
+    # The delta is the page's own report about itself, so it can only be
+    # progress when something we read independently is consistent with it —
+    # here, the AX tree not having moved at all. Progress credited to the
+    # delta alone is bounded: a caret blink or a spinner repaints forever and
+    # would otherwise reset the counter every step and never stop.
+    # Canvas only: on an ordinary page the third term is a page-text length,
+    # which is our own reading and not the page's report about its pixels.
+    delta_only = canvas and changed and ax_diff == _AX_NO_CHANGE \
+        and prev is not None and prev[0] == url \
+        and prev[1] is not None and value is not None
+    deps.delta_only_steps = (
+        deps.delta_only_steps + 1 if delta_only else 0)
     deps.stagnant_steps = 0 if changed else deps.stagnant_steps + 1
-    return deps.stagnant_steps >= _STAGNANT_STEPS
+    return deps.stagnant_steps >= _STAGNANT_STEPS \
+        or deps.delta_only_steps >= _DELTA_ONLY_STEPS
+
+
+# Consecutive steps whose only evidence of progress was the pixel delta, on a
+# page whose URL and accessibility tree never moved. Three times the ordinary
+# ceiling: a real task on a canvas app — typing, a few clicks — reaches its
+# end well inside this, and a page that repaints forever does not.
+_DELTA_ONLY_STEPS = 18
 
 
 # How many changed regions a turn names. The delta arrives as ~100 bytes for

@@ -23,9 +23,9 @@ from __future__ import annotations
 import asyncio
 
 from brotto_orchestrator.agent.harness import (
-    _CANVAS_COVERED_FLOOR, _execute_action, _is_canvas_page,
-    _note_stagnation, _observe_canvas_covered, _sparse_for_task, _AX_NO_CHANGE,
-    _STAGNANT_STEPS,
+    _CANVAS_COVERED_FLOOR, _DELTA_ONLY_STEPS, _execute_action,
+    _is_canvas_page, _note_stagnation, _observe_canvas_covered,
+    _sparse_for_task, _AX_NO_CHANGE, _STAGNANT_STEPS,
 )
 from brotto_orchestrator.agent.context import ActionCall, AgentDeps
 
@@ -285,3 +285,43 @@ def test_empty_read_on_an_ordinary_page_stays_ordinary():
     out = asyncio.run(_execute_action(
         ActionCall(action="read_page_text", action_args={}), deps))
     assert "canvas" not in out.lower(), out
+
+def test_a_page_that_repaints_forever_cannot_hold_the_loop_open():
+    """The page owns the pixel signal, so it must not own the stop condition.
+
+    A blinking caret repaints every step and moves nothing: the delta says
+    "changed" forever and the ordinary counter resets every time. Bound the
+    consecutive delta-only resets so the run still ends.
+    """
+    deps = _deps(canvas_covered=0.9)
+    fired = []
+    for i in range(_DELTA_ONLY_STEPS + 6):
+        deps.canvas_changed = i % 2 == 0  # alternating: always "something moved"
+        fired.append(_note_stagnation(deps, "docs.google.com/spreadsheets",
+                                      10031, _AX_NO_CHANGE))
+    # The first step is the baseline, not a credited reset.
+    assert fired[:_DELTA_ONLY_STEPS] == [False] * _DELTA_ONLY_STEPS
+    assert fired[_DELTA_ONLY_STEPS] is True, "an animating page must still stop"
+    assert deps.stagnant_steps == 0, "it never once looked stagnant to the delta"
+
+
+def test_the_delta_only_bound_does_not_apply_when_the_tree_moves():
+    deps = _deps(canvas_covered=0.9)
+    for i in range(_DELTA_ONLY_STEPS + 6):
+        deps.canvas_changed = i % 2 == 0
+        assert not _note_stagnation(
+            deps, "docs.google.com/spreadsheets", 10031,
+            f"[+ row {i}] ~ row, 1 ref new")
+
+
+def test_the_delta_only_bound_is_canvas_only():
+    """A page-text length is our own reading, not the page's own report.
+
+    Without the canvas gate this bound would also stop an ordinary page
+    whose text length moved every step — an input echoing each keystroke —
+    after 18 steps, which is a real task the loop is still making progress on.
+    """
+    deps = _deps(canvas_covered=0.0)
+    for i in range(_DELTA_ONLY_STEPS + 6):
+        assert not _note_stagnation(
+            deps, "https://example.com", 1000 + i, _AX_NO_CHANGE)
