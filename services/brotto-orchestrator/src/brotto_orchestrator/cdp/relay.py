@@ -171,11 +171,14 @@ FOCUS_ID_JS = (
     "})()"
 )
 
-# Exactly what `FOCUS_ID_JS` can return, and nothing else: `none`, `body`, a
-# bare `TAG`, `TAG#id` with the grammar the JS checks, or `TAG[n]`.
+# Exactly what `FOCUS_ID_JS` can return, and nothing else: `none`, `body`,
+# `TAG#id` with the grammar the JS checks, or `TAG[n]`. The suffix is
+# **required** on the named branch — the JS cannot emit a bare `TAG` (see the
+# note above its final `return`), so accepting one here would be exactly the
+# parser/validator differential this pair exists to have none of.
 FOCUS_ID_RE = re.compile(
     r"\A(?:none|body|[A-Za-z][A-Za-z0-9]{0,31}"
-    r"(?:#[A-Za-z0-9_.:-]{1,64}|\[\d{1,6}\])?)\Z"
+    r"(?:#[A-Za-z0-9_.:-]{1,64}|\[\d{1,6}\]))\Z"
 )
 
 

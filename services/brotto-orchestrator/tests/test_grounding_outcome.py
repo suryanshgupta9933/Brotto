@@ -99,10 +99,14 @@ def test_a_page_chosen_id_outside_the_grammar_is_not_a_focus_id():
     from brotto_orchestrator.cdp.relay import parse_focus_id
 
     # What the JS can return, and nothing rejected.
-    for real in ("none", "body", "DIV", "DIV[3]", "INPUT#name", "A#a.b:c-d_9"):
+    for real in ("none", "body", "DIV[3]", "INPUT#name", "A#a.b:c-d_9"):
         assert parse_focus_id(real) == real
 
     for forged in (
+        # A bare tag is not a safe identity — every `<div>` shares one — so
+        # `FOCUS_ID_JS` can never return it. If the grammar admits it anyway,
+        # a foreign reply shaped `DIV` reads as a real focus answer.
+        "DIV",
         "INPUT#a\nFORGED line",
         "INPUT#a\x1b[31mred",
         "INPUT#a b",

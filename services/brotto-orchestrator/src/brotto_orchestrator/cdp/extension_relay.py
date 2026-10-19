@@ -579,10 +579,16 @@ class ExtensionCDPRelay:
 
         `_eval_queue` is shared with `clear_ref` and `read_page_text` and is
         **not** request-correlated, so a reply from either of those can land
-        here. `parse_focus_id` is what makes that safe: a foreign reply is not
-        shaped like anything `FOCUS_ID_JS` returns, so it reads as unknown and
-        every caller refuses. The harness runs one action at a time, which
-        makes it rare — not impossible, and never safe to rely on.
+        here. What `parse_focus_id` guarantees is exactly this: a reply from
+        another producer that is not itself well-shaped — a JSON blob, prose,
+        an id with a newline or an escape in it — reads as unknown and every
+        caller refuses. **A shape check is not correlation**: a foreign reply
+        that happens to be a well-formed `TAG#id` (a cached attribute read,
+        say) is indistinguishable from a real focus answer. Closing that needs
+        a per-request ref on the `evaluate` frame, filtered in `main.py` the
+        way `deliver_attributes_result` already is — a two-sided frame change,
+        not built here. The harness runs one action at a time, which makes the
+        window rare — not impossible, and never safe to rely on.
         """
         await self._ws_send({"type": "evaluate", "expression": FOCUS_ID_JS})
         try:
