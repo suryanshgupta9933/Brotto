@@ -4057,11 +4057,29 @@ class AgentHarness:
             # known once `redact_text` has run. The same reasoning as the
             # capture, for the same reason — an empty `redactions` means no
             # detector fired, not clearance.
-            # No round trip, and no entry in `screenshots_taken`: this is
-            # 16x16 tile arithmetic on pixels the extension already had,
+            # No round trip today, and no entry in `screenshots_taken`: this
+            # is 16x16 tile arithmetic on pixels the extension already had,
             # not a capture.
-            page_delta = await deps.cdp.get_page_delta(
-                deps.policy, redactions=redactions, run_secrets=run_secrets)
+            #
+            # Guarded, and deliberately so. It sits outside the observe
+            # block's `TabUnreachable` handler because `redactions` is only
+            # known after `redact_text` runs, and being outside that handler
+            # is only safe while this read cannot fail on its own. The delta
+            # is optional evidence about change detection, so a failure to
+            # obtain it must cost the step nothing: it degrades to the answer
+            # the veto already gives — `None`, unknown — never to a dead step
+            # and never to `False`, which downstream reads as "nothing
+            # moved". `get_page_delta` is pure arithmetic today; the guard is
+            # here so the day it grows a round trip, the step ends the same
+            # way either way.
+            try:
+                page_delta = await deps.cdp.get_page_delta(
+                    deps.policy, redactions=redactions, run_secrets=run_secrets)
+            except TabUnreachable as e:
+                log.info("[%s] step %d  page delta unavailable (%s); change "
+                         "detection is unknown for this step",
+                         deps.user_id, step, e)
+                page_delta = None
             # Tri-state: True/False when the delta says so, **None when the
             # delta itself is None** — the common case, and unknown rather
             # than "nothing moved". Read once per step, off the same cached
