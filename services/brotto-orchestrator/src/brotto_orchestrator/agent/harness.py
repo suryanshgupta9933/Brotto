@@ -1364,11 +1364,14 @@ def _action_target(call: ActionCall) -> str | None:
 async def _capture_step_focus(deps: AgentDeps) -> None:
     """Record what is focused, before this step's actions run. Never raises.
 
-    Read once per step and only when the step contains a `press_key` (the
-    only verb that acts on focus it did not name), through the relay's
-    existing `focus_id()`. `None` is the honest answer when the relay cannot
-    read it, and `_focus_refusal` refuses on `None` rather than assuming
-    focus is where it was.
+    Read once per step, before `_plan_step`, so the baseline is what was
+    focused when the model last saw the page and not what is focused now —
+    the user can click anywhere in the window between. Unconditional: the
+    guard has to exist on every step, because the steps it would skip are
+    the ones that press a key. Through the relay's existing `focus_id()`.
+    `None` is the honest answer when the relay cannot read it, and
+    `_focus_refusal` refuses on `None` rather than assuming focus is where
+    it was.
     """
     getter = getattr(deps.cdp, "focus_id", None)
     if getter is None:
@@ -1398,6 +1401,12 @@ async def _focus_refusal(deps: AgentDeps) -> str:
     path that commits a search. That asymmetry is the whole guard: cheap,
     and pointed at the one window where nothing the agent did explains the
     difference.
+
+    "The agent has acted" means the action **dispatched**, not that the
+    model chose it: a click that came back `Error executing` moved nothing,
+    so the guard stays armed behind it. Arming off on the verb alone is the
+    fail-open direction — the refused click is exactly the case where the
+    keystroke behind it lands on the user's own draft.
 
     Unknown focus — a relay without `focus_id`, a read that failed, or a
     capture that came back `None` — is refused too. "We could not tell where
@@ -4421,6 +4430,14 @@ class AgentHarness:
                 deps.pending_steering, deps.steering = deps.steering, ""
 
             # Build turn
+            # Focus baseline for `press_key`, read BEFORE `_plan_step`. The
+            # ~30s the model spends generating is exactly the window a user
+            # is free to click something else in, and it is unobservable
+            # afterwards — capturing after the plan read the baseline from a
+            # page the user had already moved focus on. Unconditional: a
+            # capture on only some steps is a guard on only some steps, and
+            # the steps it skips are the ones that press a key.
+            await _capture_step_focus(deps)
             turn = AgentTurn(
                 task=deps.task,
                 step_number=step,
@@ -4780,10 +4797,8 @@ class AgentHarness:
             # later in this same step see it too and not only the ones after
             # the next step begins.
             run_secrets.extend(v for v in typed_secrets if v)
-            # One focus read for the whole batch, and only when something in
-            # it presses a key. See `_focus_refusal`.
-            if any(c.action == "press_key" for c in decision.actions):
-                await _capture_step_focus(deps)
+            # The focus baseline was taken at the top of this step, before
+            # `_plan_step` — see the `_capture_step_focus` call there.
             # Actions dispatched to the page so far this step. Read-only ones
             # do not count: they touch nothing, so a press_key behind one is
             # still the first thing to have acted on the page. Nor does
@@ -4804,7 +4819,15 @@ class AgentHarness:
                 outcome = refusal or await _execute_action(
                     call, deps, audit=audit, turn=a_turn, redactions=redactions,
                     run_secrets=run_secrets)
-                if call.action not in _READ_ONLY_ACTIONS and call.action != "press_key":
+                # From the OUTCOME, not the verb: a click the hit-test refused
+                # (or that missed, or was off-screen) moved nothing, and
+                # arming off on it would let the press_key behind it land on
+                # whatever the *user* has focused. `Error executing` is the
+                # one refusal signal both relays emit (relay.py:193,
+                # extension_relay.py:302).
+                if (call.action not in _READ_ONLY_ACTIONS
+                        and call.action != "press_key"
+                        and _EXEC_FAILURE not in outcome):
                     agent_moved_focus = True
                 # `outcome` goes to disk here *and* to the model in the next
                 # step's prompt, so an ask_human reply is scrubbed for the

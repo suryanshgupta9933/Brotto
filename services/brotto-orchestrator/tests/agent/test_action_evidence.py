@@ -38,18 +38,33 @@ class _EmptyResult:
 
 async def _run_one_step(monkeypatch, actions: list[ActionCall], *,
                         focus: list | None = None,
-                        canvas_changed: bool | None = None) -> tuple[list[dict], MagicMock]:
+                        canvas_changed: bool | None = None,
+                        refused: set[str] | None = None,
+                        plan_moves_focus: str | None = None) -> tuple[list[dict], MagicMock]:
     """Run one step. Returns (recorded actions, the relay mock).
 
     `focus` is consumed one entry per `focus_id()` call — the capture at the
     top of the step, then one per guarded press_key.
+
+    `refused` names actions the page rejects, which come back with the
+    `_EXEC_FAILURE` prefix both relays emit and dispatch nothing.
+    `plan_moves_focus` moves focus *during* `_plan_step` — after the top of
+    the step capture, before any action — which is the window a user clicks
+    into while the model thinks.
     """
     docs: list = []
     calls: list[int] = []
+    refused = refused or set()
+    # One list, shared with the relay mock: `plan_moves_focus` rewrites it
+    # from inside `_fake_plan` and the mock reads from the same object.
+    plan = list(focus) if focus is not None else None
 
     async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         if call.action == "task_complete":
             deps.result = TaskResult(status="completed", summary="ok")
+        if call.action in refused:
+            return (f"Error executing {call.action}: the page refused it — "
+                    "nothing was dispatched")
         # The model's own account of what it did. Deliberately assertive:
         # nothing the model says may reach `changed`.
         return f"{call.action} done — the page updated and the submit landed"
@@ -58,6 +73,8 @@ async def _run_one_step(monkeypatch, actions: list[ActionCall], *,
         docs.append(audit)
         calls.append(1)
         deps.result = None
+        if plan_moves_focus is not None and plan is not None:
+            plan[0] = plan_moves_focus
         deps.canvas_changed = canvas_changed
         if len(calls) > 1:
             return AgentDecision(
@@ -84,7 +101,7 @@ async def _run_one_step(monkeypatch, actions: list[ActionCall], *,
     if focus is None:
         cdp.focus_id = AsyncMock(return_value="input#q")
     else:
-        cdp.focus_id = AsyncMock(side_effect=list(focus))
+        cdp.focus_id = AsyncMock(side_effect=plan)
 
     async def ws_send(_msg: dict) -> None:
         return None
@@ -228,11 +245,53 @@ async def test_an_unchanged_focus_presses_the_key(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_focus_is_not_read_for_a_step_that_presses_nothing(monkeypatch):
+async def test_a_refused_click_does_not_disarm_the_focus_guard(monkeypatch):
+    # The fail-open case. A click the hit-test refused dispatched nothing, so
+    # the focus that changed is the *user's*, and the Enter behind it must be
+    # refused rather than landing in their draft.
+    recorded, cdp = await _run_one_step(
+        monkeypatch,
+        [ActionCall(action="click", action_args={"ref": "0:1"}),
+         ActionCall(action="press_key", action_args={"key": "Enter"}),
+         ActionCall(action="task_complete",
+                    action_args={"summary": "ok", "extracted_data": None})],
+        focus=["body", "textarea#draft"],
+        refused={"click"},
+    )
+    cdp.press_key.assert_not_called()
+    assert _one(recorded, "press_key")["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_focus_moving_during_the_plan_is_caught(monkeypatch):
+    # The baseline is read at the top of the step, so the ~30s the model
+    # spends generating is not a hole: a focus move inside that window —
+    # the user clicking their own draft while the agent thinks — is caught.
+    # The ordering matters here. With the baseline read *after* the plan it
+    # would already record the user's element and see nothing move, so the
+    # first read is the pre-plan one and the second is what the key meets.
+    recorded, cdp = await _run_one_step(
+        monkeypatch,
+        [ActionCall(action="press_key", action_args={"key": "Enter"}),
+         ActionCall(action="task_complete",
+                    action_args={"summary": "ok", "extracted_data": None})],
+        focus=["body", "textarea#draft"],
+        plan_moves_focus="textarea#draft",
+    )
+    cdp.press_key.assert_not_called()
+    assert _one(recorded, "press_key")["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_focus_is_read_on_every_step_whether_or_not_it_presses(monkeypatch):
+    # Unconditional by design: a baseline captured on only some steps is a
+    # guard that exists on only some steps, and the steps it would skip are
+    # the ones that press a key.
     _, cdp = await _run_one_step(
         monkeypatch,
         [ActionCall(action="click", action_args={"ref": "0:1"}),
          ActionCall(action="task_complete",
                     action_args={"summary": "ok", "extracted_data": None})],
+        focus=["body"],
     )
-    cdp.focus_id.assert_not_called()
+    assert cdp.focus_id.call_count >= 1
