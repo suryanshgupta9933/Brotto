@@ -1010,6 +1010,15 @@ path: it covers nodes the page-side walk could not reach *by element path*, and
 a second snippet to catch the rarer occlusion there is not worth the surface.
 Off-screen is the one that costs the run its steps.
 
+**`TARGET_PROBE`'s cross-frame check is best-effort, and that is the honest
+description.** It compares `window.top` against `window`, and `window.top` is a
+page-writable global: a page that wants the check to lie can make it. So this
+is a signal against a page that is *not* actively misleading it, not a hard
+boundary — do not read it as tamper-proof. The hard version needs
+`Page.createIsolatedWorld` per frame, which is the frame workstream and
+explicitly out of scope. What it is worth is the ordinary case: a click that
+lands on the wrong frame because a re-render moved things under it.
+
 **Three markers, and one of them had never rendered.** `ax_filter` accepted a
 `viewport_coords` argument, honoured it, and **no caller has ever passed one** —
 so `[off-screen]` had never once appeared on a real run while the code that
@@ -1172,33 +1181,72 @@ read rather than reusing a signal that exists.
 
 `focus_id()` is it, on both relays, over the `evaluate` round trip
 `clear_ref` already uses — no new request type and no extension change.
-`FOCUS_ID_JS` returns `TAG#id`, or the element's ordinal among same-tag
-elements when it has no id. Not a DOM object (the identity would change every
-read) and not a backendNodeId (correct, but not reachable from the one
-`Runtime.evaluate` both relays have). `TAG[id]` is unique in a document and
-does not move when focus does, which is the whole requirement.
+`FOCUS_ID_JS` has **three** outcomes, not two, and the uniqueness is
+conditional. Not a DOM object (the identity would change every read) and not a
+backendNodeId (correct, but not reachable from the one `Runtime.evaluate` both
+relays have):
+
+- `TAG#id` — but only when **exactly one** element in the document carries that
+  id. The script counts the matches before returning, and a duplicate id
+  returns `""`.
+- `TAG[n]` — the ordinal among same-tag elements, for an element with no id.
+- `""` — anything this evaluate cannot prove a unique identity for: a duplicate
+  id, or an element absent from its own tag list.
+
+That third outcome replaced a bare tag name, and the reason is the guard, not
+taste: **every `<div>` on the page shares one tag name**, so a bare `t` compares
+a value many elements hold and reads a real focus move as *no move* — the
+silent wrong answer this exists to prevent.
+
+`""` → `focus_id()` returns `None` → `_focus_refusal` refuses the keystroke.
+**Unknown means refuse, end to end**, and `None` is now the ordinary result for
+an unnamed element, not a signal that something broke.
+
+**One honest limit.** The enumeration binds `getElementsByTagName` once, so a
+prototype swap installed *after* the bind does not decide what the list holds —
+but one installed *before* the evaluate still does. Closing that needs
+`Page.createIsolatedWorld`, which is the frame workstream, not a bugfix. The
+gate is not unconditional and the docstring should not read as if it were.
 
 Three rules, and the middle one is the guard:
 
-- **Only the step's *first* dispatch is checked.** Once the agent has acted on
-  the page, a changed focus is the agent's own — it clicked, then pressed — and
-  refusing there breaks the ordinary click-then-Enter path that commits a
-  search. Read-only actions do not count against the step (they touch
-  nothing), and neither does `press_key` itself (counting it would let a
-  second press_key in the same batch past the guard that just refused the
-  first). Cheap, and aimed at the one window where nothing the agent did
-  explains the difference.
+- **Only the step's *first* dispatch is checked, and "dispatched" is decided by
+  the outcome, not the verb.** Once the agent has actually moved the page, a
+  changed focus is the agent's own — it clicked, then pressed — and refusing
+  there breaks the ordinary click-then-Enter path that commits a search. So
+  the guard arms off on `not _EXEC_FAILURE in outcome`: a click the hit-test
+  refused, or that missed, or was off-screen, moved nothing, and **a refused
+  click leaves the guard armed** behind it. Arming off on the verb alone is the
+  fail-open direction, and the refused click is exactly the case where the
+  keystroke behind it would land on the user's own draft. Read-only actions do
+  not count against the step (they touch nothing), and neither does `press_key`
+  itself (counting it would let a second press_key in the same batch past the
+  guard that just refused the first). Cheap, and aimed at the one window where
+  nothing the agent did explains the difference.
 - **Unknown focus is refused.** A relay without `focus_id`, a read that failed,
-  an evaluate that errored — all arrive as "we could not tell where this
-  keystroke would go", which is the condition this exists to prevent. A
-  refusal costs one step; the mistake it prevents does not come back.
-- **The capture is free unless the step presses a key.** One read at the top
-  of a step whose batch contains `press_key`, and nothing at all otherwise.
+  an evaluate that errored, and an element whose id `FOCUS_ID_JS` could not
+  prove unique — all arrive as "we could not tell where this keystroke would
+  go", which is the condition this exists to prevent. A refusal costs one step;
+  the mistake it prevents does not come back.
+- **The capture is unconditional, so it is not free.** One `Runtime.evaluate`
+  at the top of **every** step, taken before `_plan_step`, not only on steps
+  whose batch contains `press_key`. The ~30s the model spends generating is
+  exactly the window a user is free to click something else in, and it is
+  unobservable afterwards — capturing after the plan reads the baseline from a
+  page the user has already moved focus on. A capture on only some steps is a
+  guard on only some steps, and the steps it skips are the ones that press a
+  key. That is one extra evaluate per step for a guard most steps never
+  consult, and it is the right trade against a guard that is off exactly when
+  it matters.
 
 **Not verified in a browser** — `FOCUS_ID_JS` has not run against a live page.
 The ordinal path is the part that wants a real one: a re-render that reorders
 same-tag elements changes the id, which reads as a moved focus and refuses.
-That is the safe direction, but it is a step cost nobody has measured.
+That is the safe direction, but it is a step cost nobody has measured. How
+often a real page's focused element actually lands on the `""` path — a
+duplicate id, or missing from its own tag list — is likewise unmeasured, and
+it is the frequency that decides whether this guard costs a step or costs a
+step per keystroke.
 
 ### Declined: `intent` / `expect` on `StepSummary`
 
