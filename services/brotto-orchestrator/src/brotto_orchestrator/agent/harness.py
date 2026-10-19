@@ -1734,9 +1734,8 @@ async def _capture_page(deps, *, redactions=None, run_secrets=None):
         # string is whole, not that it is an image.
         # Length and shape only — the payload is page content and has no
         # business in a log line.
-        log.warning("[%s] capture returned %d chars that are not an image "
-                    "(data_url=%s)", deps.user_id, len(image),
-                    image[:11] == "data:image/")
+        log.warning("[%s] capture returned %d chars that are not an image: %s",
+                    deps.user_id, len(image), _describe_payload(image))
         return None, _CAPTURE_NOT_IMAGE_WHY
     deps.screenshots_taken += 1
     return image, None
@@ -2801,6 +2800,23 @@ _IMAGE_PREFIXES = ("/9j/", "iVBORw0KGgo", "R0lGOD", "UklGR")
 def _is_encoded_image(data: str) -> bool:
     """True when `data` opens with a header a provider's decoder will sniff."""
     return data[:16].startswith(_IMAGE_PREFIXES)
+
+
+def _describe_payload(data: str) -> str:
+    """Name the shape of a payload that is not an image.
+
+    Categories, never content: a base64 blob has no safe excerpt, and this
+    payload is a picture of the user's screen. One run has to answer "what
+    did the relay actually hand us", and a category can.
+    """
+    head = data[:64].lstrip()
+    if head.startswith("data:"):
+        return "data URL"
+    if head.startswith(("{", "[")):
+        return "JSON"
+    if " " in data[:200] and not data[:200].isalnum():
+        return "text with whitespace"
+    return f"unrecognised, first byte 0x{ord(data[0]):02x}" if data else "empty"
 _SCREENSHOT_REDACTED_WHY = (
     "this page holds something credential-shaped, and a picture cannot be "
     "redacted."
