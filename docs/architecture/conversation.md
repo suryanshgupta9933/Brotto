@@ -56,7 +56,7 @@ this reason, and `close()` deregisters — only on a terminal path.
 
 ### A session is a conversation
 
-`schema_version: 2` splits the document into three collections, because "one
+`schema_version: 3` splits the document into three collections, because "one
 session" used to mean "one run" and now means "one conversation":
 
 - `tasks[]` — one entry per task, i.e. per user message in the conversation.
@@ -66,6 +66,16 @@ session" used to mean "one run" and now means "one conversation":
 - `turns[]` — the audit, unchanged from v1, each turn carrying `task` (the
   index into `tasks[]`) so the join `messages[].turn → turns[]` and
   `turns[].task → tasks[]` can group a multi-task conversation.
+
+**v3 added fields to `turns[].actions[]`, it did not restructure the document.**
+Each entry now carries `target` (the ref or the xy the model aimed at, bounded by
+`MAX_TARGET_CHARS = 32`) and `changed` (tri-state: did the observation differ
+from the pre-action one), plus `totals.actions_dropped` for the per-session
+action cap. `changed` is `null` on any older document and the default is
+**`None`, never `False`** — "we could not tell" has to read as unknown, because a
+reader that treats absent as "the page did not change" is making a claim about
+a page it never looked at. The privacy shape of these two fields is in
+`privacy.md`. Pinned by `tests/test_grounding_outcome.py`.
 
 **Who writes `messages[]` matters, and it is not one place.** The user message
 is written at `task_start`, not at the first turn, so a run cancelled at step 0
@@ -255,6 +265,39 @@ the existing record rather than replacing it, and a corrupt file is left
 byte-for-byte as found. It is the only copy of a run nobody can read, and "we
 cannot read it" is not a reason to delete it.
 
+#### **A v2 document cannot be resumed once v3 is deployed. This is a deploy-ordering fact, not a cosmetic bump.**
+
+`harness.py:3686` refuses to resume any document whose `schema_version` is not
+exactly `SCHEMA_VERSION` — the check is equality, not `>=`. So the moment a
+server writing `SCHEMA_VERSION = 3` is rolled out, **every v2 document on disk
+becomes unresumable**, and one that was interrupted a minute before the roll
+reports `status: "interrupted"` with the version mismatch as its reason. The
+file is not lost and nothing is deleted; the run simply cannot be picked up
+again, and the user reads that as "interrupted".
+
+Three things follow, and they are why this is not the same as adding a field:
+
+- **Rolling back is not a rollback of this.** A v2 server can read a v2 document
+  again, so a v2 file that a v3 process never rewrote is recoverable that way.
+  But anything a v3 process *did* write is stamped `schema_version: 3` on disk,
+  and a v2 server refuses that on exactly the same equality check — so a
+  rollback re-refuses every session the deploy window produced. Recovery is
+  forward, and the rollback is the move that makes the window permanent.
+- **The window is one deploy wide, not one release wide.** Every in-flight
+  session on the box at the moment of the roll is a candidate. On the hosted
+  relay that is one dyno; a self-hoster restarting the container has the same
+  window, which is why this is not a self-host-only hazard.
+- **The grow-only frame contract does not cover it.** `scripts/test-frame-contract.test.js`
+  pins that a removed *frame* or key keeps working for one minor. `schema_version`
+  has no such allowance: the check is strict equality and an older document is
+  refused outright.
+
+**Deploy the orchestrator before, and expect interrupted sessions at the cut.**
+This is the same server-first rule as any other protocol change, with a sharper
+edge — the version guard (`scripts/version.js`) enforces the bump on the way
+out, but nothing sequences the *roll* against in-flight sessions, so the honest
+statement is that the cut costs a resume, not that it is safe.
+
 The extension reconnects with full jitter (1s base, ×2, 30s cap, 6 attempts)
 reusing the `session_id`. `stopRelay` and a cancel never reconnect — a
 cancelled task must not resurrect.
@@ -280,6 +323,39 @@ length bound are in `extension.md`.
 
 **Not verified in a browser.** The reconnect path and the offline-history
 fallback are unit-tested logic only.
+
+### `action_result` — what the extension did, not what it was asked (2026-10-19)
+
+`{type: "action_result", ok: bool, reason: "<closed>"}`, sent **before** the
+post-action observation, so `_send_action` — which wakes on that observation —
+finds the verdict already in its slot. A plain slot and no id: one action is in
+flight at a time and the socket is ordered.
+
+It exists because the extension's dispatch-time hit test
+(`observation/pointer.ts`, `verifyTarget`) can *refuse* a click whose coordinate
+no longer holds the element the ref resolved to, and the server could only learn
+that by noticing the page had not changed. `click_ref` returned `Clicked [7]`
+the moment `_send_action` returned, so a refused click was audited `ok: true`
+and the model was told it had acted on a world state that never existed. The
+gate prevented the wrong *action*; this is what stops the wrong *report*.
+
+**An absent frame means dispatched**, which is what an extension predating it
+means — the one-minor back-compat, in the same direction as `no-backend-id`
+failing open. The reason is clamped to `^[a-z][a-z0-9-]{0,31}(:[a-z0-9-]{1,24})?$`:
+it reaches the model's history and the audit document, so freeform text from a
+browser extension is prompt content nobody wrote.
+
+Refused means the outcome string carries `Error executing:`, which is how
+`harness.py` derives `ok` — so `click_ref`, `focus_ref`, `clear_ref`,
+`click_xy` and `focus_xy` all return the refusal instead of the success line.
+`clear_ref` *stops* on a refusal rather than continuing to select-all: the
+selection runs against whatever holds focus, and a refused click means that is
+some other field, which it would then erase.
+
+`focus_ref`, `clear_ref` and `focus_xy` were moved onto `_send_action` for this,
+so they now wait for the post-action observation they used to ignore. The
+extension already sends one after every action; it is consumed earlier, not
+asked for twice.
 
 ## Version pair and the compat window
 

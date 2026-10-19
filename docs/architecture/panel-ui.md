@@ -107,6 +107,75 @@ every terminal path passes its own sentence — `setPhase` on done/error,
 arrived rather than a generic "resolved". It is one function with five callers,
 not five deletions.
 
+### A `completed` card is the agent's report, and the card says so
+
+`REPORTED_NOTE` sits on **every** completed task, unconditionally, and reads
+back that Brotto *reports* the task done — what it did, not a check of the
+result.
+
+`task_complete` is self-asserted: the harness records success the moment the
+model says it is done, with nothing behind it. A click that silently did nothing
+produces exactly the same card as a click that worked, and the panel was
+rendering the two identically. **Nothing in the loop verifies success.** The one
+thing that is verified is the *stop* decision — a step is only allowed to end the
+run when the evidence says it should, which is a different claim in a different
+direction. That asymmetry is the whole reason the note is unconditional: if the
+note were conditional on a verification that does not exist, it would render on
+the runs where a check happened to pass and be silent everywhere else, which is
+a worse failure than saying it always.
+
+**Verification is not being deferred here; it is refused, and the refusal is the
+design.** There is nothing in the browser to inspect for most side effects — a
+purchase, a send, a delete leaves no local trace — and a canvas app has no DOM to
+ask. Any verifier that claimed confidence there would be the same
+silence-is-not-a-measurement error the rest of these docs exist to prevent, in
+the one place a user acts on the answer.
+
+So the card stops implying otherwise rather than growing a check that would be
+faked. Unconditional, because nothing is verified today. Pinned by
+`scripts/test-completion-honesty.test.js`.
+
+### The failure vocabulary is bidirectional, and both directions are code
+
+`failureNote(code)` returns a sentence and a next step for every failure code, and
+the contract it implements is **symmetric**:
+
+- **No code in `REPORTABLE` may be missing from `FAILURE_NOTE`.** `REPORTABLE` in
+  `session/failure_report.py` is 29 codes, and it — not the `failure_reason=`
+  assignment sites — is the authoritative vocabulary. Six codes reach the panel
+  *only* through it: `task_cap_reached` and its siblings are built into the
+  relay's answer rather than assigned, so a check driven by grepping for
+  `failure_reason=` looked complete while four user-facing codes had no sentence
+  at all. Deleting `task_cap_reached` from the panel left that check green.
+- **No code in `NOT_REPORTED` may appear in `FAILURE_NOTE`.** `NOT_REPORTED` is
+  the five client-side conditions (`CANCELLED`, `TASK_ERROR`, `WS_ERROR`,
+  `START_FAILED`, `NO_ACTIVE_TAB`) that never reach the operator's
+  `failure_reports` ledger. An entry for one of those is a sentence about a
+  failure nobody recorded, so the reverse direction is a real constraint and not
+  tidiness.
+
+**Why it had to be bidirectional: the failure mode of a missing code is a false
+claim, not a blank.** `failureNote`'s fallthrough is *"Something went wrong. The
+details are in Brotto's log."* A code that silently falls out of the table does
+not render as nothing — it renders as a confident statement that there is a log
+holding the reason. For `CANCELLED` that log does not exist at all: the user
+cancelled, there is no Brotto log, and the panel told them to go read one. And
+a code silently falling *out* of the ledger is equally invisible, because the
+operator asking "did the run happen, and if not which of our codes says why"
+gets a row with no code in it.
+
+**An absence reads clean in review, which is why the test enumerates codes and
+not sentences.** The check is `scripts/test-failure-reasons.test.js`, and it
+reads both sets out of the source rather than restating them: `FAILURE_NOTE`
+keys by brace-matching the table in `sidepanel.js`, `REPORTABLE` /
+`NOT_REPORTED` by slicing the two `frozenset` literals in `failure_report.py`,
+and the server's codes by finding every `failure_reason` assignment. A new code
+shows up in the output the moment someone writes it, without anyone remembering
+this file. It also asserts the reverse of the natural reading — that no
+`NOT_REPORTED` code has grown a sentence — and that `failure_reason` is always a
+literal, because a code that is not a constant cannot be looked up and the
+model's own prose belonged in `summary`.
+
 ## The composer is the answer box
 
 The clarify card used to carry its own text field. There is already one text

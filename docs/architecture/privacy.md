@@ -26,6 +26,7 @@ So the privacy posture is not "we do not collect your data". It is:
 | Page digests (200 chars each) | `logs/sessions/<id>.scratchpad.txt`, server | until deleted |
 | AX-tree sizes, page-text chars, changed-element chars | inside the audit document, server | until deleted |
 | Task title, action names, URLs, typed input | inside the audit document, server | until deleted |
+| What the agent aimed at (`turns[].actions[].target` — a ref like `0:1234` or an `x,y`, capped at 32 chars) and whether the page changed (`changed`) | inside the audit document, server | until deleted |
 | Model config, `base_url` | `chrome.storage.local`, user, under a key carrying the account id on the cloud | until cleared |
 | API key | `chrome.storage.local`, user, same account-scoped key | until the user clears it |
 | Account id (`profiles.id`, the JWT `sub`) as a **namespace component** — which local key and which mirror rows a session belongs to | the top-level `accountId` key in `chrome.storage.local`, user (its own key, not a field in `settings`, so no writer reconstructs the blob to record one); and returned as a response field, stored in no operator table | until sign-out clears it, together with that account's model key, config and mirrored rows |
@@ -254,6 +255,65 @@ here" — and for page text that is per-step observation, the tool, the recall,
 and the suggestions path. Pinned by three tests in `test_memory_capture.py`
 asserting a known card number is absent from the recalled body, from the stored
 body and from the digest.
+
+**3d. A per-action outcome record is user data too, and its two fields are on
+opposite sides of the line.** `turns[].actions[]` now carries `target` and
+`changed` alongside the action name and args (`schema_version: 3`; the fields
+themselves and the deploy-ordering consequence are in `conversation.md`). Both
+are ours to record and both are inside the user's audit document, so neither gets
+a carve-out. What is worth writing down is *why each one is still safe*, because
+the safe answer is not the same for both and asserting it silently would be the
+3a mistake in a new key.
+
+- **`target` is an identifier, not page text.** It is the AX ref the model aimed
+  at (`0:1234`) or the coordinate pair for a `*_xy` action — two forms that are
+  both under 12 characters. The bound is `MAX_TARGET_CHARS = 32` and it is a
+  **cap, not a filter**: it does not inspect the string, it only refuses to grow
+  without bound. The contract is that a caller passes an identifier, and the cap
+  is the backstop when a well-meaning future caller passes a caption or a typed
+  value instead. It bounds the damage; it does not prevent it, and this doc
+  should not be read as saying a 32-char page string is acceptable.
+- **`changed` is a measurement, and that is the whole reason it is safe.** It is
+  the extension's pixel delta — whether the observation differed from the
+  pre-action one — read by the harness from the extension and never taken from
+  the model. So it is a **derived integer and a boolean, not page content**: the
+  same category as the `ax_diff_chars` length in 3, which stores a length
+  precisely so the body does not have to cross. Being a measurement is what
+  puts it on the safe side of "the user's transcript is user data" — *not* the
+  fact that it is a boolean, and not the fact that it happens to be hard to
+  reverse. If a future change makes `changed` carry *which* region moved, or a
+  tile index that maps back to a rect, it stops being a measurement and starts
+  being a pointer into the page, and this paragraph is the thing that is then
+  wrong.
+
+**`changed` is never a model self-report (D5), and that is a rule rather than
+an observation about the current wiring.** `changed` is `deps.canvas_changed` and
+nothing else; a model saying "I clicked submit" is not evidence, and a model
+claim belongs in `outcome`, which already carries what the model was told. D5
+here is load-bearing because the alternative is worse than a wrong boolean: a
+self-reported `changed` would be the model grading its own homework, written
+into the same field a measurement writes, with no marker distinguishing them. A
+reader of the audit document could not tell which one it is reading.
+
+**The tri-state is the privacy-relevant part as much as the correctness one.**
+`changed` is `null` whenever we could not tell — a first observation, a
+navigation, a canvas page with no tree to compare — and the default is `None`,
+never `False`. `False` is a claim that the page did not change; `null` is a
+claim that we did not look. Collapsing them would write a false statement about
+a page into the user's own record, which is the same silence-is-not-a-
+measurement error as elsewhere in this doc.
+
+**A cap on volume, and it is recorded rather than silent.**
+`MAX_ACTIONS_PER_SESSION = 5_000`: a 150-step run records a few hundred of these
+and stays readable, while a model stuck in a dispatch loop must not grow the
+document without bound. Over the cap the entry is **dropped and counted** in
+`totals.actions_dropped` — never truncated mid-sequence, because a half-written
+action is indistinguishable from a real one. Both constants are in `audit.py`
+beside the comment that says what they are for.
+
+Pinned by `tests/test_grounding_outcome.py` — including the case that matters
+most, where the fake executor asserts the page updated on *every* action and the
+assertion is that `changed` is still `None`.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no

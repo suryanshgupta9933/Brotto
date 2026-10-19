@@ -111,12 +111,29 @@ no coverage, and the honest way to describe it is that the one channel the redac
 one that carries whatever was drawn on the screen.
 
 **Capture is off unless you turn it on.** It is a server setting, not a panel setting: your
-self-hosted orchestrator takes a screenshot only when `BROTTO_VISION_CAPTURE` is explicitly set to `on`,
-`1`, `true` or `yes`. Any other value — including a typo, `false`, or the variable being absent — means
-no screenshot is ever captured, on any step, for any page. If you never set it, this whole section
-describes something your install cannot do. When you do set it, the extension is told when to capture by
-your own server and captures on request and nowhere else: with no task running, nothing is captured, and
-no other tab, window or screen is ever photographed.
+self-hosted orchestrator *sends a screenshot to your model provider* only when
+`BROTTO_VISION_CAPTURE` is explicitly set to `on`, `1`, `true` or `yes`. Any other value — including a
+typo, `false`, or the variable being absent — means no screenshot ever reaches a provider, on any step,
+for any page. When you do set it, the extension is told when to capture by your own server and captures
+on request and nowhere else: with no task running, nothing is sent, and no other tab, window or screen
+is ever photographed.
+
+**There is one capture the switch does not govern, and not one of its pixels leaves
+your machine.** So Brotto can tell whether a page changed at all, the extension takes its own capture
+of the attached viewport on every step and compares it against the previous step's — a "page delta",
+which matters on a spreadsheet or drawing canvas where the accessibility tree never moves. That capture
+happens whether or not `BROTTO_VISION_CAPTURE` is set. It is decoded inside the extension,
+differenced against the previous frame, and dropped. **Not one pixel of it reaches your server, your
+model provider, your disk, the audit trail or the side panel.** What crosses the wire is about a hundred
+bytes of derived integers: whether the page changed, and the rectangles of a text selection or caret
+you were typing in. One frame is held per tab to compare against, and it is discarded on navigation, on
+task start, when the tab closes and when the extension is detached. A caret or selection is painted over
+before the comparison, so a blinking cursor does not register as a change. When the redaction gate
+refuses a page for that step — a typed secret was detected, or the domain is on your blocklist — the
+delta is withheld as well, and the run records it as unknown rather than as "nothing changed".
+
+Nothing in that second capture reaches a provider, so it does not undo anything above it: the reason a
+JPEG is the one channel redaction cannot reach is that a JPEG reaches the model. This one does not.
 
 **A site on your own blocklist is never photographed.** Independently of the switch, a page whose
 domain you have blocked in your policy is refused before any capture is attempted — the same blocklist
