@@ -2834,6 +2834,22 @@ _STAGNANT_MESSAGE = (
     "app Brotto can see into."
 )
 
+# The other way a run ends for the same bound. Here the pixels *did* move every
+# step — a caret, a spinner, a page that repaints for its own reasons — while
+# nothing Brotto can read changed, and `stagnant_steps` stayed at 0. So the
+# sentence above would be a lie twice over: "did not visibly change" is false,
+# and a step count would be a ceiling rather than a number of steps observed.
+# The guidance is the same because the situation is the same.
+_DELTA_ONLY_MESSAGE = (
+    "Stopped on a page Brotto could not read: it repainted every step, but "
+    "nothing it exposes changed, so it could not tell whether the agent's "
+    "actions did anything and kept going anyway. A real change here can look "
+    "identical to no change — this is usually an app Brotto can only see "
+    "pixels of, like a spreadsheet or canvas editor. Worth trying: a "
+    "different route or screen to reach the same thing, doing this step "
+    "yourself in the browser, or a task on an app Brotto can see into."
+)
+
 
 def _note_stagnation(deps, url: str, text_len: int, ax_diff: str) -> bool:
     """Count one step's observable change. True when the run should stop.
@@ -4138,9 +4154,15 @@ class AgentHarness:
             # bills is the whole point), and after the policy block so a
             # blocked page is reported as blocked rather than as stagnant.
             if _note_stagnation(deps, current_url, len(page_text or ""), ax_diff):
+                # Which bound fired is a fact about the run, and the two are
+                # not the same report: the delta-only path had pixels moving
+                # every step. Read the counter the call just updated rather
+                # than re-deriving it — the return is a bare bool by contract.
+                delta_only = deps.delta_only_steps >= _DELTA_ONLY_STEPS
                 log.warning(
-                    "[%s] STAGNANT: %d steps with no observable change  step=%d  url=%s",
-                    deps.user_id, _STAGNANT_STEPS, step, current_url[:80],
+                    "[%s] STAGNANT (%s): step=%d  url=%s",
+                    deps.user_id, "delta-only" if delta_only else _STAGNANT_STEPS,
+                    step, current_url[:80],
                 )
                 timing_report = self._log_timings(
                     deps.user_id, timings, steps_run,
@@ -4149,7 +4171,8 @@ class AgentHarness:
                 )
                 deps.result = TaskResult(
                     status="failed",
-                    summary=_STAGNANT_MESSAGE.format(n=_STAGNANT_STEPS),
+                    summary=(_DELTA_ONLY_MESSAGE if delta_only
+                             else _STAGNANT_MESSAGE.format(n=_STAGNANT_STEPS)),
                     failure_reason="page_not_responding",
                     steps_taken=steps_run,
                     timing=timing_report,
