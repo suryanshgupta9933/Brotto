@@ -123,6 +123,23 @@ test("an ordinary ancestor does NOT count — that is a click on something else"
   assert.match(r.reason, /different-element:div/);
 });
 
+test("a target in another document refuses — the probe reads the top frame's point", () => {
+  // The dispatch targets whichever frame the node lives in, but this probe's
+  // `document.elementFromPoint` is the top one. Checking the point in the wrong
+  // coordinate space either refuses a correct click or passes a click aimed at
+  // the wrong element, so the gate must degrade to a refusal.
+  const inner = el("button");
+  inner.ownerDocument = { notTheTopDocument: true };
+  const decoy = el("div"); // what the top document has at that point
+  const page = makePage([{ x: 10, y: 10, node: decoy }]);
+
+  const r = runProbe(inner, page, 10, 10);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "cross-frame-target");
+  assert.ok(/^[a-z][a-z0-9-]{0,31}$/.test(r.reason),
+    "must survive the server's _ACTION_REASON_RE clamp");
+});
+
 test("a stale point now over a different element is refused", async () => {
   const other = el("a");
   const page = makePage([{ x: 10, y: 10, node: other }]);

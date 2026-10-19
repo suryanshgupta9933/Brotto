@@ -160,6 +160,17 @@ const MAX_LABEL = MAX_CURSOR_LABEL;
 const TARGET_PROBE = `function (x, y) {
   var el = this;
   if (!el || el.nodeType !== 1) return { ok: false, reason: "not-an-element" };
+  // The probe's realm is the *top* document, but the element may live in
+  // another one — an iframe target, which the observation finds in that frame's
+  // own tree. elementFromPoint here is the top document's, so a cross-frame
+  // point is checked in the wrong coordinate space: it either refuses a correct
+  // click or passes one aimed at the wrong element, which is the silent wrong
+  // answer this gate exists to prevent. Refuse instead. Binding the right
+  // execution context is the frame-tree work the KNOWN LIMITATION below
+  // declines, and a refusal is one wasted step where a wrong click is loss.
+  if (el.ownerDocument && el.ownerDocument !== document) {
+    return { ok: false, reason: "cross-frame-target" };
+  }
   var hit = document.elementFromPoint(x, y);
   if (!hit) return { ok: false, reason: "point-hit-nothing" };
   if (hit === el) return { ok: true, reason: "" };

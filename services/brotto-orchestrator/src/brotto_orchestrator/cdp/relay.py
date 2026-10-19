@@ -94,19 +94,40 @@ SELECT_ALL_JS = (
 # among same-tag elements, which is unique in a document and does not move
 # when focus does.
 #
+# **But the page chooses the id, and a duplicated one is two elements with one
+# name.** The guard compares this string before and after the model thinks; a
+# page that puts `id="q"` on both its search box and its delete button makes a
+# focus move between them read as "focus did not move", and the keystroke is
+# allowed through. Page-controlled identity defeating a page-controlled guard is
+# the whole hole, so an id that is not unique among same-tag elements yields
+# `""` — unknown, which `focus_id()` reports as None and the guard refuses on.
+# Refusing costs one step; the mistake it prevents is an Enter sent to the user's
+# email draft.
+#
+# The value is never sanitised further: it is compared and discarded, and it
+# never reaches a log line as user content.
+#
 # Returns a plain string because the extension's `evaluate_result` stringifies
 # whatever comes back; `"none"` (no activeElement) and `"body"` (focus on the
-# body, i.e. nowhere) are distinct from `""`, which is what a failed or
-# errored evaluate produces and which the guard reads as unknown.
+# body, i.e. nowhere) are distinct from `""`, which is what a failed, errored or
+# ambiguous evaluate produces and which the guard reads as unknown.
 FOCUS_ID_JS = (
     "(function () {"
     "  var a = document.activeElement;"
     "  if (!a) return 'none';"
     "  if (a === document.body) return 'body';"
     "  var t = a.tagName;"
-    "  if (a.id) return t + '#' + a.id;"
     "  var all = document.getElementsByTagName(t);"
-    "  for (var i = 0; i < all.length; i++) {"
+    "  var i;"
+    "  if (a.id) {"
+    "    var n = 0;"
+    "    for (i = 0; i < all.length; i++) {"
+    "      if (all[i].id === a.id) n++;"
+    "    }"
+    "    if (n === 1) return t + '#' + a.id;"
+    "    return '';"
+    "  }"
+    "  for (i = 0; i < all.length; i++) {"
     "    if (all[i] === a) return t + '[' + i + ']';"
     "  }"
     "  return t;"
