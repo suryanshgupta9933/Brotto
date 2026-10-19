@@ -17,19 +17,19 @@
  * paid the full deadline: 10.002s of an 11.19s observation, 47.7% of the wall
  * clock of a two-step run, every step, forever.
  *
- * A page that is *already mutating hard* a second in is not waiting for its
- * initial render — it is past it. A slow renderer is the opposite shape:
- * silent, then a change (`auth-slowjs` renders at 5000ms having produced
- * almost nothing at 1000ms). So mutation rate separates the two cases, and the
- * busy page short-circuits to the caller, which rescans and compares
- * fingerprints — the check that is *already* the arbiter on every unsettled
- * page today. The short path is a way of reaching that arbiter sooner, not a
- * second opinion from a different heuristic.
+ * A page that is *already mutating* is not waiting for its initial render — it
+ * is past it. A slow renderer is the opposite shape: silent, then a change
+ * (`auth-slowjs` renders at 5000ms having produced almost nothing at 1000ms).
+ * So mutation rate separates the two cases, and the busy page short-circuits
+ * to the caller, which rescans and compares fingerprints — the check that is
+ * *already* the arbiter on every unsettled page today. The short path is a way
+ * of reaching that arbiter sooner, not a second opinion from a different
+ * heuristic.
  *
  * Misclassifying toward "busy" is the safe direction and cannot corrupt
  * anything: the caller rescans, compares, and if the page was in fact still
  * moving it falls back to the full gate (`noEarly`) and scans once more.
- * Misclassifying toward "quiet" would be the dangerous one, and the sample
+ * Misclassifying toward "quiet" would be the dangerous one, and the rate exit
  * cannot do it — it only ever reports `waited: false`.
  */
 
@@ -38,15 +38,31 @@ import * as dbg from "../debugger";
 const QUIET_MS = 3_000;
 const DEADLINE_MS = 10_000;
 
-/** How long to watch before judging the page busy. */
-const BUSY_SAMPLE_MS = 1_000;
-/** Mutations in that window that mean "already rendering, not about to". */
-const BUSY_MUTATIONS = 3;
+/**
+ * Mutations needed before a rate reading means anything.
+ *
+ * The old rule was "3 mutations in a 1000ms window" — an absolute pair that
+ * only ever described one page. Gmail mutated every ~244ms and tripped it;
+ * Google Sheets mutated 3–6 times per 10,002ms (a gap of 1.7–3.3s) and tripped
+ * *neither* half of the gate: too slow to be dense, too fast to fall silent
+ * for 3s. 10 of 14 observations in one real Sheets run hit the full 10 002ms
+ * deadline, and the tree came back from an arbitrary mid-repaint instant —
+ * which is what "the agent stumbles" is made of.
+ *
+ * So the thresholds are relative now. One test does both jobs: if the mean gap
+ * between mutations is *shorter than the quiet window*, a silent window is
+ * arithmetically unreachable and waiting for it only ever ends at the deadline.
+ * Gmail (244ms) and Sheets (1.7–3.3s) are the same fact about the world at
+ * different frequencies, and both are handed straight to the fingerprint
+ * rescan in `captureObservation`, which is the only check that can tell a page
+ * still rendering from a page merely repainting.
+ */
+const RATE_SAMPLES = 3;
 
 export interface StableOpts {
   quietMs?: number;
   deadlineMs?: number;
-  /** Skip the busy short-circuit. The caller's fallback when the page was
+  /** Skip the rate exit. The caller's fallback when the page was
    *  still moving after the rescans, and the mode that keeps a slow
    *  renderer's full window intact. */
   noEarly?: boolean;
@@ -57,8 +73,8 @@ export interface Stability {
   waited: boolean;
   /** We gave up waiting — deadline, or no usable answer from the page. */
   timedOut: boolean;
-  /** The busy short-circuit fired. We stopped at `BUSY_SAMPLE_MS`, so the
-   *  quiet window says nothing about this page either way. */
+  /** The rate short-circuit fired. We stopped before the quiet window could,
+   *  so the quiet window says nothing about this page either way. */
   early?: boolean;
   elapsedMs?: number;
   mutations?: number;
@@ -72,13 +88,13 @@ export interface Stability {
 function observerExpression(
   quietMs: number,
   deadlineMs: number,
-  earlyMs: number,
-  busy: number,
+  early: number,
+  samples: number,
 ): string {
   const q = JSON.stringify(quietMs);
   const d = JSON.stringify(deadlineMs);
-  const e = JSON.stringify(earlyMs);
-  const b = JSON.stringify(busy);
+  const e = JSON.stringify(early);
+  const n = JSON.stringify(samples);
   return (
     "new Promise(function (resolve) {\n" +
     "  var t0 = Date.now();\n" +
@@ -91,20 +107,24 @@ function observerExpression(
     "    done = true;\n" +
     "    clearInterval(poll);\n" +
     "    clearTimeout(hard);\n" +
-    "    if (sample) clearTimeout(sample);\n" +
     "    mo.disconnect();\n" +
     "    resolve({quiet: quiet, early: wasEarly === true, elapsed: Date.now() - t0, mutations: count});\n" +
     "  }\n" +
     "  var hard = setTimeout(function () { finish(false, false); }, " + d + ");\n" +
-    "  var sample = null;\n" +
-    // 0 disables the sample, which is what `noEarly` asks for: the caller
-    // re-waits on a page it has reason to believe is still rendering, and
-    // that page gets the full quiet window a slow renderer needs.
-    "  if (" + e + " > 0) sample = setTimeout(function () {\n" +
-    "    if (count >= " + b + ") finish(false, true);\n" +
-    "  }, " + e + ");\n" +
+    // `early` 0 disables the rate exit, which is what `noEarly` asks for: the
+    // caller re-waits on a page it has reason to believe is still rendering,
+    // and that page gets the full quiet window a slow renderer needs.
     "  var poll = setInterval(function () {\n" +
-    "    if (Date.now() - last >= " + q + ") finish(true, false);\n" +
+    "    var now = Date.now();\n" +
+    "    if (now - last >= " + q + ") { finish(true, false); return; }\n" +
+    // Fewer than `samples` mutations is not a rate, it is an anecdote. A page
+    // that has barely moved — `auth-slowjs`, whose control appears at 5000ms —
+    // never forms one, so it keeps waiting and reaches the deadline.
+    "    if (" + e + " === 0 || count < " + n + ") return;\n" +
+    // Mean gap since t0. Shorter than the quiet window means a silent window
+    // cannot happen, so waiting for one only ends at the deadline — and on
+    // Sheets (gap ~1.7-3.3s against a 3s window) that was every step.
+    "    if ((now - t0) / count < " + q + ") finish(false, true);\n" +
     "  }, 50);\n" +
     "  mo.observe(document, { childList: true, subtree: true, attributes: true, characterData: true });\n" +
     "})"
@@ -143,21 +163,30 @@ export async function waitForStable(
 ): Promise<Stability> {
   const quietMs = opts?.quietMs ?? QUIET_MS;
   const deadlineMs = opts?.deadlineMs ?? DEADLINE_MS;
-  const earlyMs = opts?.noEarly ? 0 : BUSY_SAMPLE_MS;
   try {
     const r = await evalInPage(
-      tabId, observerExpression(quietMs, deadlineMs, earlyMs, BUSY_MUTATIONS),
+      tabId, observerExpression(quietMs, deadlineMs, opts?.noEarly ? 0 : 1, RATE_SAMPLES),
     );
     const v = r?.result?.value;
-    // No value means the evaluate came back without resolving the promise —
-    // treat it as "did not wait", which is all the caller can act on.
-    return {
+    // Untyped, like every other extracted body: the test evals this as plain
+    // JavaScript and `: Stability` is a syntax error there.
+    const stability = {
       waited: v?.quiet === true,
       timedOut: v?.quiet !== true,
       early: v?.early === true,
       elapsedMs: v?.elapsed,
       mutations: v?.mutations,
     };
+    // A deadline hit used to be invisible: the gate returned, the model got a
+    // tree from an arbitrary instant, and the audit blamed the model. One line
+    // is enough to make the next slow page findable by name.
+    if (stability.timedOut && !stability.early && stability.elapsedMs !== undefined) {
+      console.warn(
+        `[brotto] stability deadline hit after ${stability.elapsedMs}ms ` +
+        `with ${stability.mutations ?? 0} mutation(s)`,
+      );
+    }
+    return stability;
   } catch {
     // Tab mid-navigation: the execution context is destroyed and the evaluate
     // rejects. Capture whatever is there rather than hanging the step.

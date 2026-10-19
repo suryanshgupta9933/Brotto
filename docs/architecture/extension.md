@@ -257,6 +257,50 @@ guarded. The other two are the deliberate diagnostic surfaces, `_error` and
 *no credential* rather than *no message* and a test pins that instead. Each
 comment says which of the three it is.
 
+### The last one open was `delete`, and it was fixed rather than annotated
+
+Alert #40 held `audit.py`'s `unlink` inside `delete`, and it was the only alert
+left open in the repo, so it got the treatment the other eleven never did: the
+sink was read, found **correct**, and the question became whether "correct" can
+be *shown*. It can. `py/path-injection` is a two-state query —
+`Path::PathNormalization` moves a path out of `NotNormalized`, and a
+`startswith` guard bars it in `NormalizedUnchecked` — so normalise the candidate
+and then require containment, and the sink is no longer reported. Measured
+against 2.27.2, the version that raised the alert: 13 alerts before, 12 after,
+and this one gone from the set.
+
+Three things cost a step each, and none of them were visible in a diff:
+
+- **`os.path.basename` is not a sanitizer this query models.** Two comments in
+  `audit.py` asserted that it was, and reasoned onward from it. It is not — with
+  `basename` in place and otherwise correct code, every one of these sinks is
+  still reported. A comment asserting a tool's behaviour is a claim about the
+  tool, not about the code.
+- **The guard has to be positive.** `if not target.startswith(root): continue`
+  bars nothing; the model wants the containment check on the branch that uses
+  the path. The first attempt was shaped that way and fired anyway.
+- **The normalisation has to be of the *tainted* value.** Normalising the root
+  and joining a tainted basename onto it leaves that join in `NotNormalized`,
+  which is the state the guard does not apply to.
+
+`normpath` is the normalisation, not `realpath`: the query wants the tainted
+path normalised, and `realpath` would follow a session document that is itself a
+symlink and point the unlink at whatever it references instead. `normpath` is
+textual — it collapses `..` and leaves links alone — and the directory is
+resolved the other way round, with `realpath`, because a user's
+`logs/sessions` is often a symlink and the comparison has to be against where
+it really is. `test_delete_unlinks_the_link_not_the_file_behind_it` pins that
+half, and was red before the change.
+
+The containment check is defensive rather than load-bearing, and the code says
+so: `basename` has already removed every separator, so containment holds by
+construction. That is not a reason to leave it out. It is the property a reader
+of the sink is owed, and it is the only form of "this is safe" that the one
+tool here which asserts on sinks nobody enumerated is able to check at all.
+
+**A predicate that returns and a check at the sink are different things**, and
+the alert worth reading is the one that tells you which of the two you have.
+
 ## Domain blocking — one list, the user's
 
 The blacklist is whatever the user typed in the panel, whole. There is no
@@ -568,6 +612,40 @@ from the tree, and the model was shown a login form with nothing to do.
 - `scripts/test-observation-stability.test.js` runs the real page-side
   expression against a fake DOM, so "the gate never fires" and "the observer
   leaks" are both caught. Both are absences and read clean in a diff.
+
+### The rate exit is relative, because the old one was calibrated on Gmail
+
+The gate also short-circuits before the quiet window can be reached, and it
+used to be an absolute pair — `BUSY_SAMPLE_MS` / `BUSY_MUTATIONS`, "3 mutations
+inside 1000ms". Both constants are gone. The replacement is one number,
+`RATE_SAMPLES = 3`, and one test: **if the mean gap between mutations since
+`t0` is shorter than the quiet window, a silent window is arithmetically
+unreachable**, so stop waiting and hand the caller `early`.
+
+`RATE_SAMPLES` is a floor on evidence, not a threshold on speed. Fewer than
+three mutations is an anecdote, not a rate — which is exactly what a slow
+renderer looks like, so `auth-slowjs` never forms one and keeps its full window.
+
+**The calibration point is Gmail, and it was silently a universal claim.** 41
+mutations in 10,002ms — one every ~244ms — so 3s of silence is not rare on
+that page, it is impossible. Every Gmail observation therefore paid the full
+10s deadline, forever, and the numbers behind that are in `agent-loop.md`
+("The quiet window was unreachable on exactly the pages that need it"). The
+implicit rule that came with it was *any slower page is a loading page*.
+
+**Google Sheets falls between the two heuristics**, which is how the
+assumption broke: it mutates 3–6 times per 10,002ms, a gap of 1.7–3.3s — too
+slow to clear the busy sample, too fast to fall silent for 3s. It passed *both*
+heuristics without matching either. A live Sheets run then measured **177s over
+8 steps with 10 of 14 observations at the full 10,002ms deadline**, against
+~2s/call of model generation, so ~90% of wall clock was observation latency —
+and the tree each time came from an arbitrary mid-repaint instant. Gmail and
+Sheets are the same fact about the world at two frequencies; only a
+rate-relative test says so.
+
+`noEarly` still sets the exit to 0 and is unchanged: it is the caller's
+fallback on a page that kept moving across rescans, where the full quiet window
+is the thing being preserved.
 
 The SPA retry underneath it changed condition at the same time. It retried
 while `axTargets.length < 3`, which is wrong in both directions: a page that

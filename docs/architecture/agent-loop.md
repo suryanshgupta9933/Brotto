@@ -398,10 +398,26 @@ because it is past its initial render and into its steady state, where a spinner
 or a live feed keeps the document dirty forever. Same observation, opposite
 conclusion, and nothing in the old design could tell them apart.
 
-So the gate now **samples**: if ≥3 mutations landed in the first 1000ms, resolve
-at once with `early: true` and let the caller decide. Expected Gmail observation
-is 10.8s → ~1.4s. The decision is not trusted — it is a *guess about the page*,
-and the guess is checked below.
+So the gate now **samples**, and the sample is a *rate*, not a pair of
+absolute thresholds. It resolves at once with `early: true` when the mean gap
+between mutations since `t0` is shorter than the quiet window — meaning a
+silent window cannot happen and waiting for one only ends at the deadline. The
+only constant left is `RATE_SAMPLES = 3`, a floor on how much evidence counts
+as a rate at all. Expected Gmail observation is 10.8s → ~1.4s. The decision is
+not trusted — it is a *guess about the page*, and the guess is checked below.
+
+**An absolute threshold here was one page's number wearing a universal claim.**
+The first version of this exit was "3 mutations inside 1000ms", which Gmail's
+41-per-10s clears with ~30% headroom — and which silently assumed any slower
+page was a *loading* page. Google Sheets mutates 3–6 times per 10,002ms (gap
+1.7–3.3s), so it is too slow to trip the busy sample and too fast to fall
+silent for 3s: it satisfied neither heuristic and matched neither. A live
+Sheets run then measured **177s over 8 steps, with 10 of 14 observations at the
+full 10,002ms deadline** — against ~2s a call of model generation, so ~90% of
+wall clock was observation latency, and each tree came from an arbitrary
+mid-repaint instant. That measurement is what moved the rule from an absolute
+pair to a rate-relative one; `extension.md` carries the gate-side mechanics and
+the same Gmail calibration point.
 
 **Misclassifying toward "busy" is the safe direction and cannot corrupt
 anything.** The sample only ever resolves `waited: false`; it has no path to
@@ -441,12 +457,14 @@ and pins all four shapes, because a guard that silently stops firing hands the
 model a half-rendered tree while every metric still reads healthy. An absence
 reads clean in a diff; that is the whole reason it has a test.
 
-**The thresholds are calibrated from one sample and are deliberately
-conservative.** Gmail ran 4.1 mutations/s against a threshold of 3 per 1000ms,
-so it clears the bar with ~30% headroom — a page half as busy would not, and
-would pay the old 10s. One live run recalibrates it, and the metrics already
-flow back to the server log. A *miss* costs time and never accuracy, which is
-the asymmetry that makes shipping an uncalibrated guess the right trade.
+**The exit is a miss that costs time, never accuracy.** That asymmetry is what
+makes shipping a guess the right trade: a page wrongly called busy is rescanned
+and re-tested, and only a page wrongly called *quiet* could hand the model a
+half-rendered tree — which the structure of the exit makes impossible. The
+absolute version was recalibratable from one run; the rate-relative version is
+calibrated on no page in particular, which is why it needed the Sheets
+measurement above to find rather than a tuning pass to guess. The metrics still
+flow back to the server log.
 
 ### The observation reported its cost nowhere
 
@@ -607,6 +625,42 @@ a reason nothing stated. Asserting on `_VisionFallback.note` could not catch it,
 because that is the level at which the note is always present; the tests assert
 on the rendered input, including one driven through the loop.
 
+**The prompt was telling the model to do the opposite of this feature.** The
+`<how_to_think>` section that owns the empty-page case read, on a canvas or a
+spreadsheet: check `read_page_text("body")`, and if that is empty too, the
+control is not in anything you can read — *say so and ask the user how to
+proceed.* So on exactly the pages `_vision_fallback` exists to rescue, the
+prompt instructed the model to give up on its own evidence and spend a human
+turn. A picture arriving with the turn was not mentioned at all. The feature
+was correct and the instruction contradicted it.
+
+`<how_to_think>` now states four things, and each is a rule the harness
+enforces rather than one the model is trusted to infer:
+
+- **A picture is sent for one reason only** — nothing in the tree or the page
+  text is about the task, i.e. `_sparse_for_task`. The model does not need to
+  re-derive the trigger, and a model-invented one would fire on every page.
+- **It is capped** at three per task. Stating it means a model that reads the
+  absence correctly does not spend a turn asking why there is no picture.
+- **A turn without a picture is not evidence of a blank page.** This is the
+  sentence the old prompt got backwards: past the cap the page is merely
+  unseen, and `needed` stays true with the ordinary refusal note so a bounded
+  run reads as "unseen" rather than empty.
+- **The AX tree outranks the picture where they disagree.** A canvas can be
+  mid-render, and pixels show a *rendering* state rather than the semantic
+  state the model is about to act on. This is the same distinction the
+  geometry walk rests on, arriving where a model will actually read it, and it
+  is why the picture is a supplement and never an override.
+
+The give-up-and-ask instruction survives, narrowed to the case where **no
+picture came with the turn**. It was not deleted; it was moved off the case a
+picture already answers.
+
+**The log line is not the trigger.** `harness.py:3767` logs `screenshot
+attached (%d B base64)` on the capture path, which reads as "every step gets a
+picture". That line predates the trigger being narrowed to `_sparse_for_task`;
+a step that does not log it is normal and says nothing about the page.
+
 **The base64 is transit only.** It goes on the turn, into the prompt, to the
 provider. Not the audit document, not a step summary, not a log line — the one
 log carries a byte count and nothing else. Redaction does not apply to it (see
@@ -616,8 +670,37 @@ capture reach the model as the same sentence — the page is unseen, say so,
 do not guess — so a run moves on rather than stalling the step. And a domain on
 the user's blocklist is refused before any capture is attempted.
 
-Pinned by `tests/agent/test_vision_fallback.py`, `tests/test_capability_resolution.py`
-and `tests/test_vision_capture_gate.py`.
+**A coordinate action is bounded too, because the picture is not a map.** Having
+a screenshot is not having coordinates: on a canvas the model is aiming from a
+picture at a rendered surface, and the prompt tells it to use
+`click_xy`/`focus_xy`/`type_xy` because there is no element to name. `_missed_point`
+counts a coordinate action that missed — out of viewport, something on top of
+the canvas at that point, the page moving mid-decision, or a dispatch that
+reported failure — on `deps.xy_misses`, with `_XY_MISS_LIMIT = 1`, and three
+sentences rather than one generic "that failed":
+
+1. **first miss** — re-look and click once more, adjusted. The loop
+   re-observes at the top of every step, so the retry is a *new step* with a
+   fresh tree and a fresh `probe_xy`, not a redispatch from geometry already
+   proved wrong. The limit is 1 and not 0 because a mis-aimed coordinate is
+   tens of pixels out, not hundreds, and a second informed attempt measurably
+   lands closer than asking a person.
+2. **second miss** — coordinate actions are spent for the task; bring the user
+   in with `ask_human` and ask where the label is. Deliberately **not**
+   `_ask_user`: an interactive prompt here records a failed action in the
+   document, and the escalation is one the model can make itself.
+3. **third and after** — a terminal refusal for the verb.
+
+**The third stage is the one that bounds it.** Nothing here can stop a model
+emitting `click_xy` on every step, and stages 1–2 are prose — so a counter that
+only escalates the wording still buys an ignoring model a fresh human approval
+every step. The ceiling is what closes it. `xy_misses` is reset **only** by a
+coordinate action that lands, so two misses on the way onto one canvas do not
+follow the model onto the next. The loop it closes is the one recorded below,
+"Ten clicks, four attempts, zero changes": that was this path with no ceiling.
+
+Pinned by `tests/agent/test_vision_fallback.py`, `tests/agent/test_coordinate_click.py`,
+`tests/test_capability_resolution.py` and `tests/test_vision_capture_gate.py`.
 
 ### Frames — a bounded union, and a ref that has to be composite
 
@@ -1218,6 +1301,37 @@ Note what this does *not* fix: a click that opens a menu still costs a step to l
 did. The post-action frame arrives after the model has already decided, so the diff is
 computed at the top of the *next* step and cannot collapse the two. What it fixes is the
 model clicking a toggle three times, open-shut-open, against a menu it could not see.
+
+### A step captured the same page twice
+
+The fix above made the post-action frame *trustworthy*, and nothing then reused it. A live
+Sheets run spent 177s over 8 steps with model generation at ~2s a call: two full captures
+per step, and the second was of a page nobody had changed since the first. `_send_action`
+had already blocked on a solicited frame and cached it; `get_targets()` then sent
+`observe` regardless.
+
+`_obs_reusable` is the one boolean that closes it, and it is deliberately not a cache with
+invalidation rules — it is set only where a capture provably cannot be stale and cleared by
+anything that learns otherwise. Reusable means all of: the frame was solicited for *this*
+action (`reason` was `None`/`"action"`, already enforced by `_send_action`'s loop); the
+action was not a `navigate`, whose URL will differ by the next step; and no push has been
+heard since — nothing parked in `_pushed_obs`, nothing on the queue. `_absorb` clears it,
+so the `get_current_url` that follows a click already disarms the frame if that click
+committed a navigation.
+
+A frame on the queue at reuse time is the same 7d567b66 failure one step later — a tree
+captured before the page it describes rendered — so the reuse path refuses it and the
+method falls through to a real capture. That check is why the condition is provable rather
+than merely likely: reuse fires only when the relay has heard nothing since the action, and
+any other arrival costs one round trip exactly as before.
+
+`refresh_target_map()` stays a `pass`. On the Playwright relay it re-reads the DOM; here
+there is no target map, and disarming on every call would disarm the frame the call itself
+produced.
+
+Pinned by `tests/test_observation_reuse.py`, because a flag that stops being set is
+indistinguishable from one that is never set — `get_targets()` would just quietly go back
+to capturing, at the old cost, with nothing red.
 
 ### Stagnation detection — removed, not fixed
 

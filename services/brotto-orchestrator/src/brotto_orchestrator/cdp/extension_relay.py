@@ -86,6 +86,7 @@ class ExtensionCDPRelay:
         self._sid = session_id
         self._cached_obs: dict | None = None
         self._pushed_obs: dict | None = None
+        self._obs_reusable: bool = False
         self._attrs: asyncio.Queue = asyncio.Queue()
         self._pending_attrs: set[str] = set()
         self._screenshot: asyncio.Queue = asyncio.Queue()
@@ -108,7 +109,26 @@ class ExtensionCDPRelay:
         So unsolicited frames are kept for what they are good for — the URL
         moved, which `_ensure_fresh_obs` and the login wait both read — and
         the step asks for a real one instead.
+
+        One exception, and it is the reason most steps do not re-capture:
+        `_send_action` has already blocked on a *solicited* post-action frame
+        for this exact page. Recapturing the identical page cost a second
+        ~10s round trip per step (a live Sheets run: 177s for 8 steps, model
+        generation ~2s of each). So that frame is handed over once instead,
+        under `_obs_reusable` — which is set only where a capture could not
+        have been stale, and cleared by anything that learns the page moved.
         """
+        if self._obs_reusable and self._pushed_obs is None and self._obs_queue.empty():
+            # Nothing has been heard since the action answered. A frame in the
+            # queue or a parked push means the page moved behind it, and the
+            # frame is only good for its URL — the same thing this method
+            # exists to refuse.
+            self._obs_reusable = False
+            log.debug("[%s] reusing the post-action observation  url=%s  ax=%d",
+                      self._sid, (self._cached_obs or {}).get("url", "")[:80],
+                      len((self._cached_obs or {}).get("axTargets", [])))
+            return self._cached_obs  # type: ignore[return-value]
+        self._obs_reusable = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _OBSERVATION_TIMEOUT
         while True:
@@ -168,6 +188,13 @@ class ExtensionCDPRelay:
                       "for the post-action frame", self._sid, raw.get("reason") or "untagged")
             self._pushed_obs = obs
         self._cached_obs = obs
+        # Reusable unless the page may have moved away from this frame: a
+        # `navigate` will have a different URL by the time the next step looks,
+        # and a push parked above says something already committed. Everything
+        # else — a click that opened a modal, a scroll, a keystroke — is
+        # answered *after* the page reacted, which is the tree the next step
+        # wants and the only one it would get if it asked again.
+        self._obs_reusable = action.get("type") != "navigate" and self._pushed_obs is None
         log.debug(
             "[%s] post-action observation  url=%s  ax=%d",
             self._sid, obs.get("url", "")[:80], len(obs.get("axTargets", [])),
@@ -268,6 +295,10 @@ class ExtensionCDPRelay:
         """
         if obs is None:
             return
+        # Anything absorbed here is news the post-action frame predates — a
+        # commit means the URL moved, so the tree that frame carries is no
+        # longer this page's.
+        self._obs_reusable = False
         if solicited or self._cached_obs is None:
             self._cached_obs = obs
             return
@@ -328,7 +359,9 @@ class ExtensionCDPRelay:
         pass  # extension adds its own delay after navigate
 
     async def refresh_target_map(self) -> None:
-        pass  # next get_targets() will re-observe
+        pass  # the extension has no target map to re-read; `_send_action`
+        # already parked a post-action frame, and `_obs_reusable` is what
+        # decides whether `get_targets()` may hand that one over again
 
     # ponytail: every ref-taking method below reports an unresolvable ref
     # with this prefix, because harness.py derives `ok` from
