@@ -2858,25 +2858,28 @@ def _note_stagnation(deps, url: str, text_len: int, ax_diff: str) -> bool:
     comment in the body, and `AgentDeps.canvas_changed` for what its `None`
     means.
     """
-    if _is_canvas_page(deps.canvas_covered):
-        text_len = None
-        # Pixels are the content, so the page delta — the regions that
-        # repainted since the last observation — is the honest progress term
-        # here. `None` is the **common** answer (first observation, after a
-        # navigation, after a resize, a failed capture, and every step while
-        # the capture gate is off), and it is *unknown*, not "nothing moved":
-        # two missing measurements are not a measurement. So an unknown delta
-        # is no new evidence this step — it neither resets the counter nor
-        # advances it, and a merely unobserved run is never stopped for it.
-        # Only a real `False` (two captures differing in no region) counts as
-        # no progress.
-        if deps.canvas_changed is None:
-            deps.last_obs = (url, None)
-            return False
-        text_len = deps.canvas_changed
-    obs = (url, text_len)
-    changed = ax_diff != _AX_NO_CHANGE or deps.last_obs != obs
-    deps.last_obs = obs
+    canvas = _is_canvas_page(deps.canvas_covered)
+    value = None if canvas else text_len
+    # Pixels are the content on a canvas page, so the page delta — the regions
+    # that repainted since the last observation — is the honest progress term
+    # there, in place of a page-text length the page cannot honestly report
+    # (a Sheet's text is chrome and the caret, and it flickers every step).
+    if canvas:
+        value = deps.canvas_changed
+    prev = deps.last_obs
+    # Two measurements are needed to differ. When either side is unknown the
+    # delta term cannot answer, and the URL and AX diff still can — dropping
+    # them here is what let a 23-step run be "stopped" for navigating.
+    changed = ax_diff != _AX_NO_CHANGE or prev is None or prev[0] != url \
+        or (prev[1] is not None and value is not None and prev[1] != value)
+    deps.last_obs = (url, value)
+    if canvas and value is None:
+        # Unknown is not "nothing moved": two missing measurements are not a
+        # measurement. A merely unobserved run is never stopped for it — but
+        # real evidence, if there is any, does clear the counter.
+        if changed:
+            deps.stagnant_steps = 0
+        return False
     deps.stagnant_steps = 0 if changed else deps.stagnant_steps + 1
     return deps.stagnant_steps >= _STAGNANT_STEPS
 

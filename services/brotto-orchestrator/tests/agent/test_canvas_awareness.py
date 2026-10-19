@@ -145,6 +145,7 @@ def test_stagnation_still_fires_on_an_ordinary_page():
 
 def test_canvas_delta_changed_true_is_progress():
     deps = _deps(canvas_covered=0.9)
+    deps.canvas_changed = False
     _note_stagnation(deps, "docs.google.com/spreadsheets", 10031, _AX_NO_CHANGE)
     deps.stagnant_steps = 4  # four blind steps, then pixels move
     deps.canvas_changed = True
@@ -168,6 +169,9 @@ def test_an_unknown_canvas_delta_never_stops_a_run():
     # Every delta is None — the capture gate off, or a first observation. A
     # merely unobserved run must not be stopped, and must not be advanced
     # either: the counter is where it was.
+    # The first observation has nothing to compare against and is a baseline,
+    # so it resets; from there an unknown delta must touch nothing.
+    _note_stagnation(deps, "docs.google.com/spreadsheets", 10031, _AX_NO_CHANGE)
     fired = []
     for i, n in enumerate([10031, 10044, 10046, 10079, 10083, 10136] * 4):
         deps.canvas_changed = None
@@ -187,13 +191,42 @@ def test_an_unknown_canvas_delta_never_stops_a_run():
 
 def test_an_unknown_delta_still_honours_the_url_and_the_ax_diff():
     deps = _deps(canvas_covered=0.9)
+    # Rung up first: an unknown delta must not be a free pass, and the terms it
+    # cannot speak for must still clear a counter it left standing.
+    deps.canvas_changed = False
+    for _ in range(3):
+        _note_stagnation(deps, "https://example.com/a", 10031, _AX_NO_CHANGE)
+    assert deps.stagnant_steps == 2, "the first observation is the baseline, not a rung"
+
     deps.canvas_changed = None
-    _note_stagnation(deps, "docs.google.com/spreadsheets", 10031, _AX_NO_CHANGE)
-    # The other two terms are untouched by the unknown delta.
-    assert not _note_stagnation(deps, "docs.google.com/document/d/1", 10031,
+    assert not _note_stagnation(deps, "https://example.com/b", 10031,
                                 _AX_NO_CHANGE)
-    assert not _note_stagnation(deps, "docs.google.com/document/d/1", 10031,
+    assert deps.stagnant_steps == 0, "a URL that moved is progress, unknown delta or not"
+
+    # And silence on an unmeasured delta never climbs: it neither advances nor
+    # fires, so a run nobody is measuring cannot be stopped for nothing.
+    for _ in range(_STAGNANT_STEPS * 2):
+        assert not _note_stagnation(deps, "https://example.com/b", 10031,
+                                    _AX_NO_CHANGE)
+    assert deps.stagnant_steps == 0
+
+    assert not _note_stagnation(deps, "https://example.com/b", 10031,
                                 "[+ button] ~ button, 2 refs new")
+    assert deps.stagnant_steps == 0, "a moving AX tree is progress too"
+
+
+def test_an_unknown_delta_alone_never_advances_or_verdicts():
+    deps = _deps(canvas_covered=0.9)
+    deps.canvas_changed = False
+    for _ in range(3):
+        _note_stagnation(deps, "https://example.com/a", 10031, _AX_NO_CHANGE)
+    stood = deps.stagnant_steps
+    assert stood == 2
+    deps.canvas_changed = None
+    for _ in range(_STAGNANT_STEPS * 3):
+        assert not _note_stagnation(deps, "https://example.com/a", 10031,
+                                    _AX_NO_CHANGE)
+    assert deps.stagnant_steps == stood, "the counter stands where it stood"
 
 
 def test_the_delta_changes_nothing_on_an_ordinary_page():
