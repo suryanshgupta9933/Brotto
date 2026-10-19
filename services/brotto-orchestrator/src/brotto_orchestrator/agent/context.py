@@ -337,6 +337,15 @@ class AgentDeps:
     # unknown, not 0.0** — a relay or extension build that does not send the
     # field leaves every one of those callers on the old behaviour.
     canvas_covered: float | None = None
+    # Did any region of the viewport repaint since the previous observation?
+    # `get_page_delta` is the only source, and it is **commonly None** — a
+    # tab's first observation, after a navigation, after a resize, a failed
+    # capture, and every step while the capture gate is off. **None means the
+    # answer is unknown, not "nothing moved."** Read by `_note_stagnation` on
+    # a canvas page, where it replaces page-text length; `False` is the real
+    # negative. A resumed task builds a fresh `AgentDeps`, so this starts at
+    # the unknown rather than at the previous run's answer.
+    canvas_changed: bool | None = None
     result: TaskResult | None = None
     # URL observed at the top of the current step, before its actions run.
     # Read by the click cross-domain gate and stamped onto TaskResult.

@@ -25,6 +25,7 @@ import asyncio
 from brotto_orchestrator.agent.harness import (
     _CANVAS_COVERED_FLOOR, _execute_action, _is_canvas_page,
     _note_stagnation, _observe_canvas_covered, _sparse_for_task, _AX_NO_CHANGE,
+    _STAGNANT_STEPS,
 )
 from brotto_orchestrator.agent.context import ActionCall, AgentDeps
 
@@ -122,6 +123,9 @@ def test_stagnation_accumulates_on_a_canvas_page_whose_text_flickers():
     lengths = [10031, 10044, 10046, 10079, 10083, 10136, 10030, 10037]
     fired_at = None
     for i, n in enumerate(lengths):
+        # The delta is present every step and says nothing repainted — the
+        # grid a 23-step run never moved. The flickering text must not save it.
+        deps.canvas_changed = False
         if _note_stagnation(deps, "docs.google.com/spreadsheets", n,
                             _AX_NO_CHANGE):
             fired_at = i
@@ -137,6 +141,69 @@ def test_stagnation_still_fires_on_an_ordinary_page():
     fired = [_note_stagnation(deps, "https://example.com", 900, _AX_NO_CHANGE)
              for _ in range(6)]
     assert fired == [False] * 5 + [True]
+
+
+def test_canvas_delta_changed_true_is_progress():
+    deps = _deps(canvas_covered=0.9)
+    _note_stagnation(deps, "docs.google.com/spreadsheets", 10031, _AX_NO_CHANGE)
+    deps.stagnant_steps = 4  # four blind steps, then pixels move
+    deps.canvas_changed = True
+    assert not _note_stagnation(deps, "docs.google.com/spreadsheets", 10044,
+                                _AX_NO_CHANGE)
+    assert deps.stagnant_steps == 0
+
+
+def test_canvas_delta_changed_false_is_a_real_negative():
+    deps = _deps(canvas_covered=0.9)
+    deps.canvas_changed = False
+    fired = [_note_stagnation(deps, "docs.google.com/spreadsheets", n,
+                              _AX_NO_CHANGE) for n in range(8)]
+    assert fired == [False] * 5 + [True, True, True]
+    assert deps.stagnant_steps == 7  # the first step is the baseline
+
+
+def test_an_unknown_canvas_delta_never_stops_a_run():
+    """The regression this whole change exists to avoid, twice over."""
+    deps = _deps(canvas_covered=0.9)
+    # Every delta is None — the capture gate off, or a first observation. A
+    # merely unobserved run must not be stopped, and must not be advanced
+    # either: the counter is where it was.
+    fired = []
+    for i, n in enumerate([10031, 10044, 10046, 10079, 10083, 10136] * 4):
+        deps.canvas_changed = None
+        deps.stagnant_steps = 3  # an older counter to prove it is left alone
+        fired.append(_note_stagnation(deps, "docs.google.com/spreadsheets", n,
+                                      _AX_NO_CHANGE))
+        assert deps.stagnant_steps == 3, i
+    assert not any(fired)
+    # And from a clean counter it never even climbs.
+    deps = _deps(canvas_covered=0.9)
+    deps.canvas_changed = None
+    for _ in range(_STAGNANT_STEPS * 3):
+        assert not _note_stagnation(deps, "docs.google.com/spreadsheets", 10031,
+                                    _AX_NO_CHANGE)
+    assert deps.stagnant_steps == 0
+
+
+def test_an_unknown_delta_still_honours_the_url_and_the_ax_diff():
+    deps = _deps(canvas_covered=0.9)
+    deps.canvas_changed = None
+    _note_stagnation(deps, "docs.google.com/spreadsheets", 10031, _AX_NO_CHANGE)
+    # The other two terms are untouched by the unknown delta.
+    assert not _note_stagnation(deps, "docs.google.com/document/d/1", 10031,
+                                _AX_NO_CHANGE)
+    assert not _note_stagnation(deps, "docs.google.com/document/d/1", 10031,
+                                "[+ button] ~ button, 2 refs new")
+
+
+def test_the_delta_changes_nothing_on_an_ordinary_page():
+    for changed in (True, False, None):
+        deps = _deps()
+        deps.canvas_changed = changed
+        # Text is real evidence here: identical lengths, no delta read at all.
+        fired = [_note_stagnation(deps, "https://example.com", 900, _AX_NO_CHANGE)
+                 for _ in range(6)]
+        assert fired == [False] * 5 + [True], changed
 
 
 def test_empty_read_on_a_canvas_page_does_not_claim_the_page_is_empty():

@@ -2854,10 +2854,26 @@ def _note_stagnation(deps, url: str, text_len: int, ax_diff: str) -> bool:
     and it flickers every step (10031 → 10044 → 10136 → 10030 …) while the
     grid it fails to contain is untouched — so a length change reset the
     counter every step and a 23-step run never fired. The AX diff and the URL
-    still count on every page.
+    still count on every page. In its place the page delta is used — see the
+    comment in the body, and `AgentDeps.canvas_changed` for what its `None`
+    means.
     """
     if _is_canvas_page(deps.canvas_covered):
         text_len = None
+        # Pixels are the content, so the page delta — the regions that
+        # repainted since the last observation — is the honest progress term
+        # here. `None` is the **common** answer (first observation, after a
+        # navigation, after a resize, a failed capture, and every step while
+        # the capture gate is off), and it is *unknown*, not "nothing moved":
+        # two missing measurements are not a measurement. So an unknown delta
+        # is no new evidence this step — it neither resets the counter nor
+        # advances it, and a merely unobserved run is never stopped for it.
+        # Only a real `False` (two captures differing in no region) counts as
+        # no progress.
+        if deps.canvas_changed is None:
+            deps.last_obs = (url, None)
+            return False
+        text_len = deps.canvas_changed
     obs = (url, text_len)
     changed = ax_diff != _AX_NO_CHANGE or deps.last_obs != obs
     deps.last_obs = obs
@@ -3945,6 +3961,12 @@ class AgentHarness:
                 # 16x16 tile arithmetic on pixels the extension already had,
                 # not a capture.
                 page_delta = await deps.cdp.get_page_delta(deps.policy)
+                # Tri-state: True/False when the delta says so, **None when the
+                # delta itself is None** — the common case, and unknown rather
+                # than "nothing moved". Read once per step, off the same cached
+                # observation as everything else here.
+                changed = page_delta.get("changed") if isinstance(page_delta, dict) else None
+                deps.canvas_changed = changed if isinstance(changed, bool) else None
                 current_url = await deps.cdp.get_current_url()
                 page_title = await deps.cdp.get_page_title()
                 # Free on the extension path (already in the cached
