@@ -86,6 +86,33 @@ SELECT_ALL_JS = (
     "})()"
 )
 
+# A stable name for whatever is focused right now, for the `press_key` focus
+# guard. Not a DOM object and not a node id — an id minted per evaluation would
+# change every read, so the guard would fire on nothing; a backendNodeId would
+# be stable but is not reachable from the one `Runtime.evaluate` both relays
+# already have. `TAG#id` where the element has one, otherwise its ordinal
+# among same-tag elements, which is unique in a document and does not move
+# when focus does.
+#
+# Returns a plain string because the extension's `evaluate_result` stringifies
+# whatever comes back; `"none"` (no activeElement) and `"body"` (focus on the
+# body, i.e. nowhere) are distinct from `""`, which is what a failed or
+# errored evaluate produces and which the guard reads as unknown.
+FOCUS_ID_JS = (
+    "(function () {"
+    "  var a = document.activeElement;"
+    "  if (!a) return 'none';"
+    "  if (a === document.body) return 'body';"
+    "  var t = a.tagName;"
+    "  if (a.id) return t + '#' + a.id;"
+    "  var all = document.getElementsByTagName(t);"
+    "  for (var i = 0; i < all.length; i++) {"
+    "    if (all[i] === a) return t + '[' + i + ']';"
+    "  }"
+    "  return t;"
+    "})()"
+)
+
 
 class CDPRelay:
     """Wraps a PlaywrightBrowser for dev mode.
@@ -304,6 +331,23 @@ class CDPRelay:
             return str(text or "")
         except Exception as e:
             return f"(error reading page text: {e})"
+
+    async def focus_id(self) -> str | None:
+        """A stable name for the focused element, or None if unreadable.
+
+        None is the honest answer and the guard treats it as unknown — see
+        `FOCUS_ID_JS`. Never raises: this backs a refusal, and a relay that
+        raised here would abort the step instead of the keystroke.
+        """
+        if not self._browser.page:
+            return None
+        try:
+            value = await self._browser.page.evaluate(FOCUS_ID_JS)
+        except Exception as exc:
+            log.debug("focus_id failed: %s", exc)
+            return None
+        text = str(value or "")
+        return text or None
 
     async def refresh_target_map(self) -> None:
         """Re-extract AX targets and update browser's target_map."""

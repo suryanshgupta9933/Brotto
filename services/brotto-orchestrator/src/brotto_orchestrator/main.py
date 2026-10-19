@@ -2113,6 +2113,12 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     # lookup times out after _ATTRS_TIMEOUT, so the
                     # redaction falls back to the accessible name alone.
                     await relay.deliver_attributes_result(incoming)
+                elif t == "action_result":
+                    # What the extension actually did with the action it was
+                    # last handed. Delivered rather than dropped: an unhandled
+                    # frame is not a no-op, it is the action reporting `ok`
+                    # for a click the hit test refused.
+                    await relay.deliver_action_result(incoming)
                 elif t == "human_reply":
                     log.info("[%s] ← human_reply", session_id)
                     await human_queue.put(incoming.get("content", ""))

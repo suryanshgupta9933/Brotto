@@ -64,3 +64,21 @@ test("task_start still carries every key the 0.2.0 contract names", () => {
       `task_start lost "${k}" — breaking, needs a minor bump and one minor of back-compat`);
   }
 });
+
+// `action_result` is the extension's answer to the action it was handed: the
+// dispatch-time hit test refuses a click whose coordinate no longer holds the
+// element the ref resolved to, and before this frame existed a refused click
+// read as `Clicked [7]` and was audited `ok: true`. It is a frame one side
+// sends and the other does not read if they ever disagree — a refused action
+// nobody hears about. Both halves are asserted in one test on purpose: the
+// server is shipped first and reads the frame for a minor before any extension
+// sends it, so the two are allowed to be out of step in time but never in
+// existence.
+test("action_result is sent by the extension and read by the server", () => {
+  const main = fs.readFileSync(
+    path.join(ROOT, "services/brotto-orchestrator/src/brotto_orchestrator/main.py"), "utf8");
+  assert.ok(bg.includes('type: "action_result"'),
+    "background.ts no longer sends action_result — the server's refusal report is now dead");
+  assert.ok(/t == "action_result"/.test(main),
+    "main.py no longer routes action_result — every refusal is now audited ok: true");
+});

@@ -128,6 +128,122 @@ const CLEAR_CURSOR = `function (id) {
 const MAX_LABEL = MAX_CURSOR_LABEL;
 
 /**
+ * The dispatch-time hit test. Runs as a string in the page, with the *resolved
+ * element* as `this` — so this is `Runtime.callFunctionOn`, not
+ * `Runtime.evaluate`: the element arrived as a `backendNodeId`, which has no
+ * page-side accessor at all, and `DOM.resolveNode` is the only thing that turns
+ * it into something script can hold. That is the same two-call shape
+ * `geometry.ts` uses for `BOX_WALK`, reused rather than a second probe invented
+ * beside it.
+ *
+ * **`elementFromPoint`, not `DOM.getNodeForLocation`.** The CDP one is cheaper
+ * (one call, returns a `backendNodeId` directly) and the codebase already uses
+ * it in `supplement.ts` — but it answers a different question. It returns the
+ * *deepest* node at the point, so a click on `<button><span>Send</span></button>`
+ * returns the `<span>`, which is not the element the accessibility observation
+ * named, and a naive `==` would refuse nearly every real click. `el.contains(hit)`
+ * is what absorbs the ordinary case, and it is the direction that matters: a hit
+ * on a *descendant* is a hit on the element, a hit on an *ancestor* is not.
+ * `DOM.getNodeForLocation` cannot be rescued this way without re-walking the
+ * tree to find an AX-identical ancestor, which is the cost this gate exists to
+ * avoid.
+ *
+ * The shadow-host walk is the one case `contains()` does not cover, and it is
+ * deliberate: `elementFromPoint` does not pierce a shadow boundary, so a target
+ * inside an open shadow root resolves to its *host* — and the browser retargets
+ * the event to that host, so the click genuinely lands where we are aiming. Only
+ * shadow hosts are admitted, never ordinary ancestors, for the reason above.
+ *
+ * No template literals or semicolons at EOL: `scripts/test-target-hittest.test.js`
+ * slices this constant out of the source between the backticks.
+ */
+const TARGET_PROBE = `function (x, y) {
+  var el = this;
+  if (!el || el.nodeType !== 1) return { ok: false, reason: "not-an-element" };
+  var hit = document.elementFromPoint(x, y);
+  if (!hit) return { ok: false, reason: "point-hit-nothing" };
+  if (hit === el) return { ok: true, reason: "" };
+  if (el.contains && el.contains(hit)) return { ok: true, reason: "" };
+  var root = el.getRootNode ? el.getRootNode() : null;
+  while (root && root.host) {
+    var host = root.host;
+    if (host === hit || (host.contains && host.contains(hit))) return { ok: true, reason: "" };
+    root = host.getRootNode ? host.getRootNode() : null;
+  }
+  var tag = hit.tagName ? String(hit.tagName).toLowerCase() : "unknown";
+  return { ok: false, reason: "different-element:" + tag };
+}`;
+
+/**
+ * Is (x, y) still the element this observation resolved?
+ *
+ * The geometry guards in `BOX_WALK` decide at *observation* time. Between that
+ * and the press sits a model call — tens of seconds in which the page can
+ * re-render, a menu can open, a spinner can mount. `Input.dispatchMouseEvent`
+ * returns `{}` for a click that lands anywhere, including on `<body>`, so a
+ * stale coordinate is dispatched, resolves, and is audited `ok: true`. That is
+ * the same failure shape the geometry guards were written for and they cannot
+ * close it, because they are upstream of the delay. This is downstream of it.
+ *
+ * Two CDP calls on the already-attached session, per ref-derived click only.
+ * Nothing here runs for `click_xy` / `focus_xy` / `type_xy`: those arrive with
+ * no ref and no id, they are gated by `boundedPoint` and by an approval
+ * screenshot, and refusing them on an absent id would break the only way to act
+ * on a canvas page.
+ *
+ * **Every failure here refuses.** That is the decision, and the reason is the
+ * asymmetry that runs through all of `geometry.ts`: a wrong click is data loss,
+ * a missing click is one step. If the tab navigated the id no longer resolves
+ * and the observation is stale by definition; if the probe throws, the document
+ * went away mid-call. Neither is the kind of failure where proceeding is the
+ * optimistic reading — proceeding is precisely the silent wrong click this
+ * exists to prevent. The one case that fails open is an action carrying no
+ * `backendNodeId` at all, which means a relay older than the field and no gate
+ * to run; that is today's behaviour, not a new hole, and it warns.
+ */
+export async function verifyTarget(tabId, backendNodeId, x, y) {
+  if (typeof backendNodeId !== "number") return { ok: true, reason: "no-backend-id" };
+  if (typeof x !== "number" || typeof y !== "number" || !isFinite(x) || !isFinite(y)) {
+    return { ok: false, reason: "point-not-numeric" };
+  }
+  const px = Math.round(x);
+  const py = Math.round(y);
+  let objectId = "";
+  try {
+    const resolved = await anyCommand(tabId, {
+      method: "DOM.resolveNode",
+      params: { backendNodeId },
+    });
+    objectId = resolved?.object?.objectId || "";
+  } catch {
+    // A navigated tab, or a node the page has since dropped. Either way the
+    // element the model pointed at is gone; the coordinate is now a guess.
+    return { ok: false, reason: "target-gone" };
+  }
+  if (!objectId) return { ok: false, reason: "target-unresolvable" };
+  try {
+    const call = await anyCommand(tabId, {
+      method: "Runtime.callFunctionOn",
+      params: {
+        objectId,
+        functionDeclaration: TARGET_PROBE,
+        arguments: [{ value: px }, { value: py }],
+        returnByValue: true,
+        awaitPromise: false,
+      },
+    });
+    const v = call?.result?.value;
+    if (!v || typeof v !== "object") return { ok: false, reason: "probe-silent" };
+    return { ok: v.ok === true, reason: String(v.reason ?? "") };
+  } catch {
+    // The probe itself failed — context destroyed, or the call refused. The
+    // question "is this still the right element" has no answer, and refusing is
+    // the honest one. See the note above.
+    return { ok: false, reason: "probe-failed" };
+  }
+}
+
+/**
  * KNOWN LIMITATION — this is the top frame, and only the top frame.
  *
  * `Runtime.evaluate` with no `contextId` runs in the top document. Google

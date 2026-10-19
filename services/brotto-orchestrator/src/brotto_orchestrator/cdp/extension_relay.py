@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from typing import Callable, Awaitable
 
 from ..dev.ax_tree_extractor import SemanticTarget
 from ..policy.gate import screenshot_block_reason
 from ..policy.schema import Policy
-from .relay import SELECT_ALL_JS, PRESSABLE_KEYS, is_pressable_key
+from .relay import SELECT_ALL_JS, FOCUS_ID_JS, PRESSABLE_KEYS, is_pressable_key
 
 log = logging.getLogger("brotto.ext_relay")
 
@@ -31,6 +32,15 @@ _UNSOLICITED = frozenset({"navigated"})
 # the accessible-name check (over-redact, not under-redact); raise it only if
 # live runs show real timeouts.
 _ATTRS_TIMEOUT = 2.0
+
+# The extension's refusal reasons are a closed set it already writes
+# (`observation/pointer.ts`), and this is a *shape* check rather than an
+# enumeration so a reason added there does not need a deploy here. What it does
+# need is a ceiling: this string is handed to the model in the next step's
+# history and written to the audit document, so anything longer or freeform from
+# a browser extension is prompt content nobody wrote. `different-element:<tag>`
+# is the only one with a variable tail, hence the second group.
+_ACTION_REASON_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}(:[a-z0-9-]{1,24})?$")
 
 
 _TILE_KEYS = ("x", "y", "w", "h", "pct")
@@ -92,6 +102,9 @@ class ExtensionCDPRelay:
     - Server sends {type: "observe"} → extension replies {type: "observation", url, title, axTargets}
     - Server sends {type: "action", action: {...}} → extension executes, then auto-sends observation
     - We consume the auto-sent observation so the next get_targets() skips the round-trip.
+    - The extension sends {type: "action_result", ok, reason} before that observation
+      when the dispatch-time hit test refused the action. Optional for one minor:
+      its absence is "dispatched", which is what an older extension means.
     - Server sends {type: "get_attributes", backend_node_id, ref} → extension replies
       {type: "get_attributes_result", ref, attributes: {name: value}}. Correlated by `ref`
       and resolved by the caller via deliver_attributes_result().
@@ -117,6 +130,44 @@ class ExtensionCDPRelay:
         self._attrs: asyncio.Queue = asyncio.Queue()
         self._pending_attrs: set[str] = set()
         self._screenshot: asyncio.Queue = asyncio.Queue()
+        self._action_result: dict | None = None
+
+    # ---------- Actions ----------
+
+    def deliver_action_result(self, message: dict) -> None:
+        """The extension's answer to the action it was last handed.
+
+        `brotto-extension` verifies at the instant of the press that the
+        viewport point still holds the element the ref resolved to, and refuses
+        when it does not. Until this frame existed the server learned that only
+        by noticing the page had not changed, and `click_ref` returned
+        `Clicked [7]` regardless — so a refused click was audited `ok: true` and
+        the model was told it had acted on a world state that never existed.
+
+        **A plain slot, not a queue, and no id.** One action is in flight at a
+        time and the frame is written before the post-action observation on the
+        same ordered WebSocket, so by the time `_send_action` wakes the answer
+        is already here. A frame with no readable `ok` is dropped rather than
+        guessed at: `ok` absent is an extension we do not understand, and an
+        action refused on a misread frame is worse than one reported as sent.
+        """
+        if not isinstance(message, dict) or not isinstance(message.get("ok"), bool):
+            return
+        if message["ok"]:
+            self._action_result = None
+            return
+        reason = str(message.get("reason") or "")
+        if not _ACTION_REASON_RE.match(reason):
+            log.warning("[%s] action_result with unusable reason %r — reporting "
+                        "the refusal without it", self._sid, reason[:80])
+            reason = "refused"
+        self._action_result = {"ok": False, "reason": reason}
+
+    def _take_action_result(self) -> dict | None:
+        """Read and clear. Once — a refusal that outlived its action would fail
+        the next one, which was never gated."""
+        result, self._action_result = self._action_result, None
+        return result
 
     # ---------- Internal ----------
 
@@ -188,13 +239,20 @@ class ExtensionCDPRelay:
         )
         return obs
 
-    async def _send_action(self, action: dict) -> None:
+    async def _send_action(self, action: dict) -> dict | None:
         """Send action to extension; wait for the auto-sent post-action observation.
 
         Same rule as `_get_observation`: the frame answering *this* action is
         the one tagged `"action"`. A navigation push that lands mid-wait
         belongs to whatever the page did, not to this call.
+
+        Returns the extension's own verdict — `None` when it sent no
+        `action_result`, which is an extension older than the frame and is
+        exactly today's behaviour. See `deliver_action_result`.
         """
+        # Cleared first, so a frame belonging to an action whose waiter died
+        # mid-wait cannot be read as this one's answer.
+        self._action_result = None
         log.debug("[%s] sending action %s", self._sid, action)
         await self._ws_send({"type": "action", "action": action})
         loop = asyncio.get_running_loop()
@@ -225,6 +283,27 @@ class ExtensionCDPRelay:
         log.debug(
             "[%s] post-action observation  url=%s  ax=%d",
             self._sid, obs.get("url", "")[:80], len(obs.get("axTargets", [])),
+        )
+        return self._take_action_result()
+
+    @staticmethod
+    def _refusal(what: str, result: dict | None) -> str | None:
+        """What the model is told when the extension refused the dispatch.
+
+        The harness derives `ok` from the `Error executing` prefix, so this is
+        where the audit stops saying the click happened. It has to say what to
+        do next for the same reason every `_locate` refusal does: the reason is
+        the only thing the model gets, and a refusal it cannot act on produces
+        the retry loop a silent success produces, with more steps spent on it.
+        """
+        if result is None:
+            return None
+        return (
+            f"Error executing: {what} was not dispatched — the browser refused "
+            f"it at the moment of the press ({result['reason']}), which means "
+            f"the page is not what the observation showed. Re-read the page and "
+            f"act on what is there now; clicking the same coordinates again "
+            f"will be refused the same way."
         )
 
     def _locate(self, ref: str) -> tuple[dict | None, str]:
@@ -273,7 +352,18 @@ class ExtensionCDPRelay:
                     "click it again"
                 )
             if "x" in t and "y" in t:
-                return {"x": t["x"], "y": t["y"]}, ""
+                # `backendNodeId` rides the action so the extension can ask, at
+                # the instant of the press, whether this point still holds the
+                # element the model was shown. Without it the extension has only
+                # the coordinate, and a coordinate from a previous layout is
+                # indistinguishable from a good one — `Input.dispatchMouseEvent`
+                # returns `{}` for a click on `<body>`. Every clickable target
+                # carries an id (AX targets from `targetsForFrame`, supplemented
+                # ones from `supplement.ts`), and every ref-taking method below
+                # spreads these coords, so `focus_ref`/`clear_ref` are covered by
+                # the same check.
+                return {"x": t["x"], "y": t["y"],
+                        "backendNodeId": t.get("backendNodeId")}, ""
             return None, "is off-screen (no box model in the last observation)"
 
         for t in targets:
@@ -415,8 +505,9 @@ class ExtensionCDPRelay:
             log.warning("[%s] click_ref %r — %s", self._sid, ref, why)
             return f"Error executing: ref {ref!r} {why}"
         log.info("[%s] click_ref %r at (%d,%d)", self._sid, ref, coords["x"], coords["y"])
-        await self._send_action({"type": "click", **coords})
-        return f"Clicked [{ref}]"
+        refused = self._refusal(f"clicking ref {ref!r}",
+                                 await self._send_action({"type": "click", **coords}))
+        return refused or f"Clicked [{ref}]"
 
     async def focus_ref(self, ref: str) -> str:
         coords, why = self._locate(ref)
@@ -424,8 +515,9 @@ class ExtensionCDPRelay:
             log.warning("[%s] focus_ref %r — %s", self._sid, ref, why)
             return f"Error executing: ref {ref!r} {why}"
         log.debug("[%s] focus_ref %r", self._sid, ref)
-        await self._ws_send({"type": "action", "action": {"type": "click", **coords}})
-        return f"Focused [{ref}]"
+        refused = self._refusal(f"focusing ref {ref!r}",
+                                 await self._send_action({"type": "click", **coords}))
+        return refused or f"Focused [{ref}]"
 
     async def clear_ref(self, ref: str) -> str:
         coords, why = self._locate(ref)
@@ -433,7 +525,16 @@ class ExtensionCDPRelay:
             log.warning("[%s] clear_ref %r — %s", self._sid, ref, why)
             return f"Error executing: ref {ref!r} {why}"
         log.debug("[%s] clear_ref %r — click + select-all", self._sid, ref)
-        await self._ws_send({"type": "action", "action": {"type": "click", **coords}})
+        # Routed through `_send_action` like every other click, and stopped
+        # here on a refusal: the select-all below runs against whatever holds
+        # focus, and a refused click means that is some *other* field — which
+        # this action would then erase.
+        refused = self._refusal(
+            f"clearing ref {ref!r}",
+            await self._send_action({"type": "click", **coords}),
+        )
+        if refused:
+            return refused
         # Select through the DOM, not a key chord. There is no cross-platform
         # keyboard shortcut for select-all — Meta on macOS, Ctrl everywhere
         # else — and this process cannot know which one the user's browser
@@ -462,6 +563,28 @@ class ExtensionCDPRelay:
                 f"press_key instead."
             )
         return f"Cleared [{ref}]"
+
+    async def focus_id(self) -> str | None:
+        """A stable name for the focused element, or None if unreadable.
+
+        One `evaluate` round trip on the same channel `clear_ref` uses — no
+        new request type and no extension change. None is the honest answer
+        and the `press_key` guard treats it as unknown; see `FOCUS_ID_JS`.
+
+        `_eval_queue` is shared with `clear_ref` and `read_page_text`. That
+        is safe because the harness runs one action at a time, and a foreign
+        result landing here would be a string the page produced rather than
+        our own id — which reads as a moved focus, i.e. the refusing
+        direction.
+        """
+        await self._ws_send({"type": "evaluate", "expression": FOCUS_ID_JS})
+        try:
+            value = await asyncio.wait_for(self._eval_queue.get(), timeout=15)
+        except asyncio.TimeoutError:
+            log.warning("[%s] timed out reading the focused element", self._sid)
+            return None
+        text = str(value or "")
+        return text or None
 
     # ── coordinate actions ──────────────────────────────────────────────
     # A `<canvas>` has no AX node, so there is no ref to click and no
@@ -518,8 +641,9 @@ class ExtensionCDPRelay:
         # both launders an unverified point as verified and makes that branch
         # dead code.
         log.info("[%s] click_xy (%d,%d)", self._sid, x, y)
-        await self._send_action({"type": "click_xy", "x": int(x), "y": int(y)})
-        return f"Clicked at ({x},{y})"
+        refused = self._refusal(f"clicking ({x},{y})",
+                                 await self._send_action({"type": "click_xy", "x": int(x), "y": int(y)}))
+        return refused or f"Clicked at ({x},{y})"
 
     async def focus_xy(self, x: int, y: int) -> str:
         # `click_xy` on the wire, and it was always `click`: this is a full
@@ -528,11 +652,11 @@ class ExtensionCDPRelay:
         # `Input.dispatchMouseEvent` either way — so it takes the untrusted
         # branch, exactly like `click_xy` does.
         log.debug("[%s] focus_xy (%d,%d)", self._sid, x, y)
-        await self._ws_send(
-            {"type": "action", "action": {"type": "click_xy", "x": int(x),
-                                          "y": int(y)}}
+        refused = self._refusal(
+            f"focusing ({x},{y})",
+            await self._send_action({"type": "click_xy", "x": int(x), "y": int(y)}),
         )
-        return f"Focused ({x},{y})"
+        return refused or f"Focused ({x},{y})"
 
     async def type_text_at_focus(self, text: str) -> str:
         """Insert into whatever holds focus. No ref, so no locate guard — the

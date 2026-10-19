@@ -7,7 +7,7 @@
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
 import { clearDelta } from "./observation/delta";
-import { boundedPoint, clearCursor, drawCursor } from "./observation/pointer";
+import { boundedPoint, clearCursor, drawCursor, verifyTarget } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -659,7 +659,7 @@ function signalResume(): void {
 
 // ── Action execution ─────────────────────────────────────────────────────────
 
-async function executeAction(tabId: number, action: any): Promise<void> {
+async function executeAction(tabId: number, action: any): Promise<{ ok: boolean; reason: string }> {
   const t = action.type;
   // A marker left up by an action that died mid-flight is an occluder over the
   // element the *next* click is aimed at. Idempotent, and cheap enough to be
@@ -667,6 +667,13 @@ async function executeAction(tabId: number, action: any): Promise<void> {
   // does work when a previous action left one behind.
   await clearCursor(tabId);
   let drewCursor = false;
+  // What the server is told happened. The gates below refuse rather than
+  // dispatch, and until this existed a refusal was invisible to the server:
+  // `click_ref` returned `Clicked [7]` the moment the frame left, so the model
+  // believed it acted and `record_action` wrote `ok: true` for a press that
+  // never happened. One shape, closed vocabulary, no freeform text — this
+  // string reaches the model's history and the audit document.
+  let refusal: { ok: boolean; reason: string } | null = null;
   try {
   if (t === "navigate") {
     await dbg.sendCommand(tabId, { method: "Page.navigate", params: { url: action.url } });
@@ -678,17 +685,34 @@ async function executeAction(tabId: number, action: any): Promise<void> {
     // the wire, checked by nobody, and are re-bounded against the live
     // viewport here before anything is dispatched. The `viewport` on that same
     // frame is not the bound: it is the sender's idea of the viewport, from
-    // the same untrusted message.
+    // the same untrusted message. And `click`'s coordinates are re-checked
+    // against the live page below, because "was measured correctly" and "is
+    // still there" are different questions.
     const point = t === "click_xy"
       ? await boundedPoint(tabId, action.x, action.y)
       : { x: action.x, y: action.y };
     if (!point) {
-      // Loud in the service-worker log; the relay finds out by observing an
-      // unchanged page, which is what a refused click is supposed to look like.
+      // Loud in the service-worker log, and reported: the relay can no longer
+      // learn a refusal from noticing an unchanged page, and an unreported
+      // one is audited `ok: true`.
       console.warn(`brotto: ${t} refused — (${String(action.x)}, ${String(action.y)}) is not a point in the live viewport`);
+      refusal = { ok: false, reason: "point-out-of-viewport" };
       return;
     }
     const { x, y } = point;
+    // The geometry that put these coordinates there was measured at
+    // observation time, and a model call sits between that and this press. One
+    // in-page hit test here is the last point at which "this is still the
+    // element the model was shown" is answerable. Only for `click`: `click_xy`
+    // carries no ref and no id, and `verifyTarget` reports that case as
+    // pass-through rather than refusing it, so the coordinate path onto a canvas
+    // page keeps working.
+    const check = await verifyTarget(tabId, action.backendNodeId, x, y);
+    if (!check.ok) {
+      console.warn(`brotto: ${t} refused — hit test says ${check.reason} at (${x},${y})`);
+      refusal = { ok: false, reason: check.reason };
+      return;
+    }
     // Draw, click, then the `finally` clears it. pointer-events: none means the
     // hit test in BOX_WALK cannot see it, and the clear means a later
     // observation is not reading a page we decorated.
@@ -749,6 +773,25 @@ async function executeAction(tabId: number, action: any): Promise<void> {
     // outlives the action that drew it.
     if (drewCursor) await clearCursor(tabId);
   }
+  return refusal ?? { ok: true, reason: "" };
+}
+
+/**
+ * Tell the server what this action actually did.
+ *
+ * Sent *before* the post-action observation, so by the time the server's
+ * `_send_action` wakes on that observation the verdict is already sitting in
+ * its slot — one ordered socket, no correlation id. Optional for one minor: an
+ * orchestrator predating the frame ignores it, and one predating this client
+ * never receives it, which is read as "dispatched", today's behaviour.
+ */
+function sendActionResult(result: { ok: boolean; reason: string }): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({
+    type: "action_result",
+    ok: result.ok,
+    reason: result.reason.slice(0, 64),
+  }));
 }
 
 /**
@@ -1389,7 +1432,8 @@ async function startRelay(
           }
           break;
         }
-        await executeAction(tid, msg.action);
+        const result = await executeAction(tid, msg.action);
+        sendActionResult(result);
         await sendObservation(tid, "action");
         break;
 
