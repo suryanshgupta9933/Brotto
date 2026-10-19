@@ -1513,6 +1513,17 @@ as no progress. The old rule required *all three* terms to be unchanged before
 counting a step, and dropping the other two inside that branch is what let a
 23-step run be "stopped" for having navigated.
 
+**The two ways a delta comes back unknown are deliberately the same value.** A
+page the harness refused to look at because it carries a typed secret, and a
+`get_page_delta` that raised `TabUnreachable`, both land on `None` and are
+indistinguishable to everything downstream — so neither a veto nor a failed read
+can read as "nothing moved", and neither can end a step. The cost is the same
+on purpose: a vetoed or unreadable canvas page earns *no* progress credit from
+the delta and falls back to the URL and AX terms alone, because inferring "no
+progress" from a refusal to look would be the silence-is-not-a-measurement
+error this rewrite exists to remove, and the stop message would be false about
+the run.
+
 **Because the delta belongs to the page, it cannot hold the loop open.** A
 caret blink, a spinner, a feed repainting for its own reasons moves pixels
 forever, so progress credited to the delta alone is bounded separately:
