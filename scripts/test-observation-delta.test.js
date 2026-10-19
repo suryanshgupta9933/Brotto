@@ -526,11 +526,18 @@ function check(name, cond, detail) {
   console.log("\ncanvas enumeration bound");
   {
     const MAX_CANVASES = vm.runInNewContext(extractConst("MAX_CANVASES"));
+    const SCAN_CANVASES = vm.runInNewContext(extractConst("SCAN_CANVASES"));
     const PAGE_EXPRESSION = vm.runInNewContext(
-      `(function (MAX_CANVASES) { return ${extractConstMultiline("PAGE_EXPRESSION")}; })(${MAX_CANVASES})`);
+      `(function (MAX_CANVASES, SCAN_CANVASES) { return ${extractConstMultiline("PAGE_EXPRESSION")}; })(${MAX_CANVASES}, ${SCAN_CANVASES})`);
 
-    check("the in-page expression caps its own loop",
-      PAGE_EXPRESSION.includes("cs2.length<" + MAX_CANVASES), PAGE_EXPRESSION);
+    check("the in-page expression caps how many elements it examines",
+      PAGE_EXPRESSION.includes("cs2.length<" + SCAN_CANVASES), PAGE_EXPRESSION);
+    // A decoy must not be able to spend the budget of a real canvas: the
+    // kept-budget guard has to sit *inside* the loop, on the pushed rects.
+    check("the kept budget is spent only by visible canvases, not by decoys",
+      PAGE_EXPRESSION.includes("canv.length<" + MAX_CANVASES), PAGE_EXPRESSION);
+    check("hitting the scan bound is reported as a cap, not as an answer",
+      PAGE_EXPRESSION.includes("capped=cs2.length>lim"), PAGE_EXPRESSION);
 
     // The page hands back more rects than the cap allows anyway — which is
     // exactly what a page that rewrites the expression's surroundings would do.
@@ -565,6 +572,14 @@ function check(name, cond, detail) {
     // The bound must not change the answer for a page within it.
     check("the bound leaves a full-viewport canvas fully covered",
       computeCanvasCovered((await probe({ caret: [], canvases: [{ x: 0, y: 0, w: 800, h: 600 }], vw: 800, vh: 600 })).canvases, 800, 600) === 1);
+
+    // A page that scanned more than the bound cannot vouch for the largest
+    // rect, so the answer is unknown — and unknown must read as absent, not 0.
+    check("a capped enumeration is reported as capped",
+      (await probe({ caret: [], canvases: [], capped: true, vw: 100, vh: 100 })).capped === true
+      && (await probe({ caret: [], canvases: [], vw: 100, vh: 100 })).capped === false);
+    check("a capped enumeration yields no canvasCovered at all",
+      extract("computeDelta").includes("!probe.capped"));
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");

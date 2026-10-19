@@ -106,6 +106,13 @@ const FORMAT = "png";
  *  to break). */
 const MAX_CANVASES = 64;
 
+/** Elements *examined*, as distinct from the ones kept. Separating them is the
+ *  whole point: a page that puts 64 zero-size `<canvas>` decoys ahead of its
+ *  real full-viewport one cannot hide it, because a decoy is skipped before it
+ *  reaches the kept budget. 512 is well above any real document and still a
+ *  hard bound on work a page can force on every step. */
+const SCAN_CANVASES = 512;
+
 export interface Tile { x: number; y: number; w: number; h: number; pct: number }
 export interface Delta { changed: boolean; tiles: Tile[] }
 
@@ -231,13 +238,15 @@ const PAGE_EXPRESSION =
   "if(c){c.font=cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily;" +
   "x+=c.measureText(a.value.slice(0,a.selectionStart)).width;}" +
   "out.push({x:x,y:b.top,w:2,h:b.height||16});}}catch(e){}" +
-  "var canv=[];try{var cs2=document.getElementsByTagName('canvas');" +
-  "var lim=cs2.length<" + MAX_CANVASES + "?cs2.length:" + MAX_CANVASES + ";" +
+  "var canv=[],capped=false;try{var cs2=document.getElementsByTagName('canvas');" +
+  "var lim=cs2.length<" + SCAN_CANVASES + "?cs2.length:" + SCAN_CANVASES + ";" +
+  "capped=cs2.length>lim;" +
   "for(var i=0;i<lim;i++){var cr=cs2[i].getBoundingClientRect();" +
-  "if(cr.width>0&&cr.height>0)canv.push({x:cr.left,y:cr.top,w:cr.width,h:cr.height});}}catch(e){}" +
-  "return {caret:out,canvases:canv,vw:window.innerWidth,vh:window.innerHeight};})()";
+  "if(cr.width>0&&cr.height>0&&canv.length<" + MAX_CANVASES + ")" +
+  "canv.push({x:cr.left,y:cr.top,w:cr.width,h:cr.height});}}catch(e){}" +
+  "return {caret:out,canvases:canv,capped:capped,vw:window.innerWidth,vh:window.innerHeight};})()";
 
-async function pageProbe(tabId: number): Promise<{ caret: any[]; canvases: any[]; vw: number; vh: number } | null> {
+async function pageProbe(tabId: number): Promise<{ caret: any[]; canvases: any[]; capped: boolean; vw: number; vh: number } | null> {
   try {
     const r = await dbg.sendCommand(tabId, {
       method: "Runtime.evaluate",
@@ -247,9 +256,14 @@ async function pageProbe(tabId: number): Promise<{ caret: any[]; canvases: any[]
     if (!v || typeof v !== "object") return null;
     return {
       caret: Array.isArray((v as any).caret) ? (v as any).caret : [],
+      // Shaping of an untrusted string, not a second bound on the same
+      // budget: the page already kept at most `MAX_CANVASES`. A page that
+      // returns more anyway gets its first 64, which can be smaller than the
+      // true largest — `capped` below makes that *unknown*, not *not a canvas*.
       canvases: Array.isArray((v as any).canvases)
         ? (v as any).canvases.slice(0, MAX_CANVASES)
         : [],
+      capped: (v as any).capped === true,
       vw: Number((v as any).vw) || 0,
       vh: Number((v as any).vh) || 0,
     };
@@ -361,8 +375,10 @@ async function captureFrame(tabId: number) {
  * on the first observation: it describes the page, not the previous frame, and
  * the harness reads it to decide whether to ask for a screenshot — so it has
  * to be there before that decision. It is ABSENT when the DOM pass itself
- * failed (tab gone, debugger detached): the harness treats a missing value as
- * unknown, and `0` would be a claim — "not a canvas" — that nothing checked.
+ * failed (tab gone, debugger detached) or when the canvas enumeration hit its
+ * scan bound and so cannot vouch for the largest one: the harness treats a
+ * missing value as unknown, and `0` would be a claim — "not a canvas" — that
+ * nothing checked.
  */
 export async function computeDelta(
   tabId: number,
@@ -370,7 +386,7 @@ export async function computeDelta(
   opts?: DeltaOpts,
 ): Promise<PageSignal> {
   const probe = await pageProbe(tabId);
-  const canvasCovered = probe
+  const canvasCovered = probe && !probe.capped
     ? computeCanvasCovered(probe.canvases, probe.vw, probe.vh)
     : undefined;
 
