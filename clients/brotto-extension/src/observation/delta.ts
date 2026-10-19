@@ -18,6 +18,17 @@
  * `tiles` are 16×16 tiles in FULL-RESOLUTION viewport CSS pixels. `pct` is the
  * tile's mean absolute luminance difference, as a percentage of full scale.
  *
+ * The same pass also yields, on every observation:
+ *
+ *   canvasCovered: 0.0 .. 1.0
+ *
+ * The fraction of the visible viewport occupied by the largest single
+ * `<canvas>` — Sheets, Docs, Figma, Canva. It rides the existing DOM
+ * evaluation below, so it costs one `getBoundingClientRect` loop and no round
+ * trip; the harness reads it to decide whether to ask for a screenshot, so it
+ * must be present before that decision. Fixed wire name and type; do not nest
+ * or rename it.
+ *
  * ── Locked decision D2, and it is the reason this file ends where it ends ──
  * These coordinates are EVIDENCE, NEVER A TARGET. Nothing in the extension may
  * consume them; the server is forbidden from feeding a tile to a coordinate
@@ -88,6 +99,11 @@ const FORMAT = "png";
 
 export interface Tile { x: number; y: number; w: number; h: number; pct: number }
 export interface Delta { changed: boolean; tiles: Tile[] }
+
+/** What one page pass yields: the per-step diff when there is one truthful to
+ *  report, and the canvas occupancy fraction always (it is a property of the
+ *  page, not of the previous frame, so the first observation has it too). */
+export interface PageSignal { delta?: Delta; canvasCovered?: number }
 
 /** Named rather than inline, because `scripts/test-observation-delta.test.js`
  *  extracts this function by brace matching and an inline `{ reset?: boolean }`
@@ -194,33 +210,82 @@ export function tileDelta(prev, cur, masked) {
  * looking for the widget's own cursor element, which is per-product and is not
    * a general fix.
  */
-const CARET_EXPRESSION =
-  "(function(){var a=document.activeElement;if(!a)return [];var out=[];try{" +
-  "if(a.isContentEditable){var s=window.getSelection();" +
+const PAGE_EXPRESSION =
+  "(function(){var a=document.activeElement;var out=[];try{" +
+  "if(a&&a.isContentEditable){var s=window.getSelection();" +
   "if(s&&s.rangeCount){var r=s.getRangeAt(0).getBoundingClientRect();" +
-  "if(r.width||r.height)out.push({x:r.x,y:r.y,w:2,h:r.height||16});}return out;}" +
-  "if(typeof a.value!=='string'||a.selectionStart===undefined||a.selectionStart===null)return out;" +
+  "if(r.width||r.height)out.push({x:r.x,y:r.y,w:2,h:r.height||16});}}" +
+  "else if(a&&typeof a.value==='string'&&a.selectionStart!==undefined&&a.selectionStart!==null){" +
   "var cs=getComputedStyle(a);var b=a.getBoundingClientRect();" +
   "var x=b.left+parseFloat(cs.borderLeftWidth||0)+parseFloat(cs.paddingLeft||0);" +
   "var c=document.createElement('canvas').getContext('2d');" +
   "if(c){c.font=cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily;" +
   "x+=c.measureText(a.value.slice(0,a.selectionStart)).width;}" +
-  "out.push({x:x,y:b.top,w:2,h:b.height||16});}catch(e){}" +
-  "return out;})()";
+  "out.push({x:x,y:b.top,w:2,h:b.height||16});}}catch(e){}" +
+  "var canv=[];try{var cs2=document.getElementsByTagName('canvas');" +
+  "for(var i=0;i<cs2.length;i++){var cr=cs2[i].getBoundingClientRect();" +
+  "if(cr.width>0&&cr.height>0)canv.push({x:cr.left,y:cr.top,w:cr.width,h:cr.height});}}catch(e){}" +
+  "return {caret:out,canvases:canv,vw:window.innerWidth,vh:window.innerHeight};})()";
 
-async function caretMaskRects(tabId: number): Promise<any[]> {
+async function pageProbe(tabId: number): Promise<{ caret: any[]; canvases: any[]; vw: number; vh: number } | null> {
   try {
     const r = await dbg.sendCommand(tabId, {
       method: "Runtime.evaluate",
-      params: { expression: CARET_EXPRESSION, returnByValue: true },
+      params: { expression: PAGE_EXPRESSION, returnByValue: true },
     }) as { result?: { value?: unknown } };
     const v = r?.result?.value;
-    return Array.isArray(v) ? v : [];
+    if (!v || typeof v !== "object") return null;
+    return {
+      caret: Array.isArray((v as any).caret) ? (v as any).caret : [],
+      canvases: Array.isArray((v as any).canvases) ? (v as any).canvases : [],
+      vw: Number((v as any).vw) || 0,
+      vh: Number((v as any).vh) || 0,
+    };
   } catch {
     // Tab mid-navigation, or the debugger went. The diff still works; it just
     // does not know about a caret this time.
-    return [];
+    return null;
   }
+}
+
+/**
+ * The fraction of the visible viewport occupied by the largest single
+ * `<canvas>`, in `[0, 1]`.
+ *
+ * WHY. Google Sheets, Docs, Figma and Canva draw their content to a canvas.
+ * Their AX tree is the toolbar and the menu bar and nothing else, so the
+ * vision-fallback trigger — which fires on vocabulary overlap — reads the
+ * word "Sheet1" and "Name box" in the page chrome and decides the model can
+ * see the grid. It cannot. This is the honest, cheap page-level signal, and it
+ * is one number: no pixels, no second round trip, no new frame type.
+ *
+ * The question asked is what the canvas *occupies*, not what is on top of it,
+ * so it is `getBoundingClientRect()` area and deliberately NOT
+ * `elementFromPoint` sampling: a grid's own overlay divs would sample over the
+ * canvas in places and undercount it. Rects are intersected with the viewport
+ * so a grid scrolled half off-screen reports what it actually shows.
+ *
+ * Written without local type annotations for the same reason as `tileDelta`:
+ * the test extracts this body by brace matching and evals it as plain
+ * JavaScript.
+ */
+export function computeCanvasCovered(rects, vw, vh) {
+  const area = vw * vh;
+  if (!(area > 0) || !Array.isArray(rects)) return 0;
+  let best = 0;
+  for (const r of rects) {
+    const x0 = Math.max(0, r.x);
+    const y0 = Math.max(0, r.y);
+    const x1 = Math.min(vw, r.x + (r.w || 0));
+    const y1 = Math.min(vh, r.y + (r.h || 0));
+    const a = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+    // A NaN coordinate makes `a` NaN, and the comparison is false, so a
+    // malformed rect is dropped rather than emitted.
+    if (a > best) best = a;
+  }
+  let f = best / area;
+  if (!isFinite(f) || f < 0) f = 0;
+  return f > 1 ? 1 : f;
 }
 
 /** Rasterise caret rects (CSS px) into a per-pixel mask at the frame's own
@@ -272,20 +337,31 @@ async function captureFrame(tabId: number) {
 }
 
 /**
- * The per-step delta for this tab, or `undefined` when there is nothing
- * truthful to say.
+ * The per-step delta for this tab, plus the canvas occupancy fraction.
  *
- * `undefined` is the answer for every case where a comparison would be a lie:
- * first observation, a different URL, a viewport that changed size, or a
- * capture that failed. Reporting `changed: false` in any of those would tell
- * the model "I checked and nothing happened" when in fact nothing was checked,
+ * `delta` is absent for every case where a comparison would be a lie: first
+ * observation, a different URL, a viewport that changed size, or a capture
+ * that failed. Reporting `changed: false` in any of those would tell the
+ * model "I checked and nothing happened" when in fact nothing was checked,
  * and the whole point of this feature is that the model trusts `false`.
+ *
+ * `canvasCovered` is present whenever the DOM pass returned at all, including
+ * on the first observation: it describes the page, not the previous frame, and
+ * the harness reads it to decide whether to ask for a screenshot — so it has
+ * to be there before that decision. It is ABSENT when the DOM pass itself
+ * failed (tab gone, debugger detached): the harness treats a missing value as
+ * unknown, and `0` would be a claim — "not a canvas" — that nothing checked.
  */
 export async function computeDelta(
   tabId: number,
   url: string,
   opts?: DeltaOpts,
-): Promise<Delta | undefined> {
+): Promise<PageSignal> {
+  const probe = await pageProbe(tabId);
+  const canvasCovered = probe
+    ? computeCanvasCovered(probe.canvases, probe.vw, probe.vh)
+    : undefined;
+
   const prev = frames.get(tabId);
   if (opts?.reset || (prev && prev.url !== url)) {
     clearDelta(tabId);
@@ -293,29 +369,35 @@ export async function computeDelta(
       const first = await captureFrame(tabId);
       if (first) frames.set(tabId, { url, data: first });
     } catch { /* capture failed; the next step still has nothing to compare */ }
-    return undefined;
+    return signal(canvasCovered);
   }
 
   let cur;
   try {
     cur = await captureFrame(tabId);
   } catch {
-    return undefined;
+    return signal(canvasCovered);
   }
-  if (!cur) return undefined;
+  if (!cur) return signal(canvasCovered);
   if (!prev) {
     frames.set(tabId, { url, data: cur });
-    return undefined;
+    return signal(canvasCovered);
   }
   // A resized window is not a page change; it is a different buffer. Comparing
   // them would report the whole viewport as changed.
   if (prev.data.width !== cur.width || prev.data.height !== cur.height) {
     frames.set(tabId, { url, data: cur });
-    return undefined;
+    return signal(canvasCovered);
   }
 
-  const mask = buildCaretMask(cur.width, cur.height, await caretMaskRects(tabId));
+  const mask = buildCaretMask(cur.width, cur.height, probe ? probe.caret : []);
   const delta = tileDelta(prev.data, cur, mask);
   frames.set(tabId, { url, data: cur });
-  return delta;
+  return { delta, ...(canvasCovered === undefined ? {} : { canvasCovered }) };
+}
+
+/** `undefined` here means "not measured", and is spread away rather than
+ *  defaulted to 0 — see the note on `computeDelta`. */
+function signal(canvasCovered) {
+  return canvasCovered === undefined ? {} : { canvasCovered };
 }

@@ -323,20 +323,27 @@ export async function captureObservation(tabId: number) {
   // Untyped for the same reason as every other extracted body —
   // `test-observation-rescan-guard.test.js` evals `captureObservation` as
   // plain JavaScript and `let delta: Delta` is a syntax error there.
-  let delta;
+  let signal;
   try {
-    delta = await computeDelta(tabId, url);
+    signal = await computeDelta(tabId, url);
   } catch (e) {
     console.warn("[brotto] page delta unavailable:", e);
   }
 
-  // `frames`, `metrics` and `delta` ride the wire for free — `sendObservation`
+  // `frames`, `metrics`, `delta` and `canvasCovered` ride the wire for free — `sendObservation`
   // spreads the whole observation — so a truncated or cross-origin-reading
   // step, what the observation cost to produce, and what moved on the page are
   // all visible in the server log and the audit without a second channel.
   return {
     ...observation,
-    ...(delta ? { delta } : {}),
+    ...(signal?.delta ? { delta: signal.delta } : {}),
+    // Always present when the page pass answered, including the first
+    // observation: the harness reads it to decide whether to ask for a
+    // screenshot, so it must be there before that decision. Absent when the
+    // pass itself failed — see `delta.ts` for why that is not a `0`.
+    ...(signal && signal.canvasCovered !== undefined
+      ? { canvasCovered: signal.canvasCovered }
+      : {}),
     metrics: observationMetrics(
       stability, geometry, scans, axTargets.length,
       JSON.stringify(observation).length,

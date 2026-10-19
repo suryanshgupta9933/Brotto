@@ -57,6 +57,7 @@ const NUMBERS = {
 
 const TILE_DELTA = extract("tileDelta");
 const BUILD_MASK = extract("buildCaretMask");
+const CANVAS_COVERED = extract("computeCanvasCovered");
 
 // The extracted body, bound to the real constants. The consts are *evaluated*
 // rather than passed as source text for the reason the stability suite gives:
@@ -73,6 +74,11 @@ const buildCaretMask = vm.runInNewContext(
      return function (width, height, rects) { ${BUILD_MASK} };
    })(${NUMBERS.SCALE})`,
   { Math, Uint8Array },
+);
+
+const computeCanvasCovered = vm.runInNewContext(
+  `(function () { return function (rects, vw, vh) { ${CANVAS_COVERED} }; })()`,
+  { Math, Array, isFinite },
 );
 
 // ── Synthetic frames ────────────────────────────────────────────────────────
@@ -237,14 +243,20 @@ function check(name, cond, detail) {
          const clearDelta = function (tabId) { ${extract("clearDelta")} };
          const tileDelta = function (prev, cur, masked) { ${TILE_DELTA} };
          const buildCaretMask = function (width, height, rects) { ${BUILD_MASK} };
-         async function caretMaskRects(tabId) {
+         // The one DOM pass, faked: pageProbe is the only thing between
+         // computeDelta and the wire, and it is a single evaluate returning
+         // the caret rects and the canvas rects together.
+         async function pageProbe(tabId) {
            try {
              const r = await dbg.sendCommand(tabId, {
                method: "Runtime.evaluate", params: { expression: "", returnByValue: true } });
              const v = r?.result?.value;
-             return Array.isArray(v) ? v : [];
-           } catch { return []; }
+             if (!v || typeof v !== "object") return null;
+             return { caret: v.caret, canvases: v.canvases, vw: v.vw, vh: v.vh };
+           } catch { return null; }
          }
+         const computeCanvasCovered = function (rects, vw, vh) { ${CANVAS_COVERED} };
+         const signal = function (canvasCovered) { ${extract("signal")} };
          async function captureFrame(tabId) {
            const r = await dbg.sendCommand(tabId, {
              method: "Page.captureScreenshot",
@@ -280,8 +292,9 @@ function check(name, cond, detail) {
     // The harness hands `computeDelta` a browser: a debugger that answers a
     // screenshot with base64 and answers the caret evaluate with rects, and a
     // decoder that turns the base64 into the next queued frame.
-    const makeRun = (caretRects) => {
+    const makeRun = (caretRects, canvases = [], vw = 0, vh = 0) => {
       const shots = [];
+      const calls = { evaluates: 0 };
       const canvas = {
         getContext: () => ({
           drawImage() {},
@@ -290,6 +303,7 @@ function check(name, cond, detail) {
       };
       return {
         shots,
+        get evaluates() { return calls.evaluates; },
         api: bound({
           TILE_PX: NUMBERS.TILE_PX,
           TILE_DIFF_THRESHOLD: NUMBERS.TILE_DIFF_THRESHOLD,
@@ -302,7 +316,10 @@ function check(name, cond, detail) {
           dbg: {
             sendCommand: async (tabId, cmd) => {
               if (cmd.method === "Page.captureScreenshot") return { data: "Zm9v" };
-              if (cmd.method === "Runtime.evaluate") return { result: { value: caretRects } };
+              if (cmd.method === "Runtime.evaluate") {
+                calls.evaluates++;
+                return { result: { value: { caret: caretRects, canvases, vw, vh } } };
+              }
               return {};
             },
           },
@@ -318,7 +335,7 @@ function check(name, cond, detail) {
 
     const first = await h.computeDelta(7, "https://example.test/sheet");
     check("no previous frame ⇒ delta is omitted, not a false 'all changed'",
-      first === undefined, `got ${JSON.stringify(first)}`);
+      first.delta === undefined, `got ${JSON.stringify(first)}`);
 
     // Same page, second capture, and the pixels genuinely differ — so the
     // omission above came from "no previous frame" and not from a diff that
@@ -326,21 +343,21 @@ function check(name, cond, detail) {
     run.shots.push(edited);
     const second = await h.computeDelta(7, "https://example.test/sheet");
     check("a real edit on the second observation IS reported",
-      second !== undefined && second.changed === true,
+      second.delta !== undefined && second.delta.changed === true,
       `got ${JSON.stringify(second)} — the first-observation omission above would ` +
       "have been a broken diff, not a truthful one");
 
     // A different URL: the retained frame is not this page.
     const afterNav = await h.computeDelta(7, "https://example.test/other");
-    check("a navigation ⇒ delta is omitted too", afterNav === undefined,
+    check("a navigation ⇒ delta is omitted too", afterNav.delta === undefined,
       `got ${JSON.stringify(afterNav)}`);
     const afterNavSettled = await h.computeDelta(7, "https://example.test/other");
     check("…and the frame after it diffs against the NEW page",
-      afterNavSettled !== undefined, "the navigation reset left nothing to diff");
+      afterNavSettled.delta !== undefined, "the navigation reset left nothing to diff");
 
     // An explicit reset — the onCommitted path in background.ts.
     const afterReset = await h.computeDelta(7, "https://example.test/other", { reset: true });
-    check("an explicit reset ⇒ delta is omitted", afterReset === undefined,
+    check("an explicit reset ⇒ delta is omitted", afterReset.delta === undefined,
       `got ${JSON.stringify(afterReset)}`);
 
     h.clearDelta(7);
@@ -355,8 +372,37 @@ function check(name, cond, detail) {
     caretRun.shots.push(lit);
     const caretDelta = await caretRun.api.computeDelta(7, "https://example.test/caret");
     check("a caret blink through the real capture path is not a change",
-      caretDelta !== undefined && caretDelta.changed === false,
+      caretDelta.delta !== undefined && caretDelta.delta.changed === false,
       `got ${JSON.stringify(caretDelta)}`);
+
+    // canvasCovered rides the SAME pass — the harness reads it to decide
+    // whether to ask for a screenshot, so it must be on the wire on the FIRST
+    // observation too, not only alongside a delta.
+    const canvasRun = makeRun([], [{ x: 0, y: 0, w: 1000, h: 800 }], 1000, 800);
+    const firstCanvas = await canvasRun.api.computeDelta(7, "https://example.test/sheet");
+    check("canvasCovered is present on the FIRST observation, with no delta",
+      firstCanvas.delta === undefined && firstCanvas.canvasCovered === 1,
+      `got ${JSON.stringify(firstCanvas)} — the harness cannot decide to ask for a ` +
+      "screenshot before the first action if this rides the delta alone");
+    check("canvasCovered is a top-level field, not nested in delta",
+      typeof firstCanvas.canvasCovered === "number",
+      `got ${JSON.stringify(firstCanvas)}`);
+
+    const blankRun = makeRun([], [], 1000, 800);
+    const blank = await blankRun.api.computeDelta(7, "https://example.test/plain");
+    check("a page with no canvas reports canvasCovered 0.0",
+      blank.canvasCovered === 0, `got ${JSON.stringify(blank)}`);
+
+    // One Runtime.evaluate, not two. A per-step round trip on this path is the
+    // cost the whole feature exists to avoid, so the count is asserted, not
+    // assumed: makeRun records every method it is asked for.
+    const spyRun = makeRun([], [{ x: 0, y: 0, w: 1000, h: 800 }], 1000, 800);
+    await spyRun.api.computeDelta(7, "https://example.test/sheet");
+    spyRun.shots.push(edited);
+    await spyRun.api.computeDelta(7, "https://example.test/sheet");
+    check("canvasCovered rides the existing DOM pass, not a second round trip",
+      spyRun.evaluates === 2,
+      `sent ${spyRun.evaluates} Runtime.evaluate calls across two steps`);
   }
 
   // ── 5. The wire shape ─────────────────────────────────────────────────────
@@ -395,6 +441,61 @@ function check(name, cond, detail) {
       `order was ${JSON.stringify(pcts)}`);
     check("the worst tile is first", pcts[0] > pcts[pcts.length - 1],
       `order was ${JSON.stringify(pcts)}`);
+  }
+
+  // ── 7. canvasCovered — the page-level "can the model see this?" signal ───
+  // Sheets, Docs, Figma and Canva draw the content; their AX tree is the
+  // toolbar. Vocabulary overlap fires the vision fallback on the page chrome
+  // ("Sheet1", "Name box") and not on the grid, so the harness needs the
+  // occupancy fraction instead. Same numbers, same clamped type, no pixels.
+  {
+    const VW = 1000, VH = 800;
+
+    const full = computeCanvasCovered([{ x: 0, y: 0, w: VW, h: VH }], VW, VH);
+    check("a canvas filling the viewport reports 1.0", full === 1, `got ${full}`);
+
+    const none = computeCanvasCovered([], VW, VH);
+    check("no canvas reports 0.0", none === 0, `got ${none}`);
+
+    // A toolbar-only canvas: a fifth of the viewport, well under the trigger.
+    const half = computeCanvasCovered([{ x: 0, y: 0, w: VW, h: VH / 5 }], VW, VH);
+    check("a canvas smaller than the viewport reports a fraction below 1.0",
+      half > 0 && half < 1 && Math.abs(half - 0.2) < 1e-9, `got ${half}`);
+
+    // Scrolled up off-screen: only the bottom sixth of the canvas is visible,
+    // so the raw rect (800 tall) would report 1.0 and the model would be sent
+    // a grid it cannot see.
+    const scrolled = computeCanvasCovered(
+      [{ x: 0, y: -VH * 5 / 6, w: VW, h: VH }], VW, VH);
+    check("a canvas scrolled mostly off-screen is discounted",
+      scrolled > 0 && scrolled < 0.2 && Math.abs(scrolled - 1 / 6) < 1e-9,
+      `got ${scrolled}`);
+
+    const over = computeCanvasCovered(
+      [{ x: -500, y: -500, w: VW * 3, h: VH * 3 }], VW, VH);
+    check("an over-large canvas is clamped to 1.0", over === 1, `got ${over}`);
+
+    // A rect that overflows the viewport horizontally is clipped to it, so the
+    // fraction can never exceed 1 even from a bad rect.
+    const bad = computeCanvasCovered([{ x: NaN, y: 0, w: 100, h: 100 }], VW, VH);
+    check("a NaN rect is dropped, not emitted", bad === 0, `got ${bad}`);
+
+    const nanRect = computeCanvasCovered([{ x: 0, y: 0, w: NaN, h: NaN }], VW, VH);
+    check("a NaN-sized rect is dropped, not emitted", nanRect === 0, `got ${nanRect}`);
+
+    const junk = computeCanvasCovered("not a list", VW, VH);
+    check("a non-array value is 0.0, not a throw", junk === 0, `got ${junk}`);
+
+    const zeroVp = computeCanvasCovered([{ x: 0, y: 0, w: 10, h: 10 }], 0, 0);
+    check("a zero-area viewport is 0.0, not Infinity", zeroVp === 0, `got ${zeroVp}`);
+
+    // The largest single canvas wins — a page carries decorative canvases too.
+    const biggest = computeCanvasCovered([
+      { x: 0, y: 0, w: 10, h: 10 },
+      { x: 0, y: 0, w: VW / 2, h: VH },
+    ], VW, VH);
+    check("the largest canvas is the one reported",
+      Math.abs(biggest - 0.5) < 1e-9, `got ${biggest}`);
   }
 
   console.log(failures ? `\n${failures} failed` : "\nall passed");
