@@ -126,11 +126,24 @@ const INVISIBLE_CP = (() => {
 const splitInvisible = eval(`(${sliceFunction("splitInvisible")})`);
 const appendApprovalValue = eval(`(${sliceFunction("appendApprovalValue")})`);
 const approvalValueUnavailable = eval(`(${sliceFunction("approvalValueUnavailable")})`);
+const approvalValueMasked = eval(`(${sliceFunction("approvalValueMasked")})`);
+
+// The gate settles on the deny's reply, so a gate test has to let the
+// microtask queue drain before it reads the card.
+const flush = () => new Promise((r) => setImmediate(r));
 
 let failed = 0;
+const pending = [];
 function check(name, fn) {
   try {
-    fn();
+    const out = fn();
+    if (out && typeof out.then === "function") {
+      pending.push(out.then(
+        () => console.log(`  ok  ${name}`),
+        (e) => { failed++; console.error(`FAIL  ${name}\n      ${e.message}`); },
+      ));
+      return;
+    }
     console.log(`  ok  ${name}`);
   } catch (e) {
     failed++;
@@ -663,11 +676,11 @@ function buildFullCard(frame) {
   const appendApprovalCard = new Function(
     "messagesEl", "NON_APPROVABLE_ACTIONS", "sendMessage", "console",
     "appendApprovalTarget", "appendApprovalValue", "approvalValueUnavailable",
-    "resolveCard", "decisionLabel",
+    "approvalValueMasked", "resolveCard", "decisionLabel",
     `return (${sliceFunction("appendApprovalCard")})`,
   )(messagesEl, new Set(), (m) => { sent.push(m); return Promise.resolve({ success: true }); },
     console, appendApprovalTarget, appendApprovalValue, approvalValueUnavailable,
-    resolveCard, (d) => String(d));
+    approvalValueMasked, resolveCard, (d) => String(d));
   appendApprovalCard(frame);
   const card = appended[0];
   return { card, sent, outcomes };
@@ -677,11 +690,12 @@ const actionsIn = (card) => card && findEl(card, hasClass("approval-actions"));
 // Replay's shape: the audit masked the value and left `text_chars` behind.
 const MASKED = { x: 412, y: 288, label: "the cell C4", text: "[redacted]", text_chars: 5700 };
 
-check("a type_xy whose value is unavailable carries no Approve", () => {
+check("a type_xy whose value is unavailable carries no Approve", async () => {
   const { card, outcomes, sent } = buildFullCard({
     id: 7, reason: "the text shown below this card", action: { type: "type_xy" },
     screenshot: JPEG, viewport: LAPTOP, args: MASKED, url: "https://docs.google.com/",
   });
+  await flush();
   assert(card, "the card was not rendered at all — the user is left with nothing");
   assert(!actionsIn(card), "the card still has an action row — it is answerable");
   assert(outcomes.length === 1, `expected one decision line, got ${outcomes.length}`);
@@ -693,13 +707,14 @@ check("a type_xy whose value is unavailable carries no Approve", () => {
     `the server was not told: ${JSON.stringify(sent)}`);
 });
 
-check("a value lost with no length recorded is still denied", () => {
+check("a value lost with no length recorded is still denied", async () => {
   // `text_chars` is the producer's flag, not the only signal: a mask literal
   // with no count is the same failure.
   const { card, outcomes } = buildFullCard({
     id: 8, action: { type: "type_xy" }, screenshot: JPEG, viewport: LAPTOP,
     args: { x: 1, y: 1, label: "the cell", text: "[redacted typed secret]" },
   });
+  await flush();
   assert(!actionsIn(card), "a masked value with no text_chars is still approvable");
   assert(outcomes.length === 1, "the denial line is missing");
 });
@@ -723,6 +738,62 @@ check("a click_xy is untouched by the value gate", () => {
     url: "https://docs.google.com/",
   });
   assert(actionsIn(card), "a click_xy lost its Approve/Deny");
+});
+
+check("a canonical_approval with no args is still approvable", async () => {
+  // The live regression. `canonical_approval` forwards `action` and nothing
+  // else — no `args` — so a gate that reads "no args" as "the value was
+  // masked" auto-denied every coordinate approval the frame could carry,
+  // with a card the user cannot answer. Absent args are not evidence.
+  const branch = /case 'canonical_approval': \{[\s\S]*?\n    \}/.exec(panel);
+  assert(branch, "no `case 'canonical_approval'` — renamed?");
+  assert(!/\bargs\b/.test(branch[0]),
+    "the canonical_approval branch now forwards args; this test should be re-read");
+  const { card, outcomes, sent } = buildFullCard({
+    id: 11, reason: "Brotto is requesting approval for a sensitive action.",
+    action: { type: "type_xy" },
+  });
+  await flush();
+  assert(actionsIn(card), "a canonical_approval type_xy has no Approve/Deny — the feature is dead");
+  assert(outcomes.length === 0, `it was pre-resolved: ${JSON.stringify(outcomes)}`);
+  assert(sent.length === 0, `the server was ACKed before the user answered: ${JSON.stringify(sent)}`);
+  assert(approvalValueMasked(undefined) === false, "a missing args reads as a mask");
+});
+
+check("a canonical_approval is denied when the frame really is masked", async () => {
+  // The other half: the narrow predicate must still fire. A `type_xy` frame
+  // carrying `text_chars` (set by `_scrubbed`, and now by the 8k cap) is a
+  // mask signal whether or not the caller supplied args at all.
+  const { card, outcomes } = buildFullCard({
+    id: 12, action: { type: "type_xy" }, args: { text: "[redacted]", text_chars: 5700 },
+  });
+  await flush();
+  assert(!actionsIn(card), "a masked value is still answerable");
+  assert(outcomes.length === 1 && /nothing to review/i.test(outcomes[0].text),
+    `the denial line is missing: ${JSON.stringify(outcomes)}`);
+});
+
+check("a value the audit cap truncated is unavailable, not the whole value", () => {
+  // `_cap_deep` shortens `args.text` at MAX_FIELD_CHARS and used to leave no
+  // marker, so a long paste came back as a silently shortened string under a
+  // heading promising "the whole value, exactly as it will be written".
+  // The producer now sets `text_chars` beside a truncated `args.text`.
+  const truncated = { text: "x".repeat(8000), text_chars: 12345 };
+  assert(approvalValueMasked(truncated) === true, "a truncated value does not read as a mask");
+  assert(approvalValueUnavailable(truncated) === true, "a truncated value renders as the whole thing");
+  const { card } = buildCard({ args: truncated, action: { type: "type_xy" } });
+  const block = findEl(card, hasClass("approval-value-text"));
+  assert(!block.textContent.includes("xxxx"), "the truncated string was drawn as the value");
+  assert(/not recorded/i.test(block.textContent), "the block does not say the value is unavailable");
+  const label = findEl(card, hasClass("approval-value-label"));
+  assert(!/whole value|exactly as it will be written/.test(label.textContent),
+    `the heading still promises the value: ${JSON.stringify(label.textContent)}`);
+  // The producer side, read out of the audit module so it cannot drift.
+  const audit = fs.readFileSync(
+    path.join(__dirname, "..", "services", "brotto-orchestrator", "src",
+      "brotto_orchestrator", "agent", "audit.py"), "utf8");
+  assert(/capped_args\["text_chars"\] = len\(args\["text"\]\)/.test(audit),
+    "audit.py no longer flags a capped args.text — the consumer is waiting on it");
 });
 
 console.log("\nthe regression that matters: every other approval is untouched");
@@ -760,5 +831,34 @@ check("no second copy of the pixels is written anywhere", () => {
     "the base64 payload is interpolated somewhere other than the card");
 });
 
-console.log(failed ? `\n${failed} failed` : "\nall passed");
-process.exit(failed ? 1 : 0);
+// The summary waits on the async checks: a test that has not settled has not
+// reported, and a summary that prints first reports on nothing.
+Promise.all(pending).then(() => {
+  console.log(failed ? `\n${failed} failed` : "\nall passed");
+  process.exit(failed ? 1 : 0);
+});
+check("a frame carrying no args at all is still answerable", async () => {
+  // `canonical_approval` sends {id, reason, action} and no args. Treating a
+  // missing args as a masked value auto-denied every such approval.
+  const { card, outcomes } = buildFullCard({
+    id: 9, reason: "Brotto is requesting approval for a sensitive action.",
+    action: { type: "type_xy" },
+  });
+  await flush();
+  assert(card, "no card was rendered");
+  assert(outcomes.length === 0,
+    `a frame with no args was auto-denied: ${JSON.stringify(outcomes)}`);
+  assert(actionsIn(card), "a frame with no args lost its action row");
+});
+
+check("a real type_xy value is still approvable", async () => {
+  const { card, outcomes } = buildFullCard({
+    id: 10, reason: "the text shown below this card", action: { type: "type_xy" },
+    screenshot: JPEG, viewport: LAPTOP,
+    args: { x: 412, y: 288, label: "the cell C4", text: "Q3 revenue" },
+    url: "https://docs.google.com/",
+  });
+  await flush();
+  assert(outcomes.length === 0, `a live value was denied: ${JSON.stringify(outcomes)}`);
+  assert(actionsIn(card), "a live value lost its action row");
+});

@@ -4256,9 +4256,20 @@ function splitInvisible(value) {
 // screenshot, and it coerces anything non-null: the server types
 // `str(args.get("text") or "")`, so a `text: 123` from a model would otherwise
 // be invisible here and typed as "123" — consent for a write nobody read.
-function approvalValueUnavailable(args) {
+function approvalValueMasked(args) {
   const raw = args?.text == null ? null : String(args.text);
-  return raw === null || args?.text_chars != null || /^\[redacted[^\]]*\]$/.test(raw);
+  // `text_chars` is the producer's own "there was a value and it is longer
+  // than what you see" flag — set by the audit's `_scrubbed` mask and by the
+  // 8k cap on `args.text`. A mask literal is the same fact spelled out.
+  return args?.text_chars != null || (raw !== null && /^\[redacted[^\]]*\]$/.test(raw));
+}
+
+function approvalValueUnavailable(args) {
+  // Rendering: with no value at all there is nothing to show, so the heading
+  // has to say so. Gating: a *missing* `args` is not evidence of a masked
+  // value — `canonical_approval` sends no args at all, and treating that as a
+  // mask auto-denied every coordinate approval with a dead card.
+  return approvalValueMasked(args) || args?.text == null;
 }
 
 function appendApprovalValue(card, args, action) {
@@ -4395,20 +4406,23 @@ function appendApprovalCard({ id, reason, action, resolved, screenshot, viewport
     return;
   }
 
-  // A `type_xy` whose value cannot be rendered is a write nobody can read, and
-  // an Approve button on it is one-tap consent to text that was never on
-  // screen — the exact failure this block exists to prevent. So the card stays
-  // and says why, but it is not answerable. The live frame carries the real
-  // value and no `text_chars`, so this cannot fire where the user is typing;
-  // it is the belt to that braces, on the surface where it would be visible.
+  // A `type_xy` whose value was masked or truncated in transit is a write
+  // nobody can read, and an Approve button on it is one-tap consent to text
+  // that was never on screen — the exact failure this block exists to
+  // prevent. So the card stays and says why, but it is not answerable. Only a
+  // genuine mask signal counts: a frame that carries no `args` at all is not
+  // evidence of one, and treating it as one auto-denied every coordinate
+  // approval the server sent without args.
   //
   // Denied rather than suppressed (unlike NON_APPROVABLE_ACTIONS above) so the
   // user can see what was asked and why it cannot be agreed to, and the
   // server's queue is still ACKed so a pending id is never left hanging.
-  if (action?.type === 'type_xy' && approvalValueUnavailable(args)) {
+  if (action?.type === 'type_xy' && approvalValueMasked(args)) {
+    // ACK either way so a pending id is never left holding a reply no
+    // control can send.
     if (id) void sendMessage({ type: 'submit_approval', id, approved: false });
     resolveCard(card, 'approval-decision',
-      'Not approvable — the text this would type was not recorded for this run, '
+      'Not approvable \u2014 the text this would type was not recorded for this run, '
       + 'so there is nothing to review. Approving it would authorise an unseen value.');
     messagesEl.appendChild(card);
     return;

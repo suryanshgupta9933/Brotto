@@ -666,6 +666,14 @@ class AuditTrail:
         t = self._turn(turn)
         if t is None:
             return ""
+        capped_args = _cap_deep(args)
+        # `_cap_deep` shortens `args.text` silently, and a replayed approval
+        # card renders that string under "the whole value, exactly as it will
+        # be written" — consent to a truncated write. `text_chars` is the flag
+        # the panel already reads as "there was a value and it is longer than
+        # what you see", the same one `_scrubbed` sets.
+        if isinstance(args.get("text"), str) and len(args["text"]) > MAX_FIELD_CHARS:
+            capped_args["text_chars"] = len(args["text"])
         prompt = {
             "id": secrets.token_hex(8),
             "seq": self._next_seq(),
@@ -678,7 +686,7 @@ class AuditTrail:
             "answered_at": None,
             "wait_ms": None,
             "action": action,
-            "args": _cap_deep(args),
+            "args": capped_args,
             "domain": domain,
         }
         _text(prompt, "reason", reason)
