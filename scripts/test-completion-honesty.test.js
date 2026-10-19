@@ -59,5 +59,55 @@ check(
   "the note is declared but never drawn, or it goes through innerHTML",
 );
 
+// ── The disclosure ────────────────────────────────────────────────────────
+// It is collapsed to save the panel's width, so the structure is what keeps
+// it honest: a `<details>` whose summary is reachable without a mouse, and
+// whose body — the sentence — is in the DOM whether or not it was opened.
+
+const reportedDecl = panel.match(
+  /const REPORTED_SUMMARY =\s*\n?\s*(['"])([\s\S]*?)\1;/);
+check(!!reportedDecl, "sidepanel.js declares REPORTED_SUMMARY",
+      "the collapsed label the user actually sees is missing");
+const summaryText = reportedDecl ? reportedDecl[2] : "";
+
+check(/\breports?\b/i.test(summaryText) || /reported/i.test(summaryText),
+      "the collapsed label says it is a report",
+      `"${summaryText}" does not name the claim`);
+check(/not (a )?(check|verified)/i.test(summaryText),
+      "the collapsed label says it was not verified",
+      `"${summaryText}" — the sentence a pointer user never opens has to ` +
+      "carry the claim on its own");
+check(summaryText.length > 0 && summaryText.length < 40,
+      "the collapsed label is short",
+      `${summaryText.length} chars — ${summaryText}`);
+check(!/\b(failed|error|problem|sorry|unfortunately)\b/i.test(summaryText),
+      "the collapsed label does not read as a failure",
+      `"${summaryText}" makes a successful run feel like a broken one`);
+
+// Native <details>: keyboard, touch and screen reader reach it without a
+// mouse and without a line of JS. A hover-only affordance would fail both.
+check(
+  /createElement\('details'\)/.test(panel) &&
+    /createElement\('summary'\)/.test(panel) &&
+    /reported\.className = 'final-answer-reported'/.test(panel),
+  "the note is a native <details>/<summary>, not a hover-only title",
+  "the note must open by click, Enter and a screen reader",
+);
+
+// The full sentence stays in the DOM when closed — the disclosure is a
+// presentation choice, not a licence to drop the text.
+const doneBranch = panel.slice(
+  panel.indexOf("role === 'done'"),
+  panel.indexOf("function appendFailureBubble"));
+check(
+  /createElement\('details'\)/.test(doneBranch) &&
+    doneBranch.indexOf("createElement('details')") <
+      doneBranch.indexOf("textContent = REPORTED_NOTE"),
+  "the note is drawn inside the done card",
+  "the disclosure is built somewhere else");
+check(!/onmouseover|onmouseenter|onfocus/.test(doneBranch),
+      "nothing about the disclosure depends on a mouse event",
+      "a hover-only note is invisible on touch and to a screen-reader user");
+
 console.log(failed === 0 ? "\nall checks passed" : `\n${failed} check(s) failed`);
 process.exit(failed === 0 ? 0 : 1);

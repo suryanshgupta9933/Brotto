@@ -135,6 +135,38 @@ So the card stops implying otherwise rather than growing a check that would be
 faked. Unconditional, because nothing is verified today. Pinned by
 `scripts/test-completion-honesty.test.js`.
 
+#### The note is collapsed, not removed — and it is a native `<details>`
+
+It was a permanent line **above** every completed answer, and at 320px that
+displaced the thing the user came to read: a run that genuinely worked was
+rendered as a success wearing a disclaimer. It is now **below** the answer,
+above the toolbar, and closed.
+
+**Why it cannot be conditional (option 3).** The obvious improvement is to show
+it only when the run had a reason to doubt itself, and **there is no such
+signal on the wire.** `task_completed` carries `summary`, `steps` and
+`finalAnswer` and nothing about doubt; the panel sees no canvas-dominance
+measure and no refused step. Building one is a two-sided frame change and
+`brotto-conversation`'s to make — and it would be the wrong change anyway,
+because it re-introduces the exact failure the unconditional wording was chosen
+against: a note that renders on the runs where the check happened to pass is
+silent everywhere else, which is a *worse* failure than saying it always.
+
+**Why `<details>` and not a hover glyph.** Option 1's risk is real: an affordance
+that only answers to `:hover` is invisible on touch and to a screen-reader user
+who does not hover. `<details>`/`<summary>` is the platform's answer to
+"collapsed, opens in place" — click, Enter, and the screen reader's own
+expand/collapse semantics, with no JS and no state to keep in sync. **The
+summary is the accessible name, so it has to carry the claim on its own**:
+`REPORTED_SUMMARY` ("Reported, not verified") names both halves of the sentence
+below it, because it is the only part a reader who never opens anything meets.
+
+**The full sentence is in the DOM either way.** The disclosure is a
+presentation choice; it is not a licence to drop the text until asked. The
+assertions on the structure (a native `details`, the summary naming the claim,
+no mouse-only event handler, the sentence still inside the done branch) live in
+`scripts/test-completion-honesty.test.js` alongside the four copy rules.
+
 ### The failure vocabulary is bidirectional, and both directions are code
 
 `failureNote(code)` returns a sentence and a next step for every failure code, and
