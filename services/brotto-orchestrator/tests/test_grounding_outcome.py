@@ -123,6 +123,7 @@ def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
     cdp.ping = AsyncMock(return_value=True)
     cdp.get_targets = AsyncMock(return_value=[])
     cdp.get_current_url = AsyncMock(return_value="https://app.example.com/")
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Home")
     cdp.get_page_text = AsyncMock(return_value="")
     cdp.refresh_target_map = AsyncMock()

@@ -93,6 +93,7 @@ def _deps(targets: list | None = None, page_text: str = "",
     cdp.get_targets = AsyncMock(return_value=targets or [])
     cdp.get_current_url = AsyncMock(return_value="https://example.com/board")
     cdp.get_page_text = AsyncMock(return_value=page_text)
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Board")
     cdp.refresh_target_map = AsyncMock()
     cdp.capture_screenshot = AsyncMock(return_value=JPEG)

@@ -865,6 +865,8 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         if turn.ax_diff else ""
     )
 
+    delta_section = _delta_section(turn.page_delta)
+
     # Placed after the tree, before the question: it is the last thing read,
     # and the values it carries (counts, prices, totals) are exactly what a
     # read-only question is answered from.
@@ -1014,7 +1016,7 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
 ## Current page (step {turn.step_number})
 URL: {_one_line(turn.current_url)}
 Title: {_one_line(turn.current_page_title)}
-{diff_section}
+{diff_section}{delta_section}
 ### AX Tree (interactive elements only)
 <page_content untrusted url="{_one_line(turn.current_url)}">
 {turn.ax_tree}
@@ -2775,6 +2777,69 @@ _PAGE_TEXT_ENOUGH = 400
 _MAX_CAPTURES_PER_TASK = 3
 
 
+# The no-progress bound. A Google Sheets run spent seven steps re-clicking one
+# cell with a byte-identical observation (71 targets / ~11,320 bytes, steps 8-14)
+# at one model call each; nothing in the loop noticed.
+#
+# It is a *ceiling*, not a verdict, and it is generous on purpose. The old
+# `check_stagnation` (removed; see agent-loop.md "Stagnation detection") fired
+# at 3 steps on a URL hash and warned mid-run on two tasks that then succeeded
+# — a hint that pushes a working agent to give up early is worse than no hint.
+# Three differences make this one safe to ship as a stop: it is late enough to
+# outlast a slow multi-step render, it reads the *full* tree diff rather than a
+# hashed prefix (the removed version was structurally blind below the budget
+# cut, which is most of a long page), and it terminates a run instead of
+# narrating at one.
+_STAGNANT_STEPS = 5
+
+# The literal compute_ax_diff returns when nothing changed. Named rather than
+# compared inline so a change to that module's contract breaks here.
+_AX_NO_CHANGE = "(no changes detected)"
+
+# Actions that dispatch nothing. A step made only of these cannot be a loop —
+# no click was sent — so an unchanged page is the expected reading and the
+# counter must not carry into the next step. An empty batch resets for the
+# same reason: the model narrated and did nothing.
+_READ_ONLY_ACTIONS = frozenset({
+    "find_element", "read_page_text", "read_scratchpad",
+    "recall_memory", "recall_conversation", "recall_steps",
+})
+
+# Says what was observed, not what was concluded. On a canvas app the tree is
+# blind whether or not the click worked, so a stable fingerprint is evidence
+# of blindness, never of failure — and a message that claimed "no progress"
+# would be a confidence this code has not earned.
+_STAGNANT_MESSAGE = (
+    "Stopped after {n} steps on a page that did not visibly change: the "
+    "agent acted and the page came back looking exactly the same each time. "
+    "Brotto can only see what the page exposes to it, so on some apps (a "
+    "spreadsheet or canvas editor is the usual one) a real change looks "
+    "identical to no change — this may be an app it cannot read rather than a "
+    "page that is broken. Worth trying: a different route or screen to reach "
+    "the same thing, doing this step yourself in the browser, or a task on an "
+    "app Brotto can see into."
+)
+
+
+def _note_stagnation(deps, url: str, text_len: int, ax_diff: str) -> bool:
+    """Count one step's observable change. True when the run should stop.
+
+    "Progress" is a URL that moved, a page text of a different length, or a
+    tree the diff could tell apart from last step's. Anything else is another
+    step in a row that produced no evidence.
+
+    Not a proof of failure, and it can be walked straight past: a page with a
+    ticking clock, an animated banner or an input that echoes each keystroke
+    keeps the fingerprint moving while nothing works, and a canvas app never
+    moves it at all. That is why the message says what was seen.
+    """
+    obs = (url, text_len)
+    changed = ax_diff != _AX_NO_CHANGE or deps.last_obs != obs
+    deps.last_obs = obs
+    deps.stagnant_steps = 0 if changed else deps.stagnant_steps + 1
+    return deps.stagnant_steps >= _STAGNANT_STEPS
+
+
 def _content_words(text: str | None) -> set[str]:
     return {
         w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
@@ -3727,6 +3792,13 @@ class AgentHarness:
             # than a generic server error from three frames up.
             try:
                 targets = await deps.cdp.get_targets()
+                # The delta rides on the observation `get_targets()` just
+                # took, so it is read here and not earlier — anywhere above
+                # this line it would be the previous step's answer, or none.
+                # No round trip, and no entry in `screenshots_taken`: this is
+                # 16x16 tile arithmetic on pixels the extension already had,
+                # not a capture.
+                page_delta = await deps.cdp.get_page_delta(deps.policy)
                 current_url = await deps.cdp.get_current_url()
                 page_title = await deps.cdp.get_page_title()
                 # Free on the extension path (already in the cached
@@ -3866,6 +3938,32 @@ class AgentHarness:
                                task_index=deps.task_index, cost=cost)
                     return deps.result
 
+            # The no-progress bound. Placed after observe (it reads what the
+            # observation says) and before the model call (a step nobody
+            # bills is the whole point), and after the policy block so a
+            # blocked page is reported as blocked rather than as stagnant.
+            if _note_stagnation(deps, current_url, len(page_text or ""), ax_diff):
+                log.warning(
+                    "[%s] STAGNANT: %d steps with no observable change  step=%d  url=%s",
+                    deps.user_id, _STAGNANT_STEPS, step, current_url[:80],
+                )
+                timing_report = self._log_timings(
+                    deps.user_id, timings, steps_run,
+                    time.perf_counter() - task_start, cumulative_snapshots,
+                    tokens=tokens,
+                )
+                deps.result = TaskResult(
+                    status="failed",
+                    summary=_STAGNANT_MESSAGE.format(n=_STAGNANT_STEPS),
+                    failure_reason="page_not_responding",
+                    steps_taken=steps_run,
+                    timing=timing_report,
+                )
+                deps.result.final_url = deps.step_url
+                self._close(audit, a_turn, deps.result, cumulative_snapshots, timings,
+                            task_index=deps.task_index, cost=cost)
+                return deps.result
+
             # The turn opens here — after the policy block, before the
             # login guardrail — so the login prompt has a turn to live in.
             # A turn that pauses for a login and never reaches the model
@@ -3989,6 +4087,7 @@ class AgentHarness:
                 page_text=page_text,
                 screenshot=vision.image,
                 screenshot_note=vision.note,
+                page_delta=page_delta,
                 steering=deps.pending_steering,
                 repeat_warning=repeat_nudge(deps.step_summaries),
             )
@@ -4375,6 +4474,14 @@ class AgentHarness:
                     break
             timings["execute"] += time.perf_counter() - t_ex
             combined_outcome = _summarise_outcome(outcomes, run_secrets)
+
+            # A step that dispatched nothing cannot be the loop the
+            # stagnation bound is there to close — a run that spends five
+            # steps reading is slow, not stuck. Vacuously true for an empty
+            # batch, which is the same case: the model narrated and did
+            # nothing.
+            if all(c.action in _READ_ONLY_ACTIONS for c in decision.actions):
+                deps.stagnant_steps = 0
 
             # Memory is written in code on every step (`capture_page` runs
             # above, before the turn is built), so it is persisted every step

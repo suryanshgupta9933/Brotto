@@ -416,6 +416,7 @@ def _deps() -> AgentDeps:
     cdp.get_targets = AsyncMock(return_value=[_t("0:1", "Save")])
     cdp.get_current_url = AsyncMock(return_value="https://example.com/settings")
     cdp.get_page_text = AsyncMock(return_value="nothing to see")
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Settings")
     cdp.refresh_target_map = AsyncMock()
 

@@ -44,6 +44,7 @@ def _deps() -> AgentDeps:
         SemanticTarget(ref_id="0:1", tag="button", role="button", name="Save")])
     cdp.get_current_url = AsyncMock(return_value="https://example.com/account")
     cdp.get_page_text = AsyncMock(return_value="nothing to see")
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Account")
     cdp.refresh_target_map = AsyncMock()
 

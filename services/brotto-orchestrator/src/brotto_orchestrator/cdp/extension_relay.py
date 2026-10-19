@@ -8,6 +8,8 @@ import uuid
 from typing import Callable, Awaitable
 
 from ..dev.ax_tree_extractor import SemanticTarget
+from ..policy.gate import screenshot_block_reason
+from ..policy.schema import Policy
 from .relay import SELECT_ALL_JS, PRESSABLE_KEYS, is_pressable_key
 
 log = logging.getLogger("brotto.ext_relay")
@@ -29,6 +31,31 @@ _UNSOLICITED = frozenset({"navigated"})
 # the accessible-name check (over-redact, not under-redact); raise it only if
 # live runs show real timeouts.
 _ATTRS_TIMEOUT = 2.0
+
+
+_TILE_KEYS = ("x", "y", "w", "h", "pct")
+
+
+def _clean_delta(raw) -> dict | None:
+    """The observation's `delta`, or None. Shape-checked, not trusted.
+
+    The frame is a browser extension's, and it reaches the model as text, so a
+    tile carrying a string where a number belongs would be prompt content this
+    method had no hand in. Anything not exactly the documented shape is dropped
+    whole rather than partly repaired — a `changed` with no readable tiles is
+    not evidence of anything.
+    """
+    if not isinstance(raw, dict):
+        return None
+    tiles = raw.get("tiles")
+    if not isinstance(raw.get("changed"), bool) or not isinstance(tiles, list):
+        return None
+    clean: list[dict] = []
+    for t in tiles:
+        if not isinstance(t, dict) or not all(_is_number(t.get(k)) for k in _TILE_KEYS):
+            return None
+        clean.append({k: t[k] for k in _TILE_KEYS})
+    return {"changed": raw["changed"], "tiles": clean}
 
 
 class TabUnreachable(RuntimeError):
@@ -567,6 +594,50 @@ class ExtensionCDPRelay:
             return None
         data = msg.get("data")
         return data if isinstance(data, str) and data else None
+
+    async def get_page_delta(self, policy: Policy | None = None) -> dict | None:
+        """`{"changed": bool, "tiles": [{x, y, w, h, pct}, …]}`, or None.
+
+        The step's own evidence that the page moved. The accessibility tree is
+        byte-identical across many consecutive steps on a canvas app, so the
+        model otherwise has no way to tell an action that landed from one that
+        did not. Read out of the cached observation — no round trip; it arrived
+        with the frame `get_targets()` already took.
+
+        **None is the common answer**, not the failure one: the extension omits
+        `delta` on a tab's first observation, after a navigation, after a
+        viewport resize and on a failed capture, and those are four of the most
+        frequent moments in an ordinary run.
+
+        **The gate is `screenshot_block_reason` and it is not weakened here.**
+        A delta is derived from a viewport capture — the extension decodes the
+        screenshot locally and diffs it — so it is page-derived data from the
+        same pixels the screenshot channel is refused over, and it arrives
+        through a different route. Letting it past while a capture of the same
+        page is refused would be exactly the bypass the gate exists to prevent,
+        so this asks the same question with the same answer, including the
+        `BROTTO_VISION_CAPTURE` switch: with capture off there is no delta
+        either. The extension does not know the policy and computes
+        unconditionally; the server is the authority, deliberately.
+
+        **D2: a tile is evidence, never a target.** Nothing here converts a
+        tile into a point, and nothing may — `_coordinate_action` takes
+        coordinates the model chose and that were probed and bounds-checked; a
+        tile is a region that *changed*, not a claim about what is there now,
+        since the page repaints after the diff. Re-pointing a coordinate action
+        at a tile is the tempting optimisation and it breaks D2.
+        """
+        obs = self._cached_obs or {}
+        url = obs.get("url")
+        if screenshot_block_reason(url, policy):
+            log.info("[%s] page delta withheld by the capture gate  url=%s",
+                     self._sid, (url or "")[:80])
+            return None
+        delta = _clean_delta(obs.get("delta"))
+        if delta is not None:
+            log.debug("[%s] page delta  changed=%s tiles=%d",
+                      self._sid, delta["changed"], len(delta["tiles"]))
+        return delta
 
     async def deliver_screenshot_result(self, message: dict) -> None:
         """Sink for an inbound screenshot_result. Keep only the newest: an

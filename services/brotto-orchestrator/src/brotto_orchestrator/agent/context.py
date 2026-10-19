@@ -196,6 +196,11 @@ class AgentTurn(BaseModel):
     # A mid-task correction from the user, drained out of AgentDeps into the
     # next turn. Empty on every step that has not received one.
     steering: str = ""
+    # Which parts of the viewport repainted since the previous observation,
+    # or None when there is nothing to say. None is the common answer (first
+    # observation, post-navigation, post-resize, capture off, Playwright) and
+    # renders as *nothing at all* — see `_delta_section`.
+    page_delta: dict | None = None
     # Run control, not user data: set when the last two steps said the same
     # thing, so the model changes approach instead of repeating until the
     # step budget runs out. Empty on every other step.
@@ -317,6 +322,14 @@ class AgentDeps:
     # so clearing on it let a model alternating wrong-but-dispatching clicks
     # never reach the ceiling. The ceiling is the harness's `_XY_MISS_LIMIT`.
     xy_misses: int = 0
+    # Consecutive steps whose observation matched the one before it — same
+    # URL, same page-text length, no change `compute_ax_diff` could see. The
+    # ceiling is the harness's `_STAGNANT_STEPS`. `last_obs` is the observation
+    # the counter is measured against, kept here rather than on the harness so
+    # `_note_stagnation` — a module function, called by tests directly — can
+    # read and bump both.
+    stagnant_steps: int = 0
+    last_obs: tuple | None = None
     result: TaskResult | None = None
     # URL observed at the top of the current step, before its actions run.
     # Read by the click cross-domain gate and stamped onto TaskResult.

@@ -48,6 +48,7 @@ def _login_cdp() -> MagicMock:
     cdp.get_page_text = AsyncMock(return_value="")
     # What `check_login_page` keys on. It has to stay true for the whole run
     # or the loop walks straight past the wall this test is about.
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Sign in")
     cdp.refresh_target_map = AsyncMock()
     return cdp
