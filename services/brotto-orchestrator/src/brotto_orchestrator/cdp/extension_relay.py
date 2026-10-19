@@ -609,7 +609,8 @@ class ExtensionCDPRelay:
         data = msg.get("data")
         return data if isinstance(data, str) and data else None
 
-    async def get_page_delta(self, policy: Policy | None = None) -> dict | None:
+    async def get_page_delta(self, policy: Policy | None = None,
+                             redactions=None, run_secrets=None) -> dict | None:
         """`{"changed": bool, "tiles": [{x, y, w, h, pct}, …]}`, or None.
 
         The step's own evidence that the page moved. The accessibility tree is
@@ -634,6 +635,17 @@ class ExtensionCDPRelay:
         either. The extension does not know the policy and computes
         unconditionally; the server is the authority, deliberately.
 
+        **And the same veto the capture gets for a typed secret.** `redactions`
+        and `run_secrets` are the harness's knowledge that this page holds
+        something credential-shaped; a picture of it cannot be redacted, so
+        `_capture_page` refuses — and a delta is read off those same pixels, so
+        it must be refused too, or the gate only holds while the returned value
+        happens to stay just tile rectangles and a boolean. The rule is the
+        harness's verbatim, `redactions or run_secrets`: an *empty* `redactions`
+        means no detector fired, not that the page is clean. `None` is already
+        the honest unknown everywhere downstream, so a vetoed page simply stops
+        earning progress credit from the delta.
+
         **D2: a tile is evidence, never a target.** Nothing here converts a
         tile into a point, and nothing may — `_coordinate_action` takes
         coordinates the model chose and that were probed and bounds-checked; a
@@ -643,6 +655,10 @@ class ExtensionCDPRelay:
         """
         obs = self._cached_obs or {}
         url = obs.get("url")
+        if redactions or run_secrets:
+            log.info("[%s] page delta withheld — page holds a typed secret  url=%s",
+                     self._sid, (url or "")[:80])
+            return None
         if screenshot_block_reason(url, policy):
             log.info("[%s] page delta withheld by the capture gate  url=%s",
                      self._sid, (url or "")[:80])

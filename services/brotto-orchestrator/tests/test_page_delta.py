@@ -74,3 +74,26 @@ async def test_a_malformed_tile_is_dropped_rather_than_half_repaired():
                     "delta": {"changed": True,
                               "tiles": [{"x": "64", "y": 0, "w": 32, "h": 32, "pct": 1}]}})
     assert await relay.get_page_delta(Policy()) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs", [
+    {"redactions": {"email": 1}},
+    {"run_secrets": ["hunter2"]},
+])
+async def test_a_page_holding_a_typed_secret_is_not_diffed(kwargs):
+    """The capture's veto, and it applies to the same pixels. Nothing is
+    persisted today, but the gate must not depend on the returned value
+    staying just rectangles and a boolean as the file changes."""
+    relay = _relay({"url": "https://example.com/", "delta": DELTA})
+    assert await relay.get_page_delta(Policy(), **kwargs) is None
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_redactions_list_is_not_a_veto():
+    """The boundary's other end. `redactions` empty means no detector fired,
+    not that the page is clean — but it is not a reason to refuse either, and
+    refusing here would silently strand every page."""
+    relay = _relay({"url": "https://example.com/", "delta": DELTA})
+    assert await relay.get_page_delta(Policy(), redactions={}, run_secrets=[]) == DELTA

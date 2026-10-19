@@ -3994,19 +3994,6 @@ class AgentHarness:
             # than a generic server error from three frames up.
             try:
                 targets = await deps.cdp.get_targets()
-                # The delta rides on the observation `get_targets()` just
-                # took, so it is read here and not earlier — anywhere above
-                # this line it would be the previous step's answer, or none.
-                # No round trip, and no entry in `screenshots_taken`: this is
-                # 16x16 tile arithmetic on pixels the extension already had,
-                # not a capture.
-                page_delta = await deps.cdp.get_page_delta(deps.policy)
-                # Tri-state: True/False when the delta says so, **None when the
-                # delta itself is None** — the common case, and unknown rather
-                # than "nothing moved". Read once per step, off the same cached
-                # observation as everything else here.
-                changed = page_delta.get("changed") if isinstance(page_delta, dict) else None
-                deps.canvas_changed = changed if isinstance(changed, bool) else None
                 current_url = await deps.cdp.get_current_url()
                 page_title = await deps.cdp.get_page_title()
                 # Free on the extension path (already in the cached
@@ -4061,6 +4048,26 @@ class AgentHarness:
             if redactions:
                 log.info("page text: redacted %s", ", ".join(
                     f"{n} {k}" for k, n in sorted(redactions.items())))
+            # The delta rides on the observation `get_targets()` just took, so
+            # it is read here and not earlier — anywhere above this line it
+            # would be the previous step's answer, or none. It sits below the
+            # redaction, and not a line earlier than it, because the veto it
+            # now takes is this step's: a page whose text held a credential
+            # is a page we must not diff either, and `redactions` is only
+            # known once `redact_text` has run. The same reasoning as the
+            # capture, for the same reason — an empty `redactions` means no
+            # detector fired, not clearance.
+            # No round trip, and no entry in `screenshots_taken`: this is
+            # 16x16 tile arithmetic on pixels the extension already had,
+            # not a capture.
+            page_delta = await deps.cdp.get_page_delta(
+                deps.policy, redactions=redactions, run_secrets=run_secrets)
+            # Tri-state: True/False when the delta says so, **None when the
+            # delta itself is None** — the common case, and unknown rather
+            # than "nothing moved". Read once per step, off the same cached
+            # observation as everything else here.
+            changed = page_delta.get("changed") if isinstance(page_delta, dict) else None
+            deps.canvas_changed = changed if isinstance(changed, bool) else None
             # Vision fallback. Sits here because it is the one place in a step
             # holding an empty tree, an empty page and the URL together, and
             # before `budget_for_window` below so the tree is still sized the
@@ -4159,9 +4166,16 @@ class AgentHarness:
                 # every step. Read the counter the call just updated rather
                 # than re-deriving it — the return is a bare bool by contract.
                 delta_only = deps.delta_only_steps >= _DELTA_ONLY_STEPS
+                # The ordinary path logs the counter the call just updated, not
+                # the configured ceiling it happens to equal — an operator
+                # reading `_STAGNANT_STEPS` here would reasonably take it for
+                # a tally. This line only ever fires at the stop, so the number
+                # is always "stopped at N consecutive unchanging steps", never
+                # "still counting at N".
                 log.warning(
                     "[%s] STAGNANT (%s): step=%d  url=%s",
-                    deps.user_id, "delta-only" if delta_only else _STAGNANT_STEPS,
+                    deps.user_id,
+                    "delta-only" if delta_only else deps.stagnant_steps,
                     step, current_url[:80],
                 )
                 timing_report = self._log_timings(

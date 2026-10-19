@@ -150,13 +150,17 @@ class CDPRelay:
             log.debug("capture_screenshot failed: %s", e)
             return None
 
-    async def get_page_delta(self, policy: Any = None) -> dict | None:
+    async def get_page_delta(self, policy: Any = None, redactions=None,
+                             run_secrets=None) -> dict | None:
         """Always None. The delta is computed in the extension's service worker
         from a captured frame; Playwright has no equivalent, and `None` is the
         honest answer for every observation. It exists so the harness can call
         one method without branching on the relay — and because `None` is also
         what the extension omits for, so the caller cannot distinguish "absent"
-        from "unsupported", which is correct: neither is evidence."""
+        from "unsupported", which is correct: neither is evidence.
+        `redactions`/`run_secrets` are the extension relay's veto inputs and
+        the harness passes them on every call; there are no pixels here, so
+        there is nothing for them to veto."""
         return None
 
     # ponytail: `Error executing:` prefix is the contract — harness.py
