@@ -1333,13 +1333,17 @@ Pinned by `tests/test_observation_reuse.py`, because a flag that stops being set
 indistinguishable from one that is never set — `get_targets()` would just quietly go back
 to capturing, at the old cost, with nothing red.
 
-### Stagnation detection — removed, not fixed
+### Stagnation detection — removed, then rebuilt as a stop
 
-`check_stagnation` is gone, along with `StepSummary.state`, the harness's
+The old detector is gone, and the record of why is worth keeping, because what
+replaced it is the *second* attempt at the same problem and it is right for a
+reason the first one got wrong.
+
+`check_stagnation` went with `StepSummary.state`, the harness's
 `stagnation_warning` message and the note it injected into the model's context.
-It fired falsely on two live tasks that both went on to succeed, and it is worth
-recording why, because **the fix that preceded the removal was a wrong
-primitive, and a correct one would not have saved it.**
+It fired falsely on two live tasks that both went on to succeed, and **the fix
+that preceded the removal was a wrong primitive, and a correct one would not
+have saved it.**
 
 The rule was "same URL for 3 steps". The first fix hashed the page instead of
 the URL — `blake2b` of the filtered AX tree plus page text, in `StepSummary.state`
@@ -1372,24 +1376,94 @@ reporting early, and it showed the user a warning during a task that succeeded.
 "Stuck" is not separable from "working on a slow-loading page" by hashing the
 top of a DOM.
 
-What replaced it is nothing. The model still self-assesses in
-`<stagnation_and_failure>` — same URL, same action twice, three failed
-approaches — which is the part that was always sound, because the model can see
-its own step history. Only the harness's external verdict is gone.
+What replaced it is **not nothing**: `harness.py` carries
+`_note_stagnation(deps, url, text_len, ax_diff)`, evaluated once per step,
+after observe and before the model call, with `_STAGNANT_STEPS = 5`. The model
+also still self-assesses in `<stagnation_and_failure>` — same URL, same action
+twice, three failed approaches — which is the part that was always sound,
+because the model can see its own step history. The harness's verdict is back;
+its shape is what changed, and none of the three differences is a tuning knob.
 
-**The external literature agrees, which is a relief and a caution.** Redundancy
-is defined there as *valid actions that produce no state change* — literally
-the fingerprint we removed, hash and all. But it is reported as an **offline
-metric over recorded runs**, never as a runtime detector, and the prescribed
-remedy for a redundant run is **replanning**, not detection. Nobody ships a
-runtime stuck-detector, because "this step changed nothing" and "this step is
-loading" are not separable without a model in the loop — and a model in the
-loop is just the model self-assessing, which is what `<convergence>` already
-does. The removal was correct; if stagnation comes back, it should arrive as
-a replan prompt fed by a recorded metric, not as a hash.
+- **It reads the full target diff, not a hash of it.** The old fingerprint was
+  computed from *prefixes* of the page and the budgeted tree, so it was blind
+  exactly where long pages put their content. The new check compares `ax_diff`
+  against the literal `(no changes detected)` (`_AX_NO_CHANGE`, named so a change
+  to `compute_ax_diff`'s contract breaks there rather than silently matching),
+  and checks the URL and the page-text length separately. A step is "unchanged"
+  only when **all three** hold; **any one of them changing resets the count.**
+- **A step made only of read-only actions resets it**, because nothing was
+  dispatched — an unchanged page is the expected reading there, and a read step
+  is not evidence of a loop.
+- **It stops the run; it does not hint.** The old one warned at 3 steps and
+  pushed two still-working tasks toward reporting early. A run that trips this
+  ends with `failure_reason="page_not_responding"` and `_STAGNANT_MESSAGE`,
+  which describes what was observed — "the agent acted and the page came back
+  looking exactly the same each time" — and then says outright that on a
+  spreadsheet or canvas editor this may be an app Brotto cannot read rather than
+  a broken page. **It never claims the user made no progress.**
+
+The threshold is 5 rather than 3 because it now *ends* a run rather than nudging
+one, which is the only reason the false-positive rate could go up at all.
+
+**What it still cannot tell you, and must never be reported as if it can.** The
+detector cannot distinguish "nothing happened" from "Brotto cannot see anything
+happening." On a canvas app the accessibility tree is byte-identical whether the
+agent succeeded or failed, so tree stability is a signal of *blindness*, not
+proof of failure. That is the honest ceiling of this feature, it is why the
+reported message names what was observed rather than what it concluded, and it
+is why the two known bypasses are named in a comment beside the code rather
+than only here: a ticking clock or an animated banner keeps the fingerprint
+moving while nothing works, and a canvas never moves it at all.
+
+**The consumer that makes the ceiling smaller is a pixel delta.** The
+accessibility tree is byte-identical across a canvas app's whole run, so the
+detector above cannot distinguish "nothing happened" from "Brotto cannot see
+anything happening" — that sentence is the ceiling, stated as such. The
+extension now computes a per-tile 16×16 mean-absolute-difference over
+luminance between the last two frames and ships it on the observation frame;
+`ExtensionCDPRelay.get_page_delta` reads it off the *cached* observation (no
+round trip) and `_delta_section` puts it in the prompt. So the model, not the
+harness, sees whether the viewport moved.
+
+Four rules hold that block:
+
+- **Read after `get_targets()`, in the same step.** The delta rides on the
+  observation that call just took; anywhere earlier it is the previous step's
+  answer or none.
+- **`None` renders as nothing at all.** It is the *common* answer — first
+  observation, post-navigation (the clear fires on `onCommitted`, before the
+  new page paints, so a navigation costs two steps), post-resize, failed
+  capture, and every Playwright run — and a "no change" line there would be a
+  claim about the page dressed as a claim about our plumbing. It is the same
+  discipline `_STAGNANT_MESSAGE` follows in the other direction.
+- **It costs no capture.** No `_MAX_CAPTURES_PER_TASK` entry, no second trip
+  through the screenshot path. It is arithmetic on pixels the extension
+  already had.
+- **Changed is not succeeded, and a tile is not an element.** A repaint
+  proves pixels moved and nothing about what they say; the block forbids
+  aiming a coordinate action at a region (D2).
+
+The gate is `screenshot_block_reason` and is not weakened: **with
+`BROTTO_VISION_CAPTURE` unset — the default — the delta is withheld on every
+step and the feature is inert.** Turning it on also turns on viewport capture,
+which is a privacy decision, not a default to take here.
+
+So the earlier reading of this section — that a runtime detector is not
+shippable, because "this step changed nothing" and "this step is loading" are not
+separable — was right about the *hint* and wrong about the *stop*. **The
+external literature is still what it was**, and the caution still stands:
+redundancy is defined there as *valid actions that produce no state change* —
+literally the fingerprint that was removed, hash and all — but it is reported
+as an **offline metric over recorded runs**, never as a runtime detector, and
+the prescribed remedy for a redundant run is **replanning**, not detection. That
+is why the softer signal still lives in the prompt. What changed is that a
+browser is not a headless DOM: the viewport repaints, scrolls and animates under
+the agent every step, so a *fully* unchanging viewport is a stronger fact than a
+hash of a DOM prefix was. Five of them ends a run honestly; three did not earn a
+warning.
 
 `testing/outcome.py` keeps its `"stagnat"` needle on purpose: it classifies
-*recorded* runs, and the runs recorded before this removal still contain those
+*recorded* runs, and the runs recorded before both changes still contain those
 strings.
 
 ### No step limit — `MAX_STEPS` is a runaway backstop
@@ -1414,9 +1488,11 @@ budget) and was missing only a bound. The failure mode at high step counts is
 **silent amnesia, not overflow**, and amnesia is what `recall_steps` and
 `recall_conversation` now address directly.
 
-Note the parallel to the stagnation removal above: a *detector* that guesses
+Note the parallel to the stagnation stop above: a *detector* that guesses
 "this run is going nowhere" is unreliable, and its false positives cost more
-than the runaway it catches. The backstop reports nothing until it fires.
+than the runaway it catches. The backstop reports nothing until it fires —
+which is why the stagnation check only earns a place by *ending* a run with an
+honest description of what it saw, rather than warning mid-flight.
 
 ### A cost ceiling, and what it may read
 

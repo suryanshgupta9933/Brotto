@@ -2840,6 +2840,68 @@ def _note_stagnation(deps, url: str, text_len: int, ax_diff: str) -> bool:
     return deps.stagnant_steps >= _STAGNANT_STEPS
 
 
+# How many changed regions a turn names. The delta arrives as ~100 bytes for
+# a few tiles and can grow with the tile count; the model needs to know the
+# page moved, not every rectangle.
+_DELTA_TILE_LIMIT = 8
+
+_DELTA_HEAD = "\n### What moved on the page (pixels since the last observation)\n"
+
+
+def _delta_section(delta: dict | None) -> str:
+    """The page delta, or `""`.
+
+    `None` is the **common** answer, not a failure: the extension omits the
+    key on a tab's first observation, after a navigation (the clear fires on
+    `onCommitted`, before the new page paints, so a navigation costs two
+    consecutive steps), after a resize, on a failed capture, and on every
+    Playwright run. With `BROTTO_VISION_CAPTURE` unset — the default — the
+    capture gate withholds it on every step of every run.
+
+    **So `None` renders as nothing at all.** A line reading "no change" would
+    be a claim the harness cannot make: two missing measurements are not a
+    measurement, and the model cannot tell our silence from a quiet page.
+    This is the same honesty discipline as `_STAGNANT_MESSAGE`, pointed the
+    other way — that one never claims the user made no progress, and this one
+    never claims the page made none.
+
+    What it may say is equally bounded: **changed is not succeeded.** A
+    repaint proves pixels moved and nothing about what they now say, and the
+    tiles are regions, not elements (D2) — so the block forbids aiming a
+    coordinate action at one.
+    """
+    if not delta:
+        return ""
+    tiles = list(delta.get("tiles") or [])
+    shown = tiles[:_DELTA_TILE_LIMIT]
+    more = len(tiles) - len(shown)
+    lines = [f"  x={t.get('x')} y={t.get('y')} w={t.get('w')} h={t.get('h')}"
+             f" — {t.get('pct')}% of pixels differ" for t in shown]
+    if more > 0:
+        lines.append(f"  …and {more} further region(s) not listed.")
+    if delta.get("changed") and lines:
+        body = (
+            "The viewport repainted in these regions since the previous "
+            "observation:\n" + "\n".join(lines) + "\n"
+        )
+    elif delta.get("changed"):
+        body = "The viewport repainted since the previous observation, but no "
+        "region was large enough to name.\n"
+    else:
+        body = ("Two consecutive captures of this viewport differ in no "
+                "region: the page looks identical to last step. That is what "
+                "was measured and nothing more — an action can still have "
+                "landed on something this cannot see.\n")
+    return (
+        f"{_DELTA_HEAD}<page_delta untrusted>\n"
+        f"{body}"
+        f"Pixels moved is the whole claim: a repaint is not a completed "
+        f"action, and a region is not an element — never aim click_xy, "
+        f"focus_xy or type_xy at one.\n"
+        f"</page_delta>\n"
+    )
+
+
 def _content_words(text: str | None) -> set[str]:
     return {
         w for w in re.findall(r"[a-z0-9]+", (text or "").lower())

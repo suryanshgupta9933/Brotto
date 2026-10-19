@@ -3115,6 +3115,11 @@ const FAILURE_NOTE = {
   // user got "the details are in Brotto's log" over a reason sitting in the
   // transcript in plain English.
   cannot_complete: 'Brotto could not find a way to finish this. What it tried is below.',
+  // Five steps with the URL, the AX diff and the page text all unchanged. That
+  // is what the page looked like, not proof the user did nothing — a canvas app
+  // is indistinguishable from a page Brotto cannot read, so it says neither
+  // "no progress" nor "impossible".
+  page_not_responding: 'The page stopped responding to Brotto. Some apps draw their content to a canvas and cannot be read at all.',
   // Pro only: BROTTO_MAX_TASK_COST_USD is refused without BROTTO_PRO, so a
   // free build cannot reach this. The sentence is here so the cap has one when
   // it is switched on.
