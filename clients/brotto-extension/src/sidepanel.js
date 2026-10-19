@@ -3097,7 +3097,12 @@ const FAILURE_NOTE = {
   model_http: 'The model provider rejected the request. Try again in a moment, or switch models in Settings.',
 
   // ── Brotto's own server ──
-  internal: "Brotto's server hit an error. The details are in its log.",
+  // Never "the details are in Brotto's log". For `WS_ERROR`/`TASK_ERROR` the
+  // user has no log at all; for START_FAILED the free-text reason is right
+  // below this sentence; and on a self-hosted install the log is the user's own
+  // machine, which most self-hosters never open. A sentence that names the
+  // next action is true in every edition; one that names a log is not.
+  internal: "Brotto's server hit an error. Sending the task again is the next thing to try.",
   // `task_error` carries the raw exception, which this run shows in the
   // bubble footer — so it can't claim the details are only in the log.
   server_error: "Brotto's server hit an error and stopped the run. The details are below.",
@@ -3159,6 +3164,19 @@ const FAILURE_NOTE = {
   control_plane_unavailable: "Brotto Cloud couldn't confirm your access, so it stopped rather than run unchecked. Try again in a minute.",
 };
 
+// A completed task is the agent's report, not a check.
+//
+// `task_complete` is self-asserted — the harness records success the moment
+// the model says it is done, with nothing behind it. A click that silently
+// did nothing produces exactly the same card. Verification is impossible here
+// and is not being built: a canvas app has no DOM to inspect, and any side
+// effect outside the browser (a purchase, a send, a delete) leaves nothing to
+// observe. So the card stops implying otherwise. Unconditional, because
+// nothing is verified today.
+// Pinned by scripts/test-completion-honesty.test.js.
+const REPORTED_NOTE =
+  'Brotto reports this as done — what it did, not a check of the result. Worth a look before you rely on it.';
+
 // A fetch to a server that is not there rejects with the same TypeError on
 // every browser, and the raw message ("Failed to fetch") tells the user
 // nothing. One family, one sentence — the transport cannot distinguish "the
@@ -3171,7 +3189,11 @@ function failureNote(reason, detail) {
   const note = FAILURE_NOTE[reason];
   if (note) return note;
   if (isOffline(detail)) return FAILURE_NOTE.offline;
-  return 'Something went wrong. The details are in Brotto\'s log.';
+  // Unreachable by construction: `scripts/test-failure-reasons.test.js` holds
+  // FAILURE_NOTE to the server's REPORTABLE set in both directions, so a code
+  // with no sentence here fails CI rather than reaching a user. It still
+  // says the truth if it is ever reached — an action, not a log nobody has.
+  return 'Something went wrong and Brotto can\'t say why. Sending the task again is the next thing to try.';
 }
 
 // ── Core logic (preserved verbatim) ───────────────────────────────────────
@@ -3876,6 +3898,13 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
   } else if (role === 'done') {
     const bubble = document.createElement('div');
     bubble.className = 'bubble final-answer-bubble';
+
+    // Above the answer, not below it: the answer reads as the verdict, so
+    // what the verdict is has to come first. textContent, never markdown.
+    const reported = document.createElement('div');
+    reported.className = 'final-answer-reported';
+    reported.textContent = REPORTED_NOTE;
+    bubble.appendChild(reported);
 
     if (finalAnswer) {
       const fa = document.createElement('div');
