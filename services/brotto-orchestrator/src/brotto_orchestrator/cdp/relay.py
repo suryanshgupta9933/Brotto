@@ -174,11 +174,16 @@ FOCUS_ID_JS = (
 # Exactly what `FOCUS_ID_JS` can return, and nothing else: `none`, `body`,
 # `TAG#id` with the grammar the JS checks, or `TAG[n]`. The suffix is
 # **required** on the named branch — the JS cannot emit a bare `TAG` (see the
-# note above its final `return`), so accepting one here would be exactly the
-# parser/validator differential this pair exists to have none of.
+# note above its final `return`), so accepting one here would reintroduce the
+# parser/validator differential this pair exists to rule out.
+#
+# Every character class is explicit ASCII, because the producer is. Python's
+# `\d` is Unicode by default, and the ordinal is a JS array index, which can
+# never be Arabic-Indic or fullwidth. `re.ASCII` would also work but is broader
+# than the fix and would hide which class had drifted.
 FOCUS_ID_RE = re.compile(
     r"\A(?:none|body|[A-Za-z][A-Za-z0-9]{0,31}"
-    r"(?:#[A-Za-z0-9_.:-]{1,64}|\[\d{1,6}\]))\Z"
+    r"(?:#[A-Za-z0-9_.:-]{1,64}|\[[0-9]{1,6}\]))\Z"
 )
 
 

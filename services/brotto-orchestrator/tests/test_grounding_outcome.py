@@ -107,6 +107,10 @@ def test_a_page_chosen_id_outside_the_grammar_is_not_a_focus_id():
         # `FOCUS_ID_JS` can never return it. If the grammar admits it anyway,
         # a foreign reply shaped `DIV` reads as a real focus answer.
         "DIV",
+        # `FOCUS_ID_JS` builds the ordinal from a JS array index, which is
+        # ASCII-only, so `INPUT[٣]` is not a value the producer can return.
+        # Python's `\d` is Unicode by default and would have admitted it.
+        "INPUT[٣]",
         "INPUT#a\nFORGED line",
         "INPUT#a\x1b[31mred",
         "INPUT#a b",
