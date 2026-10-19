@@ -2417,10 +2417,24 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 source="read_page_text",
             ))
             around_note = f" around={around!r}" if around else ""
+            # "→ 0 chars" on a canvas page is a statement about *us*, not about
+            # the page. A Google Sheet run read its own work back as empty,
+            # took that as evidence it had not happened, and erased it with a
+            # Backspace loop. Say what was measured — the read returned nothing
+            # and this page draws itself where text cannot reach — and never
+            # claim the page is empty, which is not what we know.
+            unread = ""
+            if _is_canvas_page(deps.canvas_covered) and not text.strip():
+                unread = (
+                    " Nothing came back, and this page's content is drawn on a "
+                    "canvas, so that is Brotto being unable to read it — not a "
+                    "page with nothing on it. Do not conclude the work is "
+                    "absent, and do not redo or erase what you have done."
+                )
             return (
                 f"read_page_text({selector!r}{around_note}, max_chars={max_chars}) "
-                f"→ {len(text)} chars. Auto-captured as {entry_id} in memory. "
-                f"Use recall_memory(entry_id='{entry_id}') for full body."
+                f"→ {len(text)} chars.{unread} Auto-captured as {entry_id} in "
+                f"memory. Use recall_memory(entry_id='{entry_id}') for full body."
             )
 
         elif action == "find_element":
@@ -2830,9 +2844,20 @@ def _note_stagnation(deps, url: str, text_len: int, ax_diff: str) -> bool:
 
     Not a proof of failure, and it can be walked straight past: a page with a
     ticking clock, an animated banner or an input that echoes each keystroke
-    keeps the fingerprint moving while nothing works, and a canvas app never
-    moves it at all. That is why the message says what was seen.
+    keeps the fingerprint moving while nothing works. That is why the message
+    says what was seen.
+
+    **Page-text length is dropped on a canvas page, because it is not
+    readable.** An earlier version of this docstring claimed a canvas app
+    "never moves it at all"; that was false and it was written by us. A
+    Google Sheet's page text is the chrome plus the caret and the search box,
+    and it flickers every step (10031 → 10044 → 10136 → 10030 …) while the
+    grid it fails to contain is untouched — so a length change reset the
+    counter every step and a 23-step run never fired. The AX diff and the URL
+    still count on every page.
     """
+    if _is_canvas_page(deps.canvas_covered):
+        text_len = None
     obs = (url, text_len)
     changed = ax_diff != _AX_NO_CHANGE or deps.last_obs != obs
     deps.last_obs = obs
@@ -2949,10 +2974,66 @@ def _target_name(target: object) -> str:
     return str(getattr(target, "name", "") or "")
 
 
+# The fraction of the viewport the largest topmost <canvas> occupies at which
+# the harness stops believing the accessibility tree. Half the viewport is the
+# floor that separates "the app draws its content here" from "there is a chart
+# or a canvas ad in the corner".
+_CANVAS_COVERED_FLOOR = 0.5
+
+
+async def _observe_canvas_covered(deps: AgentDeps) -> float | None:
+    """This step's `canvasCovered` fraction, or None when it is not known.
+
+    Read through `getattr` because the field arrives on the observation frame
+    from the extension and a relay that predates it simply has no such method —
+    a Playwright run, and any extension build from before the field shipped.
+    A missing, non-numeric or unreadable value stays **unknown**: coercing it
+    to 0.0 would silently turn "we did not measure this" into "this page is
+    not a canvas", which is a fact about the page, and we do not have one.
+    """
+    get = getattr(deps.cdp, "get_canvas_covered", None)
+    if get is None:
+        return deps.canvas_covered
+    try:
+        raw = await get()
+    except Exception as e:  # a relay that cannot answer is not a canvas
+        log.debug("canvas_covered: not available (%s)", e)
+        return deps.canvas_covered
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return deps.canvas_covered
+    return min(1.0, max(0.0, float(raw)))
+
+
+def _is_canvas_page(canvas_covered: float | None) -> bool:
+    """Whether the page is canvas-dominated. Unknown is not a canvas."""
+    return (
+        isinstance(canvas_covered, (int, float))
+        and not isinstance(canvas_covered, bool)
+        and canvas_covered >= _CANVAS_COVERED_FLOOR
+    )
+
+
 def _sparse_for_task(
     task: str | None, targets: list, page_text: str | None,
+    canvas_covered: float | None = None,
 ) -> bool:
     """Whether the visible signal is too thin to serve *this* task.
+
+    **A canvas-dominated page is sparse, unconditionally, and this is the
+    third case.** The two tests below can only see what is *there*. A canvas
+    page reports a rich, plausible tree — 64 toolbar nodes on a Google Sheet —
+    and the missing grid is exactly the thing a model reading that tree does
+    not register, because a vocabulary test cannot see an absence: the chrome
+    carries "Sheet1" and a "Name box", so the page text always shares
+    "sheet" and "name" with the task and the screenshot is refused on every
+    step of a run whose entire content is invisible. (That is not a theory:
+    `read_page_text around='Name'` succeeded on the failing run, so "Name"
+    really was in the text.) So `canvasCovered` is checked first and
+    unconditionally — before the page-text length and before the vocabulary —
+    because both of those report the *chrome*, and the chrome is not what the
+    task is about. A missing or non-numeric value is **unknown**, never
+    "not a canvas": an extension that does not send the field keeps the two
+    tests below exactly as they were.
 
     **Against the task, not a count.** Node count cannot be the bar: 40 nodes
     for "fill in this spreadsheet" is as blind as 0, because a Google Sheet's
@@ -2990,6 +3071,8 @@ def _sparse_for_task(
     past the cap, so a blocked run says the page was unseen rather than the
     model reading a blank page.
     """
+    if _is_canvas_page(canvas_covered):
+        return True
     text = (page_text or "").strip()
     if len(text) >= _PAGE_TEXT_ENOUGH:
         return False
@@ -3154,7 +3237,8 @@ async def _vision_fallback(
     Never raises. Every branch returns; a stall here would be a stall on the
     loop's hot path, and an unknown answer is reported as unknown.
     """
-    if not _sparse_for_task(deps.task, targets, page_text):
+    if not _sparse_for_task(
+            deps.task, targets, page_text, deps.canvas_covered):
         return _VisionFallback()
     if redactions or run_secrets:
         # Checked before the model is resolved, and repeated inside
@@ -3868,6 +3952,9 @@ class AgentHarness:
                 # step because the accessibility tree often omits the value a
                 # question is about.
                 page_text = await deps.cdp.get_page_text()
+                # Free, off the same cached frame. A missing field is None
+                # (unknown) and every reader below keeps its old behaviour.
+                deps.canvas_covered = await _observe_canvas_covered(deps)
             except TabUnreachable as e:
                 timing_report = self._log_timings(
                     deps.user_id, timings, steps_run,

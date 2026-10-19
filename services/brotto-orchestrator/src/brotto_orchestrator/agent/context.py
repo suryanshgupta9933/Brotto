@@ -330,6 +330,13 @@ class AgentDeps:
     # read and bump both.
     stagnant_steps: int = 0
     last_obs: tuple | None = None
+    # Fraction (0.0–1.0) of the viewport covered by the largest topmost
+    # <canvas>, from the observation frame. Set once per step by the harness's
+    # `_observe_canvas_covered`, and read by `_sparse_for_task`,
+    # `_note_stagnation` and the `read_page_text` handler. **None means
+    # unknown, not 0.0** — a relay or extension build that does not send the
+    # field leaves every one of those callers on the old behaviour.
+    canvas_covered: float | None = None
     result: TaskResult | None = None
     # URL observed at the top of the current step, before its actions run.
     # Read by the click cross-domain gate and stamped onto TaskResult.

@@ -378,6 +378,20 @@ class ExtensionCDPRelay:
         await self._ensure_fresh_obs()
         return (self._cached_obs or {}).get("pageText", "") or ""
 
+    async def get_canvas_covered(self) -> float | None:
+        """Viewport fraction covered by the largest topmost `<canvas>`.
+
+        `None` when the frame carries no such value — an extension build from
+        before the field shipped, or a frame that never sent it. The harness
+        reads `None` as *unknown*, never as "not a canvas", so this is the old
+        behaviour exactly rather than a silent downgrade to 0.0.
+        """
+        await self._ensure_fresh_obs()
+        raw = (self._cached_obs or {}).get("canvasCovered")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        return min(1.0, max(0.0, float(raw)))
+
     async def navigate(self, url: str) -> None:
         log.info("[%s] navigate → %s", self._sid, url)
         await self._send_action({"type": "navigate", "url": url})
