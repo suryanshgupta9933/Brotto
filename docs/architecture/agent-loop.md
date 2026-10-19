@@ -1133,6 +1133,86 @@ bare letter is `type_text`'s job, a modified one is a shortcut.
 `only inserts characters` in another, and the second reading is what sends the model down
 the Backspace path.
 
+### What an action aimed at, and whether the page moved
+
+`record_action` carries two more fields (`SCHEMA_VERSION` 2 → 3), and the loop
+now fills them. Both exist because the record was answering *what the model
+said* about a dispatch rather than what the harness could see.
+
+- **`target` is the ref or the point.** `0:13829`, or `412,88` for a
+  coordinate action on a canvas — an identifier, not text. `_action_target`
+  builds it from the call's own arguments and never copies `MAX_TARGET_CHARS`
+  from `audit.py`: the audit owns the bound, and a second copy of the number
+  is one that can drift.
+- **`changed` is `deps.canvas_changed`, and nothing else.** The extension
+  measured it, the server compared two measurements of the same page. A model
+  saying "I clicked submit and the page updated" is D5 — self-report is not
+  evidence — and that claim already has a home, which is `outcome`. The one
+  honest caveat: the delta is read at the step's observe, so it describes the
+  change *into* this step and sits one action behind, and it is `None` — not
+  `False` — on every step while the capture gate is off, which is the default.
+  A step that turns the delta into a per-action measurement is the honest next
+  move and is not built.
+
+Pinned by `tests/agent/test_action_evidence.py`, including the case that
+matters most: the fake executor asserts the page updated on *every* action,
+and the assertion is that `changed` is still `None`.
+
+### `press_key` targets focus, and focus is the user's
+
+`press_key` takes no ref. It types into `document.activeElement`, and the user
+is free to click something else while the model is thinking — the real case is
+the user reaching for their open email draft and the agent's next `Enter`
+sending it. Irreversible, and every layer above it records `ok: true`.
+
+**Nothing on the wire told us what the user touched.** The scope check came
+first and came back empty: there is no pointer event, no `user_gesture` and no
+navigation-attributed focus change on the relay, so the guard needed its own
+read rather than reusing a signal that exists.
+
+`focus_id()` is it, on both relays, over the `evaluate` round trip
+`clear_ref` already uses — no new request type and no extension change.
+`FOCUS_ID_JS` returns `TAG#id`, or the element's ordinal among same-tag
+elements when it has no id. Not a DOM object (the identity would change every
+read) and not a backendNodeId (correct, but not reachable from the one
+`Runtime.evaluate` both relays have). `TAG[id]` is unique in a document and
+does not move when focus does, which is the whole requirement.
+
+Three rules, and the middle one is the guard:
+
+- **Only the step's *first* dispatch is checked.** Once the agent has acted on
+  the page, a changed focus is the agent's own — it clicked, then pressed — and
+  refusing there breaks the ordinary click-then-Enter path that commits a
+  search. Read-only actions do not count against the step (they touch
+  nothing), and neither does `press_key` itself (counting it would let a
+  second press_key in the same batch past the guard that just refused the
+  first). Cheap, and aimed at the one window where nothing the agent did
+  explains the difference.
+- **Unknown focus is refused.** A relay without `focus_id`, a read that failed,
+  an evaluate that errored — all arrive as "we could not tell where this
+  keystroke would go", which is the condition this exists to prevent. A
+  refusal costs one step; the mistake it prevents does not come back.
+- **The capture is free unless the step presses a key.** One read at the top
+  of a step whose batch contains `press_key`, and nothing at all otherwise.
+
+**Not verified in a browser** — `FOCUS_ID_JS` has not run against a live page.
+The ordinal path is the part that wants a real one: a re-render that reorders
+same-tag elements changes the id, which reads as a moved focus and refuses.
+That is the safe direction, but it is a step cost nobody has measured.
+
+### Declined: `intent` / `expect` on `StepSummary`
+
+"I aimed at X and the page did not become Y" would turn a silent loop into a
+named failure, and it is not built. Recording the model's intent is easy and
+recording that it was met is not: there is no verifier the loop can honestly
+run. The AX diff would be the candidate and it is evidence only — D2 makes it
+never a targeting coordinate source and its diff tiles say nothing about *which
+element* was meant to change — so "did Y happen" can only be answered by the
+model asking itself, which is D5 again. A field named `intent`/`expect` on
+`StepSummary` would read in the document as evidence and be a self-report,
+which is the failure this record has been cleaned of twice. It needs a real
+verifier first, not a schema change.
+
 ## Mid-task steering
 
 The only way to redirect a running task was Stop, which discards the transcript. Now the composer stays live while `executing`: it posts `{"type":"steer"}` and the correction lands on the next turn.

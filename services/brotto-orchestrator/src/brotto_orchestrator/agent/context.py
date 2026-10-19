@@ -346,6 +346,15 @@ class AgentDeps:
     # negative. A resumed task builds a fresh `AgentDeps`, so this starts at
     # the unknown rather than at the previous run's answer.
     canvas_changed: bool | None = None
+    # Identity of the focused element, read once at the top of a step that
+    # contains a `press_key`. `press_key` takes no ref and types into
+    # `document.activeElement`, and the user can click something else while
+    # the model is thinking — so the step's first press_key re-reads it and
+    # refuses if it moved. **None means unknown, not "unchanged"**, and the
+    # guard refuses on it: a keystroke whose destination cannot be read is
+    # exactly the case that must not be dispatched. Written by
+    # `_capture_step_focus`, read by `_focus_refusal`.
+    step_focus: str | None = None
     # Steps whose ONLY evidence of progress was the pixel delta, with the URL
     # and the AX tree identical across all of them. The page controls that
     # signal — a ticking clock, a blinking caret, a spinner repaints forever —

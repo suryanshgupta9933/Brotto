@@ -65,7 +65,7 @@ async def test_a_ref_with_coordinates_still_clicks():
 
     assert not out.startswith(FAIL_PREFIX)
     relay._ws_send.assert_called_once_with(
-        {"type": "action", "action": {"type": "click", "x": 10, "y": 20}}
+        {"type": "action", "action": {"type": "click", "x": 10, "y": 20, "backendNodeId": None}}
     )
 
 @pytest.mark.asyncio
@@ -172,7 +172,7 @@ async def test_a_bare_node_id_resolves_to_its_composite_ref():
 
     assert not out.startswith(FAIL_PREFIX), f"recorded as ok=False: {out!r}"
     relay._ws_send.assert_called_once_with(
-        {"type": "action", "action": {"type": "click", "x": 30, "y": 40}}
+        {"type": "action", "action": {"type": "click", "x": 30, "y": 40, "backendNodeId": None}}
     )
 
 @pytest.mark.asyncio
@@ -181,7 +181,13 @@ async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
     method: `type_text` into a bare ref must not silently retype into whatever
     holds focus, which is the HDFC failure class."""
     relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
-    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+    # One post-action observation per method, queued as each is reached: the
+    # extension answers every action it is handed with one, and each of these
+    # methods now waits for it — that frame is also how the relay learns
+    # whether the dispatch was refused (`action_result`).
+    async def _obs():
+        await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": [
+            {"ref": "0:7", "role": "textbox", "x": 1, "y": 2}]})
     # clear_ref selects through the DOM rather than a key chord, so it waits on
     # the evaluate channel. The page it is aimed at is a textbox, so it answers.
     await relay._eval_queue.put("select-all")
@@ -191,6 +197,7 @@ async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
         (relay.clear_ref, ("7",)),
         (relay.type_text_to_ref, ("7", "hello")),
     ):
+        await _obs()
         out = await method(*args)
         assert not out.startswith(FAIL_PREFIX), f"{method.__name__}: {out!r}"
 
@@ -237,7 +244,7 @@ async def test_an_exact_composite_ref_wins_over_the_bare_fallback():
 
     assert not out.startswith(FAIL_PREFIX), f"recorded as ok=False: {out!r}"
     relay._ws_send.assert_called_once_with(
-        {"type": "action", "action": {"type": "click", "x": 2, "y": 2}}
+        {"type": "action", "action": {"type": "click", "x": 2, "y": 2, "backendNodeId": None}}
     )
 
 def test_the_prompt_does_not_demonstrate_a_bare_number_as_a_ref():
@@ -353,5 +360,5 @@ async def test_a_target_with_a_box_and_no_reason_still_clicks():
 
     assert not out.startswith(FAIL_PREFIX)
     relay._ws_send.assert_called_once_with(
-        {"type": "action", "action": {"type": "click", "x": 10, "y": 20}}
+        {"type": "action", "action": {"type": "click", "x": 10, "y": 20, "backendNodeId": None}}
     )

@@ -1338,6 +1338,102 @@ async def _redact_press_key(deps: AgentDeps) -> bool:
     return is_secret_field(attrs, attrs.get("accessibleName") or attrs.get("name"))
 
 
+def _action_target(call: ActionCall) -> str | None:
+    """The ref or point this action aimed at, for the audit's `target`.
+
+    An identifier, never text: the ref for a ref-taking verb, the coordinate
+    pair for a canvas one, the URL host for a navigate. `agent/audit.py`
+    caps the length (`MAX_TARGET_CHARS`) — it is the module that owns the
+    bound, so a second copy of the number here would be one that could drift.
+    Never the model's own description of what it aimed at: that is what
+    `outcome` carries, and D5 says a model claim is not evidence about a page.
+    """
+    args = call.action_args or {}
+    ref = args.get("ref")
+    if isinstance(ref, (str, int)) and str(ref).strip():
+        return str(ref).strip()
+    x, y = args.get("x"), args.get("y")
+    if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+        return f"{int(x)},{int(y)}"
+    url = args.get("url")
+    if call.action == "navigate" and isinstance(url, str) and url.strip():
+        return url.strip()
+    return None
+
+
+async def _capture_step_focus(deps: AgentDeps) -> None:
+    """Record what is focused, before this step's actions run. Never raises.
+
+    Read once per step and only when the step contains a `press_key` (the
+    only verb that acts on focus it did not name), through the relay's
+    existing `focus_id()`. `None` is the honest answer when the relay cannot
+    read it, and `_focus_refusal` refuses on `None` rather than assuming
+    focus is where it was.
+    """
+    getter = getattr(deps.cdp, "focus_id", None)
+    if getter is None:
+        deps.step_focus = None
+        return
+    try:
+        focus = await getter()
+    except Exception as exc:  # never raise: this is a guard, not a step
+        log.debug("focus_id lookup failed: %s", exc)
+        deps.step_focus = None
+        return
+    deps.step_focus = focus if isinstance(focus, str) and focus else None
+
+
+async def _focus_refusal(deps: AgentDeps) -> str:
+    """The outcome for a `press_key` refused because focus moved. "" = go.
+
+    `press_key` has no ref: it types into whatever `document.activeElement`
+    is, and the user is free to click somewhere else while the model is
+    thinking. The real case is the user reaching for their open email draft
+    and the agent's next `Enter` sending it — irreversible, and every layer
+    above it records `ok: true`.
+
+    Only the step's **first** dispatch is checked. Once the agent has acted
+    on the page, a changed focus is the agent's own (it clicked, then
+    pressed) and refusing there would break the ordinary click-then-Enter
+    path that commits a search. That asymmetry is the whole guard: cheap,
+    and pointed at the one window where nothing the agent did explains the
+    difference.
+
+    Unknown focus — a relay without `focus_id`, a read that failed, or a
+    capture that came back `None` — is refused too. "We could not tell where
+    the keystroke would go" is the condition this exists to prevent, and
+    proceeding on it is the fail-open direction. A refusal costs one step;
+    the mistake it prevents does not come back.
+    """
+    if deps.step_focus is None:
+        log.warning("[%s] press_key refused: focus unknown", deps.user_id)
+        return (
+            f"{_EXEC_FAILURE} press_key: the page would receive this "
+            "keystroke at whatever element is focused, and that element "
+            "could not be read, so nothing was pressed. Re-read the page "
+            "and aim at the field with type_text, or use navigate to move "
+            "the run along."
+        )
+    getter = getattr(deps.cdp, "focus_id", None)
+    try:
+        now = await getter() if getter is not None else None
+    except Exception as exc:
+        log.warning("[%s] press_key refused: focus re-read failed (%s)",
+                    deps.user_id, exc)
+        now = None
+    if isinstance(now, str) and now == deps.step_focus:
+        return ""
+    log.warning("[%s] press_key refused: focus moved (%r -> %r)",
+                deps.user_id, deps.step_focus, now)
+    return (
+        f"{_EXEC_FAILURE} press_key: focus has moved since this step "
+        "started, so this keystroke would have gone somewhere other than "
+        "where you were working — nothing was pressed. Look at the page "
+        "again, click the field you mean, and press the key as a separate "
+        "step."
+    )
+
+
 def _step_timings(timings: dict[str, float],
                   snapshots: list[dict[str, float]]) -> dict:
     """What this step cost: the cumulative buckets minus the snapshot taken
@@ -4684,13 +4780,32 @@ class AgentHarness:
             # later in this same step see it too and not only the ones after
             # the next step begins.
             run_secrets.extend(v for v in typed_secrets if v)
+            # One focus read for the whole batch, and only when something in
+            # it presses a key. See `_focus_refusal`.
+            if any(c.action == "press_key" for c in decision.actions):
+                await _capture_step_focus(deps)
+            # Actions dispatched to the page so far this step. Read-only ones
+            # do not count: they touch nothing, so a press_key behind one is
+            # still the first thing to have acted on the page. Nor does
+            # press_key itself — it is a keystroke, not a focus move, and
+            # counting it would let a second press_key in the same batch past
+            # the guard that just refused the first.
+            agent_moved_focus = False
             for call, redact in zip(decision.actions, redact_flags):
                 rec_args, trace = _scrubbed(call, redact)
                 action_trace.append(trace)
                 t_a = time.perf_counter()
-                outcome = await _execute_action(
+                # A press_key as the step's first move at the page: focus is
+                # whatever is focused *now*, and the user is free to have
+                # clicked somewhere else since the model was last shown.
+                refusal = (
+                    await _focus_refusal(deps) if not agent_moved_focus else ""
+                ) if call.action == "press_key" else ""
+                outcome = refusal or await _execute_action(
                     call, deps, audit=audit, turn=a_turn, redactions=redactions,
                     run_secrets=run_secrets)
+                if call.action not in _READ_ONLY_ACTIONS and call.action != "press_key":
+                    agent_moved_focus = True
                 # `outcome` goes to disk here *and* to the model in the next
                 # step's prompt, so an ask_human reply is scrubbed for the
                 # record only — the model still gets the answer it needs.
@@ -4700,6 +4815,15 @@ class AgentHarness:
                     ok=_EXEC_FAILURE not in outcome,
                     redacted=redact or reply_redacted,
                     duration_ms=int((time.perf_counter() - t_a) * 1000),
+                    target=_action_target(call),
+                    # The extension's pixel delta, measured at this step's
+                    # observe — so it describes the change *into* this step,
+                    # one action behind, and never the page content. D5: a
+                    # model claiming "I clicked submit" is not evidence, and
+                    # that claim already lives in `outcome`. This is None
+                    # whenever the delta is unknown, which is the default
+                    # with the capture gate off.
+                    changed=deps.canvas_changed,
                 )
                 outcomes.append(outcome)
                 # Short-circuit the rest of the batch on a terminal action

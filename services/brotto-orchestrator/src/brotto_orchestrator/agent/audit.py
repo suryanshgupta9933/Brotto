@@ -36,11 +36,25 @@ from .context import MemoryEntry, Scratchpad, next_serial
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+# 3 = actions[] entries carry `target` and `changed`. A reader must treat
+# both as absent on an older document: `changed` absent means UNKNOWN, which
+# is why the default is null and never False.
+SCHEMA_VERSION = 3
 
 # A single scalar is capped so one pathological page cannot produce a
 # multi-megabyte document. The cap is recorded rather than silent.
 MAX_FIELD_CHARS = 8_000
+
+# `target` is the ref ("0:1234") or the xy the model aimed at — an
+# identifier, not text. The bound is what stops a caller passing a caption
+# or a typed value; it is a cap, not a filter, so the contract is that a
+# target is short (the two forms above are under 12 characters).
+MAX_TARGET_CHARS = 32
+
+# A 150-step run records a few hundred of these and stays readable; a model
+# stuck in a dispatch loop must not grow the document without bound. Over the
+# cap the record is dropped and counted, never truncated mid-sequence.
+MAX_ACTIONS_PER_SESSION = 5_000
 
 REDACTED = "[redacted:password]"
 
@@ -322,6 +336,7 @@ class AuditTrail:
             "model": {},
             "policy": {},
             "totals": {"turns": 0, "steps": 0, "prompts": 0, "actions": 0,
+                       "actions_dropped": 0,
                        "tokens_in": 0, "tokens_out": 0,
                        "cache_read_tokens": 0, "cache_write_tokens": 0,
                        "wall_s": 0.0, "errors": 0},
@@ -558,6 +573,17 @@ class AuditTrail:
         with self._lock:
             return copy.deepcopy(self._doc.get("messages") or [])
 
+    def actions(self) -> list[dict]:
+        """This session's actions, in the order they ran.
+
+        What a reader of a finished run asks for: not the whole turn tree,
+        but the one line per action — did it dispatch, what did it aim at,
+        and did the page move. `args` is deliberately absent; it can carry
+        a value the model typed, and the full document is one call away.
+        """
+        with self._lock:
+            return _flatten_actions(self._doc)
+
     # ── turns ───────────────────────────────────────────────────
     def begin_turn(self, *, step: int, url: str, page_title: str,
                    ax_targets: int, ax_chars: int, ax_diff_chars: int,
@@ -718,21 +744,38 @@ class AuditTrail:
 
     def record_action(self, turn: int, *, action: str, args: dict,
                       outcome: str, ok: bool, redacted: bool,
-                      duration_ms: int) -> None:
+                      duration_ms: int, target: str | None = None,
+                      changed: bool | None = None) -> None:
         self._record(self._record_action, turn, action=action, args=args,
                      outcome=outcome, ok=ok, redacted=redacted,
-                     duration_ms=duration_ms)
+                     duration_ms=duration_ms, target=target, changed=changed)
 
     def _record_action(self, turn: int, *, action: str, args: dict,
                        outcome: str, ok: bool, redacted: bool,
-                       duration_ms: int) -> None:
+                       duration_ms: int, target: str | None = None,
+                       changed: bool | None = None) -> None:
         t = self._turn(turn)
         if t is None:
+            return
+        totals = self._doc["totals"]
+        if totals.get("actions", 0) >= MAX_ACTIONS_PER_SESSION:
+            totals["actions_dropped"] = totals.get("actions_dropped", 0) + 1
             return
         ended = _now()
         entry: dict = {"action": action, "args": _cap_deep(args)}
         _text(entry, "outcome", outcome)
         entry["ok"] = ok
+        # What the model aimed at, as an identifier. Not a claim about what
+        # the action did, and not page text.
+        entry["target"] = target[:MAX_TARGET_CHARS] if isinstance(target, str) \
+            else None
+        # Whether the observation differed from the pre-action one. Tri-state
+        # because every "we could not tell" — a first observation, a
+        # navigation, a canvas page with no tree to compare — must read as
+        # unknown and not as False. Page-derived only: a model saying "I
+        # clicked submit" is not evidence (D5), and a model claim belongs in
+        # `outcome`, which already carries what the model was told.
+        entry["changed"] = changed if isinstance(changed, bool) else None
         # The end timestamp is derived, not slept for: the harness already
         # measured the action, and an audit call must not add wall time.
         entry["started_at"] = ended
@@ -944,6 +987,51 @@ def load_owners(*, dir: Path | None = None) -> dict[str, str]:
         if owner:
             owners[stem] = owner
     return owners
+
+
+def _flatten_actions(doc: dict) -> list[dict]:
+    """Every action in document order, flattened for a reader.
+
+    A document written before `target`/`changed` existed has neither, and
+    both default to None — for `changed`, absent means the question was
+    never asked, which is unknown and not "nothing moved".
+    """
+    out: list[dict] = []
+    for turn in doc.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        for entry in turn.get("actions") or []:
+            if not isinstance(entry, dict):
+                continue
+            changed = entry.get("changed")
+            out.append({
+                "task": turn.get("task", 0),
+                "step": turn.get("step"),
+                "action": entry.get("action"),
+                "target": entry.get("target"),
+                "ok": entry.get("ok"),
+                "changed": changed if isinstance(changed, bool) else None,
+                "outcome": entry.get("outcome", ""),
+                "duration_ms": entry.get("duration_ms"),
+                "redacted": entry.get("redacted", False),
+            })
+    return out
+
+
+def read_actions(session_id: str, *, dir: Path | None = None) -> dict:
+    """One session's actions, read off disk. Never raises.
+
+    A missing, corrupt or older document is reported, not thrown: a reader
+    must not be unable to answer because the session it wants is unfinished.
+    """
+    doc = read(session_id, dir=dir)
+    if not doc.get("found"):
+        return {"found": False, "schema_version": None, "actions": []}
+    return {
+        "found": True,
+        "schema_version": doc.get("schema_version"),
+        "actions": _flatten_actions(doc),
+    }
 
 
 def read(session_id: str, *, dir: Path | None = None) -> dict:
