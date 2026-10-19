@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Callable
 
 from ..agent.ax_filter import PAGE_TEXT_MAX
@@ -116,6 +117,15 @@ SELECT_ALL_JS = (
 # The value is never sanitised further: it is compared and discarded, and it
 # never reaches a log line as user content.
 #
+# `a.id` is the one part the page chooses outright, so it is checked against
+# `FOCUS_ID_RE` here rather than downstream. Two reasons, and the second is the
+# one that matters: a newline or an ANSI escape in that id would otherwise be
+# concatenated into whatever rendered it, and a log sink is a parser input.
+# A tight grammar makes forging impossible instead of unlikely, and the cost is
+# a page with an exotic id falling back to `""` — which every consumer already
+# reads as unknown and refuses on. An id outside the grammar is no worse an
+# identity than one this evaluate cannot name uniquely, and it fails the same way.
+#
 # Returns a plain string because the extension's `evaluate_result` stringifies
 # whatever comes back; `"none"` (no activeElement) and `"body"` (focus on the
 # body, i.e. nowhere) are distinct from `""`, which is what a failed, errored or
@@ -135,11 +145,17 @@ FOCUS_ID_JS = (
     "  var all = gE(t);"
     "  var i;"
     "  if (a.id) {"
+    "    var id = String(a.id);"
+    # The same grammar as FOCUS_ID_RE below, in JS, because this is where the
+    # untrusted string is concatenated. Kept literal: a page-reachable RegExp
+    # constructor is not worth a defence here — the grammar rejects the
+    # interesting characters itself.
+    "    if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(id)) return '';"
     "    var n = 0;"
     "    for (i = 0; i < all.length; i++) {"
     "      if (all[i].id === a.id) n++;"
     "    }"
-    "    if (n === 1) return t + '#' + a.id;"
+    "    if (n === 1) return t + '#' + id;"
     "    return '';"
     "  }"
     "  for (i = 0; i < all.length; i++) {"
@@ -154,6 +170,36 @@ FOCUS_ID_JS = (
     "  return '';"
     "})()"
 )
+
+# Exactly what `FOCUS_ID_JS` can return, and nothing else: `none`, `body`, a
+# bare `TAG`, `TAG#id` with the grammar the JS checks, or `TAG[n]`.
+FOCUS_ID_RE = re.compile(
+    r"\A(?:none|body|[A-Za-z][A-Za-z0-9]{0,31}"
+    r"(?:#[A-Za-z0-9_.:-]{1,64}|\[\d{1,6}\])?)\Z"
+)
+
+
+def parse_focus_id(value: Any) -> str | None:
+    """A focus value that matches the grammar `FOCUS_ID_JS` produces, else None.
+
+    **This is a shape check, not a sanity check — do not "simplify" it to a
+    truthiness test.** Two different jobs, same function:
+
+    * A stale or foreign reply. The extension's `evaluate` channel is not
+      request-correlated the way `get_attributes`' `_pending_attrs` is, so an
+      `evaluate_result` still in flight can answer a focus read with the
+      previous page's value — `body` reading as `TAG#some-id`, and the
+      dispatch this guards against happening anyway. Nothing adversarial is
+      required, plain timing does it.
+    * A page-chosen string arriving through a channel that did not run our JS.
+
+    Both are exactly "is this shaped like something `FOCUS_ID_JS` returns",
+    and both fail closed on a mismatch: None, which every caller reads as
+    unknown and refuses on. A real focus move is never rejected, because a real
+    focus value is by construction one this grammar accepts.
+    """
+    text = str(value or "")
+    return text if FOCUS_ID_RE.match(text) else None
 
 
 class CDPRelay:
@@ -388,8 +434,7 @@ class CDPRelay:
         except Exception as exc:
             log.debug("focus_id failed: %s", exc)
             return None
-        text = str(value or "")
-        return text or None
+        return parse_focus_id(value)
 
     async def refresh_target_map(self) -> None:
         """Re-extract AX targets and update browser's target_map."""

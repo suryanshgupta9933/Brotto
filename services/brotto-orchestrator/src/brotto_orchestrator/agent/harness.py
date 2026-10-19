@@ -1386,6 +1386,17 @@ async def _capture_step_focus(deps: AgentDeps) -> None:
     deps.step_focus = focus if isinstance(focus, str) and focus else None
 
 
+def _focus_log_id(focus: str | None) -> str:
+    """What a focus id looks like in a log line: `named` or `unknown`.
+
+    Never the id itself. Half of it is `document.activeElement.id` — text the
+    page chose — and a newline or an ANSI escape in it would write lines into
+    our own logs, which are a parser's input. The value is compared in-process
+    (`_focus_refusal`) and discarded; it has no reason to be rendered.
+    """
+    return "unknown" if not isinstance(focus, str) or not focus else "named"
+
+
 async def _focus_refusal(deps: AgentDeps) -> str:
     """The outcome for a `press_key` refused because focus moved. "" = go.
 
@@ -1432,8 +1443,12 @@ async def _focus_refusal(deps: AgentDeps) -> str:
         now = None
     if isinstance(now, str) and now == deps.step_focus:
         return ""
-    log.warning("[%s] press_key refused: focus moved (%r -> %r)",
-                deps.user_id, deps.step_focus, now)
+    # The comparison above is in-process and stays that way. The two ids are
+    # not logged: one of them is `document.activeElement.id`, which the page
+    # chooses, and a log sink is a parser input. "unknown" for a None side is
+    # the same signal the refusal already reports to the model.
+    log.warning("[%s] press_key refused: focus moved (%s -> %s)",
+                deps.user_id, _focus_log_id(deps.step_focus), _focus_log_id(now))
     return (
         f"{_EXEC_FAILURE} press_key: focus has moved since this step "
         "started, so this keystroke would have gone somewhere other than "

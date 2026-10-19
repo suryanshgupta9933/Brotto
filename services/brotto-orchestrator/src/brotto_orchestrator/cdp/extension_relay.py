@@ -11,7 +11,13 @@ from typing import Callable, Awaitable
 from ..dev.ax_tree_extractor import SemanticTarget
 from ..policy.gate import screenshot_block_reason
 from ..policy.schema import Policy
-from .relay import SELECT_ALL_JS, FOCUS_ID_JS, PRESSABLE_KEYS, is_pressable_key
+from .relay import (
+    SELECT_ALL_JS,
+    FOCUS_ID_JS,
+    PRESSABLE_KEYS,
+    is_pressable_key,
+    parse_focus_id,
+)
 
 log = logging.getLogger("brotto.ext_relay")
 
@@ -571,11 +577,12 @@ class ExtensionCDPRelay:
         new request type and no extension change. None is the honest answer
         and the `press_key` guard treats it as unknown; see `FOCUS_ID_JS`.
 
-        `_eval_queue` is shared with `clear_ref` and `read_page_text`. That
-        is safe because the harness runs one action at a time, and a foreign
-        result landing here would be a string the page produced rather than
-        our own id — which reads as a moved focus, i.e. the refusing
-        direction.
+        `_eval_queue` is shared with `clear_ref` and `read_page_text` and is
+        **not** request-correlated, so a reply from either of those can land
+        here. `parse_focus_id` is what makes that safe: a foreign reply is not
+        shaped like anything `FOCUS_ID_JS` returns, so it reads as unknown and
+        every caller refuses. The harness runs one action at a time, which
+        makes it rare — not impossible, and never safe to rely on.
         """
         await self._ws_send({"type": "evaluate", "expression": FOCUS_ID_JS})
         try:
@@ -583,8 +590,7 @@ class ExtensionCDPRelay:
         except asyncio.TimeoutError:
             log.warning("[%s] timed out reading the focused element", self._sid)
             return None
-        text = str(value or "")
-        return text or None
+        return parse_focus_id(value)
 
     # ── coordinate actions ──────────────────────────────────────────────
     # A `<canvas>` has no AX node, so there is no ref to click and no
@@ -692,14 +698,24 @@ class ExtensionCDPRelay:
                 f"page holds focus, so nothing was typed. Click the element "
                 f"you meant to type into first, then type again."
             )
+        # `focus` ends here. Its id half is `document.activeElement.id` — text
+        # the page chose — and both a log line and the returned outcome cross a
+        # boundary this module does not own: a log sink is a parser input, and
+        # the outcome goes to the audit document, which is ours. Whether the
+        # id is named or not is the caller's own knowledge; what this can
+        # honestly report is that focus was held, which is what it checked.
         log.info(
-            "[%s] type_text_to_ref %r  len=%d focus=%s", self._sid, ref, len(text), focus
+            "[%s] type_text_to_ref %r  len=%d focus=%s", self._sid, ref, len(text),
+            "named",
         )
         await self._send_action({"type": "type", "text": text})
         # Says what was done, not what was meant: the ref resolved against a
-        # different tree than the one that now has focus, so naming it here
-        # asserts a destination this method never checked.
-        return f"Typed {len(text)} characters into the focused element ({focus})"
+        # different tree than the one that now has focus, so naming the ref
+        # here asserts a destination this method never checked. And the
+        # focused element is not named either — see above; the outcome is the
+        # model's history and the audit document, and a page-chosen string in
+        # either is page content in a file we own.
+        return f"Typed {len(text)} characters into the focused element"
 
     async def press_key(self, key: str, modifiers: int = 0) -> str:
         # A letter is rejected bare but allowed modified. A bare letter would

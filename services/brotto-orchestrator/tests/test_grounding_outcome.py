@@ -61,9 +61,12 @@ async def test_type_text_refuses_when_focus_is_unreadable():
 
 
 @pytest.mark.asyncio
-async def test_type_text_names_the_focused_element_not_the_ref():
-    """The success string asserted a destination it never checked. It stays
-    a success (no `Error executing:` prefix) so `ok` is still derived true."""
+async def test_type_text_never_echoes_the_focused_element():
+    """The success string asserted a destination it never checked, and its
+    second half named an id the *page* chose. That outcome goes to the audit
+    document and to the model's history — page content in a file we own — so
+    the element is reported as unnamed. It stays a success (no `Error
+    executing:` prefix) so `ok` is still derived true."""
     relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
     relay.focus_id = AsyncMock(return_value="DIV[3]")
     await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
@@ -71,8 +74,54 @@ async def test_type_text_names_the_focused_element_not_the_ref():
     out = await relay.type_text_to_ref("0:7", "Name")
 
     assert not out.startswith(FAIL_PREFIX)
-    assert "DIV[3]" in out
     assert "[0:7]" not in out
+    assert "DIV[3]" not in out
+
+
+@pytest.mark.asyncio
+async def test_type_text_does_not_log_the_page_chosen_id(caplog):
+    """A log sink is a parser input. An id carrying a newline or an ANSI
+    escape would write lines into our own logs, so the id is never logged."""
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    relay.focus_id = AsyncMock(return_value="INPUT#a\nFORGED 2026-10-20 ok\n")
+    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+
+    with caplog.at_level("INFO"):
+        await relay.type_text_to_ref("0:7", "Name")
+
+    assert "FORGED" not in caplog.text
+
+
+def test_a_page_chosen_id_outside_the_grammar_is_not_a_focus_id():
+    """Shape-validated at the boundary, so forging is impossible rather than
+    unlikely. Anything `FOCUS_ID_JS` cannot produce reads as unknown — which
+    is what every caller refuses on."""
+    from brotto_orchestrator.cdp.relay import parse_focus_id
+
+    # What the JS can return, and nothing rejected.
+    for real in ("none", "body", "DIV", "DIV[3]", "INPUT#name", "A#a.b:c-d_9"):
+        assert parse_focus_id(real) == real
+
+    for forged in (
+        "INPUT#a\nFORGED line",
+        "INPUT#a\x1b[31mred",
+        "INPUT#a b",
+        "INPUT#" + "x" * 65,
+        "DIV[9999999]",
+        '{"json": true}',          # a foreign evaluate reply
+        "the page moved focus",
+        None,
+        "",
+    ):
+        assert parse_focus_id(forged) is None, forged
+
+
+def test_focus_id_js_rejects_an_exotic_id_before_concatenating_it():
+    """The same grammar, in JS, because that is where the untrusted string is
+    joined onto a tag name."""
+    from brotto_orchestrator.cdp.relay import FOCUS_ID_JS
+
+    assert "^[A-Za-z0-9_.:-]{1,64}$" in FOCUS_ID_JS
 
 
 @pytest.mark.asyncio
@@ -408,3 +457,24 @@ async def test_a_target_with_a_box_and_no_reason_still_clicks():
     relay._ws_send.assert_called_once_with(
         {"type": "action", "action": {"type": "click", "x": 10, "y": 20, "backendNodeId": None}}
     )
+
+
+@pytest.mark.asyncio
+async def test_the_press_key_refusal_does_not_log_the_page_chosen_id(caplog):
+    """The same page-chosen id reaches the harness's own guard, and its
+    WARNING line is the other log sink."""
+    from brotto_orchestrator.agent.harness import AgentDeps, _focus_refusal
+
+    deps = AgentDeps(
+        cdp=SimpleNamespace(focus_id=AsyncMock(
+            return_value="INPUT#a\nFORGED 2026-10-20 ok\n")),
+        user_id="u", task="t", ws_send=AsyncMock(),
+    )
+    deps.step_focus = "INPUT#other"
+
+    with caplog.at_level("WARNING"):
+        out = await _focus_refusal(deps)
+
+    assert out.startswith(FAIL_PREFIX)
+    assert "FORGED" not in caplog.text
+    assert "named -> named" in caplog.text
