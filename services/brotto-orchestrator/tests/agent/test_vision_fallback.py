@@ -407,6 +407,35 @@ async def test_a_payload_that_is_not_an_image_never_reaches_the_model():
 
 
 @pytest.mark.asyncio
+async def test_a_jpeg_header_with_undecodable_base64_is_still_refused():
+    """The prefix check alone is not enough. `b64decode` defaults to
+    `validate=False`, which silently drops characters outside the alphabet,
+    so a guard that only sniffs the header passes a string the decode on the
+    hot path then chokes on — and that raise reaches `agent.run` and loses
+    the run rather than the picture."""
+    deps = _deps()
+    deps.cdp.capture_screenshot = AsyncMock(return_value=JPEG[:-4] + "!!!!")
+    out = await _vision_fallback(deps, [], "")
+    assert out.image == ""
+    assert "not an image" in out.note.lower()
+
+
+def test_an_undecodable_capture_degrades_the_turn_instead_of_raising():
+    """Belt to the guard's braces: `_turn_to_input` is the loop's hot path, so
+    a bad string here must reach the model as an unseen page, not as an
+    exception that ends the task."""
+    turn = AgentTurn(
+        task="read the board", step_number=1, scratchpad_entries=[],
+        current_url="https://example.com/board", current_page_title="Board",
+        ax_tree="", ax_diff="", step_summaries=[], screenshot=JPEG[:-3],
+        screenshot_note=harness_mod._SCREENSHOT_OK_NOTE,
+    )
+    parts = _turn_to_input(turn)
+    assert isinstance(parts, list) and len(parts) == 2
+    assert "not an image" in parts[1].lower()
+
+
+@pytest.mark.asyncio
 async def test_an_exception_is_not_a_stall():
     """The loop's hot path: a raise here loses the run, not the screenshot."""
     deps = _deps()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import os
 import re
 import time
@@ -1052,16 +1053,20 @@ def _turn_to_input(turn: AgentTurn) -> str | list:
         # note. Dropping the note made the refusal indistinguishable from a
         # blank page: the task failed for a reason the model was never told.
         return [prompt, note] if note else prompt
-    return [
-        prompt,
-        turn.screenshot_note,
-        # `turn.screenshot` is ALREADY base64; `BinaryImage` base64-encodes
-        # whatever bytes it is given, so handing it the base64 text encodes
-        # the payload a second time. The provider then decodes one layer,
-        # finds ASCII where the magic bytes should be, and refuses the turn.
-        BinaryImage(data=base64.b64decode(turn.screenshot),
-                    media_type="image/jpeg"),
-    ]
+    # `turn.screenshot` is ALREADY base64; `BinaryImage` base64-encodes
+    # whatever bytes it is given, so handing it the base64 text encodes
+    # the payload a second time. The provider then decodes one layer,
+    # finds ASCII where the magic bytes should be, and refuses the turn.
+    # `_is_encoded_image` has already proven this string decodes, but a
+    # raise here would land in `agent.run` and lose the run rather than
+    # the picture, so a failure degrades to the same refusal a bad
+    # capture gets rather than killing the task.
+    try:
+        image = BinaryImage(data=base64.b64decode(turn.screenshot),
+                            media_type="image/jpeg")
+    except (binascii.Error, ValueError):
+        return [prompt, _SCREENSHOT_FAILED_NOTE.format(why=_CAPTURE_NOT_IMAGE_WHY)]
+    return [prompt, turn.screenshot_note, image]
 
 
 # ── Task-abort helpers ──────────────────────────────────────────────────────
@@ -2804,8 +2809,23 @@ _IMAGE_PREFIXES = ("/9j/", "iVBORw0KGgo", "R0lGOD", "UklGR")
 
 
 def _is_encoded_image(data: str) -> bool:
-    """True when `data` opens with a header a provider's decoder will sniff."""
-    return data[:16].startswith(_IMAGE_PREFIXES)
+    """True when `data` is base64 this process can decode AND it opens with a
+    header a provider's decoder will sniff.
+
+    Both halves, because they answer different questions and the caller needs
+    both: the magic prefix is what the provider will find, and a successful
+    decode is what keeps `b64decode` downstream from raising on the hot path.
+    `validate=True` is the point — the default silently discards characters
+    outside the alphabet, so the guard and the decode would disagree about
+    what "the same string" means and the raise would survive the check.
+    """
+    if not data[:16].startswith(_IMAGE_PREFIXES):
+        return False
+    try:
+        base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return True
 
 
 def _describe_payload(data: str) -> str:

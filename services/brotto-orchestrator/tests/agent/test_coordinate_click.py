@@ -44,7 +44,7 @@ COORDINATE_CLICK_ENV = getattr(harness_mod, "COORDINATE_CLICK_ENV",
 from brotto_orchestrator.policy.gate import SCREENSHOT_CAPTURE_ENV
 from brotto_orchestrator.policy.schema import Policy
 
-JPEG = "/9j/4AAQSkZJRgABAQ==END-OF-JPEG"
+JPEG = "/9j/4AAQSkZJRgABAQ=="  # decodable base64 of a JPEG header, no more
 CANVAS = {"width": 1512, "height": 982, "tag": "CANVAS"}
 URL = "https://docs.google.com/spreadsheets/d/abc"
 
