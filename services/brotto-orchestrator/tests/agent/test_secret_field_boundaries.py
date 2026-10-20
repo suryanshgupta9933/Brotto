@@ -152,9 +152,13 @@ async def test_a_canvas_step_keeps_the_pixel_delta(monkeypatch):
             "kills the pixel delta — the only channel a canvas page has")
 
 
-# --- (b) boundaries in _SECRET_NAME_RE -----------------------------------
+# --- (b) boundaries in the secret-name matcher ----------------------------
 
-@pytest.mark.parametrize("label", [
+# ONE declared set, asserted in both directions by the property test below.
+# Every label here is a decision, so a boundary change cannot quietly move
+# one without failing a single assertion.
+
+TRUE_POSITIVES = [
     "Password", "Password1", "Password confirmation", "Passcode",
     "Passphrase", "One-time code", "One time password", "OTP", "PIN",
     "pin code", "API key", "api_key", "Api Key", "Authorization", "Auth",
@@ -165,20 +169,54 @@ async def test_a_canvas_step_keeps_the_pixel_delta(monkeypatch):
     "verification code", "security code", "Confirmation code",
     "backup code", "Client Secret", "clientSecret", "apiToken",
     "myPassword", "secret_key", "user_password", "My Password Field",
-])
+    # The regression: a trailing boundary fires after the SHORT alternative
+    # (`session[-_ ]?id` inside "identifier", `pin` inside "pinNumber"), so
+    # these four shapes were false negatives in a credential detector.
+    "Session identifier", "sessionIdentifier", "SESSION_IDENTIFIER",
+    "authorizationCode", "Authorization code", "pinNumber", "PIN number",
+    "one-time code", "OneTimeCode", "apiKey", "API key", "access_token",
+    # Not a bare field name: the clarify question reaches here whole, so a
+    # compound has to be found inside a run of words, not across the label.
+    "what's the verification code?",
+]
+
+NEGATIVES = [
+    "author", "Authority", "authority", "Authenticated", "authenticate",
+    "secretary", "Secretariat", "tokenize", "TokenBucket", "tokenizer",
+    "Session Name", "Name", "Age", "Cell A1",
+]
+
+
+@pytest.mark.parametrize("label", TRUE_POSITIVES)
 def test_a_real_secret_label_still_matches(label):
     """A boundary that silences the false positive by also silencing the real
     one is worse than the bug. One entry per rule, plus the compounds."""
     assert is_secret_field(None, label), f"{label!r} stopped matching"
 
 
-@pytest.mark.parametrize("label", [
-    "author", "Authority", "authority", "Authenticated", "authenticate",
-    "secretary", "Secretariat", "tokenize", "TokenBucket", "tokenizer",
-    "sessionIdentifier", "Session Name",
-])
+@pytest.mark.parametrize("label", NEGATIVES)
 def test_an_ordinary_word_does_not_match(label):
     assert not is_secret_field(None, label), f"{label!r} matched mid-word"
+
+
+def test_positives_and_negatives_hold_in_one_place():
+    """The property: the two declared lists are the whole contract, checked
+    in both directions by one test, so the suite goes red if EITHER side
+    drifts. Parametrised tests above fail identically; this fails first and
+    names the class of failure — a shape that is neither caught nor cleared.
+    """
+    missed = [n for n in TRUE_POSITIVES if not is_secret_field(None, n)]
+    overmatched = [n for n in NEGATIVES if is_secret_field(None, n)]
+    assert not missed, f"secret fields no longer caught: {missed}"
+    assert not overmatched, f"ordinary words now matched: {overmatched}"
+
+
+def test_every_declared_label_is_in_exactly_one_list():
+    """The lists are a partition. An overlap means a label is asserted
+    twice in opposite directions, and a gap means someone added a case
+    without saying which side it is on."""
+    both = set(TRUE_POSITIVES) & set(NEGATIVES)
+    assert not both, f"listed as both: {sorted(both)}"
 
 
 def test_type_password_still_wins_without_any_name():

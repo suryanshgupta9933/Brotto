@@ -64,41 +64,81 @@ _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 # type="email", so the definitive check misses it and the name is all there
 # is. False positives cost a replay that says [redacted:...] — the same
 # asymmetry that decides the unresolvable-lookup case.
-_SECRET_ALTERNATIVES = (
-    "password", "passcode", "passphrase", "one[- ]?time", "otp", "pin",
-    "secret", "credentials?", "token", "api[-_ ]?key",
-    # `auth` alone is boundary-guarded, so `AuthToken` does not reach it —
-    # the `T` follows `auth` directly. That shape is a separate alternative
-    # rather than a loosened boundary.
-    "auth(?:orization)?", "auth[-_]?token",
-    "bearer", "private[-_ ]?key", "csrf", "xsrf", "session[-_ ]?id",
-    "(?:recovery|backup|security|verification|confirmation)[- _]?code",
-)
+#
+# Matched by NORMALISING, not by one regex over the raw name. The previous
+# shape put a trailing boundary after each alternative, and that is what
+# `(?![A-Za-z])` after a SHORT alternative can only do: `session[-_ ]?id`
+# matches the first four characters of "identifier", sees `e` next, and
+# fails — the pattern cannot see that `id` began a longer word. It produced
+# false negatives on `sessionIdentifier`, `authorizationCode`, `pinNumber`.
+# Loosening the boundary is how the original mid-word bug returns
+# (`tokenize`, `secretary`, `author`). So the English is decided HERE, on
+# whole normalised words, instead of inside a pattern.
+#
+# Two views of one name, both cheap:
+#   1. the WORDS, split on separators and camel humps, matched exactly;
+#   2. any CONTIGUOUS run of those words, matched against the compounds.
+# (2) is what catches the shapes (1) deliberately splits apart — `apiKey`,
+# `api_key` and `API key` all reduce to the run `apikey`.
+#
+# Deliberately NOT whole words: `token`, `session`, `id`, `code`. `token`
+# alone is the reason `TokenBucket` and `tokenize` must not match, and
+# `session` alone is the reason an exported `Session Name` column must not.
+# Their real compounds are listed below instead.
 
-# Boundaries are "not a letter", NOT `\b`. `_` is a word character,
-# so `\btoken` would have stopped firing on `access_token` — the most common
-# real field name — which is the true positive this rule exists for. Mid-word
-# matching is the false positive worth fixing: on a document app `tokenize`,
-# `secretary`, `author`, `authority`, `authenticated` and an exported
-# `Session ID` column header are ordinary text, and one false positive vetoes
-# the pixel delta for the rest of the run.
-_SECRET_NAME_RE = re.compile(
-    "|".join(f"(?<![A-Za-z])(?:{a})(?![A-Za-z])"
-             for a in _SECRET_ALTERNATIVES),
-    re.I,
-)
+_SECRET_WORDS = frozenset({
+    "password", "passcode", "passphrase", "otp", "pin",
+    "secret", "credential", "credentials", "bearer", "csrf", "xsrf",
+    "auth", "authorization",
+})
 
-# camelCase is the one real field shape a leading boundary would silence --
-# `clientSecret`, `apiToken`, `myPassword`. It is matched separately and
-# case-SENSITIVELY, which is what makes it safe: the capital IS the camel
-# hump, so `Authority`, `Secretary` and `Tokenize` cannot reach it, and the
-# preceding lowercase letter is what tells `clientSecret` from a document
-# that merely starts with `Secret`. Two false positives survive and are
-# accepted: `myAuthorship` and `clientSecretariat`.
-_CAMEL_SECRET_RE = re.compile(
-    "(?<=[a-z])(?:Secret|Token|Password|Passcode|Passphrase|Auth|ApiKey"
-    "|SessionId|Credential|Bearer|Otp|Pin|Csrf|Xsrf)",
+_SECRET_COMPOUNDS = frozenset({
+    "apikey", "apitoken", "onetimecode", "onetimepassword", "privatekey",
+    "accesstoken", "refreshtoken", "sessionid", "sessionidentifier",
+    "authorizationcode", "pinnumber",
+    "recoverycode", "backupcode", "securitycode", "verificationcode",
+    "confirmationcode",
+})
+
+# Separators, and the two camel humps: lower→Upper, and the last capital of
+# a run (`APISecret` → API|Secret). Splitting rather than ignoring case is
+# the whole point: `author`/`Authority` stay ordinary words because neither
+# view produces a secret word, and nothing depends on a regex knowing where
+# an English word ends.
+_NAME_SPLIT_RE = re.compile(
+    r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])"
 )
+_TRAILING_DIGITS_RE = re.compile(r"[0-9]+$")
+
+
+def _secret_by_name(accessible_name: str | None) -> bool:
+    """True when the normalised name names a secret.
+
+    `Password1` is `password` plus a trailing digit, so digits are stripped
+    from each word before the lookup rather than special-cased per label.
+
+    A compound is matched against every CONTIGUOUS run of whole words, not
+    only the whole name, because this is not always a bare field name: the
+    clarify question "what's the verification code?" reaches here, and only
+    the run says `verificationcode`. Contiguity is what keeps this from
+    becoming mid-word matching again — `TokenBucket` is the run `tokenbucket`
+    and `Session Name` is `sessionname`, neither of which is a compound.
+    """
+    if not accessible_name:
+        return False
+    words = [w for w in _NAME_SPLIT_RE.split(accessible_name) if w]
+    if any(
+        _TRAILING_DIGITS_RE.sub("", word).lower() in _SECRET_WORDS
+        for word in words
+    ):
+        return True
+    for start in range(len(words)):
+        run = ""
+        for word in words[start:]:
+            run += word.lower()
+            if run in _SECRET_COMPOUNDS:
+                return True
+    return False
 
 
 def is_secret_field(attributes: dict | None, accessible_name: str | None) -> bool:
@@ -114,8 +154,7 @@ def is_secret_field(attributes: dict | None, accessible_name: str | None) -> boo
     """
     if attributes and (attributes.get("type") or "").lower() == "password":
         return True
-    return bool(_SECRET_NAME_RE.search(accessible_name or "")
-                or _CAMEL_SECRET_RE.search(accessible_name or ""))
+    return _secret_by_name(accessible_name)
 
 
 # ponytail: one directory, one file per session, no database and no index.
