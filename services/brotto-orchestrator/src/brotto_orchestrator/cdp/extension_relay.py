@@ -161,6 +161,16 @@ class ExtensionCDPRelay:
         if not isinstance(message, dict) or not isinstance(message.get("ok"), bool):
             return
         if message["ok"]:
+            # `ok: true` with a reason is still `ok: true` — `canvas-editor-exempt`
+            # is a success *granted by an exemption* (a canvas cell whose editor
+            # lies inside it), and the extension logs it for exactly that reason.
+            # Reading it as a refusal would refuse the shape `type_at` exists for;
+            # dropping it silently loses the only server-side trace that the
+            # identity binding was waived. Neither happens: it is logged, and the
+            # verdict stays a success.
+            note = str(message.get("reason") or "")
+            if note and _ACTION_REASON_RE.match(note):
+                log.info("[%s] action succeeded by exemption (%s)", self._sid, note)
             self._action_result = None
             return
         reason = str(message.get("reason") or "")
@@ -313,7 +323,7 @@ class ExtensionCDPRelay:
             f"will be refused the same way."
         )
 
-    def _locate(self, ref: str) -> tuple[dict | None, str]:
+    def _locate(self, ref: str, *, need_backend_id: bool = False) -> tuple[dict | None, str]:
         """Resolve a ref to click coordinates. Returns (coords, reason);
         reason is "" on success.
 
@@ -331,6 +341,14 @@ class ExtensionCDPRelay:
         across four attempts, every click resolved to coordinates, every click
         was audited `ok: true`, and those coordinates were pointed past the
         bottom of the window. `scroll` was never once suggested.
+
+        **`need_backend_id` closes the case at the source.** Every ref that can
+        produce an x/y can still produce it with no `backendNodeId`, and the
+        extension's `bindFocus` then has nothing to bind a destructive clear to
+        and refuses with `focus-unidentified` — the same case, refused a round
+        trip later and only after a press was dispatched. Refusing here costs no
+        press and no clear. The extension refusing it independently is the point:
+        two walls, no dependency between them.
         """
         if not self._cached_obs:
             return None, "cannot resolve: no observation captured yet"
@@ -357,6 +375,13 @@ class ExtensionCDPRelay:
                 return None, (
                     "is off the visible page — scroll until you can see it, then "
                     "click it again"
+                )
+            if need_backend_id and t.get("backendNodeId") is None:
+                return None, (
+                    "has a position but no element identity behind it — the last "
+                    "observation did not record which node this was, so the press "
+                    "and the clear after it cannot be checked against the page. "
+                    "Re-read the page, then type into a ref the fresh tree names."
                 )
             if "x" in t and "y" in t:
                 # `backendNodeId` rides the action so the extension can ask, at
@@ -523,6 +548,30 @@ class ExtensionCDPRelay:
         new request type and no extension change. None is the honest answer
         and the `press_key` guard treats it as unknown; see `FOCUS_ID_JS`.
 
+        **Isolated world, and why it is not optional here.** `FOCUS_ID_JS` reads
+        `document.activeElement` and `getElementsByTagName`, and in the main
+        world the page owns the globals that resolve them — so a hostile page
+        can report a focus that is not there, which is this check silencing
+        itself. `bindFocus` still refuses independently, so that was a
+        hardening rather than a wall; `isolatedWorld` closes it for one field.
+        The DOM is shared, so the element is the same object either way.
+
+        **A world that cannot be created must refuse, and it does.** The
+        extension answers `{value: "", error: …}` when `Page.createIsolatedWorld`
+        fails rather than falling back to the main world, and `main.py` puts
+        only `value` on `_eval_queue`, so this receives `""`. `""` is not in
+        `FOCUS_ID_RE`, so `parse_focus_id` returns `None`, and every caller
+        reads `None` as *unknown* and refuses. That is the safe direction and it
+        is now pinned by `test_focus_id_isolated_world.test`.
+
+        `""` is deliberately *not* the same thing as the answers `"none"` and
+        `"body"`, and the distinction is a refusal either way: those two are the
+        page saying nothing holds focus, `""` is this not being able to ask. A
+        page that breaks world creation is not a page with an empty field, and
+        the refusal string is identical because the model has nothing to act on
+        either way — but the *cause* is logged differently, so a run that keeps
+        refusing is diagnosable rather than mysterious.
+
         `_eval_queue` is shared with `read_page_text` and is
         **not** request-correlated, so a reply from either of those can land
         here. What `parse_focus_id` guarantees is exactly this: a reply from
@@ -536,12 +585,21 @@ class ExtensionCDPRelay:
         not built here. The harness runs one action at a time, which makes the
         window rare — not impossible, and never safe to rely on.
         """
-        await self._ws_send({"type": "evaluate", "expression": FOCUS_ID_JS})
+        await self._ws_send({"type": "evaluate", "expression": FOCUS_ID_JS,
+                             "isolatedWorld": True})
         try:
             value = await asyncio.wait_for(self._eval_queue.get(), timeout=15)
         except asyncio.TimeoutError:
             log.warning("[%s] timed out reading the focused element", self._sid)
             return None
+        if str(value or "") == "":
+            # Not "nothing is focused" — `"none"` and `"body"` say that. This
+            # is the extension failing to answer: no tab, or (isolated world)
+            # a world it could not create. Logged apart from an answer so a
+            # run stuck on this refusal can be told apart from a run stuck on
+            # a page that genuinely holds no focus.
+            log.warning("[%s] focus read returned nothing — the extension "
+                        "could not evaluate, so focus is unknown", self._sid)
         return parse_focus_id(value)
 
     # ── coordinate actions ──────────────────────────────────────────────
@@ -560,8 +618,17 @@ class ExtensionCDPRelay:
     async def probe_xy(self, x: int, y: int) -> dict:
         """Live viewport and topmost tag at (x, y). {} on any failure."""
         import json as _json
+        # Isolated world, and unlike `read_page_text` below this one is a
+        # decision rather than a readout. `window.innerWidth`/`innerHeight` are
+        # page-writable globals in the main world, so a page that inflates them
+        # makes every coordinate pass the bound check in `_coordinate_action` —
+        # the only thing between a model-chosen point and a press — and
+        # `document.elementFromPoint`'s `tag` is what refuses a covered canvas.
+        # The DOM is shared, so `elementFromPoint` answers on the same
+        # elements; only the globals it resolves through are the extension's.
         await self._ws_send(
-            {"type": "evaluate", "expression": self._PROBE_XY_JS % (int(x), int(y))}
+            {"type": "evaluate", "expression": self._PROBE_XY_JS % (int(x), int(y)),
+             "isolatedWorld": True}
         )
         try:
             raw = await asyncio.wait_for(self._eval_queue.get(), timeout=15)
@@ -721,23 +788,35 @@ class ExtensionCDPRelay:
         typing.
 
         **The focus check is kept, and it runs before the frame.** The
-        extension's own `focusState` probe is about the *press* — nothing may
-        hold focus after it — and it cannot answer "did the model mean this
-        field": the press puts focus somewhere, so it always holds focus. That
-        question was answered by `focus_id()` before the click was ever
-        dispatched, and it still is. `None`, `none` and `body` refuse exactly as
-        before — session 445fc36d typed into a sheet whose `activeElement` was
-        `body` and reported success, and that is the outcome this refuses. The
-        contract is therefore unchanged for the model: click the field first,
-        then `type_text` into it. `_eval_queue` is shared and uncorrelated (see
-        `parse_focus_id`), so this parses for shape and nothing more and an
-        unreadable answer refuses, as it always did.
+        extension's own `bindFocus` answers *identity* — the engine-named
+        focused node is the pressed node — and that question did not exist
+        before. This answers a different one: **intent**, and *shape*.
+        `bindFocus` runs after the press, and the press is what creates focus, so
+        a press that landed on the wrong focusable node satisfies it perfectly;
+        only a read taken *before* the dispatch can say whether the page was in a
+        state where the model could have meant this field at all. That is what
+        `None`/`none`/`body` refuse — session 445fc36d typed into a sheet whose
+        `activeElement` was `body` and reported success, and a press on a blank
+        sheet body would then satisfy `bindFocus` and clear whatever a previous
+        step left focused. The contract is unchanged for the model: click the
+        field first, then `type_text` into it.
+
+        **What it costs, stated plainly.** `focus_id` now asks for the
+        isolated world (see `focus_id`), so the page no longer owns the globals
+        its getter resolves through — that exposure is closed. It was never the
+        wall, though: `bindFocus` is, because it names the node from the engine.
+        Both stay, and they fail independently, which is why both are here.
+        A world that cannot be created is an *error* answer, not a focus
+        state, and it refuses exactly like an unreadable one — see `focus_id`.
+        `_eval_queue` is shared and uncorrelated (see `parse_focus_id`), so this
+        parses for shape and nothing more and an unreadable answer refuses, as it
+        always did.
 
         Every outcome is the relay's own verdict. Nothing here synthesises a
         destination: the ref is not named in the success string and neither is
         the focused element, for the reasons `type_text_to_ref` already gives.
         """
-        coords, why = self._locate(ref)
+        coords, why = self._locate(ref, need_backend_id=True)
         if not coords:
             log.warning("[%s] type_text_into_ref %r — %s", self._sid, ref, why)
             return f"Error executing: ref {ref!r} {why}"
@@ -933,6 +1012,14 @@ class ExtensionCDPRelay:
             "[%s] read_page_text  selector=%r  around=%r  max_chars=%d",
             self._sid, selector, around, max_chars,
         )
+        # Main world on purpose, unlike `focus_id` and `probe_xy` above. This
+        # read has no decision in it: what comes back *is* page content, and
+        # page content is page-controlled whatever world evaluates it, so an
+        # isolated world would protect the page's text from the page and buy
+        # nothing. It reads `document.body.innerText` — a DOM property, shared
+        # across worlds and unshadowable either way — and its only caller is the
+        # prompt. Not a blanket rule; this caller has a reason to be the one
+        # that does not take the flag.
         await self._ws_send({"type": "evaluate", "expression": expr})
         try:
             text = await asyncio.wait_for(self._eval_queue.get(), timeout=15)

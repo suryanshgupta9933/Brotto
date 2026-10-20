@@ -327,3 +327,32 @@ def SimpleNamespaceDeps(cdp):
     from types import SimpleNamespace
     return SimpleNamespace(cdp=cdp, step_number=1, user_id="u", result=None,
                            steering=None)
+
+@pytest.mark.asyncio
+async def test_a_ref_with_no_element_identity_is_refused_before_the_press():
+    """A `type_at` with no `backendNodeId` has nothing to bind a destructive
+    clear to. The extension refuses it as `focus-unidentified` — but only
+    *after* a press has been dispatched at the coordinates, and a press is what
+    moves focus. Refused here, it costs no press and no clear."""
+    relay = _relay([_target(backendNodeId=None)])
+    _drain_obs(relay)
+    relay._eval_queue.put_nowait("INPUT[0]")
+
+    out = await relay.type_text_into_ref("0:7", "Name")
+
+    assert out.startswith(FAIL_PREFIX), out
+    assert "no element identity" in out, out
+    assert _actions(relay) == [], "a press was dispatched for an unbound ref"
+
+
+@pytest.mark.asyncio
+async def test_the_missing_identity_guard_is_scoped_to_type_at():
+    """`click_ref` carries the same coordinates to the same engine hit test and
+    must not inherit a refusal the type path needs. Scoping it to every ref
+    would refuse clicks on any target the observation could not identify."""
+    relay = _relay([_target(backendNodeId=None)])
+    _drain_obs(relay)
+
+    out = await relay.click_ref("0:7")
+
+    assert out == "Clicked [0:7]", out

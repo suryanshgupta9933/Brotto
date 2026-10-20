@@ -289,7 +289,11 @@ async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
     """`_locate` is the one place every one of these routes through, so one case
     per method: `type_text` into a bare ref must not silently retype into whatever
     holds focus, which is the HDFC failure class."""
-    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    # `backendNodeId` because `type_text_into_ref` refuses a ref with a position
+    # and no identity — the subject here is the bare-ref *format*, so the target
+    # is otherwise a complete one.
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2,
+                     "backendNodeId": 99}])
     # One post-action observation per method, queued as each is reached: the
     # extension answers every action it is handed with one, and each of these
     # methods now waits for it — that frame is also how the relay learns

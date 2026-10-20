@@ -111,8 +111,11 @@ SELECT_ALL_JS = (
 # `getElementsByTagName` is bound once at the top — a page that swaps the
 # prototype mid-evaluate cannot change what the count is computed over. That
 # closes the *later* swap only; a prototype replaced before the evaluate starts
-# is not closed here, and closing it means `Page.createIsolatedWorld`, which is
-# the frame workstream, not a bugfix.
+# is not closed here, and closing it means evaluating in an isolated world.
+# Which is what the caller now does — `ExtensionCDPRelay.focus_id` sends
+# `isolatedWorld: true` — so this string never runs against a page's globals
+# on the product path. The dev relay above still evaluates it in the main
+# world; that is a Playwright `evaluate`, and it is not the product path.
 #
 # The value is never sanitised further: it is compared and discarded, and it
 # never reaches a log line as user content.
@@ -139,8 +142,8 @@ FOCUS_ID_JS = (
     # Bound once, because `getElementsByTagName` is a page-reachable method: a
     # page that swaps the prototype mid-evaluate would otherwise decide what
     # `all` enumerates. Binding defeats a *later* swap, not one installed before
-    # the evaluate — an honest limit. The isolated world that would close it is
-    # the frame workstream again, not a bugfix.
+    # the evaluate — an honest limit, and one the isolated world closes for the
+    # product path (see the note on `FOCUS_ID_JS` below).
     "  var gE = document.getElementsByTagName.bind(document);"
     "  var all = gE(t);"
     "  var i;"
