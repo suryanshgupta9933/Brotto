@@ -164,13 +164,67 @@ async def test_a_missing_label_refuses_instead_of_prompting(trail, label):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", [(412.5, 288), ("412", 288), (None, 288),
-                                 (True, 288), (412, [288])])
-async def test_coordinates_that_are_not_integers_refuse(trail, bad):
+@pytest.mark.parametrize("bad", [(412.5, 288), ("412.0", 288), ("1e2", 288),
+                                 ("0x71", 288), ("1,13", 288),
+                                 ("412abc", 288), ("", 288), (None, 288),
+                                 (True, 288), (False, 288), (412, [288]),
+                                 (412, 288.0), (412, "288.0"),
+                                 ("-1", 288), ("", "288")])
+async def test_coordinates_that_are_not_whole_pixels_refuse(trail, bad):
+    """The stated grammar in `_as_xy`, refused rather than guessed at: a
+    decimal point, an exponent, a radix prefix, a separator, a bool. Each is
+    a value `int()` would have accepted, truncated or reinterpreted, and each
+    would aim somewhere the model never named."""
     deps, _, _ = _deps()
     out = await _run(_click(x=bad[0], y=bad[1]), deps, trail)
     assert _EXEC_FAILURE in out
     deps.cdp.click_xy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("xy", [("412", "288"), ("412", 288), (412, "288"),
+                                 (" 412 ", " 288 "), ("\t412\n", "\t288\n")])
+async def test_a_quoted_integer_is_the_integer_it_quotes(trail, xy):
+    """The recorded failure: a real Sheets run sent `"113"` and spent the step
+    on a refusal for an aim it had got right. Quoting is a formatting
+    difference, not a different number."""
+    deps, frames, _ = _deps()
+    out = await _run(_click(x=xy[0], y=xy[1]), deps, trail)
+    assert _EXEC_FAILURE not in out, out
+    deps.cdp.click_xy.assert_awaited_once_with(412, 288)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("xy", [("9999", "288"), ("412", "9999")])
+async def test_a_coerced_coordinate_is_still_bound_checked(trail, xy):
+    """Coercion is at the boundary, not before the guards: a quoted
+    coordinate still has to be inside the viewport read now."""
+    deps, _, _ = _deps()
+    out = await _run(_click(x=xy[0], y=xy[1]), deps, trail)
+    assert _EXEC_FAILURE in out and "viewport" in out
+    deps.cdp.click_xy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_coerced_coordinate_is_still_probed_for_occlusion(trail):
+    """And still refused when something other than the canvas is on top."""
+    deps, _, _ = _deps(probe={"width": 1512, "height": 982, "tag": "DIV"})
+    out = await _run(_click(x="412", y="288"), deps, trail)
+    assert _EXEC_FAILURE in out and "canvas" in out
+    deps.cdp.click_xy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_coerced_coordinate_types_only_after_it_is_approved(trail):
+    """`type_xy` borrows focus_xy's guards wholesale, so the coerced point is
+    the point the user was shown — and the text is still gated as a string."""
+    deps, frames, _ = _deps()
+    call = ActionCall(action="type_xy", action_args={
+        "x": "412", "y": "288", "label": "the cell C4", "text": "42"})
+    out = await _run(call, deps, trail)
+    assert _EXEC_FAILURE not in out, out
+    deps.cdp.focus_xy.assert_awaited_once_with(412, 288)
+    deps.cdp.type_text_at_focus.assert_awaited_once_with("42")
 
 
 @pytest.mark.asyncio
@@ -276,7 +330,7 @@ async def test_every_refusal_says_error_executing(trail):
     written to the audit document as a successful action — which is how a
     wrong click becomes an unmeasurable one."""
     cases = [
-        _click(label=""), _click(x=-5), _click(x=1512), _click(x="412"),
+        _click(label=""), _click(x=-5), _click(x=1512), _click(x="412.5"),
         _click(probe=None) if False else _click(),
     ]
     probes = [CANVAS, CANVAS, CANVAS, CANVAS, {}]

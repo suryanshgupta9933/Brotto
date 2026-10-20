@@ -2106,9 +2106,36 @@ def _coordinate_clicks_enabled() -> bool:
     )
 
 
-def _is_int(value) -> bool:
-    # bool is an int subclass, and `true` is not a coordinate.
-    return isinstance(value, int) and not isinstance(value, bool)
+# A coordinate is a whole pixel count, and the model writes one in whatever
+# shape it likes: a recorded Sheets run sent "113" as a JSON string and the
+# step was spent refusing an aim the agent had got right. So the accepted
+# grammar is stated rather than left to `int()`, which decides by accident:
+# `int(" 113 ")` passes, `int(113.7)` truncates a pixel the model never named,
+# and `True` is `1`.
+#
+# Accepted: an int (not a bool), or a string of ASCII digits and nothing else,
+# with surrounding whitespace tolerated because quoting plus padding is a
+# formatting difference and not a different number.
+#
+# Refused, deliberately: a float (113.7 — truncating aims somewhere the model
+# did not say), "113.0" and "1e2" (a decimal or exponent is not a whole pixel
+# count and the model may well have meant the fraction), "0x71" and "1,13"
+# (a radix prefix or a separator the model invented), "", null, a list, and
+# bool. Everything downstream — the probe, the viewport bound check, the
+# backendNodeId binding, the approval card — reads the coerced int and is
+# unchanged.
+_XY_INT_STRING = re.compile(r"[0-9]+")
+
+
+def _as_xy(value) -> int | None:
+    """The coordinate for one axis, or None if `value` is not one."""
+    if isinstance(value, bool):
+        return None  # bool is an int subclass, and `true` is not a coordinate
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and _XY_INT_STRING.fullmatch(value.strip()):
+        return int(value.strip())
+    return None
 
 
 # What each verb is, on the card. They differ because each press is followed
@@ -2356,9 +2383,12 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
             f"ask the user where {label} is."
         )
     x, y = args.get("x"), args.get("y")
-    if not _is_int(x) or not _is_int(y):
+    x, y = _as_xy(x), _as_xy(y)
+    if x is None or y is None:
         return refuse(
-            f"x and y must be whole pixel coordinates, got {x!r} and {y!r}."
+            f"x and y must be whole pixel coordinates, got {args.get('x')!r} "
+            f"and {args.get('y')!r} — numbers, or a string of digits, with no "
+            f"decimal point and no units."
         )
     # One derivation of the value, checked once, used by both the frame and
     # the dispatch below — the two were separate readings of one argument,
