@@ -1625,8 +1625,10 @@ def _click_ref_href(call: ActionCall, targets: list) -> str | None:
 
     **A relative href is None, not resolved.** It cannot be resolved
     correctly without WHATWG URL parsing, and `urljoin` is not WHATWG: for
-    `\\evil.com/x` a browser resolves to `//evil.com/x` and navigates
-    cross-origin, while `urljoin` keeps it on this page — so a relative
+    `\\\\evil.com/x` a browser resolves to `//evil.com/x` and navigates
+    cross-origin, while `urljoin` keeps it on this page (the single-backslash
+    form is *not* the case: a browser resolves `\\evil.com/x` to
+    `https://good.example/evil.com/x`, same-origin) — so a relative
     href is exactly the input where a Python resolver invents a
     same-domain verdict the browser would disagree with. Same for a
     protocol-relative `//other.example/x`. None routes it to the
