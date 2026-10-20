@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 from typing import Callable, Coroutine, Any, NamedTuple
+from urllib.parse import urljoin
 
 import logging
 import re
@@ -1604,6 +1605,229 @@ def _should_prompt_cross_domain_click(
     return (True, post_etld)
 
 
+def _click_ref_domain(
+    call: ActionCall, targets: list, pre_url: str | None,
+) -> str | None:
+    """The eTLD+1 a `click` ref is about to leave for, read off the step's
+    own target list — or None when the click carries no destination.
+
+    This is the pre-flight half of the cross-domain gate. The post-click
+    half compares two URLs, which is one step too late to be an approval:
+    by the time it asks, the navigation has already carried a form POST,
+    an OAuth code or a `?token=` out of the user's logged-in tab, and a
+    deny cannot un-navigate it. So the gate has to read the href first
+    and ask before dispatch.
+
+    No wire change is needed for it: the extension already puts each
+    link's CDP `url` property on the target (`observation/index.ts`,
+    `propUrl`) and `extension_relay._to_semantic` maps it to `href`.
+
+    `urljoin` rather than a bare `etld1(href)`, because a protocol-
+    relative `//other.example/x` has no scheme of its own and would
+    resolve to nothing at all instead of to `other.example`.
+
+    **None means "no destination we can read", not "same domain".** A
+    button whose handler navigates via JS, a form submit, or a ref that
+    is no longer in the tree all land here, and all keep the post-click
+    check as their only line of defence. Returning None is what stops
+    this being a gate that looks load-bearing and silently resolves
+    nothing; the cost is that the JS-navigation case is still caught one
+    step late, which is why the post-click check stays.
+    """
+    target = next(
+        (t for t in (targets or ()) if t.ref_id == call.action_args.get("ref")),
+        None,
+    )
+    href = getattr(target, "href", None) if target is not None else None
+    if not href:
+        return None
+    if pre_url:
+        href = urljoin(pre_url, href)
+    return etld1(href)
+
+
+async def _preflight_cross_domain_click(
+    call: ActionCall, deps: AgentDeps, audit, turn: int, targets: list,
+) -> str | None:
+    """Approve a cross-domain click BEFORE it is dispatched. Returns the
+    outcome to return immediately if the user denied, else None.
+
+    Same `kind` and `record_policy` shape as the post-click gate, and
+    the same `visited_domains` set, so an approval here covers the hop
+    the post-click check would otherwise ask about — which is why
+    approving usually means exactly one prompt per domain per task, and
+    not one before and one after the same click.
+
+    The deny path sets `deps.result` and returns a blocked string, the
+    same shape the post-click gate uses, so `click` never reaches
+    `cdp.click_ref`.
+    """
+    if deps.policy is None:
+        return None
+    pre_url = getattr(deps, "step_url", None)
+    href_domain = _click_ref_domain(call, targets, pre_url)
+    if href_domain is None:
+        return None
+    # The same predicate the post-click gate uses, with the href standing
+    # in for the URL the click will land on.
+    needs_prompt, target_domain = _should_prompt_cross_domain_click(
+        pre_url, f"https://{href_domain}", deps,
+    )
+    if not needs_prompt or target_domain is None:
+        return None
+
+    log.warning(
+        "[%s] POLICY: cross-domain click BEFORE dispatch  step=%d  pre=%s  target=%s",
+        deps.user_id, deps.step_number, pre_url, target_domain,
+    )
+    audit.record_policy(
+        step=deps.step_number, kind="click_cross_domain",
+        domain=target_domain, action="click",
+        decision="require_approval",
+    )
+    approved = await _ask_user(
+        deps, audit, turn=turn, kind="click_cross_domain",
+        action="_policy_cross_domain_click",
+        args={"from_url": pre_url, "to_domain": target_domain},
+        domain=target_domain,
+        reason=(
+            f"This click would navigate to {target_domain}, a different "
+            f"organisation than the current page. Continue?"
+        ),
+    )
+    if not approved:
+        log.warning(
+            "[%s] POLICY VIOLATION: user DENIED cross-domain click BEFORE dispatch  step=%d  target=%s",
+            deps.user_id, deps.step_number, target_domain,
+        )
+        audit.record_policy(
+            step=deps.step_number, kind="click_cross_domain",
+            domain=target_domain, action="click",
+            decision="require_approval", user_decision="denied",
+        )
+        deps.result = _make_user_denied_result(
+            deps.step_number, domain=target_domain,
+            kind=f"cross-domain click to {target_domain}", deps=deps,
+        )
+        return f"[BLOCKED] policy: user denied cross-domain click to {target_domain}"
+    audit.record_policy(
+        step=deps.step_number, kind="click_cross_domain",
+        domain=target_domain, action="click",
+        decision="require_approval", user_decision="approved",
+    )
+    deps.visited_domains.add(target_domain)
+    return None
+
+
+# The card-only caveat on every coordinate approval. It carries no domain and
+# no page text, so it is safe in the frame and never reaches the audit — and
+# `_ask_user`'s `frame_reason`/`reason` split is what keeps it that way.
+_COORDINATE_CROSS_ORIGIN_CAVEAT = (
+    " Nothing about where this point leads can be read before the click: the "
+    "page is a canvas there. If it opens another site, you will be asked "
+    "after it happens."
+)
+
+
+async def _coordinate_cross_domain_after(
+    action: str, deps: AgentDeps, audit, turn: int, pre_url: str | None,
+) -> str | None:
+    """The post-dispatch half of the coordinate cross-domain gate. Returns
+    the outcome to return immediately if the click must abort the task, else
+    None.
+
+    **This is not a pre-flight, and there cannot be one.** `_coordinate_action`
+    dispatches only where `elementFromPoint` is a `CANVAS`; a canvas has no
+    href, no role and no destination, and whatever leaves the page leaves
+    through a JS handler on the pixel. `boundedPoint` does not close the gap —
+    it runs inside the extension's `click_xy` handler, after this server has
+    already decided, and returns `{x, y}` or null. So unlike ref `click`,
+    which reads the href and asks first, a coordinate click can only be
+    reported on.
+
+    What it still buys, and why it is not nothing: the landing is checked
+    against the user's blacklist in the same step, so a coordinate click can
+    no longer carry the run onto a blocked site; the hop is recorded as
+    `click_cross_domain` with the identity the user was shown; and the domain
+    joins `visited_domains`, so one approval covers the rest of the task. The
+    deny path aborts rather than returning to the loop — a declined pixel is
+    a statement about one point, but a page that has already navigated is not
+    something the model gets to try again on.
+    """
+    if deps.policy is None:
+        return None
+    await asyncio.sleep(0.5)  # let the navigation start before reading, as `click` does
+    try:
+        post_url = await deps.cdp.get_current_url()
+    except Exception:  # noqa: BLE001 — an unreadable landing is not a licence
+        return None
+    if not post_url:
+        return None
+
+    decision = check_domain_policy(post_url, deps.policy)
+    if decision == GateDecision.BLOCK:
+        domain = etld1(post_url) or post_url
+        log.warning(
+            "[%s] POLICY VIOLATION: %s navigated to blacklisted URL  url=%s  domain=%s",
+            deps.user_id, action, post_url, domain,
+        )
+        if audit is not None:
+            audit.record_policy(
+                step=deps.step_number, kind="click_blocked_post",
+                domain=domain, action=action, decision="block",
+            )
+        deps.result = _make_policy_blocked_result(deps.step_number, domain,
+                                                  deps=deps)
+        return f"[BLOCKED] policy: {action} navigated to {post_url}"
+
+    needs_prompt, target_domain = _should_prompt_cross_domain_click(
+        pre_url, post_url, deps,
+    )
+    if not needs_prompt or target_domain is None:
+        return None
+
+    log.warning(
+        "[%s] POLICY: cross-domain %s AFTER dispatch  step=%d  pre=%s  post=%s  domain=%s",
+        deps.user_id, action, deps.step_number, pre_url, post_url,
+        target_domain,
+    )
+    if audit is not None:
+        audit.record_policy(
+            step=deps.step_number, kind="click_cross_domain",
+            domain=target_domain, action=action, decision="require_approval",
+        )
+    approved = await _ask_user(
+        deps, audit, turn=turn, kind="click_cross_domain",
+        action="_policy_cross_domain_click",
+        args={"from_url": pre_url, "to_url": post_url,
+              "target_domain": target_domain},
+        domain=target_domain,
+        reason=(
+            f"The page navigated to {target_domain}, a different organisation "
+            f"than {pre_url and etld1(pre_url)}. This has already happened."
+        ),
+    )
+    if audit is not None:
+        audit.record_policy(
+            step=deps.step_number, kind="click_cross_domain",
+            domain=target_domain, action=action, decision="require_approval",
+            user_decision="approved" if approved else "denied",
+        )
+    if approved:
+        deps.visited_domains.add(target_domain)
+        return None
+
+    log.warning(
+        "[%s] POLICY VIOLATION: user DENIED cross-domain %s  step=%d  target=%s",
+        deps.user_id, action, deps.step_number, target_domain,
+    )
+    deps.result = _make_user_denied_result(
+        deps.step_number, domain=target_domain,
+        kind=f"cross-domain {action} to {target_domain}", deps=deps,
+    )
+    return f"[BLOCKED] policy: user denied cross-domain {action} to {target_domain}"
+
+
 def _guard_first_time_seen_blacklist(
     deps: AgentDeps, current_url: str, audit, step: int, action: str,
 ) -> bool:
@@ -2148,11 +2372,16 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
     if verb == "type":
         frame_args["text"] = typed
         audit_args, _ = _scrubbed(call, True)
-        frame_reason = _COORDINATE_REASONS["type"](x, y, label)
         audit_reason = _type_audit_reason(x, y, label,
                                           audit_args["text_chars"])
     else:
         audit_reason = _COORDINATE_REASONS[verb](x, y, label)
+    # The caveat rides the card for all three verbs, not only `type`. It is
+    # the whole of the cross-domain consent a coordinate click can offer: the
+    # post-dispatch prompt below is a report, so the approval the user gave
+    # before the press has to say in advance that it could be leaving the site.
+    frame_reason = _COORDINATE_REASONS[verb](x, y, label) + (
+        _COORDINATE_CROSS_ORIGIN_CAVEAT)
     approved = await _ask_user(
         deps, audit, turn=turn, kind="coordinate_click", action=action,
         args=audit_args,
@@ -2247,6 +2476,10 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
         result = await cdp.focus_xy(x, y)
         if _EXEC_FAILURE in result:
             return _missed_point(deps, action, label, result)
+        blocked = await _coordinate_cross_domain_after(action, deps, audit,
+                                                       turn, url)
+        if blocked is not None:
+            return blocked
         await cdp.refresh_target_map()
         return f"Focused at ({x},{y}) — {label}"
 
@@ -2263,19 +2496,27 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
         result = await cdp.type_text_at_focus(typed)
         if _EXEC_FAILURE in result:
             return result
+        blocked = await _coordinate_cross_domain_after(action, deps, audit,
+                                                       turn, url)
+        if blocked is not None:
+            return blocked
         await cdp.refresh_target_map()
         return f"Typed into ({x},{y}) — {label}"
 
     result = await cdp.click_xy(x, y)
     if _EXEC_FAILURE in result:
         return _missed_point(deps, action, label, result)
+    blocked = await _coordinate_cross_domain_after(action, deps, audit, turn,
+                                                   url)
+    if blocked is not None:
+        return blocked
     await cdp.refresh_target_map()
     return f"Clicked at ({x},{y}) — {label}: {result}"
 
 
 async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                           turn: int = -1, redactions=None,
-                          run_secrets=None) -> str:
+                          run_secrets=None, targets: list | None = None) -> str:
     """Execute a single action. Returns outcome string.
 
     `redactions` and `run_secrets` are this step's credential-shaped findings
@@ -2369,6 +2610,15 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             return f"Navigated to {args['url']}"
 
         elif action == "click":
+            # Before the dispatch, not after. The gate below asks about a
+            # navigation that has already happened, which is a report and
+            # not an approval — so the href the model was shown decides
+            # first, and this only runs when that href cannot be read.
+            denied = await _preflight_cross_domain_click(
+                call, deps, audit, turn, targets,
+            )
+            if denied is not None:
+                return denied
             result = await cdp.click_ref(args["ref"])
             await asyncio.sleep(0.5)
             await cdp.refresh_target_map()
@@ -2395,20 +2645,23 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                         )
                     deps.result = _make_policy_blocked_result(deps.step_number, domain, deps=deps)
                     return f"[BLOCKED] policy: click navigated to {post_url}"
-                # Cross-domain click gate (Change 3): a click that hopped
-                # to a new eTLD+1 not yet visited this task needs user
-                # approval. Reuses `visited_domains` — already populated
-                # by navigate()'s first-time-nav prompt, so a click into
-                # an already-approved domain doesn't re-prompt. Deny aborts
-                # the task. Pure decision in `_should_prompt_cross_domain_click`
-                # (unit-tested); this is the wire side.
+                # Defense-in-depth, and the only line for a click whose
+                # destination the pre-flight could not read — a JS
+                # `location.assign`, a form submit, a `target=_blank` link
+                # whose navigation lands in a tab this relay is not
+                # driving. By here the click HAS happened, so this is a
+                # report, and it is phrased in the past tense on purpose:
+                # two prompts that both predict cannot both be right, and
+                # the one after the fact must not read like a veto that
+                # still has time to stop it. It cannot un-navigate — a deny
+                # aborts the task, the tab stays where the click put it.
                 pre_url = getattr(deps, "step_url", None)
                 needs_prompt, target_domain = _should_prompt_cross_domain_click(
                     pre_url, post_url, deps,
                 )
                 if needs_prompt and target_domain is not None:
                     log.warning(
-                        "[%s] POLICY: cross-domain click  step=%d  pre=%s  post=%s  domain=%s",
+                        "[%s] POLICY: cross-domain click AFTER dispatch  step=%d  pre=%s  post=%s  domain=%s",
                         deps.user_id, deps.step_number, pre_url, post_url, target_domain,
                     )
                     if audit is not None:
@@ -2424,8 +2677,9 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                               "target_domain": target_domain},
                         domain=target_domain,
                         reason=(
-                            f"Click would navigate to {target_domain}, a different "
-                            f"organisation than the current page. Continue?"
+                            f"The page navigated to {target_domain}, a different "
+                            f"organisation than {pre_url and etld1(pre_url)}. "
+                            f"This has already happened."
                         ),
                     )
                     if not approved:
@@ -4845,7 +5099,7 @@ class AgentHarness:
                 ) if call.action == "press_key" else ""
                 outcome = refusal or await _execute_action(
                     call, deps, audit=audit, turn=a_turn, redactions=redactions,
-                    run_secrets=run_secrets)
+                    run_secrets=run_secrets, targets=targets)
                 # From the OUTCOME, not the verb: a click the hit-test refused
                 # (or that missed, or was off-screen) moved nothing, and
                 # arming off on it would let the press_key behind it land on

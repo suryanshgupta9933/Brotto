@@ -50,6 +50,7 @@ def _canvas_deps() -> AgentDeps:
     cdp.get_canvas_covered = AsyncMock(return_value=0.9)
     cdp.get_page_title = AsyncMock(return_value="Sheet1")
     cdp.refresh_target_map = AsyncMock()
+    cdp.click_ref = AsyncMock(return_value="Clicked [r:A]")
 
     async def ws_send(_msg: dict) -> None:
         return None
@@ -100,6 +101,7 @@ def _static_deps() -> AgentDeps:
     cdp.get_canvas_covered = AsyncMock(return_value=0.0)
     cdp.get_page_title = AsyncMock(return_value="Example")
     cdp.refresh_target_map = AsyncMock()
+    cdp.click_ref = AsyncMock(return_value="Clicked [r:A]")
 
     async def ws_send(_msg: dict) -> None:
         return None
