@@ -391,6 +391,62 @@ restores, and call `_persist_domain_grant` where the pre-flight approval lands �
 and neither is a change to what the *card* shows. Until one ships, this doc is
 the only place the difference is written down.
 
+**3e. Redacting a value and latching the run are two different claims (2026-10-20).**
+`_redact_if_secret` used to return one `bool`, and `True` meant both "redact
+this typed value" and "this run touched a credential". The second is not a
+variant of the first. `redactions` is per-step; `run_secrets` is latched for the
+**whole run**, and its only effect is to veto the pixel delta and the screenshot
+on every remaining step — the two channels that redaction cannot reach. So
+"redact one argument" and "blind this run's perception for its rest" were welded
+to one return value, and the wiring was wrong.
+
+The case that broke it is **an unresolvable ref** — a `ref` that matches no entry
+in `prev_targets`. That is the *absence* of evidence, not evidence. On a
+canvas-rendered app every typed cell is unresolvable, because there is no
+element and therefore no ref; the false positive was not one login, it was the
+run. On a blank spreadsheet that latched on step one and vetoed the pixel delta
+— which on a canvas app is the **only** channel that tells the agent its edit
+landed — on every step thereafter.
+
+So the function returns `(redact, latch)`. **An unresolvable ref still redacts
+the value** — fail closed on the value is unchanged and remains correct, because
+the value could be a password and we cannot tell. **It does not latch the run.**
+A ref that *did* resolve but whose attributes came back unusable still latches,
+because there the field was genuinely seen and the verdict is a finding.
+
+**The veto rule did not change.** `redactions or run_secrets` still vetoes both
+the delta and the screenshot; `run_secrets` is still run-wide; there is no new
+setting and no way to override it. "We narrowed the secret detector" and "we
+weakened the secret gate" are different claims and **only the first is true** —
+what was narrowed is which inputs are allowed to *assert* that the run saw a
+credential, and nothing about what happens to a run that did.
+
+**3f. Boundaries on a secret-name matcher, and why not `\b`.** `_SECRET_NAME_RE`
+matched mid-word: `tokenize`, `secretary`, `author`, `authority` and
+`authenticated` all read as credential fields, and so does an exported
+`Session ID` column header on a spreadsheet. `auth(?:orization)?` had no boundary
+at all. Every one of those is a **run-wide latch**, and one false positive vetoes
+perception for the rest of the task — so on a document app the detector was close
+to unusable, while the page it was protecting was a spreadsheet.
+
+The boundary is `(?<![A-Za-z])…(?![A-Za-z])`, and deliberately **not `\b`**.
+`_` is a word character in Python, so `\btoken` would have stopped firing on
+`access_token` — the single most common real field name, and the true positive
+the rule exists for. The trade is letters in, underscore out.
+
+camelCase is a second real field shape and a leading boundary would silence all
+of it (`clientSecret`, `apiToken`, `myPassword`), so it is matched by a
+separate **case-sensitive** pattern gated on a preceding lowercase letter. The
+capital *is* the camel hump, so `Authority`, `Secretary` and `Tokenize` cannot
+reach it, and the preceding lowercase is what separates `clientSecret` from a
+document that merely begins with `Secret`.
+
+**Two false positives survive and are accepted:** `myAuthorship` and
+`clientSecretariat`. Both cost a run its pixel delta; both are rarer than the
+words they shadow. Accepted, not overlooked.
+
+Pinned by `tests/agent/test_secret_field_boundaries.py`.
+
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
 Brotto-operated service, we run no servers"* and closed out each section with a
@@ -502,7 +558,7 @@ blocked, and is not, is worse off than one who never tried.
 
 So the widening is **local to `screenshot_block_reason`**, and that is the whole
 reason it is not upstream. `check_domain_policy` is shared with the harness's
-approval path (`harness.py:1456`, `:1599`, `:1679`, `:2983`), where `n/a` means
+approval path (`harness.py:1711`, `:1884`, `:1964`, `:2692`, `:2781`, `:4685`), where `n/a` means
 *do not prompt* and a wildcard that quietly widened would move the extension's
 domain-approval behaviour — a different subsystem with its own doc and its own
 semantics. The gate therefore resolves the host itself (`urlsplit().hostname`),

@@ -267,7 +267,7 @@ cannot read it" is not a reason to delete it.
 
 #### **A v2 document cannot be resumed once v3 is deployed. This is a deploy-ordering fact, not a cosmetic bump.**
 
-`harness.py:3686` refuses to resume any document whose `schema_version` is not
+`harness.py:4125` refuses to resume any document whose `schema_version` is not
 exactly `SCHEMA_VERSION` — the check is equality, not `>=`. So the moment a
 server writing `SCHEMA_VERSION = 3` is rolled out, **every v2 document on disk
 becomes unresumable**, and one that was interrupted a minute before the roll
@@ -374,6 +374,38 @@ expression in the tab's cached isolated world instead of the page's. Absent or
 all — so this is **grow-only**: an extension predating the field ignores the key,
 a server that never sends it is unchanged, and no version window is needed.
 Pinned by `scripts/test-frame-contract.test.js`.
+
+### A bare `await` on a sync method kills the socket, and the suite stays green (2026-10-20)
+
+The WebSocket receive loop is the one place in this service where **a signature
+is the contract**: it does `await relay.deliver_action_result(...)` with no
+inspection of what it got back. `deliver_action_result` was a plain `def`. So
+`await None` raised `TypeError`, the loop caught it as a generic exception,
+`break`s, the socket died and the running agent task was cancelled with it.
+
+It fired on the **first `action_result` of every run**, which is why every
+recorded run died immediately after its first click — and why it presented to
+the user as **"server unreachable"**, a fact about their network, when the
+server was fine and had thrown away its own receive loop. It is now `async`.
+
+**The durable part is not the `def`.** Four existing tests called
+`deliver_action_result` **synchronously**, so they kept passing after the loop
+started awaiting it — the suite was green, CI was green, and the feature had
+never once worked in a real run. A test that exercises a function is not
+evidence that any *caller* reached it correctly; where the call site is a bare
+`await`, a sync call and a no-op call look identical to the test.
+
+So the guard is pinned by **shape, not by behaviour**: a test asserts that all
+three `deliver_*` the receive loop awaits — `deliver_action_result`,
+`deliver_screenshot_result`, `deliver_attributes_result` — are coroutine
+functions, and that `main.py` really does `await relay.<name>(` each of them.
+That is the only check that catches a signature drifting back, because nothing
+else in the tree can observe it — the runtime can, once, expensively, by killing
+the socket.
+
+Two shapes, two costs. A bare `await` of a sync function costs one run and looks
+like a network fault. An `await` of a method that returns `None` legitimately
+costs nothing and looks like nothing, forever.
 
 ## Version pair and the compat window
 

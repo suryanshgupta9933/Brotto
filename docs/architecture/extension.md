@@ -773,6 +773,44 @@ no gate to run; the clear has no such excuse — it is the one operation here th
 destroys the user's text. The relay closes the same case at the source by
 calling `_locate(ref, need_backend_id=True)`.
 
+### The cached context id rotted, and nothing said so (2026-10-20)
+
+**An execution context id belongs to a renderer, not to a tab.** The cache in
+`isolatedWorld()` is keyed by `tabId`, but the id dies with the renderer: on a
+cross-document navigation, and on a debugger detach-and-reattach to the *same*
+page. An MV3 service worker outlives both. So the cache handed every
+`Runtime.evaluate` an id that no longer existed, the evaluate returned an error,
+and the caller read "the extension could not evaluate".
+
+The blast radius was the whole keyboard path. `focusState` runs `FOCUS_PROBE`
+through it, so `press_key` and `type_text` were refused on **every** step — the
+server's wording was `focus is unknown`, which reads as "the page has no focused
+element", i.e. a statement about the user's page. It was a statement about a
+dead id in our own cache. `probe_xy` was dead for the same reason, and that is
+the coordinate-safety probe — so the bounds check standing between a model-chosen
+point and a press was not running at all.
+
+**The fix is a self-correcting wrapper, `withWorld(tabId, fn)`.** Use the cached
+id; if `fn` throws, drop the entry, build the world again, run once more. A second
+failure propagates unchanged, so a real fault stays one fault and does not
+become two silent attempts.
+
+**Why not a list of invalidating events, and why not `loaderId`.** Enumerating
+the events that invalidate an execution context is a list that rots: a future one
+is missed and the id goes stale again, silently — and it goes stale silently
+*by construction*, because an evaluate against a dead context is an **error**,
+not an empty value, and every caller here reads "the extension could not
+evaluate" for both. Keying the cache on the frame's `loaderId` is cheaper on the
+happy path and still wrong, because detach-and-reattach-to-the-same-page leaves
+the document unchanged and the `loaderId` identical. **That is the case a live
+run actually hit.** Recovery-on-failure covers every cause — navigation, detach,
+frame swap, context destroyed — without a list of them.
+
+A failure now also reaches the server: `main.py` logs `evaluate failed in the
+extension` at warning with the extension's own error string. Dropping `error`
+and forwarding only `value` is what turned a hard failure into `focus is
+unknown` with nothing to act on and nothing to diagnose.
+
 ### The `evaluate` frame grew one optional field
 
 `{"type": "evaluate", "expression": "<js>", "isolatedWorld": true}`. Absent or

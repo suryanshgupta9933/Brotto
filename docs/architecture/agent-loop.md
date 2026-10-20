@@ -420,6 +420,18 @@ only constant left is `RATE_SAMPLES = 3`, a floor on how much evidence counts
 as a rate at all. Expected Gmail observation is 10.8s → ~1.4s. The decision is
 not trusted — it is a *guess about the page*, and the guess is checked below.
 
+**`RATE_SAMPLES = 3` still misses the case its own comment names.** A page with
+fewer than three mutations is not a rate, it is an anecdote, so the exit cannot
+fire — which is deliberate, and is what keeps a slow loader from being called
+busy. But Sheets repaints at gaps of roughly 1.7–3.3s, and a `loaderId`-shaped
+page that emits three mutations across a 3s+ quiet window straddles the sample
+floor from the other side: too slow to form a rate, too fast to go silent for
+the full window. Those observations still pay the entire quiet window, which is
+the measurement above showing up again in the one page it was measured on.
+Roughly half of that page's observations do not benefit from the exit at all.
+Raising the sample count would start calling sparse loaders busy, which is the
+direction the exit structurally cannot make safely. Recorded as open.
+
 **An absolute threshold here was one page's number wearing a universal claim.**
 The first version of this exit was "3 mutations inside 1000ms", which Gmail's
 41-per-10s clears with ~30% headroom — and which silently assumed any slower
@@ -466,6 +478,21 @@ saving stands. On the slow-renderer shape every rescan differs, the full quiet
 window is paid, and one more scan follows — which is the pre-existing
 behaviour, unchanged.
 
+**That block is a second charge, and the log line only ever accounts for the
+first.** `metrics.stability` is written from the *first* `waitForStable` alone.
+When the rate exit fires **and** the two fingerprint rescans disagree, this
+`{noEarly: true}` call pays up to another full `DEADLINE_MS` — up to another
+10s — and none of it appears in the `stability=…ms` figure, because that figure
+describes a gate that already returned. `scans` does rise, so the second charge
+is inferable; the wall-clock number is not, and on a canvas page this is the
+largest remaining latency in the loop.
+
+**Not fixed, and recorded here so it is not rediscovered as a mystery.** A fix
+means accumulating both gates' `elapsedMs` into the metric rather than keeping
+the first, and that is a one-line change nobody has made because the measurement
+has not been taken. Until it is, **do not read `stability=…ms` as the cost of
+observation.**
+
 `scripts/test-observation-rescan-guard.test.js` extracts `captureObservation`
 and pins all four shapes, because a guard that silently stops firing hands the
 model a half-rendered tree while every metric still reads healthy. An absence
@@ -499,6 +526,43 @@ One trap in it. `geometry.boxes` is a `Map`, and a `Map` on the wire serialises
 to `{}` — which in the log is indistinguishable from `source: "no-join"`, a
 real and different fault. The metrics copy the geometry fields individually
 rather than spreading, and `scripts/test-observation-metrics.test.js` pins it.
+
+### `timedOut` does not mean the deadline was hit, and the log cannot tell them apart
+
+A recorded live run logged **`stability=7452ms unsettled`** — and `7452` is well
+below `DEADLINE_MS = 10000`, which reads as impossible. It is not impossible, and
+the reason is a naming problem worth writing down before someone else spends an
+afternoon on it.
+
+`waitForStable` derives the field as `timedOut: v?.quiet !== true`. That is
+"**did not settle quietly**", not "reached the deadline". The rate exit resolves
+`finish(false, true)` — `quiet: false`, `early: true` — **at whatever moment the
+sample fires**, which on a fast page is well before the deadline. So `timedOut`
+is `true` for an early exit exactly as it is for a real deadline, and the two are
+one flag. `main.py` renders that flag as `unsettled`, which is why a sub-deadline
+number carries a deadline-sounding label.
+
+Three consequences, in descending order of how much they mislead:
+
+- **`stability=…ms unsettled` does not mean the gate used its whole window.** A
+  reader measuring the cost of the gate from that line will overestimate it by
+  up to 10s per observation, in the same direction as the invisible second
+  charge above.
+- **`Stability.early` is carried all the way to the metrics and is never
+  rendered.** It is computed, sent, logged by `waitForStable` itself on the
+  deadline-only path, and then dropped at the one place a human reads it. The
+  `console.warn` inside `waitForStable` is the *only* output that
+  distinguishes the two cases, and it fires only on `timedOut && !early`.
+- **`unknown` is a third thing entirely** — `waited: false, timedOut: false`,
+  which is the `catch` arm in `waitForStable`: the tab went away mid-observe and
+  the evaluate rejected, so there was no answer to report. It is not an early
+  exit and it is not a timeout.
+
+**Not fixed.** The fix is to render `early` as its own word in the `main.py`
+ternary, which is one branch; it was not done because it was found while
+reading logs rather than while designing the metric. Until it is, the honest
+reading of the line is *"the gate did not observe a full quiet window, and the
+reason is not in this line."*
 
 
 ### What the AX tree does not contain — measured, not inferred
@@ -670,7 +734,7 @@ The give-up-and-ask instruction survives, narrowed to the case where **no
 picture came with the turn**. It was not deleted; it was moved off the case a
 picture already answers.
 
-**The log line is not the trigger.** `harness.py:3767` logs `screenshot
+**The log line is not the trigger.** `harness.py:4649` logs `screenshot
 attached (%d B base64)` on the capture path, which reads as "every step gets a
 picture". That line predates the trigger being narrowed to `_sparse_for_task`;
 a step that does not log it is normal and says nothing about the page.
@@ -712,6 +776,38 @@ every step. The ceiling is what closes it. `xy_misses` is reset **only** by a
 coordinate action that lands, so two misses on the way onto one canvas do not
 follow the model onto the next. The loop it closes is the one recorded below,
 "Ten clicks, four attempts, zero changes": that was this path with no ceiling.
+
+**A coordinate is a number, and the output schema cannot say so.** `action_args`
+is a bare `dict`. Nothing in the schema the model generates against tells it
+that `x` is an integer rather than a string, so it guesses — and **it guesses by
+quoting**: a recorded Sheets run emitted `{"x": "113", "y": "213"}` as JSON
+strings, and the action was refused outright, spending the step to reject an aim
+the agent had got exactly right. The refusal was not wrong; it was the *only*
+safe response to a value whose type the schema never specified.
+
+Two things ship, and the second is the one that matters. `_coordinate_action`
+now coerces at the guard — an int that is not a bool, or a string of ASCII
+digits and nothing else, with surrounding whitespace tolerated because quoting
+plus padding is a formatting difference rather than a different number. And
+`prompt.py` names the type on `click_xy`, `focus_xy` and `type_xy` and carries
+one coordinate example with unquoted literals, so the guess has something to be
+instead of the default.
+
+**What is refused, deliberately.** `bool` (`True` is `1`), any float
+(`113.7` — truncating aims at a pixel the model never named), `"113.0"` and
+`"1e2"` (a decimal or an exponent is not a whole pixel count, and the model may
+well have meant the fraction), `"0x71"` and `"1,13"` (a radix prefix or a
+separator the model invented), `""`, `null`, a list. **A coordinate silently
+floored is worse than a refusal**, because the run continues and is wrong.
+Everything downstream — the probe, the viewport bound check, the
+`backendNodeId` binding, the approval card — reads the coerced int and is
+unchanged.
+
+**The root cause was written down in the code before the incident.**
+`harness.py` carried a comment saying `action_args` is a bare dict and that the
+schema therefore tells the model nothing about an argument's type. It shipped
+anyway. That is the failure worth naming: a comment is not a control, and a
+reasoning nobody is forced to read is not a constraint.
 
 **A canvas-dominated page is sparse unconditionally, and this is the third
 case, checked first.** The two tests above can only see what is *there*. A
@@ -1723,7 +1819,7 @@ which reads as flake and is not; chase it rather than retry it.
 
 **The diff was not the missing piece.** `compute_ax_diff` has always run and
 `### What changed after last action` has always been spliced into the prompt
-(`harness.py:849`, now inside the `<ax_diff untrusted>` fence). On those steps it
+(`harness.py:868`, now inside the `<ax_diff untrusted>` fence). On those steps it
 said `(no changes detected)` — correctly, because a
 stale tree genuinely has nothing new in it. The model was told, in plain text, that its
 click changed nothing, and clicked again. That is the same failure as not being told; a
