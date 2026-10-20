@@ -486,3 +486,59 @@ async def test_the_press_key_refusal_does_not_log_the_page_chosen_id(caplog):
     assert out.startswith(FAIL_PREFIX)
     assert "FORGED" not in caplog.text
     assert "named -> named" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_type_text_outcome_is_the_relays_own_verdict():
+    """The harness used to synthesise `Typed into [0:10183]` — naming the
+    destination the relay never checked — on top of a relay that had already
+    reported only "focused element". The relay's string is what was verified,
+    and it is what the audit document and the model's history get.
+
+    The ref must not reappear in any shape: `0:10183`, `[0:10183]` or
+    `Typed into [`, because a bare substring would pass while the decoration
+    moved the bracket.
+    """
+    from brotto_orchestrator.agent.harness import _execute_action
+    from brotto_orchestrator.agent.context import ActionCall
+
+    verdict = "Typed 9 characters into the focused element"
+    cdp = AsyncMock()
+    cdp.focus_ref = AsyncMock(return_value="Focused [0:10183]")
+    cdp.clear_ref = AsyncMock(return_value="Cleared [0:10183]")
+    cdp.type_text_to_ref = AsyncMock(return_value=verdict)
+
+    deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u")
+    call = ActionCall(action="type_text",
+                      action_args={"ref": "0:10183", "text": "name"})
+
+    out = await _execute_action(call, deps)
+
+    assert out == verdict
+    for shape in ("0:10183", "[0:10183]", "Typed into ["):
+        assert shape not in out, f"{shape!r} is a destination claim"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_type_reaches_the_caller_unchanged():
+    """The refusal must survive the decoration too: a wrapped `Error
+    executing:` is the bug `test_a_wrapped_failure_is_still_recorded_as_not_ok`
+    exists for, and the string the model reads has to name the recovery."""
+    from brotto_orchestrator.agent.harness import _execute_action
+    from brotto_orchestrator.agent.context import ActionCall
+
+    refusal = ("Error executing: ref '0:10183' resolved, but nothing on the "
+               "page holds focus, so nothing was typed. Click the element you "
+               "meant to type into first, then type again.")
+    cdp = AsyncMock()
+    cdp.focus_ref = AsyncMock(return_value="Focused [0:10183]")
+    cdp.clear_ref = AsyncMock(return_value="Cleared [0:10183]")
+    cdp.type_text_to_ref = AsyncMock(return_value=refusal)
+
+    deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u")
+    call = ActionCall(action="type_text",
+                      action_args={"ref": "0:10183", "text": "name"})
+
+    out = await _execute_action(call, deps)
+
+    assert out == refusal

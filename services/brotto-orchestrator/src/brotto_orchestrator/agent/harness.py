@@ -2471,9 +2471,14 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             if _EXEC_FAILURE in cleared:
                 return cleared
             result = await cdp.type_text_to_ref(args["ref"], args["text"])
+            # The relay is the only side that knows what held focus, and it
+            # reports only that. This string is both the model's history and the
+            # audit's outcome, so anything added here is a destination claim
+            # nobody checked — which is how "name" landed in a formula bar
+            # while the record said it went into a cell.
             if _EXEC_FAILURE in result:
                 return result
-            return f"Typed into [{args['ref']}]"
+            return result
 
         elif action == "press_key":
             # modifiers is CDP's bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8).
