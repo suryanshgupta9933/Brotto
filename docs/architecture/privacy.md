@@ -421,31 +421,58 @@ weakened the secret gate" are different claims and **only the first is true** �
 what was narrowed is which inputs are allowed to *assert* that the run saw a
 credential, and nothing about what happens to a run that did.
 
-**3f. Boundaries on a secret-name matcher, and why not `\b`.** `_SECRET_NAME_RE`
-matched mid-word: `tokenize`, `secretary`, `author`, `authority` and
+**3f. A secret-name boundary is a word split, not a lookaround.** The old
+matcher matched mid-word: `tokenize`, `secretary`, `author`, `authority` and
 `authenticated` all read as credential fields, and so does an exported
-`Session ID` column header on a spreadsheet. `auth(?:orization)?` had no boundary
-at all. Every one of those is a **run-wide latch**, and one false positive vetoes
-perception for the rest of the task — so on a document app the detector was close
-to unusable, while the page it was protecting was a spreadsheet.
+`Session ID` column header on a spreadsheet. `auth(?:orization)?` had no
+boundary at all. Every one of those is a **run-wide latch**, and one false
+positive vetoes perception for the rest of the task — so on a document app the
+detector was close to unusable, while the page it was protecting was a
+spreadsheet.
 
-The boundary is `(?<![A-Za-z])…(?![A-Za-z])`, and deliberately **not `\b`**.
-`_` is a word character in Python, so `\btoken` would have stopped firing on
-`access_token` — the single most common real field name, and the true positive
-the rule exists for. The trade is letters in, underscore out.
+The first fix expressed the boundary as `(?<![A-Za-z])…(?![A-Za-z])`. It does
+not work, in both directions. **Under-matching:** only ASCII letters are
+excluded, so `access_token` is not `\btoken` — `_` is a word character — and
+every compound snake_case name, the most common real field shape, walks
+straight past the single-word rule. **Over-matching:** when that boundary was
+later tightened, four genuine credentials stopped being detected —
+`Session identifier`, `sessionIdentifier`, `authorizationCode`, `pinNumber`
+— because a trailing boundary fires after the *short* alternative inside
+`identifier` and `Number`. The test suite stayed green, because the tests had
+been written against the broken matcher. A credential detector that silently
+stops matching is worse than one that over-matches, and **nothing in a passing
+CI run tells you which of the two you have.**
 
-camelCase is a second real field shape and a leading boundary would silence all
-of it (`clientSecret`, `apiToken`, `myPassword`), so it is matched by a
-separate **case-sensitive** pattern gated on a preceding lowercase letter. The
-capital *is* the camel hump, so `Authority`, `Secretary` and `Tokenize` cannot
-reach it, and the preceding lowercase is what separates `clientSecret` from a
-document that merely begins with `Secret`.
+So the boundary is not a lookaround over the raw string — `_`, `-` and camel
+case each defeat one — but a **normalisation first**. `_secret_by_name` splits
+the accessible name into whole words (`_NAME_SPLIT_RE`: any non-alphanumeric
+run, the lower→Upper hump, and the last capital of an acronym run), strips
+trailing digits from each (`Password1` is `password` plus a number), then
+matches any single word against `_SECRET_WORDS` and **every contiguous run of
+words** against `_SECRET_COMPOUNDS`. `apiKey`, `api_key` and `API key` all
+reduce to the run `apikey`, which is why camel case needs no pattern of its own.
 
-**Two false positives survive and are accepted:** `myAuthorship` and
-`clientSecretariat`. Both cost a run its pixel delta; both are rarer than the
-words they shadow. Accepted, not overlooked.
+**The contiguity requirement is load-bearing.** Matching only the fully
+flattened name broke the clarify question, which arrives as *"what's the
+verification code?"* and not as a bare label — only the run `verification code`
+says `verificationcode`. And it is also what keeps this from becoming mid-word
+matching again, because contiguity is what makes `TokenBucket` the run
+`tokenbucket` and `Session Name` the run `sessionname`, neither of which is a
+compound. The single-word list is deliberately short: `token`, `session`,
+`code` and `id` are absent, and their real compounds are enumerated instead, so
+`tokenize`, `Session Name` and `Cell A1` stay ordinary words while
+`access_token` and `SessionID` do not.
 
-Pinned by `tests/agent/test_secret_field_boundaries.py`.
+**Only the detector moved.** `type="password"` still wins outright whatever the
+name says — it is checked first and the name rules only ever add — and no caller
+of `is_secret_field` was touched, so nothing outside the matcher changed
+behaviour. The two false positives the old boundary was *accepted* with,
+`myAuthorship` and `clientSecretariat`, are now simply not matches.
+
+Pinned by `tests/agent/test_secret_field_boundaries.py`, which declares one
+partition of positive and negative labels and asserts it in both directions —
+so a boundary change cannot move a label from one side to the other without a
+single assertion going red.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
