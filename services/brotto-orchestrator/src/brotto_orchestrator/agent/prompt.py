@@ -31,7 +31,8 @@ What you can do:
   navigate(url)                                  — go to a URL
   click(ref, description)                        — click an element by its AX ref
   click_xy(x, y, label)                          — click a point on the page by CSS-pixel
-                                                   coordinates. ONLY for a page whose content is
+                                                   coordinates: x and y are whole numbers
+                                                   (integers, not strings). ONLY for a page whose content is
                                                    a <canvas> (a spreadsheet, a diagram, a
                                                    drawing app), where there is no element and
                                                    therefore no ref to click. Requires a `label`
@@ -45,12 +46,14 @@ What you can do:
                                                    dismiss it, do not try another point.
   focus_xy(x, y, label)                          — put the caret at a point on a canvas,
                                                    same rules and the same approval card as
-                                                   click_xy. It is a full press and release
+                                                   click_xy, x and y integers as there. It
+                                                   is a full press and release
                                                    there: on a spreadsheet it selects a cell,
                                                    on a drawing app it draws.
   type_xy(x, y, label, text)                      — put the caret at a point on a canvas
                                                    and type into it, in one action. Same
-                                                   rules and same guards as focus_xy; use
+                                                   rules, same guards and the same integer
+                                                   x and y as focus_xy; use
                                                    it instead of focus_xy then type_text,
                                                    which cannot follow here because a canvas
                                                    has no ref to name. One card covers the
@@ -825,6 +828,13 @@ Examples:
             }
           }
         }
+      ]
+    }
+
+  Coordinate — a canvas, no ref to name, so x and y are bare numbers:
+    {
+      "actions": [
+        {"action": "click_xy", "action_args": {"x": 412, "y": 288, "label": "the cell C4"}}
       ]
     }
 
