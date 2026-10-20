@@ -41,6 +41,29 @@ function extractKeyBranch() {
 // the branch cannot run without them. Extracted from source for the same
 // reason the branch is: a key code that quietly went missing is an absence,
 // and an absence reads clean in review.
+//
+// `dispatchKey` is extracted for a second reason: it is the *shared* press, so
+// `type_at`'s clear and the standalone `key` action cannot drift apart. A
+// modifier one of them honours and the other drops is the original bug in a
+// new place, and it would be invisible in a diff.
+function extractDispatchKey() {
+  const fn = source.search(/^async function dispatchKey\s*\(/m);
+  if (fn < 0) throw new Error("no dispatchKey in background.ts — renamed?");
+  const open = source.indexOf("{", fn);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) {
+      // The body runs as plain JavaScript, so the signature's annotations come
+      // off and only the body ships — same rule as `verifyTarget` and
+      // `anyCommand` in pointer.ts.
+      const head = source.slice(fn, open).replace(/:\s*[\w<>[\]| ]+/g, "");
+      return head + source.slice(open, i + 1);
+    }
+  }
+  throw new Error("unterminated dispatchKey");
+}
+
 function extractKeyCodeHelper() {
   const table = source.search(/const KEY_CODES/);
   if (table < 0) throw new Error("no KEY_CODES table in background.ts — renamed?");
@@ -65,7 +88,7 @@ function dispatch(action) {
     },
   };
   const fn = vm.runInNewContext(
-    `(async (t, action, dbg, tabId) => { ${extractKeyCodeHelper()}\n${extractKeyBranch()} })`,
+    `(async (t, action, dbg, tabId) => { ${extractKeyCodeHelper()}\n${extractDispatchKey()}\n${extractKeyBranch()} })`,
   );
   return fn("key", action, dbg, 7).then(() => sent);
 }

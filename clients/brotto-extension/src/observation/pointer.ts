@@ -261,6 +261,117 @@ export async function verifyTarget(tabId, backendNodeId, x, y) {
 }
 
 /**
+ * Did the press leave something that can receive text?
+ *
+ * `Input.insertText` writes into `document.activeElement` and verifies nothing,
+ * so a press that focused nothing — a dead cell, a div that took the click but
+ * not the focus — turns into a keystroke into whatever *was* focused, or into
+ * silence. `type_at` fuses the click and the type into one action, which closes
+ * the window `focus_id` in `cdp/relay.py` uses to catch the user reaching for
+ * the keyboard mid-step; this is the extension-side half of that protection.
+ *
+ * **Identity is deliberately not checked here.** Google Sheets focuses a hidden
+ * input that is not a descendant of the cell node that was clicked, so a
+ * containment test would refuse on exactly the shape this exists to serve.
+ * "Something focusable holds focus" is the question a click can actually answer;
+ * "is it the right one" is `verifyTarget`'s, and it runs before the press.
+ *
+ * **The clear is here, and it is a DOM operation.** It used to be a key chord
+ * the caller had to name, via a `modifiers` bitmask on the frame, because "which
+ * chord means select-all" is an OS question and this file is forbidden from
+ * asking it: Ctrl+A is "move to line start" on macOS and this drives a user's
+ * laptop. The server could not answer it either — it has no OS signal, and its
+ * own select-all ran *before* the press, against whatever held focus before,
+ * i.e. possibly a different field, which is the "erase some other field"
+ * failure. Ordering is why this cannot be a server-side call: after `pressAt`,
+ * `activeElement` *is* the clicked target; before it, it is not.
+ *
+ * `activeElement` and not the clicked node, which is the Sheets question: a
+ * cell is a `<canvas>` whose press focuses a hidden input that is not a
+ * descendant of the cell node, so a containment test refuses on exactly the
+ * shape this action exists for. `select()` works the same on a hidden input
+ * wherever it hangs in the tree — it selects that element's own contents, not a
+ * region of the page.
+ *
+ * Both questions, one evaluate, in the order they were already asked in — the
+ * same composition `CLEAR_AND_FOCUS_JS` performs server-side. A second round
+ * trip would ask the same unchanged `activeElement` twice.
+ *
+ * The clear's verdict rides the same `{ok, reason}` as the focus's, in a closed
+ * vocabulary: `clear-threw`, `clear-no-text-field`. No tag name or other
+ * page-chosen text appears — this string reaches the model's history and the
+ * audit document.
+ *
+ * No template literals or semicolons inside: the Node test slices this out of
+ * the source between the backticks.
+ */
+const FOCUS_PROBE = `function (doClear) {
+  var a = document.activeElement;
+  if (!a) return { ok: false, reason: "no-active-element" };
+  // The document and the root element are the "nobody is focused" answer in
+  // every engine. insertText against either is a no-op, so calling that a
+  // failure is reporting the truth rather than inventing one.
+  if (a === document.body) return { ok: false, reason: "focus-on-body" };
+  if (a === document.documentElement) return { ok: false, reason: "focus-on-root" };
+  if (!doClear) return { ok: true, reason: "" };
+  try {
+    if (typeof a.select === "function") {
+      a.select();
+      // HTMLInputElement.select() is specified to do **nothing** on an input
+      // type it does not apply to — email, number, date, time — and to do
+      // nothing, not to throw. So a successful call is not evidence a clear
+      // happened, and the text after it would append to a field the model asked
+      // to empty: the same wrong answer the chord gave, quieter. Read the
+      // selection back and refuse when the call was a no-op over a non-empty
+      // value. The value is checked first so an *empty* field of a no-op type
+      // never reaches selectionStart, which throws on those types — and an
+      // empty field has nothing to clear, so appending to it is correct.
+      if (typeof a.value === "string" && a.value.length > 0 &&
+        typeof a.selectionStart === "number" && a.selectionStart === a.selectionEnd) {
+        return { ok: false, reason: "clear-select-noop" };
+      }
+      return { ok: true, reason: "" };
+    }
+    if (a.isContentEditable) {
+      var sel = document.getSelection();
+      var range = document.createRange();
+      range.selectNodeContents(a);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return { ok: true, reason: "" };
+    }
+  } catch (e) { return { ok: false, reason: "clear-threw" }; }
+  return { ok: false, reason: "clear-no-text-field" };
+}`;
+
+/**
+ * Read the focus state of the top document, and select-all inside it when
+ * `doClear` is set. One bounded `Runtime.evaluate`, `returnByValue`, the same
+ * primitive `observation/index.ts` uses.
+ *
+ * ponytail: every failure refuses, matching `verifyTarget`. Ceiling: a page
+ * that types through a document-level key handler while focus sits on `<body>`
+ * would be refused where `insertText` would also have done nothing — upgrade if
+ * a real host is found that contradicts it.
+ */
+export async function focusState(tabId, doClear) {
+  let value;
+  try {
+    const call = await anyCommand(tabId, {
+      method: "Runtime.evaluate",
+      params: { expression: `(${FOCUS_PROBE})(${doClear === true})`, returnByValue: true },
+    });
+    value = call?.result?.value;
+  } catch {
+    // A document that went away mid-call. The question is unanswerable and
+    // typing into an unanswerable document is how text lands in the wrong one.
+    return { ok: false, reason: "focus-probe-failed" };
+  }
+  if (!value || typeof value !== "object") return { ok: false, reason: "focus-probe-silent" };
+  return { ok: value.ok === true, reason: String(value.reason ?? "") };
+}
+
+/**
  * KNOWN LIMITATION — this is the top frame, and only the top frame.
  *
  * `Runtime.evaluate` with no `contextId` runs in the top document. Google

@@ -370,6 +370,24 @@ class CDPRelay:
             return f"Error executing: ref {ref!r} {result.get('error', 'failed')}"
         return "ok"
 
+    async def type_text_into_ref(self, ref: str, text: str) -> str:
+        """The `type_text` entry point the harness calls.
+
+        **The extension relay collapses this to one `type_at` action and one
+        evaluate; this one keeps all three trips.** Dev is not the product path
+        — Playwright evaluates in-page and takes no observation at all, so
+        there is nothing here to collapse — and the sequence is what the fast
+        path falls back *to*. Same order, same guards, same strings; only the
+        trip count differs.
+        """
+        focused = await self.focus_ref(ref)
+        if focused.startswith("Error executing"):
+            return focused
+        cleared = await self.clear_ref(ref)
+        if cleared.startswith("Error executing"):
+            return cleared
+        return await self.type_text_to_ref(ref, text)
+
     async def press_key(self, key: str, modifiers: int = 0) -> str:
         """`modifiers` is CDP's bitmask; Playwright wants "Control+a"."""
         if not self._browser.page:

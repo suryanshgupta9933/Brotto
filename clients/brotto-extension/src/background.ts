@@ -7,7 +7,7 @@
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
 import { clearDelta } from "./observation/delta";
-import { boundedPoint, clearCursor, drawCursor, verifyTarget } from "./observation/pointer";
+import { boundedPoint, clearCursor, drawCursor, focusState, verifyTarget } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -659,6 +659,71 @@ function signalResume(): void {
 
 // ── Action execution ─────────────────────────────────────────────────────────
 
+/**
+ * Verify the target, press it, and settle.
+ *
+ * The whole of `click`, and the first half of `type_at`. It was extracted when
+ * the fused action landed, and deliberately keeps `verifyTarget` *inside*: the
+ * only thing binding an action to the node the model actually saw, and a gate
+ * that exists on one branch and not its sibling is a gate with a hole in it.
+ *
+ * Returns `null` when the press went out, or the refusal that stopped it.
+ */
+async function pressAt(tabId: number, action: any, x: number, y: number): Promise<{ ok: boolean; reason: string } | null> {
+  const check = await verifyTarget(tabId, action.backendNodeId, x, y);
+  if (!check.ok) {
+    console.warn(`brotto: press refused — hit test says ${check.reason} at (${x},${y})`);
+    return { ok: false, reason: check.reason };
+  }
+  // Draw, click, then the `finally` clears it. pointer-events: none means the
+  // hit test in BOX_WALK cannot see it, and the clear means a later
+  // observation is not reading a page we decorated.
+  try {
+    const drawn = await drawCursor(tabId, x, y, action.label ?? "");
+    if (!drawn.drawn) console.warn(`brotto: cursor not shown (${drawn.reason}) — the click still runs`);
+    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x, y, button: "left", clickCount: 1 } });
+    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x, y, button: "left", clickCount: 1 } });
+    await sleep(200); // brief pause for click to register / navigation to start
+  } finally {
+    // Not on a timer. The mousePressed/mouseReleased pair is dispatched with no
+    // delay, so a sub-200ms cursor is invisible, and a click that navigates
+    // makes the observation that follows throw — which is exactly how a marker
+    // outlives the action that drew it.
+    await clearCursor(tabId);
+  }
+  return null;
+}
+
+/** One key press. `modifiers` is CDP's bitmask (Alt=1, Ctrl=2, Meta=4,
+ *  Shift=8) and is the caller's to supply — the extension holds no platform
+ *  branch and must not grow one. This exists for the `key` action, which types
+ *  a shortcut the caller named; it is deliberately NOT how `type_at` clears a
+ *  field, because "which chord means select-all" is the one question that would
+ *  need the OS, and there is no legal way to ask it. That clear is a DOM
+ *  operation — see `FOCUS_PROBE`. */
+async function dispatchKey(tabId: number, key: string, mods: number): Promise<void> {
+  const code = keyCodeFor(key);
+  const base = {
+    key,
+    windowsVirtualKeyCode: code,
+    nativeVirtualKeyCode: code,
+    ...(mods ? { modifiers: mods } : {}),
+  };
+  // A character key carries its text on the keyDown, or Chrome registers a
+  // bare keypress and inserts nothing. A modified key wants rawKeyDown: the
+  // shortcut is resolved by the page, not by the browser's own key handling.
+  const printable = code >= 32 && code < 127;
+  await dbg.sendCommand(tabId, {
+    method: "Input.dispatchKeyEvent",
+    params: {
+      type: mods || !printable ? "rawKeyDown" : "keyDown",
+      ...base,
+      ...(mods || !printable ? {} : { text: key }),
+    },
+  });
+  await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...base } });
+}
+
 async function executeAction(tabId: number, action: any): Promise<{ ok: boolean; reason: string }> {
   const t = action.type;
   // A marker left up by an action that died mid-flight is an occluder over the
@@ -666,7 +731,6 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
   // unconditional — the clear also runs after every click, so this only ever
   // does work when a previous action left one behind.
   await clearCursor(tabId);
-  let drewCursor = false;
   // What the server is told happened. The gates below refuse rather than
   // dispatch, and until this existed a refusal was invisible to the server:
   // `click_ref` returned `Clicked [7]` the moment the frame left, so the model
@@ -674,10 +738,53 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
   // never happened. One shape, closed vocabulary, no freeform text — this
   // string reaches the model's history and the audit document.
   let refusal: { ok: boolean; reason: string } | null = null;
-  try {
   if (t === "navigate") {
     await dbg.sendCommand(tabId, { method: "Page.navigate", params: { url: action.url } });
     await sleep(200); // brief pause for navigation to start before readyState polling
+  } else if (t === "type_at") {
+    // The fused action: one frame where there used to be two, so one
+    // post-action observation where there used to be two. The server used to
+    // send `click` then `type`; `type` carries no coords and no
+    // `backendNodeId` and verifies nothing, so fusing them is only safe
+    // because the press half keeps every gate the standalone click had.
+    //
+    // **Sheets is the case this exists for.** A cell is a `<canvas>` with a
+    // hidden input: no value to assign, no DOM text node to write. It ends in
+    // `Input.insertText` on whatever the press focused, exactly as before.
+    if (typeof action.x !== "number" || typeof action.y !== "number") {
+      console.warn("brotto: type_at refused — no coordinate pair on the frame");
+      refusal = { ok: false, reason: "point-not-numeric" };
+      return refusal;
+    }
+    const pressed = await pressAt(tabId, action, action.x, action.y);
+    if (pressed) { refusal = pressed; return refusal; }
+    // The guard `focus_id` gives the two-frame version lived between the
+    // frames, and that window closes inside here. This is where it moves:
+    // nothing may hold focus, or the text goes somewhere the press did not
+    // put it.
+    //
+    // **`clear` rides this same probe, and is a DOM operation.** It was a key
+    // chord with the caller supplying the modifier bitmask, which put an OS
+    // question on the wire — Ctrl+A is "move to line start" on macOS, and the
+    // server has no OS signal to answer it. `focusState` reads
+    // `document.activeElement`, which after this press *is* the clicked target,
+    // and calls `select()` on it. One evaluate, both questions, and no branch
+    // anywhere that knows what OS it is on.
+    //
+    // A failed clear refuses rather than types: `clear: true` means *replace*,
+    // and appending to a field the model asked to empty is the same wrong
+    // answer the bare "a" gave, wearing a different hat.
+    const focus = await focusState(tabId, action.clear === true);
+    if (!focus.ok) {
+      console.warn(`brotto: type_at refused — ${focus.reason}; nothing holds focus to type into`);
+      refusal = { ok: false, reason: focus.reason };
+      return refusal;
+    }
+    // One call, not one per character — see the `type` branch below.
+    await dbg.sendCommand(tabId, {
+      method: "Input.insertText",
+      params: { text: (action.text ?? "") as string },
+    });
   } else if (t === "click" || t === "click_xy") {
     // Two trust classes, one dispatch. `click`'s x/y came out of BOX_WALK and
     // were verified twice in the page — viewport, then elementFromPoint — so
@@ -703,25 +810,14 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
     // The geometry that put these coordinates there was measured at
     // observation time, and a model call sits between that and this press. One
     // in-page hit test here is the last point at which "this is still the
-    // element the model was shown" is answerable. Only for `click`: `click_xy`
-    // carries no ref and no id, and `verifyTarget` reports that case as
-    // pass-through rather than refusing it, so the coordinate path onto a canvas
-    // page keeps working.
-    const check = await verifyTarget(tabId, action.backendNodeId, x, y);
-    if (!check.ok) {
-      console.warn(`brotto: ${t} refused — hit test says ${check.reason} at (${x},${y})`);
-      refusal = { ok: false, reason: check.reason };
-      return;
-    }
-    // Draw, click, then the `finally` clears it. pointer-events: none means the
-    // hit test in BOX_WALK cannot see it, and the clear means a later
-    // observation is not reading a page we decorated.
-    drewCursor = true;
-    const drawn = await drawCursor(tabId, x, y, action.label ?? "");
-    if (!drawn.drawn) console.warn(`brotto: cursor not shown (${drawn.reason}) — the click still runs`);
-    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x, y, button: "left", clickCount: 1 } });
-    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x, y, button: "left", clickCount: 1 } });
-    await sleep(200); // brief pause for click to register / navigation to start
+    // element the model was shown" is answerable — which is why the hit test
+    // lives inside `pressAt` and not here: `type_at` needs it too, and a gate
+    // that exists on one branch and not its sibling is a gate with a hole in
+    // it. Only for `click`: `click_xy` carries no ref and no id, and
+    // `verifyTarget` reports that case as pass-through rather than refusing
+    // it, so the coordinate path onto a canvas page keeps working.
+    const pressed = await pressAt(tabId, action, x, y);
+    if (pressed) { refusal = pressed; return refusal; }
   } else if (t === "type") {
     // One call, not one per character. A README is 1325 characters with 23
     // newlines: the loop made 1325 sequential CDP round trips, and each "\n" was
@@ -744,34 +840,7 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
     // being sent by the relay and dropped here, so Control+A — the clear
     // that clear_ref issues — arrived as a bare "a" and typed a letter into
     // the field instead of selecting it.
-    const mods = action.modifiers ?? 0;
-    const code = keyCodeFor(action.key);
-    const base = {
-      key: action.key,
-      windowsVirtualKeyCode: code,
-      nativeVirtualKeyCode: code,
-      ...(mods ? { modifiers: mods } : {}),
-    };
-    // A character key carries its text on the keyDown, or Chrome registers a
-    // bare keypress and inserts nothing. A modified key wants rawKeyDown: the
-    // shortcut is resolved by the page, not by the browser's own key handling.
-    const printable = code >= 32 && code < 127;
-    await dbg.sendCommand(tabId, {
-      method: "Input.dispatchKeyEvent",
-      params: {
-        type: mods || !printable ? "rawKeyDown" : "keyDown",
-        ...base,
-        ...(mods || !printable ? {} : { text: action.key }),
-      },
-    });
-    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...base } });
-  }
-  } finally {
-    // Not on a timer. The mousePressed/mouseReleased pair is dispatched with no
-    // delay, so a sub-200ms cursor is invisible, and a click that navigates
-    // makes the observation that follows throw — which is exactly how a marker
-    // outlives the action that drew it.
-    if (drewCursor) await clearCursor(tabId);
+    await dispatchKey(tabId, action.key, action.modifiers ?? 0);
   }
   return refusal ?? { ok: true, reason: "" };
 }

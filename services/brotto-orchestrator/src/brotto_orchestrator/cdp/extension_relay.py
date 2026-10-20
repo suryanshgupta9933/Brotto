@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import uuid
-from typing import Callable, Awaitable
+from contextlib import contextmanager
+from typing import Callable, Awaitable, Iterator
 
 from ..dev.ax_tree_extractor import SemanticTarget
 from ..policy.gate import screenshot_block_reason
 from ..policy.schema import Policy
 from .relay import (
-    SELECT_ALL_JS,
     FOCUS_ID_JS,
     PRESSABLE_KEYS,
     is_pressable_key,
@@ -366,7 +367,7 @@ class ExtensionCDPRelay:
                 # returns `{}` for a click on `<body>`. Every clickable target
                 # carries an id (AX targets from `targetsForFrame`, supplemented
                 # ones from `supplement.ts`), and every ref-taking method below
-                # spreads these coords, so `focus_ref`/`clear_ref` are covered by
+                # spreads these coords, so `type_text_into_ref` is covered by
                 # the same check.
                 return {"x": t["x"], "y": t["y"],
                         "backendNodeId": t.get("backendNodeId")}, ""
@@ -515,69 +516,14 @@ class ExtensionCDPRelay:
                                  await self._send_action({"type": "click", **coords}))
         return refused or f"Clicked [{ref}]"
 
-    async def focus_ref(self, ref: str) -> str:
-        coords, why = self._locate(ref)
-        if not coords:
-            log.warning("[%s] focus_ref %r — %s", self._sid, ref, why)
-            return f"Error executing: ref {ref!r} {why}"
-        log.debug("[%s] focus_ref %r", self._sid, ref)
-        refused = self._refusal(f"focusing ref {ref!r}",
-                                 await self._send_action({"type": "click", **coords}))
-        return refused or f"Focused [{ref}]"
-
-    async def clear_ref(self, ref: str) -> str:
-        coords, why = self._locate(ref)
-        if not coords:
-            log.warning("[%s] clear_ref %r — %s", self._sid, ref, why)
-            return f"Error executing: ref {ref!r} {why}"
-        log.debug("[%s] clear_ref %r — click + select-all", self._sid, ref)
-        # Routed through `_send_action` like every other click, and stopped
-        # here on a refusal: the select-all below runs against whatever holds
-        # focus, and a refused click means that is some *other* field — which
-        # this action would then erase.
-        refused = self._refusal(
-            f"clearing ref {ref!r}",
-            await self._send_action({"type": "click", **coords}),
-        )
-        if refused:
-            return refused
-        # Select through the DOM, not a key chord. There is no cross-platform
-        # keyboard shortcut for select-all — Meta on macOS, Ctrl everywhere
-        # else — and this process cannot know which one the user's browser
-        # wants, because it usually runs in a container on someone else's
-        # machine. Sending Ctrl unconditionally meant "move to line start" on
-        # a Mac, so the field kept its old text, `type_text` appended to it,
-        # and the model's only remaining move was Backspace, one character per
-        # step, for ten steps (session 7d567b66, field left holding
-        # "Protect mainmainProteProtect mainProtect mainct ma").
-        #
-        # `HTMLInputElement.select()` is specified as "select the text in this
-        # control" with no keyboard involved, so it is the same operation on
-        # every OS. `Input.insertText` then replaces the selection, which is
-        # the contract `type_text_to_ref` already relies on.
-        await self._ws_send({"type": "evaluate", "expression": SELECT_ALL_JS})
-        try:
-            result = await asyncio.wait_for(self._eval_queue.get(), timeout=15)
-        except asyncio.TimeoutError:
-            log.error("[%s] timed out selecting all in %r", self._sid, ref)
-            return f"Error executing: ref {ref!r} could not be cleared — no answer from the page"
-        if result != "select-all":
-            log.warning("[%s] select-all on %r returned %r", self._sid, ref, result)
-            return (
-                f"Error executing: ref {ref!r} could not be cleared — the page "
-                f"said {result!r}. If it is not a text field, use click or "
-                f"press_key instead."
-            )
-        return f"Cleared [{ref}]"
-
     async def focus_id(self) -> str | None:
         """A stable name for the focused element, or None if unreadable.
 
-        One `evaluate` round trip on the same channel `clear_ref` uses — no
+        One `evaluate` round trip, on the same channel `read_page_text` uses — no
         new request type and no extension change. None is the honest answer
         and the `press_key` guard treats it as unknown; see `FOCUS_ID_JS`.
 
-        `_eval_queue` is shared with `clear_ref` and `read_page_text` and is
+        `_eval_queue` is shared with `read_page_text` and is
         **not** request-correlated, so a reply from either of those can land
         here. What `parse_focus_id` guarantees is exactly this: a reply from
         another producer that is not itself well-shaped — a JSON blob, prose,
@@ -628,8 +574,8 @@ class ExtensionCDPRelay:
             return {}
         if not isinstance(data, dict):
             return {}
-        # `_eval_queue` is shared with `clear_ref`'s select-all and the page
-        # text reader, so a concurrent evaluate can land its answer first and
+        # `_eval_queue` is shared with the page text reader, so a concurrent
+        # evaluate can land its answer first and
         # this would read somebody else's. The viewport is a security decision
         # — the bound check in `_coordinate_action` is the only thing standing
         # between a model-chosen point and the page — so the answer must be
@@ -721,6 +667,112 @@ class ExtensionCDPRelay:
         # focused element is not named either — see above; the outcome is the
         # model's history and the audit document, and a page-chosen string in
         # either is page content in a file we own.
+        return f"Typed {len(text)} characters into the focused element"
+
+    @contextmanager
+    def _phase(self, name: str) -> Iterator[None]:
+        """Log how long one phase of a multi-trip action took.
+
+        Not decoration. `type_text` measured 19.9s against a ~3.6s per-action
+        floor, and no `type_text` in any recorded run exceeds 5.2s, so the gap
+        has never been attributed to anything on disk. Per-phase timing is how
+        the next run says *which* trip the seconds are in — and whether
+        collapsing the trips actually landed.
+
+        Two phases now. `clear_verify` is gone because there is no server-side
+        clear to verify: it happens inside the `type_at` action, so it is
+        inside `type_at`'s duration rather than reported as its own zero.
+
+        `finally`, so a phase that raised still reports: a refusal that costs
+        twenty seconds is the one worth seeing.
+        """
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            log.info("[%s] type_text phase=%s duration_ms=%d", self._sid, name,
+                     int((time.monotonic() - started) * 1000))
+
+    async def type_text_into_ref(self, ref: str, text: str, clear: bool = True) -> str:
+        """One `type_at` action: the press, the clear and the text, one frame.
+
+        `type_text` was three relay calls — `focus_ref`, `clear_ref`,
+        `type_text_to_ref` — and **each of the first two dispatched
+        `{"type": "click", …}` with the same coordinates and the same
+        `backendNodeId`**, resolved by the same `_locate` against the same
+        cached observation. The second click was byte-identical to the first; it
+        was there because each method had to be independently complete, not
+        because the page needed it. Every trip also blocks on
+        `_OBSERVATION_TIMEOUT` for a post-action frame the extension sends
+        unprompted, so three calls meant three of the extension's full
+        observation cycles — a quiet window, an accessibility-tree walk and a
+        screenshot — for what is one keystroke.
+
+        **The clear used to be a key chord and now is a DOM operation.** It was
+        `Control+a` sent as a `key` frame with a `modifiers` bitmask, which put
+        an OS question on the wire — that chord is "move to line start" on
+        macOS — and a server-side `SELECT_ALL_JS` was the other option, but it
+        would act on the `activeElement` of *before* the press, which may be a
+        different field than the one the model named. The extension resolves it
+        in the right place instead: `type_at` presses at the coordinates
+        (running `verifyTarget`'s `DOM.resolveNode` binding, unchanged) and then
+        calls `select()` on the element that press focused. So this frame sends
+        `clear` and no `modifiers`, and a clear that fails refuses rather than
+        typing.
+
+        **The focus check is kept, and it runs before the frame.** The
+        extension's own `focusState` probe is about the *press* — nothing may
+        hold focus after it — and it cannot answer "did the model mean this
+        field": the press puts focus somewhere, so it always holds focus. That
+        question was answered by `focus_id()` before the click was ever
+        dispatched, and it still is. `None`, `none` and `body` refuse exactly as
+        before — session 445fc36d typed into a sheet whose `activeElement` was
+        `body` and reported success, and that is the outcome this refuses. The
+        contract is therefore unchanged for the model: click the field first,
+        then `type_text` into it. `_eval_queue` is shared and uncorrelated (see
+        `parse_focus_id`), so this parses for shape and nothing more and an
+        unreadable answer refuses, as it always did.
+
+        Every outcome is the relay's own verdict. Nothing here synthesises a
+        destination: the ref is not named in the success string and neither is
+        the focused element, for the reasons `type_text_to_ref` already gives.
+        """
+        coords, why = self._locate(ref)
+        if not coords:
+            log.warning("[%s] type_text_into_ref %r — %s", self._sid, ref, why)
+            return f"Error executing: ref {ref!r} {why}"
+
+        with self._phase("focus"):
+            focus = await self.focus_id()
+        if focus is None or focus in ("body", "none"):
+            log.warning("[%s] type_text_into_ref %r — focus is %r", self._sid, ref,
+                        "unknown" if focus is None else "nothing")
+            return (
+                f"Error executing: ref {ref!r} resolved, but nothing on the "
+                f"page holds focus, so nothing was typed. Click the element "
+                f"you meant to type into first, then type again."
+            )
+
+        # `focus` ends here. Its id half is `document.activeElement.id` — text
+        # the page chose — and it reaches neither a log line nor the returned
+        # outcome: a log sink is a parser input, and the outcome is both the
+        # model's history and the audit document, which are ours.
+        log.info("[%s] type_text_into_ref %r  len=%d focus=%s", self._sid, ref,
+                 len(text), "named")
+        with self._phase("type_at"):
+            refused = self._refusal(
+                f"typing into ref {ref!r}",
+                await self._send_action(
+                    {"type": "type_at", **coords, "text": text, "clear": bool(clear)}
+                ),
+            )
+        if refused:
+            return refused
+        # Says what was done, not what was meant: the ref resolved against a
+        # different tree than the one that now has focus, so naming it here
+        # asserts a destination this method never checked. The focused element
+        # goes unnamed for the same reason `type_text_to_ref` leaves it so —
+        # its id is text the page chose.
         return f"Typed {len(text)} characters into the focused element"
 
     async def press_key(self, key: str, modifiers: int = 0) -> str:

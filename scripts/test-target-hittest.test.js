@@ -250,37 +250,58 @@ test("a point over nothing refuses", async () => {
 
 // ── the call site ───────────────────────────────────────────────────────────
 
+// The gate moved into `pressAt` when `type_at` landed: `click` and the fused
+// action now share one press, so a gate that existed on one branch and not its
+// sibling would be a gate with a hole in it. These read `pressAt`, which is a
+// *stronger* claim than the branch they replaced — it is what both call.
+function pressAtSrc() {
+  const start = bgSrc.search(/^async function pressAt\s*\(/m);
+  if (start < 0) throw new Error("no pressAt in background.ts — renamed?");
+  const end = bgSrc.indexOf("\n}\n", start);
+  if (end < 0) throw new Error("unterminated pressAt");
+  return bgSrc.slice(start, end);
+}
+
 test("executeAction consults the gate for `click` and dispatches only after it", () => {
-  const click = bgSrc.slice(
-    bgSrc.indexOf('} else if (t === "click" || t === "click_xy") {'),
-    bgSrc.indexOf('} else if (t === "type") {'),
-  );
-  const gate = click.indexOf("verifyTarget(");
-  const press = click.indexOf('type: "mousePressed"');
-  assert.ok(gate > 0, "the click branch must call verifyTarget");
-  assert.ok(gate < press, "the hit test runs before mousePressed, not after");
+  const press = pressAtSrc();
+  const gate = press.indexOf("verifyTarget(");
+  const down = press.indexOf('type: "mousePressed"');
+  assert.ok(gate > 0, "the press must call verifyTarget");
+  assert.ok(gate < down, "the hit test runs before mousePressed, not after");
 });
 
 test("executeAction returns without dispatching when the gate refuses", () => {
-  const click = bgSrc.slice(
-    bgSrc.indexOf('} else if (t === "click" || t === "click_xy") {'),
-    bgSrc.indexOf('} else if (t === "type") {'),
-  );
-  const gate = click.indexOf("if (!check.ok) {");
-  const ret = click.indexOf("return;", gate);
-  const press = click.indexOf('type: "mousePressed"');
-  assert.ok(gate > 0 && ret > gate && ret < press,
+  const press = pressAtSrc();
+  const gate = press.indexOf("if (!check.ok) {");
+  const ret = press.indexOf("return { ok: false", gate);
+  const down = press.indexOf('type: "mousePressed"');
+  assert.ok(gate > 0 && ret > gate && ret < down,
     "a refusal returns before anything is dispatched");
 });
 
-test("the gate is inside the shared click branch, so focus_ref and clear_ref get it too", () => {
-  // They dispatch the same `click` action type, so a gate placed on the
-  // `_xy` branch instead would leave typing into a moved field ungated.
-  const click = bgSrc.slice(
-    bgSrc.indexOf('} else if (t === "click" || t === "click_xy") {'),
-    bgSrc.indexOf('} else if (t === "type") {'),
-  );
-  assert.ok(click.includes("verifyTarget(tabId, action.backendNodeId, x, y)"));
+function branchBody(cond) {
+  const start = bgSrc.indexOf(`else if (${cond}) {`);
+  if (start < 0) throw new Error(`no \`${cond}\` branch in background.ts — renamed?`);
+  const open = bgSrc.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < bgSrc.length; i++) {
+    if (bgSrc[i] === "{") depth++;
+    else if (bgSrc[i] === "}" && --depth === 0) return bgSrc.slice(open + 1, i);
+  }
+  throw new Error(`unterminated \`${cond}\` branch`);
+}
+
+test("the gate is inside the shared press, so focus_ref, clear_ref and type_at all get it", () => {
+  // `focus_ref` and `clear_ref` dispatch the same `click` action type, and
+  // `type_at` is a type of its own. All three reach the press through
+  // `pressAt`; a gate placed on any one branch instead would leave typing into
+  // a moved field ungated.
+  const press = pressAtSrc();
+  assert.ok(press.includes("verifyTarget(tabId, action.backendNodeId, x, y)"));
+  for (const cond of ['t === "click" || t === "click_xy"', 't === "type_at"']) {
+    assert.ok(branchBody(cond).includes("pressAt("),
+      `${cond} must reach the press through pressAt, not dispatch its own`);
+  }
 });
 
 test("a coordinate action carries no id, and is not refused for that", async () => {

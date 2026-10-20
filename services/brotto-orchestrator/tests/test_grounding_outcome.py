@@ -183,14 +183,19 @@ async def test_type_text_into_a_hallucinated_ref_does_not_type():
 @pytest.mark.asyncio
 async def test_the_harness_stops_type_text_when_focus_failed():
     """Belt to the relays' braces: the harness must not type after a focus
-    that reported failure, or the text goes to a field the model never named."""
+    that reported failure, or the text goes to a field the model never named.
+
+    The relay owns the whole sequence now — one call, and the click/clear/
+    focus checks inside it — so this pins that a refusal it returns still
+    reaches the audit as `ok: false` rather than being read as a success. The
+    "did not type" half is pinned at the relay, in
+    `test_type_text_fast_path.py`, where the dispatch actually is."""
     from brotto_orchestrator.agent.harness import _execute_action
     from brotto_orchestrator.agent.context import ActionCall
 
     cdp = AsyncMock()
-    cdp.focus_ref = AsyncMock(return_value="Error executing: ref '0:99' is not in the current AX tree")
-    cdp.clear_ref = AsyncMock(return_value="ok")
-    cdp.type_text_to_ref = AsyncMock(return_value="ok")
+    cdp.type_text_into_ref = AsyncMock(
+        return_value="Error executing: ref '0:99' is not in the current AX tree")
 
     deps = SimpleNamespace(
         cdp=cdp, step_number=3, user_id="u", result=None, steering=None,
@@ -200,8 +205,11 @@ async def test_the_harness_stops_type_text_when_focus_failed():
     out = await _execute_action(call, deps)
 
     assert out.startswith(FAIL_PREFIX)
-    cdp.clear_ref.assert_not_awaited()
-    cdp.type_text_to_ref.assert_not_awaited()
+    # Exactly one relay call: re-sequencing the steps here is what put the
+    # duplicate click back.
+    assert [c for c in cdp.mock_calls if c[0] == "type_text_into_ref"]
+    assert not [c for c in cdp.mock_calls
+                if c[0] in ("focus_ref", "clear_ref", "type_text_to_ref")]
 
 def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
     """`ok` is derived by membership of `Error executing`, not by prefix, so a
@@ -278,8 +286,8 @@ async def test_a_bare_node_id_resolves_to_its_composite_ref():
 
 @pytest.mark.asyncio
 async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
-    """`_locate` is the one place all four route through, so one case per
-    method: `type_text` into a bare ref must not silently retype into whatever
+    """`_locate` is the one place every one of these routes through, so one case
+    per method: `type_text` into a bare ref must not silently retype into whatever
     holds focus, which is the HDFC failure class."""
     relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
     # One post-action observation per method, queued as each is reached: the
@@ -289,15 +297,12 @@ async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
     async def _obs():
         await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": [
             {"ref": "0:7", "role": "textbox", "x": 1, "y": 2}]})
-    # clear_ref selects through the DOM rather than a key chord, so it waits on
-    # the evaluate channel. The page it is aimed at is a textbox, so it answers.
-    await relay._eval_queue.put("select-all")
-    # type_text also reads focus before dispatch; answer it on the same channel.
+    # Both typing paths read focus before dispatch; answer on that channel.
+    await relay._eval_queue.put("INPUT[0]")
     await relay._eval_queue.put("INPUT[0]")
 
     for method, args in (
-        (relay.focus_ref, ("7",)),
-        (relay.clear_ref, ("7",)),
+        (relay.type_text_into_ref, ("7", "hello")),
         (relay.type_text_to_ref, ("7", "hello")),
     ):
         await _obs()
@@ -504,9 +509,7 @@ async def test_type_text_outcome_is_the_relays_own_verdict():
 
     verdict = "Typed 9 characters into the focused element"
     cdp = AsyncMock()
-    cdp.focus_ref = AsyncMock(return_value="Focused [0:10183]")
-    cdp.clear_ref = AsyncMock(return_value="Cleared [0:10183]")
-    cdp.type_text_to_ref = AsyncMock(return_value=verdict)
+    cdp.type_text_into_ref = AsyncMock(return_value=verdict)
 
     deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u")
     call = ActionCall(action="type_text",
@@ -531,9 +534,7 @@ async def test_a_refused_type_reaches_the_caller_unchanged():
                "page holds focus, so nothing was typed. Click the element you "
                "meant to type into first, then type again.")
     cdp = AsyncMock()
-    cdp.focus_ref = AsyncMock(return_value="Focused [0:10183]")
-    cdp.clear_ref = AsyncMock(return_value="Cleared [0:10183]")
-    cdp.type_text_to_ref = AsyncMock(return_value=refusal)
+    cdp.type_text_into_ref = AsyncMock(return_value=refusal)
 
     deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u")
     call = ActionCall(action="type_text",

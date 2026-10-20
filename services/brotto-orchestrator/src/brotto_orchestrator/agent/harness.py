@@ -2824,15 +2824,17 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
         elif action == "type_text":
             # focus/clear used to be fire-and-forget, so a ref that resolved to
             # nothing still typed the text into whatever was focused before —
-            # the model saw "Typed into [0:99]" and moved on. Bail on the first
-            # failure so the audit records it.
-            focused = await cdp.focus_ref(args["ref"])
-            if _EXEC_FAILURE in focused:
-                return focused
-            cleared = await cdp.clear_ref(args["ref"])
-            if _EXEC_FAILURE in cleared:
-                return cleared
-            result = await cdp.type_text_to_ref(args["ref"], args["text"])
+            # the model saw "Typed into [0:99]" and moved on.
+            #
+            # One call, because the two clicks it used to make were
+            # byte-identical — same coords, same `backendNodeId`, same cached
+            # observation — and the two evaluates read the same unchanged
+            # `document.activeElement`. Sequencing the steps here is exactly
+            # what kept them from being recognised as duplicates. The relay
+            # owns the collapse and every guard in it: the ref resolution, the
+            # extension's dispatch-time binding check, and the focus read that
+            # refuses a `body` (session 445fc36d).
+            result = await cdp.type_text_into_ref(args["ref"], args["text"])
             # The relay is the only side that knows what held focus, and it
             # reports only that. This string is both the model's history and the
             # audit's outcome, so anything added here is a destination claim
