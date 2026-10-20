@@ -281,16 +281,31 @@ export async function captureObservation(tabId: number) {
   // reason the loop was discarding.
   //
   // If every rescan saw a different tree, the page really was still moving
-  // and the short path read it early. Pay the full quiet window then, and
-  // scan once more. That is the slow-renderer shape (`auth-slowjs` renders at
-  // 5000ms), and on it this is the pre-existing behaviour — wait the gate,
-  // then rescan. On the fast path it costs nothing: the rescans matched and we
-  // never arrive here.
-  let settledByFingerprint = !pageMayStillBeMoving(stability);
+  // and the short path read it early. The disagreement *is* the signal, and
+  // the rescans are already the response to it: two full re-reads 800ms apart
+  // is 1.6s of settling, and what ships is the last one — the freshest tree,
+  // not the one the gate handed back.
+  //
+  // This used to pay a second `waitForStable(tabId, { noEarly: true })` first.
+  // `noEarly` disables the rate exit, so the only exits left were a 3s silence
+  // or the full 10s deadline — and reaching this branch at all requires
+  // `early`, meaning the page's mean mutation gap was already shorter than the
+  // quiet window. On a canvas grid that is a cursor blink and an autosave: the
+  // silence never comes, the gate ran to 10s every step, and it shipped a tree
+  // from an arbitrary mid-repaint instant anyway — the outcome the wait was
+  // supposed to prevent. `metrics.stability` records the *first* gate, so that
+  // 10s never appeared in the `stability=…ms` log line.
+  //
+  // What is accepted instead: a page that is genuinely still arriving is read
+  // 1.6s late rather than up to 10s late. The next step re-observes, and a page
+  // still moving at capture time is not made settled by waiting longer — on
+  // the case this was written for (`auth-slowjs`, a sparse mutator) `early` is
+  // never set at all, so the branch never fired there in the first place.
   if (pageMayStillBeMoving(stability)) {
     const fingerprint = (ts: any[]) =>
       ts.map((t: any) => t.role + "|" + (t.name ?? "") + "|" + (t.value ?? "")).join("~");
-    for (let i = 0, fp = fingerprint(axTargets); i < 2; i++) {
+    let fp = fingerprint(axTargets);
+    for (let i = 0; i < 2; i++) {
       await sleep(800);
       const next = await extractAx(tabId);
       const nextFp = fingerprint(next.targets);
@@ -298,17 +313,9 @@ export async function captureObservation(tabId: number) {
       frames = next.frames;
       geometry = next.geometry;
       scans++;
-      if (nextFp === fp) { settledByFingerprint = true; break; }
+      if (nextFp === fp) break;
       fp = nextFp;
     }
-  }
-  if (stability.early && !settledByFingerprint) {
-    await waitForStable(tabId, { noEarly: true });
-    const settled = await extractAx(tabId);
-    axTargets = settled.targets;
-    frames = settled.frames;
-    geometry = settled.geometry;
-    scans++;
   }
 
   const observation = { url, title, pageText, axTargets, frames };

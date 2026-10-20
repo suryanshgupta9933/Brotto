@@ -11,12 +11,20 @@
 // So the guess is checked, not trusted. `captureObservation` rescans and
 // compares `role|name|value` fingerprints; if two rescans agree the page had
 // settled and the short path was right. If every rescan saw something
-// different, the page really was still moving, and the guard pays the full
-// quiet window (`noEarly`) and scans once more — the pre-existing behaviour.
+// different, the page was still moving, and the rescans' own 1.6s of settling
+// plus the freshest tree is the answer.
 //
-// That guard is the whole justification for the change. If it silently stopped
-// firing, a half-rendered tree would reach the model and every metric would
-// still look fine. An absence reads clean in a diff, so it is pinned here.
+// It used to be a *second* `waitForStable(tabId, {noEarly: true})` on top of
+// that, and that was the largest latency left in the loop. `noEarly` disables
+// the rate exit, so on a page that reached that branch at all — which requires
+// `early`, i.e. a mean mutation gap already shorter than the quiet window — the
+// only reachable exits were a 3s silence or the full `DEADLINE_MS`. On a canvas
+// grid neither comes: a cursor blink or an autosave trickles, so the gate ran
+// to 10s every step and shipped a tree from an arbitrary instant anyway. The
+// rescans are the arbiter and the gate is now charged once.
+//
+// The invariant pinned here is that one capture charges the gate exactly once,
+// on every path. An absence reads clean in a diff, so it is pinned.
 //
 // The body is extracted from source and the handful of TypeScript annotations
 // are stripped, so the logic under test is the logic that ships.
@@ -138,26 +146,26 @@ console.log("observation rescan guard");
     obs.axTargets[0].name === "Inbox", `got ${JSON.stringify(obs.axTargets)}`);
 }
 
-// 2. THE GUARD. `auth-slowjs` mutates almost nothing, so the sample claims it
-//    early, but the tree keeps changing — the control really is still arriving.
-//    Every rescan differs, so the page was read too early and the full gate is
-//    owed. Without this the model gets a tree from 5000ms-in on a page whose
-//    control does not exist yet.
+// 2. THE DISAGREEMENT PATH. `auth-slowjs` mutates almost nothing, so the sample
+//    claims it early, but the tree keeps changing — the control really is still
+//    arriving. Every rescan differs, so the page was read too early. The two
+//    rescans are the settle: 1.6s and a full fresh read each, and what ships is
+//    the last tree, not the one the gate returned on.
 {
   const h = harness({
     stability: { waited: false, timedOut: true, early: true },
-    trees: [tree("a"), tree("b"), tree("c"), tree("d")],
+    trees: [tree("a"), tree("b"), tree("c")],
   });
   const obs = await h.run();
-  check("a page still changing after the short-circuit gets the full gate",
-    h.calls.waits.length === 2 && h.calls.waits[1]?.noEarly === true,
+  check("a page still changing after the short-circuit is NOT re-gated",
+    h.calls.waits.length === 1,
     `waitForStable was called ${h.calls.waits.length}× with ${JSON.stringify(h.calls.waits)} — ` +
-    "the noEarly fallback did not fire, so a half-rendered tree would reach the model");
-  check("…and one more scan after it",
-    obs.metrics.scans === 4,
-    `scans was ${obs.metrics.scans} (1 + 2 rescans + 1 after the gate)`);
-  check("…reading the tree as it was after the full wait",
-    obs.axTargets[0].name === "d", `got ${JSON.stringify(obs.axTargets)}`);
+    "a second gate charges up to a full DEADLINE_MS per step to reach an exit a mutating page cannot");
+  check("…and takes both rescans instead",
+    obs.metrics.scans === 3,
+    `scans was ${obs.metrics.scans} (1 initial + 2 rescans)`);
+  check("…reading the tree as it was after the rescans",
+    obs.axTargets[0].name === "c", `got ${JSON.stringify(obs.axTargets)}`);
 }
 
 // 3. A page that never even produced an `early` verdict — it ran to the
@@ -193,21 +201,27 @@ console.log("observation rescan guard");
     `slept ${h.calls.sleeps}×`);
 }
 
-// 5. A page that reports both `waited` and `early`. The real gate cannot emit
-//    it — the sample only ever resolves `waited:false` — but if a future edit
-//    made it possible, `pageMayStillBeMoving` is the gate that matters: a page
-//    that *did* go still needs no rescan and no second wait at all. This is why
-//    the fallback keys on `early && !settledByFingerprint` rather than on the
-//    `early` flag alone.
+// 5. ONE CAPTURE, ONE GATE — the whole point, asserted across every stability
+//    shape rather than only the one case 2 covers. `metrics.stability` is
+//    written from the first `waitForStable` alone, so a second charge is
+//    invisible in the `stability=…ms` log line and was up to 10s a step. If a
+//    future edit adds a gate back, this is what catches it.
 {
-  const h = harness({
-    stability: { waited: true, timedOut: false, early: true },
-    trees: [tree("x")],
-  });
-  const obs = await h.run();
-  check("a page that went still is never re-waited, whatever early says",
-    h.calls.waits.length === 1 && obs.metrics.scans === 1,
-    `waits ${h.calls.waits.length}, scans ${obs.metrics.scans}`);
+  const shapes = [
+    { name: "quiet",        stability: { waited: true,  timedOut: false, early: false }, trees: [tree("x")] },
+    { name: "quiet+early",  stability: { waited: true,  timedOut: false, early: true  }, trees: [tree("x")] },
+    { name: "early",        stability: { waited: false, timedOut: true,  early: true  }, trees: [tree("a"), tree("b")] },
+    { name: "early, moving",stability: { waited: false, timedOut: true,  early: true  }, trees: [tree("a"), tree("b"), tree("c")] },
+    { name: "deadline",     stability: { waited: false, timedOut: true,  early: false }, trees: [tree("a"), tree("b")] },
+    { name: "no answer",    stability: { waited: false, timedOut: false, early: false }, trees: [tree("a"), tree("b")] },
+  ];
+  for (const s of shapes) {
+    const h = harness({ stability: s.stability, trees: s.trees });
+    await h.run();
+    check(`the gate is charged exactly once — ${s.name}`,
+      h.calls.waits.length === 1,
+      `waitForStable was called ${h.calls.waits.length}×`);
+  }
 }
 
 console.log(failures ? `\n${failures} failed` : "\nall passed");
