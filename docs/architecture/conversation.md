@@ -357,6 +357,14 @@ so they now wait for the post-action observation they used to ignore. The
 extension already sends one after every action; it is consumed earlier, not
 asked for twice.
 
+**On the extension relay, `focus_ref` and `clear_ref` have no callers left.**
+`type_text` no longer sequences them — it is one `type_at` frame; the reasoning
+is in `agent-loop.md` ("One observation per model turn, not per CDP command").
+They are still live on the **Playwright** `CDPRelay`, whose `type_text_into_ref`
+is the three-call sequence the extension relay collapsed, so they are not dead
+code — but a reader tracing `type_text` down the product path will not find
+them, and that is correct rather than a missing hop.
+
 ## Version pair and the compat window
 
 `task_start` carries `ext_version` (additive). `/health` carries `version`.

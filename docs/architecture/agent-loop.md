@@ -106,6 +106,20 @@ recover.
 = 53.4% of wall, and 12s of `execute` is one click: `_send_action` blocks until
 the extension pushes the post-action observation back.
 
+**…and it was being paid per CDP command rather than per user action.** The
+extension sends a full `captureObservation` after *every* action, so a logical
+user action cost its action count times a stability gate, an AX-tree walk and a
+`Page.captureScreenshot`. `type_text` was the worst case in the action space:
+`harness.py` called `focus_ref`, then `clear_ref`, then `type_text_to_ref`, and
+**the first two each dispatched a `click` frame with the same coordinates and the
+same `backendNodeId`, resolved by the same `_locate` against the same cached
+observation**. The second click was byte-identical to the first, and was there
+because each relay method had to be independently complete — not because the page
+needed it. Three actions, three observations, two server-side evaluates, for one
+keystroke. Session `3dab5bb6` records a `type_text` at **19,965ms** against a
+~3.6s per-action floor; `445fc36d` has two higher still, at 27,058ms and
+26,415ms.
+
 **What it costs, measured per CDP call.** `scripts/probe_observation_perf.py`
 replays the exact call sequence `captureObservation` runs, timing every call,
 with `BOX_WALK` and `HIDDEN_PROBE` extracted from the TypeScript rather than
@@ -884,8 +898,11 @@ Fixed at the shared point both relays route through:
   does not resolve, on both `extension_relay.py` and `relay.py`. `ok` is then
   correct with no change to `harness.py`, because the prefix was already the
   contract and only the callers were violating it.
-- `type_text` in the harness bails if `focus_ref` or `clear_ref` reports
-  failure, instead of typing into a field the model never named.
+- `type_text` no longer sequences `focus_ref` and `clear_ref` in the harness at
+  all. It is one `type_text_into_ref` call, and the relay owns the ref
+  resolution and every guard in it — so a ref that does not resolve refuses
+  before a keystroke is dispatched, rather than typing into a field the model
+  never named. See "One observation per model turn, not per CDP command".
 
 Pinned by `tests/test_grounding_outcome.py` (5 tests, both relays).
 
@@ -1293,6 +1310,67 @@ bare letter is `type_text`'s job, a modified one is a shortcut.
 **`type_text` replaces the field; it always did.** The prompt said so in one place and
 `only inserts characters` in another, and the second reading is what sends the model down
 the Backspace path.
+
+### One observation per model turn, not per CDP command
+
+The observation boundary used to be the CDP command. It is the model turn, and
+it moved when `type_text` stopped being three relay calls and became one.
+
+`ExtensionCDPRelay.type_text_into_ref` sends a single `type_at` frame —
+`{type, x, y, backendNodeId, text, clear}` — so one keystroke is one action, one
+post-action observation and one extension-side evaluate, against three of each
+before. The harness call site needed no edit: `clear=True` is still the default
+and still means *the caller asked to replace the field's contents*, which is what
+the prompt says `type_text` does.
+
+**Playwright and Chrome DevTools MCP put the boundary in the same place, and for
+the same reason.** Playwright's `fill()` is one `evaluateInUtility` that checks
+visible, enabled and editable and fills, with no observation between sub-steps;
+the DevTools MCP tool set is one observation per model turn, not per CDP verb.
+The cost of getting this wrong is not elegance — it is that every decomposition
+of a single user intent is multiplied by a full observation cycle, which is the
+19.9s above.
+
+**The clear is a DOM operation, and it runs in the extension *after* the press.**
+That ordering is the whole reason it cannot be a server-side call. `clear_ref`
+already used `SELECT_ALL_JS` — the chord was fixed earlier — but it was a
+*separate action*: its click was dispatched, the extension sent a full
+observation, and only then did the select-all evaluate. After `pressAt`,
+`document.activeElement` **is** the clicked target; before it, it is whatever held
+focus a moment earlier, which may be a different field. Clearing that one is
+worse than appending, because the field the model did not name is the field that
+empties. So `type_at` presses, then `focusState` reads focus and calls
+`select()` on the same `Runtime.evaluate`.
+
+`clear-ref` is the third trip, and it was never free even before the chord was
+removed: it dispatched a whole `click` — with the coordinates the type was about
+to use — to establish focus, and then paid a second observation. The fused
+action is what removes it.
+
+**The canvas case needs no special handling, and a containment check would
+break it.** A Google Sheets cell is a `<canvas>`; its hidden input is not a
+descendant of the cell node that was clicked, so "is the focused element inside
+the thing I clicked" refuses on exactly the shape this action exists to serve.
+`activeElement.select()` selects that element's own contents wherever it hangs in
+the tree. This is recorded in `extension.md` because the obvious "fix" is the
+one that breaks Sheets.
+
+**The focus refusal is unchanged, and it is still two walls.** The server's
+`focus_id` pre-check runs before the frame is sent and refuses `none` / `body` /
+`""` — the `445fc36d` outcome, where a `type_text` typed "Name"/"Age" into a new
+sheet whose body held focus, read "Typed into [0:10050]", and completed on an
+empty sheet. The extension's `focusState` probe is a *different* question and
+does not replace it: it asks whether anything focusable holds focus **after the
+press**, which is a different answer from whether the model meant this field.
+Fusing the frames closed the window `focus_id` used to guard — the one between
+two clicks where a user could reach for the keyboard — and the probe is what
+closes it.
+
+**Per-phase timing was added because the aggregate number attributes nothing.**
+`_phase("focus")` and `_phase("type_at")` log milliseconds per phase under the
+session id. The total was measurable; which trip held the seconds was not.
+`clear_verify` is gone as a phase because there is no server-side clear left to
+verify — it happens inside `type_at`.
 
 ### What an action aimed at, and whether the page moved
 

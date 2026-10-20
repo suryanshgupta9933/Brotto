@@ -676,6 +676,88 @@ consequence is that this work is unit-tested logic and **needs a hand-run in a r
 browser** before it is called verified. `auth-inbox` flipped to PASS because ranked
 selection is the one server-side fix, and that PASS is real.
 
+## One action, one observation — `pressAt`, `dispatchKey`, `focusState`
+
+`executeAction` used to inline the whole of `click`: verify, draw, press,
+release, settle, clear the cursor in a `finally`. Three verbs needed those
+gates and only one of them had them, so the other two got *no* hit test —
+`focus_ref` and `clear_ref` were `type_text`'s first two trips, dispatched as
+plain `click` frames, and each one paid a full `captureObservation`.
+
+`pressAt(tabId, action, x, y)` is that block, extracted, and it keeps
+`verifyTarget` **inside** it. That placement is load-bearing: `verifyTarget` is
+the only thing binding an action to the node the model was shown, and a gate
+that exists on one branch and not its sibling is a gate with a hole in it.
+It returns `null` when the press went out, or the refusal that stopped it.
+`dispatchKey(tabId, key, mods)` is the same treatment for the `key` branch's
+key-down/key-up pair, and carries the comment that `mods` is CDP's bitmask
+(Alt=1, Ctrl=2, Meta=4, Shift=8) and is the caller's to supply — the extension
+holds no platform branch and must not grow one.
+
+`type_at` is the new branch: press via `pressAt`, read focus via `focusState`,
+optionally clear, then one `Input.insertText`. `clear` is set by the relay's
+`type_text_into_ref`, whose default is `clear=True` — the caller asked to
+replace the field's contents.
+
+### `focusState` reads focus and clears in one evaluate
+
+`FOCUS_PROBE` is one `Runtime.evaluate`, `returnByValue`, answering two
+questions in the order they were already asked in — a second round trip would
+ask the same unchanged `document.activeElement` twice. It returns
+`{ok, reason}` from a **closed vocabulary**: `no-active-element`,
+`focus-on-body`, `focus-on-root`, `clear-threw`, `clear-no-text-field`,
+`clear-select-noop`, `focus-probe-failed`, `focus-probe-silent`. No tag name or
+other page-chosen text appears in any of them — this string reaches the model's
+history and the audit document.
+
+`document.body` and `document.documentElement` are the "nobody is focused"
+answer in every engine, and `Input.insertText` against either is a no-op, so
+refusing there reports the truth rather than inventing a failure.
+
+### A successful `select()` is not evidence a clear happened
+
+**This is the one behavioural change here, and it trades a step for never
+appending to a field the model asked to empty.** `HTMLInputElement.select()` is
+*specified* to silently do nothing on input types it does not apply to —
+`email`, `number`, `date`, `time` — and to do nothing, **not to throw**. So
+calling it successfully proves nothing, and the text that follows would append
+to a field the model asked to replace: the same wrong answer the bare `"a"`
+gave, quieter. The probe reads the selection back and refuses with
+`clear-select-noop` when the call was a no-op over a non-empty value.
+
+The value is checked **first**, deliberately, because `selectionStart` throws
+on those same types — and an empty field of a no-op type has nothing to clear,
+so appending to it is correct. An empty field is exempt. The practical
+consequence: **a numeric or date field now costs the model an extra step**,
+which is the intended price and not a regression to route around.
+
+### The canvas case needs no containment check
+
+**Identity is deliberately not verified in `focusState`.** Google Sheets focuses
+a hidden input that is *not* a descendant of the cell node that was clicked, so
+a containment test — "is the focused element inside the thing I pressed?" —
+refuses on exactly the shape this action exists to serve.
+`activeElement.select()` selects that element's own contents wherever it hangs
+in the tree; it is not a region of the page. "Something focusable holds focus"
+is the question a click can answer; "is it the right one" is `verifyTarget`'s,
+and it runs before the press. Do not add the containment check.
+
+### The clear runs after the press, and that ordering is why it is here
+
+It is tempting to move the select-all back to the server. It cannot go there:
+`pressAt` establishes the focus, so after it `activeElement` **is** the clicked
+target and before it is whatever held focus a moment earlier — possibly a
+different field, which the clear would then empty. Ordering, not capability, is
+the argument. The key-chord route is closed for the reason in
+`agent-loop.md` ("Select-all is not a keyboard shortcut"): Ctrl+A is "move to
+line start" on macOS and there is no legal way for this file to ask which OS it
+is on.
+
+Pinned by `scripts/test-type-at.test.js`, which extracts the branch and evals
+it against a fake CDP session, and `scripts/test-target-hittest.test.js`, which
+asserts the gate lives inside `pressAt` so `click` and `type_at` cannot drift
+apart.
+
 ## Geometry is three calls, not one per node
 
 `targetsForFrame` used to call `DOM.getBoxModel` **once per kept node, serially,

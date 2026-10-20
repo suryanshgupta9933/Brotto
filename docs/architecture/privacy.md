@@ -208,6 +208,23 @@ page is a 200-char digest. Two tests hold the line and both are load-bearing:
 content back puts it all on disk again, and no amount of `is_secret_field`
 behaviour catches it.
 
+**A refusal is a place page text could enter, so the vocabulary is closed.**
+Every outcome string an action returns becomes the model's history *and* the
+audit document — both ours. `FOCUS_PROBE` in `observation/pointer.ts` therefore
+returns `{ok, reason}` from a fixed set (`clear-select-noop`, `clear-threw`,
+`focus-on-body`, …) and never a tag name or any other page-chosen string. That
+is a deliberate improvement over the constant it sits beside: `SELECT_ALL_JS` in
+`cdp/relay.py` returns `'not-a-text-field: ' + el.tagName`, which is why
+`_PAGE_ECHO` and `_strip_page_echo` exist in `harness.py` at all. The `type_at`
+path cannot produce that echo, and `focusState` **reads `activeElement.value` in
+the page** to decide whether a clear was a no-op — but only its `.length`, it
+returns a boolean, and the value never crosses back out of the evaluate.
+
+Fusing `type_text` into one action also cut the extension's screenshots on that
+path from three to one, since a `captureObservation` (and therefore a
+`Page.captureScreenshot`) follows every action. Fewer is better and neither
+number is a boundary.
+
 **3a. `redact_text` had one call site, and the README's Privacy section promised two.** The policy
 says page text is redacted "on every task, with no setting to turn it off". That
 was true of `harness.py` and false of `suggest.py`: the idle-suggestions path
