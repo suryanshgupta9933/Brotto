@@ -1251,12 +1251,12 @@ async def _await_login(deps: AgentDeps, cdp, *, timeout: float = 300.0,
             return "resume"
 
 
-async def _redact_if_secret(deps: AgentDeps, ref: str) -> bool:
-    """Is this field a password? Never raises.
+async def _redact_if_secret(deps: AgentDeps, ref: str) -> tuple[bool, bool]:
+    """(redact_this_value, latch_run_secrets) — is this field a password?
 
-    Resolved here and not at extraction: one CDP round trip per TYPED
-    ACTION is cheap, one per textbox per STEP is not, and this loop is
-    latency-bound.
+    Never raises. Resolved here and not at extraction: one CDP round trip
+    per TYPED ACTION is cheap, one per textbox per STEP is not, and this
+    loop is latency-bound.
 
     A field we cannot classify is redacted, not written. `get_attributes`
     is best-effort by contract and returns {} on a dead relay, a
@@ -1267,14 +1267,26 @@ async def _redact_if_secret(deps: AgentDeps, ref: str) -> bool:
     replay that says "[redacted:password]", under-redacting costs a
     plaintext credential on disk forever.
 
-    ponytail: this redacts every typed value on a relay too old to answer
-    get_attributes. Upgrade path: a per-task "attributes unavailable"
-    counter, so the audit can say "this run had no DOM visibility" instead
-    of a field that looks deliberately masked.
+    That asymmetry also decides the second element, and returning a pair
+    is the whole reason this is not one boolean. Redacting a typed value
+    is a local statement about one argument in one action. Latching
+    `run_secrets` is a run-wide claim that this run touched a credential,
+    and it vetoes the pixel delta and the screenshot for every remaining
+    step. A ref that resolves to no target is the ABSENCE of evidence, and
+    on a canvas app (Sheets) every typed cell has one — so a latch here
+    does not guard one login, it ends the run's only way to see the page
+    at all. Fail closed on the value; do not fail the run closed.
+
+    ponytail: this still redacts every typed value on a relay too old to
+    answer get_attributes. Upgrade path: a per-task "attributes
+    unavailable" counter, so the audit can say "this run had no DOM
+    visibility" instead of a field that looks deliberately masked.
     """
     target = next((t for t in deps.prev_targets if t.ref_id == ref), None)
     if target is None:
-        return True
+        # Not a finding. Redact the value (it could be a password field and
+        # we cannot tell), do not tell the rest of the run it was one.
+        return True, False
     attrs: object = {}
     getter = getattr(deps.cdp, "get_attributes", None)
     if getter is not None and getattr(target, "backend_node_id", None):
@@ -1285,10 +1297,14 @@ async def _redact_if_secret(deps: AgentDeps, ref: str) -> bool:
             attrs = {}
     if not isinstance(attrs, dict) or not attrs:
         # No usable DOM signal — the accessible name is all that is left.
-        return is_secret_field(None, target.name) or not (
+        # Here we DID see the field, so a secret verdict is a finding and it
+        # latches; only an unresolvable ref is mere absence of evidence.
+        redact = is_secret_field(None, target.name) or not (
             target.name or ""
         ).strip()
-    return is_secret_field(attrs, target.name)
+        return redact, redact
+    redact = is_secret_field(attrs, target.name)
+    return redact, redact
 
 
 def _typed_field(call: ActionCall) -> str | None:
@@ -5163,19 +5179,24 @@ class AgentHarness:
                     continue
                 # A ref for type_text, the focused element for press_key —
                 # both resolve to "is this a password field", and both fail
-                # closed when the answer is unavailable. `type_xy` has no ref
-                # and no DOM field behind it, so the lookup is "" and the
-                # answer is always "redact" — the same place `press_key`'s
-                # literal characters already sit, and the safe direction: a
-                # canvas can be a password widget and nothing here can tell
-                # it from a spreadsheet cell.
-                redact = (
+                # closed on the VALUE when the answer is unavailable.
+                # `type_xy` has no ref and no DOM field behind it, so the
+                # lookup is "" and the answer is always "redact" — the same
+                # place `press_key`'s literal characters already sit, and the
+                # safe direction: a canvas can be a password widget and
+                # nothing here can tell it from a spreadsheet cell.
+                #
+                # `latch` is the second half and is NOT the same statement:
+                # it is the run-wide "this touched a credential" claim that
+                # vetoes the pixel delta and the screenshot. An unresolvable
+                # ref must not make that claim — see `_redact_if_secret`.
+                redact, latch = (
                     await _redact_if_secret(deps, call.action_args.get("ref", ""))
                     if field == "text"
-                    else await _redact_press_key(deps)
+                    else (True, await _redact_press_key(deps))
                 )
                 redact_flags.append(redact)
-                if redact:
+                if latch:
                     typed_secrets.append(str(call.action_args.get(field) or ""))
             # Into the run-wide list the moment it is known, so the sinks
             # later in this same step see it too and not only the ones after

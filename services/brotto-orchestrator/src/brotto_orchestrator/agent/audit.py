@@ -60,16 +60,44 @@ REDACTED = "[redacted:password]"
 
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
+# Not just passwords. An API-key or token field is usually type="text" or
+# type="email", so the definitive check misses it and the name is all there
+# is. False positives cost a replay that says [redacted:...] — the same
+# asymmetry that decides the unresolvable-lookup case.
+_SECRET_ALTERNATIVES = (
+    "password", "passcode", "passphrase", "one[- ]?time", "otp", "pin",
+    "secret", "credentials?", "token", "api[-_ ]?key",
+    # `auth` alone is boundary-guarded, so `AuthToken` does not reach it —
+    # the `T` follows `auth` directly. That shape is a separate alternative
+    # rather than a loosened boundary.
+    "auth(?:orization)?", "auth[-_]?token",
+    "bearer", "private[-_ ]?key", "csrf", "xsrf", "session[-_ ]?id",
+    "(?:recovery|backup|security|verification|confirmation)[- _]?code",
+)
+
+# Boundaries are "not a letter", NOT `\b`. `_` is a word character,
+# so `\btoken` would have stopped firing on `access_token` — the most common
+# real field name — which is the true positive this rule exists for. Mid-word
+# matching is the false positive worth fixing: on a document app `tokenize`,
+# `secretary`, `author`, `authority`, `authenticated` and an exported
+# `Session ID` column header are ordinary text, and one false positive vetoes
+# the pixel delta for the rest of the run.
 _SECRET_NAME_RE = re.compile(
-    r"password|passcode|passphrase|one[- ]?time|\botp\b|\bpin\b"
-    # Not just passwords. An API-key or token field is usually type="text" or
-    # type="email", so the definitive check misses it and the name is all
-    # there is. False positives cost a replay that says [redacted:...] — the
-    # same asymmetry that decides the unresolvable-lookup case.
-    r"|secret|token|api[-_ ]?key|auth(?:orization)?|credential|bearer"
-    r"|private[-_ ]?key|csrf|xsrf|session[-_ ]?id"
-    r"|(?:recovery|backup|security|verification|confirmation)[- _]?code",
+    "|".join(f"(?<![A-Za-z])(?:{a})(?![A-Za-z])"
+             for a in _SECRET_ALTERNATIVES),
     re.I,
+)
+
+# camelCase is the one real field shape a leading boundary would silence --
+# `clientSecret`, `apiToken`, `myPassword`. It is matched separately and
+# case-SENSITIVELY, which is what makes it safe: the capital IS the camel
+# hump, so `Authority`, `Secretary` and `Tokenize` cannot reach it, and the
+# preceding lowercase letter is what tells `clientSecret` from a document
+# that merely starts with `Secret`. Two false positives survive and are
+# accepted: `myAuthorship` and `clientSecretariat`.
+_CAMEL_SECRET_RE = re.compile(
+    "(?<=[a-z])(?:Secret|Token|Password|Passcode|Passphrase|Auth|ApiKey"
+    "|SessionId|Credential|Bearer|Otp|Pin|Csrf|Xsrf)",
 )
 
 
@@ -86,7 +114,8 @@ def is_secret_field(attributes: dict | None, accessible_name: str | None) -> boo
     """
     if attributes and (attributes.get("type") or "").lower() == "password":
         return True
-    return bool(_SECRET_NAME_RE.search(accessible_name or ""))
+    return bool(_SECRET_NAME_RE.search(accessible_name or "")
+                or _CAMEL_SECRET_RE.search(accessible_name or ""))
 
 
 # ponytail: one directory, one file per session, no database and no index.
