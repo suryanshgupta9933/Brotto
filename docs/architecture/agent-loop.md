@@ -1347,24 +1347,64 @@ removed: it dispatched a whole `click` — with the coordinates the type was abo
 to use — to establish focus, and then paid a second observation. The fused
 action is what removes it.
 
-**The canvas case needs no special handling, and a containment check would
-break it.** A Google Sheets cell is a `<canvas>`; its hidden input is not a
+**The canvas case needs no special handling, and a *blanket* containment check
+would break it.** A Google Sheets cell is a `<canvas>`; its hidden input is not a
 descendant of the cell node that was clicked, so "is the focused element inside
-the thing I clicked" refuses on exactly the shape this action exists to serve.
-`activeElement.select()` selects that element's own contents wherever it hangs in
-the tree. This is recorded in `extension.md` because the obvious "fix" is the
-one that breaks Sheets.
+the thing I clicked" as a blanket rule refuses on exactly the shape this action
+exists to serve. `activeElement.select()` selects that element's own contents
+wherever it hangs in the tree. So containment **is** performed — by `bindFocus`,
+before `focusState` — and the canvas shape is a named, logged exemption inside
+that check rather than an exemption for everything. `extension.md` has the
+predicate and its three conditions; this is recorded here because the obvious
+"fix" is still the one that breaks Sheets.
 
-**The focus refusal is unchanged, and it is still two walls.** The server's
-`focus_id` pre-check runs before the frame is sent and refuses `none` / `body` /
-`""` — the `445fc36d` outcome, where a `type_text` typed "Name"/"Age" into a new
-sheet whose body held focus, read "Typed into [0:10050]", and completed on an
-empty sheet. The extension's `focusState` probe is a *different* question and
-does not replace it: it asks whether anything focusable holds focus **after the
-press**, which is a different answer from whether the model meant this field.
-Fusing the frames closed the window `focus_id` used to guard — the one between
-two clicks where a user could reach for the keyboard — and the probe is what
-closes it.
+**The identity binding is the other half of why one fused action is safe.** The
+argument above is about cost — one observation per model turn, not per CDP
+command — but fusing alone is only cheaper, not safer, and *fusing plus the
+binding* is what makes it safe. Before the fusion, the last thing that read
+`document.activeElement` was the server, and it read it between frames. After it,
+one extension branch reads it and *destroys* whatever it finds — so the branch
+needs a wall of its own. `bindFocus` is that wall: the focused node is named by
+the engine (`DOM.getFocusNode`), never by a page getter, and must be the pressed
+node, a descendant of it, or a canvas editor lying wholly inside it. It refuses
+an absent `backendNodeId` as `focus-unidentified` where `verifyTarget` fails open
+for an older relay, because this is the branch that empties the user's text. Two
+walls, no dependency between them.
+
+**The focus refusal is unchanged, and it is still two walls — now a third,
+serving a different question.** The server's `focus_id` pre-check runs before the
+frame is sent and refuses `none` / `body` / `""` — the `445fc36d` outcome, where a
+`type_text` typed "Name"/"Age" into a new sheet whose body held focus, read
+"Typed into [0:10050]", and completed on an empty sheet. The extension's probes
+are *different* questions and do not replace it: `bindFocus` asks whether what
+holds focus **after the press** is the thing the press was aimed at, which a
+press landing on the wrong focusable node satisfies perfectly, and which
+therefore cannot answer *intent* or *shape*. Only a read taken before the
+dispatch can say the page was in a state where the model could have meant this
+field at all. That is what `focus_id` refuses, and it is unchanged for the model:
+click the field first, then `type_text` into it. Fusing the frames closed the
+window `focus_id` used to guard — the one between two clicks where a user could
+reach for the keyboard — and the extension-side probes are what close it.
+
+`focus_id` now also calls `_locate(ref, need_backend_id=True)`, refusing a ref
+that has a position but no element identity at the source, so `focus-unidentified`
+never costs a press.
+
+**What `focus_id` costs, stated plainly.** It was a *main-world* `evaluate`, so
+the page owned the getter it read and could report a focus that was not there —
+the same exposure `FOCUS_PROBE` was hardened against by moving into an isolated
+world. **That is closed: `focus_id` now sends `isolatedWorld: true`**, so the
+read runs in the extension's world and the page cannot shadow the getters it
+resolves through. It never needed to be the wall — `bindFocus` is, and stays
+independent. The two answer different questions and are not redundant: `focus_id`
+answers *intent* (was this field plausibly in focus before the dispatch), which
+the engine cannot answer; `bindFocus` answers *identity* (is this node the one
+that holds focus now), which `focus_id`'s page-shaped read never could.
+
+A world that cannot be created must refuse, and it does: the extension answers
+`{value: "", error: …}` rather than falling back to the main world, `""` is not
+in `FOCUS_ID_RE`, and every caller reads `None` as *unknown* and refuses —
+pinned by `test_focus_id_isolated_world.py`.
 
 **Per-phase timing was added because the aggregate number attributes nothing.**
 `_phase("focus")` and `_phase("type_at")` log milliseconds per phase under the

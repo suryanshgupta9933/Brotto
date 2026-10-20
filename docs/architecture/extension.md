@@ -694,21 +694,132 @@ key-down/key-up pair, and carries the comment that `mods` is CDP's bitmask
 (Alt=1, Ctrl=2, Meta=4, Shift=8) and is the caller's to supply — the extension
 holds no platform branch and must not grow one.
 
-`type_at` is the new branch: press via `pressAt`, read focus via `focusState`,
-optionally clear, then one `Input.insertText`. `clear` is set by the relay's
+`type_at` is the new branch, and it is the branch that destroys the user's
+text, so it carries four gates in order: **bound the point, verify the target,
+bind the identity, then read and clear**. `clear` is set by the relay's
 `type_text_into_ref`, whose default is `clear=True` — the caller asked to
 replace the field's contents.
 
+- **The point is bounded.** `boundedPoint(tabId, action.x, action.y)` re-reads
+  the live viewport and refuses anything outside it, non-finite, or
+  non-numeric — the same reason `click_xy` already uses, and it subsumes the old
+  `typeof` check. The `viewport` field on the same frame is *not* the bound; it
+  is the sender's idea of the viewport, from the same untrusted message. The
+  **bounded** `{x, y}` is what goes into `pressAt` and into `bindFocus`, so the
+  hit test is asked about the point that is actually dispatched.
+- **`bindFocus` binds the identity.** See below — this is what `type_at` has
+  that `click` does not, because `type_at` is the only branch that reads
+  `document.activeElement` and *acts destructively* on it.
+
+### `bindFocus` — three walls, and the canvas exemption
+
+`verifyTarget` answers "is the right element at this point", before the press.
+It cannot answer "what holds focus now", because the press is what creates
+focus. Everything after `pressAt` reads `document.activeElement` and acts on it,
+so a press that missed, landed on a non-focusable, or was moved by page script
+leaves the user's *previous* field focused — and `clear` empties that one.
+
+**Wall 1 — engine-sourced identity.** `focusNode` runs `DOM.enable` →
+`DOM.getFocusNode` → `DOM.describeNode` and returns `{backendNodeId, nodeName}`.
+**No page script runs to answer this**, so overriding the
+`document.activeElement` getter changes nothing. Every failure refuses with
+`focus-identify-failed`: `DOM.getFocusNode` is experimental and can decline to
+answer, and a page whose focus cannot be named cannot be cleared.
+
+**Wall 2 — containment, in an isolated world.** `IDENTITY_PROBE` is a
+`Runtime.callFunctionOn` with the pressed node as `this` and the focused node as
+an argument, admitted when they are the same node, when the focused node is a
+*descendant* of the pressed one (a `<label>`, a wrapper `<div>`, a `<span>`
+inside a button — an ancestor is not admitted), or when focus was retargeted to
+the pressed node's own shadow host, which ordinary `contains()` cannot see.
+
+The world matters. `isolatedWorld(tabId)` does one
+`Page.createIsolatedWorld` per tab under the name `IDLE_WORLD` and **caches** the
+`executionContextId`; nodes are resolved into it with
+`DOM.resolveNode({backendNodeId, executionContextId})`. In the page's own world
+the page owns both the question and the effect — it can override the
+`activeElement` getter so the probe reports a focus that is not there, and it can
+override `Element.prototype.select` so `select()` does something other than
+select. A probe a malicious page can answer *and* act on is not a guard.
+
+**Wall 3 — the canvas exemption**, for the one shape neither of the above can
+serve: a `<canvas>` grid cell whose press focuses a hidden editor that is not
+the cell and not inside it. All three conditions hold:
+
+1. the pressed node is a `CANVAS`;
+2. the focused node's engine-supplied `nodeName` is an `INPUT` or `TEXTAREA`;
+3. `DOM.getBoxModel` for the focused node **wholly inside** the pressed canvas's box.
+
+(3) is what makes it narrow rather than a hole. A visible field the user was
+typing into — a real search box, a real form input — is somewhere else on the
+page, so its box cannot be inside the canvas that was just clicked. Both boxes
+come from the engine in the engine's coordinates, so **no page attribute
+(`aria-hidden`, `hidden`, inline style) can unlock the exemption** by being
+written onto the user's own field. The residual: a page that physically moved
+the user's focused input on top of the canvas it was clicked — and then
+`verifyTarget`'s `elementFromPoint` has already refused the press as
+`different-element`, because the click landed on the input, not the canvas.
+
+**The exemption is reported, never silent.** `bindFocus` returns
+`{ok: true, reason: "canvas-editor-exempt"}`, `executeAction` logs it, and
+`ExtensionCDPRelay` logs "action succeeded by exemption" while keeping the
+verdict a success. Reading it as a refusal would refuse the shape `type_at`
+exists for; dropping it silently loses the only server-side trace that the
+identity binding was waived.
+
+`bindFocus` also refuses `focus-unidentified` when the frame carries no
+`backendNodeId`. `verifyTarget` *fails open* there, because an older relay has
+no gate to run; the clear has no such excuse — it is the one operation here that
+destroys the user's text. The relay closes the same case at the source by
+calling `_locate(ref, need_backend_id=True)`.
+
+### The `evaluate` frame grew one optional field
+
+`{"type": "evaluate", "expression": "<js>", "isolatedWorld": true}`. Absent or
+`false` is exactly the call that shipped — main world, **no `contextId` key in
+`params` at all**. Set, the *same expression* is evaluated in the tab's cached
+`brotto-idle` world, whose prototypes are the extension's, so a page cannot
+shadow the getters it reads. The isolated world shares the DOM, so `document`
+and every element are the same objects; only the JS globals differ, and
+`returnByValue` returns the same primitive either way.
+
+This is a **grow-only** addition to an existing frame: an old extension ignores
+the field, an old server never sends it. No version window is needed.
+
+**Who sets it, decided per caller.** The flag is opt-in and the callers are not
+uniform, because the reads are not:
+
+- **`focus_id` — set.** Reads `document.activeElement`; in the main world the
+  page owns the getter it resolves through, so the check could silence itself.
+- **`probe_xy` — set.** Not a diagnostic: it is a decision.
+  `window.innerWidth`/`innerHeight` are page-writable globals feeding
+  `_coordinate_action`'s bound check — the only thing between a model-chosen
+  point and a press — and its `tag` read is what refuses a covered canvas.
+  The DOM is shared, so `elementFromPoint` still answers on the same elements.
+- **`read_page_text` — deliberately not set.** The value *is* page content,
+  page-controlled in any world, and it reads shared DOM anyway. Isolating it
+  would protect the page's text from the page, which is backwards.
+
 ### `focusState` reads focus and clears in one evaluate
 
-`FOCUS_PROBE` is one `Runtime.evaluate`, `returnByValue`, answering two
-questions in the order they were already asked in — a second round trip would
-ask the same unchanged `document.activeElement` twice. It returns
-`{ok, reason}` from a **closed vocabulary**: `no-active-element`,
-`focus-on-body`, `focus-on-root`, `clear-threw`, `clear-no-text-field`,
-`clear-select-noop`, `focus-probe-failed`, `focus-probe-silent`. No tag name or
-other page-chosen text appears in any of them — this string reaches the model's
-history and the audit document.
+`FOCUS_PROBE` is one `Runtime.evaluate`, `returnByValue`, **in the isolated
+world** (`contextId` from `isolatedWorld`), answering two questions in the order
+they were already asked in — a second round trip would ask the same unchanged
+`document.activeElement` twice. It returns `{ok, reason}`, and the whole
+vocabulary is **`TYPE_AT_REFUSALS`** in `pointer.ts` — the exported list the
+tests assert both ways, kept in one place because a reader who has to assemble
+it from the branches will read it wrong.
+
+"Is this a text field" was once inferred from `typeof a.select === "function"`,
+which is a duck type: any element can carry a `select`, a `select()` on a `<div>`
+does nothing, and the page owns that method. It is now one real predicate —
+`a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement ||
+a.isContentEditable === true` — which is exactly what the isolated world buys.
+A non-field refuses `focus-no-text-field` on the type-only path and
+`clear-no-text-field` on the clear path, because "cannot receive text" is the
+whole question on one and "nothing to clear" on the other. A focused `IFRAME`
+refuses `focus-on-frame`: `insertText` would land in a document no observation
+this run produced covered.
 
 `document.body` and `document.documentElement` are the "nobody is focused"
 answer in every engine, and `Input.insertText` against either is a no-op, so
@@ -716,31 +827,43 @@ refusing there reports the truth rather than inventing a failure.
 
 ### A successful `select()` is not evidence a clear happened
 
-**This is the one behavioural change here, and it trades a step for never
-appending to a field the model asked to empty.** `HTMLInputElement.select()` is
-*specified* to silently do nothing on input types it does not apply to —
-`email`, `number`, `date`, `time` — and to do nothing, **not to throw**. So
-calling it successfully proves nothing, and the text that follows would append
-to a field the model asked to replace: the same wrong answer the bare `"a"`
-gave, quieter. The probe reads the selection back and refuses with
-`clear-select-noop` when the call was a no-op over a non-empty value.
+**This is the behavioural change, and it trades a step for never appending to a
+field the model asked to empty.** `HTMLInputElement.select()` is *specified* to
+silently do nothing on input types it does not apply to — `email`, `number`,
+`date`, `time` — and to do nothing, **not to throw**. So calling it successfully
+proves nothing, and the text that follows would append to a field the model asked
+to replace: the same wrong answer the bare `"a"` gave, quieter. The probe reads
+the selection back and refuses with `clear-select-noop` unless
+`selectionEnd - selectionStart === value.length`.
 
-The value is checked **first**, deliberately, because `selectionStart` throws
-on those same types — and an empty field of a no-op type has nothing to clear,
-so appending to it is correct. An empty field is exempt. The practical
-consequence: **a numeric or date field now costs the model an extra step**,
-which is the intended price and not a regression to route around.
+The value's length is read **first**, deliberately, because `selectionStart` is
+`null` (not a number) on those same types — and an empty field of a no-op type
+has nothing to clear, so appending to it is correct. That is also the Sheets
+case: the canvas exemption's editor holds the cell's text in a hidden input, and
+an empty cell's input is empty. The practical consequence: **a numeric or date
+field now costs the model an extra step**, which is the intended price and not a
+regression to route around.
 
-### The canvas case needs no containment check
+The `contenteditable` branch has no `select()`, so a `Range` over the node's
+contents is the same operation by another route — and it is confirmed the same
+way: `selection.rangeCount === 1` and a non-empty `getRangeAt(0).toString()`
+when the node had text. Anything else is `clear-select-noop`, as is a missing
+`Selection`. A throw is `clear-threw`.
 
-**Identity is deliberately not verified in `focusState`.** Google Sheets focuses
-a hidden input that is *not* a descendant of the cell node that was clicked, so
-a containment test — "is the focused element inside the thing I pressed?" —
-refuses on exactly the shape this action exists to serve.
-`activeElement.select()` selects that element's own contents wherever it hangs
-in the tree; it is not a region of the page. "Something focusable holds focus"
-is the question a click can answer; "is it the right one" is `verifyTarget`'s,
-and it runs before the press. Do not add the containment check.
+### The canvas case is exempted, not waved through
+
+An earlier version of this doc argued the opposite — that identity must *not* be
+verified in `focusState`, because a Sheets cell is a `<canvas>` whose hidden
+input is not a descendant of the clicked node. That was right about the
+consequence and wrong about the conclusion: containment is exactly the check
+needed, and the Sheets shape is the one case that gets a named exemption rather
+than an exemption for everything. `select()` selects that element's own contents
+wherever it hangs in the tree — it is not a region of the page — but that is a
+reason to *exempt* the shape, not to skip the identity question. The identity
+check lives in `bindFocus`, upstream of `focusState`, precisely so the exemption
+is the narrowest thing in the path.
+
+### The clear runs after the press, and that ordering is why it is here
 
 ### The clear runs after the press, and that ordering is why it is here
 
@@ -753,10 +876,22 @@ the argument. The key-chord route is closed for the reason in
 line start" on macOS and there is no legal way for this file to ask which OS it
 is on.
 
+**`point-not-numeric` is not a dead key.** It is emitted by `verifyTarget`, not
+by the `type_at` branch — the `typeof` check there is now subsumed by
+`boundedPoint`, which reports the same case as `point-out-of-viewport`. The
+`verifyTarget` guard is live because `click` hands `pressAt` the frame's **raw**
+`action.x/action.y` and only `click_xy` is bounded upstream, so a `click_ref`
+coordinate is checked for numerics and hit-tested but never clamped to the
+viewport. Do not delete the key on the reasoning that nothing emits it.
+
 Pinned by `scripts/test-type-at.test.js`, which extracts the branch and evals
-it against a fake CDP session, and `scripts/test-target-hittest.test.js`, which
+it against a fake CDP session, `scripts/test-target-hittest.test.js`, which
 asserts the gate lives inside `pressAt` so `click` and `type_at` cannot drift
-apart.
+apart, and `scripts/test-evaluate-isolated-world.test.js`, which asserts the
+`evaluate` frame's optional `isolatedWorld` field is absent-until-asked — an
+extension without it ignores the key, a server that never sends it is unchanged.
+The server does ask: `focus_id` and `probe_xy` set it, `read_page_text`
+deliberately does not.
 
 ## Geometry is three calls, not one per node
 

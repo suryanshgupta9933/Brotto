@@ -357,13 +357,23 @@ so they now wait for the post-action observation they used to ignore. The
 extension already sends one after every action; it is consumed earlier, not
 asked for twice.
 
-**On the extension relay, `focus_ref` and `clear_ref` have no callers left.**
+**On the extension relay, `focus_ref` and `clear_ref` no longer exist.**
 `type_text` no longer sequences them — it is one `type_at` frame; the reasoning
 is in `agent-loop.md` ("One observation per model turn, not per CDP command").
-They are still live on the **Playwright** `CDPRelay`, whose `type_text_into_ref`
-is the three-call sequence the extension relay collapsed, so they are not dead
-code — but a reader tracing `type_text` down the product path will not find
-them, and that is correct rather than a missing hop.
+They were first left on `ExtensionCDPRelay` with no callers and have since been
+**removed**, so the two paragraphs above that still name them on this relay are
+history, not a map. They remain live on the **Playwright** `CDPRelay`, whose
+`type_text_into_ref` is the three-call sequence the extension relay collapsed, so
+they are not dead code — and a reader tracing `type_text` down the product path
+will not find them, which is correct rather than a missing hop.
+
+**`evaluate` gained one optional field: `isolatedWorld`.**
+`{"type": "evaluate", "expression": …, "isolatedWorld": true}` evaluates the same
+expression in the tab's cached isolated world instead of the page's. Absent or
+`false` is the call that shipped, unchanged — no `contextId` key in `params` at
+all — so this is **grow-only**: an extension predating the field ignores the key,
+a server that never sends it is unchanged, and no version window is needed.
+Pinned by `scripts/test-frame-contract.test.js`.
 
 ## Version pair and the compat window
 

@@ -212,13 +212,45 @@ behaviour catches it.
 Every outcome string an action returns becomes the model's history *and* the
 audit document — both ours. `FOCUS_PROBE` in `observation/pointer.ts` therefore
 returns `{ok, reason}` from a fixed set (`clear-select-noop`, `clear-threw`,
-`focus-on-body`, …) and never a tag name or any other page-chosen string. That
-is a deliberate improvement over the constant it sits beside: `SELECT_ALL_JS` in
-`cdp/relay.py` returns `'not-a-text-field: ' + el.tagName`, which is why
-`_PAGE_ECHO` and `_strip_page_echo` exist in `harness.py` at all. The `type_at`
-path cannot produce that echo, and `focusState` **reads `activeElement.value` in
-the page** to decide whether a clear was a no-op — but only its `.length`, it
-returns a boolean, and the value never crosses back out of the evaluate.
+`focus-on-body`, …) and never a tag name or any other page-chosen string. The
+whole list is `TYPE_AT_REFUSALS`, exported and asserted both ways by
+`scripts/test-type-at.test.js` — every `reason:` in the source is in it, and
+every entry in it is used. That is a deliberate improvement over the constant it
+sits beside: `SELECT_ALL_JS` in `cdp/relay.py` returns
+`'not-a-text-field: ' + el.tagName`, which is why `_PAGE_ECHO` and
+`_strip_page_echo` exist in `harness.py` at all. The `type_at` path cannot
+produce that echo, and `focusState` **reads `activeElement.value` in the page**
+to decide whether a clear was a no-op — but only its `.length`, it returns a
+boolean, and the value never crosses back out of the evaluate.
+
+**The identity read is the one page question with no page script in it.**
+`FOCUS_PROBE` still reads `document.activeElement`, so it is page-answerable —
+which is why it is now the *corroboration for the effect*, not the authority for
+the identity. `bindFocus` names the focused node from the engine (`DOM.enable` →
+`DOM.getFocusNode` → `DOM.describeNode`), and **no page script runs to produce
+that answer**: overriding the `activeElement` getter, or
+`Element.prototype.select`, changes nothing the engine reports. The containment
+predicate that follows runs via `Runtime.callFunctionOn` in the tab's cached
+isolated world (`Page.createIsolatedWorld`, name `IDLE_WORLD`) where the
+prototypes are the extension's, so the page cannot shadow the classes the "is
+this a text field" test compares against. The two walls fail independently
+rather than resting on the same script.
+
+**The last main-world server read is closed, and the two walls are still not
+redundant.** The server's `focus_id` pre-check was a *main-world* `evaluate`,
+where the page owns the globals that resolve `document.activeElement` and could
+make the check silence itself. It now sends `isolatedWorld: true`, so it reads in
+the extension's world; the DOM is shared, so the element named is the same object
+either way. `focus_id` and `bindFocus` answer different questions and neither is
+spare: `focus_id` answers *intent* (was this field plausibly in focus before the
+dispatch), which no engine call can answer; `bindFocus` answers *identity* (is
+this node the one that holds focus now). A world that cannot be created refuses
+rather than falling back to the main world, so the failure direction is a
+refusal, not a silent downgrade.
+
+Neither the coordinate bounding (`boundedPoint` reads the live viewport; the
+point never leaves the tab) nor the engine-sourced node read sends anything off
+the machine. Both are strictly *less* page-derived than what shipped.
 
 Fusing `type_text` into one action also cut the extension's screenshots on that
 path from three to one, since a `captureObservation` (and therefore a
