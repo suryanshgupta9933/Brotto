@@ -10,7 +10,7 @@ import re
 import time
 import uuid
 from typing import Callable, Coroutine, Any, NamedTuple
-from urllib.parse import urljoin
+from urllib.parse import urlsplit
 
 import logging
 import re
@@ -1605,11 +1605,9 @@ def _should_prompt_cross_domain_click(
     return (True, post_etld)
 
 
-def _click_ref_domain(
-    call: ActionCall, targets: list, pre_url: str | None,
-) -> str | None:
-    """The eTLD+1 a `click` ref is about to leave for, read off the step's
-    own target list — or None when the click carries no destination.
+def _click_ref_href(call: ActionCall, targets: list) -> str | None:
+    """The absolute destination a `click` ref carries, read off the step's
+    own target list — or None when there is no destination we may trust.
 
     This is the pre-flight half of the cross-domain gate. The post-click
     half compares two URLs, which is one step too late to be an approval:
@@ -1620,11 +1618,19 @@ def _click_ref_domain(
 
     No wire change is needed for it: the extension already puts each
     link's CDP `url` property on the target (`observation/index.ts`,
-    `propUrl`) and `extension_relay._to_semantic` maps it to `href`.
+    `propUrl`), which Chrome fills with the **resolved** URL, and
+    `extension_relay._to_semantic` maps it to `href`. So an absolute href
+    is used as-is and never re-resolved — there is nothing here that
+    disagrees with the browser, because nothing here resolves anything.
 
-    `urljoin` rather than a bare `etld1(href)`, because a protocol-
-    relative `//other.example/x` has no scheme of its own and would
-    resolve to nothing at all instead of to `other.example`.
+    **A relative href is None, not resolved.** It cannot be resolved
+    correctly without WHATWG URL parsing, and `urljoin` is not WHATWG: for
+    `\\evil.com/x` a browser resolves to `//evil.com/x` and navigates
+    cross-origin, while `urljoin` keeps it on this page — so a relative
+    href is exactly the input where a Python resolver invents a
+    same-domain verdict the browser would disagree with. Same for a
+    protocol-relative `//other.example/x`. None routes it to the
+    post-click gate, which compares what actually happened.
 
     **None means "no destination we can read", not "same domain".** A
     button whose handler navigates via JS, a form submit, or a ref that
@@ -1641,9 +1647,17 @@ def _click_ref_domain(
     href = getattr(target, "href", None) if target is not None else None
     if not href:
         return None
-    if pre_url:
-        href = urljoin(pre_url, href)
-    return etld1(href)
+    parts = urlsplit(href)
+    if parts.scheme not in ("http", "https"):
+        # `javascript:`, `data:`, `file:` are not navigable destinations we
+        # can read an eTLD+1 out of; a relative href has no scheme at all.
+        return None
+    if "@" in parts.netloc:
+        # `https://bank.example@evil.example/` reads as `bank.example` to
+        # a glance and as `evil.example` to the browser. Refuse the shape
+        # rather than pick a side.
+        return None
+    return href
 
 
 async def _preflight_cross_domain_click(
@@ -1665,13 +1679,36 @@ async def _preflight_cross_domain_click(
     if deps.policy is None:
         return None
     pre_url = getattr(deps, "step_url", None)
-    href_domain = _click_ref_domain(call, targets, pre_url)
-    if href_domain is None:
+    href = _click_ref_href(call, targets)
+    if href is None:
         return None
+
+    # The blacklist first, and before any question is asked. `navigate`
+    # reads the same policy against its target before dispatch, and the
+    # post-click check reads it after; asking the user about a site their
+    # own list already says never is the one verb where the destination is
+    # readable in advance, so a question there would downgrade "never go
+    # here" to "please confirm". Same shape as `navigate`: hard block, no
+    # approval path, and nothing joins `visited_domains`.
+    if check_domain_policy(href, deps.policy) == GateDecision.BLOCK:
+        domain = etld1(href) or href
+        log.warning(
+            "[%s] POLICY VIOLATION: click BLOCKED BEFORE dispatch  step=%d  url=%s  domain=%s",
+            deps.user_id, deps.step_number, href, domain,
+        )
+        if audit is not None:
+            audit.record_policy(
+                step=deps.step_number, kind="click_blocked_pre", domain=domain,
+                action="click", decision="block",
+            )
+        deps.result = _make_policy_blocked_result(deps.step_number, domain,
+                                                  deps=deps)
+        return f"[BLOCKED] policy: click would navigate to {href}"
+
     # The same predicate the post-click gate uses, with the href standing
     # in for the URL the click will land on.
     needs_prompt, target_domain = _should_prompt_cross_domain_click(
-        pre_url, f"https://{href_domain}", deps,
+        pre_url, href, deps,
     )
     if not needs_prompt or target_domain is None:
         return None
@@ -1689,6 +1726,13 @@ async def _preflight_cross_domain_click(
         deps, audit, turn=turn, kind="click_cross_domain",
         action="_policy_cross_domain_click",
         args={"from_url": pre_url, "to_domain": target_domain},
+        # The card names the full destination; the audit keeps the domain
+        # only. The href is page-supplied and can carry a path, a query and
+        # a fragment the user's own list should never meet on disk — and it
+        # is what the re-check below compares, so the card and the check
+        # have to be reading the same string.
+        frame_args={"from_url": pre_url, "to_domain": target_domain,
+                    "to_url": href},
         domain=target_domain,
         reason=(
             f"This click would navigate to {target_domain}, a different "
@@ -1715,6 +1759,39 @@ async def _preflight_cross_domain_click(
         domain=target_domain, action="click",
         decision="require_approval", user_decision="approved",
     )
+    # The href the user approved was read before a human spent seconds on
+    # the card. Read it again immediately before dispatch, for the same
+    # reason `_coordinate_action` re-reads the point and the page URL after
+    # its approval: a page can rewrite an anchor's href inside that window,
+    # and then the approval is consent to `good.example` being used to
+    # navigate to `evil.example`. That check is absent here — a re-read of
+    # the *page URL* cannot see an href that changed without the page
+    # moving — so it has to read the href.
+    #
+    # ponytail: `get_targets()` may hand back the relay's reusable
+    # post-action frame rather than a fresh capture. Then this confirms
+    # nothing and the post-click gate remains the line; upgrade path is a
+    # `get_attributes` read of the live node, which needs no wire change
+    # but a `backendNodeId` this tree does not carry per href.
+    try:
+        href_now = _click_ref_href(call, await deps.cdp.get_targets())
+    except Exception:  # noqa: BLE001 — an unreadable destination refuses
+        href_now = None
+    if href_now is None or etld1(href_now) != target_domain:
+        now_domain = etld1(href_now) if href_now else "no readable destination"
+        log.warning(
+            "[%s] POLICY: click destination changed during approval  step=%d  approved=%s  now=%s",
+            deps.user_id, deps.step_number, target_domain, now_domain,
+        )
+        # `_EXEC_FAILURE` because `ok` is derived from it and nothing was
+        # clicked — a friendly sentence would audit this refusal as a
+        # successful click, which is the failure this whole path exists to
+        # prevent.
+        return (f"{_EXEC_FAILURE} click: the link's destination changed while "
+                f"the user was deciding ({target_domain} → {now_domain}), so "
+                f"it was not clicked. The user approved a different site; "
+                f"look at the page again and ask about the link you actually "
+                f"mean.")
     deps.visited_domains.add(target_domain)
     return None
 
@@ -1722,10 +1799,17 @@ async def _preflight_cross_domain_click(
 # The card-only caveat on every coordinate approval. It carries no domain and
 # no page text, so it is safe in the frame and never reaches the audit — and
 # `_ask_user`'s `frame_reason`/`reason` split is what keeps it that way.
+#
+# The second sentence is conditional on purpose. `_coordinate_cross_domain
+# _after` skips a domain already in `visited_domains`, so promising an ask
+# unconditionally is a promise the run can break — on a card that fires for
+# every canvas press, which is exactly the sort of claim that teaches a user
+# to stop reading it. Both halves are load-bearing: the destination is
+# unreadable, and the ask comes later rather than now.
 _COORDINATE_CROSS_ORIGIN_CAVEAT = (
-    " Nothing about where this point leads can be read before the click: the "
-    "page is a canvas there. If it opens another site, you will be asked "
-    "after it happens."
+    " Nothing about where this press leads can be read before it happens: the "
+    "page is a canvas there, so this may open another site. If it lands "
+    "somewhere new, you will be asked then."
 )
 
 
@@ -1733,8 +1817,8 @@ async def _coordinate_cross_domain_after(
     action: str, deps: AgentDeps, audit, turn: int, pre_url: str | None,
 ) -> str | None:
     """The post-dispatch half of the coordinate cross-domain gate. Returns
-    the outcome to return immediately if the click must abort the task, else
-    None.
+    the outcome to return immediately if the click must abort the task or
+    its landing could not be verified, else None.
 
     **This is not a pre-flight, and there cannot be one.** `_coordinate_action`
     dispatches only where `elementFromPoint` is a `CANVAS`; a canvas has no
@@ -1760,9 +1844,24 @@ async def _coordinate_cross_domain_after(
     try:
         post_url = await deps.cdp.get_current_url()
     except Exception:  # noqa: BLE001 — an unreadable landing is not a licence
-        return None
+        post_url = None
     if not post_url:
-        return None
+        # Fail closed, like every other unreadable read on this path. This
+        # used to return None, and None is the "no cross-origin hop" signal
+        # — so a landing we could not read was recorded as a clean one, the
+        # one direction the whole gate exists to prevent.
+        #
+        # It is not a refusal either: the press happened and nothing here
+        # can undo it. So it says exactly that, and it carries
+        # `_EXEC_FAILURE` because `ok` is derived from that and a
+        # destination we could not read against the user's blacklist must
+        # not be recorded as a verified success. The next step's
+        # observe-phase check reads the page properly and gates on it then.
+        return (f"{_EXEC_FAILURE} {action}: the press happened, but where it "
+                f"landed could not be read, so it was not checked against the "
+                f"policy and no cross-origin hop was confirmed either way. "
+                f"Treat the destination as unverified — read the page before "
+                f"acting on what is there.")
 
     decision = check_domain_policy(post_url, deps.policy)
     if decision == GateDecision.BLOCK:

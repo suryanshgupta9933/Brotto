@@ -201,6 +201,22 @@ async def test_the_approval_card_says_the_destination_is_unreadable():
 
 
 @pytest.mark.asyncio
+async def test_the_card_does_not_promise_an_ask_that_will_not_happen():
+    """The caveat must not overclaim. `test_an_already_approved_domain_is_not
+    _asked_about_twice` proves a landing in an already-approved domain
+    prompts nobody — so an unconditional "you will be asked" is a promise the
+    user can be let down on, on a card that fires for every canvas press.
+    The later ask is conditional on the landing being somewhere new."""
+    cdp = _cdp()
+    deps = _deps(cdp)
+    audit = MagicMock()
+    await _run(cdp, deps, audit)
+    frame = [c.args[0] for c in deps.ws_send.await_args_list
+             if c.args and c.args[0].get("type") == "approval_required"][0]
+    assert "somewhere new" in frame["reasoning"], frame["reasoning"]
+
+
+@pytest.mark.asyncio
 async def test_the_card_caveat_never_reaches_the_audit_document():
     """`logs/sessions/` is the user's data: prose the card carries is page-
     derived context, and `_ask_user` splits card-only text for exactly this."""
@@ -210,3 +226,49 @@ async def test_the_card_caveat_never_reaches_the_audit_document():
     await _run(cdp, deps, audit)
     reason = audit.record_prompt.call_args.kwargs["reason"]
     assert "another site" not in reason
+
+
+def _cdp_landing(*, raises=False, empty=False):
+    """`post_url` never arrives: the third read is the landing, and it is
+    the only one this test cares about."""
+    cdp = _cdp()
+    reads = {"n": 0}
+
+    async def get_current_url():
+        reads["n"] += 1
+        if reads["n"] <= 2:
+            return PRE_URL
+        if raises:
+            raise RuntimeError("tab gone")
+        return ""
+
+    cdp.get_current_url = AsyncMock(side_effect=get_current_url)
+    return cdp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["raises", "empty"])
+async def test_an_unreadable_landing_is_never_a_clean_landing(mode):
+    """Fail closed, like every other unreadable read on this path.
+
+    `None` means "no cross-origin hop", so an unreadable landing used to
+    return `None` and the step went on reporting a clean cross-domain
+    canvas press — recorded `ok: true` on disk, with the user's blacklist
+    never read against it.
+    """
+    cdp = _cdp_landing(raises=mode == "raises")
+    deps = _deps(cdp)
+    audit = MagicMock()
+
+    out = await _run(cdp, deps, audit)
+
+    # The press happened. Saying otherwise would be the other lie.
+    cdp.click_xy.assert_awaited_once()
+    assert _EXEC_FAILURE in out, out
+    assert "could not be read" in out
+    # And nothing was granted, because nothing was learned.
+    assert deps.result is None
+    assert [c for c in audit.record_policy.call_args_list
+            if c.kwargs.get("decision") == "block"] == []
+    assert [c for c in audit.record_policy.call_args_list
+            if c.kwargs.get("kind") == "click_cross_domain"] == []

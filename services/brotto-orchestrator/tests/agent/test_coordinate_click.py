@@ -691,7 +691,12 @@ async def test_a_query_or_hash_change_is_not_a_site_change(trail, second):
     constantly, and refusing every one of those would train the model to read
     this verdict as noise."""
     deps, _, _ = _deps()
-    deps.cdp.get_current_url = AsyncMock(side_effect=[URL, second])
+    # Three reads: before the approval, the re-check after it, and the
+    # landing. The landing is the same sheet, re-fragmented — which is the
+    # whole claim. It used to pass with only two, because the third read
+    # raised and `_coordinate_cross_domain_after` swallowed the raise as
+    # "no cross-origin hop": the test was passing on the fail-open.
+    deps.cdp.get_current_url = AsyncMock(side_effect=[URL, second, second])
     out = await _execute_action(_click(), deps, audit=trail, turn=TURN)
     assert _EXEC_FAILURE not in out, out
     deps.cdp.click_xy.assert_awaited_once_with(412, 288)

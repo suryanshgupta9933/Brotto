@@ -41,7 +41,6 @@ def _deps(page_text: str, seen: list) -> AgentDeps:
     cdp.get_page_title = AsyncMock(return_value="Example")
     cdp.refresh_target_map = AsyncMock()
     cdp.click_ref = AsyncMock(return_value="Clicked [r:A]")
-    cdp.click_ref = AsyncMock(return_value="Clicked [r:A]")
 
     async def ws_send(_msg: dict) -> None:
         return None
