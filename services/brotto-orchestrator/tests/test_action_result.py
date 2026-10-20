@@ -52,7 +52,7 @@ async def _click_with(relay: ExtensionCDPRelay, result: dict | None):
     task = asyncio.create_task(relay.click_ref("7"))
     await asyncio.sleep(0)  # the action goes out
     if result is not None:
-        relay.deliver_action_result(result)
+        await relay.deliver_action_result(result)
     await relay._obs_queue.put({"url": "https://x.test/", "axTargets": [], "reason": "action"})
     return await task
 
@@ -133,7 +133,7 @@ async def test_the_xy_path_reports_a_refusal_too():
     relay = _relay()
     task = asyncio.create_task(relay.click_xy(10, 20))
     await asyncio.sleep(0)
-    relay.deliver_action_result({"ok": False, "reason": "point-out-of-viewport"})
+    await relay.deliver_action_result({"ok": False, "reason": "point-out-of-viewport"})
     await relay._obs_queue.put({"url": "https://x.test/", "axTargets": [], "reason": "action"})
     out = await task
     assert out.startswith("Error executing"), out
@@ -206,3 +206,35 @@ def test_the_relay_hardcodes_no_reason_from_the_vocabulary():
     quoted = set(re.findall(r'"([a-z]+(?:-[a-z0-9]+)+)"', src))
     stale = sorted(quoted & set(_extension_refusals()))
     assert stale == [], f"the relay names reasons itself: {stale}"
+
+
+def test_every_deliver_method_the_receive_loop_awaits_is_a_coroutine():
+    """A sync `deliver_*` is `await None`, and it kills the whole run.
+
+    `main.py`'s receive loop awaits each `relay.deliver_*` it dispatches to.
+    One of them being a plain `def` raises `TypeError: object NoneType can't be
+    used in 'await' expression`, which the loop catches as a generic exception,
+    logs, and then `break`s on — so the socket dies and the agent task is
+    cancelled. It looked like "server unreachable" and it happened on *every*
+    run, because `action_result` arrives after the first action and nothing
+    survives it.
+
+    Pinned by shape rather than by behaviour: the call sites are a bare `await
+    relay.deliver_x(...)`, and asserting the call site is async is the only way
+    to catch the signature drifting back without running a socket.
+    """
+    import inspect
+
+    from brotto_orchestrator.cdp.extension_relay import ExtensionCDPRelay
+
+    for name in ("deliver_action_result", "deliver_screenshot_result",
+                 "deliver_attributes_result"):
+        fn = getattr(ExtensionCDPRelay, name)
+        assert inspect.iscoroutinefunction(fn), f"{name} is awaited in main.py"
+
+    # And the main-world source really does await all three.
+    main_py = pathlib.Path(extension_relay.__file__).parents[1] / "main.py"
+    src = main_py.read_text()
+    for name in ("deliver_action_result", "deliver_screenshot_result",
+                 "deliver_attributes_result"):
+        assert f"await relay.{name}(" in src, name

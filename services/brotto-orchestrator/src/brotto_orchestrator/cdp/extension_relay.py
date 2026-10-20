@@ -141,7 +141,7 @@ class ExtensionCDPRelay:
 
     # ---------- Actions ----------
 
-    def deliver_action_result(self, message: dict) -> None:
+    async def deliver_action_result(self, message: dict) -> None:
         """The extension's answer to the action it was last handed.
 
         `brotto-extension` verifies at the instant of the press that the

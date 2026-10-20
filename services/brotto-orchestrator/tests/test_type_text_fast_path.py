@@ -202,7 +202,7 @@ async def test_a_refused_dispatch_reports_the_extension_own_words():
         if frame.get("type") == "action":
             relay._obs_queue.put_nowait(
                 {"url": "https://docs.google.com/", "axTargets": []})
-            relay.deliver_action_result(
+            await relay.deliver_action_result(
                 {"ok": False, "reason": "clear-select-noop"})
         await real_send(frame)
     real_send = relay._ws_send
