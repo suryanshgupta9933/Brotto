@@ -1111,10 +1111,14 @@ the predicate the gate runs on.
 **The href is used as-is and never re-resolved, because `urljoin` is not
 WHATWG.** Chrome fills that property with the *resolved* URL, so an absolute
 href is already what the browser would navigate to and resolving it again can
-only introduce disagreement. The case that decided it: for `\evil.com/x` a
-browser resolves to `//evil.com/x` and goes cross-origin, while `urljoin` keeps
-it on this page — so a relative href is exactly the input where a Python
-resolver invents a *same-domain* verdict the browser would contradict.
+only introduce disagreement. The case that decided it: a **doubled**
+backslash, `\\evil.com/x`, which a browser reads as slashes and resolves to
+`//evil.com/x` — cross-origin — while `urljoin` leaves it on this page. So a
+relative href is exactly the input where a Python resolver invents a
+*same-domain* verdict the browser would contradict. (The single-backslash form
+is *not* the divergent case: `\evil.com/x` resolves to a same-origin path in
+both. Worth saying, because the shape that motivates the rule is easy to get
+wrong by one character.)
 Therefore a relative href and a protocol-relative one are `None`, not resolved.
 So are `javascript:`, `data:` and `file:` (no eTLD+1 to read) and any netloc
 carrying `@`, which a browser reads as the *host* while a glance reads it as the

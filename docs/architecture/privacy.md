@@ -326,12 +326,21 @@ approval with no domain and no page content in it. **A reader of the audit
 document sees that a domain was approved; the caveat about what could not be
 checked for it exists only on the card the user actually saw.**
 
-**A pre-flight `click_cross_domain` event is a grant, and a resume reads it.**
-The cross-domain gate records `policy_events` with
-`user_decision: "approved"` *before* the click it authorizes, so a session
-resumed from the audit restores that grant the same way a `first_navigation` or
-`first_time_seen` approval does — including for a click that never ran. That is
-correct: the consent to the site is the fact being stored, not the navigation.
+**A pre-flight `click_cross_domain` event is a grant, and today it is a grant
+only to the run that asked for it.** The gate records `policy_events` with
+`user_decision: "approved"` *before* the click it authorizes — the consent to
+the site is the fact being stored, not the navigation — but neither of the two
+paths that outlive a run reads it back. `_resume_state` restores
+`visited_domains` from `first_navigation` and `first_time_seen` kinds only, and
+the grant file is written by `_persist_domain_grant`, which today has one caller:
+the first-time-seen approval. So a resumed session, and a new session on a new
+process, re-asks about a site the user already said yes to in this one.
+
+**Not built, and recorded here so the asymmetry is not mistaken for a policy.**
+Either fix is small — add `click_cross_domain` to the kinds `_resume_state`
+restores, and call `_persist_domain_grant` where the pre-flight approval lands —
+and neither is a change to what the *card* shows. Until one ships, this doc is
+the only place the difference is written down.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
