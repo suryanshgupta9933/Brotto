@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brotto-orchestrator"
-version = "0.2.7"
+version = "0.2.8"
 description = "An AI agent that works inside your own logged-in Chrome. Reads the accessibility tree instead of screenshots. Bring your own model key."
 readme = "README.md"
 requires-python = ">=3.12"
