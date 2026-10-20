@@ -2218,6 +2218,85 @@ def _type_audit_reason(x, y, label, chars: int) -> str:
     )
 
 
+# How many steps after an ambiguous write the shutter stays closed. Two, and
+# it is counted in STEPS rather than in pixel egresses, which is the only
+# unit a `break`, a terminal action or three veto checks in one step cannot
+# consume unevenly. See `_PixelVeto`.
+_AMBIGUOUS_PIXEL_WINDOW = 2
+
+# The stand-in handed to the relays while an ambiguous write's window is open.
+# The relays read `run_secrets` for truthiness only and never log it, so this
+# carries a fact, not a value: no typed text is anywhere in it.
+_AMBIGUOUS_MARKER = "[redacted-value]"
+
+
+class _PixelVeto:
+    """The two claims that stop pixels leaving, and how long each one holds.
+
+    `latched` is **positive evidence** — a field that positively identifies as
+    a secret (`is_secret_field`). A credential can be rendered into this page
+    or the next at any point in the run, so this is run-wide and never
+    releases.
+
+    `armed_at` is the step of the newest **ambiguous write**: a value we
+    refused to write but could not classify. A value cannot have been
+    rendered before it was typed, so the only exposure is the observation
+    taken after the keystroke — the page paints it into the DOM, a password
+    manager or a live-validated form echoes it back, and the shutter is shut
+    for that. After two steps have had a full observation each — the stability
+    gate, the AX walk, the repaint — the claim is spent.
+
+    It is read, never consumed. Nothing decrements it and nothing resets it,
+    which is the whole reason it is a step comparison and not a counter: an
+    early `break`, a terminal action, `ask_human`, a cancellation or three
+    veto checks inside one step cannot shorten the window, because there is no
+    countdown for them to eat. Only `latched`, which is a list on the run,
+    outlives every loop exit.
+
+    `open` is deliberately inclusive of the armed step itself. The keystroke
+    has just happened and nothing has settled; that is the least safe moment
+    in the run, not the most, and closing it costs nothing — the pixels it
+    suppresses are pixels of a page mid-typing.
+
+    ponytail: a step-keyed window, not a per-pixel countdown, so the claim
+    cannot be narrowed by the number of veto sites a step happens to call.
+    Upgrade path: if the extension ever reports a paint timestamp, arm on
+    that instead of on the step.
+    """
+
+    __slots__ = ("latched", "armed_at")
+
+    def __init__(self) -> None:
+        self.latched: list[str] = []
+        # None, not -1: step 0 is a real step and `step - (-1) <= window`
+        # would open the shutter on a run that never armed it.
+        self.armed_at: int | None = None
+
+    def arm(self, step: int) -> None:
+        """An ambiguous write landed on `step`. Never shortens an open
+        window — `max`, so a second ambiguous write one step later re-opens
+        rather than shortens the shutter the first one opened."""
+        self.armed_at = step if self.armed_at is None else max(self.armed_at, step)
+
+    def open(self, step: int) -> bool:
+        if self.latched:
+            return True
+        if self.armed_at is None:
+            return False
+        return 0 <= step - self.armed_at <= _AMBIGUOUS_PIXEL_WINDOW
+
+
+def _pixel_latch(veto: _PixelVeto, step: int) -> list[str]:
+    """What the delta and the screenshot vetoes read, for `step`.
+
+    A list because that is what every relay and both in-harness guards
+    already take and already test for truthiness — this is the single place
+    the window is turned into one, so the screenshot and the delta cannot
+    disagree about whether pixels may leave.
+    """
+    return veto.latched or ([_AMBIGUOUS_MARKER] if veto.open(step) else [])
+
+
 async def _capture_page(deps, *, redactions=None, run_secrets=None):
     """The one guarded, budgeted screenshot in the harness. `(image, why)`.
 
@@ -4493,11 +4572,12 @@ class AgentHarness:
         run_secrets: list[str] = []
         # The subset that may veto pixels. `run_secrets` above is the scrub
         # list (a later thought must never quote a value we redacted);
-        # `latched_secrets` is the positive-evidence list the screenshot and
-        # page-delta vetoes read. They differ only where redaction fired on
-        # absence of evidence — an unclassifiable field — and conflating them
-        # vetoed the delta for every remaining step of a canvas run.
-        latched_secrets: list[str] = []
+        # `pixel_veto` is the positive-evidence list the screenshot and
+        # page-delta vetoes read, plus the bounded window an ambiguous write
+        # opens. They differ only where redaction fired on absence of
+        # evidence — an unclassifiable field — and conflating them vetoed
+        # the delta for every remaining step of a canvas run.
+        pixel_veto = _PixelVeto()
 
         for step in range(first_step, self.MAX_STEPS):
             deps.step_number = step
@@ -4634,7 +4714,7 @@ class AgentHarness:
             try:
                 page_delta = await deps.cdp.get_page_delta(
                     deps.policy, redactions=redactions,
-                    run_secrets=latched_secrets)
+                    run_secrets=_pixel_latch(pixel_veto, step))
             except TabUnreachable as e:
                 log.info("[%s] step %d  page delta unavailable (%s); change "
                          "detection is unknown for this step",
@@ -4669,7 +4749,8 @@ class AgentHarness:
             # resolved model (`None` = unresolved, which is not a denial). A
             # blocked run branches on that and stops before the turn is built.
             vision = await _vision_fallback(
-                deps, targets, page_text, redactions, latched_secrets)
+                deps, targets, page_text, redactions,
+                _pixel_latch(pixel_veto, step))
             if vision.image:
                 log.info("[%s] step %d  screenshot attached (%d B base64)",
                          deps.user_id, step, len(vision.image))
@@ -5228,6 +5309,7 @@ class AgentHarness:
             redact_flags: list[bool] = []
             typed_secrets: list[str] = []
             latched: list[str] = []
+            ambiguous_write = False
             for call in decision.actions:
                 field = _typed_field(call)
                 if field is None:
@@ -5259,11 +5341,21 @@ class AgentHarness:
                     typed_secrets.append(value)
                 if latch and value:
                     latched.append(value)
+                elif redact and value:
+                    ambiguous_write = True
             # Into the run-wide lists the moment they are known, so the sinks
             # later in this same step see them too and not only the ones after
             # the next step begins.
             run_secrets.extend(v for v in typed_secrets if v)
-            latched_secrets.extend(v for v in latched if v)
+            pixel_veto.latched.extend(v for v in latched if v)
+            # An ambiguous write: redacted, because we could not tell the field
+            # from a password box, but never positively identified as one.
+            # The shutter is closed for this step and the next
+            # `_AMBIGUOUS_PIXEL_WINDOW` — see `_PixelVeto` — and the value is
+            # on `run_secrets` either way, so nothing here changes whether it
+            # is scrubbed, only when pixels flow.
+            if ambiguous_write:
+                pixel_veto.arm(step)
             # The focus baseline was taken at the top of this step, before
             # `_plan_step` — see the `_capture_step_focus` call there.
             # Actions dispatched to the page so far this step. Read-only ones
@@ -5285,7 +5377,8 @@ class AgentHarness:
                 ) if call.action == "press_key" else ""
                 outcome = refusal or await _execute_action(
                     call, deps, audit=audit, turn=a_turn, redactions=redactions,
-                    run_secrets=latched_secrets, targets=targets)
+                    run_secrets=_pixel_latch(pixel_veto, step),
+                    targets=targets)
                 # From the OUTCOME, not the verb: a click the hit-test refused
                 # (or that missed, or was off-screen) moved nothing, and
                 # arming off on it would let the press_key behind it land on

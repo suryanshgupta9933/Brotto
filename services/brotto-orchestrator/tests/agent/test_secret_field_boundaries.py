@@ -33,7 +33,8 @@ from brotto_orchestrator.agent.context import (
     ActionCall, AgentDecision, AgentDeps, TaskResult,
 )
 from brotto_orchestrator.agent.harness import (
-    AgentHarness, _redact_if_secret, _redact_press_key,
+    _AMBIGUOUS_PIXEL_WINDOW, AgentHarness, _redact_if_secret,
+    _redact_press_key,
 )
 from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
 import brotto_orchestrator.agent.harness as harness_mod
@@ -165,6 +166,11 @@ async def test_a_canvas_step_keeps_the_pixel_delta(monkeypatch):
                 actions=[ActionCall(action="type_text",
                                     action_args={"ref": "9:1", "text": "Q3"})],
             ), 400_000, None
+        if len(calls) <= 2 + _AMBIGUOUS_PIXEL_WINDOW:
+            return AgentDecision(
+                reasoning="look", thought="Looking.",
+                actions=[],
+            ), 400_000, None
         return AgentDecision(
             reasoning="done", thought="done",
             actions=[ActionCall(action="task_complete",
@@ -184,11 +190,21 @@ async def test_a_canvas_step_keeps_the_pixel_delta(monkeypatch):
     assert "Q3" not in written
     # The harness hands `run_secrets` to the relay, which is where the veto
     # lives, so this is the observable that says the run still has a channel.
-    assert deps.cdp.get_page_delta.await_count >= 1
-    for call_ in deps.cdp.get_page_delta.await_args_list:
-        assert not call_.kwargs["run_secrets"], (
-            "a ref that resolved to nothing latched the run-wide veto, which "
-            "kills the pixel delta — the only channel a canvas page has")
+    assert deps.cdp.get_page_delta.await_count > _AMBIGUOUS_PIXEL_WINDOW
+    latches = [c.kwargs["run_secrets"]
+               for c in deps.cdp.get_page_delta.await_args_list]
+    assert not latches[0], (
+        "step 0 observed before the keystroke; nothing was typed yet")
+    assert latches[1:], (
+        "a ref that resolved to nothing latched the run-wide veto, which "
+        "kills the pixel delta — the only channel a canvas page has")
+    # ...but an ambiguous write is not nothing. A value cannot have been
+    # rendered before it was typed, so the shutter is shut for the step the
+    # keystroke happened on and the `_AMBIGUOUS_PIXEL_WINDOW` steps after it,
+    # and then it opens. See `_PixelVeto`.
+    assert all(latches[1:1 + _AMBIGUOUS_PIXEL_WINDOW])
+    assert not any(latches[1 + _AMBIGUOUS_PIXEL_WINDOW:]), (
+        "the window never closed — a canvas run loses its only channel")
 
 
 # --- (b) boundaries in the secret-name matcher ----------------------------
