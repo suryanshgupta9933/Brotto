@@ -7,7 +7,7 @@
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
 import { clearDelta } from "./observation/delta";
-import { boundedPoint, clearCursor, drawCursor, focusState, verifyTarget } from "./observation/pointer";
+import { bindFocus, boundedPoint, clearCursor, drawCursor, focusState, isolatedWorld, verifyTarget } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -751,13 +751,46 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
     // **Sheets is the case this exists for.** A cell is a `<canvas>` with a
     // hidden input: no value to assign, no DOM text node to write. It ends in
     // `Input.insertText` on whatever the press focused, exactly as before.
-    if (typeof action.x !== "number" || typeof action.y !== "number") {
-      console.warn("brotto: type_at refused — no coordinate pair on the frame");
-      refusal = { ok: false, reason: "point-not-numeric" };
+    //
+    // **The coordinate is bounded, exactly as `click_xy` bounds it.** A raw
+    // x/y off the wire has been checked by nobody, and this branch is the one
+    // that then *destroys* whatever the press focused — `clear` is select-all
+    // plus a type. `boundedPoint` re-reads the live viewport and refuses
+    // anything outside it; the `viewport` on the same frame is the sender's
+    // idea of it, from the same untrusted message, and is not the bound. The
+    // *bounded* pair is what goes into `pressAt` and into `bindFocus`, so the
+    // hit test is asked about the point that is actually dispatched rather than
+    // the one that was sent.
+    //
+    // This subsumes the old `typeof` check: `boundedPoint` returns null for a
+    // non-number too, and one refusal covers both.
+    const point = await boundedPoint(tabId, action.x, action.y);
+    if (!point) {
+      console.warn(`brotto: type_at refused — (${String(action.x)}, ${String(action.y)}) is not a point in the live viewport`);
+      refusal = { ok: false, reason: "point-out-of-viewport" };
       return refusal;
     }
-    const pressed = await pressAt(tabId, action, action.x, action.y);
+    const { x, y } = point;
+    const pressed = await pressAt(tabId, action, x, y);
     if (pressed) { refusal = pressed; return refusal; }
+    // **Is what holds focus the thing this press was aimed at?** Without this,
+    // everything below reads `document.activeElement` and acts on it — and a
+    // press that missed, landed on a non-focusable, or was moved by page script
+    // leaves the user's *previous* field focused, so `clear` empties that one
+    // and the text is typed into it. `bindFocus` names the focused node from the
+    // engine (`DOM.getFocusNode`), which no page script can answer, and compares
+    // it against the node the press was verified against. The one shape identity
+    // cannot serve — a canvas cell whose press focuses a hidden editor — is
+    // exempted narrowly and *reported*, never silently passed.
+    const bound = await bindFocus(tabId, action.backendNodeId, x, y);
+    if (!bound.ok) {
+      console.warn(`brotto: type_at refused — ${bound.reason}; nothing here holds the focus this press aimed at`);
+      refusal = { ok: false, reason: bound.reason };
+      return refusal;
+    }
+    if (bound.reason === "canvas-editor-exempt") {
+      console.warn("brotto: type_at — focus is an editor inside the pressed canvas, not the pressed node itself (logged, not silent)");
+    }
     // The guard `focus_id` gives the two-frame version lived between the
     // frames, and that window closes inside here. This is where it moves:
     // nothing may hold focus, or the text goes somewhere the press did not
@@ -767,9 +800,11 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
     // chord with the caller supplying the modifier bitmask, which put an OS
     // question on the wire — Ctrl+A is "move to line start" on macOS, and the
     // server has no OS signal to answer it. `focusState` reads
-    // `document.activeElement`, which after this press *is* the clicked target,
-    // and calls `select()` on it. One evaluate, both questions, and no branch
-    // anywhere that knows what OS it is on.
+    // `document.activeElement` in an **isolated world** — so a page that
+    // overrode `Element.prototype.select` cannot change what `select()` does —
+    // and calls `select()` on it, after `bindFocus` has proved that element is
+    // the pressed target. One evaluate, both questions, and no branch anywhere
+    // that knows what OS it is on.
     //
     // A failed clear refuses rather than types: `clear: true` means *replace*,
     // and appending to a field the model asked to empty is the same wrong
@@ -1716,9 +1751,22 @@ async function startRelay(
       case "evaluate": {
         try {
           if (tid === null) throw new Error("no tab attached");
+          // `isolatedWorld: true` is the one addition to this frame, and it is
+          // opt-in: absent or false is exactly the call that shipped — main
+          // world, no `contextId` key in `params` at all. Set, the *same*
+          // expression is evaluated in the cached `brotto-idle` world, whose
+          // prototypes are the extension's, so a page cannot shadow the getters
+          // it reads. The isolated world shares the DOM, so `document` and
+          // every element are the same objects; only the JS globals differ, and
+          // `returnByValue` returns the same primitive either way.
+          const contextId = msg.isolatedWorld === true ? await isolatedWorld(tid) : undefined;
           const r = await dbg.sendCommand(tid, {
             method: "Runtime.evaluate",
-            params: { expression: msg.expression ?? "''", returnByValue: true },
+            params: {
+              expression: msg.expression ?? "''",
+              returnByValue: true,
+              ...(contextId === undefined ? {} : { contextId }),
+            },
           }) as { result?: { value?: unknown } };
           ws!.send(JSON.stringify({ type: "evaluate_result", value: String(r.result?.value ?? "") }));
         } catch (e) {

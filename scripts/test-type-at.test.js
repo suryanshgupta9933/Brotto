@@ -9,13 +9,18 @@
 //
 //   1. `verifyTarget` — the press still resolves `backendNodeId` and refuses when
 //      the node is gone. Unchanged from `click`, but it now runs on a type.
-//   2. `focusState` — the two-frame version had the server's `focus_id` reading
+//   2. `bindFocus` — *who* holds focus. `focusState` alone proved only that
+//      something did, so `select()` ran against whatever `activeElement` was
+//      and a missed press emptied some other field. `bindFocus` names the
+//      focused node from the engine (`DOM.getFocusNode`, which no page script
+//      can answer) and binds it to the node the press was verified against,
+//      with a narrow exemption for the canvas shape identity cannot serve.
+//   3. `focusState` — the two-frame version had the server's `focus_id` reading
 //      the focused element between the click and the keystroke. Fusing closes
 //      that window, so the extension reads focus itself and refuses to type into
-//      a document where nothing holds it. Sheets is why this is deliberately
-//      not an identity check: a cell's focus lands on a hidden input that is not
-//      a descendant of the cell node.
-//   3. `clear` is a DOM operation on the focused element, and the focus probe
+//      a document where nothing holds it. It evaluates in an **isolated world**,
+//      so a page cannot override `document.activeElement` or `select()`.
+//   4. `clear` is a DOM operation on the focused element, and the focus probe
 //      and the clear are one evaluate. It used to be a modifier bitmask on the
 //      frame — the shape of the original Gmail bug, where Control+A arrived as
 //      a bare "a" and typed a letter. The chord is gone because "which chord
@@ -110,6 +115,7 @@ const KEY_CODES = bgSrc.slice(
 );
 
 const FOCUS_PROBE = extractTemplate(ptrSrc, "FOCUS_PROBE");
+const IDENTITY_PROBE = extractTemplate(ptrSrc, "IDENTITY_PROBE");
 
 // ── the harness ─────────────────────────────────────────────────────────────
 
@@ -128,7 +134,9 @@ function run(action, opts = {}) {
     dbg,
     tabId: 1,
     action,
+    boundedPoint: opts.point ?? (async (_t, x, y) => ({ x: Math.round(x), y: Math.round(y) })),
     verifyTarget: opts.verify ?? (async () => ({ ok: true, reason: "" })),
+    bindFocus: opts.bind ?? (async () => ({ ok: true, reason: "same-node" })),
     clearCursor: async () => {},
     drawCursor: async () => ({ drawn: true, reason: "" }),
     focusState: opts.focus ?? (async () => ({ ok: true, reason: "" })),
@@ -188,6 +196,50 @@ test("the fused action is gated exactly as `click` is, on the same helper", () =
   }
   assert.ok(extractFn(bgSrc, "pressAt").includes("verifyTarget(tabId, action.backendNodeId, x, y)"),
     "the hit test stays inside the shared press, so both branches are gated");
+});
+
+// ── gate 0: the coordinate is a point in the live viewport ───────────────────
+
+test("a coordinate outside the live viewport refuses before anything is dispatched", async () => {
+  // Finding 1. `type_at` used to press and then run a *destructive* clear on
+  // whatever the press focused, with the wire's x/y checked by nobody.
+  const { result, sent } = await run(AT, { point: async () => null });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "point-out-of-viewport", "the reason `click_xy` already uses");
+  assert.equal(sent.length, 0, "no press, no clear, no text");
+});
+
+test("the bounded point is what is pressed, verified and bound", async () => {
+  // Not the sent point: the sent point is what the sender believed about a
+  // window that may have been resized since. The hit test in `pressAt` asks
+  // `elementFromPoint` about the point that is *dispatched*, so the two must be
+  // the same number or the check describes a different click.
+  const seen = { verify: null, bound: null };
+  const { sent } = await run({ ...AT, x: 100.4, y: 200.6 }, {
+    point: async () => ({ x: 100, y: 201 }),
+    verify: async (_t, _id, x, y) => { seen.verify = [x, y]; return { ok: true, reason: "" }; },
+    bind: async (_t, _id, x, y) => { seen.bound = [x, y]; return { ok: true, reason: "same-node" }; },
+  });
+  assert.deepEqual(seen.verify, [100, 201], "the hit test is asked about the dispatched point");
+  assert.deepEqual(seen.bound, [100, 201], "and the focus is bound to it too");
+  const [press, release] = sent;
+  assert.equal(press.params.x, 100);
+  assert.equal(release.params.y, 201);
+});
+
+test("the bounding runs before the press, and both verbs share one helper", () => {
+  const typeAt = extractBranch('t === "type_at"');
+  const click = extractBranch('t === "click" || t === "click_xy"');
+  assert.ok(typeAt.indexOf("boundedPoint(") > 0 && typeAt.indexOf("boundedPoint(") < typeAt.indexOf("pressAt("),
+    "an unbounded press is a destructive press");
+  for (const [name, src] of [["type_at", typeAt], ["click", click]]) {
+    assert.ok(src.includes("boundedPoint(tabId, action.x, action.y)"),
+      `${name} must bound the wire coordinate the same way`);
+    assert.ok(src.includes('reason: "point-out-of-viewport"'),
+      `${name} must refuse in the same words`);
+  }
+  assert.ok(typeAt.includes("pressAt(tabId, action, x, y)"),
+    "the bounded pair is what is dispatched");
 });
 
 // ── gate 2: something holds focus ───────────────────────────────────────────
@@ -271,106 +323,225 @@ test("the branch never dispatches a key, so it can never need to know the OS", (
 });
 
 // ── the shipped focus probe ─────────────────────────────────────────────────
+//
+// `FOCUS_PROBE` decides "is this a text field" with `instanceof` against the
+// extension's own prototypes. That is only sound because the probe runs in an
+// isolated world, and it is only *testable* if the fixture is built in the same
+// realm as the classes it is tested against — an `instanceof` across two vm
+// contexts is false for every fixture, so a `runInNewContext` harness with
+// plain-object fixtures would report the predicate as always refusing and would
+// pass for entirely the wrong reason. The fixture is therefore built by
+// evaluating source *inside* the probe's own context.
 
-function runProbe(active, doClear = false) {
-  const doc = {
-    activeElement: active,
-    body: { nodeType: 1 },
-    documentElement: { nodeType: 1 },
-    getSelection: () => selection,
-    createRange: () => ({
-      selectNodeContents: (el) => { selection.__contents = el; },
-    }),
+const REALM = `
+  class HTMLInputElement {
+    constructor(v) {
+      this.nodeType = 1; this.tagName = "INPUT";
+      this.value = v === undefined ? "" : v;
+      this.selectionStart = 0; this.selectionEnd = 0; this.selects = 0;
+    }
+    // The native behaviour select() is specified to have: it covers the value.
+    select() { this.selects++; this.selectionStart = 0; this.selectionEnd = this.value.length; }
+  }
+  class HTMLTextAreaElement extends HTMLInputElement {
+    constructor(v) { super(v); this.tagName = "TEXTAREA"; }
+  }
+  class HTMLElement {
+    constructor() { this.nodeType = 1; this.tagName = "DIV"; }
+  }
+  class HTMLIFrameElement extends HTMLElement {
+    constructor() { super(); this.tagName = "IFRAME"; }
+  }
+  // input[type=email|number|date|time]: select() is specified to do NOTHING.
+  class NoOpSelectInput extends HTMLInputElement {
+    select() { this.selects++; this.selectionStart = this.value.length; this.selectionEnd = this.value.length; }
+  }
+  // A page that patches select on the element the probe will call it on.
+  class PatchedSelectInput extends HTMLInputElement {
+    select() { this.paged++; }
+    constructor(v) { super(v); this.paged = 0; }
+  }
+  class ThrowingSelectInput extends HTMLInputElement {
+    select() { throw new Error("detached"); }
+  }
+  class ContentEditable extends HTMLElement {
+    constructor(text) { super(); this.isContentEditable = true; this.textContent = text === undefined ? "" : text; }
+  }
+  let __rangeText = "";
+  const __sel = {
+    rangeCount: 0, ranges: [],
+    removeAllRanges() { this.rangeCount = 0; this.ranges.length = 0; },
+    addRange(r) { this.ranges.push(r); this.rangeCount = this.ranges.length; },
+    getRangeAt() { return { toString() { return __rangeText; } }; },
   };
-  const selection = {
-    ranges: [],
-    removeAllRanges() { this.ranges.length = 0; },
-    addRange(r) { this.ranges.push(r); },
+  const document = {
+    body: { nodeType: 1 }, documentElement: { nodeType: 1 }, activeElement: null,
+    createRange() { return { selectNodeContents(el) { __rangeText = el.textContent || ""; } }; },
+    getSelection() { return __sel; },
   };
-  const window = {};
-  return { result: vm.runInNewContext(`(${FOCUS_PROBE})`, { document: doc, window }).call(null, doClear), selection };
+`;
+
+/**
+ * Run the shipped probe over an element built from `src` in the probe's own
+ * realm. `patch` is optional realm-level source applied first (to break
+ * something the page could break). Returns the verdict *and* the element, so a
+ * test can assert what the probe did to it.
+ */
+function runProbe(src, doClear = false, patch = "") {
+  const ctx = vm.createContext({});
+  vm.runInContext(REALM, ctx);
+  if (patch) vm.runInContext(patch, ctx);
+  const active = vm.runInContext(`__active = (${src})`, ctx);
+  // `document` is a lexical global of the realm, not a property of the context
+  // object — it is assigned from inside, for the same reason the fixture is.
+  vm.runInContext("document.activeElement = __active", ctx);
+  const probe = vm.runInContext(`(${FOCUS_PROBE})`, ctx);
+  return { result: probe.call(null, doClear), active, ctx };
 }
 
-/** A focusable element with the DOM surface `select()` needs. */
-const textField = () => ({ nodeType: 1, selected: 0, value: "", select() { this.selected++; } });
-
-/** `input[type=email]` and friends: `select()` is specified to do nothing. */
-const noOpSelectField = () => ({
-  nodeType: 1, value: "a@b.com", selectionStart: 5, selectionEnd: 5, select() {},
-});
-
-test("an element holding focus passes — including one the click did not reach into", async () => {
-  // Sheets: the cell node is a <canvas>, the focus lands on a hidden input that
-  // is not its descendant. An identity or containment check would refuse here,
-  // which is why the probe asks only whether *something* holds focus.
-  assert.equal(runProbe({ nodeType: 1 }).result.ok, true);
+test("a text field holding focus passes on both paths", () => {
+  for (const doClear of [false, true]) {
+    assert.equal(runProbe('new HTMLInputElement("hello")', doClear).result.ok, true, `clear=${doClear}`);
+    assert.equal(runProbe('new HTMLTextAreaElement("hello")', doClear).result.ok, true, `clear=${doClear}`);
+    assert.equal(runProbe('new ContentEditable("hello")', doClear).result.ok, true, `clear=${doClear}`);
+  }
 });
 
 test("body and root are 'nobody is focused', and null is too", () => {
-  assert.equal(runProbe(null).result.reason, "no-active-element");
-  const doc = { activeElement: { nodeType: 1 }, body: { nodeType: 1 }, documentElement: { nodeType: 1 } };
-  const window = {};
-  for (const [active, why] of [["body", "focus-on-body"], ["documentElement", "focus-on-root"]]) {
-    doc.activeElement = doc[active];
-    assert.equal(vm.runInNewContext(`(${FOCUS_PROBE})`, { document: doc, window }).call(null, true).reason, why);
+  assert.equal(runProbe("null").result.reason, "no-active-element");
+  for (const [which, why] of [["body", "focus-on-body"], ["documentElement", "focus-on-root"]]) {
+    const ctx = vm.createContext({});
+    vm.runInContext(REALM, ctx);
+    vm.runInContext(`document.activeElement = document.${which}`, ctx);
+    assert.equal(vm.runInContext(`(${FOCUS_PROBE})`, ctx).call(null, true).reason, why);
   }
 });
 
 test("a clear selects the focused element's own contents, wherever it hangs in the tree", () => {
-  const el = textField();
-  const { result } = runProbe(el, true);
+  // Sheets: the cell node is a <canvas>, the focus is a hidden input that is not
+  // its descendant, so there is nowhere to walk to — `select()` works the same
+  // wherever the element hangs, because it selects *that element's* contents.
+  const { result, active } = runProbe('new HTMLInputElement("hello")', true);
   assert.equal(result.ok, true);
-  assert.equal(el.selected, 1, "select() on the hidden input is the clear");
+  assert.equal(active.selects, 1, "select() on the hidden input is the clear");
 });
 
 test("a clear with no chord means contenteditable is handled, not skipped", () => {
   // Google Docs: no `select()`, the text is in a contenteditable. A range over
   // the node's contents is the same operation by another route.
-  const el = { nodeType: 1, isContentEditable: true };
-  const { result, selection } = runProbe(el, true);
+  const { result, ctx } = runProbe('new ContentEditable("hello")', true);
   assert.equal(result.ok, true);
-  assert.equal(selection.ranges.length, 1);
-  assert.equal(selection.__contents, el);
+  assert.equal(vm.runInContext("document.getSelection().rangeCount", ctx), 1);
 });
 
 test("no clear asked for, nothing is selected", () => {
-  const el = textField();
-  assert.equal(runProbe(el, false).result.ok, true);
-  assert.equal(el.selected, 0);
+  const { result, active } = runProbe('new HTMLInputElement("hello")', false);
+  assert.equal(result.ok, true);
+  assert.equal(active.selects, 0);
 });
+
+// ── the clear is confirmed, not inferred ────────────────────────────────────
 
 test("a `select()` that silently did nothing refuses — email, number, date", () => {
   // HTMLInputElement.select() is specified to do nothing on a type it does not
   // apply to, and to do nothing rather than throw. Reporting success there is
   // the append bug with the refusal removed.
-  assert.equal(runProbe(noOpSelectField(), true).result.reason, "clear-select-noop");
+  assert.equal(runProbe('new NoOpSelectInput("a@b.com")', true).result.reason, "clear-select-noop");
+});
+
+test("a partial selection refuses, where a collapsed one was the whole test before", () => {
+  // Finding 2. `selectionStart === selectionEnd` only catches the *no-op*. A
+  // select() that covers some of the value clears some of it and leaves the
+  // rest — the field the model asked to empty is now half-full and the text
+  // appends after what is left.
+  const src = `(function () {
+    var el = new HTMLInputElement("hello");
+    el.select = function () { this.selects++; this.selectionStart = 0; this.selectionEnd = 2; };
+    return el;
+  })()`;
+  assert.equal(runProbe(src, true).result.reason, "clear-select-noop");
+});
+
+test("a `selectionStart` the type cannot answer refuses, rather than being read as 0", () => {
+  // The getter is null on email/number/date/time. A `typeof === "number"`
+  // guard is what makes null a refusal instead of a NaN comparison that
+  // happens to pass.
+  const src = `(function () {
+    var el = new HTMLInputElement("hello");
+    el.select = function () {};
+    el.selectionStart = null; el.selectionEnd = null;
+    return el;
+  })()`;
+  assert.equal(runProbe(src, true).result.reason, "clear-select-noop");
 });
 
 test("a real select over a value passes, because the selection actually moved", () => {
-  const el = textField();
-  el.value = "hello";
-  el.selectionStart = 0;
-  el.selectionEnd = 0;
-  el.select = function () { this.selected++; this.selectionStart = 0; this.selectionEnd = 5; };
-  assert.equal(runProbe(el, true).result.ok, true);
+  assert.equal(runProbe('new HTMLInputElement("hello")', true).result.ok, true);
 });
 
 test("an empty field of a no-op type is not a failed clear — there is nothing to clear", () => {
-  const el = noOpSelectField();
-  el.value = "";
-  el.selectionStart = 0;
-  el.selectionEnd = 0;
-  assert.equal(runProbe(el, true).result.ok, true);
+  // Also the Sheets cell case: an empty cell's hidden editor holds no value, so
+  // the strict check must not read a selection that the type cannot report.
+  assert.equal(runProbe('new NoOpSelectInput("")', true).result.ok, true);
 });
 
-test("an element with neither `select()` nor contenteditable refuses, and types nothing", () => {  // A <canvas> cell whose press focused something untypable. Refusing is the
-  // point: insertText would append to whatever text was already there.
-  assert.equal(runProbe({ nodeType: 1, tagName: "DIV" }, true).result.reason, "clear-no-text-field");
+test("an empty contenteditable is not a failed clear", () => {
+  assert.equal(runProbe('new ContentEditable("")', true).result.ok, true);
+});
+
+test("a contenteditable whose range never materialised refuses", () => {
+  const silent = `document.getSelection = function () {
+    return { rangeCount: 0, removeAllRanges() {}, addRange() {} };
+  };`;
+  assert.equal(runProbe('new ContentEditable("hello")', true, silent).result.reason, "clear-select-noop");
+});
+
+test("an element with neither `select()` nor contenteditable refuses, and types nothing", () => {
+  // A <div> that took the click. Refusing is the point: insertText would append
+  // to whatever text was already there, or go nowhere and still report success.
+  assert.equal(runProbe("new HTMLElement()", true).result.reason, "clear-no-text-field");
+});
+
+test("the duck type is gone — a non-field with a `select()` method is still refused", () => {
+  // `typeof a.select === "function"` was the old evidence, and any element can
+  // carry a `select`. A div with one is not a text field.
+  const src = `(function () {
+    var el = new HTMLElement();
+    el.value = "hello"; el.selects = 0;
+    el.select = function () { this.selects++; this.selectionStart = 0; this.selectionEnd = 5; };
+    return el;
+  })()`;
+  assert.equal(runProbe(src, true).result.reason, "clear-no-text-field");
+  assert.equal(runProbe(src, false).result.reason, "focus-no-text-field");
 });
 
 test("a `select()` that throws refuses rather than reporting a clear that did not happen", () => {
-  const el = { nodeType: 1, select() { throw new Error("detached"); } };
-  assert.equal(runProbe(el, true).result.reason, "clear-threw");
+  assert.equal(runProbe('new ThrowingSelectInput("hello")', true).result.reason, "clear-threw");
+});
+
+// ── the no-clear path must not report a typed-into-nowhere success ───────────
+
+test("a focused <iframe> refuses on both paths, rather than typing into the frame", () => {
+  // Finding 3. `Input.insertText` against a focused iframe lands in *that*
+  // document — which no observation in this run covered, and which the user is
+  // not looking at.
+  for (const doClear of [false, true]) {
+    assert.equal(runProbe("new HTMLIFrameElement()", doClear).result.reason, "focus-on-frame");
+  }
+});
+
+test("a focused element that cannot receive text refuses on the no-clear path", () => {
+  // The old answer was `{ok: true}` for *anything* focused, so a <div> that
+  // took the click reported a successful type into nothing.
+  assert.equal(runProbe("new HTMLElement()", false).result.reason, "focus-no-text-field");
+});
+
+test("the two paths share one predicate, so they cannot disagree about what a text field is", () => {
+  const field = 'new HTMLInputElement("hello")';
+  assert.equal(runProbe(field, false).result.ok, runProbe(field, true).result.ok);
+  const notField = "new HTMLElement()";
+  assert.equal(runProbe(notField, false).result.ok, runProbe(notField, true).result.ok);
+  assert.match(extractTemplate(ptrSrc, "FOCUS_PROBE"), /var field = a instanceof HTMLInputElement/);
 });
 
 test("the probe holds no platform branch and names no element", () => {
@@ -383,12 +554,66 @@ test("the probe holds no platform branch and names no element", () => {
   assert.doesNotMatch(FOCUS_PROBE, /backendNodeId|querySelector|elementFromPoint/);
 });
 
+
 // ── focusState, the CDP wrapper around it ───────────────────────────────────
 
-function loadFocusState(handler) {
-  const anyCommand = async (tabId, command) => handler(command);
+function loadFocusState(handler, log = []) {
+  const anyCommand = async (tabId, command) => {
+    log.push(command);
+    // The world has to exist before the probe can be evaluated in it; these are
+    // the plumbing calls, not answers.
+    if (command.method === "Page.getFrameTree") return { frameTree: { frame: { id: "F" } } };
+    if (command.method === "Page.createIsolatedWorld") return { executionContextId: 77 };
+    return handler(command);
+  };
   const shipped = extractFn(ptrSrc, "focusState").replace(/^export\s+/, "");
-  return new Function("anyCommand", "FOCUS_PROBE", `return ${shipped}`)(anyCommand, FOCUS_PROBE);
+  const world = extractFn(ptrSrc, "isolatedWorld").replace(/^export\s+/, "");
+  const frame = extractFn(ptrSrc, "topFrameId").replace(/^export\s+/, "");
+  const cache = "const worldIds = new Map();\n";
+  const src = `${cache}\nconst IDLE_WORLD = "brotto-idle";\n${frame}\n${world}\nreturn ${shipped}`;
+  return new Function("anyCommand", "FOCUS_PROBE", src)(anyCommand, FOCUS_PROBE);
+}
+
+/** The fake CDP session for `bindFocus`: named commands, a real-ish protocol
+ *  shape, so a wall that stops being called is a *missing answer*, not a
+ *  function that quietly passes. The world's plumbing has real answers too,
+ *  because `bindFocus` resolves its nodes into it. */
+const PLUMBING = {
+  "Page.getFrameTree": { frameTree: { frame: { id: "F" } } },
+  "Page.createIsolatedWorld": { executionContextId: 9 },
+};
+
+function engine(answers = {}) {
+  const calls = [];
+  const table = { ...PLUMBING, ...answers };
+  const anyCommand = async (_tabId, command) => {
+    calls.push(command);
+    if (!(command.method in table)) throw new Error(`unexpected CDP call: ${command.method}`);
+    const answer = table[command.method];
+    return typeof answer === "function" ? answer(command) : answer;
+  };
+  return { anyCommand, calls, methods: () => calls.map((c) => c.method) };
+}
+
+/** The shipped `bindFocus`, with the shipped `focusNode`/`isolatedWorld`/`box`
+ *  around it — a test that stubs them away would not be testing the walls. */
+function loadBindFocus(fx) {
+  const shipped = extractFn(ptrSrc, "bindFocus").replace(/^export\s+/, "");
+  const body = ["focusNode", "isolatedWorld", "topFrameId", "box"]
+    .map((n) => extractFn(ptrSrc, n).replace(/^export\s+/, ""))
+    .join("\n");
+  const prelude = 'const IDLE_WORLD = "brotto-idle";\nconst worldIds = new Map();\n' +
+    'const TEXT_INPUT_TAGS = new Set(["INPUT", "TEXTAREA"]);\n';
+  return new Function("anyCommand", "IDENTITY_PROBE", `${prelude}${body}\nreturn ${shipped}`)(
+    fx.anyCommand,
+    IDENTITY_PROBE,
+  );
+}
+
+/** Runs the identity probe with `this` = the pressed node. */
+function runIdentity(pressed, focus) {
+  const fn = vm.runInNewContext(`(${IDENTITY_PROBE})`, {});
+  return fn.call(pressed, focus);
 }
 
 test("the clear flag reaches the page as a literal, not a truthy frame value", async () => {
@@ -408,6 +633,42 @@ test("one evaluate answers both questions — the clear costs no extra round tri
   await focusState(1, true);
   assert.equal(calls, 1, "the focus read and the select share one evaluate");
 });
+
+test("the probe runs in an isolated world, never the page's own", async () => {
+  // Finding 2. `Runtime.evaluate` with no `contextId` runs in the page's main
+  // world, where the page owns both `document.activeElement` and
+  // `Element.prototype.select` — it can answer the question falsely *and* change
+  // what the answer does. The context id is what makes the probe unshadowable.
+  const seen = [];
+  const focusState = loadFocusState(async () => ({ result: { value: { ok: true, reason: "" } } }), seen);
+  await focusState(1, true);
+  const evaluate = seen.find((c) => c.method === "Runtime.evaluate");
+  assert.equal(evaluate.params.contextId, 77, "the probe is evaluated in the isolated world");
+  assert.ok(seen.some((c) => c.method === "Page.createIsolatedWorld"),
+    "the world must be created, not assumed");
+  const created = seen.find((c) => c.method === "Page.createIsolatedWorld");
+  assert.equal(created.params.worldName, "brotto-idle");
+  assert.equal(created.params.grantUniveralAccess, false,
+    "an isolated world must not be granted access to the page's objects");
+});
+
+test("the world is created once per tab and reused", async () => {
+  let worlds = 0;
+  const anyCommand = async (_t, command) => {
+    if (command.method === "Page.getFrameTree") return { frameTree: { frame: { id: "F" } } };
+    if (command.method === "Page.createIsolatedWorld") { worlds++; return { executionContextId: 5 }; }
+    return { result: { value: { ok: true, reason: "" } } };
+  };
+  const shipped = extractFn(ptrSrc, "focusState").replace(/^export\s+/, "");
+  // Fresh module state per load, so the cache is exercised from empty.
+  const focusState = new Function("anyCommand", "FOCUS_PROBE",
+    'const worldIds = new Map();\nconst IDLE_WORLD = "brotto-idle";\n' +
+    extractFn(ptrSrc, "topFrameId") + "\n" + extractFn(ptrSrc, "isolatedWorld").replace(/^export\s+/, "") + `\nreturn ${shipped}`)(anyCommand, FOCUS_PROBE);
+  await focusState(1, true);
+  await focusState(1, true);
+  assert.equal(worlds, 1, "one createIsolatedWorld per tab, not one per clear");
+});
+
 
 test("the probe's verdict survives the round trip", async () => {
   const focusState = loadFocusState(async () => ({ result: { value: { ok: true, reason: "" } } }));
@@ -434,4 +695,267 @@ test("the action is additive: an orchestrator that predates it is unaffected", (
   assert.ok(bgSrc.includes('} else if (t === "type_at") {'));
   assert.match(bgSrc, /const result = await executeAction\(tid, msg\.action\)/,
     "type_at is an action kind, not a new frame type");
+});
+// ── the identity wall ────────────────────────────────────────────────────────
+//
+// Finding 1: the probe proved only that *something* held focus, so `select()`
+// ran against whatever `activeElement` happened to be. These are the tests
+// that say who it must be.
+
+test("the branch binds focus between the press and the text, and refuses when it cannot", async () => {
+  const branch = extractBranch('t === "type_at"');
+  assert.ok(branch.indexOf("bindFocus(") > branch.indexOf("pressAt(")
+    && branch.indexOf("bindFocus(") < branch.indexOf("focusState("),
+    "identity is proved after the press (which moves focus) and before anything reads it");
+  const { result, sent } = await run(AT, { bind: async () => ({ ok: false, reason: "focus-not-the-target" }) });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "focus-not-the-target");
+  assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 0,
+    "an unbound focus types nothing and clears nothing");
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchMouseEvent").length, 2,
+    "the press still happened — it is what moved focus");
+});
+
+test("the focused node is named by the engine, not by script in the page", async () => {
+  const fx = engine({
+    "DOM.enable": {},
+    "DOM.getFocusNode": { nodeId: 11 },
+    "DOM.describeNode": { node: { backendNodeId: 99, nodeName: "INPUT" } },
+    "DOM.resolveNode": { object: { objectId: "obj-1" } },
+    "Runtime.callFunctionOn": { result: { value: { ok: true, reason: "same-node", tag: "CANVAS" } } },
+  });
+  const ok = await loadBindFocus(fx)(1, 99);
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.ok(fx.methods().includes("DOM.getFocusNode"),
+    "identity comes from the engine; no evaluate is consulted for it");
+  const described = fx.calls.find((c) => c.method === "DOM.describeNode");
+  assert.equal(described.params.nodeId, 11, "the nodeId the engine returned is the one described");
+});
+
+test("an engine that will not name the focused node refuses — it is never inferred", async () => {
+  for (const answers of [
+    { "DOM.enable": {}, "DOM.getFocusNode": { nodeId: 11 }, "DOM.describeNode": { node: {} } },
+    { "DOM.enable": {} },   // getFocusNode throws
+    { "DOM.enable": {}, "DOM.getFocusNode": { nodeId: 11 }, "DOM.describeNode": { node: { backendNodeId: 9, nodeName: "INPUT" } } },
+  ]) {
+    const fx = engine(answers);
+    const r = await loadBindFocus(fx)(1, 99);
+    assert.ok(!r.ok || r.reason === "focus-not-the-target", `got ${JSON.stringify(r)}`);
+    if (!r.ok) assert.equal(r.reason, "focus-identify-failed", JSON.stringify(r));
+  }
+});
+
+test("a clear with no backendNodeId to bind to refuses", async () => {
+  const fx = engine({});
+  const r = await loadBindFocus(fx)(1, undefined, 10, 10);
+  assert.deepEqual(r, { ok: false, reason: "focus-unidentified" });
+  assert.deepEqual(fx.calls, [], "it refuses before spending a CDP call");
+});
+
+// ── the containment allowance ───────────────────────────────────────────────
+
+test("the same node passes", async () => {
+  const el = { nodeType: 1, tagName: "INPUT", contains: () => false };
+  const r = runIdentity(el, el);
+  assert.equal(r.ok, true);
+  assert.equal(r.reason, "same-node");
+});
+
+test("focus on a descendant of what was pressed passes — a label, a wrapper, a span", () => {
+  // The ordinary case an equality test throws away: the model pressed a
+  // `<label>`, the browser focused the `<input>` inside it.
+  const input = { nodeType: 1 };
+  const label = { nodeType: 1, tagName: "LABEL", contains: (n) => n === input };
+  const r = runIdentity(label, input);
+  assert.equal(r.ok, true);
+  assert.equal(r.reason, "focus-inside-target");
+});
+
+test("focus on an ancestor of what was pressed does NOT pass", () => {
+  // The direction is load-bearing: a hit on a descendant is a hit on the
+  // element, a hit on an ancestor is not.
+  const wrapper = { nodeType: 1, tagName: "DIV", contains: () => true };
+  const inner = { nodeType: 1, tagName: "INPUT" };
+  assert.equal(runIdentity(inner, wrapper).ok, false);
+});
+
+test("focus the browser retargeted to the pressed node's shadow host passes", () => {
+  // A press inside an open shadow root: `elementFromPoint` resolves to the
+  // host, and the browser retargets focus back to the host. Ordinary
+  // `contains()` misses this — the host *contains* what was pressed.
+  const host = { nodeType: 1, tagName: "MY-WIDGET", contains: () => false };
+  const inner = { nodeType: 1, tagName: "INPUT", contains: () => false, getRootNode: () => ({ host }) };
+  const r = runIdentity(inner, host);
+  assert.equal(r.ok, true);
+  assert.equal(r.reason, "focus-retargeted-to-host");
+});
+
+test("an unrelated focused node refuses, with the tag of the pressed node for the exemption", async () => {
+  const fx = engine({
+    "DOM.enable": {},
+    "DOM.getFocusNode": { nodeId: 11 },
+    "DOM.describeNode": { node: { backendNodeId: 99, nodeName: "INPUT" } },
+    "DOM.resolveNode": { object: { objectId: "obj-1" } },
+    "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag: "BUTTON" } } },
+  });
+  const r = await loadBindFocus(fx)(1, 99);
+  assert.deepEqual(r, { ok: false, reason: "focus-not-the-target" });
+});
+
+// ── the canvas exemption ────────────────────────────────────────────────────
+
+/** The one shape identity cannot serve: a <canvas> grid whose press focuses an
+ *  editor that is neither the cell nor inside it. */
+function canvasShape({ tag = "CANVAS", focusTag = "TEXTAREA", inner, outer } = {}) {
+  const fx = engine({
+    "DOM.enable": {},
+    "DOM.getFocusNode": { nodeId: 11 },
+    "DOM.describeNode": { node: { backendNodeId: 77, nodeName: focusTag } },
+    "DOM.resolveNode": { object: { objectId: "obj-1" } },
+    "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag } } },
+    "DOM.getBoxModel": ({ params }) => (params.backendNodeId === 77 ? { model: { quads: [inner] } } : { model: { quads: [outer] } }),
+  });
+  return loadBindFocus(fx);
+}
+
+const QUAD = (x, y, w, h) => [x, y, x + w, y, x + w, y + h, x, y + h];
+
+test("a canvas cell whose press focuses an editor inside it is exempt, and says so", async () => {
+  const bind = canvasShape({ inner: QUAD(10, 10, 40, 12), outer: QUAD(0, 0, 400, 300) });
+  const r = await bind(1, 42);
+  assert.deepEqual(r, { ok: true, reason: "canvas-editor-exempt" },
+    "the exemption is reported, never silently asserted as identity");
+});
+
+test("a press on a canvas cannot clear a visible field somewhere else on the page", async () => {
+  // The defeat finding 1 describes. The editor's box is nowhere near the canvas,
+  // so the containment fails and the clear refuses. No attribute is consulted —
+  // `aria-hidden` on the user's own input cannot unlock the exemption.
+  const bind = canvasShape({ inner: QUAD(600, 700, 200, 24), outer: QUAD(0, 0, 400, 300) });
+  const r = await bind(1, 42);
+  assert.deepEqual(r, { ok: false, reason: "focus-not-the-target" });
+});
+
+test("the exemption is canvas-only", async () => {
+  const bind = canvasShape({ tag: "DIV", inner: QUAD(10, 10, 40, 12), outer: QUAD(0, 0, 400, 300) });
+  assert.equal((await bind(1, 42)).reason, "focus-not-the-target");
+});
+
+test("the exemption is text-input-only", async () => {
+  const bind = canvasShape({ focusTag: "DIV", inner: QUAD(10, 10, 40, 12), outer: QUAD(0, 0, 400, 300) });
+  assert.equal((await bind(1, 42)).reason, "focus-not-the-target");
+});
+
+test("an editor with no rendered box does not qualify", async () => {
+  const fx = engine({
+    "DOM.enable": {},
+    "DOM.getFocusNode": { nodeId: 11 },
+    "DOM.describeNode": { node: { backendNodeId: 77, nodeName: "TEXTAREA" } },
+    "DOM.resolveNode": { object: { objectId: "obj-1" } },
+    "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag: "CANVAS" } } },
+    "DOM.getBoxModel": { model: { quads: [QUAD(10, 10, 40, 12)] } },
+  });
+  // Only the canvas answers with a box; the editor has none.
+  const bind = loadBindFocus({ ...fx, anyCommand: async (t, c) => (c.method === "DOM.getBoxModel" && c.params.backendNodeId === 77
+    ? (() => { throw new Error("not rendered"); })() : fx.anyCommand(t, c)) });
+  assert.equal((await bind(1, 42)).reason, "focus-not-the-target");
+});
+
+test("the exemption is stated in the source, so the rule is not just a test", () => {
+  const src = extractFn(ptrSrc, "bindFocus");
+  assert.match(src, /v\.tag === "CANVAS"/, "the pressed node must be a canvas");
+  assert.match(src, /TEXT_INPUT_TAGS\.has\(focus\.nodeName\)/, "the focused node must be a text input");
+  assert.match(src, /inner\.minX >= outer\.minX/, "the editor must lie inside the canvas box");
+  assert.match(extractFn(ptrSrc, "box"), /DOM\.getBoxModel/,
+    "both boxes come from the engine, not from page attributes");
+  assert.doesNotMatch(src, /getAttribute|aria-hidden/, "a page-written attribute must not unlock the exemption");
+});
+
+test("the refusal vocabulary is closed, and lives in one place", () => {
+  // TYPE_AT_REFUSALS is the list a reader needs; these three assertions are
+  // what keep it true. Every reason emitted must be in it, every entry in it
+  // must be emitted somewhere, and every entry must say what it means.
+  const list = ptrSrc.slice(ptrSrc.indexOf("export const TYPE_AT_REFUSALS"));
+  for (const m of list.matchAll(/^  "([a-z0-9-]+)": "([^"]*)"/gm)) {
+    assert.ok(m[2].length > 10, `${m[1]} must carry a meaning, not a restatement`);
+  }
+  const declared = new Set([...list.matchAll(/^  "([a-z0-9-]+)":/gm)].map((m) => m[1]));
+  for (const r of ["no-active-element", "focus-on-body", "focus-on-root", "focus-on-frame",
+    "focus-no-text-field", "clear-select-noop", "clear-no-text-field", "clear-threw",
+    "focus-probe-failed", "focus-probe-silent", "focus-unidentified", "focus-identify-failed",
+    "focus-not-the-target", "point-out-of-viewport", "point-not-numeric", "target-gone",
+    "target-unresolvable", "probe-silent", "probe-failed"]) {
+    assert.ok(declared.has(r), `${r} must be documented in TYPE_AT_REFUSALS`);
+  }
+  // Nothing on the `type_at` path may emit a reason the list does not name.
+  // `different-element:<tag>` is the one prefixed form — a hit-test verdict
+  // whose detail is a tag. The scan is over this action's surfaces only; the
+  // cursor draw has its own (`foreign-frame`, `no-body`) and is not a refusal.
+  const surfaces = [FOCUS_PROBE, IDENTITY_PROBE, extractTemplate(ptrSrc, "TARGET_PROBE"),
+    extractFn(ptrSrc, "verifyTarget"), extractFn(ptrSrc, "bindFocus"), extractFn(ptrSrc, "focusState"),
+    extractBranch('t === "type_at"'), extractFn(bgSrc, "pressAt")];
+  for (const src of surfaces) {
+    for (const m of src.matchAll(/reason:\s*"([a-z0-9:-]+)"/g)) {
+      const name = m[1].split(":")[0];
+      if (name === "different-element") continue;
+      assert.ok(declared.has(name), `"${m[1]}" is emitted but not documented`);
+    }
+  }
+  // ...and every declared entry is emitted by *some* surface, so the list
+  // cannot grow a reason nothing produces — which is how a vocabulary grows a
+  // name that reads like a refusal and is not one.
+  //
+  // **Positioned on a `reason`, not as a bare substring.** The old check was
+  // `emitted.includes(`"${name}"`)`, which a mere mention satisfies: a name
+  // quoted in a comment or a console message counts as emitted, so a key that
+  // nothing returns passes. That is the whole defect — a guard that cannot
+  // fail. Comments are stripped first, then the name must appear on a line that
+  // is producing a reason, which admits the two forms the code actually uses:
+  // `reason: "x"` and `reason: doClear ? "a" : "b"` (and, in
+  // `bindFocus`, `String(v.reason ?? "identity-verified")`).
+  const emitted = surfaces
+    .map((s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""))
+    .join("\n");
+  for (const name of declared) {
+    assert.ok(new RegExp(`reason[^\\n]*"${name}"`).test(emitted),
+      `${name} is documented but nothing returns it`);
+  }
+
+  // The prose block and the map are two renderings of one vocabulary, and only
+  // the map is parsed above — so a key edited into one and not the other read
+  // clean. The prose may document a strict subset (the other names are written
+  // up at their own call sites), but it may not name a key the map lacks.
+  const docStart = ptrSrc.indexOf("/**\n * **Every reason `type_at` can refuse");
+  const docBlock = ptrSrc.slice(docStart, ptrSrc.indexOf("export const TYPE_AT_REFUSALS"));
+  for (const m of docBlock.matchAll(/^ \*   ([a-z0-9:-]+)\s/gm)) {
+    assert.ok(declared.has(m[1]),
+      `the refusal prose documents "${m[1]}" but TYPE_AT_REFUSALS does not carry it`);
+  }
+});
+
+test("the numeric guard in verifyTarget refuses, and is the only emitter of point-not-numeric", async () => {
+  // `point-not-numeric` is emitted here, not by `background.ts`: every
+  // coordinate that reaches `pressAt` from `type_at` / `click_xy` has been
+  // through `boundedPoint` (which refuses a non-number as
+  // `point-out-of-viewport`), but `click_ref` hands `verifyTarget` the
+  // *server's* raw x/y, which nothing has bounded. Deleting the key from the
+  // vocabulary because "nothing emits it any more" would have left a live
+  // refusal reaching the model's history and the audit document unnamed — and
+  // deleting the guard instead would have let a string coordinate reach
+  // `Math.round` and then `Input.dispatchMouseEvent`. Both directions are
+  // pinned here: it is emitted, and it fails closed.
+  const src = extractFn(ptrSrc, "verifyTarget");
+  assert.match(src, /reason: "point-not-numeric"/, "the guard must refuse, not fall through to a stale read");
+  const verifyTarget = new Function("anyCommand", "return " +
+    extractFn(ptrSrc, "verifyTarget").replace(/^export\s+/, ""))(
+      async () => { throw new Error("must not resolve a node"); });
+  for (const [x, y] of [["10", 20], [10, null], [NaN, 5], [Infinity, 5]]) {
+    const r = await verifyTarget(1, 42, x, y);
+    assert.equal(r.ok, false, `(${String(x)},${String(y)}) must not verify`);
+    assert.equal(r.reason, "point-not-numeric");
+  }
+  // An absent id is still the deliberate pass-through — a relay too old to
+  // carry one — and it is NOT the same refusal. Collapsing the two is the bug
+  // `credentialState`'s three states exist to prevent.
+  assert.deepEqual(await verifyTarget(1, undefined, 10, 20), { ok: true, reason: "no-backend-id" });
 });

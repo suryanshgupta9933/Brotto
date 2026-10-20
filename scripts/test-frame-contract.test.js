@@ -82,3 +82,18 @@ test("action_result is sent by the extension and read by the server", () => {
   assert.ok(/t == "action_result"/.test(main),
     "main.py no longer routes action_result — every refusal is now audited ok: true");
 });
+
+// The one grow-only addition to an *inbound* frame. `evaluate` gained an
+// optional `isolatedWorld` flag; it is not a new frame and not a shape change,
+// so the only thing the contract can require is that the default is untouched
+// — a caller that does not pass the flag must reach the main world with the
+// same params as before. The behavioural half lives in
+// `test-evaluate-isolated-world.test.js`; this is the place a reader checking
+// the grow-only set will look.
+test("evaluate's optional isolatedWorld flag leaves the default shape alone", () => {
+  const branch = bg.slice(bg.indexOf('case "evaluate":'));
+  assert.match(branch, /msg\.isolatedWorld === true/,
+    "the flag must be read as an explicit true, so absence and false are one path");
+  assert.match(branch, /returnByValue: true/,
+    "returnByValue is the contract's half — the isolated world shares the DOM, so the value is the same");
+});

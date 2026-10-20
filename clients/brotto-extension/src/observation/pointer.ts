@@ -270,11 +270,14 @@ export async function verifyTarget(tabId, backendNodeId, x, y) {
  * the window `focus_id` in `cdp/relay.py` uses to catch the user reaching for
  * the keyboard mid-step; this is the extension-side half of that protection.
  *
- * **Identity is deliberately not checked here.** Google Sheets focuses a hidden
- * input that is not a descendant of the cell node that was clicked, so a
- * containment test would refuse on exactly the shape this exists to serve.
- * "Something focusable holds focus" is the question a click can actually answer;
- * "is it the right one" is `verifyTarget`'s, and it runs before the press.
+ * **Identity is not checked here.** Google Sheets focuses an input that is not a
+ * descendant of the cell node that was clicked, so a containment test inside this
+ * probe would refuse on exactly the shape this exists to serve. Identity is
+ * `bindFocus`'s, it is engine-sourced, and it runs *before* this probe — so by
+ * the time `select()` is reached, the element it is called on has been proved to
+ * be the thing the press was aimed at (or the narrow, logged canvas exemption).
+ * This probe's remaining question is only "is there something here that can
+ * receive text", which is the one a click can answer on its own.
  *
  * **The clear is here, and it is a DOM operation.** It used to be a key chord
  * the caller had to name, via a `modifiers` bitmask on the frame, because "which
@@ -298,9 +301,9 @@ export async function verifyTarget(tabId, backendNodeId, x, y) {
  * trip would ask the same unchanged `activeElement` twice.
  *
  * The clear's verdict rides the same `{ok, reason}` as the focus's, in a closed
- * vocabulary: `clear-threw`, `clear-no-text-field`. No tag name or other
- * page-chosen text appears — this string reaches the model's history and the
- * audit document.
+ * vocabulary. **The whole list lives in `TYPE_AT_REFUSALS` below** — no tag
+ * name or other page-chosen text appears, because this string reaches the
+ * model's history and the audit document.
  *
  * No template literals or semicolons inside: the Node test slices this out of
  * the source between the backticks.
@@ -313,41 +316,365 @@ const FOCUS_PROBE = `function (doClear) {
   // failure is reporting the truth rather than inventing one.
   if (a === document.body) return { ok: false, reason: "focus-on-body" };
   if (a === document.documentElement) return { ok: false, reason: "focus-on-root" };
+  // A focused <iframe> is a *document*, not an element: insertText against it
+  // lands in the frame, which no observation this run produced covered. Named
+  // apart from the generic refusal below because the cause is a different one
+  // and the sentence the model reads should say so.
+  if (a.tagName === "IFRAME") return { ok: false, reason: "focus-on-frame" };
+  // **One predicate, both paths.** "Is this a text field" was inferred from
+  // \`typeof a.select === "function"\`, which is a duck type: any element can
+  // carry a \`select\`, a \`select()\` on a <div> does nothing, and the page owns
+  // that method. \`instanceof\` against the extension's own prototypes is the
+  // real test — and it holds here precisely because the probe runs in an
+  // isolated world (see IDENTITY_PROBE), where these classes cannot be
+  // shadowed by anything the page did.
+  var field = a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || a.isContentEditable === true;
+  if (!field) return { ok: false, reason: doClear ? "clear-no-text-field" : "focus-no-text-field" };
+  // Nothing was asked to be cleared, and what holds focus can receive text —
+  // which is the whole question on this path. \`Input.insertText\` verifies
+  // nothing, so the answer used to be "success" for a <div> that took the click
+  // and a keystroked into nothing.
   if (!doClear) return { ok: true, reason: "" };
   try {
-    if (typeof a.select === "function") {
+    if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) {
       a.select();
-      // HTMLInputElement.select() is specified to do **nothing** on an input
-      // type it does not apply to — email, number, date, time — and to do
-      // nothing, not to throw. So a successful call is not evidence a clear
-      // happened, and the text after it would append to a field the model asked
-      // to empty: the same wrong answer the chord gave, quieter. Read the
-      // selection back and refuse when the call was a no-op over a non-empty
-      // value. The value is checked first so an *empty* field of a no-op type
-      // never reaches selectionStart, which throws on those types — and an
-      // empty field has nothing to clear, so appending to it is correct.
-      if (typeof a.value === "string" && a.value.length > 0 &&
-        typeof a.selectionStart === "number" && a.selectionStart === a.selectionEnd) {
+      // **Confirm the clear, do not infer it.** HTMLInputElement.select() is
+      // specified to do *nothing* on an input type it does not apply to — email,
+      // number, date, time — and to do nothing rather than throw, so a call
+      // that returned is not evidence a clear happened. Read the selection back
+      // and require it to cover the whole value; anything less is a clear that
+      // did not happen, and the text after it would append to a field the model
+      // asked to empty.
+      //
+      // The value is read first so an *empty* field of a no-op type returns
+      // before \`selectionStart\` is touched: it is null (not a number) on those
+      // types, and an empty field has nothing to clear, so appending to it is
+      // correct. That is also the Sheets case — the canvas exemption's editor
+      // holds the cell's text in a hidden input, and an empty cell's input is
+      // empty.
+      var len = typeof a.value === "string" ? a.value.length : -1;
+      if (len === 0) return { ok: true, reason: "" };
+      var start = a.selectionStart;
+      var end = a.selectionEnd;
+      if (typeof start !== "number" || typeof end !== "number" || end - start !== len) {
         return { ok: false, reason: "clear-select-noop" };
       }
       return { ok: true, reason: "" };
     }
-    if (a.isContentEditable) {
-      var sel = document.getSelection();
-      var range = document.createRange();
-      range.selectNodeContents(a);
-      sel.removeAllRanges();
-      sel.addRange(range);
-      return { ok: true, reason: "" };
+    // contenteditable: no \`select()\`, so a range over the node's contents is
+    // the same operation by another route — and it is confirmed the same way.
+    var had = a.textContent ? a.textContent.length : 0;
+    var sel = document.getSelection();
+    if (!sel) return { ok: false, reason: "clear-select-noop" };
+    var range = document.createRange();
+    range.selectNodeContents(a);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    if (had > 0) {
+      if (sel.rangeCount !== 1) return { ok: false, reason: "clear-select-noop" };
+      var got = sel.getRangeAt(0);
+      if (!got || !got.toString()) return { ok: false, reason: "clear-select-noop" };
     }
-  } catch (e) { return { ok: false, reason: "clear-threw" }; }
-  return { ok: false, reason: "clear-no-text-field" };
+    return { ok: true, reason: "" };
+  } catch (err) { return { ok: false, reason: "clear-threw" }; }
 }`;
 
 /**
+ * **The probe runs in an isolated world, and that is load-bearing.** In the
+ * page's own world the page owns both the question and the effect: it can
+ * override the `document.activeElement` getter so the probe reports a focus
+ * that is not there, and it can override `Element.prototype.select` so
+ * `select()` does something other than select. A probe a malicious page can
+ * answer *and* act on is not a guard — so this evaluates in a world whose
+ * prototypes are the extension's, and `focusState` is only ever called after
+ * `bindFocus` has independently named the focused node from the engine, so the
+ * two walls fail independently rather than resting on the same script.
+ */
+const IDENTITY_PROBE = `function (focus) {
+  var el = this;
+  if (!el || el.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "" };
+  if (!focus || focus.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "" };
+  var tag = el.tagName ? String(el.tagName).toUpperCase() : "";
+  // The ordinary case: the same node, or focus landing on a descendant of what
+  // was pressed — a <label>, a <div> wrapper, a <span> inside a button. A hit on
+  // a *descendant* is a hit on the element; an ancestor is not admitted.
+  if (el === focus) return { ok: true, reason: "same-node", tag: tag };
+  if (el.contains && el.contains(focus)) return { ok: true, reason: "focus-inside-target", tag: tag };
+  // The shadow direction: the press resolved to a node inside an open shadow
+  // root — elementFromPoint does not pierce one, so it resolved to the host —
+  // and the browser retargeted focus to that same host. So the focus is one of
+  // the *pressed node's* shadow hosts, which ordinary contains() cannot see.
+  var sroot = el.getRootNode ? el.getRootNode() : null;
+  while (sroot && sroot.host) {
+    if (sroot.host === focus) return { ok: true, reason: "focus-retargeted-to-host", tag: tag };
+    sroot = sroot.host.getRootNode ? sroot.host.getRootNode() : null;
+  }
+  return { ok: false, reason: "not-the-target", tag: tag };
+}`;
+
+/** The one named world. Reused: `createIsolatedWorld` is idempotent per name. */
+const IDLE_WORLD = "brotto-idle";
+
+/**
+ * **Every reason `type_at` can refuse, in one list.**
+ *
+ * These strings are a closed vocabulary: they reach the model's history and the
+ * audit document, so each one names a *cause* and nothing about the page. They
+ * are kept here rather than at their five call sites because the list is the
+ * thing a reader needs, and a reader who has to assemble it from the branches
+ * will read it wrong — which is how a duck-typed refusal reason got in
+ * alongside a real one. Exported so `scripts/test-type-at.test.js` can assert
+ * every `reason:` in the source is in here, and every entry here is used.
+ *
+ *   no-active-element       `document.activeElement` was null — nothing to read,
+ *                           or the document went away under the probe.
+ *   focus-on-body           focus is `<body>`, the engine's "nobody" answer.
+ *   focus-on-root           focus is `<html>`, the same answer by another name.
+ *   focus-on-frame          focus is an `<iframe>`: the text would land in
+ *                           another document, which no observation covered.
+ *   focus-no-text-field     focus is a real element but not one `Input.insertText`
+ *                           can enter, and no clear was asked for.
+ *   focus-unidentified      the frame carried no `backendNodeId`, so there is
+ *                           nothing to bind a destructive clear to. `verifyTarget`
+ *                           passes that case through; the clear cannot.
+ *   focus-identify-failed   the engine would not name the focused node, or the
+ *                           probe over it failed. Never inferred.
+ *   focus-not-the-target    focus holds a node that is not the pressed node, not
+ *                           inside it, and not a canvas editor inside it.
+ *   focus-probe-failed      the `Runtime.evaluate` threw — the document is gone.
+ *   focus-probe-silent      the evaluate returned no object: no answer, no pass.
+ *   clear-select-noop       the clear was requested and did not happen — the
+ *                           selection did not cover the value, or the range did
+ *                           not materialise. The clear is *confirmed*, never
+ *                           inferred from `select()` having returned.
+ *   clear-threw             `select()` / `createRange` threw — a detached node.
+ *   clear-no-text-field     a clear was asked for and focus is not a text field,
+ *                           so there is nothing to clear.
+ *   point-out-of-viewport   the coordinate is not a point in the live viewport
+ *                           (outside it, not finite, or the viewport unreadable).
+ *                           Shared with `click_xy`.
+ *   point-not-numeric       x/y were not numbers on the frame.
+ *   target-gone             the pressed node no longer resolves — the page
+ *                           dropped it, or the tab navigated.
+ *   target-unresolvable     `DOM.resolveNode` answered without an object id.
+ *   probe-silent            the dispatch-time hit test returned no object.
+ *   probe-failed            the dispatch-time hit test threw.
+ *   different-element:<tag> the hit test found a different element at the point.
+ *                           The tag is appended by `TARGET_PROBE` and is the one
+ *                           place a page-chosen string enters; it names a tag,
+ *                           which is engine-derived, not freeform.
+ */
+export const TYPE_AT_REFUSALS: Readonly<Record<string, string>> = {
+  "no-active-element": "nothing holds focus, or the document went away",
+  "unreadable": "the pressed node or the focused node would not resolve in the probe's realm",
+  "not-an-element": "the dispatch-time probe was not bound to an element",
+  "cross-frame-target": "the target is not in this document — the coordinates are the top frame's",
+  "point-hit-nothing": "elementFromPoint returned nothing at the dispatched point",
+  "no-backend-id": "the frame carried no id, so the hit test has nothing to gate — a pass-through, not a proof",
+  
+  "focus-on-body": "focus is <body>",
+  "focus-on-root": "focus is <html>",
+  "focus-on-frame": "focus is an <iframe>: the text would land in another document",
+  "focus-no-text-field": "focus is real but cannot receive Input.insertText",
+  "focus-unidentified": "no backendNodeId to bind a destructive clear to",
+  "focus-identify-failed": "the engine would not name the focused node",
+  "focus-not-the-target": "focus is not the pressed node, an ancestor-descendant of it, or a canvas editor",
+  "focus-probe-failed": "the focus evaluate threw; the document went away",
+  "focus-probe-silent": "the focus evaluate returned no answer",
+  "clear-select-noop": "the clear was requested and did not happen",
+  "clear-threw": "select()/createRange threw — a detached node",
+  "clear-no-text-field": "a clear was asked for and focus is not a text field",
+  "point-out-of-viewport": "the coordinate is not a point in the live viewport",
+  "point-not-numeric": "x or y on the frame was not a number",
+  "target-gone": "the pressed node no longer resolves",
+  "target-unresolvable": "DOM.resolveNode returned no object id",
+  "probe-silent": "the dispatch-time hit test returned no object",
+  "probe-failed": "the dispatch-time hit test threw",
+
+  // The successes, in the same list because they ride the same wire and a
+  // reader handed this list should not have to guess which half a name is in.
+  // Every one of these means `ok: true`, and `canvas-editor-exempt` is the
+  // only one that is an allowance rather than a proof.
+  "same-node": "OK — focus is the pressed node",
+  "focus-inside-target": "OK — focus is inside the pressed node",
+  "focus-retargeted-to-host": "OK — focus was retargeted to the pressed node's shadow host",
+  "not-the-target": "the identity probe's verdict before the exemption is consulted",
+  "identity-verified": "OK — the probe answered without naming which way",
+  "canvas-editor-exempt": "OK by exemption — a canvas cell whose editor lies inside it",
+};
+
+/** Cache the world's context id per tab. One `Page.createIsolatedWorld` per tab,
+ *  not one per action — the clear runs on every `type_at`, and the `evaluate`
+ *  frame's `isolatedWorld` flag reuses this same world rather than making a
+ *  second one per call. */
+const worldIds = new Map<number, number>();
+
+export async function isolatedWorld(tabId: number): Promise<number> {
+  const cached = worldIds.get(tabId);
+  if (typeof cached === "number") return cached;
+  const created = await anyCommand(tabId, {
+    method: "Page.createIsolatedWorld",
+    params: { frameId: await topFrameId(tabId), worldName: IDLE_WORLD, grantUniveralAccess: false },
+  });
+  const id = created?.executionContextId;
+  if (typeof id !== "number") throw new Error("no execution context");
+  worldIds.set(tabId, id);
+  return id;
+}
+
+async function topFrameId(tabId: number): Promise<string> {
+  const tree = await anyCommand(tabId, { method: "Page.getFrameTree" });
+  const id = tree?.frameTree?.frame?.id;
+  if (typeof id !== "string") throw new Error("no frame tree");
+  return id;
+}
+
+/**
+ * The focused node, as the *engine* names it.
+ *
+ * `DOM.getFocusNode` + `DOM.describeNode` is the answer the page has no way to
+ * reach: no script runs to produce it, so overriding `document.activeElement`
+ * changes nothing. This is the primary wall — `focusState`'s in-page read is
+ * corroboration for the *effect*, this is the authority for the *identity*.
+ *
+ * Every failure refuses. `DOM.getFocusNode` is experimental and can decline to
+ * answer; a page whose focus cannot be named cannot be cleared.
+ */
+async function focusNode(tabId: number): Promise<{ ok: boolean; reason: string; backendNodeId?: number; nodeName?: string }> {
+  try {
+    await anyCommand(tabId, { method: "DOM.enable" });
+    const got = await anyCommand(tabId, { method: "DOM.getFocusNode" });
+    const nodeId = got?.nodeId;
+    if (typeof nodeId !== "number") return { ok: false, reason: "focus-identify-failed" };
+    const described = await anyCommand(tabId, { method: "DOM.describeNode", params: { nodeId } });
+    const backendNodeId = described?.node?.backendNodeId;
+    const nodeName = described?.node?.nodeName;
+    if (typeof backendNodeId !== "number") return { ok: false, reason: "focus-identify-failed" };
+    return { ok: true, reason: "", backendNodeId, nodeName: String(nodeName ?? "") };
+  } catch {
+    return { ok: false, reason: "focus-identify-failed" };
+  }
+}
+
+/** A box, as min/max CSS px, or null. `DOM.getBoxModel` declines on a node that
+ *  is not rendered, which is the answer "no visible box" rather than a throw. */
+async function box(tabId: number, backendNodeId: number) {
+  try {
+    const m = await anyCommand(tabId, { method: "DOM.getBoxModel", params: { backendNodeId } });
+    const quads = m?.model?.quads;
+    if (!Array.isArray(quads) || quads.length < 1) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const q of quads) {
+      for (let i = 0; i + 1 < q.length; i += 2) {
+        minX = Math.min(minX, q[i]); maxX = Math.max(maxX, q[i]);
+        minY = Math.min(minY, q[i + 1]); maxY = Math.max(maxY, q[i + 1]);
+      }
+    }
+    return { minX, minY, maxX, maxY };
+  } catch {
+    return null;
+  }
+}
+
+/** Text-entry controls. A `CANVAS` press may only reach one of these through the
+ *  exemption — never a button, never a div, never a contenteditable host. */
+const TEXT_INPUT_TAGS = new Set(["INPUT", "TEXTAREA"]);
+
+/**
+ * Prove that what holds focus is the thing this press was aimed at.
+ *
+ * Three walls, and none of them closes the finding alone:
+ *
+ *   1. **Engine-sourced identity** — `DOM.getFocusNode` vs the pressed
+ *      `backendNodeId`. The page cannot lie: no script runs to answer. Alone
+ *      this would refuse Sheets, and alone it would refuse a `<label>` press.
+ *   2. **Containment, in an isolated world** — same node, a descendant, or a
+ *      focus the browser retargeted to the pressed node's shadow host. This
+ *      absorbs the ordinary DOM cases identity-by-equality throws away.
+ *   3. **The canvas exemption**, for the one shape none of the above can serve:
+ *      a `<canvas>` grid cell whose press focuses a hidden editor that is not
+ *      the cell and not inside it.
+ *
+ * **The exemption, stated so it can be checked.** All four hold:
+ *
+ *   (i)   the pressed node is a `CANVAS`;
+ *   (ii)  the focused node is an `INPUT` or `TEXTAREA` — the engine's own name
+ *         for it, not a page-supplied attribute;
+ *   (iii) the focused node has a rendered box, and that box lies **wholly
+ *         inside** the pressed canvas's box.
+ *
+ * (iii) is what makes this narrow rather than a hole. A visible field the user
+ * was typing into — a real search box, a real form input — is somewhere else
+ * on the page, so its box cannot be inside the canvas that was just clicked,
+ * and a press on a canvas can never clear it. Both boxes come from the engine,
+ * in the engine's own coordinates, so no page attribute (`aria-hidden`,
+ * `style="opacity:0"`, `hidden`) can unlock the exemption by being written
+ * onto the user's own field. The residual: a page that physically moved the
+ * user's focused input on top of the canvas it was clicked — at which point
+ * `verifyTarget`'s `elementFromPoint` hit test has already refused the press as
+ * `different-element`, because the click landed on the input, not the canvas.
+ *
+ * The exemption is reported, never silent: it returns
+ * `ok: true, reason: "canvas-editor-exempt"`, and the caller logs it.
+ */
+export async function bindFocus(tabId, backendNodeId, x, y) {
+  if (typeof backendNodeId !== "number") {
+    // Nothing to bind a *destructive* clear to. `verifyTarget` fails open on an
+    // absent id because an older relay has no gate to run; the clear has no such
+    // excuse — it is the one operation here that destroys the user's text.
+    return { ok: false, reason: "focus-unidentified" };
+  }
+  const focus = await focusNode(tabId);
+  if (!focus.ok) return { ok: false, reason: focus.reason };
+
+  let contextId, targetObj, focusObj;
+  try {
+    contextId = await isolatedWorld(tabId);
+    const resolve = async (id) =>
+      (await anyCommand(tabId, { method: "DOM.resolveNode", params: { backendNodeId: id, executionContextId: contextId } }))?.object?.objectId || "";
+    targetObj = await resolve(backendNodeId);
+    focusObj = await resolve(focus.backendNodeId);
+  } catch {
+    return { ok: false, reason: "focus-identify-failed" };
+  }
+  if (!targetObj || !focusObj) return { ok: false, reason: "focus-identify-failed" };
+
+  let v;
+  try {
+    const call = await anyCommand(tabId, {
+      method: "Runtime.callFunctionOn",
+      params: {
+        objectId: targetObj,
+        functionDeclaration: IDENTITY_PROBE,
+        arguments: [{ objectId: focusObj }],
+        returnByValue: true,
+      },
+    });
+    v = call?.result?.value;
+  } catch {
+    return { ok: false, reason: "focus-identify-failed" };
+  }
+  if (!v || typeof v !== "object") return { ok: false, reason: "focus-identify-failed" };
+  if (v.ok === true) return { ok: true, reason: String(v.reason ?? "identity-verified") };
+
+  // Wall 3. Only reached when identity AND containment both failed, so the
+  // exemption is the narrowest thing in this function.
+  if (v.tag === "CANVAS" && TEXT_INPUT_TAGS.has(focus.nodeName)) {
+    const inner = await box(tabId, focus.backendNodeId);
+    const outer = await box(tabId, backendNodeId);
+    if (inner && outer &&
+        inner.minX >= outer.minX && inner.maxX <= outer.maxX &&
+        inner.minY >= outer.minY && inner.maxY <= outer.maxY) {
+      return { ok: true, reason: "canvas-editor-exempt" };
+    }
+  }
+  return { ok: false, reason: "focus-not-the-target" };
+}
+
+/**
  * Read the focus state of the top document, and select-all inside it when
- * `doClear` is set. One bounded `Runtime.evaluate`, `returnByValue`, the same
- * primitive `observation/index.ts` uses.
+ * `doClear` is set. One bounded `Runtime.evaluate`, `returnByValue`, in an
+ * isolated world (see `IDENTITY_PROBE`).
  *
  * ponytail: every failure refuses, matching `verifyTarget`. Ceiling: a page
  * that types through a document-level key handler while focus sits on `<body>`
@@ -357,9 +684,14 @@ const FOCUS_PROBE = `function (doClear) {
 export async function focusState(tabId, doClear) {
   let value;
   try {
+    const contextId = await isolatedWorld(tabId);
     const call = await anyCommand(tabId, {
       method: "Runtime.evaluate",
-      params: { expression: `(${FOCUS_PROBE})(${doClear === true})`, returnByValue: true },
+      params: {
+        expression: `(${FOCUS_PROBE})(${doClear === true})`,
+        contextId,
+        returnByValue: true,
+      },
     });
     value = call?.result?.value;
   } catch {
