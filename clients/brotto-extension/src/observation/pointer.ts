@@ -522,6 +522,35 @@ export async function isolatedWorld(tabId: number): Promise<number> {
   return id;
 }
 
+/**
+ * Run `fn` in the tab's isolated world, and make a stale context id
+ * self-correcting.
+ *
+ * A context id belongs to a *renderer*, not to a tab: it dies with a
+ * cross-document navigation and with a detach/reattach, and neither event
+ * invalidates this cache. Enumerating the invalidating events would rot — a
+ * future one is missed and the id goes stale again, silently, because a
+ * `Runtime.evaluate` against a dead context is an *error*, not an empty value,
+ * and every caller here reads "the extension could not evaluate".
+ *
+ * So the staleness corrects itself: one failure drops the entry, the world is
+ * created again, and the call runs once more. That covers every cause —
+ * navigation, detach, frame swap, context destroyed — without a list of them.
+ * Keying the cache on the frame's `loaderId` is cheaper on the happy path but
+ * still misses detach-and-reattach-to-the-same-page, which is the case a live
+ * run actually hit.
+ *
+ * A second failure propagates unchanged, so a real fault is still one.
+ */
+export async function withWorld<T>(tabId: number, fn: (contextId: number) => Promise<T>): Promise<T> {
+  try {
+    return await fn(await isolatedWorld(tabId));
+  } catch (e) {
+    worldIds.delete(tabId);
+    return await fn(await isolatedWorld(tabId));
+  }
+}
+
 async function topFrameId(tabId: number): Promise<string> {
   const tree = await anyCommand(tabId, { method: "Page.getFrameTree" });
   const id = tree?.frameTree?.frame?.id;
@@ -627,13 +656,13 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
   const focus = await focusNode(tabId);
   if (!focus.ok) return { ok: false, reason: focus.reason };
 
-  let contextId, targetObj, focusObj;
+  let targetObj, focusObj;
   try {
-    contextId = await isolatedWorld(tabId);
-    const resolve = async (id) =>
-      (await anyCommand(tabId, { method: "DOM.resolveNode", params: { backendNodeId: id, executionContextId: contextId } }))?.object?.objectId || "";
-    targetObj = await resolve(backendNodeId);
-    focusObj = await resolve(focus.backendNodeId);
+    ({ targetObj, focusObj } = await withWorld(tabId, async (id) => {
+      const resolve = async (nid) =>
+        (await anyCommand(tabId, { method: "DOM.resolveNode", params: { backendNodeId: nid, executionContextId: id } }))?.object?.objectId || "";
+      return { targetObj: await resolve(backendNodeId), focusObj: await resolve(focus.backendNodeId) };
+    }));
   } catch {
     return { ok: false, reason: "focus-identify-failed" };
   }
@@ -684,15 +713,15 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
 export async function focusState(tabId, doClear) {
   let value;
   try {
-    const contextId = await isolatedWorld(tabId);
-    const call = await anyCommand(tabId, {
-      method: "Runtime.evaluate",
-      params: {
-        expression: `(${FOCUS_PROBE})(${doClear === true})`,
-        contextId,
-        returnByValue: true,
-      },
-    });
+    const call = await withWorld(tabId, (contextId) =>
+      anyCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: {
+          expression: `(${FOCUS_PROBE})(${doClear === true})`,
+          contextId,
+          returnByValue: true,
+        },
+      }));
     value = call?.result?.value;
   } catch {
     // A document that went away mid-call. The question is unanswerable and

@@ -59,7 +59,12 @@ function stripSignature(sig) {
   // A return type can carry its own braces (`Promise<{ ok: boolean; reason:
   // string } | null>`), so it is scanned for its matching angle rather than
   // pattern-matched — a regex stops at the first `{` and leaves half behind.
-  let out = sig.replace(/\)\s*:\s*Promise</g, ")<");
+  // An arrow-typed parameter carries its own `Promise<T>` and its own `(...)`,
+  // and neither the `)<` rule below nor the scalar rule after it reaches inside
+  // one — so it goes first, whole.
+  let out = sig
+    .replace(/:\s*\([^()]*\)\s*=>\s*Promise<[^<>]*>/g, "")
+    .replace(/\)\s*:\s*Promise</g, ")<");
   for (let i = out.indexOf(")<"); i >= 0; i = out.indexOf(")<")) {
     let depth = 0;
     let end = -1;
@@ -76,7 +81,9 @@ function stripSignature(sig) {
 const stripBody = (body) => body.replace(/\s+as\s+[A-Za-z<>\[\]| ]+/g, "");
 
 function extractFn(src, name) {
-  const head = new RegExp(`^(export )?(async )?function ${name}\\s*\\(`, "m");
+  // `[<(]` and not `\\(`: a generic function carries a parameter list, as
+  // `withWorld<T>(` does, and a signature rule that only knows `(` cannot find it.
+  const head = new RegExp(`^(export )?(async )?function ${name}\\s*[<(]`, "m");
   const start = src.search(head);
   if (start < 0) throw new Error(`no function ${name} — renamed?`);
   // The body opens at the first `{` that ends a line, not the first `{` on
@@ -91,7 +98,8 @@ function extractFn(src, name) {
       // One pass over the whole function: a return type straddles the
       // signature/body boundary (`): Promise<void> {`) and splitting first
       // leaves half of it behind.
-      return stripSignature(src.slice(start, open)) + stripBody(src.slice(open, i + 1));
+      return stripSignature(src.slice(start, open)).replace(/<[A-Za-z]\w*>\(/, "(")
+        + stripBody(src.slice(open, i + 1));
     }
   }
   throw new Error(`unterminated function ${name}`);
@@ -567,10 +575,12 @@ function loadFocusState(handler, log = []) {
     return handler(command);
   };
   const shipped = extractFn(ptrSrc, "focusState").replace(/^export\s+/, "");
-  const world = extractFn(ptrSrc, "isolatedWorld").replace(/^export\s+/, "");
-  const frame = extractFn(ptrSrc, "topFrameId").replace(/^export\s+/, "");
+  // `withWorld` too: it is what makes a cached context id self-correcting, and
+  // stubbing it away here would leave `focusState` unevaluated.
+  const plumbing = ["topFrameId", "isolatedWorld", "withWorld"]
+    .map((n) => extractFn(ptrSrc, n).replace(/^export\s+/, "")).join("\n");
   const cache = "const worldIds = new Map();\n";
-  const src = `${cache}\nconst IDLE_WORLD = "brotto-idle";\n${frame}\n${world}\nreturn ${shipped}`;
+  const src = `${cache}\nconst IDLE_WORLD = "brotto-idle";\n${plumbing}\nreturn ${shipped}`;
   return new Function("anyCommand", "FOCUS_PROBE", src)(anyCommand, FOCUS_PROBE);
 }
 
@@ -599,7 +609,7 @@ function engine(answers = {}) {
  *  around it — a test that stubs them away would not be testing the walls. */
 function loadBindFocus(fx) {
   const shipped = extractFn(ptrSrc, "bindFocus").replace(/^export\s+/, "");
-  const body = ["focusNode", "isolatedWorld", "topFrameId", "box"]
+  const body = ["focusNode", "isolatedWorld", "withWorld", "topFrameId", "box"]
     .map((n) => extractFn(ptrSrc, n).replace(/^export\s+/, ""))
     .join("\n");
   const prelude = 'const IDLE_WORLD = "brotto-idle";\nconst worldIds = new Map();\n' +
@@ -663,7 +673,7 @@ test("the world is created once per tab and reused", async () => {
   // Fresh module state per load, so the cache is exercised from empty.
   const focusState = new Function("anyCommand", "FOCUS_PROBE",
     'const worldIds = new Map();\nconst IDLE_WORLD = "brotto-idle";\n' +
-    extractFn(ptrSrc, "topFrameId") + "\n" + extractFn(ptrSrc, "isolatedWorld").replace(/^export\s+/, "") + `\nreturn ${shipped}`)(anyCommand, FOCUS_PROBE);
+    ["topFrameId", "isolatedWorld", "withWorld"].map((n) => extractFn(ptrSrc, n).replace(/^export\s+/, "")).join("\n") + `\nreturn ${shipped}`)(anyCommand, FOCUS_PROBE);
   await focusState(1, true);
   await focusState(1, true);
   assert.equal(worlds, 1, "one createIsolatedWorld per tab, not one per clear");

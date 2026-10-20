@@ -41,6 +41,10 @@ function extractBranch() {
         // error in the extracted code, not as the bug it is. A type annotation
         // carries no `;`, so stop there.
         .replace(/ as \{[^;]*\}/g, "")
+        // An optional-parameter annotation on a local arrow, e.g. the
+        // `(contextId?: number)` the isolated path takes. `?:` cannot appear in
+        // a plain JS binding, so this cannot eat an object literal.
+        .replace(/\((\w+)\?:\s*[\w<>[\]| ]+\)/g, "($1)")
         .replace(/ws!/g, "ws")
         .replace(/^\s*break;\s*$/m, "");
     }
@@ -49,6 +53,45 @@ function extractBranch() {
 }
 
 const BODY = extractBranch();
+
+/** One shipped function out of `pointer.ts`, types stripped, sharing one cache.
+ *  The signature and the body are stripped separately: a rule that removed
+ *  `: false,` would also eat the `: false` in `{ ok: false }`. */
+function ptrSrc(name) {
+  const head = new RegExp(`^(export )?(async )?function ${name}\\s*[<(]`, "m");
+  const start = ptr.search(head);
+  if (start < 0) throw new Error(`pointer.ts has no ${name} — renamed?`);
+  const open = ptr.indexOf("{\n", start);
+  let depth = 0;
+  for (let i = open; i < ptr.length; i++) {
+    if (ptr[i] === "{") depth++;
+    else if (ptr[i] === "}" && --depth === 0) {
+      let sig = ptr.slice(start, open)
+        // An arrow parameter's own `Promise<T>` first: the `): Promise<` rule
+        // below would otherwise match the *outer* return type and leave a
+        // dangling `)` where the arrow's was.
+        .replace(/=>\s*Promise<[^<>]*>/g, "=> Promise")
+        .replace(/\)\s*:\s*Promise</g, ")<")
+        .replace(/:\s*[\w<>[\]| ]+(?=\s*[,)])/g, "")
+        // An arrow-typed parameter, `fn: (contextId: number) => Promise<T>`:
+        // the scalar rule above stops at the `(`.
+        .replace(/:\s*\([^()]*\)\s*=>\s*\w+/g, "")
+        .replace(/^export\s+/, "")
+        .replace(/<[A-Za-z]\w*>\(/, "("); // the generic parameter list
+      for (let j = sig.indexOf(")<"); j >= 0; j = sig.indexOf(")<")) {
+        let d = 0, end = -1;
+        for (let k = j + 1; k < sig.length; k++) {
+          if (sig[k] === "<") d++;
+          else if (sig[k] === ">" && --d === 0) { end = k; break; }
+        }
+        if (end < 0) break;
+        sig = sig.slice(0, j + 1) + sig.slice(end + 1);
+      }
+      return sig + ptr.slice(open, i + 1).replace(/\s+as\s+[A-Za-z<>\[\]| ]+/g, "");
+    }
+  }
+  throw new Error(`unterminated ${name}`);
+}
 
 /** Run the branch with a fake debugger, and report the commands it sent. */
 async function runBranch(msg, { sendCommand } = {}) {
@@ -64,7 +107,7 @@ async function runBranch(msg, { sendCommand } = {}) {
         return sendCommand ? sendCommand(c) : { result: { value: "ok" } };
       },
     },
-    isolatedWorld: async () => 7,
+    withWorld: async (_t, fn) => fn(7),
   };
   vm.createContext(ctx);
   new vm.Script(`(async () => {${BODY}})()`).runInContext(ctx);
@@ -128,7 +171,7 @@ test("a failing isolated-world lookup answers with an error, never a main-world 
     msg: { type: "evaluate", expression: "document.activeElement", isolatedWorld: true },
     ws: { send: (s) => sent.push(JSON.parse(s)) },
     dbg: { sendCommand: async () => { throw new Error("the debugger is gone"); } },
-    isolatedWorld: async () => { throw new Error("no execution context"); },
+    withWorld: async () => { throw new Error("no execution context"); },
   };
   vm.createContext(ctx);
   new vm.Script(`(async () => {${BODY}})()`).runInContext(ctx);
@@ -149,10 +192,65 @@ test("the world is the one `pointer.ts` already caches — one per tab, not one 
   assert.match(body, /worldIds\.get\(tabId\)/, "the tab's world must be cached, not recreated");
   assert.match(body, /worldIds\.set\(tabId, id\)/, "and stored after the first create");
   // And `background.ts` must import that helper rather than open a world of its own.
-  assert.match(bg, /import \{[^}]*isolatedWorld[^}]*\} from "\.\/observation\/pointer"/,
+  assert.match(bg, /import \{[^}]*withWorld[^}]*\} from "\.\/observation\/pointer"/,
     "the evaluate path must reuse pointer.ts's world, not create a second one");
   assert.doesNotMatch(extractBranch(), /createIsolatedWorld|worldName/,
     "the evaluate branch must not create a world of its own");
+});
+
+test("a context id the renderer threw away is corrected, not obeyed", async () => {
+  // The failure this pins is silent and terminal. `worldIds` is a module-level
+  // `Map<tabId, executionContextId>` in a service worker that outlives many page
+  // loads, and a context id belongs to a *renderer*: it dies on a cross-document
+  // navigation and on a detach/reattach, neither of which invalidates the cache.
+  // `Runtime.evaluate` against a dead context is an **error**, so the `catch`
+  // answers `{value: "", error}` and the server reads "the extension could not
+  // evaluate" — `duration_ms=1`, an empty focus id, and every action refused as
+  // "focus unknown" for the rest of the run. Observed live on google.com and on
+  // Sheets, first focus read of a fresh connection already failing.
+  //
+  // There is no list of invalidating events to check — navigation, detach, frame
+  // swap, context destroyed, and whatever comes next — so the correction has to
+  // be the failure itself: drop the id, create the world again, retry once.
+  const sent = [];
+  const commands = [];
+  let creates = 0;
+  const sendCommand = async (_t, c) => {
+    commands.push(c);
+    if (c.method === "Page.getFrameTree") return { frameTree: { frame: { id: "F" } } };
+    if (c.method === "Page.createIsolatedWorld") {
+      creates++;
+      return { executionContextId: creates === 1 ? 5 : 9 };
+    }
+    // The "renderer" throws away context 5 the moment it navigates.
+    if (c.params.contextId === 5) throw new Error("Cannot find context with specified id");
+    return { result: { value: "INPUT" } };
+  };
+  // The shipped `isolatedWorld` + `withWorld` + `topFrameId` over one cache, not
+  // stubs: the bug *is* the cache, and a stubbed world would not have one.
+  const withWorld = new Function("anyCommand",
+    `const worldIds = new Map();
+     const IDLE_WORLD = "brotto-idle";
+     ${ptrSrc("topFrameId")}
+     ${ptrSrc("isolatedWorld")}
+     ${ptrSrc("withWorld")}
+     return withWorld;`)(sendCommand);
+  const ctx = {
+    tid: 1,
+    msg: { type: "evaluate", expression: "document.activeElement.tagName", isolatedWorld: true },
+    ws: { send: (s) => sent.push(JSON.parse(s)) },
+    dbg: { sendCommand },
+    withWorld,
+  };
+  vm.createContext(ctx);
+  new vm.Script(`(async () => {${BODY}})()`).runInContext(ctx);
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.deepEqual(sent, [{ type: "evaluate_result", value: "INPUT" }],
+    `a stale cached context id must be recreated and retried, not answered as an error: ${JSON.stringify(sent)}`);
+  const contexts = commands.filter((c) => c.method === "Runtime.evaluate").map((c) => c.params.contextId);
+  assert.deepEqual(contexts, [5, 9],
+    "exactly one retry, against the freshly created world");
 });
 
 test("the grow-only frame contract still holds for `evaluate`", () => {

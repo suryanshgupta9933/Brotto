@@ -7,7 +7,7 @@
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
 import { clearDelta } from "./observation/delta";
-import { bindFocus, boundedPoint, clearCursor, drawCursor, focusState, isolatedWorld, verifyTarget } from "./observation/pointer";
+import { bindFocus, boundedPoint, clearCursor, drawCursor, focusState, verifyTarget, withWorld } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -1759,15 +1759,22 @@ async function startRelay(
           // it reads. The isolated world shares the DOM, so `document` and
           // every element are the same objects; only the JS globals differ, and
           // `returnByValue` returns the same primitive either way.
-          const contextId = msg.isolatedWorld === true ? await isolatedWorld(tid) : undefined;
-          const r = await dbg.sendCommand(tid, {
+          const evaluate = (contextId?: number) => dbg.sendCommand(tid, {
             method: "Runtime.evaluate",
             params: {
               expression: msg.expression ?? "''",
               returnByValue: true,
               ...(contextId === undefined ? {} : { contextId }),
             },
-          }) as { result?: { value?: unknown } };
+          });
+          // `withWorld`, not `isolatedWorld`: a cached context id the renderer
+          // has thrown away makes this *error*, which reaches the server as an
+          // empty `evaluate_result` — and the run then refuses every action as
+          // "focus unknown" for the rest of its life. One failure recreates the
+          // world and retries, so the id cannot stay stale.
+          const r = (msg.isolatedWorld === true
+            ? await withWorld(tid, evaluate)
+            : await evaluate(undefined)) as { result?: { value?: unknown } };
           ws!.send(JSON.stringify({ type: "evaluate_result", value: String(r.result?.value ?? "") }));
         } catch (e) {
           ws!.send(JSON.stringify({ type: "evaluate_result", value: "", error: String(e) }));
