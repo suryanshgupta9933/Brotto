@@ -204,11 +204,11 @@ async def test_the_harness_stops_type_text_when_focus_failed():
     cdp.type_text_to_ref.assert_not_awaited()
 
 def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
-    """The harness decorates the relay's outcome as `Clicked [ref]: <result>`,
-    which puts a success-shaped prefix in front of the failure marker. A
-    derivation that only looks at the *start* of the string then writes
-    ok=True for a click that never happened — which is exactly what a live
-    Gmail run recorded."""
+    """`ok` is derived by membership of `Error executing`, not by prefix, so a
+    failure records as a failure whatever it is wrapped in. The harness used to
+    wrap click outcomes as `Clicked [ref]: <result>` and no longer does; this
+    is what stops that being re-introduced and a click that never happened
+    being written as ok=True — which is exactly what a live Gmail run did."""
     import json
 
     from brotto_orchestrator.agent.context import ActionCall, AgentDeps
@@ -542,3 +542,50 @@ async def test_a_refused_type_reaches_the_caller_unchanged():
     out = await _execute_action(call, deps)
 
     assert out == refusal
+
+
+@pytest.mark.asyncio
+async def test_a_click_outcome_reaches_the_caller_unchanged():
+    """The click path wrapped the relay's verdict as `Clicked [ref]: <result>`,
+    which asserted a destination a second time — and asserted one the relay
+    never checked. Session 3dab5bb6: on a canvas page the model clicked a node
+    it read as a cell, the text went to the formula bar, and both the history
+    line and the audit document said `Clicked [0:10183]: Clicked [0:10183]`.
+    Same class as the `type_text` decoration fixed in 11fa5fff."""
+    from brotto_orchestrator.agent.harness import _execute_action
+    from brotto_orchestrator.agent.context import ActionCall
+
+    verdict = "Clicked [0:10183]"
+    cdp = AsyncMock()
+    cdp.click_ref = AsyncMock(return_value=verdict)
+    cdp.refresh_target_map = AsyncMock()
+
+    deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u", policy=None)
+    call = ActionCall(action="click", action_args={"ref": "0:10183"})
+
+    out = await _execute_action(call, deps)
+
+    assert out == verdict, f"the harness restated the verdict: {out!r}"
+    assert out.count("0:10183") == 1, "the ref is asserted twice"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_click_reaches_the_caller_unchanged():
+    """`ok` is derived by membership, so the refusal still records as a
+    failure — but the string the model reads must carry the relay's reason,
+    not a success-shaped prefix in front of it."""
+    from brotto_orchestrator.agent.harness import _execute_action, _EXEC_FAILURE
+    from brotto_orchestrator.agent.context import ActionCall
+
+    refusal = ("Error executing: ref '0:10183' is not in the current AX tree")
+    cdp = AsyncMock()
+    cdp.click_ref = AsyncMock(return_value=refusal)
+    cdp.refresh_target_map = AsyncMock()
+
+    deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u", policy=None)
+    call = ActionCall(action="click", action_args={"ref": "0:10183"})
+
+    out = await _execute_action(call, deps)
+
+    assert out == refusal
+    assert _EXEC_FAILURE in out

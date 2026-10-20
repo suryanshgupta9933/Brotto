@@ -1081,7 +1081,9 @@ function setBadgeForResult(): void {
  * `navigated` push can become a step's accessibility tree. That is not a
  * slightly-stale tree: it is a tree of the page before the popover opened,
  * so the model is shown a dropdown that has not rendered yet and told
- * `Clicked [0:37563]: ok`. Measured on session 7d567b66 — the agent clicked
+ * `Clicked [0:37563]` — the relay's verdict verbatim, no `: ok` tail: the
+ * harness used to wrap it as `Clicked [ref]: <result>` and no longer does.
+ * Measured on session 7d567b66 — the agent clicked
  * the same branch-selector three times and never saw one branch.
  */
 async function sendObservation(tabId: number, reason: "observe" | "action" | "navigated"): Promise<void> {

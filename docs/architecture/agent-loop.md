@@ -896,14 +896,32 @@ recorded it in the audit document:
 'click' ok=True  ->  'Clicked [13829]: Error executing: ref 13829 is not in the current AX tree'
 ```
 
-The prefix was there, just not at the front: `harness.py` decorates the relay's
+The prefix was there, just not at the front: `harness.py` decorated the relay's
 outcome on the way through (`f"Clicked [{ref}]: {result}"`), so a
-`startswith` test misses every failure whose action had a name to print. Making
+`startswith` test missed every failure whose action had a name to print. Making
 the relays well-behaved was necessary and not sufficient — the derivation point
 had to change too, and it is now **membership**, `_EXEC_FAILURE not in outcome`,
 with the string named as a module constant rather than repeated. A prefix test
 is the kind of contract that only holds until something upstream formats the
 message. Pinned by `test_a_wrapped_failure_is_still_recorded_as_not_ok`.
+
+**…and the decoration itself was the same bug again, in the other direction.**
+Tolerating a mid-string failure marker is necessary but not sufficient: the
+wrapper asserted a destination the relay had never checked. The relay already
+returns `Clicked [0:10183]` on success and `Error executing: …` on refusal —
+both already name the ref and both are honest. So the harness stopped wrapping
+(`click` now returns the relay's string verbatim, exactly as `type_text` does
+after 11fa5fff), which deletes the double assertion: the audit document and the
+model's context read `Clicked [0:10183]`, not `Clicked [0:10183]: Clicked
+[0:10183]`. On session 3dab5bb6 the click landed on the formula bar instead of
+a cell and the record claimed the cell.
+
+`ok` is unaffected — membership survives either shape — and
+`_REFUSAL_RE`'s optional `Clicked [...]: ` group is **kept**: a run resumed from
+an audit document written before this change replays decorated outcomes into
+`step_summaries`, and that prompt builder still has to select them.
+Pinned by `test_a_click_outcome_reaches_the_caller_unchanged` and
+`test_a_refused_click_reaches_the_caller_unchanged`.
 
 **The model wrote `ref: 13829` because the prompt taught it to.** Two
 anti-examples in `SYSTEM_PROMPT` demonstrated the target as a *bare number*:

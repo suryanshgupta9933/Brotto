@@ -95,9 +95,10 @@ _INTERNAL_ACTIONS = {
 _TERMINAL_ACTIONS = {"task_complete", "cannot_complete"}
 
 # ponytail: a failed action marks its outcome with this string, and the audit
-# derives `ok` from its *absence*. Membership, not a prefix test: the outcome
-# is decorated as it travels (`Clicked [0:7]: <result>`), so a relay failure
-# arrives mid-string and a prefix test recorded it as a success.
+# derives `ok` from its *absence*. Membership, not a prefix test: an outcome
+# reaches this string mid-sentence — `_REFUSAL_RE` decorates it as
+# `Clicked [0:7]: Error executing: …` — so a prefix test recorded a relay
+# failure as a success.
 _EXEC_FAILURE = "Error executing"
 
 # A step's outcomes are joined and capped before they become a StepSummary.
@@ -152,8 +153,10 @@ def _summarise_outcome(
 
 
 # Either bare (`Error executing: …`) or decorated by the click path
-# (`Clicked [0:7]: Error executing: …`). Anchored so an outcome that only
-# mentions the phrase later does not drag an unrelated fragment in.
+# Optional prefix: the click path no longer wraps its outcome, but a run
+# resumed from an audit document written before that replays the old decorated
+# shape into `step_summaries`. Anchored so an outcome that only mentions the
+# phrase later does not drag an unrelated fragment in.
 _REFUSAL_RE = re.compile(rf"^(?:Clicked \[[^\]]*\]: )?{_EXEC_FAILURE}")
 # `clear_ref` builds `… could not be cleared — the page said {result!r}. …`
 # where `result` came from evaluating JS in the page and can hold a tagName
@@ -906,8 +909,9 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
     # step. In the history line it is one clause among twelve, so a model
     # reading for its next action reads past it. Derived from the summaries
     # rather than stored, so it works identically on a resumed run.
-    # Selected on a *prefix*, not a substring: the click path decorates its
-    # outcome as `Clicked [0:7]: Error executing: …`, so both shapes count,
+    # Selected on a *prefix*, not a substring: a run resumed from an older
+    # audit document still carries the click path's old
+    # `Clicked [0:7]: Error executing: …` shape, so both shapes count,
     # while an outcome that merely mentions the phrase mid-sentence does not.
     refusals = [
         _refusal_line(part)
@@ -2449,7 +2453,10 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                     # Approve → cache so subsequent hops/clicks in this
                     # task to the same domain don't re-prompt.
                     deps.visited_domains.add(target_domain)
-            return f"Clicked [{args['ref']}]: {result}"
+            # The relay already names the ref and already says whether the
+            # click happened; wrapping it restated a destination nobody
+            # re-checked. Same fix as `type_text` below.
+            return result
 
         elif action in ("click_xy", "focus_xy", "type_xy"):
             if audit is None:
