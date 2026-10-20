@@ -1277,6 +1277,14 @@ async def _redact_if_secret(deps: AgentDeps, ref: str) -> tuple[bool, bool]:
     does not guard one login, it ends the run's only way to see the page
     at all. Fail closed on the value; do not fail the run closed.
 
+    A blank accessible name with no attributes is the same absence, and it
+    is the one that actually cost a run: a Sheets cell has no backend node,
+    so every cell typed in took this branch, and a latch per cell vetoed
+    the pixel delta -- the only channel a canvas leaves -- for the rest of
+    the task. Latch on positive evidence (`is_secret_field`) and redact on
+    anything weaker; the value still never reaches the audit document,
+    because the scrub list takes every redacted value regardless.
+
     ponytail: this still redacts every typed value on a relay too old to
     answer get_attributes. Upgrade path: a per-task "attributes
     unavailable" counter, so the audit can say "this run had no DOM
@@ -1297,12 +1305,15 @@ async def _redact_if_secret(deps: AgentDeps, ref: str) -> tuple[bool, bool]:
             attrs = {}
     if not isinstance(attrs, dict) or not attrs:
         # No usable DOM signal — the accessible name is all that is left.
-        # Here we DID see the field, so a secret verdict is a finding and it
-        # latches; only an unresolvable ref is mere absence of evidence.
-        redact = is_secret_field(None, target.name) or not (
-            target.name or ""
-        ).strip()
-        return redact, redact
+        # Two claims, not one. The value is redacted either way (below), but
+        # the run-wide latch needs POSITIVE evidence: a name that positively
+        # identifies a secret field. A blank name is the absence of
+        # evidence, and latching on it poisoned the whole run on a canvas --
+        # a Sheets cell has no backend node, so every cell typed in latched
+        # `run_secrets` and vetoed the pixel delta for the rest of the task.
+        # That is the same distinction the unresolvable ref above makes.
+        named = is_secret_field(None, target.name)
+        return named or not (target.name or "").strip(), named
     redact = is_secret_field(attrs, target.name)
     return redact, redact
 
@@ -1333,13 +1344,17 @@ def _typed_field(call: ActionCall) -> str | None:
     return None
 
 
-async def _redact_press_key(deps: AgentDeps) -> bool:
-    """Is the currently focused field a password? Never raises. Fails closed.
+async def _redact_press_key(deps: AgentDeps) -> tuple[bool, bool]:
+    """`(redact_this_value, latch_run_secrets)` — never raises, fails closed.
 
     `press_key` takes no ref, so the field it types into is whatever the
     page last focused — and a single-character press_key is typing into
     that field just as much as type_text is. Over-redacting a named key
     would break every form submission, so only literal characters get here.
+
+    Like `_redact_if_secret`, an unavailable answer redacts the value without
+    latching the run: every Enter key on a canvas has an unavailable answer,
+    and latching there vetoed the pixel delta for the rest of a Sheets run.
 
     ponytail: no relay implements `focused_attributes()` yet, so every
     literal character currently redacts — the safe direction, since the
@@ -1348,15 +1363,17 @@ async def _redact_press_key(deps: AgentDeps) -> bool:
     """
     getter = getattr(deps.cdp, "focused_attributes", None)
     if getter is None:
-        return True
+        return True, False
     try:
         attrs = await getter()
     except Exception as exc:  # never raise: this runs mid-typing
         log.debug("focused-element lookup failed: %s", exc)
-        return True
+        return True, False
     if not isinstance(attrs, dict) or not attrs:
-        return True
-    return is_secret_field(attrs, attrs.get("accessibleName") or attrs.get("name"))
+        return True, False
+    secret = is_secret_field(
+        attrs, attrs.get("accessibleName") or attrs.get("name"))
+    return secret, secret
 
 
 def _action_target(call: ActionCall) -> str | None:
@@ -4474,6 +4491,13 @@ class AgentHarness:
         # password. A later step's thought quoting a value typed earlier is
         # the leak this closes.
         run_secrets: list[str] = []
+        # The subset that may veto pixels. `run_secrets` above is the scrub
+        # list (a later thought must never quote a value we redacted);
+        # `latched_secrets` is the positive-evidence list the screenshot and
+        # page-delta vetoes read. They differ only where redaction fired on
+        # absence of evidence — an unclassifiable field — and conflating them
+        # vetoed the delta for every remaining step of a canvas run.
+        latched_secrets: list[str] = []
 
         for step in range(first_step, self.MAX_STEPS):
             deps.step_number = step
@@ -4609,7 +4633,8 @@ class AgentHarness:
             # way either way.
             try:
                 page_delta = await deps.cdp.get_page_delta(
-                    deps.policy, redactions=redactions, run_secrets=run_secrets)
+                    deps.policy, redactions=redactions,
+                    run_secrets=latched_secrets)
             except TabUnreachable as e:
                 log.info("[%s] step %d  page delta unavailable (%s); change "
                          "detection is unknown for this step",
@@ -4644,7 +4669,7 @@ class AgentHarness:
             # resolved model (`None` = unresolved, which is not a denial). A
             # blocked run branches on that and stops before the turn is built.
             vision = await _vision_fallback(
-                deps, targets, page_text, redactions, run_secrets)
+                deps, targets, page_text, redactions, latched_secrets)
             if vision.image:
                 log.info("[%s] step %d  screenshot attached (%d B base64)",
                          deps.user_id, step, len(vision.image))
@@ -5202,6 +5227,7 @@ class AgentHarness:
             # textbox per step, unchanged.
             redact_flags: list[bool] = []
             typed_secrets: list[str] = []
+            latched: list[str] = []
             for call in decision.actions:
                 field = _typed_field(call)
                 if field is None:
@@ -5223,15 +5249,21 @@ class AgentHarness:
                 redact, latch = (
                     await _redact_if_secret(deps, call.action_args.get("ref", ""))
                     if field == "text"
-                    else (True, await _redact_press_key(deps))
+                    else await _redact_press_key(deps)
                 )
                 redact_flags.append(redact)
-                if latch:
-                    typed_secrets.append(str(call.action_args.get(field) or ""))
-            # Into the run-wide list the moment it is known, so the sinks
-            # later in this same step see it too and not only the ones after
+                value = str(call.action_args.get(field) or "")
+                if redact and value:
+                    # Scrub list: every value we refused to write, whether or
+                    # not we could prove it was a credential.
+                    typed_secrets.append(value)
+                if latch and value:
+                    latched.append(value)
+            # Into the run-wide lists the moment they are known, so the sinks
+            # later in this same step see them too and not only the ones after
             # the next step begins.
             run_secrets.extend(v for v in typed_secrets if v)
+            latched_secrets.extend(v for v in latched if v)
             # The focus baseline was taken at the top of this step, before
             # `_plan_step` — see the `_capture_step_focus` call there.
             # Actions dispatched to the page so far this step. Read-only ones
@@ -5253,7 +5285,7 @@ class AgentHarness:
                 ) if call.action == "press_key" else ""
                 outcome = refusal or await _execute_action(
                     call, deps, audit=audit, turn=a_turn, redactions=redactions,
-                    run_secrets=run_secrets, targets=targets)
+                    run_secrets=latched_secrets, targets=targets)
                 # From the OUTCOME, not the verb: a click the hit-test refused
                 # (or that missed, or was off-screen) moved nothing, and
                 # arming off on it would let the press_key behind it land on

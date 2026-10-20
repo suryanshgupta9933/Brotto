@@ -11,6 +11,10 @@
     `tokenize` and an exported `Session ID` column header are ordinary words
     on a document app, and each one latched the same permanent veto.
 
+(c) A blank accessible name with no attributes, which is what a canvas cell
+    looks like: the same absence of evidence as (a), reaching the latch
+    through a different branch, and it poisoned the run the same way.
+
 The veto rule itself is unchanged: `redactions or run_secrets` still blocks
 both the delta and the screenshot (`_capture_page`, `harness.py:2212`). What
 changed is that an ABSENCE OF EVIDENCE is no longer promoted to a finding.
@@ -87,22 +91,57 @@ async def test_a_named_secret_field_still_latches_the_run():
 
 
 @pytest.mark.asyncio
-async def test_a_blank_name_with_no_attrs_still_latches():
-    """A field with no accessible name and no DOM signal is unclassifiable,
-    and unclassifiable is still a field we saw — the ponytail ceiling in the
-    docstring. Only the *ref* is different."""
+async def test_a_blank_name_with_no_attrs_redacts_the_value():
+    """A canvas cell: no accessible name, no DOM signal. Fail closed on the
+    VALUE — a canvas can be a password widget and nothing here can tell it
+    from a spreadsheet cell."""
     deps = _deps_with_targets([SemanticTarget(ref_id="0:2", tag="input", role="textbox", name="")])
-    redact, latch = await _redact_if_secret(deps, "0:2")
+    redact, _latch = await _redact_if_secret(deps, "0:2")
+    assert redact is True
+
+
+@pytest.mark.asyncio
+async def test_a_blank_name_with_no_attrs_does_not_latch_the_run():
+    """The live-run bug. Latching here vetoed the page delta and the
+    screenshot for every remaining step of a Sheets run, because every typed
+    cell on a canvas lands in this branch. Absence of evidence is not
+    evidence — the same line the unresolvable ref draws."""
+    deps = _deps_with_targets([SemanticTarget(ref_id="0:2", tag="input", role="textbox", name="")])
+    _redact, latch = await _redact_if_secret(deps, "0:2")
+    assert latch is False
+
+
+@pytest.mark.asyncio
+async def test_a_password_typed_by_its_type_still_latches():
+    """The escape-hatch check on that narrowing: `type="password"` is the
+    definitive signal and it still reaches the latch, named or not. A blank
+    name cannot suppress it."""
+    deps = _deps_with_targets([
+        SemanticTarget(ref_id="0:3", tag="input", role="textbox", name="",
+                       backend_node_id=42)])
+    deps.cdp.get_attributes = AsyncMock(return_value={"type": "password"})
+    redact, latch = await _redact_if_secret(deps, "0:3")
     assert redact is True and latch is True
 
 
 @pytest.mark.asyncio
 async def test_pressing_a_literal_key_still_latches():
-    """`press_key` has no ref, so it is a (True, answer) pair — the shape
-    change must not have quietly turned it into a never-latch."""
+    """`press_key` has no ref, so it is a pair: no focused-element signal
+    redacts, and a `type="password"` focused field latches."""
     deps = _deps_with_targets([])
     deps.cdp.focused_attributes = AsyncMock(return_value={"type": "password"})
-    assert await _redact_press_key(deps) is True
+    redact, latch = await _redact_press_key(deps)
+    assert redact is True and latch is True
+
+
+@pytest.mark.asyncio
+async def test_pressing_a_literal_key_with_no_signal_does_not_latch():
+    """No relay implements `focused_attributes()` yet, so every Enter key on
+    a canvas has no signal — latching there is the same poisoned run."""
+    deps = _deps_with_targets([])
+    del deps.cdp.focused_attributes
+    redact, latch = await _redact_press_key(deps)
+    assert redact is True and latch is False
 
 
 @pytest.mark.asyncio
