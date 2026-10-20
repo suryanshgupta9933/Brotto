@@ -650,9 +650,9 @@ and the tree each time came from an arbitrary mid-repaint instant. Gmail and
 Sheets are the same fact about the world at two frequencies; only a
 rate-relative test says so.
 
-`noEarly` still sets the exit to 0 and is unchanged: it is the caller's
-fallback on a page that kept moving across rescans, where the full quiet window
-is the thing being preserved.
+`noEarly` still sets the exit to 0 and is unchanged. It now has **no caller** —
+the second gate that passed it is gone (see `agent-loop.md`), and it was left in
+place as the gate's own API rather than deleted alongside its last use.
 
 The SPA retry underneath it changed condition at the same time. It retried
 while `axTargets.length < 3`, which is wrong in both directions: a page that

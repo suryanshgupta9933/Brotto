@@ -448,50 +448,64 @@ the same Gmail calibration point.
 **Misclassifying toward "busy" is the safe direction and cannot corrupt
 anything.** The sample only ever resolves `waited: false`; it has no path to
 `waited: true`, so it can never assert a page is still when it is not. The
-caller rescans and compares fingerprints, and if the page turns out to have been
-moving it falls back to the full gate. Misclassifying toward "quiet" is the
-dangerous direction and the sample structurally cannot do it.
+caller rescans and compares fingerprints, and disagreement means the guess did
+not hold. Misclassifying toward "quiet" is the dangerous direction and the
+sample structurally cannot do it.
 
-`waitForStable(tabId, {noEarly: true})` sets the sample window to 0, which is
-the caller's fallback and the mode that keeps a slow renderer's full window
-intact. `Stability.early` marks a page the sample claimed, so `metrics` says
-which path a given observation took.
+`Stability.early` marks a page the sample claimed, so `metrics` says which path
+a given observation took.
 
 ### The short-circuit is a guess, so the rescans are the arbiter
 
-`captureObservation`'s retry loop already compared `role|name|value`
-fingerprints across scans and broke on the first match — the check that decides
-whether an unsettled page is worth reading again. What it discarded was its exit
-reason, which is the only thing that distinguishes "the sample was right, the
-page had settled" from "we read it too early and owe it another look."
+The rate exit is a claim about the page: *already mutating hard ⇒ past its
+initial render ⇒ a silent window cannot happen, so waiting for one only ends at
+the deadline.* It is a good claim and an untested one. `captureObservation`'s
+rescan loop is what tests it — two full re-reads 800ms apart, comparing
+`role|name|value` fingerprints and breaking at the first match. Agreement means
+the guess held. Every scan differing means the page was still moving and the
+short path read it early; the disagreement *is* the signal, and the response is
+already in hand — what ships is the **last** scan, the freshest tree, not the
+one the gate handed back.
 
-```ts
-if (stability.early && !settledByFingerprint) {
-  await waitForStable(tabId, { noEarly: true });
-  const settled = await extractAx(tabId);
-  ...
-}
-```
+The rescans were never a retry mechanism, which is what the surrounding code's
+shape suggested. They were the empirical check on the rate exit, and the
+settling work they used to do was delegated to a second gate.
 
-On the fast path the rescans match and this block never runs, so the whole
-saving stands. On the slow-renderer shape every rescan differs, the full quiet
-window is paid, and one more scan follows — which is the pre-existing
-behaviour, unchanged.
+**That second gate is gone, and it bought nothing.** It ran
+`waitForStable(tabId, {noEarly: true})` only when the rate exit had fired *and*
+the rescans disagreed — and `noEarly` disables the rate exit, so its only
+reachable exits were a 3s silence or the full 10s deadline. Reaching the branch
+at all means the page's mean mutation gap was already shorter than the quiet
+window, so the silence was arithmetically unlikely to arrive and the typical
+outcome was the deadline: a tree from an arbitrary mid-repaint instant, which is
+precisely the outcome the wait existed to prevent. It could not fire on the case
+its own comment cited either — `auth-slowjs`, a sparse mutator with a 5000ms
+control — because `count < RATE_SAMPLES` means it never forms a rate, so `early`
+is never set there. The branch was unreachable on the slow renderer it was
+written for, and expensive on the fast one.
 
-**That block is a second charge, and the log line only ever accounts for the
-first.** `metrics.stability` is written from the *first* `waitForStable` alone.
-When the rate exit fires **and** the two fingerprint rescans disagree, this
-`{noEarly: true}` call pays up to another full `DEADLINE_MS` — up to another
-10s — and none of it appears in the `stability=…ms` figure, because that figure
-describes a gate that already returned. `scans` does rise, so the second charge
-is inferable; the wall-clock number is not, and on a canvas page this is the
-largest remaining latency in the loop.
+It was also a **second charge the log line never accounted for.**
+`metrics.stability` is written from the first `waitForStable` alone, so that
+extra up-to-10s never appeared in the `stability=…ms` figure — `scans` rose, but
+the wall-clock number did not, and on a canvas page it was the largest remaining
+latency in the loop.
 
-**Not fixed, and recorded here so it is not rediscovered as a mystery.** A fix
-means accumulating both gates' `elapsedMs` into the metric rather than keeping
-the first, and that is a one-line change nobody has made because the measurement
-has not been taken. Until it is, **do not read `stability=…ms` as the cost of
-observation.**
+**The accepted cost, stated plainly:** a page whose every rescan differs is now
+read ~1.6s late rather than up to 10s late. It is still moving. The next step
+re-observes — and a page still moving at capture time is not made settled by
+waiting longer for it.
+
+`StableOpts.noEarly` remains in `stability.ts` and remains pinned by a test, and
+no caller passes it any more. It was left in place deliberately as the gate's
+own API rather than deleted on the side.
+
+**Still outstanding, and a product decision rather than an oversight:** the gate
+requires **zero** mutations for a continuous 3s, and on a spreadsheet a
+blinking cursor plus autosave produces a trickle that never reaches it — so
+Sheets captures still tend to run to the 10s deadline. Turning that into a rate
+tolerance changes what a captured observation guarantees, so it was held back
+rather than guessed at. Reading this section as a solved canvas story is reading
+it wrong.
 
 `scripts/test-observation-rescan-guard.test.js` extracts `captureObservation`
 and pins all four shapes, because a guard that silently stops firing hands the
@@ -546,8 +560,7 @@ Three consequences, in descending order of how much they mislead:
 
 - **`stability=…ms unsettled` does not mean the gate used its whole window.** A
   reader measuring the cost of the gate from that line will overestimate it by
-  up to 10s per observation, in the same direction as the invisible second
-  charge above.
+  up to 10s per observation.
 - **`Stability.early` is carried all the way to the metrics and is never
   rendered.** It is computed, sent, logged by `waitForStable` itself on the
   deadline-only path, and then dropped at the one place a human reads it. The

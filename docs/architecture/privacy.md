@@ -391,35 +391,48 @@ restores, and call `_persist_domain_grant` where the pre-flight approval lands �
 and neither is a change to what the *card* shows. Until one ships, this doc is
 the only place the difference is written down.
 
-**3e. Redacting a value and latching the run are two different claims (2026-10-20).**
-`_redact_if_secret` used to return one `bool`, and `True` meant both "redact
-this typed value" and "this run touched a credential". The second is not a
-variant of the first. `redactions` is per-step; `run_secrets` is latched for the
-**whole run**, and its only effect is to veto the pixel delta and the screenshot
-on every remaining step — the two channels that redaction cannot reach. So
-"redact one argument" and "blind this run's perception for its rest" were welded
-to one return value, and the wiring was wrong.
+**3e. Two lists, because "redact this value" and "this run touched a credential"
+are two different claims (2026-10-20).**
+For a while one list, `run_secrets`, was doing both jobs, and that conflation was
+the bug. It is now split, and the split is the evidence bar:
 
-The case that broke it is **an unresolvable ref** — a `ref` that matches no entry
-in `prev_targets`. That is the *absence* of evidence, not evidence. On a
-canvas-rendered app every typed cell is unresolvable, because there is no
-element and therefore no ref; the false positive was not one login, it was the
-run. On a blank spreadsheet that latched on step one and vetoed the pixel delta
-— which on a canvas app is the **only** channel that tells the agent its edit
-landed — on every step thereafter.
+- **`run_secrets` takes every redacted value.** It is the *scrub* list, read by
+  `_safe_thought`, `_safe_reasoning` and `_summarise_outcome`. That is the
+  reason it exists: a later step's thought must never quote a value the agent
+  typed on an earlier one. It previously took only the latched subset, so it is
+  now strictly **more** scrubbing than before, not less.
+- **`latched_secrets` is what the three veto sites read** — `get_page_delta`,
+  `_vision_fallback` and `_execute_action` — and it carries the higher bar:
+  positive identification that a credential was touched, not merely that a value
+  was redacted.
 
-So the function returns `(redact, latch)`. **An unresolvable ref still redacts
-the value** — fail closed on the value is unchanged and remains correct, because
-the value could be a password and we cannot tell. **It does not latch the run.**
-A ref that *did* resolve but whose attributes came back unusable still latches,
-because there the field was genuinely seen and the verdict is a finding.
+**Redaction fires on the absence of evidence; the run-wide veto cannot.** "This
+one value looks like a password" concerns one argument in one action and must
+fail closed, because you cannot prove a canvas cell is not a password widget.
+"This run touched a credential" vetoes pixels for *every remaining step*, so it
+requires positive evidence, and `_redact_if_secret` / `_redact_press_key` return
+that as a second element rather than folding it into the first.
 
-**The veto rule did not change.** `redactions or run_secrets` still vetoes both
-the delta and the screenshot; `run_secrets` is still run-wide; there is no new
-setting and no way to override it. "We narrowed the secret detector" and "we
-weakened the secret gate" are different claims and **only the first is true** —
-what was narrowed is which inputs are allowed to *assert* that the run saw a
-credential, and nothing about what happens to a run that did.
+What the conflation cost, in a live Google Sheets run: the grid is a `<canvas>`,
+its AX tree is 62 targets and does not change when you type, so the pixel delta
+and the screenshot were the **sole** signal that an edit landed. One
+blank-named grid cell latched the flag, and the agent went blind for the rest of
+the run — re-clicking the same cell seven times. A false positive here was never
+one login; it was the run.
+
+**The second instance of the identical bug, found only because the first was
+fixed.** `_redact_press_key` returned a bare `bool` that its caller turned into
+`latch=True`, on a path that answers "unknown" three times out of four because
+no relay implements `focused_attributes()` yet. Every literal keypress — every
+Enter on a canvas — latched the poisoned run. The lesson generalises past this
+file: **"fix the branch that was named" and "fix the bug" are different
+achievements, and the grep is what tells you which one you did.**
+
+**The veto rule itself did not weaken.** `redactions or run_secrets` still vetoes
+the delta and the screenshot, the veto is still run-wide, and there is no new
+setting and no override. What changed is which inputs are allowed to *assert*
+that the run saw a credential — not what happens to a run that did.
+
 
 **3f. A secret-name boundary is a word split, not a lookaround.** The old
 matcher matched mid-word: `tokenize`, `secretary`, `author`, `authority` and
