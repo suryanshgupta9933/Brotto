@@ -417,6 +417,13 @@ description was the page title rendered as *"the agent wants to District by
 Zomato — Best Go Karting in Gurgaon (2026)"*, which is a page, not an action. A
 domain-scoped approval does not need a per-action label.
 
+**The grant is per-domain, but the gate that consults it is not uniformly
+timed.** A ref `click` is approved *before* dispatch, from the link's `href`. A
+coordinate click cannot be — the page is a canvas there and nothing about its
+destination is readable — so it is gated after. Same grant, same
+`visited_domains`, one approval covering both; when the question arrives is in
+`agent-loop.md`.
+
 ## Two boundaries that are structure, not settings
 
 Both are unconditional, and both should stay that way:

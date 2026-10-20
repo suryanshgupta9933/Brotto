@@ -315,6 +315,24 @@ Pinned by `tests/test_grounding_outcome.py` — including the case that matters
 most, where the fake executor asserts the page updated on *every* action and the
 assertion is that `changed` is still `None`.
 
+**An approval caveat is card text, and the split that keeps it out of the audit
+is structural, not editorial.** A coordinate click cannot be checked before it is
+dispatched (`agent-loop.md` has why), so every coordinate approval card carries
+the caveat that the destination is unreadable in advance. It rides `_ask_user`'s
+`frame_reason`, while `reason` — the argument `audit.record_prompt` is called
+with — carries the audit reason. Merging them would put "this may leave the
+site" into every user's audit document, and that sentence is the one part of the
+approval with no domain and no page content in it. **A reader of the audit
+document sees that a domain was approved; the caveat about what could not be
+checked for it exists only on the card the user actually saw.**
+
+**A pre-flight `click_cross_domain` event is a grant, and a resume reads it.**
+The cross-domain gate records `policy_events` with
+`user_decision: "approved"` *before* the click it authorizes, so a session
+resumed from the audit restores that grant the same way a `first_navigation` or
+`first_time_seen` approval does — including for a click that never ran. That is
+correct: the consent to the site is the fact being stored, not the navigation.
+
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
 Brotto-operated service, we run no servers"* and closed out each section with a

@@ -1090,6 +1090,136 @@ and `tests/test_ax_filter.py` (the markers). Every case was run against the
 pre-fix source first. **Not verified in a browser** — whether GitHub's Create
 button was in fact off-screen is inferred from the form, not observed.
 
+### The cross-domain gate asks before dispatch — for the verbs that can
+
+A click that hops to a new eTLD+1 used to be gated **after** it ran: dispatch,
+`sleep`, read the URL, then ask. By the time the user was asked, the navigation
+had already left their logged-in tab carrying a form POST, an OAuth code or a
+`?token=`, and a deny could abort the task but not un-navigate. That is an
+approval in the future tense about something already done.
+
+Two verbs, two shapes, and the difference is not a preference — it is what each
+verb knows before it presses.
+
+**Ref `click` gets a pre-flight.** `_click_ref_href` reads the `href` off the
+step's *own* target list (`observation/index.ts`, `propUrl`) and returns the
+absolute destination; `_preflight_cross_domain_click` then runs
+`_should_prompt_cross_domain_click` — **unchanged**, with the href standing in
+for the URL the click will land on, so the six existing pure-helper tests cover
+the predicate the gate runs on.
+
+**The href is used as-is and never re-resolved, because `urljoin` is not
+WHATWG.** Chrome fills that property with the *resolved* URL, so an absolute
+href is already what the browser would navigate to and resolving it again can
+only introduce disagreement. The case that decided it: for `\evil.com/x` a
+browser resolves to `//evil.com/x` and goes cross-origin, while `urljoin` keeps
+it on this page — so a relative href is exactly the input where a Python
+resolver invents a *same-domain* verdict the browser would contradict.
+Therefore a relative href and a protocol-relative one are `None`, not resolved.
+So are `javascript:`, `data:` and `file:` (no eTLD+1 to read) and any netloc
+carrying `@`, which a browser reads as the *host* while a glance reads it as the
+userinfo (`https://bank.example@evil.example/`). **Refuse the shape rather than
+pick a side.** All of them land on the same `None` as an unreadable href, and
+`None` means *no destination we can read*, not *same domain* — see below.
+
+**No wire change was needed, and that is the reason it was possible.** The
+extension already puts each link's CDP `url` property on the target, and
+`extension_relay._to_semantic` already maps it to `SemanticTarget.href`. The
+pre-flight reads a field the model was already shown; it does not invent one.
+
+**Two meanings of "no href", and the difference is load-bearing.** A button
+whose handler navigates in JS, a form submit, and a ref that has aged out of the
+tree all return `None` — and `None` means *no destination we can read*, **not
+*same domain***. Collapsing the two produces a gate that looks load-bearing and
+resolves nothing for exactly the cases that most need it. `None` falls through
+to the post-dispatch check, which stays for three reasons: it is defense in
+depth, it is the only line for an href that cannot be read, and the JS-nav case
+is still caught one step late by design.
+
+**The blacklist is read first, before any question is asked.** `navigate` reads
+the same policy against its target before dispatch, and the post-click check
+reads it after; a ref `click` now does the same. This is the one verb where the
+destination is readable in advance, so asking first would downgrade the user's
+own "never go here" into "please confirm" — a block is a block, with no approval
+path, and nothing joins `visited_domains`.
+
+**The href is re-read after the user answers, and that re-read has no
+substitute.** The page can rewrite an anchor's `href` inside the window the
+human spends on the card, and then the approval is consent to `good.example`
+being used to reach `evil.example`. A re-read of the *page URL* cannot catch
+that — the page did not move — so it has to read the href, exactly as
+`_coordinate_action` re-reads the point. Disagreement returns `_EXEC_FAILURE`,
+not a friendly sentence: `ok` is derived from that, and a soft refusal would
+audit a refusal as a successful click. The re-read can confirm nothing when
+`get_targets()` hands back the relay's reusable post-action frame rather than a
+fresh capture; the post-click gate remains the line for that case.
+
+**The post-click check is now phrased in the past tense on purpose.** Two prompts
+that both predict cannot both be right, and the one after the fact must not read
+like a veto that still has time to stop it — it says *"The page navigated to X.
+This has already happened."* Both halves share `visited_domains`, so approving in
+the pre-flight means the post-click check sees a domain it already has and stays
+silent: usually **one prompt per domain per task**, not one before and one after
+the same click.
+
+**Open gap: `target=_blank` gets no post-click prompt either.** The navigation
+lands in a tab this relay is not driving, so `get_current_url()` returns the
+*old* tab's URL, the eTLD+1 matches, and the gate says nothing. The fix is a
+`target` field read off the link and mapped onto the target the extension already
+sends — the target object itself is on the wire; nothing reads `target` today.
+**Not built.**
+
+#### A coordinate click is gated and audited, not prevented
+
+`click_xy` / `focus_xy` / `type_xy` run `_coordinate_cross_domain_after`, a
+**post-dispatch** gate reusing the same BLOCK / prompt / `record_policy` /
+`visited_domains` machinery. Before it, a coordinate click had **no policy read
+on where it landed at all**, and could carry a run onto a blacklisted site.
+
+**A pre-flight is impossible for this verb, not merely unavailable.** This is
+the part someone will try to "fix". `_coordinate_action` dispatches only where
+`elementFromPoint` is a `CANVAS` — anything else refuses — and a canvas has no
+href, no AX role and no destination; whatever leaves the page leaves through a
+JS handler on the pixel. The two guards that look like they close the gap do
+not: `boundedPoint` runs **inside the extension**, after this server has already
+decided, and `verifyTarget`'s own docstring says *"Nothing here runs for
+`click_xy` / `focus_xy` / `type_xy`"* — those arrive with no ref and no id, and
+refusing them on an absent id would break the only way to act on a canvas page.
+
+So the strongest available form is a report. It still buys three real things:
+the landing is checked against the user's blacklist **in the same step**, the hop
+is recorded under the identity the user was shown, and the domain joins
+`visited_domains` so one approval covers the rest of the task. The deny path
+**aborts** rather than returning to the loop — a declined pixel is a statement
+about one point, but a page that has already navigated is not something the model
+gets to try again on.
+
+**The consent the user can get before the press is a caveat, not a check.**
+Every coordinate approval card now carries `_COORDINATE_CROSS_ORIGIN_CAVEAT` —
+*"Nothing about where this press leads can be read before it happens: the page
+is a canvas there, so this may open another site. If it lands somewhere new,
+you will be asked then."* The last sentence is **conditional on purpose**:
+`_coordinate_cross_domain_after` skips a domain already in `visited_domains`, so
+an unconditional "you will be asked" is a promise the run can break — on a card
+that fires for every canvas press, which is exactly the sort of claim that
+teaches a user to stop reading it. It rides `frame_reason`, not `reason`, so it
+is card-only: no domain, no page text, nothing that reaches the audit document.
+See `privacy.md`.
+
+**A click that navigates *during* the approval wait is already caught
+pre-dispatch.** The post-approval recheck in `_coordinate_action` re-reads the
+viewport, the topmost element *and* the URL after the human answers, and refuses
+on any disagreement. So the only hop that escapes is the one the click itself
+causes.
+
+D2 already exempts `click_xy` from "diff tiles are never a targeting coordinate
+source". That exemption is documented, and its cost is precisely this: the
+coordinate path acts on a target nothing can vouch for. Gated and audited is
+what it is; prevented is not on offer.
+
+Pinned by `tests/test_click_preflight.py` and
+`tests/test_coordinate_cross_domain.py`.
+
 ### The model could not press a key
 
 A 19-step HDFC UPI run burned 158s and ~19 model calls without executing a single
