@@ -223,6 +223,31 @@ produce that echo, and `focusState` **reads `activeElement.value` in the page**
 to decide whether a clear was a no-op — but only its `.length`, it returns a
 boolean, and the value never crosses back out of the evaluate.
 
+**One probe reads the page's text, and it reads it to answer a closed
+question.** `GRID_DELIVERY_PROBE` (`observation/pointer.ts`) exists because a key
+event leaves no trace of its own: when a grid replaces its own editor
+mid-typing, the only way to know where the typed text went is to look for it.
+It reads the `value` and the `textContent` of every `input`, `textarea` and
+`contenteditable` in the document and compares each against a needle that is
+the text the agent is *typing* — the agent's own payload, never the user's own
+input — so it reads the contents of editors *other than* the grid's, which
+nothing else on the typing path does. (The neighbouring read is narrower:
+`editorText` brings the grid editor's **own** text back to the extension for a
+local before/after comparison, and it never leaves the browser either.)
+
+Three things keep this read where it is. It happens **in the page**, in the
+extension's isolated world, so the page cannot observe the comparison and its
+own prototypes cannot shadow the accessors that read the values. It is
+**bounded to a recognised application**: the probe looks the document's origin
+up in `GRID_ADAPTERS` first and refuses `grid-editor-unrecognised` without
+inspecting a document that is not `https://docs.google.com`, so it is not a
+general "read the page" capability — only the one application the grid path
+was written for. And **nothing crosses back out**: the only thing it returns
+is `in-grid`, `foreign` or `unknown`, and the only thing the server hears is a
+refusal reason from the closed vocabulary above. So the table of what lives
+where does not change: this is a read of page content, not a new place page
+content lands.
+
 **The identity read is the one page question with no page script in it.**
 `FOCUS_PROBE` still reads `document.activeElement`, so it is page-answerable —
 which is why it is now the *corroboration for the effect*, not the authority for
