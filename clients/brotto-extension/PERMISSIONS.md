@@ -52,7 +52,11 @@ given — the accessibility tree and the visible page text. That includes a
 `<canvas>` (Google Docs, Figma, a chart, a spreadsheet grid) with no
 accessibility node and no readable text of its own, and it includes a canvas
 app whose *toolbar* gives a rich tree while the content it is drawing is in
-none of it. The extension issues
+none of it. (Several of those apps name a screen-reader shortcut in their own
+page text; pressing it puts the *selected cell* back in the tree, which checks
+a keystroke without a picture. The picture is still requested on the same
+conditions as before and the capture rules below are unchanged by it.) The
+extension issues
 this command from exactly one call site, in `background.ts`, in response to a
 relay frame from your own server. It is not periodic and not automatic: with no
 task running, nothing is captured.

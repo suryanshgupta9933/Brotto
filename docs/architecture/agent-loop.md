@@ -957,7 +957,7 @@ harness keeps no copy of the previous one and so cannot confirm a change by
 comparison. A step on a page like this stays unconfirmed until something else
 confirms it.
 
-### The keyboard is how you act; the picture is how you know
+### The keyboard is how you act; the tree is how you know, where there is one
 
 The canvas page reduced the model to clicking pixels, and **a coordinate in a
 spreadsheet is a guess at which cell that is** — the app has no element to
@@ -974,7 +974,69 @@ was sent and never that the cell changed, so **a keyboard step is UNVERIFIED by
 construction** — and repeating it teaches nothing. And a key press tells the
 model nothing about the page: not what is selected, not what is there. What it
 wants next, and whether its last move landed, still comes from the picture.
-The keyboard is how you act; the picture is how you know.
+
+#### The page names its own accessibility mode, and it is read before the page is called empty
+
+The second limit above was true and **unconditional**, and it was wrong as
+written. An app whose grid is a `<canvas>` knows that, and ships a
+screen-reader mode behind a chord — and it usually says so **in its own page
+text**, which the loop already has. Google Sheets reads "Turn on screen reader
+support / To enable screen reader support, press ⌘+Option+Z". So the prompt now
+tells the model to read a canvas page's text for such a shortcut and press it,
+once, early, before typing anything, spelling the modifiers as the numbers the
+prompt already spells Home's with (Meta=4, Alt=1, so Meta+Alt is
+`press_key("z", modifiers=5)`). **Do not guess a chord the page did not name**
+— a guessed shortcut is a random keystroke into a grid — and do not skip one
+because the page looks empty, because on a canvas the shortcut is sometimes the
+only text there is.
+
+**What that measured, and what it did not.** Measured on a live Google Sheet in
+Chrome: pressing that chord flips the accessibility layer on and the tree
+carries the grid again **for the cell the model is in** — the name box is a
+`textbox value="A2"` holding the current cell's ADDRESS, the formula bar is a
+`textbox value="..."` holding that cell's CONTENT, and a live region announces
+the two together. Both follow selection: ArrowDown moved A1/`president_number`
+to A2/`1`. The grid itself stays a `<canvas>`; it is the accessibility layer
+that appears, not the DOM. **None of this needed new plumbing** — the extension
+already captures `node.value?.value` (`observation/index.ts`) and
+`filter_ax_targets` already renders `value="..."` and already keeps a node that
+has a value and no name (`ax_filter.py`), and `press_key` already speaks CDP's
+modifier bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8) with `keyCodeFor` handling a
+single letter. **One page, one browser:** a real run's model-facing behaviour is
+not yet verified, and the five tests in
+`tests/agent/test_canvas_accessibility_mode.py` assert the *prompt's wording* —
+that it names the shortcut, the bitmask, the name box and the ceiling — and
+never that a model read the grid because of it.
+
+**The ceiling is one cell, and it is stated where the model will read it.** The
+mode reports the selected cell. It is **not a read of the whole sheet**, so no
+claim about neighbouring or distant cells follows from it, and the prompt says
+so in the same paragraph as the confirmation rather than leaving it to be
+inferred from a convenient one. Read the name box and the formula bar *before*
+the next move and again *after* a write; a content the tree reports for the
+address you were in is the cell that was written, which is how a keyboard step
+is checked — not by squinting at the picture, and not by typing it again and
+seeing the cell change either time.
+
+**So the old sentence is scoped, not deleted.** "The keyboard is how you act;
+the picture is how you know" was the rule for a page with **no accessibility
+mode**, and there it still is: the picture remains the only view of the cells and
+the keyboard remains how you act. It is not the rule on a page that ships a mode
+and names it. Two contradicting paragraphs are worse than either one alone, so
+the replacement states both branches rather than leaving the superseded claim
+standing next to the correction.
+
+**No gate moved.** This is worth saying because the natural misreading of "the
+canvas problem is fixed" is "something was loosened". Nothing was. The pixel
+veto (`_PixelVeto`, `latched` and the two-step ambiguous window) is unchanged
+and still runs **before** the model is resolved; `_MAX_CANVAS_CAPTURES_PER_TASK`
+is still 40 and the picture still rides along with the veto; the redaction rules
+are untouched; `BROTTO_VISION_CAPTURE` is still default-off; the blocklist is
+still the user's. The commit is one paragraph of `SYSTEM_PROMPT` and its tests —
+no product code. **The point of the change is that the model stops needing a
+picture**, so the privacy cost of a canvas task should not grow; nothing in this
+section is a licence for a wider capture and `privacy.md` §3's account of that
+trade stands unchanged.
 
 **Home is sent two ways, and that is not a branch.** `Ctrl+Home` and `Cmd+Home`
 are the same intent on different keyboards, and this project forbids
@@ -1070,6 +1132,15 @@ the agent re-clicked the same cell seven times — reading its own repeated
 failure as a page that refused to change. The incident is recorded in
 `privacy.md` §3e; the loop's half of it is that a run on a canvas was left
 with no evidence to correct itself with.
+
+**"Sole signal" was true of that run and is now a choice.** The tree did not
+change because the mode was off, and Sheets names the chord that turns it on in
+its own page text — see "The page names its own accessibility mode" above. With
+that mode on the tree carries the selected cell, so a canvas step has a channel
+that is not pixels and is not vetoed by a veto about pixels. **The window
+below is unchanged**: an ambiguous write still withholds the delta and the
+screenshot for the armed step and the two that follow, because those are
+exposures of what the user typed, and the tree does not redact.
 
 **The second instance of the identical bug, found only because the first was
 fixed.** `_redact_press_key` returned a bare `bool` that its caller turned into
