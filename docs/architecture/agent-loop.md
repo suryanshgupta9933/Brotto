@@ -949,6 +949,61 @@ channel the canvas case depends on, so the canvas case is not closed by the
 window. The accessibility tree reaching a provider is a separate disclosed gap
 (`privacy.md`) and is not closed by any of this.
 
+### A marker the model read as a verdict on its own input
+
+A Google Sheets run typed its values, and then wrote that it was "navigating to
+[typed into a secret field]" and that "the system is redacting any short text
+I try to type, treating it as a potential password". It gave up on typing, and
+went looking for a workaround to a block that did not exist. **The text was
+typed.** Nothing refused it; the value reached the page exactly as the model
+sent it.
+
+**The marker was the bug, twice over.** It made a claim about a *field* — a
+secret field — and the model read that claim as a claim about its *own input*,
+because that is the reading its own action line put next to it. And nothing in
+`SYSTEM_PROMPT` had ever defined the token, so the model filled the gap with
+the worst reading available. On a canvas app every cell is unclassifiable, so
+every typed value was marked, and the agent's conclusion was consistent with
+the evidence it had been given. **A marker the model has no definition for is
+a marker the model will interpret**, and the interpretation it picked was
+expensive.
+
+**The model-facing marker now says what happened, and the prompt defines it.**
+`prompt.WITHHELD` is `"[withheld from the record]"`. The prompt has a section
+that says, in terms: read the marker as a fact about the *record*, never about
+delivery; **the text was typed**; a typing that did not reach the page is
+reported as a failure and the action line says so, so a marker that is the
+only thing on the line means the typing worked; do not re-type around it and do
+not go looking for a block that is not there; and the value is not recoverable
+from the marker, so read it back off the page or ask the user rather than
+reconstructing it from context. The definition is the fix — the marker alone
+would have been a new undefined token with a friendlier name.
+
+**Two markers, two audiences, and neither carries the value.** The record keeps
+`audit.REDACTED` — `"[redacted:password]"` — and the model-facing line
+(substitution, narration, outcome summary, and the thought that is rendered
+into the next prompt) carries `WITHHELD`. The privacy guarantee is unchanged
+by the split: the value reaches neither the audit document, nor the
+extension's mirror of it, nor the trace, nor a later step's thought. Only its
+length does. `privacy.md` carries the split itself; this is the loop's half,
+because the whole cost of the old marker was paid in steps.
+
+**The general rule, because the same shape recurs.** A closed vocabulary is a
+promise that each token means exactly one thing. `[off-screen]`,
+`[covered]`, `[disabled]`, `focus-identify-failed` and `[redacted:password]`
+are all in that vocabulary, and every one of them is a *fact about the world*:
+the control is off-screen, the press was refused, the value is not in the
+record. The old marker broke the promise in the one direction that costs the
+most, because a model told "your input was treated as a password" will act on
+that — it will not type, and it will spend the run looking for a gate that is
+not there. A redaction marker has to be about the *record*, and the prompt has
+to say so, or the model will read it about itself.
+
+Pinned by `tests/agent/test_withheld_marker.py`, which asserts the two
+markers, the prompt's definition of the model-facing one, and that the value
+is in neither line; and by `tests/agent/test_typed_secret_capture.py`, which
+asserts the value never reached the audit document.
+
 ### Frames — a bounded union, and a ref that has to be composite
 
 `observation/surfaces.ts` walks `Page.getFrameTree` and calls
@@ -1563,12 +1618,27 @@ command — but fusing alone is only cheaper, not safer, and *fusing plus the
 binding* is what makes it safe. Before the fusion, the last thing that read
 `document.activeElement` was the server, and it read it between frames. After it,
 one extension branch reads it and *destroys* whatever it finds — so the branch
-needs a wall of its own. `bindFocus` is that wall: the focused node is named by
-the engine (`DOM.getFocusNode`), never by a page getter, and must be the pressed
-node, a descendant of it, or a canvas editor lying wholly inside it. It refuses
-an absent `backendNodeId` as `focus-unidentified` where `verifyTarget` fails open
-for an older relay, because this is the branch that empties the user's text. Two
-walls, no dependency between them.
+needs a wall of its own. `bindFocus` is that wall: the focused node is read in the
+extension's **isolated world** and named by the engine (`DOM.describeNode`),
+never by a page getter, and must be the pressed node, a descendant of it, a
+canvas editor lying wholly inside it, or the grid's own editor lying outside
+the canvas entirely. It refuses an absent `backendNodeId` as
+`focus-unidentified` where `verifyTarget` fails open for an older relay,
+because this is the branch that empties the user's text. Two walls, no
+dependency between them.
+
+**That wall was refusing every call in the field, and the reason is worth
+carrying.** The route it used to ask the question — `DOM.getFocusNode` — was
+removed from Chrome, so the read failed on every build, `bindFocus` returned
+`focus-identify-failed`, and **every `type_at` was refused on every site**.
+The reason string was true about itself and wrong in fact, which is the
+failure this file keeps meeting: a closed vocabulary of reasons is a promise
+that each reason means one thing. The lesson for the loop is that the model
+was handed a plausible reason — *the focus could not be identified* — for a
+cause that had nothing to do with the page, and it built its next step on
+it. `extension.md` has the mechanism and the geometry; what is owned here is
+the shape of the mistake — a platform change that no mocked test can see, and
+a reason string that hides it.
 
 **The focus refusal is unchanged, and it is still two walls — now a third,
 serving a different question.** The server's `focus_id` pre-check runs before the

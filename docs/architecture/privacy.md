@@ -226,15 +226,27 @@ boolean, and the value never crosses back out of the evaluate.
 **The identity read is the one page question with no page script in it.**
 `FOCUS_PROBE` still reads `document.activeElement`, so it is page-answerable —
 which is why it is now the *corroboration for the effect*, not the authority for
-the identity. `bindFocus` names the focused node from the engine (`DOM.enable` →
-`DOM.getFocusNode` → `DOM.describeNode`), and **no page script runs to produce
-that answer**: overriding the `activeElement` getter, or
-`Element.prototype.select`, changes nothing the engine reports. The containment
-predicate that follows runs via `Runtime.callFunctionOn` in the tab's cached
-isolated world (`Page.createIsolatedWorld`, name `IDLE_WORLD`) where the
-prototypes are the extension's, so the page cannot shadow the classes the "is
-this a text field" test compares against. The two walls fail independently
-rather than resting on the same script.
+the identity. `bindFocus` reads `document.activeElement` in the tab's isolated
+world and has the engine name the node it points at (`DOM.enable` →
+`DOM.describeNode`), and **no page script runs to produce that answer**:
+overriding the `activeElement` getter, or `Element.prototype.select`, changes
+nothing the engine reports. The containment predicate that follows runs via
+`Runtime.callFunctionOn` in the tab's cached isolated world
+(`Page.createIsolatedWorld`, name `IDLE_WORLD`) where the prototypes are the
+extension's, so the page cannot shadow the classes the "is this a text field"
+test compares against. The two walls fail independently rather than resting on
+the same script.
+
+**The route changed, and the guarantee did not.** The read used to be
+`DOM.getFocusNode`, and **Chrome removed that method**: it answers `-32601` on
+every current build, so the identity read failed on every step, `bindFocus`
+returned `focus-identify-failed`, and every `type_at` was refused on every
+site. The read is now the same question asked by a route that still exists —
+`document.activeElement` read in the extension's world, and the *naming* done by
+the engine. The privacy property is unchanged and is worth stating on its own:
+the page still cannot answer the question, because the world the question is
+read in is the extension's, and the identification of the node is the engine's.
+Nothing about the page's own script reaches this answer.
 
 **The last main-world server read is closed, and the two walls are still not
 redundant.** The server's `focus_id` pre-check was a *main-world* `evaluate`,
@@ -560,6 +572,60 @@ Pinned by `tests/agent/test_pixel_veto_window.py`, which asserts the window
 cannot be narrowed by the number of veto sites a step calls, that a second
 ambiguous write re-opens rather than shortens it, and that the marker carries
 no typed value.
+
+**3h. The record and the model read different lines, and they have to
+(2026-10-21).** One marker used to serve two audiences, and the model was the
+wrong one for it.
+
+**The split.** A value the harness will not record is written into two places,
+and they are two different audiences with two different questions:
+
+- **The record** — the audit document on disk, and the extension's IndexedDB
+  mirror of that document — keeps `audit.REDACTED`, `"[redacted:password]"`.
+  It answers *what was written down*, and it is read by a person or a grep,
+  months later.
+- **The model's line** — the action line in the trace, the narration, the
+  step's outcome summary, and the thought that is rendered into the next
+  prompt — carries `prompt.WITHHELD`, `"[withheld from the record]"`. It
+  answers *what the model is allowed to see*, and it is read by a model that
+  will act on it.
+
+**Why one marker could not serve both.** The old token was
+`"[typed into a secret field]"`, and it made a claim about a **field**. The
+model read that claim as a claim about its **own input** — the action line
+puts the marker on the line describing the action the model just took, so the
+nearest claim is "my input was treated as a secret and swallowed". On a canvas
+app every cell is unclassifiable, so every typed value was marked, and the
+model reached a conclusion that was consistent with the evidence it had: that
+the harness was blocking it. It then stopped typing and spent the run looking
+for a block that did not exist. Nothing was ever refused; the text reached the
+page unmasked. The only thing that was wrong was the sentence.
+
+**The guarantee did not move, and that is the point of the split.** The value
+still reaches **none** of: the audit document, the extension's mirror of it,
+the model-facing trace, or a later step's thought. Only its **length** does,
+and the length is there so a consumer can tell "typed something" from "typed
+nothing". The dispatch was never the problem — the value is sent to the page
+exactly as the model wrote it — so nothing about what is stored, what is kept,
+what is scrubbed, or what is retained has changed. What changed is the label
+on the line, and who is allowed to read it.
+
+**A marker with no definition is a hole in a closed vocabulary.** The
+redaction vocabulary is closed on purpose: every token in it is a promise that
+the token means one thing. The old marker was a token the prompt had never
+defined, so the model supplied the definition — the worst one available. The
+fix has two halves and both are needed: the token now says what happened
+("withheld from the record" — a fact about the record), and `SYSTEM_PROMPT` now
+defines it, including the part that is a claim about the world: **the text was
+typed**, a typing that did not reach the page is reported as a failure
+instead, and the value is not recoverable from the marker, so read it back off
+the page or ask the user. `agent-loop.md` carries the loop's half — what the
+model did with the old token, and the rule that a marker the model has no
+definition for is a marker the model will interpret.
+
+Pinned by `tests/agent/test_withheld_marker.py`, which asserts the two
+markers, the prompt's definition of the model-facing one, and that the value
+appears in neither audience's line.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
