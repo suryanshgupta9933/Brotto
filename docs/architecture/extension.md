@@ -707,21 +707,63 @@ plain `click` frames, and each one paid a full `captureObservation`.
 agent is clicking, and a `finally` that removed it made the cursor invisible
 in practice: the mouse pair is dispatched with no delay, so a sub-200ms marker
 was never seen at all. Nothing in the extension removes it any more. The next
-click *moves* it — the draw removes the previous dot, label and style by name
-and puts new ones at the new point, so there is never more than one — and the
+click *moves* it — the draw removes the previous dot and label by name and puts
+new ones at the new point, so there is never more than one — and the
 only thing that takes it away is the page going away, so an overlay cannot be
 orphaned across a navigation, because it cannot outlive the document it lives
-in.
+in. A stylesheet left by an older build, which rendered the words with a
+pseudo-element, is still removed by name when it is found: it is inert now, but
+it would otherwise sit in the page forever.
 
 **A marker that outlives its click has to be invisible to the observation.**
-Its words live in a `data-label` rendered by a `::after` rule, and both halves
-are `aria-hidden`, so they are in neither the page text the model reads
-(`document.body.innerText`) nor the accessibility tree the observation is
-built from. A pseudo-element's content is not a text node, and the `<style>`
-element's own text is CSS. Without that, a marker left up across steps would
+Its words live in a **shadow root** under an `aria-hidden` host, so they are in
+neither the page text the model reads (`document.body.innerText`) nor the
+accessibility tree the observation is built from: `innerText` and `textContent`
+do not cross a shadow boundary, and `aria-hidden` on the host takes the subtree
+out of the AX tree. Without that, a marker left up across steps would
 put the agent's own annotation into the page's text — the model reading "Fill
 the form" as if the page had said it, and acting on its own words as
 evidence.
+
+**The pseudo-element route was tried and it died on a Content-Security-Policy.**
+The first version rendered the words with a `::after` rule in an injected
+`<style>` element, which is also not a text node and also not in the AX tree.
+On a page whose CSP is `style-src 'self'` it rendered an **empty black pill**:
+the `<style>` element carries no nonce, so the page refuses it, and the rule
+never painted — while the inline styles set through CSSOM were not refused, so
+the pill's box appeared with nothing in it. **A CSP-restricted page is the
+norm, not the exception**, so a mechanism that depends on injecting a stylesheet
+cannot be the mechanism. Shadow DOM has no such surface: the styles are set
+through CSSOM, and the words are real text in a tree the page's CSS and the
+page's CSP do not reach.
+
+**The red glow is gone, and the placement did not move.** The marker is a 14px
+ink disc (`#111827`) with a 2px white halo — calm on a white sheet, legible on
+a dark page, and it reads as a pointer rather than an alarm — with the words in
+a white chip and a `rgba(17,24,39,0.18)` hairline.
+
+**The placement was deliberately not changed, and "the marker is misplaced" is
+the natural wrong conclusion.** It draws at the exact dispatched coordinate,
+and the audit of the recorded run showed the agent really did click the name
+box five times while its `click_xy` on a cell was refused server-side. The
+marker was reporting the truth: the marker's position is the position the
+agent acted at, and moving it to where the model *meant* to click would have
+made the user's approval surface lie about what the agent was doing.
+
+**A new test measures the paint, because the source assertions could not.**
+`scripts/test-cursor.test.js` asserts on the *source* of the draw snippet: the
+words are capped, the host carries no text node, no `<style>` element is
+injected. All three passed while the label rendered as an empty pill — the
+pseudo-element's content is not a text node, so the first version satisfied
+every one of them. `scripts/test-cursor-render.test.js` renders the marker in
+headless Chrome **on a page with a strict CSP** and asks the page what it
+drew: the words are in a text node, they are **painted** (measured through
+`Range.getClientRects()`, not merely present in the DOM), the label is a
+laid-out box and is visible, the words are out of the light DOM, and they are
+not in the page text the model reads. The file needs a Chrome on the machine;
+with none it says so loudly and passes, which is a skip and not a green — which
+is why the source assertions stay. Model any future claim about what the user
+actually sees on this test.
 
 `pressAt(tabId, action, x, y)` is that block, extracted, and it keeps
 `verifyTarget` **inside** it. That placement is load-bearing: `verifyTarget` is
@@ -1298,9 +1340,9 @@ and the server is forbidden from feeding a tile to a coordinate action.
 screenshot.** The capture is decoded in the extension, differenced and dropped;
 what crosses is ~100 bytes of derived integers. It is a *second*
 `Page.captureScreenshot` call per step, independent of the vision screenshot and
-of `BROTTO_VISION_CAPTURE`, and it does **not** consume the 3-per-task
-`_MAX_CAPTURES_PER_TASK` budget — that counter guards what a model sees, and no
-model sees a delta. One frame is retained per tab and cleared on navigation, on
+of `BROTTO_VISION_CAPTURE`, and it does **not** consume the per-task capture
+budget — that budget is `_capture_ceiling`'s, and it guards what a model sees,
+and no model sees a delta. One frame is retained per tab and cleared on navigation, on
 task start, on tab close and on detach. The permission disclosure for all of
 this is `PERMISSIONS.md`, because a CWS reviewer counting screenshots should
 find the second call stated rather than discover it.
@@ -1393,6 +1435,64 @@ found nothing covering the viewport.
 
 Pinned by `scripts/test-observation-delta.test.js`,
 `tests/agent/test_canvas_awareness.py` and `tests/test_page_delta.py`.
+
+## The vision capture can be asked for CSS pixels
+
+`Page.captureScreenshot` takes device pixels by default, so a 2× display hands
+the model a picture four times the area of the page it is clicking in. The
+`capture_screenshot` frame grew **one optional key**, `css_resolution`, and the
+request is the server's: `{"type": "capture_screenshot", "css_resolution":
+true}` asks for the CSS-pixel viewport, and anything else — absent, `false`, or
+a value that is not exactly `true` — is today's behaviour.
+
+**It is a key on a frame that already exists, not a new frame type.** The
+contract grows by a key, so an extension build from before the key ignores it
+and a server from before the key never sends it: no version window, no new
+`type`, nothing for the panel to answer — the frame is not forwarded to the
+panel at all, and adding a `case` for a frame the panel never receives is how
+a run never ends. This is the same grow-only rule as the `evaluate` frame's
+`isolatedWorld` above, and the reason for it is the same: a new *type* is a
+protocol version, and a new *key* on an existing type is not.
+
+**Who decides is the seam.** The extension cannot tell the model's capture from
+the approval card's — it is the same frame and the same branch — and the card
+is the user's own surface, shown on the user's machine, where small text has
+to stay legible. Deciding in the extension would mean a second, weaker copy of
+the harness's `_is_canvas_page` on the client, and a rule that lives in two
+places is a rule that will disagree with itself. So the harness asks, the
+extension obeys: **canvas pages take the CSS-pixel copy; the card keeps the
+device copy**, and an ordinary page keeps the device copy too, because that is
+where the small text is.
+
+**The clip-scale gotcha is measured, not assumed.** A `clip` is specified in
+CSS pixels, but its `scale` applies to the **device** surface — so `scale: 1`
+comes back at 3024×1890, byte-identical to no clip at all and 2.6× the bytes
+for nothing. It is `1 / devicePixelRatio` that lands on 1512×945. The
+extension reads `window.innerWidth`, `window.innerHeight` and
+`window.devicePixelRatio` in one `Runtime.evaluate` and sends
+`clip: {x: 0, y: 0, width, height, scale: 1/dpr}`.
+
+**A viewport that cannot be measured falls back to the device capture, not to a
+clip of a guessed size.** `null` is the honest answer — the answer changes when
+the user zooms or resizes, and no caching means no second invalidation path —
+and a clip of a guessed size is a picture of the wrong page, which is the one
+failure here that costs a click.
+
+**What the CSS copy actually saves, and it is not mostly tokens.** The device
+capture is 3024×1890 and the CSS capture 1512×945, which looks like 1.8× — but
+the API downscales the long edge to 1568px before pricing, so the two cost
+~2,049 and ~1,905 image tokens: **about 7%**. The real win is **bytes**
+(~223 KB → ~85 KB per capture; ~3.1 MB → ~1.2 MB per canvas task across the
+relay) and **1:1 with the coordinate space**: the model clicks in CSS pixels
+whatever the picture is, so a CSS-pixel picture is the coordinate it is asked
+for, and a retina picture invites a multiplication the model has to get right.
+
+Pinned by `scripts/test-screenshot-frames.test.js`, which asserts the clip's
+extent and its `1/dpr` scale, that `css_resolution: false` and
+`css_resolution: "yes"` both fall back to the device capture, that the branch
+is never forwarded to the panel, and that the Python relay's
+`capture_screenshot` carries the same optional key, defaulted off. The loop's
+half of this is `agent-loop.md`.
 
 ## `aria-hidden` is surfaced, not recovered
 

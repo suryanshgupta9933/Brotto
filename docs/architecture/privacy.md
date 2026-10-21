@@ -848,6 +848,64 @@ Otherwise a model could infer, from a refusal, that *this particular* URL would
 have been blocked, which turns a local policy into an oracle the user can be
 probed through.
 
+### A canvas page is photographed more often, never more safely
+
+The gate above is unchanged — same veto, same switch, same blocklist, same
+"transit only" rule — and the amount of the user's screen that leaves the
+machine on a canvas page has gone **up**. That has to be said here rather than
+left to be inferred from a ceiling constant in another file.
+
+**What changed.** The model's picture on a canvas page used to be capped at
+three per task, and the reason was a cost guard: three is a *supplement*
+budget, and it is only the right number on a page the agent can otherwise
+read. On a canvas page the content is in neither the accessibility tree nor
+the page text, so the picture is the perception channel, and the ceiling is now
+`_MAX_CANVAS_CAPTURES_PER_TASK = 40` — the picture arrives on **every step of
+the task** while that budget lasts, instead of on three of them. The approval
+card's picture is a second, separate budget (`deps.screenshots_taken` against
+`deps.sight_captures`, split because one counter for two buyers starved the
+model's on a canvas page). So a long canvas task now sends up to forty
+pictures of the user's screen to the model provider where it sent at most
+three, and the number of pictures the **user** is shown is bounded the same
+way.
+
+**What did not change, and is the whole safety story.**
+
+- The `redactions or run_secrets` veto is still checked **before the model is
+  even resolved** and again inside `_capture_page` — the shared guard every
+  capture site routes through. A step whose redaction found something is not
+  photographed, and an empty redaction dict is the absence of a detector
+  firing, never clearance.
+- `BROTTO_VISION_CAPTURE` is still default-off, still accepts only an
+  explicit `on`/`1`/`true`/`yes`, and still unparseable-means-refusal. A
+  capture-off run photographs nothing, canvas page or not.
+- The domain rules are the same ones: `screenshot_block_reason` refuses a
+  blocked domain, an unresolvable host, and the curated special-use suffix
+  set, and it refuses our own relay too.
+- The base64 is still **transit only**: on the turn, into the prompt, to the
+  provider — never in the audit document, never in a log line, never in an
+  outcome, never on disk. The one log carries a byte count and nothing else.
+
+So the sentence to keep in view is: **a canvas page is photographed more
+often, never more safely.** A higher count on the one kind of page where the
+pixels are the only content is a deliberate trade — a run that cannot see the
+grid fails — and it is a trade that buys *reach*, not *permission*. The gates
+are the gates.
+
+**The CSS-resolution change is not a new disclosure.** Asking for the
+CSS-pixel copy instead of the device-pixel one is **the same viewport and the
+same content with fewer pixels**: the frame is the same page, at the same
+moment, downscaled before it is sent. What it changes is the size of the
+picture and the size of the coordinate space it agrees with, not what is in
+it. The number of images and the number of pixels in each are the only two
+things that moved, and the first is the subject of the paragraph above.
+
+**The card's picture is not egress to a provider.** The approval card is
+shown to the user, on the user's own machine, and the model never sees it —
+which is why its budget is counted separately rather than being a second
+consumer of the model's. It does transit the server on the way to the panel,
+and that is the same local relay the rest of the run uses.
+
 ## Where this is going: local-first
 
 The target is that the orchestrator holds **no session history at all**.

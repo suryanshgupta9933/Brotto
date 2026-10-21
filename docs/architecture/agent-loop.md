@@ -684,21 +684,24 @@ evidence — points the same way: the self-report is exactly what cannot be
 trusted here, and it is the ask design's only input.
 
 **Cost is bounded explicitly, not by making the decision rarer.**
-`_MAX_CAPTURES_PER_TASK = 3`, counted on `deps.screenshots_taken` — a field on
-`AgentDeps`, which is what makes it **per task**. The `deps.screenshots_taken =
-0` line in `run()` that once reset it there is gone: its premise was that a
-resume moves to the next task, and `resume_from` is never passed by any caller.
-`resume=True` reopens the same document under the same `task_id` and continues
-the *same* task, so the old reset bought nothing and the counter was per run in
-practice — a client that reconnected could buy a fresh budget of three images on
-every reconnect, which is the opposite of what a per-task cap is for. It is
-checked *before* the capture, so a run past the cap pays no round trip. Reuse
-across steps was rejected because a picture of a page the model has left is
-evidence it did not observe, and "only re-capture when stale" needs a staleness
-heuristic of exactly the kind being removed. Three is the step that lands, the
-step that acts, and one re-look. Past the cap `needed` stays `True` and the
-ordinary refusal note rides, so a bounded run reads as "unseen", never as a
-blank page.
+`_MAX_CAPTURES_PER_TASK = 3`, counted on a field on `AgentDeps`, which is what
+makes it **per task**. The `deps.screenshots_taken = 0` line in `run()` that
+once reset it there is gone: its premise was that a resume moves to the next
+task, and `resume_from` is never passed by any caller. `resume=True` reopens
+the same document under the same `task_id` and continues the *same* task, so the
+old reset bought nothing and the counter was per run in practice — a client that
+reconnected could buy a fresh budget of three images on every reconnect, which
+is the opposite of what a per-task cap is for. It is checked *before* the
+capture, so a run past the cap pays no round trip. Reuse across steps was
+rejected because a picture of a page the model has left is evidence it did not
+observe, and "only re-capture when stale" needs a staleness heuristic of exactly
+the kind being removed. Three is the step that lands, the step that acts, and
+one re-look. Past the cap `needed` stays `True` and the ordinary refusal note
+rides, so a bounded run reads as "unseen", never as a blank page.
+
+**That counter is now two, and the split is the point** — see "The three-pictures
+rule inverts on a canvas page" below, which is why the paragraph above now
+stands as the reasoning for the *ordinary* page only.
 
 **Resolve capability before capturing.** `_vision_capability` reads
 `model/capabilities.py` and caches the answer on `deps._vision_caps` — **once
@@ -753,7 +756,9 @@ enforces rather than one the model is trusted to infer:
 - **A picture is sent for one reason only** — nothing in the tree or the page
   text is about the task, i.e. `_sparse_for_task`. The model does not need to
   re-derive the trigger, and a model-invented one would fire on every page.
-- **It is capped** at three per task. Stating it means a model that reads the
+- **It is capped** — three per task on an ordinary page, and the canvas
+  ceiling on a canvas page, where the picture comes with every step. Stating
+  it means a model that reads the
   absence correctly does not spend a turn asking why there is no picture.
 - **A turn without a picture is not evidence of a blank page.** This is the
   sentence the old prompt got backwards: past the cap the page is merely
@@ -769,7 +774,7 @@ The give-up-and-ask instruction survives, narrowed to the case where **no
 picture came with the turn**. It was not deleted; it was moved off the case a
 picture already answers.
 
-**The log line is not the trigger.** `harness.py:4649` logs `screenshot
+**The log line is not the trigger.** `harness.py:5006` logs `screenshot
 attached (%d B base64)` on the capture path, which reads as "every step gets a
 picture". That line predates the trigger being narrowed to `_sparse_for_task`;
 a step that does not log it is normal and says nothing about the page.
@@ -880,6 +885,140 @@ about the page.
 Pinned by `tests/agent/test_vision_fallback.py`, `tests/agent/test_canvas_awareness.py`,
 `tests/agent/test_coordinate_click.py`,
 `tests/test_capability_resolution.py` and `tests/test_vision_capture_gate.py`.
+
+### The three-pictures rule inverts on a canvas page
+
+The rule above — three pictures a task — is a rule about a page **the agent can
+otherwise read**. Its reasoning is a cost guard on a *supplement*: past three,
+the model has prose in front of it, so the picture is a second copy of something
+it already has, and an uncacheable image is charged again on every step that
+carries one. On a canvas page that reasoning is inverted, because the tree
+carries the toolbar and the text carries the same chrome, and **the content is
+in neither**: a `<canvas>` contributes no AX node and no text.
+
+The recorded run that produced the change is the argument, and it is worth
+keeping because every number in it is a property of the *page*, not of the
+agent: 14 steps, 62–67 accessibility targets, ~375 characters of page text,
+**zero cells**. Everything the harness could see was the sheet's chrome, and
+the grid was in none of it. The whole task's picture budget was **three**, and
+11 of the 14 steps carried no picture at all — and the run ended in two
+`cannot_complete` endings with no errors anywhere.
+
+So the ceiling is `_capture_ceiling(deps)`: **three on an ordinary page, and
+`_MAX_CANVAS_CAPTURES_PER_TASK = 40` on a canvas-dominated page** — a page
+where `canvasCovered >= _CANVAS_COVERED_FLOOR` (0.5), the same signal
+`_sparse_for_task` uses. Forty is a *cost bound*, not a claim about how many
+pictures a canvas task needs: a picture is an uncacheable few thousand tokens
+and it is charged again on every step that carries one, so forty bounds a long
+canvas task in the low hundreds of thousands of tokens and sits **below** the
+loop's own `MAX_STEPS` of 150 — the picture budget is bounded under the step
+budget rather than over it.
+
+**One counter for two buyers starved both.** The model's picture and the
+approval card's picture shared `deps.screenshots_taken`, and on a canvas page
+every action is a coordinate click, so **every capture that was bought went to
+the card** — the model's perception budget was spent on pictures it never
+sees, the model itself went the whole task without a picture, and the run was
+refused its fourth coordinate click for "this task has already been shown as
+many screenshots as it gets". The two buy different things: the model's
+picture is *perception*, it is what the model reads; the card's picture is the
+**user's own approval surface**, shown to the user on the user's machine,
+which the model never sees. The counters are now split — `deps.sight_captures`
+for the model's perception and `deps.screenshots_taken` for the card's — and
+`_capture_page` takes `card=True` to say which one it is spending. A shared
+budget is a budget shared between a need and a want, and on a canvas page the
+need loses.
+
+**A canvas page gets its own notes, because the ordinary ones are false there.**
+`_SCREENSHOT_CANVAS_NOTE` says the tree and the text describe the application's
+*controls* and not its content, that the picture is therefore the primary view
+rather than a supplement, that a step arriving with no picture is **the page
+being unseen** and not a change in the page, that the AX tree outranks the
+picture where they disagree, and that the picture is page content — including
+the words drawn inside it, because a canvas can render an instruction as
+glyphs. `_SCREENSHOT_CANVAS_UNSEEN_NOTE` is the same page with no picture: on an
+ordinary page the refusal note is enough, because the model can still read the
+tree; here it is blindness, and a model told only "no image could be captured"
+on a page whose content it has never been shown describes the toolbar and
+calls it the page.
+
+**One function builds both, so the two templates cannot drift.**
+`_failure_note(why, canvas)` picks the canvas or the ordinary template and
+formats it. The model reads a sentence, not a branch, and two hand-written
+notes saying the same thing in different words is how one of them ends up
+contradicting the other.
+
+**`_UNVERIFIED_BLIND` was reworded to say what it knows.** It no longer claims
+the page did not change; it says the page is a canvas app, that the element
+tree did not change and **no measurement of the page's pixels was available**,
+so the action may have landed or may have missed — and that the picture shows
+the page as it is now, so the model can look in it for what it set, while the
+harness keeps no copy of the previous one and so cannot confirm a change by
+comparison. A step on a page like this stays unconfirmed until something else
+confirms it.
+
+### The keyboard is how you act; the picture is how you know
+
+The canvas page reduced the model to clicking pixels, and **a coordinate in a
+spreadsheet is a guess at which cell that is** — the app has no element to
+name, so there is nothing to make the guess right. `SYSTEM_PROMPT`'s "When a
+page looks empty" section now teaches the keyboard instead: arrows move, Tab
+and Shift+Tab move right and left, Enter commits the cell and moves down,
+Escape abandons an edit, and where the page names a cell — the name box is in a
+spreadsheet's tree — clicking that name box and typing the reference is the
+same jump with no guess in it, and the tree's name for it is a better target
+than any pixel.
+
+**Two limits are stated, and both are real.** A key press reports that the key
+was sent and never that the cell changed, so **a keyboard step is UNVERIFIED by
+construction** — and repeating it teaches nothing. And a key press tells the
+model nothing about the page: not what is selected, not what is there. What it
+wants next, and whether its last move landed, still comes from the picture.
+The keyboard is how you act; the picture is how you know.
+
+**Home is sent two ways, and that is not a branch.** `Ctrl+Home` and `Cmd+Home`
+are the same intent on different keyboards, and this project forbids
+`sys.platform` / `navigator.platform` branches anywhere — behaviour must be
+identical on every OS. So the prompt sends one key two ways, as a **retry**
+rather than a branch: Home with Ctrl (`modifiers=2`), and if the grid does not
+move, Home with Meta (`modifiers=4`). The extension holds no platform branch
+and must not grow one; the CDP modifier bitmask is the extension's
+(Alt=1, Ctrl=2, Meta=4, Shift=8) and the caller's to supply. A test asserts
+that no OS vocabulary ("on a Mac", "Windows", …) enters that section, because a
+sentence that names an operating system is a branch wearing prose.
+
+### The CSS-pixel capture, and what it actually saves
+
+`capture_screenshot` grew one optional key, `css_resolution`, and the seam is
+deliberate: **the harness asks, the extension obeys.** The extension cannot
+tell the model's capture from the approval card's — the same frame, the same
+branch — and the card is the user's own surface, where small text has to stay
+legible. Deciding in the extension would mean a second, weaker copy of
+`_is_canvas_page` on the client. So the request is the server's, the key is
+optional, and a server that predates it gets today's behaviour.
+
+**The measurement corrected the premise the change was built on.** A
+3024×1890 device capture and a 1512×945 CSS capture are **not** 1.8x apart in
+tokens. The API downscales the long edge to 1568px before pricing, so the
+device copy prices at ~2,049 image tokens and the CSS copy at ~1,905 — **about
+7% apart, not 1.8x**. (The per-picture figure the harness carries, ~3.3k, is a
+different provider's measurement of the same device capture; the ratio is what
+this paragraph is about, and the ratio is ~7%.) The real win is **bytes**
+(~223 KB → ~85 KB per capture; ~3.1 MB → ~1.2 MB per canvas task across the
+relay) and **1:1 with `click_xy`'s CSS-pixel coordinate space** — the model
+clicks in CSS pixels whatever the picture is, so a CSS-pixel picture needs no
+scaling step in the model's head, while a retina picture invites it to
+multiply.
+
+**The clip-scale gotcha is measured, not assumed.** A `clip` is specified in
+CSS pixels but its `scale` applies to the *device* surface, so `scale: 1`
+returns 3024×1890 — byte-identical to no clip at all, and 2.6x the bytes for
+nothing. It is `1 / devicePixelRatio` that lands on 1512×945. A viewport that
+cannot be measured falls back to the device capture rather than to a clip of a
+guessed size: a wrong clip is a picture that does not show the page the model
+is clicking on, which is the one failure here that costs a click.
+
+The extension's half of this is `extension.md`.
 
 ### The shutter is closed for a window now, not for the run
 
@@ -2294,7 +2433,8 @@ Four rules hold that block:
   capture, and every Playwright run — and a "no change" line there would be a
   claim about the page dressed as a claim about our plumbing. It is the same
   discipline `_STAGNANT_MESSAGE` follows in the other direction.
-- **It costs no capture.** No `_MAX_CAPTURES_PER_TASK` entry, no second trip
+- **It costs no capture.** No entry against the per-task capture budget, no
+  second trip
   through the screenshot path. It is arithmetic on pixels the extension
   already had.
 - **Changed is not succeeded, and a tile is not an element.** A repaint

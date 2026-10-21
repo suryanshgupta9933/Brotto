@@ -46,10 +46,13 @@ complete set of CDP methods the extension issues:
 | Runtime | `Runtime.evaluate` | Reading page text and stability, and drawing the click marker — see below |
 
 **`Page.captureScreenshot` — one place, and only on request.** The agent
-perceives the page through the Accessibility tree first, and asks for a picture
-only when that tree is empty *and* the visible page text is empty too — a
-`<canvas>` (Google Docs, Figma, a chart) has no accessibility node and no
-readable text, so a text-only agent cannot see it at all. The extension issues
+perceives the page through the Accessibility tree first, and your server asks
+for a picture only when nothing the harness can see is about the task it was
+given — the accessibility tree and the visible page text. That includes a
+`<canvas>` (Google Docs, Figma, a chart, a spreadsheet grid) with no
+accessibility node and no readable text of its own, and it includes a canvas
+app whose *toolbar* gives a rich tree while the content it is drawing is in
+none of it. The extension issues
 this command from exactly one call site, in `background.ts`, in response to a
 relay frame from your own server. It is not periodic and not automatic: with no
 task running, nothing is captured.
@@ -130,13 +133,15 @@ shipped code, and they are the ones that run without the server asking:
 | `observation/index.ts` | `{url, title, text: body.innerText}`, whitespace collapsed, capped at **20,000 characters** | every observation |
 | `observation/stability.ts` | installs a `MutationObserver` and reports whether the page has gone still | every observation |
 | `observation/supplement.ts` | a probe listing `aria-hidden` controls so they can be hit-tested | when the tree is supplemented |
-| `observation/pointer.ts` | draws, then removes, a `pointer-events: none` click marker and its label — label set with `textContent`, never `innerHTML`, and capped at 80 characters because it is model-authored prose | around a click, before and after the mouse event pair |
+| `observation/pointer.ts` | draws a `pointer-events: none` click marker and its label — the words set with `textContent` inside a **shadow root** on an `aria-hidden` host, never `innerHTML`, and capped at 80 characters because it is model-authored prose | around a click, before and after the mouse event pair |
 | `observation/delta.ts` | one pass returning two things: the text caret — the selection rectangle of a focused `contentEditable` element, or the measured position of the cursor inside a focused `input`/`textarea` — and the rectangles of every visible `<canvas>`. Returns **rectangle geometry only**: `{caret: [{x, y, w, h}], canvases: [{x, y, w, h}], vw, vh}` | every observation; the caret half feeds the page-delta mask, the canvas half becomes the `canvasCovered` fraction on the wire |
 
 The first three run on every observation; the pointer marker only runs around a
-click, and it is removed in a `finally` after the mouse event pair rather than
-on a timer — a click that navigates throws on the observation that follows, and
-a timer is how a marker outlives the action that drew it. The same `delta.ts` evaluate now also reports each `<canvas>` rectangle; those
+click, and **nothing removes it afterwards** — it is the user's only way to see
+where the agent is clicking, and a `finally` that took it away made it
+invisible in practice, because the mouse pair is dispatched with no delay and a
+sub-200ms marker was never seen. The next click *moves* it, and only the page
+going away takes it with it. The same `delta.ts` evaluate now also reports each `<canvas>` rectangle; those
 are intersected with the viewport and reduced to one number, `canvasCovered`
 (0.0–1.0), so the server can tell a canvas-rendered app from a DOM one without
 a second round trip and without a pixel leaving the extension. It reads no text
