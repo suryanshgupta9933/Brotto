@@ -752,7 +752,7 @@ performed.
   that `click` does not, because `type_at` is the only branch that reads
   `document.activeElement` and *acts destructively* on it.
 
-### `bindFocus` — four walls, and the two canvas exemptions
+### `bindFocus` — four walls, the two canvas exemptions, and one adapter list
 
 `verifyTarget` answers "is the right element at this point", before the press.
 It cannot answer "what holds focus now", because the press is what creates
@@ -809,8 +809,8 @@ override `Element.prototype.select` so `select()` does something other than
 select. A probe a malicious page can answer *and* act on is not a guard.
 
 **Wall 3 — the canvas exemption**, for the one shape neither of the above can
-serve: a `<canvas>` grid cell whose press focuses a hidden editor that is not
-the cell and not inside it. All three conditions hold:
+serve: a `<canvas>` cell whose press focuses a text field that is not the cell
+and not inside it. All three conditions hold:
 
 1. the pressed node is a `CANVAS`;
 2. the focused node's engine-supplied `nodeName` is an `INPUT` or `TEXTAREA`;
@@ -833,21 +833,60 @@ verdict a success. Reading it as a refusal would refuse the shape `type_at`
 exists for; dropping it silently loses the only server-side trace that the
 identity binding was waived.
 
-**Wall 3b — the grid editor.** Wall 3 cannot serve a grid that keeps its
-editor *outside* the canvas. Google Sheets' cell editor is
-`DIV#waffle-rich-text-editor.cell-input[contenteditable=true]` — a direct
-child of `BODY`, zero-width, parked at `y = -9998` — so it is neither the
-pressed node nor inside it, and it is not an `INPUT` either. Wall 3b admits a
-focused **editable or text input** on a canvas press when **the engine's own
-geometry** says the user cannot see it: it has no area at all, or it lies
-wholly outside the live viewport, or its box contains the point that was
-pressed (the editor drawn over the cell being edited). Editability is the DOM
-property `isContentEditable`, read in the isolated world — **no page attribute
-is consulted**, so a page cannot unlock it by writing `contenteditable` onto
-the user's own field; and a viewport that cannot be read proves nothing, so
-that case fails closed. A visible field elsewhere on the page satisfies none
-of the three and is still refused, which is the "erase some other field"
-failure.
+**Wall 3b — the grid editor, and the application that owns it.** Wall 3
+cannot serve a grid that keeps its editor *outside* the canvas. Google Sheets'
+cell editor is `DIV#waffle-rich-text-editor` (a direct child of `BODY`) holding
+a `.cell-input[contenteditable=true]` — zero-width, parked at `y = -9998` — so
+it is neither the pressed node nor inside it, and it is not an `INPUT` either.
+
+**The grant is to an application, not to a shape.** Wall 3b used to be a
+geometry rule: any canvas press whose focus was an editable the user could not
+see was admitted as the grid's editor. Nothing in that geometry tells a
+spreadsheet from a disguise. A page can ship a `<canvas>`, a click listener
+and a hidden `<input type="password">` focused on click, and it satisfies
+every one of those conditions — and then the agent types into a field the
+user cannot see, believing it typed into the cell under the cursor. That is a
+UI-redress of the agent's own action, and the "erase some other field"
+failure this codebase refuses elsewhere.
+
+So the permission is the *application*, and the application is named in
+`GRID_ADAPTERS` (`observation/pointer.ts`). One entry today: `app:
+"google-sheets"`, `origin: "https://docs.google.com"`, `scopeId:
+"waffle-rich-text-editor"`, `className: "cell-input"`. All three parts must
+match, and the focused node must be a contenteditable — a plain `div` that
+happens to sit in the same container is not the editor.
+
+**The origin is the load-bearing half.** It is read in the isolated world,
+from the document itself, and a page cannot forge it: only a navigation
+changes it, and a page that navigates away from `docs.google.com` has no
+adapter. The id and the class are page-written strings, so they are consulted
+*only after* the origin has matched — on their own they prove nothing, and a
+page that writes `id="waffle-rich-text-editor"` onto its own hidden input
+buys nothing while it is on its own origin. What keeps a Google *Doc* from
+qualifying is Google's own paste sanitizer, not anything here. **Adding an app
+is one entry**, so the list grows one application at a time as real grids are
+met, rather than by a rule that admits all of them at once.
+
+**A canvas press that focuses an editable on an unrecognised page is refused,
+loudly.** `grid-editor-unrecognised` — "a canvas press focused an editable,
+but the page is not a recognised grid". The reason is the grid's own, because a
+*contenteditable* focus is what a grid parks off-screen, so a page we cannot
+recognise holding one is the disguise. A plain text input keeps the older
+`focus-not-the-target`: it was never the grid's shape, and "the focus is not
+the target" is the truer sentence. `focus-not-the-target`'s own description was
+widened to name the fourth case — "focus is not the pressed node, an
+ancestor-descendant of it, or a recognised grid editor".
+
+**The geometry narrowed the grant; it did not create it.** The old test did
+not disappear — it now narrows an already-admitted adapter rather than
+granting one. Three ways the editor is admitted, all three the engine's own
+geometry: (a) it has no area at all, so nothing the user can see is there;
+(b) it lies wholly outside the live viewport, so it is not visible either;
+(c) its box contains the point that was pressed, because the editor is drawn
+over the cell being edited, under the canvas that took the press. The measured
+Sheets editor is zero-width at `y = -9998` *after* the press, which is the
+grid's **not-editing** state; a grid that is editing draws its editor over the
+cell, and that is the third admission.
 
 The third admission is the one that needs its own argument, because it is the
 only one that admits a field the user *could* be looking at. It is safe
@@ -865,6 +904,82 @@ text goes out as one `Input.dispatchKeyEvent` pair per character (a newline is
 a Return key), never with a modifier, so no chord and no OS question. The
 ordinary DOM path keeps its single `Input.insertText` call. The run is bounded
 at 1000 characters, and over that it refuses with `canvas-text-too-long`.
+
+**The keystrokes are bound to the grid's editor, not to the ambient focus.** A
+key event is not bound to a node — it goes to whatever holds focus when the
+browser processes it. So the binding cannot be made in the dispatch; it has to
+be made in the page, immediately before each dispatch. The first attempt at
+this was *observational* — re-read `document.activeElement` and compare it —
+and the review was right that it bound nothing: an `await` sat between the
+check and the insertion, so a page that took the focus in that window got the
+text anyway.
+
+**A reading is not a binding, so the focus is put back rather than read.**
+`GRID_FOCUS_PROBE` (`pointer.ts:543`) runs in the isolated world and does
+three things in order. First, it looks the adapter up **by the document's own
+origin** — a document that navigated away mid-typing has no adapter and is
+refused `grid-editor-unrecognised`, and no page can forge its way into one.
+Second, if the grid's editor is already the active element, it touches nothing
+at all. Third, otherwise the focus drifted, so the editor is found **by its
+role** and given the focus with `editor.focus({ preventScroll: true })`, then
+confirmed. `preventScroll` is load-bearing: Sheets parks the editor at
+`y = -9998`, and a plain `focus()` scrolls the user's viewport to the top of
+the document. `reassertGridFocus` (`pointer.ts:609`) is one
+`Runtime.evaluate`.
+
+**The binding is to the role, not the instance.** A grid replaces its own
+editor when it re-renders the cell it is editing, so the *node* is not stable
+enough to bind to, and binding to the instance would refuse the typing that
+worked. The role is the same three parts the grant was made on, re-read at the
+point of insertion. If the container holds several `.cell-input` elements, the
+restore takes the first in document order.
+
+**Restore, then refuse.** `typeIntoCanvas` (`background.ts:741`) takes a
+required `beforeChar` callback, invoked **per character**, with nothing between
+its answer and the key event — the check and the dispatch are adjacent by
+construction. The whole grid sequence is: press → `bindFocus` → the editor's
+text *before* → per character: reassert focus → keyDown → keyUp → the
+after-read → the delivery check. A focus steal that can be corrected *is*
+corrected and the typing continues; a binding that cannot be restored refuses
+with `focus-changed` — "the grid's editor does not hold the focus and could not
+be given it back". This is a deliberate behaviour change and it is not a
+weakening: the text still cannot land in an unverified field, and the field is
+now re-found by role rather than trusted by instance. If the binding breaks
+mid-string the prefix is already typed, and the refusal says "the typing
+stopped".
+
+**The grid reports its own delivery.** The editor's own text is read before and
+after the typing. If the text is unchanged *and* the text is absent, the step
+refuses with `grid-text-not-delivered` — "the grid's editor did not change —
+the text did not land in the cell". Reading "before" as well is what makes
+"unchanged" mean "the typing changed nothing" rather than "the cell was always
+empty", and it is why a grid that reformats what it is given (a number, a
+formula) is not reported as a failure.
+
+**The before and the after are comparable only on the same node.** A grid
+that replaces its editor mid-typing leaves the old node's text behind, and
+comparing it with itself would report a delivery failure for a typing that
+worked. So the focus is read once more after the typing: if the editor is
+still the focused node, the two reads are comparable; if it is not, **nothing
+was measured and nothing is claimed** — "not measured", never "failed". A
+newline is skipped from the check, because a grid commits and empties its
+editor on Enter, so "unchanged" there is the grid's own behaviour.
+
+**The window is not closed, and this doc says so.** One round trip remains
+between the re-assert answering and the browser processing the `keyDown`; a
+page that takes the focus in that window gets that one character. The window
+is **per character**, not per string — a single check would leave a window
+spanning every keystroke in the string — at the cost of one extra CDP round
+trip per character (2 → 3). The realistic residual is Google's own re-render
+rather than a hostile page: a hostile page on `docs.google.com` cannot reach
+the path at all, because the adapter is looked up by the document's own
+origin. What is genuinely page-chosen is the id and the class — page-written
+strings, kept honest here by Google's paste sanitizer — and the
+first-in-document-order pick when a container holds several editors.
+
+**The non-grid path still has its own window.** Between `focusState` and
+`Input.insertText` there is a one-round-trip gap, unchanged by this work and
+outside this finding.
 
 **The grid path does not clear, and the grid is told to stop clearing.** The
 DOM clear reaches for a selection inside an off-screen editor, which is not
@@ -984,11 +1099,11 @@ the selection back and refuses with `clear-select-noop` unless
 
 The value's length is read **first**, deliberately, because `selectionStart` is
 `null` (not a number) on those same types — and an empty field of a no-op type
-has nothing to clear, so appending to it is correct. That is also the Sheets
-case: the canvas exemption's editor holds the cell's text in a hidden input, and
-an empty cell's input is empty. The practical consequence: **a numeric or date
-field now costs the model an extra step**, which is the intended price and not a
-regression to route around.
+has nothing to clear, so appending to it is correct. The Sheets cell is not an
+example here any more: the grid's editor is a contenteditable, and on the
+wall-3b path the clear is skipped entirely. The practical consequence: **a
+numeric or date field now costs the model an extra step**, which is the
+intended price and not a regression to route around.
 
 The `contenteditable` branch has no `select()`, so a `Range` over the node's
 contents is the same operation by another route — and it is confirmed the same
@@ -999,15 +1114,17 @@ when the node had text. Anything else is `clear-select-noop`, as is a missing
 ### The canvas case is exempted, not waved through
 
 An earlier version of this doc argued the opposite — that identity must *not* be
-verified in `focusState`, because a Sheets cell is a `<canvas>` whose hidden
-input is not a descendant of the clicked node. That was right about the
+verified in `focusState`, because a Sheets cell is a `<canvas>` whose editor is
+not a descendant of the clicked node. That was right about the
 consequence and wrong about the conclusion: containment is exactly the check
-needed, and the Sheets shape is the one case that gets a named exemption rather
+needed, and the canvas shape is the one case that gets a named exemption rather
 than an exemption for everything. `select()` selects that element's own contents
 wherever it hangs in the tree — it is not a region of the page — but that is a
 reason to *exempt* the shape, not to skip the identity question. The identity
 check lives in `bindFocus`, upstream of `focusState`, precisely so the exemption
-is the narrowest thing in the path.
+is the narrowest thing in the path. And the exemption is now narrower still:
+the grid shape is admitted only on a **recognised application's own origin**
+(wall 3b above), so the shape alone buys nothing.
 
 ### The clear runs after the press, and that ordering is why it is here
 
