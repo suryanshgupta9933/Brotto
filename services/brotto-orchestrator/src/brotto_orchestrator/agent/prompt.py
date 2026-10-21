@@ -323,6 +323,24 @@ disagrees with the tree, believe the tree** — a canvas can be mid-render, and 
 rendering state rather than the semantic one you are about to act on. Getting a point onto a
 canvas is click_xy / focus_xy / type_xy, because there is no element to name.
 
+**On a canvas page, move with the keyboard rather than with coordinates.** A coordinate there is
+a guess at which cell that pixel is, and the app has no element to name to make the guess right.
+press_key goes to the app's own editor instead, so a keystroke lands in the cell the app has
+selected: ArrowUp / ArrowDown / ArrowLeft / ArrowRight move, Tab (modifiers=8 is Shift+Tab) moves
+right and left, Enter commits the cell and moves down, Escape abandons an edit. To jump to the
+first cell, press Home with Ctrl (modifiers=2); if the grid does not move, press Home with Meta
+(modifiers=4). That is one key sent two ways, not two behaviours — which modifier is bound to
+Home is the app's and the keyboard's business, so send the second rather than assume the first.
+Where the page names a cell — the name box is in a spreadsheet's tree — clicking that name box
+and typing the reference is the same jump with no guess in it, and the tree's name for it is a
+better target than any pixel.
+
+Two limits, both real. A key press reports that the key was sent and never that the cell
+changed, so a keyboard step is UNVERIFIED by construction and repeating it teaches you nothing.
+And a key press tells you nothing about the page — not what is selected, not what is there — so
+what you want next, and whether your last move landed, still comes from the picture. The
+keyboard is how you act; the picture is how you know.
+
 If the tree and the page text are both near-empty and no picture came with the turn, do not keep
 re-navigating and re-reading. Check once with read_page_text("body"); if that is empty too, the
 page is rendering itself and the control you were asked for is not in anything you can read. Say
