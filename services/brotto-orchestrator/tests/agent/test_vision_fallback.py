@@ -812,7 +812,7 @@ async def test_the_capture_budget_survives_a_resumed_task(monkeypatch):
     deps = _deps(targets=targets, page_text="Board",
                  task="fill in the spreadsheet")
     # A resumed task arrives with the budget its earlier run already spent.
-    deps.screenshots_taken = harness_mod._MAX_CAPTURES_PER_TASK
+    deps.sight_captures = harness_mod._MAX_CAPTURES_PER_TASK
     result = await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
     assert result.status == "completed"
     deps.cdp.capture_screenshot.assert_not_awaited()

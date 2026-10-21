@@ -320,12 +320,21 @@ class AgentDeps:
     scratchpad: Scratchpad = field(default_factory=Scratchpad)
     step_summaries: list[StepSummary] = field(default_factory=list)
     step_number: int = 0
-    # Screenshots handed to the model by the vision fallback, counted across
-    # the current task and reset when a task begins. The ceiling is the
-    # harness's `_MAX_CAPTURES_PER_TASK`; the counter is here rather than on
-    # the harness so `_vision_fallback` — a module function, called by tests
-    # directly — can read and bump it without a harness instance.
+    # Screenshots shown to the *user* on a coordinate-approval card, counted
+    # across the current task. Separate from `sight_captures` because the two
+    # are different purchases: this one is the user's approval surface and the
+    # model never sees it, and a shared counter let the two starve each other
+    # on a canvas page, where every action is a coordinate click. The ceiling
+    # is the harness's `_MAX_CAPTURES_PER_TASK` (or the canvas ceiling).
     screenshots_taken: int = 0
+    # Screenshots handed to the *model* by the vision fallback — the picture it
+    # reads. Counted across the current task; the ceiling is the harness's
+    # `_capture_ceiling`, which is three on an ordinary page and the canvas
+    # ceiling on a canvas page, where the picture is the page's content rather
+    # than a supplement to it. The counter is here rather than on the harness
+    # so `_vision_fallback` — a module function, called by tests directly —
+    # can read and bump it without a harness instance.
+    sight_captures: int = 0
     # Coordinate actions that verifiably missed the target — outside the
     # viewport, or a relay dispatch failure. Counted per task and never
     # cleared: a dispatch that *landed* is not evidence the point was right,

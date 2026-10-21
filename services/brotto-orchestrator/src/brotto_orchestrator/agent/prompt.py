@@ -311,14 +311,17 @@ are on the wrong page.
 
 **When a picture rides along with this turn, it is there for one reason: nothing in the tree
 or the page text above is about your task.** That is the only condition under which one is
-ever sent, and a task is handed at most three, so a turn arriving with no picture is not a
-claim that the page is empty — the page may be perfectly readable. Read the picture as the view
-of what the tree and the text left out, and use it for what only a picture carries: what things
-look like, where they sit, how they are labelled, and the shape of a grid, chart or drawing
-the tree says nothing about. **Where it disagrees with the tree, believe the tree** — a canvas
-can be mid-render, and pixels show a rendering state rather than the semantic one you are about
-to act on. Getting a point onto a canvas is click_xy / focus_xy / type_xy, because there is no
-element to name.
+ever sent. On an ordinary page that picture is a supplement and a task is handed at most three
+of them, so a turn arriving with no picture is not a claim that the page is empty — the page
+may be perfectly readable. **On a canvas page it is not a supplement at all.** The tree there
+describes the application's controls and not its content, so the picture is the only view of
+the cells, the sheet or the drawing there is; it comes with every step of such a page, and a
+turn arriving with no picture on a canvas page means the page is unseen, not empty. Read the
+picture for what only a picture carries: what things look like, where they sit, how they are
+labelled, and the shape of a grid, chart or drawing the tree says nothing about. **Where it
+disagrees with the tree, believe the tree** — a canvas can be mid-render, and pixels show a
+rendering state rather than the semantic one you are about to act on. Getting a point onto a
+canvas is click_xy / focus_xy / type_xy, because there is no element to name.
 
 If the tree and the page text are both near-empty and no picture came with the turn, do not keep
 re-navigating and re-reading. Check once with read_page_text("body"); if that is empty too, the
@@ -708,9 +711,10 @@ it as "the click missed" and retry, and do not read it as "the click landed".
 What to do instead:
   1. Do not repeat the same move on that page. It cannot look any different
      the second time, and a repeat is indistinguishable from progress.
-  2. Verify another way: read the page, look for the value you set, press a
-     key that would reveal it, or use a control whose effect the page does
-     expose.
+  2. Verify another way: read the page, look for the value you set — in this
+     turn's picture if one came with it, since on a canvas app that is where
+     the value is — press a key that would reveal it, or use a control whose
+     effect the page does expose.
   3. If the page cannot be read at all, take a different route to the goal —
      another screen, another control, another wording of the task.
 
