@@ -2318,6 +2318,52 @@ _AMBIGUOUS_PIXEL_WINDOW = 2
 # carries a fact, not a value: no typed text is anywhere in it.
 _AMBIGUOUS_MARKER = "[redacted-value]"
 
+# The claims that close the pixel shutter, in the words the record and the
+# log use. Three, and they are facts about the RUN — never a value, never a
+# page string, never a kind of page.
+_VETO_PAGE_REDACTION = "page_redaction"
+_VETO_LATCHED = "latched_secret"
+_VETO_AMBIGUOUS = "ambiguous_write"
+
+
+def _redaction_kinds(redactions) -> str:
+    """The per-kind counts, and never the values.
+
+    `redact_text` reports a count per kind, and a count is the safe thing
+    to print: "1 card" is a fact about the page, "4111 1111 1111 1111" is
+    the page. The `isinstance` guard is here because this is the one line
+    that formats whatever it is handed, and the guarantee — that a value can
+    reach neither a log line nor the record — has to survive a caller that
+    hands it the wrong shape.
+    """
+    if not redactions:
+        return ""
+    return ", ".join(
+        f"{n} {k}" if isinstance(n, int) else k
+        for k, n in sorted(redactions.items()))
+
+
+def _veto_reason(redactions, run_secrets) -> str:
+    """Which claim closed the pixel shutter, as one closed-vocabulary string.
+
+    Facts about the run, never about the page's content: a redaction's
+    per-kind counts, and which of the two pixel claims is holding the
+    shutter. A typed value is never here — `run_secrets` is read for what it
+    *is*, not for what is in it.
+
+    The pixel claim is read off the list the vetoes already read, and the
+    read is a comparison against the one sentinel `_pixel_latch` puts in
+    place of a value: a list holding only that marker is the ambiguous
+    window, anything else is a latched value.
+    """
+    parts = []
+    if redactions:
+        parts.append(f"{_VETO_PAGE_REDACTION}: {_redaction_kinds(redactions)}")
+    if run_secrets:
+        parts.append(_VETO_AMBIGUOUS if list(run_secrets) == [_AMBIGUOUS_MARKER]
+                     else _VETO_LATCHED)
+    return ", ".join(parts)
+
 
 class _PixelVeto:
     """The two claims that stop pixels leaving, and how long each one holds.
@@ -2427,7 +2473,7 @@ async def _capture_page(deps, *, redactions=None, run_secrets=None,
     already has a handler.
     """
     if redactions or run_secrets:
-        return None, _SCREENSHOT_REDACTED_WHY
+        return None, _veto_why(redactions, run_secrets)
     spent = deps.screenshots_taken if card else deps.sight_captures
     if spent >= _capture_ceiling(deps):
         return None, _SCREENSHOT_BUDGET_WHY
@@ -3153,8 +3199,8 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             # a secure-mode setting.
             text, redactions = redact_text(text)
             if redactions:
-                log.info("read_page_text: redacted %s", ", ".join(
-                    f"{n} {k}" for k, n in sorted(redactions.items())))
+                log.info("read_page_text: redacted %s",
+                         _redaction_kinds(redactions))
             # Heuristic: if the returned text is near the cap, the page was
             # bigger than we saw. The agent can use this to decide whether
             # to read again with `around` set.
@@ -4075,6 +4121,51 @@ _SCREENSHOT_REDACTED_WHY = (
     "this page holds something credential-shaped, and a picture cannot be "
     "redacted."
 )
+# The page's own redaction is the one claim the model can already see: the
+# redacted page text above it says `[redacted:card]`. The two pixel claims
+# are not in the text at all, and one of them is not even a fact about the
+# page — a value typed into a cell says nothing about what the page holds.
+# So each gets its own sentence, and a run can tell which one closed the
+# shutter.
+#
+# A field that positively identifies as a credential was typed into. This is
+# run-wide and never releases, so no picture is coming for the rest of the
+# task — and the value WAS typed, so the sentence says that, because a model
+# that reads a closed shutter as a refused input stops typing (see
+# `privacy.md` 3h).
+_SCREENSHOT_LATCHED_WHY = (
+    "this run has typed a value into a field that identifies as a "
+    "credential, so no picture can be taken for the rest of this run. The "
+    "value was typed: it is the picture, not the typing, that is withheld."
+)
+# A value was typed into a field the harness could not classify, so the
+# shutter is closed for a moment in case that value is still on the page.
+# The recorded Sheets run was told the sentence above for this, and it was
+# false — the page held a spreadsheet — so the model spent fourteen steps
+# looking for a credential that was never there.
+_SCREENSHOT_AMBIGUOUS_WHY = (
+    "a value was typed a moment ago into a field that could not be "
+    "classified, so pictures are withheld for a moment in case that value "
+    "is still on the page. The value was typed: it is the picture, not the "
+    "typing, that is withheld."
+)
+
+
+def _veto_why(redactions, run_secrets) -> str:
+    """The sentence the model is told when there is no picture.
+
+    The fact, not the taxonomy: the model is told which of the things
+    happened, in words, and not the names this file uses for them. The
+    page's own redaction keeps the sentence it has always had — the model
+    can see `[redacted:card]` in the text above it, so it knows that one.
+    """
+    if redactions:
+        return _SCREENSHOT_REDACTED_WHY
+    if not run_secrets:
+        return ""
+    if list(run_secrets) == [_AMBIGUOUS_MARKER]:
+        return _SCREENSHOT_AMBIGUOUS_WHY
+    return _SCREENSHOT_LATCHED_WHY
 
 
 async def _vision_capability(deps: AgentDeps) -> Capabilities:
@@ -4170,7 +4261,7 @@ async def _vision_fallback(
         # one case where it is too late by the time we get there.
         return _VisionFallback(
             needed=True, can_see=True,
-            note=_failure_note(_SCREENSHOT_REDACTED_WHY, canvas),
+            note=_failure_note(_veto_why(redactions, run_secrets), canvas),
         )
     # Whether the page is *thin* or *absent* decides the note: the empty-tree
     # note is false on a page with a readable toolbar, and a model told the
@@ -4929,8 +5020,33 @@ class AgentHarness:
             # credential is a credential.
             page_text, redactions = redact_text(page_text)
             if redactions:
-                log.info("page text: redacted %s", ", ".join(
-                    f"{n} {k}" for k, n in sorted(redactions.items())))
+                log.info("page text: redacted %s", _redaction_kinds(redactions))
+            # Which claim closed the pixel shutter this step, recorded before
+            # anything downstream can be blamed for it. The recorded Sheets run
+            # repeated one sentence for fourteen steps and its document could
+            # not say which claim had closed the shutter — a gate that fires
+            # silently is a gate nobody can debug.
+            #
+            # It is the audit document and not only the log, because the log
+            # is the operator's console and the document is the run's
+            # record: only one of them is still there next month. What is
+            # written is a closed vocabulary of claims and, for a page
+            # redaction, the per-kind counts `redact_text` already reports —
+            # a fact about the run, in the same shape as the rest of the
+            # document, and never a page string and never a typed value.
+            #
+            # One record per step, here, where both facts are known: this
+            # step's page redaction and the pixel claim the vetoes read. The
+            # approval card's own capture reads the same two facts a few
+            # lines later, and a latch made by this step's own typing shows
+            # up in the NEXT step's record, because the latch is run-wide.
+            veto = _veto_reason(redactions, _pixel_latch(pixel_veto, step))
+            if veto:
+                log.info("[%s] step %d  pixel shutter closed: %s",
+                         deps.user_id, step, veto)
+                audit.record_policy(
+                    step=step, kind="pixel_veto", domain=None, action=None,
+                    decision=veto)
             # The delta rides on the observation `get_targets()` just took, so
             # it is read here and not earlier — anywhere above this line it
             # would be the previous step's answer, or none. It sits below the
