@@ -261,15 +261,21 @@ class CDPRelay:
             log.debug("get_page_text failed: %s", e)
             return ""
 
-    async def capture_screenshot(self) -> str | None:
+    async def capture_screenshot(self, css_resolution: bool = False) -> str | None:
         """Base64 JPEG of the viewport, or None. Same contract as
         `ExtensionCDPRelay.capture_screenshot`: the vision fallback is a
         harness feature, not an extension feature, so the dev relay needs it
-        too or `/run` goes blind on exactly the pages the fallback exists for."""
+        too or `/run` goes blind on exactly the pages the fallback exists for.
+
+        `css_resolution` is the extension's viewport clip at scale 1; here it
+        is Playwright's own spelling of the same picture, so a dev run spends
+        the tokens the real extension would."""
         if not self._browser.page:
             return None
         try:
-            raw = await self._browser.page.screenshot(type="jpeg", quality=60)
+            raw = await self._browser.page.screenshot(
+                type="jpeg", quality=60,
+                **({"scale": "css"} if css_resolution else {}))
             import base64
             return base64.b64encode(raw).decode("ascii")
         except Exception as e:

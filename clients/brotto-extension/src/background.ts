@@ -1616,6 +1616,40 @@ async function startRelay(
     ws!.send(JSON.stringify(payload));
   };
 
+  // The CSS-pixel viewport of the tab and the clip scale that lands on it, or
+  // null when either cannot be measured.
+  //
+  // `Page.captureScreenshot` defaults to device pixels, so a 2x display hands
+  // the model a picture 4x the area and ~2.6x the bytes, bought for detail
+  // only a `<canvas>` with real text in it can use. A `clip` is specified in
+  // CSS pixels but its `scale` is applied to the *device* surface, so scale 1
+  // reproduces the retina shot at four times the cost — measured on Chrome:
+  // `scale: 1` at dpr 2 returned 3024x1890, identical to no clip at all. It
+  // is `1 / devicePixelRatio` that produces 1512x945.
+  //
+  // No caching: the answer changes when the user zooms or resizes, and one
+  // `Runtime.evaluate` beside an 85 KB screenshot is not worth a second
+  // invalidation path. `null` is the honest answer and the caller falls back to
+  // the device capture — a clip of a guessed size is a picture of the wrong
+  // page, which is the one failure here that costs a click.
+  const cssViewport = async (tabId: number): Promise<{ width: number; height: number; scale: number } | null> => {
+    try {
+      const r = await dbg.sendCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: {
+          expression: "[window.innerWidth, window.innerHeight, window.devicePixelRatio]",
+          returnByValue: true,
+        },
+      }) as { result?: { value?: unknown } };
+      const [w, h, dpr] = (r.result?.value || []) as number[];
+      return w > 0 && h > 0 && dpr > 0
+        ? { width: w, height: h, scale: 1 / dpr }
+        : null;
+    } catch {
+      return null;
+    }
+  };
+
   ws.onmessage = async (ev) => {
     const msg = JSON.parse(ev.data as string) as any;
     // ponytail: fall back to the tab this run is driving rather than
@@ -1919,12 +1953,26 @@ async function startRelay(
       //
       // Not forwarded to the panel: the consumer is the model, and a frame the
       // panel has no `case` for is a run that never ends.
+      //
+      // `css_resolution` is the server's request, not ours, and that is the
+      // seam decision. The alternative — deciding here from the page — would
+      // mean a second, weaker copy of the harness's `_is_canvas_page` in the
+      // extension, and no way to tell this capture from the approval card's:
+      // they are the same frame, and the card is the user's own surface, shown
+      // on the user's machine, where small text has to stay legible. So the
+      // caller asks, the one key is optional and a server that predates it
+      // gets today's behaviour, and the frame contract grows by a key rather
+      // than by a type.
       case "capture_screenshot": {
         try {
           if (tid === null) throw new Error("no tab attached");
+          const vp = msg.css_resolution === true ? await cssViewport(tid) : null;
           const r = await dbg.sendCommand(tid, {
             method: "Page.captureScreenshot",
-            params: { format: "jpeg", quality: 60 },
+            params: vp
+              ? { format: "jpeg", quality: 60,
+                  clip: { x: 0, y: 0, width: vp.width, height: vp.height, scale: vp.scale } }
+              : { format: "jpeg", quality: 60 },
           }) as { data?: unknown };
           const data = typeof r.data === "string" ? r.data : "";
           // A truncated base64 string decodes to a corrupt image that a vision

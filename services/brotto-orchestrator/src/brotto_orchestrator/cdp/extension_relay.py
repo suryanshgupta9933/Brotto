@@ -882,11 +882,17 @@ class ExtensionCDPRelay:
         await self._send_action({"type": "key", "key": key, "modifiers": modifiers})
         return "ok"
 
-    async def capture_screenshot(self) -> str | None:
+    async def capture_screenshot(self, css_resolution: bool = False) -> str | None:
         """A JPEG of the attached tab, base64, or None.
 
         The capture primitive for the vision fallback: the accessibility tree
         is blind on `<canvas>`, where there is no node and no page text.
+
+        `css_resolution` asks the extension for a CSS-pixel image rather than
+        the device-pixel one it takes by default. An optional key on a frame
+        that already exists, not a new frame type, and off by default so both
+        a caller that does not care and an extension that predates the key
+        keep today's behaviour.
 
         Transit only. The payload is page content, so it is returned to the
         caller and never logged, stored on the relay, or written to an audit
@@ -895,7 +901,10 @@ class ExtensionCDPRelay:
         because the same JSON channel carries both, and a viewport JPEG at
         q60 is 270–700 KB of base64 against a few KB of tree.
         """
-        await self._ws_send({"type": "capture_screenshot"})
+        frame: dict = {"type": "capture_screenshot"}
+        if css_resolution:
+            frame["css_resolution"] = True
+        await self._ws_send(frame)
         try:
             async with asyncio.timeout(_OBSERVATION_TIMEOUT):
                 msg = await self._screenshot.get()

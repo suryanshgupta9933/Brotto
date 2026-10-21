@@ -84,6 +84,27 @@ async def test_a_canvas_page_is_pictured_on_every_step_of_the_task():
 
 
 @pytest.mark.asyncio
+async def test_a_canvas_picture_is_taken_at_css_resolution():
+    """The cost half of the same rule. A canvas has no small text to read, the
+    model clicks in CSS pixels regardless, so the device copy is ~3,300 image
+    tokens where ~1,800 would show the same grid — and a canvas task takes a
+    picture every step. An ordinary page keeps the device copy: that is where
+    the small text is."""
+    canvas = _canvas_deps()
+    for _ in range(14):
+        await _vision_fallback(canvas, _toolbar(40), "Sheet1")
+    assert all(call.kwargs.get("css_resolution") is True
+               for call in canvas.cdp.capture_screenshot.await_args_list)
+
+    ordinary = _deps(targets=_toolbar(40), page_text="Board", task=_SHEET_TASK)
+    for _ in range(3):
+        await _vision_fallback(ordinary, _toolbar(40), "Board")
+    assert ordinary.cdp.capture_screenshot.await_count == 3
+    assert all(call.kwargs.get("css_resolution") in (None, False)
+               for call in ordinary.cdp.capture_screenshot.await_args_list)
+
+
+@pytest.mark.asyncio
 async def test_an_ordinary_sparse_page_keeps_its_three_pictures():
     """The other half: the canvas rule must not leak. A page the tree and the
     text can serve is a page where a picture is a second copy of something
