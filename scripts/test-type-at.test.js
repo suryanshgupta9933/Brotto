@@ -479,6 +479,19 @@ test("an editor that cannot be read is not a failure — it is not measured", as
   assert.equal(result.ok, true, JSON.stringify(result));
 });
 
+test("a grid that replaced its editor mid-typing is not a failed delivery", async () => {
+  // The editor node the text was typed into is gone — the grid re-rendered the
+  // cell. The old node's text is not evidence about the new one, so the two
+  // reads are not comparable and nothing is claimed either way.
+  let focusReads = 0;
+  const { result } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    focusNode: async () => ({ ok: true, backendNodeId: focusReads++ === 0 ? 42 : 99 }),
+    editorText: async () => ({ ok: true, text: "" }),
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
 test("text that is already in the cell is not a failed delivery", async () => {
   // The cell already said "ab" and the agent typed "ab": the editor did not
   // change, and nothing is wrong. The check must not call that a failure.

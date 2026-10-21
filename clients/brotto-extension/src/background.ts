@@ -839,7 +839,16 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
         refusal = { ok: false, reason: typed.reason };
         return refusal;
       }
-      const after = await editorText(tabId, bound.focusId);
+      // The after-read is only meaningful on **the same node** the before-read
+      // was taken from. A grid that replaces its editor mid-typing (which
+      // Sheets does when it re-renders a cell) leaves the old node's text
+      // behind, and comparing it with itself would report a delivery failure
+      // for a typing that worked. So the focus is read once more: if the
+      // editor is still the focused node, the two reads are comparable; if it
+      // is not, nothing was measured and nothing is claimed.
+      const afterFocus = await focusNode(tabId);
+      const sameNode = afterFocus.ok && afterFocus.backendNodeId === bound.focusId;
+      const after = sameNode ? await editorText(tabId, bound.focusId) : { ok: false, text: "" };
       // A newline is skipped: a grid commits and empties its editor on Enter,
       // so "unchanged" is the grid's own behaviour and not a failed delivery.
       if (before.ok && after.ok && text && !text.includes("\n") &&
