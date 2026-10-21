@@ -7,7 +7,7 @@
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
 import { clearDelta } from "./observation/delta";
-import { bindFocus, boundedPoint, drawCursor, editorText, focusNode, focusState, reassertGridFocus, verifyTarget, withWorld } from "./observation/pointer";
+import { bindFocus, boundedPoint, drawCursor, editorText, focusNode, focusState, gridDelivery, reassertGridFocus, verifyTarget, withWorld } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -741,18 +741,24 @@ const MAX_CANVAS_CHARS = 1000;
 async function typeIntoCanvas(
   tabId: number,
   text: string,
-  beforeChar: () => Promise<{ ok: boolean; reason: string }>,
-): Promise<{ ok: boolean; reason: string }> {
+  beforeChar: () => Promise<{ ok: boolean; reason: string; drift?: string }>,
+): Promise<{ ok: boolean; reason: string; drift?: string }> {
   if (text.length > MAX_CANVAS_CHARS) {
     return { ok: false, reason: "canvas-text-too-long" };
   }
+  // The drift of the last re-assert is kept, and a "suspect" one is sticky: a
+  // key event is focus-global, so the focus that was taken back is the focus
+  // the previous keystroke went to — and a later benign drift does not un-do
+  // an earlier stray one.
+  let drift = undefined as string | undefined;
   for (const ch of text) {
     const held = await beforeChar();
     if (!held.ok) return { ok: false, reason: held.reason };
+    if (held.drift === "suspect" || drift === undefined) drift = held.drift;
     if (ch === "\n") await dispatchKey(tabId, "Enter", 0);
     else await dispatchKey(tabId, ch, 0);
   }
-  return { ok: true, reason: "" };
+  return { ok: true, reason: "", drift };
 }
 
 async function executeAction(tabId: number, action: any): Promise<{ ok: boolean; reason: string }> {
@@ -875,9 +881,37 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
       // so "unchanged" is the grid's own behaviour and not a failed delivery.
       if (before.ok && after.ok && text && !text.includes("\n") &&
           after.text === before.text && !after.text.includes(text)) {
+        // **A keystroke that went to another editor is a different failure.**
+        // The re-assert takes the focus back, and it reports what *had* it: a
+        // text-entry surface that is not the grid's own is the one shape a
+        // keystroke can go into, so the keystroke before it may have landed
+        // there. The grid's editor did not change, so the text did not reach
+        // the cell — and it may be sitting in somebody else's field.
+        if (typed.drift === "suspect") {
+          console.warn("brotto: type_at refused — a keystroke went to another editor; the text did not land in the cell");
+          refusal = { ok: false, reason: "grid-text-misdelivered" };
+          return refusal;
+        }
         console.warn("brotto: type_at refused — the grid's editor did not change; the text did not land in the cell");
         refusal = { ok: false, reason: "grid-text-not-delivered" };
         return refusal;
+      }
+      // **The editor was replaced mid-typing, so the two reads prove
+      // nothing** — and a keystroke may have gone astray while it happened.
+      // Then the page is asked where the text is: the grid's own scope holds
+      // it, so the re-render is the grid's business; anywhere else, or
+      // nowhere, and the text is not where the press aimed it.
+      //
+      // The page is asked **only** in that case. A run with no drift reports
+      // what it measured and claims nothing more, and a run that never
+      // re-rendered its editor is answered by the two reads above.
+      if (!sameNode && typed.drift === "suspect") {
+        const delivery = await gridDelivery(tabId, text);
+        if (!(delivery.ok && delivery.state === "in-grid")) {
+          console.warn(`brotto: type_at refused — the grid's scope does not hold the text (${delivery.state ?? delivery.reason ?? "unknown"}); a keystroke went elsewhere`);
+          refusal = { ok: false, reason: "grid-text-misdelivered" };
+          return refusal;
+        }
       }
     } else {
       // The guard `focus_id` gives the two-frame version lived between the

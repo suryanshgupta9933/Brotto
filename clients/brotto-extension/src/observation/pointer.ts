@@ -550,6 +550,22 @@ const GRID_FOCUS_PROBE = `function (adapters) {
     for (var i = 0; i < cls.length; i++) { if (cls[i] === className) return true; }
     return false;
   }
+  // **What had the focus, classified.** A key event is focus-global, so the
+  // element that held the focus when the previous keystroke was processed is
+  // where that keystroke went. A *text-entry surface* that is not the grid's
+  // own editor is the one shape a keystroke can go into, so the drift is
+  // "suspect" there; anything else — the body, the grid's own canvas — cannot
+  // receive text, and the drift is "benign".
+  function driftOf(el, scopeId, className) {
+    try {
+      if (!el || el.nodeType !== 1) return "benign";
+      if (isGridEditor(el, scopeId, className)) return "benign";
+      var tag = String(el.tagName || el.nodeName || "").toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA") return "suspect";
+      if (el.isContentEditable === true) return "suspect";
+    } catch (err) { return "benign"; }
+    return "benign";
+  }
   var origin = "";
   try { origin = String(location.origin || ""); } catch (err) { origin = ""; }
   var adapter = null, seen = 0;
@@ -560,7 +576,10 @@ const GRID_FOCUS_PROBE = `function (adapters) {
   // wall was written for, and a page that navigated here gets nothing.
   if (seen !== 1 || !adapter) return { ok: false, reason: "grid-editor-unrecognised" };
   var scopeId = String(adapter.scopeId), className = String(adapter.className);
-  if (isGridEditor(document.activeElement, scopeId, className)) {
+  // What held the focus *before* this probe. The keystroke that preceded it
+  // went wherever this was.
+  var prior = document.activeElement;
+  if (isGridEditor(prior, scopeId, className)) {
     return { ok: true, outcome: "already-focused" };
   }
   // The focus drifted. Find the grid's editor by its role and take it back.
@@ -588,7 +607,7 @@ const GRID_FOCUS_PROBE = `function (adapters) {
     return { ok: false, reason: "focus-changed" };
   }
   if (isGridEditor(document.activeElement, scopeId, className)) {
-    return { ok: true, outcome: "refocused" };
+    return { ok: true, outcome: "refocused", drift: driftOf(prior, scopeId, className) };
   }
   return { ok: false, reason: "focus-changed" };
 }`;
@@ -605,8 +624,13 @@ const GRID_FOCUS_PROBE = `function (adapters) {
  * the document is no longer served from a recognised grid's origin, and
  * `focus-changed` when the editor does not hold the focus and could not be
  * given it back.
+ *
+ * **`drift` says what had the focus when the probe took it back** — `suspect`
+ * when it was a text-entry surface that is not the grid's own (so the
+ * keystroke before it may have gone there), `benign` when it was something that
+ * cannot receive text. It is absent when nothing drifted.
  */
-export async function reassertGridFocus(tabId: number): Promise<{ ok: boolean; reason: string }> {
+export async function reassertGridFocus(tabId: number): Promise<{ ok: boolean; reason: string; drift?: string }> {
   const adapters = JSON.stringify(GRID_ADAPTERS);
   try {
     const call = await withWorld(tabId, (contextId) =>
@@ -620,10 +644,112 @@ export async function reassertGridFocus(tabId: number): Promise<{ ok: boolean; r
       }));
     const v = call?.result?.value;
     if (!v || typeof v !== "object") return { ok: false, reason: "focus-changed" };
-    if (v.ok === true) return { ok: true, reason: "" };
+    if (v.ok === true) {
+      const drift = v.drift === "suspect" || v.drift === "benign" ? v.drift : undefined;
+      return { ok: true, reason: "", drift };
+    }
     return { ok: false, reason: String(v.reason ?? "focus-changed") };
   } catch {
     return { ok: false, reason: "focus-changed" };
+  }
+}
+
+/**
+ * **Where the typed text went.**
+ *
+ * The focus probe says whether the grid's editor held the focus; it cannot say
+ * where a keystroke that went *elsewhere* landed, because a key event is
+ * focus-global and leaves no trace of its own. This asks the page instead:
+ *
+ *   - `in-grid`  the text is inside the grid's own scope, so the grid has it.
+ *   - `foreign`  the text is in some other editor on the page — the case the
+ *                 security review named: the press was never aimed there.
+ *   - `unknown`  the text was found nowhere, so nothing is claimed.
+ *
+ * The origin is checked first, exactly as the focus probe checks it: a page
+ * that is not the recognised application is refused without being inspected.
+ */
+const GRID_DELIVERY_PROBE = `function (adapters, text) {
+  var origin = "";
+  try { origin = String(location.origin || ""); } catch (err) { origin = ""; }
+  var adapter = null, seen = 0;
+  for (var i = 0; i < adapters.length; i++) {
+    if (String(adapters[i].origin) === origin) { adapter = adapters[i]; seen++; }
+  }
+  if (seen !== 1 || !adapter) return { ok: false, reason: "grid-editor-unrecognised" };
+  var needle = String(text == null ? "" : text);
+  if (!needle) return { ok: true, state: "unknown" };
+  function holds(el) {
+    if (!el || el.nodeType !== 1) return false;
+    try {
+      if (el.value != null && String(el.value).indexOf(needle) >= 0) return true;
+      if (el.textContent != null && String(el.textContent).indexOf(needle) >= 0) return true;
+    } catch (err) { return false; }
+    return false;
+  }
+  function isEditor(el) {
+    if (!el || el.nodeType !== 1) return false;
+    var tag = String(el.tagName || el.nodeName || "").toUpperCase();
+    if (tag === "INPUT" || tag === "TEXTAREA") return true;
+    return el.isContentEditable === true;
+  }
+  // The grid's own scope: by id, and by a document scan if the id lookup
+  // finds nothing.
+  var scopeId = String(adapter.scopeId), scope = null;
+  try { scope = document.getElementById(scopeId); } catch (err) { scope = null; }
+  if (!scope) {
+    var ids = [];
+    try { ids = document.querySelectorAll ? document.querySelectorAll("[id]") : []; }
+    catch (err) { ids = []; }
+    for (var j = 0; j < ids.length; j++) {
+      if (String(ids[j].id) === scopeId) { scope = ids[j]; break; }
+    }
+  }
+  if (scope && holds(scope)) return { ok: true, state: "in-grid" };
+  if (scope && scope.querySelectorAll) {
+    var inside = [];
+    try { inside = scope.querySelectorAll("*"); } catch (err) { inside = []; }
+    for (var k = 0; k < inside.length; k++) {
+      if (holds(inside[k])) return { ok: true, state: "in-grid" };
+    }
+  }
+  // Anywhere else on the page: an editor that holds the text.
+  var others = [];
+  try { others = document.querySelectorAll ? document.querySelectorAll("input, textarea, [contenteditable]") : []; }
+  catch (err) { others = []; }
+  for (var m = 0; m < others.length; m++) {
+    if (scope && scope.contains && scope.contains(others[m])) continue;
+    if (holds(others[m]) && isEditor(others[m])) return { ok: true, state: "foreign" };
+  }
+  return { ok: true, state: "unknown" };
+}`;
+
+/**
+ * Ask the page where the typed text went, in the grid's own isolated world.
+ *
+ * Only consulted when the grid replaced its own editor mid-typing — so the
+ * before/after reads are not comparable — *and* a keystroke may have gone
+ * astray. The page is asked because a key event leaves no trace of its own;
+ * the answer is a claim about where the text is, and `unknown` claims nothing.
+ */
+export async function gridDelivery(tabId: number, text: string): Promise<{ ok: boolean; state?: string; reason?: string }> {
+  const adapters = JSON.stringify(GRID_ADAPTERS);
+  try {
+    const call = await withWorld(tabId, (contextId) =>
+      anyCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: {
+          expression: `(${GRID_DELIVERY_PROBE})(${adapters}, ${JSON.stringify(String(text ?? ""))})`,
+          contextId,
+          returnByValue: true,
+        },
+      }));
+    const v = call?.result?.value;
+    if (!v || typeof v !== "object") return { ok: false, reason: "focus-probe-silent" };
+    if (v.ok === true) return { ok: true, state: String(v.state ?? "unknown") };
+    return { ok: false, reason: String(v.reason ?? "grid-editor-unrecognised") };
+  } catch {
+    return { ok: false, reason: "focus-probe-failed" };
   }
 }
 
@@ -667,6 +793,9 @@ const IDLE_WORLD = "brotto-idle";
  *                           typed.
  *   grid-text-not-delivered the grid's editor did not change after the text was
  *                           typed into it, so the text did not land in the cell.
+ *   grid-text-misdelivered a keystroke went to an editor the press was never
+ *                           aimed at, so the text may have landed in somebody
+ *                           else's field.
  *   focus-probe-failed      the `Runtime.evaluate` threw — the document is gone.
  *   focus-probe-silent      the evaluate returned no object: no answer, no pass.
  *   clear-select-noop       the clear was requested and did not happen — the
@@ -714,6 +843,7 @@ export const TYPE_AT_REFUSALS: Readonly<Record<string, string>> = {
   "grid-editor-unrecognised": "a canvas press focused an editable, but the page is not a recognised grid",
   "focus-changed": "the grid's editor does not hold the focus and could not be given it back",
   "grid-text-not-delivered": "the grid's editor did not change — the text did not land in the cell",
+  "grid-text-misdelivered": "a keystroke went to another editor — the text may have landed in a field the press was never aimed at",
   "focus-probe-failed": "the focus evaluate threw; the document went away",
   "focus-probe-silent": "the focus evaluate returned no answer",
   "clear-select-noop": "the clear was requested and did not happen",
