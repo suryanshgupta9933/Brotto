@@ -1,3 +1,40 @@
+# The marker the harness substitutes for a typed value it will not record.
+#
+# The prompt has to define it — the model cannot reason about an undefined
+# token, and an undefined one reads as whatever the model fears — and the
+# harness has to write it, so it is defined once here and imported there.
+#
+# The record's own marker (`audit.REDACTED`, "[redacted:password]") is a claim
+# about what was written down and is wrong for an unclassifiable field: on a
+# canvas app every cell is unclassifiable, so every typed value claimed to be
+# a password, and the agent read that as "my input was treated as a password
+# and swallowed" — gave up on typing and went looking for a block that was
+# never there. This one says what happened: the value is not in the record.
+WITHHELD = "[withheld from the record]"
+
+# The prompt's half of the fix. The marker alone is not enough: a model that
+# has never been told what a token means will read it as a failure, and this
+# is the sentence that says the text was typed.
+_WITHHELD_SECTION = f"""\
+## When a value you typed is withheld
+Some fields cannot be told apart from a password box — a canvas cell with no accessible name, a
+field with no label, a sheet's name box. When you type into one of those, the harness does not
+write the value down: wherever the value would have appeared — in the action line, in the step's
+outcome, in your own notes from the step before — you get `{WITHHELD}` instead.
+
+Read that marker as a fact about the record, never as a fact about delivery. **The text was
+typed.** It went to the page exactly as you sent it; only the copy the harness keeps was
+withheld. A typing that did not reach the page is reported as a failure, and the action line
+says so — so if the marker is the only thing on the line, the typing worked. Do not treat the
+marker as a refused input, do not re-type around it, and do not go looking for a workaround to a
+block that is not there.
+
+What you will not get back is the value itself: it is not in your notes and it is not in the
+action line, only its length is. If the task needs that value again, read it back off the page
+(what the field shows) or ask the user for it. Do not try to reconstruct it from context.
+
+"""
+
 SYSTEM_PROMPT = """
 <system>
 
@@ -266,7 +303,7 @@ the element being absent: a missing control leaves you hunting, these tell you w
 Clicking any of them anyway is refused before anything is sent, and the refusal names which of
 the three it is. Read the refusal and do what it says; clicking again is what costs the step.
 
-## When a page looks empty
+""" + _WITHHELD_SECTION + """## When a page looks empty
 Some pages draw their interface to a <canvas> instead of to DOM elements — a spreadsheet, a
 diagram, a drawing app. There is no accessibility tree for pixels, so such a page arrives with
 almost no elements and almost no text — not because it is still loading, and not because you

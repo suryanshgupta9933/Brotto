@@ -21,7 +21,7 @@ from brotto_orchestrator.agent.context import (
 )
 from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
 from brotto_orchestrator.agent.harness import (
-    _NARRATION_CHARS, _narrate, _step_note, _turn_to_prompt,
+    _NARRATION_CHARS, _narrate, _step_note, _turn_to_prompt, WITHHELD,
 )
 
 
@@ -459,7 +459,7 @@ def test_a_value_typed_into_a_secret_field_is_substituted():
     out = _narrate("Typed hunter2 into the password field to sign in.",
                    ["hunter2"])
     assert "hunter2" not in out
-    assert "[typed into a secret field]" in out
+    assert WITHHELD in out
 
 
 def test_a_short_secret_typed_into_a_secret_field_is_substituted():
@@ -469,7 +469,7 @@ def test_a_short_secret_typed_into_a_secret_field_is_substituted():
     out = _narrate("Signed in with pw123 after the code came back.",
                    ["pw1"])
     assert "pw1" not in out
-    assert "[typed into a secret field]" in out
+    assert WITHHELD in out
 
 
 def test_narration_cannot_close_its_own_fence():

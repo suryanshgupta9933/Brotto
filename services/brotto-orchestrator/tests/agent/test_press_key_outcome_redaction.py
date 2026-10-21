@@ -21,7 +21,7 @@ import pytest
 
 from brotto_orchestrator.agent.context import ActionCall, AgentDeps
 from brotto_orchestrator.agent.harness import (
-    _execute_action, _history_line, _summarise_outcome,
+    _execute_action, _history_line, _summarise_outcome, WITHHELD,
 )
 
 SECRET = "hunter2"
@@ -63,7 +63,7 @@ def test_a_run_secret_does_not_reach_the_stored_outcome():
     the run-wide list knows it."""
     outcome = _summarise_outcome([f"Pressed {SECRET}"], [SECRET])
     assert SECRET not in outcome
-    assert "[typed into a secret field]" in outcome
+    assert WITHHELD in outcome
 
 
 def test_a_run_secret_in_the_refusal_tail_is_scrubbed_too():

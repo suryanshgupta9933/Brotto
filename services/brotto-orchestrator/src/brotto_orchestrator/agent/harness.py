@@ -58,7 +58,7 @@ from ..policy.gate import (
     SCREENSHOT_CAPTURE_ENV,
 )
 from ..policy.domains import etld1
-from .prompt import SYSTEM_PROMPT, policy_preamble
+from .prompt import SYSTEM_PROMPT, policy_preamble, WITHHELD
 from .audit import (
     SCHEMA_VERSION, AuditTrail, REDACTED, is_secret_field, load_scratchpad,
     read,
@@ -129,7 +129,7 @@ def _summarise_outcome(
     # the model. Same run-wide list, same marker, same order.
     def _sub(text: str) -> str:
         for v in secret_values or ():
-            text = text.replace(v, "[typed into a secret field]")
+            text = text.replace(v, WITHHELD)
         return text
 
     joined = redact_text(_sub("; ".join(outcomes) if outcomes else "no action"))[0]
@@ -245,7 +245,7 @@ def _narrate(text: str | None, secret_values: list[str] | None = None) -> str | 
     # the alternative is a live credential on disk, and this module already
     # trades readability for that unconditionally.
     for v in secret_values or ():
-        out = out.replace(v, "[typed into a secret field]")
+        out = out.replace(v, WITHHELD)
     out, _counts = redact_text(out)
     # Angle brackets out before the fence, not after: the narration is the
     # model's words *about* page content and can quote a closing tag the page
@@ -286,11 +286,16 @@ def _scrub_known_secrets(text: str | None, secret_values: list[str] | None) -> s
 
     Order matches `_narrate`: substitution first, because these exact strings
     are the ones `redact_text` has no rule for.
+
+    The marker is the model-facing one. The thought also reaches the prompt —
+    `deps.conversation` is the audit's own messages, and they are rendered
+    into `## This conversation so far` — so a marker that reads as "your input
+    was swallowed" reaches the model here too, and not only the user.
     """
     if not text:
         return None
     for v in secret_values or ():
-        text = text.replace(v, "[typed into a secret field]")
+        text = text.replace(v, WITHHELD)
     return redact_text(text)[0]
 
 
@@ -1588,13 +1593,22 @@ def _scrubbed(call: ActionCall, redact: bool) -> tuple[dict, str]:
 
     The mask follows the argument that carries the character, so it covers
     `press_key`'s single-character key as well as `type_text`'s text.
+
+    Two markers, two audiences. `args` goes to disk and keeps the privacy
+    marker; the trace is the model's view of the same action, and the model
+    reads it as a claim about its own input — "[redacted:password]" said
+    "your input was treated as a password and swallowed", which is not what
+    happened (the text is dispatched unmasked; see the loop's `_execute_action`
+    call). The model's line says what did happen instead. Neither carries the
+    value, so the guarantee is the same either way.
     """
     field = _typed_field(call) if redact else None
     if field is None:
         return call.action_args, f"{call.action}({call.action_args})"
     value = call.action_args.get(field, "")
     args = {**call.action_args, field: REDACTED, f"{field}_chars": len(str(value))}
-    return args, f"{call.action}({args})"
+    model_args = {**args, field: WITHHELD}
+    return args, f"{call.action}({model_args})"
 
 
 def _make_user_denied_result(step: int, domain: str | None, kind: str, deps: AgentDeps | None = None) -> TaskResult:

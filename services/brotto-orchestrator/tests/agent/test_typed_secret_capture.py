@@ -23,7 +23,7 @@ import pytest
 from brotto_orchestrator.agent.context import (
     ActionCall, AgentDecision, AgentDeps, TaskResult,
 )
-from brotto_orchestrator.agent.harness import AgentHarness
+from brotto_orchestrator.agent.harness import AgentHarness, WITHHELD
 from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
 import brotto_orchestrator.agent.harness as harness_mod
 
@@ -110,7 +110,7 @@ async def test_a_secret_typed_after_a_scroll_is_still_scrubbed(monkeypatch):
     ], f"Typed {_SECRET} into the password field after scrolling.")
 
     assert _SECRET not in summaries[0].extracted
-    assert "[typed into a secret field]" in summaries[0].extracted
+    assert WITHHELD in summaries[0].extracted
 
 
 @pytest.mark.asyncio
