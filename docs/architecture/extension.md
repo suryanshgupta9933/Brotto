@@ -705,13 +705,23 @@ plain `click` frames, and each one paid a full `captureObservation`.
 
 **The clear is gone.** The marker is the user's only way to see where the
 agent is clicking, and a `finally` that removed it made the cursor invisible
-in practice. Nothing in the extension removes it any more: the next click
-*moves* it, and the only thing that takes it away is the page going away — so
-an overlay cannot be orphaned across a navigation, because it cannot outlive
-the document it lives in. Its words live in a `data-label` rendered by a
-`::after` rule, and both halves are `aria-hidden`, so they are in neither the
-page text the model reads nor the accessibility tree the observation is built
-from.
+in practice: the mouse pair is dispatched with no delay, so a sub-200ms marker
+was never seen at all. Nothing in the extension removes it any more. The next
+click *moves* it — the draw removes the previous dot, label and style by name
+and puts new ones at the new point, so there is never more than one — and the
+only thing that takes it away is the page going away, so an overlay cannot be
+orphaned across a navigation, because it cannot outlive the document it lives
+in.
+
+**A marker that outlives its click has to be invisible to the observation.**
+Its words live in a `data-label` rendered by a `::after` rule, and both halves
+are `aria-hidden`, so they are in neither the page text the model reads
+(`document.body.innerText`) nor the accessibility tree the observation is
+built from. A pseudo-element's content is not a text node, and the `<style>`
+element's own text is CSS. Without that, a marker left up across steps would
+put the agent's own annotation into the page's text — the model reading "Fill
+the form" as if the page had said it, and acting on its own words as
+evidence.
 
 `pressAt(tabId, action, x, y)` is that block, extracted, and it keeps
 `verifyTarget` **inside** it. That placement is load-bearing: `verifyTarget` is
@@ -727,7 +737,9 @@ holds no platform branch and must not grow one.
 text, so it carries four gates in order: **bound the point, verify the target,
 bind the identity, then read and clear**. `clear` is set by the relay's
 `type_text_into_ref`, whose default is `clear=True` — the caller asked to
-replace the field's contents.
+replace the field's contents. The fourth gate has one exception, and it is
+named below: on a canvas grid the clear is the grid's own business and is not
+performed.
 
 - **The point is bounded.** `boundedPoint(tabId, action.x, action.y)` re-reads
   the live viewport and refuses anything outside it, non-finite, or
@@ -740,7 +752,7 @@ replace the field's contents.
   that `click` does not, because `type_at` is the only branch that reads
   `document.activeElement` and *acts destructively* on it.
 
-### `bindFocus` — three walls, and the canvas exemption
+### `bindFocus` — four walls, and the two canvas exemptions
 
 `verifyTarget` answers "is the right element at this point", before the press.
 It cannot answer "what holds focus now", because the press is what creates
@@ -749,8 +761,9 @@ so a press that missed, landed on a non-focusable, or was moved by page script
 leaves the user's *previous* field focused — and `clear` empties that one.
 
 **Wall 1 — engine-sourced identity.** `focusNode` runs `DOM.enable`, reads
-`document.activeElement` **in the isolated world** (`Runtime.evaluate` with the
-world's `contextId`), and has the engine name the node that read points at
+`document.activeElement` **in the isolated world** — a `Runtime.evaluate` with
+the world's `contextId`, through `withWorld`, so a dead context id is rebuilt
+rather than refused — and has the engine name the node that read points at
 (`DOM.describeNode({objectId})`), returning `{backendNodeId, nodeName}`.
 **No page script runs to answer this**: the isolated world has its own
 prototypes, so overriding the `document.activeElement` getter in the page's own
@@ -763,10 +776,21 @@ path.** It answered `-32601` ("'DOM.getFocusNode' wasn't found") on every
 current build, so `focusNode` always failed, so `bindFocus` always returned
 `focus-identify-failed`, so **every `type_at` was refused on every site** — not
 only the canvas ones. The report that started this was a Sheets run whose
-`type_text` was refused with `focus-identify-failed`; the click had landed and
-selected the cell, and the text was never dispatched because the probe had
-already given up. The replacement asks the same question by the route that
-still exists.
+`type_text` was refused with `focus-identify-failed` — four refusals in one
+run's audit; the click had landed and selected the cell, and the text was
+never dispatched because the probe had already given up. The replacement asks
+the same question by the route that still exists.
+
+**No test could have caught this, and that is the point.** The extraction tests
+mock the platform, so every assertion about the refusal vocabulary, the
+identity comparison and the geometry stayed green while the feature refused
+every call in the field. A test proves the code you wrote; it cannot prove that
+the thing you wrote still exists in the browser. The only detector was a live
+run whose audit said `focus-identify-failed` four times, and the failure took
+that long to find because the refusal read like policy — a page that would not
+accept the text — rather than like a method that no longer exists. **A closed
+vocabulary of reasons is a promise that each reason means one thing, so the
+reason has to be the true one.**
 
 **Wall 2 — containment, in an isolated world.** `IDENTITY_PROBE` is a
 `Runtime.callFunctionOn` with the pressed node as `this` and the focused node as
@@ -814,15 +838,25 @@ editor *outside* the canvas. Google Sheets' cell editor is
 `DIV#waffle-rich-text-editor.cell-input[contenteditable=true]` — a direct
 child of `BODY`, zero-width, parked at `y = -9998` — so it is neither the
 pressed node nor inside it, and it is not an `INPUT` either. Wall 3b admits a
-focused editable on a canvas press when **the engine's own geometry** says the
-user cannot see it: it has no area at all, or it lies wholly outside the live
-viewport, or its box contains the point that was pressed (the editor drawn over
-the cell being edited). Editability is the DOM property `isContentEditable`,
-read in the isolated world — **no page attribute is consulted**, so a page
-cannot unlock it by writing `contenteditable` onto the user's own field; and a
-viewport that cannot be read proves nothing, so that case fails closed. A
-visible field elsewhere on the page satisfies none of the three and is still
-refused, which is the "erase some other field" failure.
+focused **editable or text input** on a canvas press when **the engine's own
+geometry** says the user cannot see it: it has no area at all, or it lies
+wholly outside the live viewport, or its box contains the point that was
+pressed (the editor drawn over the cell being edited). Editability is the DOM
+property `isContentEditable`, read in the isolated world — **no page attribute
+is consulted**, so a page cannot unlock it by writing `contenteditable` onto
+the user's own field; and a viewport that cannot be read proves nothing, so
+that case fails closed. A visible field elsewhere on the page satisfies none
+of the three and is still refused, which is the "erase some other field"
+failure.
+
+The third admission is the one that needs its own argument, because it is the
+only one that admits a field the user *could* be looking at. It is safe
+because `verifyTarget` has already asked `elementFromPoint` about the
+dispatched point and been told the **canvas** is there: a visible field of the
+user's own, sitting on top, would have been the hit, and the press would have
+been refused as `different-element` before the text was ever dispatched. The
+editor is admitted because it is under the canvas that took the press, not
+because it is somewhere else.
 
 **A grid cell is typed, not inserted.** `Input.insertText` fires no keydown,
 and a grid starts editing on the *keystroke* — so an insertion never reaches
@@ -831,6 +865,15 @@ text goes out as one `Input.dispatchKeyEvent` pair per character (a newline is
 a Return key), never with a modifier, so no chord and no OS question. The
 ordinary DOM path keeps its single `Input.insertText` call. The run is bounded
 at 1000 characters, and over that it refuses with `canvas-text-too-long`.
+
+**The grid path does not clear, and the grid is told to stop clearing.** The
+DOM clear reaches for a selection inside an off-screen editor, which is not
+what a grid wants: a grid replaces a selected cell's content on the first
+keystroke. So on this path the clear is skipped entirely and the first
+keystroke is the replacement — the same outcome, by the grid's own rule
+instead of ours. The allowance is reported like wall 3's
+(`canvas-grid-editor`), never silent: `bindFocus` returns it, `executeAction`
+logs it, and the server sees an action that succeeded by an allowance.
 
 `bindFocus` also refuses `focus-unidentified` when the frame carries no
 `backendNodeId`. `verifyTarget` *fails open* there, because an older relay has
