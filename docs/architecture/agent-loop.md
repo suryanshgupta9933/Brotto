@@ -1602,7 +1602,7 @@ to use — to establish focus, and then paid a second observation. The fused
 action is what removes it.
 
 **The canvas case needs no special handling, and a *blanket* containment check
-would break it.** A Google Sheets cell is a `<canvas>`; its hidden input is not a
+would break it.** A Google Sheets cell is a `<canvas>`; its editor is not a
 descendant of the cell node that was clicked, so "is the focused element inside
 the thing I clicked" as a blanket rule refuses on exactly the shape this action
 exists to serve. `activeElement.select()` selects that element's own contents
@@ -1622,10 +1622,29 @@ needs a wall of its own. `bindFocus` is that wall: the focused node is read in t
 extension's **isolated world** and named by the engine (`DOM.describeNode`),
 never by a page getter, and must be the pressed node, a descendant of it, a
 canvas editor lying wholly inside it, or the grid's own editor lying outside
-the canvas entirely. It refuses an absent `backendNodeId` as
+the canvas entirely — and that last one only on a **recognised grid's own
+origin**, because the geometry that identifies a spreadsheet is a geometry any
+page can imitate. It refuses an absent `backendNodeId` as
 `focus-unidentified` where `verifyTarget` fails open for an older relay,
 because this is the branch that empties the user's text. Two walls, no
 dependency between them.
+
+**What the grid path does about the focus is not a read.** A grid cell is
+*typed*, not inserted: the text arrives as key events, and a key event goes to
+whatever holds focus when the browser processes it. So the extension cannot
+bind the text to a node by reading the focus before the dispatch — a page that
+moves the focus in that window takes the text anyway. It binds it by putting
+the focus **back**, in the page, immediately before each keystroke, and it
+does that per character rather than per string, because a single check would
+leave a window spanning every keystroke. The cost is one extra CDP round trip
+per character. The window that remains — one round trip between the re-assert
+answering and the browser processing the key — is stated in `extension.md`
+rather than smoothed over, and the honest residual is Google's own re-render
+rather than a hostile page, since the adapter is looked up by the document's
+own origin. `extension.md` has the mechanism; what is owned here is the shape
+of it: **a reading is not a binding**, and the refusal vocabulary grew a name
+for the binding (`focus-changed`) and a separate one for the delivery check
+(`grid-text-not-delivered`) rather than one that blurred the two cases.
 
 **That wall was refusing every call in the field, and the reason is worth
 carrying.** The route it used to ask the question — `DOM.getFocusNode` — was
