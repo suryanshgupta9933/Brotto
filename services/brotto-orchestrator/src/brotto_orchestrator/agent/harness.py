@@ -347,7 +347,79 @@ def _history_line(s: StepSummary) -> str:
     """
     return _strip_brackets(
         f"Step {s.step} | {s.url} | {s.action_taken} → {_safe_outcome(str(s.outcome or ''))}"
-    ) + _step_note(s)
+    ) + _step_note(s) + (
+        f"\n  {_strip_brackets(s.unverified)}" if s.unverified else "")
+
+
+# The fact a step earns when nothing that could see its effect did. It says
+# what is missing rather than concluding failure: on a canvas page a working
+# click and a missed one look identical, which is the whole reason the record
+# has to say "cannot tell" instead of "did not work".
+#
+# It is a FACT, not an order. The history block is untrusted by contract, so
+# the behaviour that follows from an unverified step lives in the prompt
+# ("A step that could not be verified"), not in this string.
+_UNVERIFIED_BLIND = (
+    "UNVERIFIED — nothing confirmed this step. The page is a canvas app: the "
+    "element tree did not change after the action, and no picture of it was "
+    "available to compare, so the action may have landed or may have missed. "
+    "Steps on a page like this stay unconfirmed until something else confirms "
+    "them."
+)
+
+
+def _mark_unverified(summaries: list[StepSummary], *, ax_diff: str,
+                     canvas: bool, pixels: bool | None) -> None:
+    """Judge the LAST step's record by the observation just taken.
+
+    Called from the next step's observe, because that is the first moment the
+    evidence exists: a step cannot know whether its own click landed until the
+    page has been read again. Marking there rather than at write time is why
+    the field is set once and never re-litigated.
+
+    A step is unverified when **no channel existed** to report its effect.
+    The three channels, and what each one means when it is silent:
+
+    * the element tree — on an ordinary page this IS the channel, so its
+      silence is a *reading* the model already has in the diff block ("no
+      changes detected"), not an absence. On a canvas page the tree holds the
+      app's chrome and not its content, so its silence says nothing at all
+      about the content. `_is_canvas_page` is the line between the two.
+    * the pixel delta — `True` means the page moved, `False` means it did
+      not, and both are readings. `None` is the unknown: the delta is
+      withheld (the capture gate, a typed secret) or unavailable (first
+      observation, after a navigation, a failed capture). `None` is not
+      `False` and is never read as "nothing moved".
+    * the URL — a navigation changes it, and the tree changes with it.
+
+    So the only case left is a canvas page whose tree did not change and
+    whose pixels could not be compared: nothing can see that step. That is
+    the case worth recording, and it is recorded **once per page** — the
+    fact is a property of the page, not of each step, so a second line on
+    every step of a blind run would be noise that teaches the model to skip
+    the line. The wording says so, and the history keeps the line for the
+    rest of the run.
+
+    Nothing here can *unmark* a step, and no gate reads it: it is the model
+    that has to be told, and `_note_stagnation` remains the only thing that
+    ends a blind run.
+    """
+    if not summaries:
+        return
+    s = summaries[-1]
+    if not s.mutated or s.unverified or ax_diff != _AX_NO_CHANGE:
+        return
+    if pixels is not None:
+        # A measured reading: the page moved, or it did not. Either way the
+        # model is not in the dark, and the delta block already says which.
+        return
+    if not canvas:
+        # The tree is this page's channel and it said nothing changed.
+        return
+    if any(o.unverified and o.url == s.url for o in summaries[:-1]):
+        # This page has already said it reports nothing.
+        return
+    s.unverified = _UNVERIFIED_BLIND
 
 
 def _unescape(text: str) -> str:
@@ -3450,6 +3522,20 @@ _READ_ONLY_ACTIONS = frozenset({
     "recall_memory", "recall_conversation", "recall_steps",
 })
 
+# Actions whose effect a page would show, and which therefore leave a step
+# with something that can go unseen. `scroll` is deliberately NOT here:
+# `compute_ax_diff` documents that a scroll changes no name and no value, so
+# a scroll is silent on a page that scrolled perfectly well, and calling that
+# an unverified step would be a false alarm on every long page.
+_NON_MUTATING_ACTIONS = (
+    _READ_ONLY_ACTIONS | _TERMINAL_ACTIONS | {"ask_human", "scroll"})
+
+
+def _is_mutating(action: str) -> bool:
+    """Whether an action of this name could have moved the page."""
+    return action not in _NON_MUTATING_ACTIONS
+
+
 # Says what was observed, not what was concluded. On a canvas app the tree is
 # blind whether or not the click worked, so a stable fingerprint is evidence
 # of blindness, never of failure — and a message that claimed "no progress"
@@ -4248,6 +4334,11 @@ def _resume_state(session_id: str) -> dict:
             action_taken="; ".join(str(a.get("action") or "?") for a in actions)
                          or "no action",
             outcome=outcomes[:120] or "no action",
+            # The same fact the live path records, so a resumed run can still
+            # be judged: a step that only read, scrolled or ended the
+            # conversation has no effect to go unseen.
+            mutated=any(_is_mutating(str(a.get("action") or ""))
+                        for a in actions),
         ))
     # Only domains the user APPROVED get into visited_domains on the live
     # path, so only those are restored — re-adding a domain they never
@@ -4776,6 +4867,15 @@ class AgentHarness:
             budget = budget_for_window(getattr(deps, "context_window", None), step=step)
             filtered_ax = filter_ax_targets(targets, max_chars=budget)
             ax_diff = compute_ax_diff(deps.prev_targets, targets, max_chars=budget // 10)
+            # The previous step's record, judged by what this observation just
+            # saw — both signals are already in hand (`deps.canvas_changed` is
+            # set above, before the vision fallback). The previous step is
+            # the one being judged: a step cannot know whether its own click
+            # landed until the page has been read again.
+            _mark_unverified(
+                deps.step_summaries, ax_diff=ax_diff,
+                canvas=_is_canvas_page(deps.canvas_covered),
+                pixels=deps.canvas_changed)
             # Published here, not at the bottom of the loop: the diff above
             # has already been taken, and everything after this point —
             # redaction in particular — resolves refs against the tree the
@@ -5453,6 +5553,11 @@ class AgentHarness:
                 url=current_url,
                 action_taken="; ".join(action_trace) if action_trace else "no action",
                 outcome=combined_outcome,
+                # Whether the next step is entitled to judge this one at all.
+                # A batch of pure reads, a scroll, or one that only finished
+                # the conversation, moved nothing the page would show and so
+                # has no effect to go unseen — see `_mark_unverified`.
+                mutated=any(_is_mutating(c.action) for c in decision.actions),
                 # The loop is stateless per step, so this is the model's own
                 # thread back to itself. `extracted` was rendered into both
                 # the history block and recall_steps and had no writer, so a

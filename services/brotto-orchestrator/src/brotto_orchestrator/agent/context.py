@@ -37,6 +37,16 @@ class StepSummary(BaseModel):
     action_taken: str
     outcome: str
     extracted: str | None = None
+    # Whether this step dispatched something that could have moved the page. A
+    # step of pure reading is not a step whose effect went unseen — the page not
+    # changing after one is the expected reading — so it is never marked.
+    mutated: bool = False
+    # Written by the NEXT step's observe, not by this one: a step cannot know
+    # whether its own effect landed until the page has been read again. Empty
+    # means confirmed, or not a mutation, and is the overwhelmingly common
+    # case. It is a fact for the model to read, never a gate: nothing in the
+    # loop branches on it.
+    unverified: str = ""
 
 
 class MemoryEntry(BaseModel):
