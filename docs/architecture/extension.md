@@ -703,6 +703,16 @@ gates and only one of them had them, so the other two got *no* hit test —
 `focus_ref` and `clear_ref` were `type_text`'s first two trips, dispatched as
 plain `click` frames, and each one paid a full `captureObservation`.
 
+**The clear is gone.** The marker is the user's only way to see where the
+agent is clicking, and a `finally` that removed it made the cursor invisible
+in practice. Nothing in the extension removes it any more: the next click
+*moves* it, and the only thing that takes it away is the page going away — so
+an overlay cannot be orphaned across a navigation, because it cannot outlive
+the document it lives in. Its words live in a `data-label` rendered by a
+`::after` rule, and both halves are `aria-hidden`, so they are in neither the
+page text the model reads nor the accessibility tree the observation is built
+from.
+
 `pressAt(tabId, action, x, y)` is that block, extracted, and it keeps
 `verifyTarget` **inside** it. That placement is load-bearing: `verifyTarget` is
 the only thing binding an action to the node the model was shown, and a gate

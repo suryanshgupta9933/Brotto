@@ -9,7 +9,8 @@
 // real interaction and not a restatement of it.
 //
 // What is asserted is mostly *absence*: the target is clickable with the marker
-// up, and the marker is gone afterwards.
+// up, and nothing in the extension ever removes the marker — it is the user's
+// only way to see where the agent is clicking.
 //
 //   node --test scripts/test-cursor.test.js
 
@@ -54,7 +55,6 @@ const MAX_CURSOR_LABEL = src.match(/^export const MAX_CURSOR_LABEL = (\d+);$/m)[
 // The one `${…}` the sliced literal carries, resolved the way TypeScript
 // resolves it — so the cap the snippet enforces is the constant, not a copy.
 const DRAW_CURSOR = extractTemplate("DRAW_CURSOR").replace("${MAX_CURSOR_LABEL}", MAX_CURSOR_LABEL);
-const CLEAR_CURSOR = extractTemplate("CLEAR_CURSOR");
 const BOX_WALK = extractTemplate("BOX_WALK", geo);
 
 // ── one fake page, shared by both snippets ─────────────────────────────────
@@ -73,6 +73,9 @@ function node(tag, box, style = {}) {
     parentNode: null,
     style: { ...style },
     _box: box,
+    _attrs: {},
+    setAttribute(k, v) { self._attrs[k] = String(v); },
+    getAttribute(k) { return k in self._attrs ? self._attrs[k] : null; },
     getClientRects: () => (box ? [{ width: 1 }] : []),
     getBoundingClientRect: () => self._box || { left: 0, right: 0, top: 0, bottom: 0 },
     contains: (other) => allNodes.includes(other) && subtree(self).includes(other),
@@ -158,7 +161,6 @@ function sandboxFor(page, width = 1000, height = 800) {
   const sandbox = { document: page.doc, window: { innerWidth: width, innerHeight: height }, String, JSON, Math, console };
   return {
     draw: vm.runInNewContext("(" + DRAW_CURSOR + ")", sandbox),
-    clear: vm.runInNewContext("(" + CLEAR_CURSOR + ")", sandbox),
     walk: vm.runInNewContext("(" + BOX_WALK + ")", sandbox),
   };
 }
@@ -203,19 +205,39 @@ function check(name, cond, detail) {
       `BOX_WALK answered ${JSON.stringify(out[0])} with the marker drawn — the cursor is occluding the click it announces`);
   }
 
-  // 2. The label is bounded and rendered as text, not markup.
+  // 2. The label is bounded, and it is not in the page's text.
+  //
+  //    The marker stays up, so its words would otherwise sit in the page text
+  //    the model reads (`document.body.innerText`) and in the accessibility tree
+  //    the observation is built from — the model would read the agent's own
+  //    annotation as if it were the page's. So the words live in `data-label`
+  //    and are rendered by a `::after` rule: a pseudo-element's content is not
+  //    a text node, so it is in neither.
   {
     const page = makePage();
     const { draw } = sandboxFor(page);
     draw(150, 120, "x".repeat(500) + "<img src=x onerror=1>", CURSOR_ID);
     const label = page.doc.getElementById(CURSOR_ID + "-label");
     const cap = src.match(/^export const MAX_CURSOR_LABEL = (\d+);$/m)[1];
-    check("the label is capped", label && label.textContent.length === Number(cap),
-      `label is ${label && label.textContent.length} chars, cap is ${cap}`);
+    const words = label ? (label.getAttribute("data-label") || "") : "";
+    check("the label is capped", words.length === Number(cap),
+      `label is ${words.length} chars, cap is ${cap}`);
+    check("the label carries no text node", label && !label.textContent,
+      `the label has text content: ${JSON.stringify(label && label.textContent)}`);
     check("the label is textContent, never innerHTML",
       label && label.innerHTML === undefined, "the label element exposes innerHTML");
     check("the label is pointer-events: none too",
       label && label.style.pointerEvents === "none", "only the dot was made transparent to the hit test");
+    check("the label is hidden from the accessibility tree",
+      label && label.getAttribute("aria-hidden") === "true",
+      "aria-hidden is what keeps the label out of the AX tree the observation is built from");
+    const dot = page.doc.getElementById(CURSOR_ID);
+    check("the dot is hidden from the accessibility tree too",
+      dot && dot.getAttribute("aria-hidden") === "true", "the dot exposes an empty node to the AX tree");
+    const sheet = page.doc.getElementById(CURSOR_ID + "-style");
+    check("the label's rule is a stylesheet, not a text node",
+      sheet && typeof sheet.textContent === "string" && sheet.textContent.includes("attr(data-label)"),
+      "the rule that renders the words was not written");
   }
 
   // 3. A second draw replaces the first: two markers is one occluder too many,
@@ -225,20 +247,22 @@ function check(name, cond, detail) {
     const { draw } = sandboxFor(page);
     draw(150, 120, "first", CURSOR_ID);
     draw(160, 130, "second", CURSOR_ID);
-    // button, iframe, marker, label — the first two are the page's own.
-    check("a redraw leaves one marker", page.body.children.length === 4,
+    // button, iframe, style, dot, label — the first two are the page's own.
+    check("a redraw leaves one marker", page.body.children.length === 5,
       `body has ${page.body.children.length} children: ${page.body.children.map((c) => c.id).join(", ")}`);
   }
 
-  // 4. The clear removes both halves, and is safe when there is nothing to clear.
+  // 4. The marker is never removed. There is no path that takes it away: the
+  //    next click *moves* it, and the only thing that ends it is the page going
+  //    away — so an overlay can never be orphaned across a navigation, because
+  //    it cannot outlive the document it lives in.
   {
-    const page = makePage();
-    const { draw, clear } = sandboxFor(page);
-    draw(150, 120, "the cell C4", CURSOR_ID);
-    clear(CURSOR_ID);
-    check("the clear leaves no marker", !page.doc.getElementById(CURSOR_ID), "the dot survived the clear");
-    check("the clear leaves no label", !page.doc.getElementById(CURSOR_ID + "-label"), "the label survived the clear");
-    check("the clear is idempotent", clear(CURSOR_ID) === true, "clearing a marker that was never drawn threw or answered falsy");
+    check("nothing in the extension removes the marker",
+      !src.includes("CLEAR_CURSOR") && !src.includes("clearCursor"),
+      "the pointer module still has a path that removes the marker");
+    const bg = fs.readFileSync(path.join(EXT, "src", "background.ts"), "utf8");
+    check("nothing in the background removes the marker either",
+      !bg.includes("clearCursor"), "background.ts still clears the marker");
   }
 
   // 5. A point inside an iframe is another document. The draw must say so

@@ -27,10 +27,15 @@
  *   1. `pointer-events: none`, so the hit test skips it. This is what makes
  *      `scripts/test-cursor.test.js` assertable: the marker is invisible to the
  *      resolver, not merely drawn on top.
- *   2. Removal strictly after the `mousePressed`/`mouseReleased` pair, in a
- *      `finally` at the `executeAction` call site — not on a timer. A click
- *      that navigates throws on the observation that follows, and a timer is
- *      how a marker outlives the action that drew it.
+ *   2. **The marker stays.** There is no code path that removes it: the next
+ *      click *moves* it, and the only thing that takes it away is the page
+ *      going away. That is what "always visible" means here, and it is a claim
+ *      about the absence of a call rather than about a timer — a timer is how a
+ *      marker outlives the action that drew it, and a `finally` that clears it
+ *      is how the user never sees where the agent is clicking. Its words live
+ *      in a `data-label` rendered by a `::after` rule, and both halves are
+ *      `aria-hidden`, so the label is in neither the page text the model reads
+ *      nor the accessibility tree the observation is built from.
  *
  * No offscreen document (no permission, no new surface) and no content script:
  * this is one more bounded `Runtime.evaluate`, the same primitive as
@@ -47,8 +52,8 @@ async function anyCommand(tabId: number, command: any): Promise<any> {
   return await dbg.sendCommand(tabId, command);
 }
 
-/** The marker's element id. The label gets `${id}-label`, so one `clearCursor`
- *  removes both by name rather than by class. */
+/** The marker's element id. The label gets `${id}-label` and the rule that
+ *  renders it `${id}-style`, so a redraw replaces all three by name. */
 export const CURSOR_ID = "__brotto_cursor";
 
 /** A label is a truncated slice of model-authored text rendered into the page.
@@ -62,6 +67,18 @@ export const MAX_CURSOR_LABEL = 80;
  * `DRAW_CURSOR`. Idempotent: it removes the old marker first, so a crash
  * between actions cannot leave one behind.
  *
+ * **The marker stays.** There is no path that removes it — the next click
+ * *moves* it, and the only thing that takes it away is the page going away.
+ * That is the whole "always visible" claim, and it is a claim about the
+ * absence of a call rather than about a timer.
+ *
+ * **The label is not in the DOM's text.** The words live in `data-label` and
+ * are rendered by a `::after` rule, and both halves are `aria-hidden`. A
+ * marker that outlives its click would otherwise put its own words into the
+ * page text the model reads (`document.body.innerText`) and into the
+ * accessibility tree the observation is built from — the model would be
+ * reading the agent's annotation as if it were the page's.
+ *
  * No template literals or semicolons inside: the Node test slices these
  * constants out of the source between the backticks, and a backtick inside
  * would end the slice early.
@@ -72,6 +89,8 @@ const DRAW_CURSOR = `function (x, y, label, id) {
   if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
   var prevLabel = doc.getElementById(id + "-label");
   if (prevLabel && prevLabel.parentNode) prevLabel.parentNode.removeChild(prevLabel);
+  var prevStyle = doc.getElementById(id + "-style");
+  if (prevStyle && prevStyle.parentNode) prevStyle.parentNode.removeChild(prevStyle);
   // Where the click will actually land. An iframe here means the content is
   // another document, and a marker appended to *this* body's stacking context
   // is invisible over it — with no error, which is the failure this probe
@@ -85,6 +104,7 @@ const DRAW_CURSOR = `function (x, y, label, id) {
   if (!host) return { drawn: false, reason: "no-body" };
   var dot = doc.createElement("div");
   dot.id = id;
+  dot.setAttribute("aria-hidden", "true");
   dot.style.position = "fixed";
   dot.style.left = (x - 7) + "px";
   dot.style.top = (y - 7) + "px";
@@ -97,7 +117,8 @@ const DRAW_CURSOR = `function (x, y, label, id) {
   dot.style.zIndex = "2147483647";
   var tag = doc.createElement("div");
   tag.id = id + "-label";
-  tag.textContent = String(label == null ? "" : label).slice(0, ${MAX_CURSOR_LABEL});
+  tag.setAttribute("aria-hidden", "true");
+  tag.setAttribute("data-label", String(label == null ? "" : label).slice(0, ${MAX_CURSOR_LABEL}));
   tag.style.position = "fixed";
   tag.style.left = (x + 12) + "px";
   tag.style.top = (y + 12) + "px";
@@ -109,20 +130,16 @@ const DRAW_CURSOR = `function (x, y, label, id) {
   tag.style.borderRadius = "4px";
   tag.style.pointerEvents = "none";
   tag.style.zIndex = "2147483647";
+  // The rule that renders the label. A pseudo-element's content is not a text
+  // node, so it is in neither innerText nor the accessibility tree; the
+  // <style> element's own text is CSS and is not rendered either.
+  var sheet = doc.createElement("style");
+  sheet.id = id + "-style";
+  sheet.textContent = "#" + id + "-label:after{content:attr(data-label);white-space:pre-wrap}";
+  host.appendChild(sheet);
   host.appendChild(dot);
   host.appendChild(tag);
   return { drawn: true, reason: "" };
-}`;
-
-/** Remove the marker and the label. Never throws on a missing marker: this is
- *  the `finally` path, and a throw there would mask the click's own failure. */
-const CLEAR_CURSOR = `function (id) {
-  var doc = document;
-  var a = doc.getElementById(id);
-  if (a && a.parentNode) a.parentNode.removeChild(a);
-  var b = doc.getElementById(id + "-label");
-  if (b && b.parentNode) b.parentNode.removeChild(b);
-  return true;
 }`;
 
 const MAX_LABEL = MAX_CURSOR_LABEL;
@@ -845,19 +862,6 @@ export async function drawCursor(tabId, x, y, label) {
     // No marker. The click still happens; the user just does not see it, which
     // is a smaller failure than a click that does not happen.
     return { drawn: false, reason: "evaluate-failed" };
-  }
-}
-
-/** Idempotent. Call it before drawing and in the `finally` after clicking. */
-export async function clearCursor(tabId) {
-  try {
-    await anyCommand(tabId, {
-      method: "Runtime.evaluate",
-      params: { expression: "(" + CLEAR_CURSOR + ")(" + JSON.stringify(CURSOR_ID) + ")", returnByValue: true },
-    });
-  } catch {
-    // A tab mid-navigation rejects the evaluate. Nothing to clear, or the
-    // document that held it is gone — both are the outcome we wanted anyway.
   }
 }
 

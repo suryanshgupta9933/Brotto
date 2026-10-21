@@ -7,7 +7,7 @@
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
 import { clearDelta } from "./observation/delta";
-import { bindFocus, boundedPoint, clearCursor, drawCursor, focusState, verifyTarget, withWorld } from "./observation/pointer";
+import { bindFocus, boundedPoint, drawCursor, focusState, verifyTarget, withWorld } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -675,22 +675,17 @@ async function pressAt(tabId: number, action: any, x: number, y: number): Promis
     console.warn(`brotto: press refused — hit test says ${check.reason} at (${x},${y})`);
     return { ok: false, reason: check.reason };
   }
-  // Draw, click, then the `finally` clears it. pointer-events: none means the
-  // hit test in BOX_WALK cannot see it, and the clear means a later
-  // observation is not reading a page we decorated.
-  try {
-    const drawn = await drawCursor(tabId, x, y, action.label ?? "");
-    if (!drawn.drawn) console.warn(`brotto: cursor not shown (${drawn.reason}) — the click still runs`);
-    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x, y, button: "left", clickCount: 1 } });
-    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x, y, button: "left", clickCount: 1 } });
-    await sleep(200); // brief pause for click to register / navigation to start
-  } finally {
-    // Not on a timer. The mousePressed/mouseReleased pair is dispatched with no
-    // delay, so a sub-200ms cursor is invisible, and a click that navigates
-    // makes the observation that follows throw — which is exactly how a marker
-    // outlives the action that drew it.
-    await clearCursor(tabId);
-  }
+  // Draw, click, and leave the marker up. pointer-events: none means the hit
+  // test in BOX_WALK cannot see it, and the marker *stays*: there is no path
+  // that removes it, so the next click moves it and the only thing that takes
+  // it away is the page going away. A navigation takes the marker with it,
+  // because the marker lives in the document that went away — an overlay
+  // cannot be orphaned across a navigation, because it cannot outlive one.
+  const drawn = await drawCursor(tabId, x, y, action.label ?? "");
+  if (!drawn.drawn) console.warn(`brotto: cursor not shown (${drawn.reason}) — the click still runs`);
+  await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x, y, button: "left", clickCount: 1 } });
+  await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x, y, button: "left", clickCount: 1 } });
+  await sleep(200); // brief pause for click to register / navigation to start
   return null;
 }
 
@@ -747,11 +742,6 @@ async function typeIntoCanvas(tabId: number, text: string): Promise<{ ok: boolea
 
 async function executeAction(tabId: number, action: any): Promise<{ ok: boolean; reason: string }> {
   const t = action.type;
-  // A marker left up by an action that died mid-flight is an occluder over the
-  // element the *next* click is aimed at. Idempotent, and cheap enough to be
-  // unconditional — the clear also runs after every click, so this only ever
-  // does work when a previous action left one behind.
-  await clearCursor(tabId);
   // What the server is told happened. The gates below refuse rather than
   // dispatch, and until this existed a refusal was invisible to the server:
   // `click_ref` returned `Clicked [7]` the moment the frame left, so the model

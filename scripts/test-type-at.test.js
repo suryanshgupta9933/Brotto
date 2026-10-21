@@ -405,6 +405,20 @@ test("the ordinary path is unchanged — one insertion, no keystrokes", async ()
   assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 0);
 });
 
+// ── the cursor stays where it was put ────────────────────────────────────────
+
+test("nothing in the extension removes the marker — the cursor is always visible", async () => {
+  // The cursor is the user's only way to see where the agent is clicking. A
+  // path that removes it — a `finally`, a timer, a redraw that starts from
+  // scratch — puts the user back to a click they cannot see.
+  const { state, sent } = await run(AT);
+  assert.equal(state.clears, 0, "the marker was removed after the click");
+  assert.ok(!bgSrc.includes("clearCursor"), "the extension has no path that removes the marker");
+  assert.ok(!ptrSrc.includes("CLEAR_CURSOR"), "and no snippet removes it either");
+  assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 1,
+    "the run still did its work");
+});
+
 // ── the shipped focus probe ─────────────────────────────────────────────────
 //
 // `FOCUS_PROBE` decides "is this a text field" with `instanceof` against the
