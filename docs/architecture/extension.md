@@ -1011,8 +1011,6 @@ is the narrowest thing in the path.
 
 ### The clear runs after the press, and that ordering is why it is here
 
-### The clear runs after the press, and that ordering is why it is here
-
 It is tempting to move the select-all back to the server. It cannot go there:
 `pressAt` establishes the focus, so after it `activeElement` **is** the clicked
 target and before it is whatever held focus a moment earlier — possibly a
