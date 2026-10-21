@@ -414,25 +414,99 @@ const IDENTITY_PROBE = `function (focus) {
   // a contenteditable, and no engine-side answer carries "is editable".
   var focusTag = (focus && focus.tagName) ? String(focus.tagName).toUpperCase() : "";
   var focusEditable = !!(focus && focus.isContentEditable === true);
-  if (!el || el.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable };
-  if (!focus || focus.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable };
+  // **The page's origin, and the focused node's own name.** Both are needed by
+  // the grid wall, and neither can be forged by a script on the page:
+  // location.origin is the document's own address, which only a navigation
+  // can change, and it is read in the isolated world, where the page owns
+  // neither the getter nor the value.
+  var origin = "";
+  try { origin = String(location.origin || ""); } catch (err) { origin = ""; }
+  // The focused node's *scope* — the nearest ancestor-or-self carrying an id —
+  // and its own class list. These are page-written strings, so they are read
+  // only after the origin has already matched: on its own they prove nothing.
+  var focusScope = "";
+  var focusClass = "";
+  try {
+    if (focus && focus.nodeType === 1) {
+      var scope = focus.closest ? focus.closest("[id]") : null;
+      focusScope = (scope && scope.id) ? String(scope.id) : "";
+      focusClass = (focus.className && typeof focus.className === "string") ? String(focus.className) : "";
+    }
+  } catch (err) { focusScope = ""; focusClass = ""; }
+  if (!el || el.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
+  if (!focus || focus.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
   var tag = el.tagName ? String(el.tagName).toUpperCase() : "";
   // The ordinary case: the same node, or focus landing on a descendant of what
   // was pressed — a <label>, a <div> wrapper, a <span> inside a button. A hit on
   // a *descendant* is a hit on the element; an ancestor is not admitted.
-  if (el === focus) return { ok: true, reason: "same-node", tag: tag, focusTag: focusTag, focusEditable: focusEditable };
-  if (el.contains && el.contains(focus)) return { ok: true, reason: "focus-inside-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable };
+  if (el === focus) return { ok: true, reason: "same-node", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
+  if (el.contains && el.contains(focus)) return { ok: true, reason: "focus-inside-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
   // The shadow direction: the press resolved to a node inside an open shadow
   // root — elementFromPoint does not pierce one, so it resolved to the host —
   // and the browser retargeted focus to that same host. So the focus is one of
   // the *pressed node's* shadow hosts, which ordinary contains() cannot see.
   var sroot = el.getRootNode ? el.getRootNode() : null;
   while (sroot && sroot.host) {
-    if (sroot.host === focus) return { ok: true, reason: "focus-retargeted-to-host", tag: tag, focusTag: focusTag, focusEditable: focusEditable };
+    if (sroot.host === focus) return { ok: true, reason: "focus-retargeted-to-host", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
     sroot = sroot.host.getRootNode ? sroot.host.getRootNode() : null;
   }
-  return { ok: false, reason: "not-the-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable };
+  return { ok: false, reason: "not-the-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
 }`;
+
+/**
+ * **The recognised grid editors.**
+ *
+ * A grid whose editor is parked off-screen is a shape *any* page can fake: a
+ * canvas, a click listener, and a hidden input the agent cannot see. Nothing
+ * in the geometry tells a spreadsheet from that — the page that wants the
+ * hidden field admitted can do exactly what Sheets does, and the old wall
+ * admitted it. So the geometry is not the permission; **the app is.**
+ *
+ * Each entry names one application, in three parts:
+ *
+ *   - `origin` — the address the application is served from. This is the only
+ *     part a page cannot forge: it is the document's own origin, read by the
+ *     engine, and only a navigation changes it. A hostile page cannot make
+ *     itself `docs.google.com`.
+ *   - `scopeId` — the id the application's editor container carries.
+ *   - `className` — the class the application's own editor element carries.
+ *
+ * The id and the class are page-written strings, so they are consulted *only*
+ * after the origin has matched: on their own they prove nothing, and a page
+ * that wrote `id="waffle-rich-text-editor"` onto its own hidden input buys
+ * nothing while it is on its own origin.
+ *
+ * **Adding an app is one entry.** The shape of the exemption is deliberately
+ * narrow so that the list can grow one application at a time, as real grids
+ * are met, rather than a rule that admits all of them at once.
+ */
+export const GRID_ADAPTERS = [
+  {
+    app: "google-sheets",
+    origin: "https://docs.google.com",
+    scopeId: "waffle-rich-text-editor",
+    className: "cell-input",
+  },
+];
+
+/**
+ * The adapter that recognises this focus, or null.
+ *
+ * All three parts must match: the origin, the scope id and the editor class.
+ * The editor must also be a contenteditable — a grid's editor is an editable
+ * surface, and a plain div that happens to sit in the same container is not it.
+ */
+export function gridAdapter(sig) {
+  if (!sig || sig.focusEditable !== true) return null;
+  const classes = String(sig.focusClass || "").split(/\s+/).filter(Boolean);
+  for (const a of GRID_ADAPTERS) {
+    if (a.origin !== sig.origin) continue;
+    if (a.scopeId !== sig.focusScope) continue;
+    if (!classes.includes(a.className)) continue;
+    return a;
+  }
+  return null;
+}
 
 /** The one named world. Reused: `createIsolatedWorld` is idempotent per name. */
 const IDLE_WORLD = "brotto-idle";
@@ -462,7 +536,11 @@ const IDLE_WORLD = "brotto-idle";
  *   focus-identify-failed   the engine would not name the focused node, or the
  *                           probe over it failed. Never inferred.
  *   focus-not-the-target    focus holds a node that is not the pressed node, not
- *                           inside it, and not a canvas editor inside it.
+ *                           inside it, and not a recognised grid editor.
+ *   grid-editor-unrecognised
+ *                           a canvas press focused something editable, but the
+ *                           page is not one of the recognised grids — so the
+ *                           editor cannot be trusted to be the grid's own.
  *   focus-probe-failed      the `Runtime.evaluate` threw — the document is gone.
  *   focus-probe-silent      the evaluate returned no object: no answer, no pass.
  *   clear-select-noop       the clear was requested and did not happen — the
@@ -506,7 +584,8 @@ export const TYPE_AT_REFUSALS: Readonly<Record<string, string>> = {
   "focus-no-text-field": "focus is real but cannot receive Input.insertText",
   "focus-unidentified": "no backendNodeId to bind a destructive clear to",
   "focus-identify-failed": "the engine would not name the focused node",
-  "focus-not-the-target": "focus is not the pressed node, an ancestor-descendant of it, or a canvas editor",
+  "focus-not-the-target": "focus is not the pressed node, an ancestor-descendant of it, or a recognised grid editor",
+  "grid-editor-unrecognised": "a canvas press focused an editable, but the page is not a recognised grid",
   "focus-probe-failed": "the focus evaluate threw; the document went away",
   "focus-probe-silent": "the focus evaluate returned no answer",
   "clear-select-noop": "the clear was requested and did not happen",
@@ -669,7 +748,9 @@ const TEXT_INPUT_TAGS = new Set(["INPUT", "TEXTAREA"]);
  *      the cell and not inside it.
  *   4. **The grid editor**, for the shape wall 3 cannot serve either: a canvas
  *      whose press focuses an editable the grid keeps *outside* the canvas —
- *      parked off-screen, or drawn over the cell being edited.
+ *      parked off-screen, or drawn over the cell being edited. This one is
+ *      granted to a *recognised application* only (`GRID_ADAPTERS`), because
+ *      the shape itself is one any page can imitate.
  *
  * **The exemption, stated so it can be checked.** All four hold:
  *
@@ -752,8 +833,21 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
   // zero-width and parked at y = -9998 — so wall 3a's text-input rule misses
   // it twice over: it is not an INPUT, and it is not inside the canvas.
   //
+  // **The app is the permission; the geometry is only a narrowing.**
+  //
+  // The old rule admitted any canvas press whose focus was an editable that
+  // the user could not see. That is a shape every page can fake: a canvas, a
+  // click listener, and a hidden input parked off-screen. The agent then typed
+  // into a field the user cannot see, believing it had typed into the cell
+  // under the cursor — a UI-redress of the agent's own action.
+  //
+  // Nothing in the geometry can tell a spreadsheet from that disguise, so the
+  // geometry is not what decides. What decides is the *application*: the
+  // origin the document is served from, which a page cannot forge, plus the
+  // editor that application is known to write. See `GRID_ADAPTERS`.
+  //
   // Three ways the editor is admitted, and all three are the engine's own
-  // geometry:
+  // geometry — they narrow the exemption further, they do not create it:
   //
   //   (a) it has no area at all — nothing the user can see is there;
   //   (b) it lies wholly outside the live viewport — also not visible;
@@ -766,12 +860,20 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
   // press would already have been refused as `different-element`. A viewport
   // that cannot be read proves nothing, so (b) fails closed and the press is
   // refused rather than typed into.
-  //
-  // No page attribute is consulted — editability is read as the DOM property
-  // `isContentEditable`, in the isolated world, where the page cannot
-  // redefine it. A page that made the user's own field editable would not
-  // unlock this: the field would be visible, and (a) and (b) would both fail.
   if (v.tag === "CANVAS" && (v.focusEditable === true || TEXT_INPUT_TAGS.has(focus.nodeName))) {
+    const adapter = gridAdapter(v);
+    if (!adapter) {
+      // A canvas press that focuses something editable, on a page that is not
+      // one of the recognised grids. This is the hostile shape and it is
+      // refused — loudly, and with its own reason, because "the focus is not
+      // the target" reads like a stale observation and this is not one.
+      //
+      // The reason is the grid's own: a *contenteditable* focus is what a
+      // grid parks off-screen, so a page we cannot recognise that holds one
+      // is the disguise. A plain text input keeps the older reason — it was
+      // never the grid's shape, and "not the target" is the truer sentence.
+      return { ok: false, reason: v.focusEditable === true ? "grid-editor-unrecognised" : "focus-not-the-target" };
+    }
     const inner = await box(tabId, focus.backendNodeId);
     if (inner) {
       const zeroArea = inner.maxX <= inner.minX || inner.maxY <= inner.minY;
@@ -785,7 +887,9 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
         }
       }
       if (zeroArea || overPoint || offscreen) {
-        return { ok: true, reason: "canvas-grid-editor" };
+        // The focused node's id, so the caller can re-read the focus before it
+        // types and refuse if the page moved it in the meantime.
+        return { ok: true, reason: "canvas-grid-editor", focusId: focus.backendNodeId };
       }
     }
   }

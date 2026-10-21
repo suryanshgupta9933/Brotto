@@ -133,6 +133,21 @@ const MAX_CANVAS_CHARS = Number((MAX_CANVAS_CHARS_SRC.match(/\d+/) || ["0"])[0])
 const FOCUS_PROBE = extractTemplate(ptrSrc, "FOCUS_PROBE");
 const IDENTITY_PROBE = extractTemplate(ptrSrc, "IDENTITY_PROBE");
 
+// The recognised grid editors, read from the source rather than copied, so a
+// test cannot pass against an adapter list the code does not have.
+const GRID_ADAPTERS_SRC = ptrSrc.slice(
+  ptrSrc.indexOf("export const GRID_ADAPTERS"),
+  ptrSrc.indexOf("];", ptrSrc.indexOf("export const GRID_ADAPTERS")) + 2,
+).replace("export const", "const");
+
+/** The identity the recognised Sheets grid presents: the app's own origin, the
+ *  app's own editor container id, and the app's own editor class. */
+const SHEETS = {
+  origin: "https://docs.google.com",
+  focusScope: "waffle-rich-text-editor",
+  focusClass: "cell-input",
+};
+
 // ── the harness ─────────────────────────────────────────────────────────────
 
 /**
@@ -368,7 +383,7 @@ test("a canvas grid is typed, one keystroke per character — an insertion never
   // keydown, so the cell would show a caret with nothing in it. That is the
   // reported failure — the cell was selected, and the text never arrived.
   const { result, sent } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor" }),
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
   });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 0,
@@ -383,7 +398,7 @@ test("a canvas grid is typed, one keystroke per character — an insertion never
 
 test("a newline on the grid path is a Return key, not a newline character", async () => {
   const { sent } = await run({ ...AT, text: "a\nb" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor" }),
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
   });
   const downs = sent.filter((c) => c.method === "Input.dispatchKeyEvent" && c.params.type !== "keyUp");
   assert.deepEqual(downs.map((c) => c.params.key), ["a", "Enter", "b"]);
@@ -391,7 +406,7 @@ test("a newline on the grid path is a Return key, not a newline character", asyn
 
 test("text longer than the canvas bound is refused, and nothing is typed", async () => {
   const { result, sent } = await run({ ...AT, text: "x".repeat(MAX_CANVAS_CHARS + 1) }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor" }),
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "canvas-text-too-long");
@@ -713,11 +728,11 @@ function engine(answers = {}) {
  *  around it — a test that stubs them away would not be testing the walls. */
 function loadBindFocus(fx) {
   const shipped = extractFn(ptrSrc, "bindFocus").replace(/^export\s+/, "");
-  const body = ["focusNode", "isolatedWorld", "withWorld", "topFrameId", "box", "liveViewport"]
+  const body = ["focusNode", "isolatedWorld", "withWorld", "topFrameId", "box", "liveViewport", "gridAdapter"]
     .map((n) => extractFn(ptrSrc, n).replace(/^export\s+/, ""))
     .join("\n");
   const prelude = 'const IDLE_WORLD = "brotto-idle";\nconst worldIds = new Map();\n' +
-    'const TEXT_INPUT_TAGS = new Set(["INPUT", "TEXTAREA"]);\n';
+    'const TEXT_INPUT_TAGS = new Set(["INPUT", "TEXTAREA"]);\n' + GRID_ADAPTERS_SRC + "\n";
   return new Function("anyCommand", "IDENTITY_PROBE", `${prelude}${body}\nreturn ${shipped}`)(
     fx.anyCommand,
     IDENTITY_PROBE,
@@ -924,11 +939,12 @@ test("an unrelated focused node refuses, with the tag of the pressed node for th
 
 /** The one shape identity cannot serve: a <canvas> grid whose press focuses an
  *  editor that is neither the cell nor inside it. */
-function canvasShape({ tag = "CANVAS", focusTag = "TEXTAREA", focusEditable = false, inner, outer, viewport } = {}) {
+function canvasShape({ tag = "CANVAS", focusTag = "TEXTAREA", focusEditable = false, inner, outer, viewport,
+  origin = "", focusScope = "", focusClass = "" } = {}) {
   const answers = focusAnswers({
     "DOM.describeNode": { node: { backendNodeId: 77, nodeName: focusTag } },
     "DOM.resolveNode": { object: { objectId: "obj-1" } },
-    "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag, focusTag, focusEditable } } },
+    "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag, focusTag, focusEditable, origin, focusScope, focusClass } } },
     "DOM.getBoxModel": ({ params }) => (params.backendNodeId === 77 ? { model: { quads: [inner] } } : { model: { quads: [outer] } }),
   });
   if (viewport === "throw") answers["Page.getLayoutMetrics"] = () => { throw new Error("no target"); };
@@ -984,23 +1000,78 @@ test("an editor with no rendered box does not qualify", async () => {
 // y = -9998 — so it is neither the pressed node nor inside it, and it is not
 // an INPUT either. The one shape identity cannot serve and wall 3 cannot
 // serve, and the run that reported it typed nothing at all.
+//
+// **The shape is not the permission.** A canvas, a click listener and a hidden
+// input parked off-screen is a shape any page can build, and the old wall
+// admitted it on the strength of geometry alone: the agent then typed into a
+// field the user cannot see, believing it had typed into the cell under the
+// cursor. So the exemption is granted to a *recognised application* — the
+// origin the document is served from (which a page cannot forge) plus the
+// editor that application is known to write.
 
 test("a canvas grid whose editor is parked off-screen is admitted, and says so", async () => {
   const bind = canvasShape({
-    focusTag: "DIV", focusEditable: true,
+    focusTag: "DIV", focusEditable: true, ...SHEETS,
     inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
   });
   const r = await bind(1, 42, 300, 200);
-  assert.deepEqual(r, { ok: true, reason: "canvas-grid-editor" },
+  assert.deepEqual(r, { ok: true, reason: "canvas-grid-editor", focusId: 77 },
     "the grid editor is admitted, and the allowance is reported");
 });
 
 test("a canvas grid whose editor is drawn over the clicked cell is admitted", async () => {
   const bind = canvasShape({
-    focusTag: "DIV", focusEditable: true,
+    focusTag: "DIV", focusEditable: true, ...SHEETS,
     inner: QUAD(280, 190, 100, 24), outer: QUAD(0, 142, 1388, 620),
   });
-  assert.deepEqual(await bind(1, 42, 300, 200), { ok: true, reason: "canvas-grid-editor" });
+  assert.deepEqual(await bind(1, 42, 300, 200),
+    { ok: true, reason: "canvas-grid-editor", focusId: 77 });
+});
+
+// ── the grid wall is granted to an application, not to a shape ───────────────
+
+test("a canvas press that focuses a hidden field on an unrecognised page is refused", async () => {
+  // The defeat the security review names. A hostile page renders a canvas,
+  // listens for the click, and focuses an off-screen input; the agent then
+  // types into a field the user cannot see, believing it typed into the cell.
+  // The shape is identical to a spreadsheet's, so the shape cannot decide.
+  const bind = canvasShape({
+    focusTag: "DIV", focusEditable: true,
+    origin: "https://attacker.example", focusScope: "grid-editor", focusClass: "cell-input",
+    inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
+  });
+  assert.deepEqual(await bind(1, 42, 300, 200),
+    { ok: false, reason: "grid-editor-unrecognised" });
+});
+
+test("the page's own attributes cannot unlock the wall on another origin", async () => {
+  // The editor wears the app's own id and class, on the page's own origin.
+  // The origin is the part a page cannot forge, so this is refused.
+  const bind = canvasShape({
+    focusTag: "DIV", focusEditable: true,
+    ...SHEETS, origin: "https://attacker.example",
+    inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
+  });
+  assert.deepEqual(await bind(1, 42, 300, 200),
+    { ok: false, reason: "grid-editor-unrecognised" });
+});
+
+test("the app's origin alone does not unlock the wall — the editor must be the app's too", async () => {
+  const bind = canvasShape({
+    focusTag: "DIV", focusEditable: true,
+    origin: SHEETS.origin, focusScope: "some-other-editor", focusClass: "cell-input",
+    inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
+  });
+  assert.deepEqual(await bind(1, 42, 300, 200),
+    { ok: false, reason: "grid-editor-unrecognised" });
+});
+
+test("the wall needs an editable — the app's own editor, but not editable, is refused", async () => {
+  const bind = canvasShape({
+    focusTag: "DIV", focusEditable: false, ...SHEETS,
+    inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
+  });
+  assert.equal((await bind(1, 42, 300, 200)).reason, "focus-not-the-target");
 });
 
 test("a visible field elsewhere on the page is still refused — the grid wall is not a hole", async () => {
@@ -1009,23 +1080,15 @@ test("a visible field elsewhere on the page is still refused — the grid wall i
   // satisfies none of the three ways in — and typing into it is the
   // "erase some other field" failure.
   const bind = canvasShape({
-    focusTag: "DIV", focusEditable: true,
+    focusTag: "DIV", focusEditable: true, ...SHEETS,
     inner: QUAD(600, 700, 200, 24), outer: QUAD(0, 142, 1388, 620),
   });
   assert.deepEqual(await bind(1, 42, 300, 200), { ok: false, reason: "focus-not-the-target" });
 });
 
-test("the grid wall needs an editable — a canvas that focuses a plain div is refused", async () => {
-  const bind = canvasShape({
-    focusTag: "DIV", focusEditable: false,
-    inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
-  });
-  assert.equal((await bind(1, 42, 300, 200)).reason, "focus-not-the-target");
-});
-
 test("the grid wall is canvas-only", async () => {
   const bind = canvasShape({
-    tag: "DIV", focusTag: "DIV", focusEditable: true,
+    tag: "DIV", focusTag: "DIV", focusEditable: true, ...SHEETS,
     inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
   });
   assert.equal((await bind(1, 42, 300, 200)).reason, "focus-not-the-target");
@@ -1033,20 +1096,33 @@ test("the grid wall is canvas-only", async () => {
 
 test("a viewport that cannot be read proves nothing, so the grid wall fails closed", async () => {
   const bind = canvasShape({
-    focusTag: "DIV", focusEditable: true, viewport: "throw",
+    focusTag: "DIV", focusEditable: true, viewport: "throw", ...SHEETS,
     inner: QUAD(600, 700, 200, 24), outer: QUAD(0, 142, 1388, 620),
   });
   assert.equal((await bind(1, 42, 300, 200)).reason, "focus-not-the-target");
 });
 
-test("the grid wall consults no page attribute, so a page cannot unlock it", () => {
+test("the grid wall is granted to an application, and the application is named in the source", () => {
   const src = extractFn(ptrSrc, "bindFocus");
   const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-  assert.doesNotMatch(code, /getAttribute|aria-hidden|contenteditable/,
-    "a page-written attribute must not unlock the grid wall");
-  assert.match(code, /v\.focusEditable === true/, "editability is the DOM property, read in the isolated world");
+  assert.match(code, /gridAdapter\(v\)/,
+    "the wall must consult the adapter, not the geometry alone");
+  assert.match(code, /v\.focusEditable === true/,
+    "editability is the DOM property, read in the isolated world");
   assert.match(extractFn(ptrSrc, "box"), /DOM\.getBoxModel/,
     "the geometry is the engine's, not the page's");
+  // The origin is the unforgeable half, and it is read from the document.
+  const probe = extractTemplate(ptrSrc, "IDENTITY_PROBE");
+  assert.match(probe, /location\.origin/,
+    "the app is identified by the document's own origin");
+  // And the adapter list names an origin for every entry — an adapter with no
+  // origin would be a shape rule wearing an adapter's clothes.
+  const adapters = vm.runInNewContext(`${GRID_ADAPTERS_SRC}; GRID_ADAPTERS`);
+  assert.ok(adapters.length > 0, "there must be at least one recognised grid");
+  for (const a of adapters) {
+    assert.match(a.origin, /^https:\/\//, `${a.app} must name an origin`);
+    assert.ok(a.scopeId && a.className, `${a.app} must name the editor it writes into`);
+  }
 });
 
 test("the exemption is stated in the source, so the rule is not just a test", () => {
@@ -1073,6 +1149,7 @@ test("the refusal vocabulary is closed, and lives in one place", () => {
     "focus-probe-failed", "focus-probe-silent", "focus-unidentified", "focus-identify-failed",
     "focus-not-the-target", "point-out-of-viewport", "point-not-numeric", "target-gone",
     "target-unresolvable", "probe-silent", "probe-failed", "canvas-grid-editor",
+    "grid-editor-unrecognised",
     "canvas-text-too-long"]) {
     assert.ok(declared.has(r), `${r} must be documented in TYPE_AT_REFUSALS`);
   }
