@@ -951,10 +951,12 @@ stopped".
 **The grid reports its own delivery.** The editor's own text is read before and
 after the typing. If the text is unchanged *and* the text is absent, the step
 refuses with `grid-text-not-delivered` — "the grid's editor did not change —
-the text did not land in the cell". Reading "before" as well is what makes
-"unchanged" mean "the typing changed nothing" rather than "the cell was always
-empty", and it is why a grid that reformats what it is given (a number, a
-formula) is not reported as a failure.
+the text did not land in the cell" — or with `grid-text-misdelivered` if a
+suspect focus drift says the keystroke went somewhere else; the two are
+different failures and are written up below. Reading "before" as well is what
+makes "unchanged" mean "the typing changed nothing" rather than "the cell was
+always empty", and it is why a grid that reformats what it is given (a number,
+a formula) is not reported as a failure.
 
 **The before and the after are comparable only on the same node.** A grid
 that replaces its editor mid-typing leaves the old node's text behind, and
@@ -964,6 +966,79 @@ still the focused node, the two reads are comparable; if it is not, **nothing
 was measured and nothing is claimed** — "not measured", never "failed". A
 newline is skipped from the check, because a grid commits and empties its
 editor on Enter, so "unchanged" there is the grid's own behaviour.
+
+**The focus drift is classified, because "the focus moved" is not one fact.**
+`reassertGridFocus` (`pointer.ts:633`) reports, on the `refocused` path
+(`pointer.ts:610`), what *had* the focus when the probe took it back. A key
+event is focus-global — it goes to whatever holds the focus when the browser
+processes it — so the focus that was taken back is the focus the previous
+keystroke went to. `driftOf()` (`pointer.ts:559`, inside `GRID_FOCUS_PROBE`)
+sorts that element into two classes:
+
+- **`suspect`** — a text-entry surface that is not the grid's own editor: an
+  `INPUT`, a `TEXTAREA`, or a `contenteditable`. This is the one shape a
+  keystroke can go into, so the keystroke before the re-assert may have landed
+  there.
+- **`benign`** — `BODY`, the grid's own canvas, the grid's own editor, anything
+  that cannot receive text. The focus moved, and no character could have
+  followed it.
+
+The distinction is what makes the classification worth carrying. Without it
+every focus steal would be reported as a possible misdelivery, and a grid
+re-rendering its own cell — which is ordinary, and is what the replaced-editor
+case below is made of — would raise a false alarm on every re-render.
+
+**A misdelivery is a different failure from a non-delivery.**
+`grid-text-misdelivered` (`pointer.ts:846`) is kept **distinct** from
+`grid-text-not-delivered` (`pointer.ts:845`). A misdelivery is a keystroke that
+reached a field the press was never aimed at; a non-delivery is text that
+reached nothing. The first is a *wrong* answer, the second is an *empty* one,
+and the reason string reaches the model's history and the audit document
+(`privacy.md`), so the two cases need two names: the first wants a different
+target, the second wants a retry.
+
+**The delivery probe asks the page where the text went.** `GRID_DELIVERY_PROBE`
+(`pointer.ts:672`) and `gridDelivery()` (`pointer.ts:735`) — the same isolated
+world, the same adapter list and the same origin rule as the focus probe. It
+searches the document for the text that was typed and answers one of three
+states: `in-grid` (the text is inside the grid's own scope, so the grid has
+it), `foreign` (the text is in some other editor on the page), or `unknown`
+(found nowhere, so nothing is claimed). A document that is not a recognised
+adapter's origin is refused `grid-editor-unrecognised` without being
+inspected — the same rule, and for the same reason: a page cannot forge its
+way into a probe whose only job is to say where its text went.
+
+**The page is asked only when there is something to ask** (`background.ts:909`).
+The delivery probe is consulted **only** when the grid replaced its own editor
+mid-typing — so the before/after reads are not comparable — *and* a suspect
+drift was reported. If the editor is still the same node, the two reads above
+already answered; if no drift was ever reported, nothing went astray to look
+for. That is a cost guard as much as a behaviour: the probe is a document scan,
+and running it on every grid typing would put one on the tail of every
+keystroke to answer a question that is nearly always already answered. A test
+asserts the page is asked **zero** times when the reads are comparable or no
+drift was reported.
+
+**A suspect drift is sticky** (`background.ts:753`). The drift of the last
+re-assert is carried forward, and a later benign drift does not un-do an
+earlier stray keystroke: the character that went into another field on the page
+stayed there, and a subsequent benign re-render does not take it back out. A
+drift that reads as benign is therefore never a clean bill of health for the
+whole string.
+
+**This is the detection half of the binding question, not the prevention
+half.** The third security review's last actionable sentence was to verify that
+the editor receiving the insertion is the one `bindFocus` validated. The
+re-assert makes the *next* keystroke go to the validated editor; it cannot make
+the *previous* one do so, because the window between the re-assert answering and
+the browser processing the `keyDown` is still open. What the drift
+classification and the delivery probe add is that the failure is now
+**named** — the wrong-field case and the empty-field case are two different
+reasons. In the same-node case the step already refused, so what is new is
+*which* refusal. In the replaced-editor case the step previously fell through
+as a success, and a stray keystroke there was invisible; it is now detected
+and refused. That is a detection, not a prevention: the residual below is
+unchanged in size, and changed only in visibility.
 
 **The window is not closed, and this doc says so.** One round trip remains
 between the re-assert answering and the browser processing the `keyDown`; a
@@ -976,6 +1051,20 @@ the path at all, because the adapter is looked up by the document's own
 origin. What is genuinely page-chosen is the id and the class — page-written
 strings, kept honest here by Google's paste sanitizer — and the
 first-in-document-order pick when a container holds several editors.
+
+**The residual is detectable, and it is still not preventable.** The character
+that slips through the window still slips through: the re-assert cannot reach
+backwards to a keystroke the page has already taken, and nothing here can un-type
+a character that reached a field the press was never aimed at. What changed is
+that the slip is no longer invisible. The drift is classified, so a focus that
+moved to something which cannot receive text is not confused with one that
+could; and where a suspect drift meets a replaced editor, the delivery probe
+asks the page where the text is and the step refuses `grid-text-misdelivered`
+rather than finishing as a success. So the honest statement of the residual is
+now two clauses, and neither is droppable: **the window is still one round trip
+per character, and a keystroke that goes astray is now named instead of
+silently reported as delivered.** Closing the window itself means removing the
+round trip, which is a different change and not this one.
 
 **The non-grid path still has its own window.** Between `focusState` and
 `Input.insertText` there is a one-round-trip gap, unchanged by this work and
