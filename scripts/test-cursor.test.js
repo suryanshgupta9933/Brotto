@@ -76,6 +76,17 @@ function node(tag, box, style = {}) {
     _attrs: {},
     setAttribute(k, v) { self._attrs[k] = String(v); },
     getAttribute(k) { return k in self._attrs ? self._attrs[k] : null; },
+    // The label's words live in a shadow root, so the fake needs one: it
+    // models the boundary that keeps them out of the page's text, and it is
+    // where the chip is built.
+    attachShadow() {
+      const sr = {
+        children: [],
+        appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+      };
+      self.shadowRoot = sr;
+      return sr;
+    },
     getClientRects: () => (box ? [{ width: 1 }] : []),
     getBoundingClientRect: () => self._box || { left: 0, right: 0, top: 0, bottom: 0 },
     contains: (other) => allNodes.includes(other) && subtree(self).includes(other),
@@ -210,9 +221,14 @@ function check(name, cond, detail) {
   //    The marker stays up, so its words would otherwise sit in the page text
   //    the model reads (`document.body.innerText`) and in the accessibility tree
   //    the observation is built from — the model would read the agent's own
-  //    annotation as if it were the page's. So the words live in `data-label`
-  //    and are rendered by a `::after` rule: a pseudo-element's content is not
-  //    a text node, so it is in neither.
+  //    annotation as if it were the page's. So the words live in a shadow root
+  //    under an `aria-hidden` host: `innerText` and `textContent` do not cross
+  //    a shadow boundary.
+  //
+  //    This asserts the *source* of that arrangement. Whether the words
+  //    actually appear on screen is a different question, and the answer to it
+  //    is in `scripts/test-cursor-render.test.js` — the first version of the
+  //    label passed every assertion in this block and rendered an empty pill.
   {
     const page = makePage();
     const { draw } = sandboxFor(page);
@@ -234,10 +250,14 @@ function check(name, cond, detail) {
     const dot = page.doc.getElementById(CURSOR_ID);
     check("the dot is hidden from the accessibility tree too",
       dot && dot.getAttribute("aria-hidden") === "true", "the dot exposes an empty node to the AX tree");
-    const sheet = page.doc.getElementById(CURSOR_ID + "-style");
-    check("the label's rule is a stylesheet, not a text node",
-      sheet && typeof sheet.textContent === "string" && sheet.textContent.includes("attr(data-label)"),
-      "the rule that renders the words was not written");
+    check("the words are in a shadow root, not in the page's tree",
+      label && label.shadowRoot && label.shadowRoot.children.length === 1 &&
+        label.shadowRoot.children[0].textContent === words,
+      "the words are not in the shadow root, so the page's text would find them");
+    check("no stylesheet is injected to render the words",
+      !page.doc.getElementById(CURSOR_ID + "-style") &&
+        !extractTemplate("DRAW_CURSOR").includes('createElement("style")'),
+      "the words are rendered by an injected <style> element, which a page's CSP can refuse");
   }
 
   // 3. A second draw replaces the first: two markers is one occluder too many,
@@ -247,8 +267,8 @@ function check(name, cond, detail) {
     const { draw } = sandboxFor(page);
     draw(150, 120, "first", CURSOR_ID);
     draw(160, 130, "second", CURSOR_ID);
-    // button, iframe, style, dot, label — the first two are the page's own.
-    check("a redraw leaves one marker", page.body.children.length === 5,
+    // button, iframe, dot, label — the first two are the page's own.
+    check("a redraw leaves one marker", page.body.children.length === 4,
       `body has ${page.body.children.length} children: ${page.body.children.map((c) => c.id).join(", ")}`);
   }
 
