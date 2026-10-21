@@ -1644,7 +1644,12 @@ rather than a hostile page, since the adapter is looked up by the document's
 own origin. `extension.md` has the mechanism; what is owned here is the shape
 of it: **a reading is not a binding**, and the refusal vocabulary grew a name
 for the binding (`focus-changed`) and a separate one for the delivery check
-(`grid-text-not-delivered`) rather than one that blurred the two cases.
+(`grid-text-not-delivered`) rather than one that blurred the two cases. It has
+since grown a third: `grid-text-misdelivered`, for a keystroke that reached
+some editor other than the validated one — the model needs to know the text
+went *somewhere else*, because the next move is a different target and not a
+retry. The window is still one round trip per character; what the third name
+buys is that the residual is now **detectable** as well as stated.
 
 **That wall was refusing every call in the field, and the reason is worth
 carrying.** The route it used to ask the question — `DOM.getFocusNode` — was
