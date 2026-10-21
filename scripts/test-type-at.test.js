@@ -148,6 +148,15 @@ function gridFocusProbe() {
   return _gridFocusProbe;
 }
 
+// The delivery probe is a template literal too, and is cooked the same way.
+let _gridDeliveryProbe = null;
+function gridDeliveryProbe() {
+  if (_gridDeliveryProbe === null) {
+    _gridDeliveryProbe = vm.runInNewContext("`" + extractTemplate(ptrSrc, "GRID_DELIVERY_PROBE") + "`");
+  }
+  return _gridDeliveryProbe;
+}
+
 // The recognised grid editors, read from the source rather than copied, so a
 // test cannot pass against an adapter list the code does not have.
 const GRID_ADAPTERS_SRC = ptrSrc.slice(
@@ -201,6 +210,10 @@ function run(action, opts = {}) {
     // by default; a test that is about a focus steal says otherwise.
     reassertGridFocus: opts.reassert ?? (async () => ({ ok: true, reason: "" })),
     editorText: opts.editorText ?? (async () => ({ ok: true, text: editorReads++ === 0 ? "" : "typed" })),
+    // Where the typed text ended up, when the grid replaced its own editor and
+    // the two reads are no longer comparable. The default models the ordinary
+    // case: the grid's own scope holds it.
+    gridDelivery: opts.delivery ?? (async () => ({ ok: true, state: "in-grid" })),
     sleep: async () => {},
     console,
   };
@@ -522,6 +535,88 @@ test("text that is already in the cell is not a failed delivery", async () => {
   assert.equal(result.ok, true, JSON.stringify(result));
 });
 
+// ── a keystroke that went to another editor ──────────────────────────────────
+//
+// A key event is focus-global: it goes to whatever holds the focus when the
+// browser processes it. The re-assert puts the grid's editor back before every
+// keystroke, so at most one keystroke can go astray per focus steal — but one
+// is one character of the user's text in somebody else's field, and the old
+// path reported that as a plain success.
+
+test("a keystroke that went to another editor is a misdelivery, not a success", async () => {
+  // The re-assert found a *text-entry surface* that is not the grid's own
+  // holding the focus: the previous keystroke may have gone there. The grid's
+  // editor did not change, so the text did not land in the cell either.
+  let calls = 0;
+  const { result } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    reassert: async () => { calls++; return { ok: true, reason: "", drift: calls === 2 ? "suspect" : "benign" }; },
+    editorText: async () => ({ ok: true, text: "" }),
+  });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.reason, "grid-text-misdelivered",
+    "a keystroke that reached another editor is named as such");
+});
+
+test("a focus move that is not to a text field is not a misdelivery", async () => {
+  // The grid's own re-render moves the focus to the body, and a commit moves
+  // it to the grid's canvas. Neither can receive the text, so neither is a
+  // misdelivery — the plain "did not land" reason is the honest one.
+  let calls = 0;
+  const { result } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    reassert: async () => { calls++; return { ok: true, reason: "", drift: "benign" }; },
+    editorText: async () => ({ ok: true, text: "" }),
+  });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.reason, "grid-text-not-delivered");
+});
+
+test("the editor replaced mid-typing, with a keystroke that went elsewhere, is a misdelivery", async () => {
+  // The grid re-rendered its editor, so the two reads are not comparable and
+  // the old path skipped the check — and reported a success. The page is
+  // asked where the text is instead: not in the grid's own scope, so it went
+  // somewhere the press was never aimed at.
+  let calls = 0;
+  const { result } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    reassert: async () => { calls++; return { ok: true, reason: "", drift: calls === 2 ? "suspect" : "benign" }; },
+    focusNode: async () => ({ ok: true, backendNodeId: 99 }),
+    editorText: async () => ({ ok: true, text: "" }),
+    delivery: async () => ({ ok: true, state: "unknown" }),
+  });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.reason, "grid-text-misdelivered");
+});
+
+test("the editor replaced mid-typing, and the grid has the text, is a success", async () => {
+  // The same shape, with the text where it belongs: the grid's own scope
+  // holds it, so the re-render is the grid's business and nothing is wrong.
+  let calls = 0;
+  const { result } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    reassert: async () => { calls++; return { ok: true, reason: "", drift: calls === 2 ? "suspect" : "benign" }; },
+    focusNode: async () => ({ ok: true, backendNodeId: 99 }),
+    editorText: async () => ({ ok: true, text: "" }),
+    delivery: async () => ({ ok: true, state: "in-grid" }),
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("the editor replaced mid-typing, with nothing wrong, is still a success", async () => {
+  // No keystroke went astray, so the page is not even asked: the old
+  // behaviour — nothing measured, nothing claimed — is kept.
+  let asked = 0;
+  const { result } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    focusNode: async () => ({ ok: true, backendNodeId: 99 }),
+    editorText: async () => ({ ok: true, text: "" }),
+    delivery: async () => { asked++; return { ok: true, state: "unknown" }; },
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(asked, 0, "the page is only asked when a keystroke may have gone elsewhere");
+});
+
 // ── the binding on the grid path ─────────────────────────────────────────────
 //
 // A grid cell is *typed*, not inserted. `Input.insertText` fires no keydown,
@@ -609,6 +704,7 @@ function gridDom({ origin = SHEETS.origin, withEditor = true } = {}) {
   const state = { focusCalls: [], active: null };
   const el = (o) => ({
     nodeType: 1,
+    tagName: o.tag || "DIV",
     isContentEditable: o.editable !== false,
     className: o.className || "",
     id: o.id || "",
@@ -626,7 +722,11 @@ function gridDom({ origin = SHEETS.origin, withEditor = true } = {}) {
   // Something else holds the focus: a field the user can see, and no part of
   // the grid.
   const stranger = el({ className: "user-field", editable: false });
-  return { state, document: doc, location: { origin }, container, editor, stranger };
+  // A field that can *receive* text — the one shape a keystroke can go into.
+  const otherField = el({ className: "other-field", tag: "INPUT", editable: false });
+  // The engine's "nobody holds the focus".
+  const body = el({ className: "body", tag: "BODY", editable: false });
+  return { state, document: doc, location: { origin }, container, editor, stranger, otherField, body };
 }
 
 const ADAPTERS = vm.runInNewContext(`${GRID_ADAPTERS_SRC}; GRID_ADAPTERS`);
@@ -685,6 +785,90 @@ test("a page that is not the application is refused", async () => {
 test("the probe takes the focus back with preventScroll, in the source", () => {
   assert.match(gridFocusProbe(), /focus\(\{ preventScroll: true \}\)/,
     "the editor is off-screen; a plain focus() scrolls the user's viewport away");
+});
+
+test("a focus that was on another text field is reported as suspect", () => {
+  // The drift is classified, not just noticed: a *text-entry surface* that is
+  // not the grid's own is the one shape a keystroke can go into, so the
+  // keystroke before it may have gone there. The caller needs to know.
+  const dom = gridDom();
+  dom.state.active = dom.otherField;
+  const r = runGridProbe(dom);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.outcome, "refocused");
+  assert.equal(r.drift, "suspect", "another field held the focus");
+});
+
+test("a focus that was on the body, or on the grid's own surface, is benign", () => {
+  // The grid replaces its own editor when it re-renders a cell, and the focus
+  // lands on the body; a commit lands it on the grid's canvas. Neither can
+  // receive text, so neither is a misdelivery.
+  for (const which of ["body", "stranger"]) {
+    const dom = gridDom();
+    dom.state.active = dom[which];
+    const r = runGridProbe(dom);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.drift, "benign", `${which} cannot receive the text`);
+  }
+});
+
+/** A DOM small enough to run the shipped delivery probe against. */
+function deliveryDom({ origin = SHEETS.origin, scopeText = "", foreign = [] } = {}) {
+  const el = (o) => ({
+    nodeType: 1,
+    tagName: o.tag || "DIV",
+    isContentEditable: o.editable === true,
+    className: o.className || "",
+    value: o.value,
+    textContent: o.text ?? "",
+  });
+  const scope = el({ id: SHEETS.focusScope, text: scopeText });
+  scope.contains = (n) => n === scope;
+  scope.querySelectorAll = () => [];
+  const doc = {
+    getElementById: (id) => (id === SHEETS.focusScope ? scope : null),
+    querySelectorAll: () => foreign,
+  };
+  return { document: doc, location: { origin }, scope };
+}
+
+function runDeliveryProbe(dom, text) {
+  const fn = vm.runInNewContext("(" + gridDeliveryProbe() + ")", {
+    document: dom.document,
+    location: dom.location,
+  });
+  return fn.call(dom.document, ADAPTERS, text);
+}
+
+test("the delivery probe finds the text in the grid's own scope", () => {
+  const dom = deliveryDom({ scopeText: "hello world" });
+  const r = runDeliveryProbe(dom, "hello");
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.state, "in-grid");
+});
+
+test("the delivery probe finds the text in another editor", () => {
+  // The case the review named: the text reached an editor the press was never
+  // aimed at.
+  const other = { nodeType: 1, tagName: "INPUT", isContentEditable: false, value: "hello" };
+  const dom = deliveryDom({ scopeText: "", foreign: [other] });
+  const r = runDeliveryProbe(dom, "hello");
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.state, "foreign");
+});
+
+test("the delivery probe finds nothing when the text is nowhere", () => {
+  const dom = deliveryDom({ scopeText: "" });
+  const r = runDeliveryProbe(dom, "hello");
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.state, "unknown", "nothing was found, and nothing is claimed");
+});
+
+test("the delivery probe refuses a page that is not the application", () => {
+  const dom = deliveryDom({ origin: "https://attacker.example", scopeText: "hello" });
+  const r = runDeliveryProbe(dom, "hello");
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "grid-editor-unrecognised");
 });
 
 /** The shipped `reassertGridFocus`, with the shipped world plumbing around it. */
@@ -1450,7 +1634,7 @@ test("the refusal vocabulary is closed, and lives in one place", () => {
     "focus-not-the-target", "point-out-of-viewport", "point-not-numeric", "target-gone",
     "target-unresolvable", "probe-silent", "probe-failed", "canvas-grid-editor",
     "grid-editor-unrecognised", "focus-changed", "grid-text-not-delivered",
-    "canvas-text-too-long"]) {
+    "grid-text-misdelivered", "canvas-text-too-long"]) {
     assert.ok(declared.has(r), `${r} must be documented in TYPE_AT_REFUSALS`);
   }
   // Nothing on the `type_at` path may emit a reason the list does not name.
@@ -1458,9 +1642,9 @@ test("the refusal vocabulary is closed, and lives in one place", () => {
   // whose detail is a tag. The scan is over this action's surfaces only; the
   // cursor draw has its own (`foreign-frame`, `no-body`) and is not a refusal.
   const surfaces = [FOCUS_PROBE, IDENTITY_PROBE, extractTemplate(ptrSrc, "TARGET_PROBE"),
-    gridFocusProbe(),
+    gridFocusProbe(), gridDeliveryProbe(),
     extractFn(ptrSrc, "verifyTarget"), extractFn(ptrSrc, "bindFocus"), extractFn(ptrSrc, "focusState"),
-    extractFn(ptrSrc, "reassertGridFocus"),
+    extractFn(ptrSrc, "reassertGridFocus"), extractFn(ptrSrc, "gridDelivery"),
     extractBranch('t === "type_at"'), extractFn(bgSrc, "pressAt"), extractFn(bgSrc, "typeIntoCanvas")];
   for (const src of surfaces) {
     for (const m of src.matchAll(/reason:\s*"([a-z0-9:-]+)"/g)) {
