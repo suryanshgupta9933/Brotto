@@ -159,6 +159,10 @@ const SHEETS = {
 function run(action, opts = {}) {
   const sent = [];
   const state = { clears: 0 };
+  // The grid path reads the editor's content twice — before and after the
+  // keystrokes — and the default models a grid that took them: empty, then
+  // not.
+  let editorReads = 0;
   const dbg = {
     sendCommand: async (_tabId, cmd) => { sent.push(cmd); return {}; },
   };
@@ -175,6 +179,10 @@ function run(action, opts = {}) {
     clearCursor: async () => { state.clears++; },
     drawCursor: async () => ({ drawn: true, reason: "" }),
     focusState: opts.focus ?? (async () => ({ ok: true, reason: "" })),
+    // The focus re-read on the grid path: the same node, unless a test says
+    // otherwise.
+    focusNode: opts.focusNode ?? (async () => ({ ok: true, backendNodeId: 42 })),
+    editorText: opts.editorText ?? (async () => ({ ok: true, text: editorReads++ === 0 ? "" : "typed" })),
     sleep: async () => {},
     console,
   };
@@ -418,6 +426,67 @@ test("the ordinary path is unchanged — one insertion, no keystrokes", async ()
   const { sent } = await run(AT, { bind: async () => ({ ok: true, reason: "same-node" }) });
   assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 1);
   assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 0);
+});
+
+// ── the grid path reports its own delivery ───────────────────────────────────
+
+test("focus that moved between the check and the text refuses, and types nothing", async () => {
+  // The editor was verified a moment ago; the page may have moved focus since.
+  // Typing now would put the text wherever focus is *now* — a field nobody
+  // verified, which is the failure the whole focus binding exists to prevent.
+  const { result, sent } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    focusNode: async () => ({ ok: true, backendNodeId: 99 }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "focus-changed");
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 0,
+    "a refusal types nothing");
+});
+
+test("a grid whose editor did not change reports the text as not delivered", async () => {
+  // The editor still says exactly what it said before the keystrokes, and it
+  // does not contain what was typed — so the text did not land in the cell.
+  // Reported, not swallowed: the old path said "ok" and the model believed it.
+  let reads = 0;
+  const { result, sent } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    editorText: async () => { reads++; return { ok: true, text: "" }; },
+  });
+  assert.equal(reads, 2, "the editor is read before and after the keystrokes");
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "grid-text-not-delivered");
+  assert.ok(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length > 0,
+    "the text was typed — it simply did not land");
+});
+
+test("a grid whose editor changed reports success", async () => {
+  let reads = 0;
+  const { result } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    editorText: async () => ({ ok: true, text: reads++ === 0 ? "" : "ab" }),
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("an editor that cannot be read is not a failure — it is not measured", async () => {
+  // `ok: false` from the read means the node is gone or the page went away. A
+  // check that cannot read must not report a delivery it did not observe.
+  const { result } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    editorText: async () => ({ ok: false, text: "" }),
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("text that is already in the cell is not a failed delivery", async () => {
+  // The cell already said "ab" and the agent typed "ab": the editor did not
+  // change, and nothing is wrong. The check must not call that a failure.
+  const { result } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    editorText: async () => ({ ok: true, text: "ab" }),
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
 });
 
 // ── the cursor stays where it was put ────────────────────────────────────────
@@ -1149,7 +1218,7 @@ test("the refusal vocabulary is closed, and lives in one place", () => {
     "focus-probe-failed", "focus-probe-silent", "focus-unidentified", "focus-identify-failed",
     "focus-not-the-target", "point-out-of-viewport", "point-not-numeric", "target-gone",
     "target-unresolvable", "probe-silent", "probe-failed", "canvas-grid-editor",
-    "grid-editor-unrecognised",
+    "grid-editor-unrecognised", "focus-changed", "grid-text-not-delivered",
     "canvas-text-too-long"]) {
     assert.ok(declared.has(r), `${r} must be documented in TYPE_AT_REFUSALS`);
   }

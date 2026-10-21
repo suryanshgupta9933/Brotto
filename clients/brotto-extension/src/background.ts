@@ -7,7 +7,7 @@
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
 import { clearDelta } from "./observation/delta";
-import { bindFocus, boundedPoint, drawCursor, focusState, verifyTarget, withWorld } from "./observation/pointer";
+import { bindFocus, boundedPoint, drawCursor, editorText, focusNode, focusState, verifyTarget, withWorld } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -814,10 +814,38 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
       // cell's content on the first keystroke, and the DOM clear would have
       // reached for a selection inside an off-screen editor.
       console.warn("brotto: type_at — focus is the canvas grid's own editor, outside the canvas (logged, not silent)");
-      const typed = await typeIntoCanvas(tabId, String(action.text ?? ""));
+      // **Re-read the focus, right now, and compare.** `bindFocus` named the
+      // editor a moment ago; the page may have moved focus since — a
+      // keystroke listener, a re-render, the grid handing focus to something
+      // else. Typing now would put the text wherever focus is *now*, which is
+      // not the node that was verified. Refuse instead.
+      const still = await focusNode(tabId);
+      if (!still.ok || still.backendNodeId !== bound.focusId) {
+        console.warn("brotto: type_at refused — focus changed between the check and the text");
+        refusal = { ok: false, reason: "focus-changed" };
+        return refusal;
+      }
+      const text = String(action.text ?? "");
+      // **Did the text land?** The editor's own content is the direct answer:
+      // a grid that took the keystrokes changed it, a grid that ignored them
+      // did not. Read *before* as well, so "unchanged" means "the typing
+      // changed nothing" rather than "the cell was always empty" — and so a
+      // grid that reformats what it is given (a number, a formula) is not
+      // reported as a failure.
+      const before = await editorText(tabId, bound.focusId);
+      const typed = await typeIntoCanvas(tabId, text);
       if (!typed.ok) {
         console.warn(`brotto: type_at refused — ${typed.reason}; the text was not typed`);
         refusal = { ok: false, reason: typed.reason };
+        return refusal;
+      }
+      const after = await editorText(tabId, bound.focusId);
+      // A newline is skipped: a grid commits and empties its editor on Enter,
+      // so "unchanged" is the grid's own behaviour and not a failed delivery.
+      if (before.ok && after.ok && text && !text.includes("\n") &&
+          after.text === before.text && !after.text.includes(text)) {
+        console.warn("brotto: type_at refused — the grid's editor did not change; the text did not land in the cell");
+        refusal = { ok: false, reason: "grid-text-not-delivered" };
         return refusal;
       }
     } else {

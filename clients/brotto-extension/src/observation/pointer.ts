@@ -541,6 +541,10 @@ const IDLE_WORLD = "brotto-idle";
  *                           a canvas press focused something editable, but the
  *                           page is not one of the recognised grids — so the
  *                           editor cannot be trusted to be the grid's own.
+ *   focus-changed           the focused node was not the one that was verified:
+ *                           the page moved focus between the check and the text.
+ *   grid-text-not-delivered the grid's editor did not change after the text was
+ *                           typed into it, so the text did not land in the cell.
  *   focus-probe-failed      the `Runtime.evaluate` threw — the document is gone.
  *   focus-probe-silent      the evaluate returned no object: no answer, no pass.
  *   clear-select-noop       the clear was requested and did not happen — the
@@ -586,6 +590,8 @@ export const TYPE_AT_REFUSALS: Readonly<Record<string, string>> = {
   "focus-identify-failed": "the engine would not name the focused node",
   "focus-not-the-target": "focus is not the pressed node, an ancestor-descendant of it, or a recognised grid editor",
   "grid-editor-unrecognised": "a canvas press focused an editable, but the page is not a recognised grid",
+  "focus-changed": "the page moved focus between the check and the text",
+  "grid-text-not-delivered": "the grid's editor did not change — the text did not land in the cell",
   "focus-probe-failed": "the focus evaluate threw; the document went away",
   "focus-probe-silent": "the focus evaluate returned no answer",
   "clear-select-noop": "the clear was requested and did not happen",
@@ -688,7 +694,7 @@ async function topFrameId(tabId: number): Promise<string> {
  *
  * Every failure refuses. A page whose focus cannot be named cannot be cleared.
  */
-async function focusNode(tabId: number): Promise<{ ok: boolean; reason: string; backendNodeId?: number; nodeName?: string }> {
+export async function focusNode(tabId: number): Promise<{ ok: boolean; reason: string; backendNodeId?: number; nodeName?: string }> {
   try {
     await anyCommand(tabId, { method: "DOM.enable" });
     const read = await withWorld(tabId, (contextId) =>
@@ -731,6 +737,56 @@ async function box(tabId: number, backendNodeId: number) {
 /** Text-entry controls. A `CANVAS` press may only reach one of these through the
  *  exemption — never a button, never a div, never a contenteditable host. */
 const TEXT_INPUT_TAGS = new Set(["INPUT", "TEXTAREA"]);
+
+/**
+ * What the given node holds, as text.
+ *
+ * The grid's editor is a contenteditable, and its content is the cell's text —
+ * so "the editor still says what it said before the keystrokes" is the direct
+ * answer to "did the text land", and it is read from the *editor* rather than
+ * from the canvas, whose repaint we cannot measure (our own cursor marker
+ * moves the pixels too, so a pixel diff cannot tell a cell edit from our
+ * marker).
+ *
+ * Read in the isolated world, so a page cannot override the getter and make
+ * the editor look full.
+ */
+const EDITOR_TEXT_PROBE = `function () {
+  var el = this;
+  if (!el || el.nodeType !== 1) return { ok: false, text: "" };
+  try {
+    if (el.isContentEditable === true) return { ok: true, text: el.textContent || "" };
+    if (typeof el.value === "string") return { ok: true, text: el.value };
+  } catch (err) { return { ok: false, text: "" }; }
+  return { ok: false, text: "" };
+}`;
+
+/**
+ * The text a node holds, or `{ok: false}` when it cannot be read.
+ *
+ * `ok: false` means **not measured** — the node is gone, the page went away,
+ * or it is not a text-holding surface. It never means "empty": an empty editor
+ * is `ok: true, text: ""`, and the difference is the whole point, because a
+ * check that cannot read must not report a failure it did not observe.
+ */
+export async function editorText(tabId: number, backendNodeId: number): Promise<{ ok: boolean; text: string }> {
+  try {
+    return await withWorld(tabId, async (id) => {
+      const resolved = await anyCommand(tabId, { method: "DOM.resolveNode", params: { backendNodeId, executionContextId: id } });
+      const objectId = resolved?.object?.objectId;
+      if (!objectId) return { ok: false, text: "" };
+      const call = await anyCommand(tabId, {
+        method: "Runtime.callFunctionOn",
+        params: { objectId, functionDeclaration: EDITOR_TEXT_PROBE, returnByValue: true },
+      });
+      const v = call?.result?.value;
+      if (!v || typeof v !== "object") return { ok: false, text: "" };
+      return { ok: v.ok === true, text: String(v.text ?? "") };
+    });
+  } catch {
+    return { ok: false, text: "" };
+  }
+}
 
 /**
  * Prove that what holds focus is the thing this press was aimed at.
