@@ -416,9 +416,10 @@ So the gate now **samples**, and the sample is a *rate*, not a pair of
 absolute thresholds. It resolves at once with `early: true` when the mean gap
 between mutations since `t0` is shorter than the quiet window — meaning a
 silent window cannot happen and waiting for one only ends at the deadline. The
-only constant left is `RATE_SAMPLES = 3`, a floor on how much evidence counts
-as a rate at all. Expected Gmail observation is 10.8s → ~1.4s. The decision is
-not trusted — it is a *guess about the page*, and the guess is checked below.
+only constant in *this* exit is `RATE_SAMPLES = 3`, a floor on how much evidence
+counts as a rate at all. Expected Gmail observation is 10.8s → ~1.4s. The
+decision is not trusted — it is a *guess about the page*, and the guess is
+checked below.
 
 **`RATE_SAMPLES = 3` still misses the case its own comment names.** A page with
 fewer than three mutations is not a rate, it is an anecdote, so the exit cannot
@@ -442,7 +443,16 @@ has produced a change or two and then gone quiet is a *loading* page
 reaches 1.5 windows of continuous churn, so it still runs to the deadline
 unsettled, for the right reason. The churn floor is measured from `t0` (how long
 the page has been *watched* without ever going quiet), not from the first
-mutation, because that is the part of the wait the exit exists to shorten.
+mutation, because that is the part of the wait the exit exists to shorten. It
+is a number of quiet windows, so it scales with the window the caller asked
+for rather than with the default.
+
+**Both exits are evaluated in the observer callback, at the moment a sample
+arrives — not in the 50ms poll.** A sample is the only thing that can *start* a
+rate, and a poll firing long after the last mutation would claim a page busy
+on the strength of a change it has already forgotten. That is also why a single
+mutation starts neither exit: the rate needs three samples before a mean means
+anything, and the churn needs two before there is a gap between them.
 
 **An absolute threshold here was one page's number wearing a universal claim.**
 The first version of this exit was "3 mutations inside 1000ms", which Gmail's
@@ -469,7 +479,7 @@ a given observation took.
 
 ### The short-circuit is a guess, so the rescans are the arbiter
 
-The rate exit is a claim about the page: *already mutating hard ⇒ past its
+The early exits are a claim about the page: *already mutating hard ⇒ past its
 initial render ⇒ a silent window cannot happen, so waiting for one only ends at
 the deadline.* It is a good claim and an untested one. `captureObservation`'s
 rescan loop is what tests it — two full re-reads 800ms apart, comparing
@@ -480,41 +490,38 @@ already in hand — what ships is the **last** scan, the freshest tree, not the
 one the gate handed back.
 
 The rescans were never a retry mechanism, which is what the surrounding code's
-shape suggested. They were the empirical check on the rate exit, and the
+shape suggested. They were the empirical check on the early exits, and the
 settling work they used to do was delegated to a second gate.
 
-**That second gate is gone, and it bought nothing.** It ran
-`waitForStable(tabId, {noEarly: true})` only when the rate exit had fired *and*
-the rescans disagreed — and `noEarly` disables the rate exit, so its only
-reachable exits were a 3s silence or the full 10s deadline. Reaching the branch
-at all means the page's mean mutation gap was already shorter than the quiet
-window, so the silence was arithmetically unlikely to arrive and the typical
-outcome was the deadline: a tree from an arbitrary mid-repaint instant, which is
-precisely the outcome the wait existed to prevent. It could not fire on the case
-its own comment cited either — `auth-slowjs`, a sparse mutator with a 5000ms
-control — because `count < RATE_SAMPLES` means it never forms a rate, so `early`
-is never set there. The branch was unreachable on the slow renderer it was
-written for, and expensive on the fast one.
-
-It was also a **second charge the log line never accounted for.**
-`metrics.stability` is written from the first `waitForStable` alone, so that
-extra up-to-10s never appeared in the `stability=…ms` figure — `scans` rose, but
-the wall-clock number did not, and on a canvas page it was the largest remaining
-latency in the loop.
+**There is one gate, and the rescan is its arbiter.** An earlier version had a
+second one — a re-wait with the early exits disabled, for a page whose rescans
+disagreed — and it bought nothing: its only reachable outcomes were a 3s
+silence or the full 10s deadline, on a page whose silence was already
+arithmetically unlikely, so it handed back a tree from an arbitrary mid-repaint
+instant. It was also a second charge the log line never accounted for, because
+`metrics.stability` is written from the first `waitForStable` alone. It is
+gone, and `StableOpts.noEarly` remains in `stability.ts` — pinned by a test, no
+caller passing it any more — because it is the gate's own API and deleting it
+alongside its last use would have been a change nobody asked for.
 
 **The accepted cost, stated plainly:** a page whose every rescan differs is now
 read ~1.6s late rather than up to 10s late. It is still moving. The next step
 re-observes — and a page still moving at capture time is not made settled by
 waiting longer for it.
 
-`StableOpts.noEarly` remains in `stability.ts` and remains pinned by a test, and
-no caller passes it any more. It was left in place deliberately as the gate's
-own API rather than deleted on the side.
+**What the gate now guarantees, and what it does not.** Two early exits, both in
+the observer callback, both of which hand the caller `early: true` and neither
+of which can report a page as quiet — a page the gate is unsure about is
+reported as unsettled, never as settled. The 10s deadline is unchanged and is
+still the backstop, and the quiet window is still the only thing *in the gate*
+that can claim a page is still. The fingerprint rescan in `captureObservation`
+remains the arbiter for every page an exit claimed, which is the whole reason
+neither exit is trusted with the claim it makes.
 
 **The sparse end is now closed, and the quiet end is still the unreachable
 one.** The gate requires **zero** mutations for a continuous 3s, and a
 spreadsheet's blinking cursor plus autosave never produces that — so the *quiet*
-exit is unreachable on that page and the rate exit is what remains. The rate
+exit is unreachable on that page and the early exits are what remains. The rate
 exit used to be late by the sample floor; the churn exit now takes a sparse
 page at the *second* sample instead of the third, which is what the 8752ms
 observation in the Sheets run was. What a rate tolerance would change is what a
@@ -527,10 +534,10 @@ and pins all four shapes, because a guard that silently stops firing hands the
 model a half-rendered tree while every metric still reads healthy. An absence
 reads clean in a diff; that is the whole reason it has a test.
 
-**The exit is a miss that costs time, never accuracy.** That asymmetry is what
+**The exits are a miss that costs time, never accuracy.** That asymmetry is what
 makes shipping a guess the right trade: a page wrongly called busy is rescanned
 and re-tested, and only a page wrongly called *quiet* could hand the model a
-half-rendered tree — which the structure of the exit makes impossible. The
+half-rendered tree — which the structure of the exits makes impossible. The
 absolute version was recalibratable from one run; the rate-relative version is
 calibrated on no page in particular, which is why it needed the Sheets
 measurement above to find rather than a tuning pass to guess. The metrics still
@@ -1722,6 +1729,138 @@ model asking itself, which is D5 again. A field named `intent`/`expect` on
 `StepSummary` would read in the document as evidence and be a self-report,
 which is the failure this record has been cleaned of twice. It needs a real
 verifier first, not a schema change.
+
+What *is* recorded is the opposite of a self-report: the **absence of
+evidence**, which the loop can establish for itself. That is the next section.
+
+## A step that nothing could confirm
+
+The live Google Sheets run is the failure this exists for. The agent created a
+file, clicked into the grid and typed successfully — and then re-clicked the
+same cell seven times across steps 3 to 9. It was not a weak model on a hard
+page. For most of that run it had **no feedback channel at all**: the grid is a
+`<canvas>`, the accessibility tree does not change when a cell is edited, and
+the pixel delta and the screenshot had both been vetoed (a separate bug, since
+fixed). And the agent's own transcript told it the previous step had worked,
+so re-trying was *indistinguishable from making progress*. Nothing in the
+record said "you cannot tell".
+
+The step record now carries that fact. `StepSummary` gains two fields
+(`context.py`):
+
+- **`mutated: bool`** — whether this step dispatched something the page would
+  show. A step of pure reading is not a step whose effect went unseen: the page
+  not changing after a read is the expected reading.
+- **`unverified: str`** — the fact itself. Empty in the overwhelming majority
+  of steps.
+
+### The three channels, and what their silence means
+
+A step is unverified when **no channel existed** to report its effect. There
+are three channels, and their silence does not mean the same thing.
+
+- **The element tree.** On an ordinary page this *is* the channel, so its
+  silence is a reading the model already has — "no changes detected" in the
+  diff block — and a coarse one. A checkbox toggle changes no name and no
+  value, so "the tree did not change" is wrong as often as it is right. On a
+  canvas page the tree holds the app's chrome and not its content, so its
+  silence says nothing about the content at all.
+- **The pixel delta.** `True` means the page moved, `False` means it did not,
+  and both are readings the model can act on. `None` is the unknown — withheld
+  (the capture gate, a typed secret) or unavailable (first observation, after
+  a navigation, a failed capture). **`None` is not `False`**, and it is never
+  read as "nothing moved"; the tri-state is the whole design, and
+  `deps.canvas_changed` is `True`/`False`/`None` for exactly that reason.
+- **The URL.** A navigation changes it, and the tree changes with it.
+
+So "no channel existed" is exactly one case: **a canvas page whose tree did
+not change and whose pixels could not be compared.** A step whose effect was
+*observed to be nil* is a different fact and is not this one.
+
+That is also why the fact is recorded **per page**. The blindness belongs to
+the page, not to each step: the page says it once, on the first blind step, and
+the steps after it on that same page carry no second line. A line on every
+step of a blind run is noise that teaches the model to skip the line — and the
+marker says so in as many words, telling the model that steps on a page like
+this stay unconfirmed until something else confirms them.
+
+### The rule, and the three details that are load-bearing
+
+A step is marked only when all four hold:
+
+1. it **mutated** the page;
+2. the AX tree **did not change** across it (`ax_diff == _AX_NO_CHANGE`);
+3. the pixel delta was **`None`** — withheld or unavailable, never `False`;
+4. the page **is a canvas page** (`_is_canvas_page`).
+
+- **A read and a scroll are never mutations.** `_NON_MUTATING_ACTIONS` is the
+  read-only actions, the terminal actions, `ask_human` and `scroll`. A scroll
+  changes no name and no value, so a page that scrolled perfectly well is
+  silent — calling that an unverified step would be a false alarm on every long
+  page. A blocked step dispatched nothing and is not a mutation either.
+- **The previous step is the one being judged.** The call site is in the
+  observe block, right after `compute_ax_diff`, because that is the first
+  moment the evidence exists: a step cannot know whether its own click landed
+  until the page has been read again. Judging there rather than at write time
+  is why the record is set once and never re-litigated.
+- **Unknown is not a canvas.** `_is_canvas_page` reads the canvas coverage
+  measurement, and an unavailable measurement is not a canvas page — so a page
+  whose coverage we could not read is never marked. A false mark costs the
+  model its trust in the line.
+
+**The marker can only be written, never cleared.** Nothing unmarks a step, and
+nothing branches on it.
+
+`tests/agent/test_unverified_steps.py` pins each of the four conditions and
+each of the ways a step escapes them — a tree that moved, a measured delta
+either way, an ordinary page, a read, a scroll — plus the once-per-page rule
+and the fact that the marker reaches the history line and the prompt.
+
+### It is a fact, not a gate
+
+`unverified` is read in exactly one place, `_history_line`, which renders it as
+a second line of the history entry — and the same line comes back through
+`recall_steps`, so a step the history window dropped can still be fetched with
+its fact attached. **No gate, stop, approval or budget branches on it** — it is
+easy to read a marker and assume a behaviour change, and there is none.
+
+**Nothing was relaxed to make this work.** Stagnation, the delta-only stop and
+the approval gates are untouched, and the marker can only be written. The
+behaviour change is indirect and deliberate: the model now has a fact it did
+not have ("nothing confirmed this step") plus a named response to it.
+`repeat_nudge` already fires when the last two steps did the same thing; this
+supplies the missing half — that the page never confirmed anything. Repeating a
+click on a page that cannot show the click is not a recovery, it is the loop.
+
+The sentence says what is **missing** rather than concluding failure, because
+on a canvas page a working click and a missed one look identical and "did not
+work" would be a claim the record cannot support. The behaviour that follows
+from an unverified step lives in the prompt — "A step that could not be
+verified" — and not in the string, because the history block is untrusted by
+contract and a record carrying an order would be read as page content. The
+trust hierarchy in the prompt points at that section, so the line is read as
+Brotto's own fact about the page rather than something the page said.
+
+### What it deliberately does not do
+
+- **No self-reported `intent`/`expect` field.** The record carries what the
+  loop could not confirm, never what the model says it meant or expected — a
+  field the model fills in about itself would read as evidence, and it is not.
+  See "Declined: `intent` / `expect` on `StepSummary`" above.
+- **Not on an ordinary page.** There the tree is a channel, its silence is a
+  reading, and nothing is written — an ordinary run pays no token cost for the
+  marker.
+- **Not on a read or a scroll**, for the reason above.
+- **Not a failure verdict.** `UNVERIFIED` is neither success nor failure; it
+  is the absence of evidence, and the prompt says so in those words.
+
+### What a resumed run gets
+
+The audit document stores turns, not step records, so the marker does not
+survive a resume. The resume path **rebuilds `mutated`** from the actions in
+the document, so a resumed run's later steps can still be judged — but the
+blind page's earlier steps carry no marker, and the model that picks the run up
+does not learn that the page had already gone blind.
 
 ## Mid-task steering
 
