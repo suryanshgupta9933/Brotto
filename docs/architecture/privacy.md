@@ -591,7 +591,9 @@ could plausibly be on screen.
   That is the same evidence channel the canvas case depends on, so the canvas
   case is not closed by the window. **It is now one channel of two, on a page
   that offers a second.** Pressing the accessibility shortcut a canvas app
-  names in its own page text puts the selected cell's address and content in
+  names in its own page text — which the prompt permits only for the one chord
+  it allows a page to direct, Option/Alt + Z with Command or Ctrl — puts the
+  selected cell's address and content in
   the tree, and a pixel veto does not withhold the tree — so a canvas step can
   be checked without photographing anything. **That changes nothing here**: the
   tree is not redacted either, so a written value is visible in it exactly as
@@ -868,7 +870,9 @@ budget, and it is only the right number on a page the agent can otherwise
 read. On a canvas page the content is in neither the accessibility tree nor
 the page text — **as the page arrives**; an app that names an accessibility
 shortcut in its own text puts the *selected cell* back in the tree once that
-is pressed, which is a verification channel and not a way to read the sheet, and
+is pressed — and the prompt permits a page to direct exactly one chord,
+Option/Alt + Z with Command or Ctrl, so a page naming any other chord gets
+nothing. It is a verification channel and not a way to read the sheet, and
 which is why the ceiling below is unchanged rather than raised. So the picture is
 the perception channel, and the ceiling is now
 `_MAX_CANVAS_CAPTURES_PER_TASK = 40` — the picture arrives on **every step of

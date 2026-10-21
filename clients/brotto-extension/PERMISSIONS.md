@@ -340,7 +340,13 @@ to find them.
 4. **Brotto is not protected against prompt injection** from page content.
    Treat a hostile page as able to mislead the model. Text and accessibility
    names are wrapped and labelled as untrusted, but that is a fence, not a
-   guarantee. **A rendered image is the residual case.** If your server has
+   guarantee. **One action is fenced harder than the rest: a page's text can
+   direct the agent to press at most one chord, Option/Alt + Z with Command or
+   Ctrl, which is inert in a browser.** A page naming ⌘Q, ⌘W, ⌘⇧Q, ⌘L or F4
+   gets the key refused, because a chord named on a page is a fact about the
+   page and never an order. Keys the model picks for its own navigation are
+   its own.
+   **A rendered image is the residual case.** If your server has
    screenshot capture enabled and the page draws with a `<canvas>`, the pixels
    carry no wrapper and cannot be fenced at all: instructions can be rendered
    as glyphs, so the agent is told in prose that the words drawn in the image
