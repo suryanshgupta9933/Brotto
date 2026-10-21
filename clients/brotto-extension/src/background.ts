@@ -7,7 +7,7 @@
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
 import { clearDelta } from "./observation/delta";
-import { bindFocus, boundedPoint, drawCursor, editorText, focusNode, focusState, verifyTarget, withWorld } from "./observation/pointer";
+import { bindFocus, boundedPoint, drawCursor, editorText, focusNode, focusState, reassertGridFocus, verifyTarget, withWorld } from "./observation/pointer";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -729,11 +729,26 @@ async function dispatchKey(tabId: number, key: string, mods: number): Promise<vo
  *  that spends its budget on the wire. */
 const MAX_CANVAS_CHARS = 1000;
 
-async function typeIntoCanvas(tabId: number, text: string): Promise<{ ok: boolean; reason: string }> {
+/** `beforeChar` is the binding, re-made before every keystroke: the grid's own
+ *  editor is given the focus back if it lost it, and the typing stops if the
+ *  binding cannot be held. It is called with nothing between its answer and the
+ *  key event — the whole point is that the check and the dispatch are adjacent.
+ *
+ *  It is called *per character* and not once per string because a key event is
+ *  a round trip: a single check would leave a window that spans every
+ *  keystroke in the string, and a page that takes the focus after the first
+ *  character would receive the rest. */
+async function typeIntoCanvas(
+  tabId: number,
+  text: string,
+  beforeChar: () => Promise<{ ok: boolean; reason: string }>,
+): Promise<{ ok: boolean; reason: string }> {
   if (text.length > MAX_CANVAS_CHARS) {
     return { ok: false, reason: "canvas-text-too-long" };
   }
   for (const ch of text) {
+    const held = await beforeChar();
+    if (!held.ok) return { ok: false, reason: held.reason };
     if (ch === "\n") await dispatchKey(tabId, "Enter", 0);
     else await dispatchKey(tabId, ch, 0);
   }
@@ -814,17 +829,6 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
       // cell's content on the first keystroke, and the DOM clear would have
       // reached for a selection inside an off-screen editor.
       console.warn("brotto: type_at — focus is the canvas grid's own editor, outside the canvas (logged, not silent)");
-      // **Re-read the focus, right now, and compare.** `bindFocus` named the
-      // editor a moment ago; the page may have moved focus since — a
-      // keystroke listener, a re-render, the grid handing focus to something
-      // else. Typing now would put the text wherever focus is *now*, which is
-      // not the node that was verified. Refuse instead.
-      const still = await focusNode(tabId);
-      if (!still.ok || still.backendNodeId !== bound.focusId) {
-        console.warn("brotto: type_at refused — focus changed between the check and the text");
-        refusal = { ok: false, reason: "focus-changed" };
-        return refusal;
-      }
       const text = String(action.text ?? "");
       // **Did the text land?** The editor's own content is the direct answer:
       // a grid that took the keystrokes changed it, a grid that ignored them
@@ -832,10 +836,28 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
       // changed nothing" rather than "the cell was always empty" — and so a
       // grid that reformats what it is given (a number, a formula) is not
       // reported as a failure.
+      //
+      // **The read comes before the binding, not between it and the text.** A
+      // read sitting between the last focus check and the keystroke is a race
+      // window with a round trip in it, and it was the window the review named.
+      // A "before" reading belongs before the binding anyway.
       const before = await editorText(tabId, bound.focusId);
-      const typed = await typeIntoCanvas(tabId, text);
+      // **The binding is re-made before every keystroke, not observed once.**
+      // A grid cell is *typed*: the text arrives as key events, and a key
+      // event is not bound to a node — it goes to whatever holds focus when
+      // the browser processes it. So the check cannot be made in the dispatch;
+      // it is made in the page, immediately before each dispatch, and it is
+      // made by *putting the focus back* rather than by reading it. A reading
+      // is not a binding: the page can move focus between the read and the
+      // keystroke, and the text goes there anyway.
+      //
+      // `reassertGridFocus` therefore does not ask "is the focus still where it
+      // was" — it makes the grid's own editor the focused element and then says
+      // so. It is the closest available equivalent of "insert into that node",
+      // because a key event cannot be addressed to one.
+      const typed = await typeIntoCanvas(tabId, text, async () => reassertGridFocus(tabId));
       if (!typed.ok) {
-        console.warn(`brotto: type_at refused — ${typed.reason}; the text was not typed`);
+        console.warn(`brotto: type_at refused — ${typed.reason}; the typing stopped`);
         refusal = { ok: false, reason: typed.reason };
         return refusal;
       }

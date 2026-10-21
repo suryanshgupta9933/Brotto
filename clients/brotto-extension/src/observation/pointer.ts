@@ -508,6 +508,125 @@ export function gridAdapter(sig) {
   return null;
 }
 
+/**
+ * **Hold the focus on the grid's own editor, at the moment of the keystroke.**
+ *
+ * A grid cell is *typed*, not inserted: the text arrives as `Input.dispatchKeyEvent`
+ * calls, and a key event is not bound to a node — it goes to whatever holds focus
+ * when the browser processes it. So the binding cannot be made in the dispatch. It
+ * has to be made in the *page*, immediately before each dispatch — and it has to be
+ * made by putting the focus **back**, not by observing that it left.
+ *
+ * **A reading is not a binding.** Reading `document.activeElement` and comparing
+ * ids says what was true when the read answered; a page that moves focus between
+ * the read and the keystroke gets the text anyway. That is the whole finding, and
+ * it is why this operation *changes* the page rather than only reading it.
+ *
+ * Three things happen here, in this order:
+ *
+ *   1. **the document is still the application.** The origin is read from the
+ *      document, in the isolated world, and the adapter is looked up *by that
+ *      origin* — so a page that navigated away mid-typing has no adapter and is
+ *      refused, and a page cannot forge its way into one.
+ *   2. **the editor holds the focus** — the ordinary case, and it touches
+ *      nothing at all.
+ *   3. **otherwise the focus is taken back.** The editor is found by its role
+ *      (the container id and the class the application writes) and given the
+ *      focus with `preventScroll`, because the editor is parked at y = -9998 and
+ *      a plain `focus()` scrolls the user's viewport to the top of the document.
+ *
+ * **The role, not the instance.** A grid replaces its own editor when it
+ * re-renders a cell, so the *node* is not stable enough to bind to — binding to
+ * the instance would refuse the typing that worked. The role is the same three
+ * parts the grant was made on, re-read at the point of insertion.
+ */
+const GRID_FOCUS_PROBE = `function (adapters) {
+  function isGridEditor(el, scopeId, className) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.isContentEditable !== true) return false;
+    var scope = el.closest ? el.closest("[id]") : null;
+    if (!scope || String(scope.id) !== String(scopeId)) return false;
+    var cls = (el.className && typeof el.className === "string") ? el.className.split(/\\s+/) : [];
+    for (var i = 0; i < cls.length; i++) { if (cls[i] === className) return true; }
+    return false;
+  }
+  var origin = "";
+  try { origin = String(location.origin || ""); } catch (err) { origin = ""; }
+  var adapter = null, seen = 0;
+  for (var i = 0; i < adapters.length; i++) {
+    if (String(adapters[i].origin) === origin) { adapter = adapters[i]; seen++; }
+  }
+  // No adapter for this origin, or an ambiguous one: this is not the grid the
+  // wall was written for, and a page that navigated here gets nothing.
+  if (seen !== 1 || !adapter) return { ok: false, reason: "grid-editor-unrecognised" };
+  var scopeId = String(adapter.scopeId), className = String(adapter.className);
+  if (isGridEditor(document.activeElement, scopeId, className)) {
+    return { ok: true, outcome: "already-focused" };
+  }
+  // The focus drifted. Find the grid's editor by its role and take it back.
+  var container = null;
+  try { container = document.getElementById(scopeId); } catch (err) { container = null; }
+  var editor = null;
+  if (container) {
+    if (isGridEditor(container, scopeId, className)) {
+      editor = container;
+    } else {
+      var found = [];
+      try { found = container.querySelectorAll ? container.querySelectorAll("." + className) : []; }
+      catch (err) { found = []; }
+      for (var j = 0; j < found.length; j++) {
+        if (isGridEditor(found[j], scopeId, className)) { editor = found[j]; break; }
+      }
+    }
+  }
+  if (!editor) return { ok: false, reason: "focus-changed" };
+  try {
+    // **preventScroll**: the editor is parked off-screen, and a plain focus()
+    // would scroll the user's viewport to the top of the document.
+    editor.focus({ preventScroll: true });
+  } catch (err) {
+    return { ok: false, reason: "focus-changed" };
+  }
+  if (isGridEditor(document.activeElement, scopeId, className)) {
+    return { ok: true, outcome: "refocused" };
+  }
+  return { ok: false, reason: "focus-changed" };
+}`;
+
+/**
+ * Put the focus back on the grid's own editor, and say whether it is there.
+ *
+ * One isolated-world evaluate, so the page owns neither the question nor the
+ * effect. The result is a *binding*, not an observation: on the success path
+ * the grid's editor holds the focus at the moment the evaluate answers, and
+ * the keystroke that follows is the very next thing sent.
+ *
+ * The refusal reasons are the existing ones: `grid-editor-unrecognised` when
+ * the document is no longer served from a recognised grid's origin, and
+ * `focus-changed` when the editor does not hold the focus and could not be
+ * given it back.
+ */
+export async function reassertGridFocus(tabId: number): Promise<{ ok: boolean; reason: string }> {
+  const adapters = JSON.stringify(GRID_ADAPTERS);
+  try {
+    const call = await withWorld(tabId, (contextId) =>
+      anyCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: {
+          expression: `(${GRID_FOCUS_PROBE})(${adapters})`,
+          contextId,
+          returnByValue: true,
+        },
+      }));
+    const v = call?.result?.value;
+    if (!v || typeof v !== "object") return { ok: false, reason: "focus-changed" };
+    if (v.ok === true) return { ok: true, reason: "" };
+    return { ok: false, reason: String(v.reason ?? "focus-changed") };
+  } catch {
+    return { ok: false, reason: "focus-changed" };
+  }
+}
+
 /** The one named world. Reused: `createIsolatedWorld` is idempotent per name. */
 const IDLE_WORLD = "brotto-idle";
 
@@ -540,9 +659,12 @@ const IDLE_WORLD = "brotto-idle";
  *   grid-editor-unrecognised
  *                           a canvas press focused something editable, but the
  *                           page is not one of the recognised grids — so the
- *                           editor cannot be trusted to be the grid's own.
- *   focus-changed           the focused node was not the one that was verified:
- *                           the page moved focus between the check and the text.
+ *                           editor cannot be trusted to be the grid's own. Also
+ *                           the answer when the document is no longer served
+ *                           from a recognised grid's origin.
+ *   focus-changed           the grid's own editor does not hold the focus and
+ *                           could not be given it back, so the text was not
+ *                           typed.
  *   grid-text-not-delivered the grid's editor did not change after the text was
  *                           typed into it, so the text did not land in the cell.
  *   focus-probe-failed      the `Runtime.evaluate` threw — the document is gone.
@@ -590,7 +712,7 @@ export const TYPE_AT_REFUSALS: Readonly<Record<string, string>> = {
   "focus-identify-failed": "the engine would not name the focused node",
   "focus-not-the-target": "focus is not the pressed node, an ancestor-descendant of it, or a recognised grid editor",
   "grid-editor-unrecognised": "a canvas press focused an editable, but the page is not a recognised grid",
-  "focus-changed": "the page moved focus between the check and the text",
+  "focus-changed": "the grid's editor does not hold the focus and could not be given it back",
   "grid-text-not-delivered": "the grid's editor did not change — the text did not land in the cell",
   "focus-probe-failed": "the focus evaluate threw; the document went away",
   "focus-probe-silent": "the focus evaluate returned no answer",

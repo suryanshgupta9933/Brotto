@@ -133,6 +133,21 @@ const MAX_CANVAS_CHARS = Number((MAX_CANVAS_CHARS_SRC.match(/\d+/) || ["0"])[0])
 const FOCUS_PROBE = extractTemplate(ptrSrc, "FOCUS_PROBE");
 const IDENTITY_PROBE = extractTemplate(ptrSrc, "IDENTITY_PROBE");
 
+// The grid focus probe is a template literal, so it is *cooked* before it is
+// run: the source text carries `\\s+` and the string the page sees carries
+// `\s+`. A raw slice would split the class list on a literal backslash.
+//
+// Lazy on purpose: a source without the probe must fail the tests that need
+// it, not the whole file — otherwise a missing feature breaks the *other*
+// tests' harness instead of failing its own.
+let _gridFocusProbe = null;
+function gridFocusProbe() {
+  if (_gridFocusProbe === null) {
+    _gridFocusProbe = vm.runInNewContext("`" + extractTemplate(ptrSrc, "GRID_FOCUS_PROBE") + "`");
+  }
+  return _gridFocusProbe;
+}
+
 // The recognised grid editors, read from the source rather than copied, so a
 // test cannot pass against an adapter list the code does not have.
 const GRID_ADAPTERS_SRC = ptrSrc.slice(
@@ -182,6 +197,9 @@ function run(action, opts = {}) {
     // The focus re-read on the grid path: the same node, unless a test says
     // otherwise.
     focusNode: opts.focusNode ?? (async () => ({ ok: true, backendNodeId: 42 })),
+    // The binding, re-made before every keystroke on the grid path. It holds
+    // by default; a test that is about a focus steal says otherwise.
+    reassertGridFocus: opts.reassert ?? (async () => ({ ok: true, reason: "" })),
     editorText: opts.editorText ?? (async () => ({ ok: true, text: editorReads++ === 0 ? "" : "typed" })),
     sleep: async () => {},
     console,
@@ -430,13 +448,14 @@ test("the ordinary path is unchanged — one insertion, no keystrokes", async ()
 
 // ── the grid path reports its own delivery ───────────────────────────────────
 
-test("focus that moved between the check and the text refuses, and types nothing", async () => {
+test("a focus steal that cannot be corrected refuses, and types nothing", async () => {
   // The editor was verified a moment ago; the page may have moved focus since.
-  // Typing now would put the text wherever focus is *now* — a field nobody
-  // verified, which is the failure the whole focus binding exists to prevent.
+  // The binding is re-made before the keystroke, and if it cannot be re-made
+  // the text is not typed at all — a field nobody verified must not receive
+  // it, and the refusal says which field it was.
   const { result, sent } = await run({ ...AT, text: "ab" }, {
     bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
-    focusNode: async () => ({ ok: true, backendNodeId: 99 }),
+    reassert: async () => ({ ok: false, reason: "focus-changed" }),
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "focus-changed");
@@ -483,10 +502,11 @@ test("a grid that replaced its editor mid-typing is not a failed delivery", asyn
   // The editor node the text was typed into is gone — the grid re-rendered the
   // cell. The old node's text is not evidence about the new one, so the two
   // reads are not comparable and nothing is claimed either way.
-  let focusReads = 0;
   const { result } = await run({ ...AT, text: "ab" }, {
     bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
-    focusNode: async () => ({ ok: true, backendNodeId: focusReads++ === 0 ? 42 : 99 }),
+    // The only focus read left on this path is the after-read, and it names
+    // the replacement editor — so the two reads are not comparable.
+    focusNode: async () => ({ ok: true, backendNodeId: 99 }),
     editorText: async () => ({ ok: true, text: "" }),
   });
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -500,6 +520,204 @@ test("text that is already in the cell is not a failed delivery", async () => {
     editorText: async () => ({ ok: true, text: "ab" }),
   });
   assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+// ── the binding on the grid path ─────────────────────────────────────────────
+//
+// A grid cell is *typed*, not inserted. `Input.insertText` fires no keydown,
+// and a grid starts editing on the keystroke, so the text has to arrive as key
+// events — and a key event is not bound to a node: it goes to whatever holds
+// focus when the browser processes it. So the binding cannot be made in the
+// dispatch. It is made in the page, immediately before each dispatch, and it
+// is made by *putting the focus back* rather than by observing that it left.
+//
+// Reading the focus and comparing ids is not a binding. The read says what
+// was true when it answered; a page that moves focus between the read and
+// the keystroke gets the text anyway. That is the finding, and it is why
+// this path now changes the page instead of only reading it.
+
+test("the binding is re-made before every keystroke, not once per string", async () => {
+  // Per character, because a key event is a round trip: one check would leave
+  // a window spanning every keystroke in the string, and a page that takes the
+  // focus after the first character would receive the rest of it.
+  let calls = 0;
+  const { result } = await run({ ...AT, text: "abc" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    reassert: async () => { calls++; return { ok: true, reason: "" }; },
+  });
+  assert.equal(calls, 3, "one binding per character");
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("nothing sits between the binding and the key event", async () => {
+  // The review named this: a read between the final focus check and the
+  // insertion is a round trip of window with nothing in it.
+  const fn = extractFn(bgSrc, "typeIntoCanvas");
+  const i = fn.indexOf("await beforeChar()");
+  const j = fn.indexOf("await dispatchKey(");
+  assert.ok(i > 0 && j > i, "the binding comes first");
+  const between = fn.slice(i, j);
+  assert.equal((between.match(/await /g) || []).length, 1,
+    "the only await between the binding and the key event is the binding itself");
+});
+
+test("the editor is read before the binding, not between it and the text", async () => {
+  // It is a "before" reading, so it belongs there — and a read that sits
+  // between the last check and the keystroke is the window the review named.
+  const branch = extractBranch('t === "type_at"');
+  const firstRead = branch.indexOf("editorText(");
+  const typing = branch.indexOf("typeIntoCanvas(");
+  assert.ok(firstRead > 0 && typing > firstRead,
+    "the before-read must precede the binding, not interrupt it");
+});
+
+test("a focus steal that is corrected does not stop the text", async () => {
+  // The whole point of re-asserting rather than observing: the page took the
+  // focus, the extension took it back, and the text still lands in the grid.
+  let calls = 0;
+  const { result, sent } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    reassert: async () => { calls++; return { ok: true, reason: "" }; },
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 4,
+    "two characters, each a keyDown and a keyUp");
+});
+
+test("a focus steal in the middle of the string stops the typing where it happened", async () => {
+  // The binding broke on the second character, so the second character is not
+  // typed — and the refusal is reported, not swallowed.
+  let calls = 0;
+  const { result, sent } = await run({ ...AT, text: "abc" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    reassert: async () => {
+      calls++;
+      return calls === 1 ? { ok: true, reason: "" } : { ok: false, reason: "focus-changed" };
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "focus-changed");
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 2,
+    "one character was typed before the binding broke, and no more");
+});
+
+// ── the probe that holds the focus ───────────────────────────────────────────
+
+/** A DOM small enough to run the shipped grid focus probe against. */
+function gridDom({ origin = SHEETS.origin, withEditor = true } = {}) {
+  const state = { focusCalls: [], active: null };
+  const el = (o) => ({
+    nodeType: 1,
+    isContentEditable: o.editable !== false,
+    className: o.className || "",
+    id: o.id || "",
+    scope: o.scope || null,
+    closest() { return this.scope ? this.scope : (this.id ? this : null); },
+    focus(opts) { state.focusCalls.push({ el: this, opts }); state.active = this; },
+  });
+  const container = el({ id: SHEETS.focusScope, editable: false });
+  const editor = el({ className: SHEETS.focusClass, scope: container });
+  container.querySelectorAll = (sel) => (withEditor && sel === "." + SHEETS.focusClass ? [editor] : []);
+  const doc = {
+    get activeElement() { return state.active; },
+    getElementById: (id) => (id === SHEETS.focusScope ? container : null),
+  };
+  // Something else holds the focus: a field the user can see, and no part of
+  // the grid.
+  const stranger = el({ className: "user-field", editable: false });
+  return { state, document: doc, location: { origin }, container, editor, stranger };
+}
+
+const ADAPTERS = vm.runInNewContext(`${GRID_ADAPTERS_SRC}; GRID_ADAPTERS`);
+
+function runGridProbe(dom) {
+  const fn = vm.runInNewContext("(" + gridFocusProbe() + ")", {
+    document: dom.document,
+    location: dom.location,
+  });
+  return fn.call(dom.document, ADAPTERS);
+}
+
+test("the grid's editor already holds the focus — the probe touches nothing", async () => {
+  const dom = gridDom();
+  dom.state.active = dom.editor;
+  const r = runGridProbe(dom);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.outcome, "already-focused");
+  assert.equal(dom.state.focusCalls.length, 0, "the focus is not moved when it is already right");
+});
+
+test("a stolen focus is taken back — and the page is not scrolled", async () => {
+  // The editor is parked at y = -9998, so a plain `focus()` scrolls the user's
+  // viewport to the top of the document. `preventScroll` is the difference
+  // between a correction and a yank.
+  const dom = gridDom();
+  dom.state.active = dom.stranger;
+  const r = runGridProbe(dom);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.outcome, "refocused");
+  assert.equal(dom.state.focusCalls.length, 1);
+  assert.deepEqual(dom.state.focusCalls[0].opts, { preventScroll: true },
+    "the focus is taken back without scrolling the user's page");
+  assert.equal(dom.state.active, dom.editor, "the focus is the grid's own editor");
+});
+
+test("a focus that cannot be taken back refuses", async () => {
+  // There is no editor to take it back to, so the text is not typed.
+  const dom = gridDom({ withEditor: false });
+  dom.state.active = dom.stranger;
+  const r = runGridProbe(dom);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "focus-changed");
+});
+
+test("a page that is not the application is refused", async () => {
+  // The origin is the part a page cannot forge, and it is the part the probe
+  // looks the adapter up by — so a page that is not the grid gets no binding.
+  const dom = gridDom({ origin: "https://attacker.example" });
+  dom.state.active = dom.editor;
+  const r = runGridProbe(dom);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "grid-editor-unrecognised");
+});
+
+test("the probe takes the focus back with preventScroll, in the source", () => {
+  assert.match(gridFocusProbe(), /focus\(\{ preventScroll: true \}\)/,
+    "the editor is off-screen; a plain focus() scrolls the user's viewport away");
+});
+
+/** The shipped `reassertGridFocus`, with the shipped world plumbing around it. */
+function loadReassert(fx, adapters = ADAPTERS) {
+  const shipped = extractFn(ptrSrc, "reassertGridFocus").replace(/^export\s+/, "");
+  const body = ["isolatedWorld", "withWorld", "topFrameId"]
+    .map((n) => extractFn(ptrSrc, n).replace(/^export\s+/, ""))
+    .join("\n");
+  const prelude = 'const IDLE_WORLD = "brotto-idle";\nconst worldIds = new Map();\n';
+  return new Function("anyCommand", "GRID_ADAPTERS", "GRID_FOCUS_PROBE",
+    `${prelude}${body}\nreturn ${shipped}`)(fx.anyCommand, adapters, gridFocusProbe());
+}
+
+test("the re-assert runs in the isolated world, with the adapter list in the expression", async () => {
+  const seen = [];
+  const anyCommand = async (_t, c) => {
+    seen.push(c);
+    if (c.method === "Page.getFrameTree") return { frameTree: { frame: { id: "F" } } };
+    if (c.method === "Page.createIsolatedWorld") return { executionContextId: 9 };
+    return { result: { value: { ok: true, outcome: "already-focused" } } };
+  };
+  const r = await loadReassert({ anyCommand })(1);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const evaluate = seen.find((c) => c.method === "Runtime.evaluate");
+  assert.equal(evaluate.params.contextId, 9, "the page must not be able to answer the question");
+  assert.match(evaluate.params.expression, /docs\.google\.com/,
+    "the adapter list rides in the expression, so the test cannot drift from the code");
+});
+
+test("a re-assert that cannot answer refuses — the answer is unknowable, not a pass", async () => {
+  const r = await loadReassert({ anyCommand: async () => { throw new Error("context destroyed"); } })(1);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "focus-changed");
 });
 
 // ── the cursor stays where it was put ────────────────────────────────────────
@@ -1240,7 +1458,9 @@ test("the refusal vocabulary is closed, and lives in one place", () => {
   // whose detail is a tag. The scan is over this action's surfaces only; the
   // cursor draw has its own (`foreign-frame`, `no-body`) and is not a refusal.
   const surfaces = [FOCUS_PROBE, IDENTITY_PROBE, extractTemplate(ptrSrc, "TARGET_PROBE"),
+    gridFocusProbe(),
     extractFn(ptrSrc, "verifyTarget"), extractFn(ptrSrc, "bindFocus"), extractFn(ptrSrc, "focusState"),
+    extractFn(ptrSrc, "reassertGridFocus"),
     extractBranch('t === "type_at"'), extractFn(bgSrc, "pressAt"), extractFn(bgSrc, "typeIntoCanvas")];
   for (const src of surfaces) {
     for (const m of src.matchAll(/reason:\s*"([a-z0-9:-]+)"/g)) {
