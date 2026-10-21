@@ -724,6 +724,27 @@ async function dispatchKey(tabId: number, key: string, mods: number): Promise<vo
   await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...base } });
 }
 
+/** A canvas grid's cell is typed, not inserted. `Input.insertText` fires no
+ *  keydown, and a grid starts editing on the keystroke — so an insertion never
+ *  reaches the cell, and the cell shows a caret with nothing in it. One key
+ *  event per character instead, and never a modifier: no chord, so no OS
+ *  question is introduced anywhere on this path.
+ *
+ *  Bounded because a keystroke is a round trip and an unbounded one is a run
+ *  that spends its budget on the wire. */
+const MAX_CANVAS_CHARS = 1000;
+
+async function typeIntoCanvas(tabId: number, text: string): Promise<{ ok: boolean; reason: string }> {
+  if (text.length > MAX_CANVAS_CHARS) {
+    return { ok: false, reason: "canvas-text-too-long" };
+  }
+  for (const ch of text) {
+    if (ch === "\n") await dispatchKey(tabId, "Enter", 0);
+    else await dispatchKey(tabId, ch, 0);
+  }
+  return { ok: true, reason: "" };
+}
+
 async function executeAction(tabId: number, action: any): Promise<{ ok: boolean; reason: string }> {
   const t = action.type;
   // A marker left up by an action that died mid-flight is an occluder over the
@@ -778,8 +799,9 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
     // press that missed, landed on a non-focusable, or was moved by page script
     // leaves the user's *previous* field focused, so `clear` empties that one
     // and the text is typed into it. `bindFocus` names the focused node from the
-    // engine (`DOM.getFocusNode`), which no page script can answer, and compares
-    // it against the node the press was verified against. The one shape identity
+    // engine — read in an isolated world, then described by `DOM.describeNode`,
+    // because `DOM.getFocusNode` no longer exists in Chrome — and compares it
+    // against the node the press was verified against. The one shape identity
     // cannot serve — a canvas cell whose press focuses a hidden editor — is
     // exempted narrowly and *reported*, never silently passed.
     const bound = await bindFocus(tabId, action.backendNodeId, x, y);
@@ -791,35 +813,54 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
     if (bound.reason === "canvas-editor-exempt") {
       console.warn("brotto: type_at — focus is an editor inside the pressed canvas, not the pressed node itself (logged, not silent)");
     }
-    // The guard `focus_id` gives the two-frame version lived between the
-    // frames, and that window closes inside here. This is where it moves:
-    // nothing may hold focus, or the text goes somewhere the press did not
-    // put it.
-    //
-    // **`clear` rides this same probe, and is a DOM operation.** It was a key
-    // chord with the caller supplying the modifier bitmask, which put an OS
-    // question on the wire — Ctrl+A is "move to line start" on macOS, and the
-    // server has no OS signal to answer it. `focusState` reads
-    // `document.activeElement` in an **isolated world** — so a page that
-    // overrode `Element.prototype.select` cannot change what `select()` does —
-    // and calls `select()` on it, after `bindFocus` has proved that element is
-    // the pressed target. One evaluate, both questions, and no branch anywhere
-    // that knows what OS it is on.
-    //
-    // A failed clear refuses rather than types: `clear: true` means *replace*,
-    // and appending to a field the model asked to empty is the same wrong
-    // answer the bare "a" gave, wearing a different hat.
-    const focus = await focusState(tabId, action.clear === true);
-    if (!focus.ok) {
-      console.warn(`brotto: type_at refused — ${focus.reason}; nothing holds focus to type into`);
-      refusal = { ok: false, reason: focus.reason };
-      return refusal;
+    if (bound.reason === "canvas-grid-editor") {
+      // The grid keeps its editor outside the canvas (Sheets parks it
+      // off-screen), and a grid starts editing on the *keystroke*: an
+      // insertion fires no keydown, so the cell would show a caret with
+      // nothing in it. Typed, one key event per character, and no modifier
+      // ever — so no chord, and no OS question.
+      //
+      // The clear is the grid's own business: a grid replaces a selected
+      // cell's content on the first keystroke, and the DOM clear would have
+      // reached for a selection inside an off-screen editor.
+      console.warn("brotto: type_at — focus is the canvas grid's own editor, outside the canvas (logged, not silent)");
+      const typed = await typeIntoCanvas(tabId, String(action.text ?? ""));
+      if (!typed.ok) {
+        console.warn(`brotto: type_at refused — ${typed.reason}; the text was not typed`);
+        refusal = { ok: false, reason: typed.reason };
+        return refusal;
+      }
+    } else {
+      // The guard `focus_id` gives the two-frame version lived between the
+      // frames, and that window closes inside here. This is where it moves:
+      // nothing may hold focus, or the text goes somewhere the press did not
+      // put it.
+      //
+      // **`clear` rides this same probe, and is a DOM operation.** It was a key
+      // chord with the caller supplying the modifier bitmask, which put an OS
+      // question on the wire — Ctrl+A is "move to line start" on macOS, and the
+      // server has no OS signal to answer it. `focusState` reads
+      // `document.activeElement` in an **isolated world** — so a page that
+      // overrode `Element.prototype.select` cannot change what `select()` does —
+      // and calls `select()` on it, after `bindFocus` has proved that element is
+      // the pressed target. One evaluate, both questions, and no branch anywhere
+      // that knows what OS it is on.
+      //
+      // A failed clear refuses rather than types: `clear: true` means *replace*,
+      // and appending to a field the model asked to empty is the same wrong
+      // answer the bare "a" gave, wearing a different hat.
+      const focus = await focusState(tabId, action.clear === true);
+      if (!focus.ok) {
+        console.warn(`brotto: type_at refused — ${focus.reason}; nothing holds focus to type into`);
+        refusal = { ok: false, reason: focus.reason };
+        return refusal;
+      }
+      // One call, not one per character — see the `type` branch below.
+      await dbg.sendCommand(tabId, {
+        method: "Input.insertText",
+        params: { text: (action.text ?? "") as string },
+      });
     }
-    // One call, not one per character — see the `type` branch below.
-    await dbg.sendCommand(tabId, {
-      method: "Input.insertText",
-      params: { text: (action.text ?? "") as string },
-    });
   } else if (t === "click" || t === "click_xy") {
     // Two trust classes, one dispatch. `click`'s x/y came out of BOX_WALK and
     // were verified twice in the page — viewport, then elementFromPoint — so
@@ -858,8 +899,9 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
     // newlines: the loop made 1325 sequential CDP round trips, and each "\n" was
     // a literal newline *character* rather than a line break — so a markdown
     // document arrived as one run-on line with 23 dead characters in it.
-    // insertText is also what a canvas-rendered editor (Google Docs) expects;
-    // per-character key events reach a contenteditable and nothing else.
+    // insertText is also what a canvas-rendered editor (Google Docs) expects.
+    // The per-character path above is the grid editor's, and only there: a
+    // grid starts editing on the keystroke.
     await dbg.sendCommand(tabId, {
       method: "Input.insertText",
       params: { text: (action.text ?? "") as string },

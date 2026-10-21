@@ -122,6 +122,14 @@ const KEY_CODES = bgSrc.slice(
   bgSrc.indexOf("};", bgSrc.indexOf("const KEY_CODES")) + 2,
 );
 
+// The canvas bound, read from the source rather than copied, so a test that
+// trips it cannot drift from the constant that trips it.
+const MAX_CANVAS_CHARS_SRC = bgSrc.includes("const MAX_CANVAS_CHARS")
+  ? bgSrc.slice(bgSrc.indexOf("const MAX_CANVAS_CHARS"),
+    bgSrc.indexOf(";", bgSrc.indexOf("const MAX_CANVAS_CHARS")) + 1)
+  : "";
+const MAX_CANVAS_CHARS = Number((MAX_CANVAS_CHARS_SRC.match(/\d+/) || ["0"])[0]);
+
 const FOCUS_PROBE = extractTemplate(ptrSrc, "FOCUS_PROBE");
 const IDENTITY_PROBE = extractTemplate(ptrSrc, "IDENTITY_PROBE");
 
@@ -135,6 +143,7 @@ const IDENTITY_PROBE = extractTemplate(ptrSrc, "IDENTITY_PROBE");
  */
 function run(action, opts = {}) {
   const sent = [];
+  const state = { clears: 0 };
   const dbg = {
     sendCommand: async (_tabId, cmd) => { sent.push(cmd); return {}; },
   };
@@ -145,25 +154,35 @@ function run(action, opts = {}) {
     boundedPoint: opts.point ?? (async (_t, x, y) => ({ x: Math.round(x), y: Math.round(y) })),
     verifyTarget: opts.verify ?? (async () => ({ ok: true, reason: "" })),
     bindFocus: opts.bind ?? (async () => ({ ok: true, reason: "same-node" })),
-    clearCursor: async () => {},
+    // Counts any call that removes the marker. The cursor is the user's only
+    // way to see where the agent is clicking, so a call here is a defect; the
+    // assertion that says so lives with the cursor.
+    clearCursor: async () => { state.clears++; },
     drawCursor: async () => ({ drawn: true, reason: "" }),
     focusState: opts.focus ?? (async () => ({ ok: true, reason: "" })),
     sleep: async () => {},
     console,
   };
   const names = Object.keys(deps);
+  // The canvas helper is optional, so that a source without it still builds the
+  // harness — otherwise a missing feature breaks the *other* tests' harness
+  // instead of failing its own.
+  const canvasHelper = bgSrc.includes("function typeIntoCanvas")
+    ? extractFn(bgSrc, "typeIntoCanvas") : "";
   const fn = vm.runInNewContext(
     `(async (${names.join(", ")}) => {
       ${KEY_CODES}
+      ${MAX_CANVAS_CHARS_SRC}
       ${extractFn(bgSrc, "keyCodeFor")}
       ${extractFn(bgSrc, "dispatchKey")}
+      ${canvasHelper}
       ${extractFn(bgSrc, "pressAt")}
       let refusal = null;
       ${extractBranch('t === "type_at"')}
       return refusal ?? { ok: true, reason: "" };
     })`,
   );
-  return fn(...names.map((n) => deps[n])).then((result) => ({ result, sent }));
+  return fn(...names.map((n) => deps[n])).then((result) => ({ result, sent, state }));
 }
 
 const AT = { type: "type_at", x: 100, y: 200, backendNodeId: 42, text: "hello" };
@@ -322,12 +341,68 @@ test("the clear is selected before the text, or the text lands inside it", async
   ], `insertText must come last, and only one probe between press and text: ${JSON.stringify(methods)}`);
 });
 
-test("the branch never dispatches a key, so it can never need to know the OS", () => {
+test("no keystroke on any path carries a modifier, so no path needs to know the OS", async () => {
+  // The clear is a DOM operation, so the ordinary path sends no key at all; the
+  // canvas path sends character keys, and a chord is the per-OS bug the clear
+  // was moved away from. Both facts are the same fact: no modifier, ever.
+  for (const reason of ["same-node", "canvas-grid-editor"]) {
+    const { sent } = await run({ ...AT, text: "ab" }, {
+      bind: async () => ({ ok: true, reason }),
+    });
+    for (const k of sent.filter((c) => c.method === "Input.dispatchKeyEvent")) {
+      assert.ok(!k.params.modifiers, `${reason}: a chord means something different per OS`);
+    }
+  }
+  const { sent } = await run({ ...AT, clear: true });
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 0,
+    "the ordinary path types by insertion, and the clear is not a chord");
   const branch = extractBranch('t === "type_at"');
-  assert.doesNotMatch(branch, /dispatchKey|modifiers|navigator|userAgent|platform/,
-    "select-all is a DOM operation; a key here is the per-OS bug it replaced");
   assert.ok(branch.includes("focusState(tabId, action.clear === true)"),
     "the clear rides the focus probe, so it targets what the press focused");
+});
+
+// ── the canvas grid path ─────────────────────────────────────────────────────
+
+test("a canvas grid is typed, one keystroke per character — an insertion never reaches a cell", async () => {
+  // A grid starts editing on the *keystroke*: `Input.insertText` fires no
+  // keydown, so the cell would show a caret with nothing in it. That is the
+  // reported failure — the cell was selected, and the text never arrived.
+  const { result, sent } = await run({ ...AT, text: "ab" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor" }),
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 0,
+    "an insertion fires no keydown, and a grid starts editing on the keydown");
+  const keys = sent.filter((c) => c.method === "Input.dispatchKeyEvent");
+  assert.equal(keys.length, 4, "two characters, each a keyDown and a keyUp");
+  assert.equal(keys[0].params.type, "keyDown");
+  assert.equal(keys[0].params.text, "a");
+  assert.equal(keys[1].params.type, "keyUp");
+  assert.equal(keys[2].params.text, "b");
+});
+
+test("a newline on the grid path is a Return key, not a newline character", async () => {
+  const { sent } = await run({ ...AT, text: "a\nb" }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor" }),
+  });
+  const downs = sent.filter((c) => c.method === "Input.dispatchKeyEvent" && c.params.type !== "keyUp");
+  assert.deepEqual(downs.map((c) => c.params.key), ["a", "Enter", "b"]);
+});
+
+test("text longer than the canvas bound is refused, and nothing is typed", async () => {
+  const { result, sent } = await run({ ...AT, text: "x".repeat(MAX_CANVAS_CHARS + 1) }, {
+    bind: async () => ({ ok: true, reason: "canvas-grid-editor" }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "canvas-text-too-long");
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 0,
+    "a refusal types nothing");
+});
+
+test("the ordinary path is unchanged — one insertion, no keystrokes", async () => {
+  const { sent } = await run(AT, { bind: async () => ({ ok: true, reason: "same-node" }) });
+  assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 1);
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 0);
 });
 
 // ── the shipped focus probe ─────────────────────────────────────────────────
@@ -591,7 +666,22 @@ function loadFocusState(handler, log = []) {
 const PLUMBING = {
   "Page.getFrameTree": { frameTree: { frame: { id: "F" } } },
   "Page.createIsolatedWorld": { executionContextId: 9 },
+  "Page.getLayoutMetrics": { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 } },
 };
+
+/** The engine's answers to "name the focused node", in the shape the shipped
+ *  `focusNode` asks for: an isolated-world read of `document.activeElement`,
+ *  then the engine's own description of the node that read points at.
+ *  `DOM.getFocusNode` is not in it — Chrome removed that method, and asking
+ *  for it is what made every `type_at` refuse. */
+function focusAnswers(overrides = {}) {
+  return {
+    "DOM.enable": {},
+    "Runtime.evaluate": { result: { objectId: "focus-obj" } },
+    "DOM.describeNode": { node: { backendNodeId: 77, nodeName: "DIV" } },
+    ...overrides,
+  };
+}
 
 function engine(answers = {}) {
   const calls = [];
@@ -609,7 +699,7 @@ function engine(answers = {}) {
  *  around it — a test that stubs them away would not be testing the walls. */
 function loadBindFocus(fx) {
   const shipped = extractFn(ptrSrc, "bindFocus").replace(/^export\s+/, "");
-  const body = ["focusNode", "isolatedWorld", "withWorld", "topFrameId", "box"]
+  const body = ["focusNode", "isolatedWorld", "withWorld", "topFrameId", "box", "liveViewport"]
     .map((n) => extractFn(ptrSrc, n).replace(/^export\s+/, ""))
     .join("\n");
   const prelude = 'const IDLE_WORLD = "brotto-idle";\nconst worldIds = new Map();\n' +
@@ -727,26 +817,32 @@ test("the branch binds focus between the press and the text, and refuses when it
 });
 
 test("the focused node is named by the engine, not by script in the page", async () => {
-  const fx = engine({
-    "DOM.enable": {},
-    "DOM.getFocusNode": { nodeId: 11 },
+  // `DOM.getFocusNode` was removed from Chrome, so the read is done in the
+  // isolated world — where the page cannot redefine `document.activeElement` —
+  // and the node is named by the engine. Reading it in the page's own world
+  // would ask the page a question it may answer falsely.
+  const fx = engine(focusAnswers({
     "DOM.describeNode": { node: { backendNodeId: 99, nodeName: "INPUT" } },
     "DOM.resolveNode": { object: { objectId: "obj-1" } },
     "Runtime.callFunctionOn": { result: { value: { ok: true, reason: "same-node", tag: "CANVAS" } } },
-  });
+  }));
   const ok = await loadBindFocus(fx)(1, 99);
   assert.equal(ok.ok, true, JSON.stringify(ok));
-  assert.ok(fx.methods().includes("DOM.getFocusNode"),
-    "identity comes from the engine; no evaluate is consulted for it");
+  const read = fx.calls.find((c) => c.method === "Runtime.evaluate");
+  assert.ok(read, "the focused node is read at all");
+  assert.equal(read.params.expression, "document.activeElement");
+  assert.equal(read.params.contextId, 9, "read in the isolated world, not the page's own");
   const described = fx.calls.find((c) => c.method === "DOM.describeNode");
-  assert.equal(described.params.nodeId, 11, "the nodeId the engine returned is the one described");
+  assert.equal(described.params.objectId, "focus-obj", "the engine names the node that was read");
+  assert.ok(!fx.methods().includes("DOM.getFocusNode"),
+    "that method no longer exists in Chrome, and asking for it is what refused every type_at");
 });
 
 test("an engine that will not name the focused node refuses — it is never inferred", async () => {
   for (const answers of [
-    { "DOM.enable": {}, "DOM.getFocusNode": { nodeId: 11 }, "DOM.describeNode": { node: {} } },
-    { "DOM.enable": {} },   // getFocusNode throws
-    { "DOM.enable": {}, "DOM.getFocusNode": { nodeId: 11 }, "DOM.describeNode": { node: { backendNodeId: 9, nodeName: "INPUT" } } },
+    { "DOM.enable": {}, "Runtime.evaluate": { result: {} } },        // no object id
+    { "DOM.enable": {}, "Runtime.evaluate": { result: { objectId: "o" } }, "DOM.describeNode": { node: {} } },
+    { "DOM.enable": {} },                                            // the read throws
   ]) {
     const fx = engine(answers);
     const r = await loadBindFocus(fx)(1, 99);
@@ -801,13 +897,11 @@ test("focus the browser retargeted to the pressed node's shadow host passes", ()
 });
 
 test("an unrelated focused node refuses, with the tag of the pressed node for the exemption", async () => {
-  const fx = engine({
-    "DOM.enable": {},
-    "DOM.getFocusNode": { nodeId: 11 },
+  const fx = engine(focusAnswers({
     "DOM.describeNode": { node: { backendNodeId: 99, nodeName: "INPUT" } },
     "DOM.resolveNode": { object: { objectId: "obj-1" } },
     "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag: "BUTTON" } } },
-  });
+  }));
   const r = await loadBindFocus(fx)(1, 99);
   assert.deepEqual(r, { ok: false, reason: "focus-not-the-target" });
 });
@@ -816,16 +910,15 @@ test("an unrelated focused node refuses, with the tag of the pressed node for th
 
 /** The one shape identity cannot serve: a <canvas> grid whose press focuses an
  *  editor that is neither the cell nor inside it. */
-function canvasShape({ tag = "CANVAS", focusTag = "TEXTAREA", inner, outer } = {}) {
-  const fx = engine({
-    "DOM.enable": {},
-    "DOM.getFocusNode": { nodeId: 11 },
+function canvasShape({ tag = "CANVAS", focusTag = "TEXTAREA", focusEditable = false, inner, outer, viewport } = {}) {
+  const answers = focusAnswers({
     "DOM.describeNode": { node: { backendNodeId: 77, nodeName: focusTag } },
     "DOM.resolveNode": { object: { objectId: "obj-1" } },
-    "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag } } },
+    "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag, focusTag, focusEditable } } },
     "DOM.getBoxModel": ({ params }) => (params.backendNodeId === 77 ? { model: { quads: [inner] } } : { model: { quads: [outer] } }),
   });
-  return loadBindFocus(fx);
+  if (viewport === "throw") answers["Page.getLayoutMetrics"] = () => { throw new Error("no target"); };
+  return loadBindFocus(engine(answers));
 }
 
 const QUAD = (x, y, w, h) => [x, y, x + w, y, x + w, y + h, x, y + h];
@@ -857,18 +950,89 @@ test("the exemption is text-input-only", async () => {
 });
 
 test("an editor with no rendered box does not qualify", async () => {
-  const fx = engine({
-    "DOM.enable": {},
-    "DOM.getFocusNode": { nodeId: 11 },
+  const fx = engine(focusAnswers({
     "DOM.describeNode": { node: { backendNodeId: 77, nodeName: "TEXTAREA" } },
     "DOM.resolveNode": { object: { objectId: "obj-1" } },
     "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag: "CANVAS" } } },
     "DOM.getBoxModel": { model: { quads: [QUAD(10, 10, 40, 12)] } },
-  });
+  }));
   // Only the canvas answers with a box; the editor has none.
   const bind = loadBindFocus({ ...fx, anyCommand: async (t, c) => (c.method === "DOM.getBoxModel" && c.params.backendNodeId === 77
     ? (() => { throw new Error("not rendered"); })() : fx.anyCommand(t, c)) });
   assert.equal((await bind(1, 42)).reason, "focus-not-the-target");
+});
+
+// ── the grid editor ──────────────────────────────────────────────────────────
+//
+// The second canvas shape: a grid that keeps its editor *outside* the canvas.
+// Google Sheets' cell editor is `DIV#waffle-rich-text-editor.cell-input
+// [contenteditable=true]` — a direct child of BODY, zero-width, parked at
+// y = -9998 — so it is neither the pressed node nor inside it, and it is not
+// an INPUT either. The one shape identity cannot serve and wall 3 cannot
+// serve, and the run that reported it typed nothing at all.
+
+test("a canvas grid whose editor is parked off-screen is admitted, and says so", async () => {
+  const bind = canvasShape({
+    focusTag: "DIV", focusEditable: true,
+    inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
+  });
+  const r = await bind(1, 42, 300, 200);
+  assert.deepEqual(r, { ok: true, reason: "canvas-grid-editor" },
+    "the grid editor is admitted, and the allowance is reported");
+});
+
+test("a canvas grid whose editor is drawn over the clicked cell is admitted", async () => {
+  const bind = canvasShape({
+    focusTag: "DIV", focusEditable: true,
+    inner: QUAD(280, 190, 100, 24), outer: QUAD(0, 142, 1388, 620),
+  });
+  assert.deepEqual(await bind(1, 42, 300, 200), { ok: true, reason: "canvas-grid-editor" });
+});
+
+test("a visible field elsewhere on the page is still refused — the grid wall is not a hole", async () => {
+  // The defeat: a grid editor is admitted, and now *any* focused editable
+  // qualifies. A visible field of the user's own, somewhere else on the page,
+  // satisfies none of the three ways in — and typing into it is the
+  // "erase some other field" failure.
+  const bind = canvasShape({
+    focusTag: "DIV", focusEditable: true,
+    inner: QUAD(600, 700, 200, 24), outer: QUAD(0, 142, 1388, 620),
+  });
+  assert.deepEqual(await bind(1, 42, 300, 200), { ok: false, reason: "focus-not-the-target" });
+});
+
+test("the grid wall needs an editable — a canvas that focuses a plain div is refused", async () => {
+  const bind = canvasShape({
+    focusTag: "DIV", focusEditable: false,
+    inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
+  });
+  assert.equal((await bind(1, 42, 300, 200)).reason, "focus-not-the-target");
+});
+
+test("the grid wall is canvas-only", async () => {
+  const bind = canvasShape({
+    tag: "DIV", focusTag: "DIV", focusEditable: true,
+    inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
+  });
+  assert.equal((await bind(1, 42, 300, 200)).reason, "focus-not-the-target");
+});
+
+test("a viewport that cannot be read proves nothing, so the grid wall fails closed", async () => {
+  const bind = canvasShape({
+    focusTag: "DIV", focusEditable: true, viewport: "throw",
+    inner: QUAD(600, 700, 200, 24), outer: QUAD(0, 142, 1388, 620),
+  });
+  assert.equal((await bind(1, 42, 300, 200)).reason, "focus-not-the-target");
+});
+
+test("the grid wall consults no page attribute, so a page cannot unlock it", () => {
+  const src = extractFn(ptrSrc, "bindFocus");
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  assert.doesNotMatch(code, /getAttribute|aria-hidden|contenteditable/,
+    "a page-written attribute must not unlock the grid wall");
+  assert.match(code, /v\.focusEditable === true/, "editability is the DOM property, read in the isolated world");
+  assert.match(extractFn(ptrSrc, "box"), /DOM\.getBoxModel/,
+    "the geometry is the engine's, not the page's");
 });
 
 test("the exemption is stated in the source, so the rule is not just a test", () => {
@@ -894,7 +1058,8 @@ test("the refusal vocabulary is closed, and lives in one place", () => {
     "focus-no-text-field", "clear-select-noop", "clear-no-text-field", "clear-threw",
     "focus-probe-failed", "focus-probe-silent", "focus-unidentified", "focus-identify-failed",
     "focus-not-the-target", "point-out-of-viewport", "point-not-numeric", "target-gone",
-    "target-unresolvable", "probe-silent", "probe-failed"]) {
+    "target-unresolvable", "probe-silent", "probe-failed", "canvas-grid-editor",
+    "canvas-text-too-long"]) {
     assert.ok(declared.has(r), `${r} must be documented in TYPE_AT_REFUSALS`);
   }
   // Nothing on the `type_at` path may emit a reason the list does not name.
@@ -903,7 +1068,7 @@ test("the refusal vocabulary is closed, and lives in one place", () => {
   // cursor draw has its own (`foreign-frame`, `no-body`) and is not a refusal.
   const surfaces = [FOCUS_PROBE, IDENTITY_PROBE, extractTemplate(ptrSrc, "TARGET_PROBE"),
     extractFn(ptrSrc, "verifyTarget"), extractFn(ptrSrc, "bindFocus"), extractFn(ptrSrc, "focusState"),
-    extractBranch('t === "type_at"'), extractFn(bgSrc, "pressAt")];
+    extractBranch('t === "type_at"'), extractFn(bgSrc, "pressAt"), extractFn(bgSrc, "typeIntoCanvas")];
   for (const src of surfaces) {
     for (const m of src.matchAll(/reason:\s*"([a-z0-9:-]+)"/g)) {
       const name = m[1].split(":")[0];

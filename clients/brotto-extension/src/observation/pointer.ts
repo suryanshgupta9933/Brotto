@@ -392,24 +392,29 @@ const FOCUS_PROBE = `function (doClear) {
  */
 const IDENTITY_PROBE = `function (focus) {
   var el = this;
-  if (!el || el.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "" };
-  if (!focus || focus.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "" };
+  // What the *focused* node is, read in this world: its tag, and whether it is
+  // an editable surface. The canvas-grid wall needs both — a grid's editor is
+  // a contenteditable, and no engine-side answer carries "is editable".
+  var focusTag = (focus && focus.tagName) ? String(focus.tagName).toUpperCase() : "";
+  var focusEditable = !!(focus && focus.isContentEditable === true);
+  if (!el || el.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable };
+  if (!focus || focus.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable };
   var tag = el.tagName ? String(el.tagName).toUpperCase() : "";
   // The ordinary case: the same node, or focus landing on a descendant of what
   // was pressed — a <label>, a <div> wrapper, a <span> inside a button. A hit on
   // a *descendant* is a hit on the element; an ancestor is not admitted.
-  if (el === focus) return { ok: true, reason: "same-node", tag: tag };
-  if (el.contains && el.contains(focus)) return { ok: true, reason: "focus-inside-target", tag: tag };
+  if (el === focus) return { ok: true, reason: "same-node", tag: tag, focusTag: focusTag, focusEditable: focusEditable };
+  if (el.contains && el.contains(focus)) return { ok: true, reason: "focus-inside-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable };
   // The shadow direction: the press resolved to a node inside an open shadow
   // root — elementFromPoint does not pierce one, so it resolved to the host —
   // and the browser retargeted focus to that same host. So the focus is one of
   // the *pressed node's* shadow hosts, which ordinary contains() cannot see.
   var sroot = el.getRootNode ? el.getRootNode() : null;
   while (sroot && sroot.host) {
-    if (sroot.host === focus) return { ok: true, reason: "focus-retargeted-to-host", tag: tag };
+    if (sroot.host === focus) return { ok: true, reason: "focus-retargeted-to-host", tag: tag, focusTag: focusTag, focusEditable: focusEditable };
     sroot = sroot.host.getRootNode ? sroot.host.getRootNode() : null;
   }
-  return { ok: false, reason: "not-the-target", tag: tag };
+  return { ok: false, reason: "not-the-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable };
 }`;
 
 /** The one named world. Reused: `createIsolatedWorld` is idempotent per name. */
@@ -454,6 +459,8 @@ const IDLE_WORLD = "brotto-idle";
  *                           (outside it, not finite, or the viewport unreadable).
  *                           Shared with `click_xy`.
  *   point-not-numeric       x/y were not numbers on the frame.
+ *   canvas-text-too-long    the text is longer than a canvas grid can be given
+ *                           in one run of keystrokes.
  *   target-gone             the pressed node no longer resolves — the page
  *                           dropped it, or the tab navigated.
  *   target-unresolvable     `DOM.resolveNode` answered without an object id.
@@ -463,6 +470,10 @@ const IDLE_WORLD = "brotto-idle";
  *                           The tag is appended by `TARGET_PROBE` and is the one
  *                           place a page-chosen string enters; it names a tag,
  *                           which is engine-derived, not freeform.
+ *   canvas-grid-editor      an allowance, like `canvas-editor-exempt`: the
+ *                           canvas grid's own editor, which the grid keeps
+ *                           outside the canvas — parked off-screen, or drawn
+ *                           over the cell being edited.
  */
 export const TYPE_AT_REFUSALS: Readonly<Record<string, string>> = {
   "no-active-element": "nothing holds focus, or the document went away",
@@ -484,6 +495,7 @@ export const TYPE_AT_REFUSALS: Readonly<Record<string, string>> = {
   "clear-select-noop": "the clear was requested and did not happen",
   "clear-threw": "select()/createRange threw — a detached node",
   "clear-no-text-field": "a clear was asked for and focus is not a text field",
+  "canvas-text-too-long": "the text is longer than a canvas grid can be given in one run of keystrokes",
   "point-out-of-viewport": "the coordinate is not a point in the live viewport",
   "point-not-numeric": "x or y on the frame was not a number",
   "target-gone": "the pressed node no longer resolves",
@@ -501,6 +513,7 @@ export const TYPE_AT_REFUSALS: Readonly<Record<string, string>> = {
   "not-the-target": "the identity probe's verdict before the exemption is consulted",
   "identity-verified": "OK — the probe answered without naming which way",
   "canvas-editor-exempt": "OK by exemption — a canvas cell whose editor lies inside it",
+  "canvas-grid-editor": "OK by exemption — a canvas grid whose editor lies outside the canvas",
 };
 
 /** Cache the world's context id per tab. One `Page.createIsolatedWorld` per tab,
@@ -559,23 +572,37 @@ async function topFrameId(tabId: number): Promise<string> {
 }
 
 /**
- * The focused node, as the *engine* names it.
+ * The focused node, as the engine names it.
  *
- * `DOM.getFocusNode` + `DOM.describeNode` is the answer the page has no way to
- * reach: no script runs to produce it, so overriding `document.activeElement`
- * changes nothing. This is the primary wall — `focusState`'s in-page read is
- * corroboration for the *effect*, this is the authority for the *identity*.
+ * **The read is in the isolated world, and the naming is the engine's.** The
+ * page owns `Document.prototype.activeElement` in *its* world, so a probe run
+ * there can be answered falsely; the isolated world has its own prototypes, so
+ * `document.activeElement` there is the real one. The object it returns is then
+ * named by the engine (`DOM.describeNode`), which is what makes the *identity*
+ * check in `bindFocus` a comparison between two engine-sourced ids rather than
+ * between two things a page produced.
  *
- * Every failure refuses. `DOM.getFocusNode` is experimental and can decline to
- * answer; a page whose focus cannot be named cannot be cleared.
+ * **`DOM.getFocusNode` was removed from Chrome** — it answers `-32601`
+ * ("'DOM.getFocusNode' wasn't found") on every current build, so the probe
+ * below always failed and **every `type_at` was refused** with
+ * `focus-identify-failed`, on every site and not only the canvas ones. The
+ * replacement asks the same question by the route that still exists: read
+ * `document.activeElement` in the isolated world, then have the engine describe
+ * the node it points at.
+ *
+ * Every failure refuses. A page whose focus cannot be named cannot be cleared.
  */
 async function focusNode(tabId: number): Promise<{ ok: boolean; reason: string; backendNodeId?: number; nodeName?: string }> {
   try {
     await anyCommand(tabId, { method: "DOM.enable" });
-    const got = await anyCommand(tabId, { method: "DOM.getFocusNode" });
-    const nodeId = got?.nodeId;
-    if (typeof nodeId !== "number") return { ok: false, reason: "focus-identify-failed" };
-    const described = await anyCommand(tabId, { method: "DOM.describeNode", params: { nodeId } });
+    const read = await withWorld(tabId, (contextId) =>
+      anyCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: { expression: "document.activeElement", contextId, returnByValue: false },
+      }));
+    const objectId = read?.result?.objectId;
+    if (!objectId) return { ok: false, reason: "focus-identify-failed" };
+    const described = await anyCommand(tabId, { method: "DOM.describeNode", params: { objectId } });
     const backendNodeId = described?.node?.backendNodeId;
     const nodeName = described?.node?.nodeName;
     if (typeof backendNodeId !== "number") return { ok: false, reason: "focus-identify-failed" };
@@ -623,6 +650,9 @@ const TEXT_INPUT_TAGS = new Set(["INPUT", "TEXTAREA"]);
  *   3. **The canvas exemption**, for the one shape none of the above can serve:
  *      a `<canvas>` grid cell whose press focuses a hidden editor that is not
  *      the cell and not inside it.
+ *   4. **The grid editor**, for the shape wall 3 cannot serve either: a canvas
+ *      whose press focuses an editable the grid keeps *outside* the canvas —
+ *      parked off-screen, or drawn over the cell being edited.
  *
  * **The exemption, stated so it can be checked.** All four hold:
  *
@@ -695,6 +725,51 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
         inner.minX >= outer.minX && inner.maxX <= outer.maxX &&
         inner.minY >= outer.minY && inner.maxY <= outer.maxY) {
       return { ok: true, reason: "canvas-editor-exempt" };
+    }
+  }
+
+  // Wall 3b. The *grid* editor: a canvas whose press focuses an editable that
+  // is neither the cell nor inside it, because the grid keeps its editor
+  // somewhere else entirely. Google Sheets' is `DIV#waffle-rich-text-editor
+  // .cell-input[contenteditable=true]` — a direct child of BODY whose box is
+  // zero-width and parked at y = -9998 — so wall 3a's text-input rule misses
+  // it twice over: it is not an INPUT, and it is not inside the canvas.
+  //
+  // Three ways the editor is admitted, and all three are the engine's own
+  // geometry:
+  //
+  //   (a) it has no area at all — nothing the user can see is there;
+  //   (b) it lies wholly outside the live viewport — also not visible;
+  //   (c) its box contains the point that was pressed — the editor is drawn
+  //       over the cell being edited, under the canvas that took the press.
+  //
+  // (c) is safe because `verifyTarget` has already asked `elementFromPoint`
+  // about the dispatched point and been told the *canvas* is there: a visible
+  // field of the user's own, sitting on top, would have been the hit and the
+  // press would already have been refused as `different-element`. A viewport
+  // that cannot be read proves nothing, so (b) fails closed and the press is
+  // refused rather than typed into.
+  //
+  // No page attribute is consulted — editability is read as the DOM property
+  // `isContentEditable`, in the isolated world, where the page cannot
+  // redefine it. A page that made the user's own field editable would not
+  // unlock this: the field would be visible, and (a) and (b) would both fail.
+  if (v.tag === "CANVAS" && (v.focusEditable === true || TEXT_INPUT_TAGS.has(focus.nodeName))) {
+    const inner = await box(tabId, focus.backendNodeId);
+    if (inner) {
+      const zeroArea = inner.maxX <= inner.minX || inner.maxY <= inner.minY;
+      const overPoint = inner.minX <= x && x <= inner.maxX && inner.minY <= y && y <= inner.maxY;
+      let offscreen = false;
+      if (!zeroArea && !overPoint) {
+        const vp = await liveViewport(tabId);
+        if (vp) {
+          offscreen = inner.maxX <= 0 || inner.maxY <= 0 ||
+                      inner.minX >= vp.width || inner.minY >= vp.height;
+        }
+      }
+      if (zeroArea || overPoint || offscreen) {
+        return { ok: true, reason: "canvas-grid-editor" };
+      }
     }
   }
   return { ok: false, reason: "focus-not-the-target" };

@@ -738,12 +738,25 @@ focus. Everything after `pressAt` reads `document.activeElement` and acts on it,
 so a press that missed, landed on a non-focusable, or was moved by page script
 leaves the user's *previous* field focused — and `clear` empties that one.
 
-**Wall 1 — engine-sourced identity.** `focusNode` runs `DOM.enable` →
-`DOM.getFocusNode` → `DOM.describeNode` and returns `{backendNodeId, nodeName}`.
-**No page script runs to answer this**, so overriding the
-`document.activeElement` getter changes nothing. Every failure refuses with
-`focus-identify-failed`: `DOM.getFocusNode` is experimental and can decline to
-answer, and a page whose focus cannot be named cannot be cleared.
+**Wall 1 — engine-sourced identity.** `focusNode` runs `DOM.enable`, reads
+`document.activeElement` **in the isolated world** (`Runtime.evaluate` with the
+world's `contextId`), and has the engine name the node that read points at
+(`DOM.describeNode({objectId})`), returning `{backendNodeId, nodeName}`.
+**No page script runs to answer this**: the isolated world has its own
+prototypes, so overriding the `document.activeElement` getter in the page's own
+world changes nothing, and the *naming* is the engine's. Every failure refuses
+with `focus-identify-failed`, and a page whose focus cannot be named cannot be
+cleared.
+
+**`DOM.getFocusNode` was removed from Chrome, and that was the whole keyboard
+path.** It answered `-32601` ("'DOM.getFocusNode' wasn't found") on every
+current build, so `focusNode` always failed, so `bindFocus` always returned
+`focus-identify-failed`, so **every `type_at` was refused on every site** — not
+only the canvas ones. The report that started this was a Sheets run whose
+`type_text` was refused with `focus-identify-failed`; the click had landed and
+selected the cell, and the text was never dispatched because the probe had
+already given up. The replacement asks the same question by the route that
+still exists.
 
 **Wall 2 — containment, in an isolated world.** `IDENTITY_PROBE` is a
 `Runtime.callFunctionOn` with the pressed node as `this` and the focused node as
@@ -785,6 +798,29 @@ the user's focused input on top of the canvas it was clicked — and then
 verdict a success. Reading it as a refusal would refuse the shape `type_at`
 exists for; dropping it silently loses the only server-side trace that the
 identity binding was waived.
+
+**Wall 3b — the grid editor.** Wall 3 cannot serve a grid that keeps its
+editor *outside* the canvas. Google Sheets' cell editor is
+`DIV#waffle-rich-text-editor.cell-input[contenteditable=true]` — a direct
+child of `BODY`, zero-width, parked at `y = -9998` — so it is neither the
+pressed node nor inside it, and it is not an `INPUT` either. Wall 3b admits a
+focused editable on a canvas press when **the engine's own geometry** says the
+user cannot see it: it has no area at all, or it lies wholly outside the live
+viewport, or its box contains the point that was pressed (the editor drawn over
+the cell being edited). Editability is the DOM property `isContentEditable`,
+read in the isolated world — **no page attribute is consulted**, so a page
+cannot unlock it by writing `contenteditable` onto the user's own field; and a
+viewport that cannot be read proves nothing, so that case fails closed. A
+visible field elsewhere on the page satisfies none of the three and is still
+refused, which is the "erase some other field" failure.
+
+**A grid cell is typed, not inserted.** `Input.insertText` fires no keydown,
+and a grid starts editing on the *keystroke* — so an insertion never reaches
+the cell, and the cell shows a caret with nothing in it. On the grid path the
+text goes out as one `Input.dispatchKeyEvent` pair per character (a newline is
+a Return key), never with a modifier, so no chord and no OS question. The
+ordinary DOM path keeps its single `Input.insertText` call. The run is bounded
+at 1000 characters, and over that it refuses with `canvas-text-too-long`.
 
 `bindFocus` also refuses `focus-unidentified` when the frame carries no
 `backendNodeId`. `verifyTarget` *fails open* there, because an older relay has
