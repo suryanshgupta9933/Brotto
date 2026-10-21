@@ -126,11 +126,14 @@ happens whether or not `BROTTO_VISION_CAPTURE` is set. It is decoded inside the 
 differenced against the previous frame, and dropped. **Not one pixel of it reaches your server, your
 model provider, your disk, the audit trail or the side panel.** What crosses the wire is about a hundred
 bytes of derived integers: whether the page changed, and the rectangles of a text selection or caret
-you were typing in. One frame is held per tab to compare against, and it is discarded on navigation, on
+you were typing in — and the server hands those to the agent only while screenshot capture is enabled.
+One frame is held per tab to compare against, and it is discarded on navigation, on
 task start, when the tab closes and when the extension is detached. A caret or selection is painted over
 before the comparison, so a blinking cursor does not register as a change. When the redaction gate
-refuses a page for that step — a typed secret was detected, or the domain is on your blocklist — the
-delta is withheld as well, and the run records it as unknown rather than as "nothing changed".
+refuses a page for that step — a credential was positively identified, a typed value could not be
+classified (which withholds the delta for that step and the two that follow), or the domain is on your
+blocklist — the delta is withheld as well, and the run records it as unknown rather than as "nothing
+changed".
 
 Nothing in that second capture reaches a provider, so it does not undo anything above it: the reason a
 JPEG is the one channel redaction cannot reach is that a JPEG reaches the model. This one does not.

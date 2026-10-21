@@ -401,10 +401,12 @@ the bug. It is now split, and the split is the evidence bar:
   reason it exists: a later step's thought must never quote a value the agent
   typed on an earlier one. It previously took only the latched subset, so it is
   now strictly **more** scrubbing than before, not less.
-- **`latched_secrets` is what the three veto sites read** — `get_page_delta`,
-  `_vision_fallback` and `_execute_action` — and it carries the higher bar:
-  positive identification that a credential was touched, not merely that a value
-  was redacted.
+- **The veto is `_PixelVeto`**, and the three veto sites read it through one
+  helper — `get_page_delta`, `_vision_fallback` and `_execute_action`. It holds
+  two things, and they have two different lengths: `latched`, the positive
+  identification that a credential was touched, and `armed_at`, the step of an
+  ambiguous write. `latched` is run-wide; `armed_at` opens a window. That
+  window is 3g.
 
 **Redaction fires on the absence of evidence; the run-wide veto cannot.** "This
 one value looks like a password" concerns one argument in one action and must
@@ -429,9 +431,11 @@ file: **"fix the branch that was named" and "fix the bug" are different
 achievements, and the grep is what tells you which one you did.**
 
 **The veto rule itself did not weaken.** `redactions or run_secrets` still vetoes
-the delta and the screenshot, the veto is still run-wide, and there is no new
-setting and no override. What changed is which inputs are allowed to *assert*
-that the run saw a credential — not what happens to a run that did.
+the delta and the screenshot, the veto is still there on every path, and there
+is no new setting and no override. What changed is which inputs are allowed to
+*assert* that the run saw a credential — not what happens to a run that did.
+The second change was to the *duration*, and that is 3g: the run-wide claim is
+now one of two, and the other one has a window.
 
 
 **3f. A secret-name boundary is a word split, not a lookaround.** The old
@@ -486,6 +490,76 @@ Pinned by `tests/agent/test_secret_field_boundaries.py`, which declares one
 partition of positive and negative labels and asserts it in both directions —
 so a boundary change cannot move a label from one side to the other without a
 single assertion going red.
+
+**3g. The veto has two durations, because the two claims do (2026-10-21).**
+`_PixelVeto` (`agent/harness.py`) holds both claims the veto has to serve, and
+they do not have the same length.
+
+- **`latched` — positive evidence, run-wide, never releases.** A field that
+  positively identifies as a secret (`is_secret_field`). A credential can be
+  rendered into this page or the next at any point in the run, so nothing
+  shortens it.
+- **`armed_at` — the step of the newest ambiguous write.** A value that was
+  redacted but could not be classified: a canvas cell, a field with no
+  accessible name, a literal keypress with no focused element to read.
+  `open(step)` is `latched or 0 <= step - armed_at <= _AMBIGUOUS_PIXEL_WINDOW`,
+  and the window is 2 — so the shutter is closed on the armed step and the two
+  that follow, and open again on the third.
+
+**The window closes the actual exposure, and then releases.** A value cannot
+have been rendered before it was typed, so the only exposure from an ambiguous
+write is the observation taken *after* the keystroke: the page paints it into
+the DOM, a password manager echoes it back, a live-validated form redisplays
+it. Two more steps have had a full observation each by then — the stability
+gate, the AX walk, the repaint — and the claim is spent. Latching it instead
+vetoed pixels for the rest of the run, and on a canvas that was the run's only
+channel.
+
+**The window is keyed on the step number and is read, never consumed.** Nothing
+decrements it and nothing resets it. `deps.step_number` is the unit because it
+is the only one a `break`, a terminal action, `ask_human`, a cancellation or
+`deps.result` ending the loop cannot consume unevenly — and a step that calls
+three veto sites cannot eat the window and make it narrower than advertised. A
+second ambiguous write does not shorten an open window either: `arm` takes the
+`max`, so a later write re-opens the shutter rather than closing it early.
+
+**The window includes the armed step.** The keystroke has just happened and
+nothing has settled; that is the least safe moment in the run, not the most,
+and closing it costs nothing — the pixels it suppresses are pixels of a page
+mid-typing.
+
+**One place turns the window into an answer, so the delta and the screenshot
+cannot disagree.** `_pixel_latch(veto, step)` returns the latched values, or
+`["[redacted-value]"]` while an ambiguous window is open, or nothing at all.
+The relays read the list for truthiness and never log it, so the marker carries
+a fact and not a value: no typed text is anywhere in it.
+
+**The veto rule itself did not weaken.** `redactions or run_secrets` still
+vetoes the delta and the screenshot, on every path, and there is no new
+setting and no override. What changed is which inputs may *assert* that the
+run saw a credential, and for how long.
+
+**The asymmetry is intended.** The *value* of an ambiguous write stays on the
+run-wide scrub list for the whole run, so a later thought can never quote it.
+Its *pixels* are withheld for the window only. The text of a value is scrubbed
+everywhere it might resurface; the picture of it is withheld for as long as it
+could plausibly be on screen.
+
+**Still open, and recorded as open rather than designed.**
+
+- `type_xy` and a literal `press_key` character are always ambiguous writes,
+  so they arm the window on most canvas steps — and a run that keeps typing
+  keeps re-arming it. The window is bounded in time, not in the presence of
+  continuous writing, and on such a run the delta is withheld on most steps.
+  That is the same evidence channel the canvas case depends on, so the canvas
+  case is not closed by the window.
+- The accessibility tree is the other channel redaction does not reach, and
+  nothing here closes it.
+
+Pinned by `tests/agent/test_pixel_veto_window.py`, which asserts the window
+cannot be narrowed by the number of veto sites a step calls, that a second
+ambiguous write re-opens rather than shortens it, and that the marker carries
+no typed value.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no

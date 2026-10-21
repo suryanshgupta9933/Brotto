@@ -423,14 +423,19 @@ not trusted — it is a *guess about the page*, and the guess is checked below.
 **`RATE_SAMPLES = 3` still misses the case its own comment names.** A page with
 fewer than three mutations is not a rate, it is an anecdote, so the exit cannot
 fire — which is deliberate, and is what keeps a slow loader from being called
-busy. But Sheets repaints at gaps of roughly 1.7–3.3s, and a `loaderId`-shaped
-page that emits three mutations across a 3s+ quiet window straddles the sample
-floor from the other side: too slow to form a rate, too fast to go silent for
-the full window. Those observations still pay the entire quiet window, which is
-the measurement above showing up again in the one page it was measured on.
-Roughly half of that page's observations do not benefit from the exit at all.
-Raising the sample count would start calling sparse loaders busy, which is the
-direction the exit structurally cannot make safely. Recorded as open.
+busy. But the same floor is what the sparse case runs into from the other side.
+A spreadsheet with a blinking cursor and an autosave mutates at gaps of roughly
+1.7–3.3s, so its mean gap is under the 3s quiet window and the exit *can* fire
+— but three samples have to exist before a mean means anything, and the third
+one arrives at 7–9s of the 10s deadline. The exit therefore resolves a second
+or three before the thing it exists to avoid, and on the page it was measured
+on it saves almost nothing.
+
+**Raising the sample count is not the fix either.** More samples makes the exit
+later still, and fewer makes a sparse loader look busy — the one direction the
+exit structurally cannot make safely. Closing this end means reading a rate out
+of a page that has barely moved, which is a different measurement rather than a
+different constant, and it is not closed. Recorded as open.
 
 **An absolute threshold here was one page's number wearing a universal claim.**
 The first version of this exit was "3 mutations inside 1000ms", which Gmail's
@@ -499,13 +504,14 @@ waiting longer for it.
 no caller passes it any more. It was left in place deliberately as the gate's
 own API rather than deleted on the side.
 
-**Still outstanding, and a product decision rather than an oversight:** the gate
-requires **zero** mutations for a continuous 3s, and on a spreadsheet a
-blinking cursor plus autosave produces a trickle that never reaches it — so
-Sheets captures still tend to run to the 10s deadline. Turning that into a rate
-tolerance changes what a captured observation guarantees, so it was held back
-rather than guessed at. Reading this section as a solved canvas story is reading
-it wrong.
+**Still outstanding, and it is the sparse end of the exit rather than the quiet
+end.** The gate requires **zero** mutations for a continuous 3s, and a
+spreadsheet's blinking cursor plus autosave never produces that — so the *quiet*
+exit is unreachable on that page and the rate exit is what remains, late by the
+sample floor described above. What a rate tolerance would change is what a
+captured observation guarantees, so it was held back rather than guessed at.
+Reading this section as a solved canvas story is reading it wrong: the exit
+exists, it fires on that page, and it fires almost too late to matter.
 
 `scripts/test-observation-rescan-guard.test.js` extracts `captureObservation`
 and pins all four shapes, because a guard that silently stops firing hands the
@@ -858,6 +864,74 @@ about the page.
 Pinned by `tests/agent/test_vision_fallback.py`, `tests/agent/test_canvas_awareness.py`,
 `tests/agent/test_coordinate_click.py`,
 `tests/test_capability_resolution.py` and `tests/test_vision_capture_gate.py`.
+
+### The shutter is closed for a window now, not for the run
+
+The harness's rule for refusing pixels used to be one rule with one duration: a
+run that touched a credential lost the page delta and the screenshot for every
+remaining step. On a canvas that is not a precaution, it is the removal of the
+run's only evidence channel — and it happened for reasons that had nothing to
+do with credentials. `privacy.md` §3g carries the rule itself; this is what it
+costs the loop.
+
+`_PixelVeto` (`harness.py`) now holds two claims, and they have two lengths.
+`latched` is positive evidence — a field that positively identifies as a secret
+— and is run-wide, because a credential can be rendered into this page or the
+next at any point. `armed_at` is the step of an *ambiguous* write: a value that
+was redacted because the field could not be told from a password box, which is
+every canvas cell and every literal keypress. `open(step)` is
+`latched or 0 <= step - armed_at <= 2`, so an ambiguous write closes the
+shutter on its own step and the two that follow, and opens it again on the
+third.
+
+**A value cannot have been rendered before it was typed, so the window is the
+exposure.** The only moment an ambiguous value can be on screen is the
+observation taken after the keystroke — the page paints it into the DOM, a
+password manager echoes it back, a live-validated form redisplays it. After two
+more steps have had a full observation each, the claim is spent. Vetoing for
+the rest of the run was vetoing a risk that had already passed, at the price of
+the run.
+
+**The window is keyed on `deps.step_number` and is read, never consumed.**
+Nothing decrements it. That is the whole reason it is a step comparison and not
+a countdown: an early `break`, a terminal action, `ask_human`, a cancellation
+or `deps.result` ending the loop cannot shorten it, because there is no
+countdown for them to eat, and neither can a step that calls the three veto
+sites. The window includes the armed step itself, because the keystroke has
+just happened and nothing has settled — the least safe moment in the run, not
+the most.
+
+**What the loop loses while it is closed.** The delta is `None` — unknown, not
+"nothing moved" — so the page earns no progress credit from it and falls back
+to the URL and AX terms, and the vision screenshot is refused, so the model
+reads the page as unseen rather than as blank. Both are the existing refusal
+semantics; only the length of the refusal changed.
+
+**What it cost, in a live Google Sheets run.** The grid is a `<canvas>` whose AX
+tree does not change when a cell is edited, so the pixel delta and the
+screenshot were the **sole** signal that an edit landed. One blank-named grid
+cell latched the flag, the shutter stayed closed for the rest of the run, and
+the agent re-clicked the same cell seven times — reading its own repeated
+failure as a page that refused to change. The incident is recorded in
+`privacy.md` §3e; the loop's half of it is that a run on a canvas was left
+with no evidence to correct itself with.
+
+**The second instance of the identical bug, found only because the first was
+fixed.** `_redact_press_key` returned a bare `bool` that its caller turned into
+`latch=True`, on a path that answers "unknown" three times out of four because
+no relay implements `focused_attributes()` yet — so every Enter on a canvas
+latched the poisoned run too. The lesson is in `privacy.md` §3e: "fix the
+branch that was named" and "fix the bug" are different achievements, and the
+grep is what tells you which one you did.
+
+**Still open, and recorded as open rather than designed.** `type_xy` and a
+literal `press_key` character are always ambiguous writes, so they arm the
+window on most canvas steps — and a run that keeps typing keeps re-arming it.
+The window is bounded in time, not in the presence of continuous writing, and
+on such a run the delta is withheld on most steps. That is the same evidence
+channel the canvas case depends on, so the canvas case is not closed by the
+window. The accessibility tree reaching a provider is a separate disclosed gap
+(`privacy.md`) and is not closed by any of this.
 
 ### Frames — a bounded union, and a ref that has to be composite
 
@@ -2021,8 +2095,9 @@ counting a step, and dropping the other two inside that branch is what let a
 23-step run be "stopped" for having navigated.
 
 **The two ways a delta comes back unknown are deliberately the same value.** A
-page the harness refused to look at because it carries a typed secret, and a
-`get_page_delta` that raised `TabUnreachable`, both land on `None` and are
+page the harness refused to look at — because it carries a typed secret, or
+because an ambiguous write opened the window above — and a `get_page_delta` that
+raised `TabUnreachable`, both land on `None` and are
 indistinguishable to everything downstream — so neither a veto nor a failed read
 can read as "nothing moved", and neither can end a step. The cost is the same
 on purpose: a vetoed or unreadable canvas page earns *no* progress credit from

@@ -1004,7 +1004,11 @@ same pixels a screenshot of that page is refused over, and letting it through a
 different route would be the bypass the gate exists to prevent. Pixels are the
 one channel redaction cannot reach (see `privacy.md`, "A screenshot is a gate,
 not a redaction pass"), and an empty `redactions` still means no detector fired,
-never that the page is clean.
+never that the page is clean. What the extension cannot see is *how long* that
+veto holds: the harness's input is a run-wide latch for a positively identified
+secret and a window covering the ambiguous write's own step and the two after
+it, and the extension is told the same thing in both cases — refuse
+(`privacy.md`, §3g).
 
 #### Two things this does not do yet, and neither is settled
 
