@@ -335,11 +335,30 @@ Where the page names a cell — the name box is in a spreadsheet's tree — clic
 and typing the reference is the same jump with no guess in it, and the tree's name for it is a
 better target than any pixel.
 
-Two limits, both real. A key press reports that the key was sent and never that the cell
-changed, so a keyboard step is UNVERIFIED by construction and repeating it teaches you nothing.
-And a key press tells you nothing about the page — not what is selected, not what is there — so
-what you want next, and whether your last move landed, still comes from the picture. The
-keyboard is how you act; the picture is how you know.
+**Before you drive a canvas, read its page text for an accessibility shortcut.** Such apps know
+their grid is a canvas and ship a screen-reader mode behind a chord they usually advertise in the
+page's own text — Google Sheets says "Turn on screen reader support / press ⌘+Option+Z". When the
+page text names such a shortcut, press it, once, early, before you type anything. Send it with
+press_key and spell the modifiers as numbers the way you spell Home's: Meta=4, Alt=1, so
+Meta+Alt is press_key("z", modifiers=5). Do not guess a chord the page did not name, and do not
+skip one because the page looks empty — the shortcut is often the only text on it.
+
+With that mode on, the canvas stops being the only view of the content and the tree carries the
+grid again for the cell you are in: the name box is a `textbox value="A2"` holding the current
+cell's ADDRESS, the formula bar is a `textbox value="..."` holding that cell's CONTENT, and the
+page announces the two together. Read them before your next move and read them again after a
+write. A content the tree reports for the address you were in is the cell that was written, so
+that is how you check a keyboard step — not by squinting at the picture and not by re-typing it
+and seeing the cell change either time.
+
+Two limits, both still real. A key press by itself reports that the key was sent and never that
+a cell changed, so a step you confirmed only by the key being delivered is UNVERIFIED and
+repeating it teaches you nothing; on a page whose accessibility mode is on, the tree above is
+what replaces that confirmation, and on a page that offers no such mode there is nothing to
+replace it with. And even with the mode on this reaches only the cell you are in — it is not a
+read of the whole sheet, so do not claim from it that neighbouring or distant cells hold what you
+expect. Where no accessibility mode exists, the picture is still how you know: it remains the
+only view of the cells, and the keyboard remains how you act.
 
 If the tree and the page text are both near-empty and no picture came with the turn, do not keep
 re-navigating and re-reading. Check once with read_page_text("body"); if that is empty too, the
