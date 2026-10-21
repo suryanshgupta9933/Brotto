@@ -2480,8 +2480,15 @@ async def _capture_page(deps, *, redactions=None, run_secrets=None,
     image = await deps.cdp.capture_screenshot(
         # CSS resolution on a canvas page, and nowhere else. The model clicks
         # in CSS pixels either way, so a CSS-pixel picture is 1:1 with the
-        # coordinates it is asked for and costs ~1.8x less to send — and a
-        # canvas has no small body text to justify the device copy. `card=True`
+        # coordinates it is asked for — no scaling step at all — and a canvas
+        # has no small body text to justify the device copy. Measured at a
+        # 1512x945 CSS viewport, dpr 2: 3024x1890 / ~223 KB / 2049 image
+        # tokens becomes 1512x945 / ~85 KB / 1905, so ~7% of tokens and 2.6x
+        # of bytes. The token saving is small because the vision API downscales
+        # the long edge to 1568px before pricing, so both captures are priced
+        # on the downscaled image; what this buys is the bytes (~3.1 MB ->
+        # ~1.2 MB per canvas task across the relay) and the 1:1 coordinates.
+        # `card=True`
         # keeps the device capture: that picture is the user's own approval
         # surface, read on the user's screen, where labels have to stay legible.
         css_resolution=(not card) and _is_canvas_page(deps.canvas_covered))
@@ -3579,7 +3586,7 @@ _SCREENSHOT_PARTIAL_NOTE = (
 # It also says what the model must not be left to guess: on a canvas page the
 # picture comes on *every* step while the budget lasts, so a step that
 # arrives without one is a page that is unseen, not a page that is unchanged.
-# A model handed three pictures and then eleven blind steps cannot tell those
+# A model that sees the page on one step and not on the next cannot tell those
 # two apart on its own, and the harness has to say which it is.
 _SCREENSHOT_CANVAS_NOTE = (
     "This is a canvas page. The accessibility tree and the page text above "
@@ -3670,18 +3677,28 @@ _MAX_CAPTURES_PER_TASK = 3
 # page text, and not one of them is a cell: the tree is the toolbar, the menu
 # bar, the name box and the formula bar, and the grid is a `<canvas>` that
 # contributes no node and no text. So the three-pictures rule above is
-# inverted there — it rations the only channel that carries the content, and
-# a 14-step task got three looks at the spreadsheet and eleven blind steps
-# reasoning from a toolbar.
+# inverted there — it rations the only channel that carries the content.
+#
+# The recorded 14-step run on a Google Sheet is why that matters, and it was
+# blind for two different reasons, not one. It had a picture on some steps
+# and none on others, and on its last steps the model was told the page
+# "holds something credential-shaped" — a claim about the page that was
+# false, and that the pixel veto had made true only of the run. So the
+# blindness on one step was the picture budget and the blindness on another
+# was the veto, and **raising this ceiling does not fix that run**: a closed
+# shutter is closed however many pictures the budget would have paid for.
+# (The record of that run holds no approval-card capture at all — no step
+# paused for approval — so the pictures the model did get were its own.)
 #
 # The number is a cost bound, not a claim about how many pictures a canvas
 # task needs: a picture is an uncacheable ~3.3k tokens (measured on
-# MiniMax-M3, retina capture of a 1512×945 viewport) and it is charged again
-# on every step that carries one. Forty covers a long canvas task — ~132k
-# tokens — and sits below the loop's own `MAX_STEPS` of 150, so the picture
-# budget is bounded *under* the step budget rather than over it. It is a knob:
-# the honest lever on this cost is not which steps carry a picture but how
-# big it is, and the extension still captures at device resolution.
+# MiniMax-M3 for a 1512×945 viewport) and it is charged again on every step
+# that carries one. Forty covers a long canvas task — ~132k tokens — and
+# sits below the loop's own `MAX_STEPS` of 150, so the picture budget is
+# bounded *under* the step budget rather than over it. It is a knob: the
+# honest lever on this cost is not which steps carry a picture but how big it
+# is, and a canvas page is captured at CSS resolution, so one picture pixel
+# is one CSS pixel.
 _MAX_CANVAS_CAPTURES_PER_TASK = 40
 
 

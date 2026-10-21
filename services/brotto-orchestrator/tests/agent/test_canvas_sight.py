@@ -5,9 +5,12 @@ steps, 62–67 accessibility targets, ~375 characters of page text, 23 actions
 and zero errors — and a grid that appears in neither the tree nor the text,
 because a `<canvas>` contributes no node and no characters. The trigger for
 the picture already fired on such a page; what did not is the *budget*. The
-task was handed three pictures and eleven blind steps, and the model's two
-"cannot_complete" endings are what eleven blind steps on a spreadsheet look
-like.
+run had a picture on some steps and none on others, and the model's two
+"cannot_complete" endings are what a blind stretch on a spreadsheet looks
+like. (On the last of those steps the model was told the page held
+"credential-shaped" content, which was false — the veto, not the budget, was
+closing the shutter there, and a bigger budget buys nothing against a closed
+shutter.)
 
 So the rule under test: on a canvas-dominated page the picture is the
 perception channel, not a supplement, and it comes with every step while a
@@ -86,10 +89,13 @@ async def test_a_canvas_page_is_pictured_on_every_step_of_the_task():
 @pytest.mark.asyncio
 async def test_a_canvas_picture_is_taken_at_css_resolution():
     """The cost half of the same rule. A canvas has no small text to read, the
-    model clicks in CSS pixels regardless, so the device copy is ~3,300 image
-    tokens where ~1,800 would show the same grid — and a canvas task takes a
-    picture every step. An ordinary page keeps the device copy: that is where
-    the small text is."""
+    model clicks in CSS pixels regardless, so a CSS-pixel picture is 1:1 with
+    the coordinate it is asked for — and a canvas task takes a picture every
+    step. Measured: 3024x1890 / ~223 KB / 2049 image tokens becomes 1512x945 /
+    ~85 KB / 1905, ~7% of tokens and 2.6x of bytes. The token saving is small
+    because the vision API downscales the long edge to 1568px before pricing;
+    the byte win is the reason to pay for it. An ordinary page keeps the
+    device copy: that is where the small text is."""
     canvas = _canvas_deps()
     for _ in range(14):
         await _vision_fallback(canvas, _toolbar(40), "Sheet1")
@@ -177,9 +183,8 @@ async def test_a_canvas_step_is_told_the_picture_is_the_primary_view():
 
 @pytest.mark.asyncio
 async def test_a_canvas_step_without_a_picture_is_told_the_page_is_unseen():
-    """A model handed three pictures and then eleven blind steps cannot tell
-    'the page did not change' from 'the page is not shown'. The note has to
-    say which."""
+    """A model that saw the page a step ago cannot tell 'the page did not
+    change' from 'the page is not shown'. The note has to say which."""
     deps = _canvas_deps()
     deps.sight_captures = harness_mod._MAX_CANVAS_CAPTURES_PER_TASK
     out = await _vision_fallback(deps, _toolbar(40), "Sheet1")
