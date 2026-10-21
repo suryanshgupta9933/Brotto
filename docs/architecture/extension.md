@@ -633,6 +633,25 @@ unreachable**, so stop waiting and hand the caller `early`.
 three mutations is an anecdote, not a rate — which is exactly what a slow
 renderer looks like, so `auth-slowjs` never forms one and keeps its full window.
 
+**The sparse end needed a second exit, because three samples is also a wait.**
+On a page that mutates every 2.9s the third sample arrives at 8.7s, so most of
+the deadline went on counting samples rather than looking at the page — a real
+Sheets run measured `stability=unsettled in 8752ms (3 mutations)`. The second
+exit is `CHURN_WINDOWS = 1.5`: **two samples whose gap is shorter than the
+quiet window, once the page has been churning continuously for one and a half
+windows.** The churn floor is what keeps a loading page out — `auth-slowjs`
+mutates twice and then goes quiet, which never reaches the floor, so it still
+waits out its deadline and the tree it hands the model has the control on it.
+A single mutation never starts either exit, and a page that goes quiet is
+claimed quiet by the window, not by the churn.
+
+Both exits are evaluated **in the observer callback, at the moment a sample
+arrives**, not in the poll: a sample is the only thing that can start a rate,
+and a poll firing long after the last mutation would claim a page busy on the
+strength of a change it has already forgotten. Neither exit can report a page
+as quiet — both hand the caller `early`, and the fingerprint rescan stays the
+arbiter.
+
 **The calibration point is Gmail, and it was silently a universal claim.** 41
 mutations in 10,002ms — one every ~244ms — so 3s of silence is not rare on
 that page, it is impossible. Every Gmail observation therefore paid the full

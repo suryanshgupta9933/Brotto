@@ -31,6 +31,13 @@
  * moving it falls back to the full gate (`noEarly`) and scans once more.
  * Misclassifying toward "quiet" would be the dangerous one, and the rate exit
  * cannot do it — it only ever reports `waited: false`.
+ *
+ * **The sparse end needed a second exit.** Three samples is a floor on
+ * evidence, but it is also a *wait*: on a page that mutates every 2.9s the
+ * third sample arrives at 8.7s, so most of the deadline went on counting
+ * samples rather than looking at the page. Two samples are enough once the
+ * page has been *continuously* churning for long enough that the churn is a
+ * regime and not a burst — the churn exit below.
  */
 
 import * as dbg from "../debugger";
@@ -59,6 +66,29 @@ const DEADLINE_MS = 10_000;
  */
 const RATE_SAMPLES = 3;
 
+/**
+ * Windows of continuous churn before two samples are a rate rather than an
+ * anecdote.
+ *
+ * The rate exit above needs three samples, and on the sparse end of Sheets
+ * (a mutation every 2.9s) the third one arrives at 8.7s — most of the
+ * deadline spent counting samples instead of looking at the page. Two
+ * samples are enough once the page has been churning *continuously* for long
+ * enough that the churn is a regime and not a burst: a page that has
+ * produced a change or two and then gone quiet is a *loading* page
+ * (`auth-slowjs`, whose control appears at 5000ms), and the churn floor is
+ * what keeps it out.
+ *
+ * One and a half windows is the floor because a page is only provably past
+ * its initial render once it has been seen mutating for longer than the
+ * window would have taken: a page whose first change lands just inside a
+ * window can look like it is holding the window open without being a churn.
+ * The floor is measured from `t0` — how long the page has been *watched*
+ * without ever going quiet — and not from the first mutation, because that
+ * is the part of the wait the rate exit exists to shorten.
+ */
+const CHURN_WINDOWS = 1.5;
+
 export interface StableOpts {
   quietMs?: number;
   deadlineMs?: number;
@@ -73,8 +103,9 @@ export interface Stability {
   waited: boolean;
   /** We gave up waiting — deadline, or no usable answer from the page. */
   timedOut: boolean;
-  /** The rate short-circuit fired. We stopped before the quiet window could,
-   *  so the quiet window says nothing about this page either way. */
+  /** The rate or the churn short-circuit fired. We stopped before the quiet
+   *  window could, so the quiet window says nothing about this page either
+   *  way. */
   early?: boolean;
   elapsedMs?: number;
   mutations?: number;
@@ -90,18 +121,45 @@ function observerExpression(
   deadlineMs: number,
   early: number,
   samples: number,
+  churnMin: number,
 ): string {
   const q = JSON.stringify(quietMs);
   const d = JSON.stringify(deadlineMs);
   const e = JSON.stringify(early);
   const n = JSON.stringify(samples);
+  const c = JSON.stringify(churnMin);
   return (
     "new Promise(function (resolve) {\n" +
     "  var t0 = Date.now();\n" +
     "  var last = t0;\n" +
+    "  var prev = t0;\n" +
     "  var count = 0;\n" +
     "  var done = false;\n" +
-    "  var mo = new MutationObserver(function () { last = Date.now(); count++; });\n" +
+    "  var mo = new MutationObserver(function () {\n" +
+    "    prev = last;\n" +
+    "    last = Date.now();\n" +
+    "    count++;\n" +
+    // The early exits live in the observer callback, not in the poll: a sample
+    // is the only thing that can *start* a rate, and a poll firing long after
+    // the last mutation would claim a page busy on the strength of a change
+    // it has already forgotten.
+    "    if (done || " + e + " === 0) return;\n" +
+    // The rate: fewer than `samples` mutations is not a rate, it is an
+    // anecdote. A page that has barely moved — `auth-slowjs`, whose control
+    // appears at 5000ms — never forms one, so it keeps waiting and reaches
+    // the deadline. A mean gap since t0 shorter than the quiet window means
+    // a silent window is arithmetically unreachable, so waiting for one only
+    // ends at the deadline.
+    "    if (count >= " + n + " && (last - t0) / count < " + q + ") { finish(false, true); return; }\n" +
+    // The churn: two samples closer together than the quiet window — the page
+    // is mutating as fast as the window could close — and a churn that has
+    // lasted `churnMin`, so the churn is a regime and not a burst. This is
+    // the sparse end: a page that mutates every 2.9s never falls silent for
+    // a window, and the third sample it would take to prove that arrives at
+    // 8.7s. The churn floor is what keeps a loading page out — two
+    // mutations and then nothing never reaches it.
+    "    if (count >= 2 && last - prev < " + q + " && last - t0 >= " + c + ") { finish(false, true); }\n" +
+    "  });\n" +
     "  function finish(quiet, wasEarly) {\n" +
     "    if (done) return;\n" +
     "    done = true;\n" +
@@ -111,20 +169,8 @@ function observerExpression(
     "    resolve({quiet: quiet, early: wasEarly === true, elapsed: Date.now() - t0, mutations: count});\n" +
     "  }\n" +
     "  var hard = setTimeout(function () { finish(false, false); }, " + d + ");\n" +
-    // `early` 0 disables the rate exit, which is what `noEarly` asks for: the
-    // caller re-waits on a page it has reason to believe is still rendering,
-    // and that page gets the full quiet window a slow renderer needs.
     "  var poll = setInterval(function () {\n" +
-    "    var now = Date.now();\n" +
-    "    if (now - last >= " + q + ") { finish(true, false); return; }\n" +
-    // Fewer than `samples` mutations is not a rate, it is an anecdote. A page
-    // that has barely moved — `auth-slowjs`, whose control appears at 5000ms —
-    // never forms one, so it keeps waiting and reaches the deadline.
-    "    if (" + e + " === 0 || count < " + n + ") return;\n" +
-    // Mean gap since t0. Shorter than the quiet window means a silent window
-    // cannot happen, so waiting for one only ends at the deadline — and on
-    // Sheets (gap ~1.7-3.3s against a 3s window) that was every step.
-    "    if ((now - t0) / count < " + q + ") finish(false, true);\n" +
+    "    if (Date.now() - last >= " + q + ") { finish(true, false); }\n" +
     "  }, 50);\n" +
     "  mo.observe(document, { childList: true, subtree: true, attributes: true, characterData: true });\n" +
     "})"
@@ -163,9 +209,13 @@ export async function waitForStable(
 ): Promise<Stability> {
   const quietMs = opts?.quietMs ?? QUIET_MS;
   const deadlineMs = opts?.deadlineMs ?? DEADLINE_MS;
+  // The churn floor is measured in quiet windows, so it scales with the
+  // window the caller asked for and not with the default.
+  const churnMin = Math.round(quietMs * CHURN_WINDOWS);
   try {
     const r = await evalInPage(
-      tabId, observerExpression(quietMs, deadlineMs, opts?.noEarly ? 0 : 1, RATE_SAMPLES),
+      tabId,
+      observerExpression(quietMs, deadlineMs, opts?.noEarly ? 0 : 1, RATE_SAMPLES, churnMin),
     );
     const v = r?.result?.value;
     // Untyped, like every other extracted body: the test evals this as plain

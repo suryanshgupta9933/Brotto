@@ -57,6 +57,7 @@ const CONSTS = {
   QUIET_MS: extractConst("QUIET_MS"),
   DEADLINE_MS: extractConst("DEADLINE_MS"),
   RATE_SAMPLES: extractConst("RATE_SAMPLES"),
+  CHURN_WINDOWS: extractConst("CHURN_WINDOWS"),
 };
 
 // A DOM with no content, a MutationObserver we can fire by hand, and a count
@@ -117,7 +118,7 @@ function harness({ behaviour = "run", quietMs, deadlineMs } = {}) {
     `(function () {
        const waitForStable = (async function (tabId, opts) { ${BODIES.waitForStable} });
        const evalInPage = (async function (tabId, expression) { ${BODIES.evalInPage} });
-       const observerExpression = (function (quietMs, deadlineMs, early, samples) { ${BODIES.observerExpression} });
+       const observerExpression = (function (quietMs, deadlineMs, early, samples, churnMin) { ${BODIES.observerExpression} });
        return function (tabId, opts) { return waitForStable(tabId, opts); };
      })()`,
     sandbox,
@@ -235,6 +236,56 @@ function bounded(p, ms) {
       r.ok ? JSON.stringify(r.v) : "no result");
     check("…and disconnecting its observer", h.dom.installed() === 0,
       `${h.dom.installed()} observer(s) still installed`);
+  }
+
+  // 2c. THE SPARSE END — the case the rate exit was too slow for.
+  //
+  //     A page that mutates every ~2.5s (a Sheets cell cursor, an autosave)
+  //     never falls silent for a full quiet window, so the window can never
+  //     open and the rate exit has to carry it. The rate exit needs three
+  //     samples, and on this cadence the third arrives at 2.25s here — 7.5s in
+  //     the real run, 8.752s measured on the 8752ms observation. Most of the
+  //     deadline went on counting samples rather than looking at the page.
+  //
+  //     Two samples are enough once the page has been churning continuously
+  //     for longer than a window and a half: the churn is a regime, not a
+  //     burst, and a regime does not go quiet. Scaled by ~1/3.3 like case 2b,
+  //     so the shapes are identical to the real run's.
+  {
+    const h = harness({ quietMs: 900, deadlineMs: 3000 });
+    const ticker = setInterval(() => h.dom.mutate(), 750);
+    const t0 = Date.now();
+    const r = await bounded(h.wait(), 6000);
+    const took = Date.now() - t0;
+    clearInterval(ticker);
+    // The old gate needed the third sample, so it took 2250ms. The churn exit
+    // takes the second, at 1500ms. The bound sits between them.
+    check("a sparse trickle settles on two samples, not three",
+      r.ok === true && r.v.early === true && r.v.waited === false && took < 1900,
+      `took ${took}ms, got ${r.ok ? JSON.stringify(r.v) : "no result"} — ` +
+      "the gate waited for a third sample it did not need");
+    check("…without waiting for the deadline", r.ok && took < 3000,
+      `took ${took}ms`);
+    check("…and disconnecting its observer", h.dom.installed() === 0,
+      `${h.dom.installed()} observer(s) still installed`);
+  }
+
+  // 2d. The churn floor is what keeps a *loading* page out of the churn
+  //     exit. One mutation and then nothing is a page that has barely moved —
+  //     an anecdote, not a rate — and it must not be claimed busy no matter
+  //     how long the gate watches it.
+  {
+    const h = harness({ quietMs: 600, deadlineMs: 3000 });
+    setTimeout(() => h.dom.mutate(), 100);
+    const t0 = Date.now();
+    const r = await bounded(h.wait(), 5000);
+    const took = Date.now() - t0;
+    check("a single mutation never claims the page busy",
+      r.ok === true && r.v.early !== true,
+      `got ${r.ok ? JSON.stringify(r.v) : "no result"} — one sample is an anecdote`);
+    check("…it settles on the quiet window instead",
+      r.ok && r.v.waited === true && took >= 600 && took < 2000,
+      `took ${took}ms, got ${r.ok ? JSON.stringify(r.v) : "no result"}`);
   }
 
   // 3. a page that goes quiet late resolves when it goes quiet, not at the

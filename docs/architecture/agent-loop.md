@@ -433,9 +433,16 @@ on it saves almost nothing.
 
 **Raising the sample count is not the fix either.** More samples makes the exit
 later still, and fewer makes a sparse loader look busy — the one direction the
-exit structurally cannot make safely. Closing this end means reading a rate out
-of a page that has barely moved, which is a different measurement rather than a
-different constant, and it is not closed. Recorded as open.
+exit structurally cannot make safely. The sparse end is therefore closed by a
+*second* exit rather than by moving this one: **two samples whose gap is shorter
+than the quiet window, once the page has been churning continuously for
+`CHURN_WINDOWS = 1.5` windows** (`extension.md`, `stability.ts`). A page that
+has produced a change or two and then gone quiet is a *loading* page
+(`auth-slowjs`), and the churn floor is what keeps it out — the fixture never
+reaches 1.5 windows of continuous churn, so it still runs to the deadline
+unsettled, for the right reason. The churn floor is measured from `t0` (how long
+the page has been *watched* without ever going quiet), not from the first
+mutation, because that is the part of the wait the exit exists to shorten.
 
 **An absolute threshold here was one page's number wearing a universal claim.**
 The first version of this exit was "3 mutations inside 1000ms", which Gmail's
@@ -504,14 +511,16 @@ waiting longer for it.
 no caller passes it any more. It was left in place deliberately as the gate's
 own API rather than deleted on the side.
 
-**Still outstanding, and it is the sparse end of the exit rather than the quiet
-end.** The gate requires **zero** mutations for a continuous 3s, and a
+**The sparse end is now closed, and the quiet end is still the unreachable
+one.** The gate requires **zero** mutations for a continuous 3s, and a
 spreadsheet's blinking cursor plus autosave never produces that — so the *quiet*
-exit is unreachable on that page and the rate exit is what remains, late by the
-sample floor described above. What a rate tolerance would change is what a
+exit is unreachable on that page and the rate exit is what remains. The rate
+exit used to be late by the sample floor; the churn exit now takes a sparse
+page at the *second* sample instead of the third, which is what the 8752ms
+observation in the Sheets run was. What a rate tolerance would change is what a
 captured observation guarantees, so it was held back rather than guessed at.
 Reading this section as a solved canvas story is reading it wrong: the exit
-exists, it fires on that page, and it fires almost too late to matter.
+exists, it fires on that page, and it fires well before the deadline.
 
 `scripts/test-observation-rescan-guard.test.js` extracts `captureObservation`
 and pins all four shapes, because a guard that silently stops firing hands the
