@@ -406,9 +406,11 @@ class AgentDeps:
     # The model's declared plan, tracked by the harness. An item closes
     # only from a confirmed ledger entry.
     plan: list[PlanItem] = field(default_factory=list)
-    # Write attempts that ended without a confirmation. Three of these and
-    # the harness ends the run itself: a run that cannot make progress must
-    # stop spending the user's tokens.
+    # Writes that read back the WRONG value. Three of these and the harness
+    # ends the run itself: a run that cannot make progress must stop spending
+    # the user's tokens. A write that could not be READ does not count here —
+    # an unknown is the absence of a read, not a fact about the target, and it
+    # must not end a run the way a wrong value does.
     blocked_attempts: int = 0
     # Set when a `task_complete` was refused because a planned target read
     # back wrong. A second call with the same unresolved state is accepted
