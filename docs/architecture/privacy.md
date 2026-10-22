@@ -715,14 +715,30 @@ write the run attempted, and what the target said when it was read back — and
 a plan, the steps the run declared. A **cell value is a typed value**: the
 user typed it, and it is the user's data by rule 1 and rule 3 alike.
 
-**What is redacted.** Two fields of a ledger entry hold a typed value:
-`intended` (what the model meant to write) and `observed` (what the target
-read back). A plan item holds `value` (the value to write) and `intent` (the
-model's own sentence about the step, which may quote the value — "write the
-card number to A1"). All four go through the **existing** redactor,
-`redact_text` (`audit.py:177`–`178`, `_redact_entry`), which is the same
-pattern-matching redactor the page text uses: a cell has no field name to be
-secret-shaped by, so the redactor matches on the *shape* of the value.
+**A cell's value does not go to disk at all — only its length does.** Two
+fields of a ledger entry hold a value: `intended` (what the model meant to
+write) and `observed` (what the target read back); a plan item holds `value`.
+Each is replaced with the **fixed** mask `[redacted:cell-value]`, and its
+length is kept beside it as `intended_chars` / `observed_chars` / `value_chars`.
+That is the rule this document already follows for the observation block —
+counts, never content, the AX diff reduced to a length for exactly this
+reason — applied to the one block that had forgotten it.
+
+**Why shape-based redaction is the wrong tool here.** The first version of
+this rule sent those values through the existing `redact_text`
+(`_redact_entry`, `audit.py`), which catches things that *look* like keys. A
+spreadsheet cell's contents are user data regardless of shape: a column of
+customer names has no secret shape, and `age` survived the redactor
+untouched. Shape-based redaction is right for a field *named* for a secret —
+there, the name is the evidence — and wrong for a field whose contents are
+user data by rule 1 whatever they look like. The mask is fixed, and
+`redact_text` still runs over what remains.
+
+**The plan's `intent` is the model's own prose, and stays — minus the value.**
+An intent is the model's sentence about the step ("write the card number to
+A1") and is persisted like every other model prose in this document. What it
+may not carry is the value, so any occurrence of the item's own `value` inside
+the intent is masked before the shape-based redactor runs.
 
 **What is not redacted, and why it must not be.** The `target_key` — `cell:A1`,
 `ref:textbox:Full name` — is **structural**, and a structural key is not
@@ -740,14 +756,16 @@ them on the way in. So the guarantee is the same shape as 3c's — **redacting
 on the way out while storing the raw string would have left the value sitting
 in memory for a later step to fetch**.
 
-**A redacted value rehydrates as `unknown`, never as a mismatch.** A resumed
-run compares a rehydrated value against a fresh one, and a redacted value
-cannot be compared. `is_redacted_value` (`audit.py:1338`) recognises it by its
-`[redacted…]` prefix, and the completion pass then reports **`unknown`** for
-that item and skips the read entirely. The two wrong answers are both wrong:
-a confirmation would be a claim the run cannot prove, and a mismatch would
-accuse the page of holding the wrong value when the truth is that the *value*
-was redacted. `unknown` says exactly what is true.
+**A masked value cannot be compared, so a resumed run reads the ledger's
+verdict instead.** A rehydrated plan item's value is the mask, not the value,
+so the completion pass cannot compare it against the cell. It falls back to
+the **ledger's** entry for that target: a `confirmed` flag there is not a
+model claim but a harness-computed verdict from a real read-back, so it
+survives the resume; anything else is **`unknown`**, and the read is skipped
+entirely. The two wrong answers are both wrong — a confirmation taken from the
+model's own claim is a claim the run cannot prove, and a mismatch would accuse
+the page of holding the wrong value when the truth is that the *value* is not
+here.
 
 **The ledger never becomes a metric, a log line, or a count.** Rule 1 is
 absolute and the ledger is exactly the kind of thing rule 1 is about: its
@@ -780,18 +798,17 @@ verbatim:
 - The per-action **trace** (`action_taken` in the step summary, which is
   persisted and replayed) embeds the raw arguments for the same reason.
 
-So a card number typed into a cell is redacted in the ledger and written in
-plaintext three times elsewhere in the same document. That is a real hole and
+So a card number typed into a cell is masked in the ledger and plan and
+written in plaintext three times elsewhere in the same document. That is a real hole and
 it is **not fixed here** — the fix belongs to whoever owns the typed-value
 masking, and it is one line in `_typed_field` plus a redaction of the
 harness's own outcome string. It is recorded here because a privacy rule that
 is only true of one block of the document is not a rule.
 
-Pinned by `tests/agent/test_ledger_resume.py` — the redaction of a
-secret-shaped cell value on disk, the structural fields staying readable, the
-plan's value and intent being redacted, and the recognisable form on the way
-back — and by `tests/agent/test_ledger_rehydrate.py`
-(`test_a_redacted_plan_value_is_unknown_not_a_mismatch`).
+Pinned by `tests/agent/test_ledger_resume.py` — a cell value on disk being
+the fixed mask with its length beside it, the structural fields staying
+readable, and the plan's `intent` surviving while a value quoted inside it is
+not — and by `tests/agent/test_ledger_rehydrate.py`.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no

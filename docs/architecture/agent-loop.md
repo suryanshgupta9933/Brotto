@@ -2347,6 +2347,14 @@ target is the absence of one (`_discrepancy_sentence`, `harness.py:3398`).
 **a record of what was attempted**, so a *refused* write writes no entry —
 there was no attempt.
 
+**The ledger in memory and the ledger on disk are not the same ledger.** The
+run's own copy carries the real values — that is what the read-back compares
+and what the model sees in its prompt — but a persisted entry's `intended` and
+`observed` are the fixed mask plus their lengths, and only the structural
+fields survive: `target_key`, `confirmed`, `mechanism`, `step`. A reader
+(including the harness on resume) can name a target and read a verdict, and
+can reconstruct nothing about what was written. See `privacy.md` 3i.
+
 **An entry is confirmed only from a read-back that matched.** The model
 saying so is not evidence, and there is no path by which the model can say so:
 the ledger is written in `_do_write_text`, after the comparison, and nowhere
@@ -2415,6 +2423,16 @@ turn.
 - An item is **unknown** → the completion is refused too, with a **different
   wording**: `A1 could not be read back (unknown), so the write cannot be
   confirmed`. The model may accept that and report the task as unconfirmed.
+- A **resumed** run's item is different again. The plan's `value` was masked on
+  the way to disk — a cell's contents are user data and the document keeps the
+  length, not the value (`privacy.md` 3i) — so there is nothing to compare. The
+  pass takes the **ledger's** verdict for that target instead
+  (`_latest_attempt`): a `confirmed` flag there is harness-computed from a real
+  read-back, not a model claim, so it survives the resume. No such entry, or an
+  unconfirmed one, is **unknown**, and the read is skipped — it cannot change a
+  verdict that is already unknown, and the relay has one slot. A confirmation
+  read out of the model's own prose would be exactly the lie this pass exists
+  to stop.
 
 **A second, identical completion is accepted, with the discrepancy appended
 to the summary** (`_append_discrepancies`, `harness.py:3417`). This bounds the
