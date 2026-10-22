@@ -433,11 +433,13 @@ are two different claims (2026-10-20).**
 For a while one list, `run_secrets`, was doing both jobs, and that conflation was
 the bug. It is now split, and the split is the evidence bar:
 
-- **`run_secrets` takes every redacted value.** It is the *scrub* list, read by
+- **`run_secrets` takes every latched value.** It is the *scrub* list, read by
   `_safe_thought`, `_safe_reasoning` and `_summarise_outcome`. That is the
   reason it exists: a later step's thought must never quote a value the agent
-  typed on an earlier one. It previously took only the latched subset, so it is
-  now strictly **more** scrubbing than before, not less.
+  typed on an earlier one. Latching is the positive-identification half of
+  `_redact_if_secret`, so the list holds only credentials; a value the harness
+  merely refused to write is masked in the action arguments and nowhere else
+  (3h). It earlier took every redacted value, and 3h narrowed it.
 - **The veto is `_PixelVeto`**, and the three veto sites read it through one
   helper — `get_page_delta`, `_vision_fallback` and `_execute_action`. It holds
   two things, and they have two different lengths: `latched`, the positive
@@ -658,6 +660,16 @@ value may reappear in the model's own prose — and the prose is recorded, in
 the audit document and in the extension's mirror of it, so for such a value
 the on-disk guarantee is the action arguments and not the whole document.
 
+**The match did not change, and that is deliberate.** The substitution removes
+the value wherever it appears, whole string or part of one, longest value
+first. Every value on the list is a positively identified credential, so the
+safe direction there is to over-redact: a credential that survives because it
+sat inside a longer token ("pw1" inside "pw123") is a credential on disk. The
+model's prose became readable again because **the list holds only positively
+identified credentials** — not because the match was loosened. An unclassifiable
+value (every typed value on a canvas) is ordinary data and never reaches the
+list; the mask in the action arguments is what protects it.
+
 **The published policy already says the narrower thing, so it does not
 change.** `PRIVACY.md` promises redaction for "values typed into a field the
 orchestrator identifies as a secret — anything with `type="password"`, or a
@@ -692,7 +704,10 @@ rather than a marker about a secret field; and by
 `tests/agent/test_prose_scrub.py`, which asserts the narrower rule end to end
 — an unclassified value stays in the model's own words and is still masked
 where it was typed, a credential is still scrubbed out of the model's words,
-and the substitution is whole-token and longest-value-first.
+and the substitution removes the value wherever it appears and is
+longest-value-first. `tests/agent/test_memory_capture.py` pins the same
+over-redaction on the narration in
+`test_a_credential_is_removed_even_inside_a_longer_token`.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no

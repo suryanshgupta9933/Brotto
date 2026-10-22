@@ -110,22 +110,24 @@ _OUTCOME_CHARS = 120
 
 
 def _substitute_values(text: str, values: list[str] | None) -> str:
-    """Substitute known values for the withheld marker, whole-token.
+    """Substitute known values for the withheld marker.
 
-    A bare `str.replace` ate ordinary words. Measured on a failed Sheets
-    run: "The page Agent shows Messages about the age of the Image." with
-    the value "Age" came out as "The page [withheld from the record]nt
-    shows …" — "Age" is a prefix of "Agent", so the model's own sentence
-    came back as gibberish and the user read it. Boundaries on both sides
-    keep a value to the token it actually is, and longest-value-first stops
-    a short value from winning over a longer one that contains it.
+    Every value on this list is POSITIVELY identified as a credential, so
+    the safe direction is to over-redact: a value is removed wherever it
+    appears, whole string or part of one, because a credential that survives
+    because it sat inside a longer token is a credential on disk. The
+    longest value goes first, so a short value cannot win over a longer one
+    that contains it.
 
-    `(?<!\\w)` / `(?!\\w)` rather than `\\b`: a value that starts or ends
-    with a non-word character (a token, a URL) has no `\\b` to sit on, and
-    `\\b` would silently never match it.
+    The ordinary-word mangling this used to cause — "Age" eating "Agent",
+    so the model read its own sentence back as gibberish — was NOT fixed
+    here, by loosening the match. It was fixed at the source: an
+    unclassifiable field's value (every typed value on a canvas) is
+    ordinary data, and it is no longer on this list at all. The mask in
+    the action arguments is what protects that value.
     """
     for v in sorted({v for v in values or () if v}, key=len, reverse=True):
-        text = re.sub(rf"(?<!\w){re.escape(v)}(?!\w)", WITHHELD, text)
+        text = text.replace(v, WITHHELD)
     return text
 
 
@@ -257,11 +259,10 @@ def _narrate(text: str | None, secret_values: list[str] | None = None) -> str | 
     out = (text or "").strip()
     if not out:
         return None
-    # No length guard. Every value here came out of a secret field, so its
-    # shortness says nothing about whether it is a secret — a 3-character
-    # password survived the old `len(v) >= 4` heuristic and went back into
-    # the prompt and the record. The substitution is whole-token, so a short
-    # value can no longer eat an ordinary word either.
+    # No length guard. Every value here came out of a field that positively
+    # identifies as a credential, so its shortness says nothing about whether
+    # it is a secret — a 3-character password survived the old `len(v) >= 4`
+    # heuristic and went back into the prompt and the record.
     out = _substitute_values(out, secret_values)
     out, _counts = redact_text(out)
     # Angle brackets out before the fence, not after: the narration is the
@@ -5846,8 +5847,9 @@ class AgentHarness:
             # from a password box, but never positively identified as one.
             # The shutter is closed for this step and the next
             # `_AMBIGUOUS_PIXEL_WINDOW` — see `_PixelVeto` — and the value is
-            # on `run_secrets` either way, so nothing here changes whether it
-            # is scrubbed, only when pixels flow.
+            # NOT on `run_secrets`, because it was never identified as a
+            # credential: it is masked in the action's own arguments and left
+            # in the model's own words. See `privacy.md` §3h.
             if ambiguous_write:
                 pixel_veto.arm(step)
             # The focus baseline was taken at the top of this step, before

@@ -1296,15 +1296,24 @@ field **positively identifies as a credential**. `privacy.md` carries the
 split itself; this is the loop's half, because the whole cost of the old
 marker was paid in steps.
 
-**Prose substitution is whole-token, and the reason is a value with no word
-boundary.** A bare `str.replace` ate ordinary words: measured on the failed
-Sheets run, "The page Agent shows Messages about the age of the Image." with
-the value "Age" came out as "The page [withheld from the record]nt shows …" —
+**Prose substitution removes the value wherever it appears, whole string or
+part of one, longest value first.** Every value on the list is a positively
+identified credential, so the safe direction there is to over-redact: a
+credential that survives because it happened to sit inside a longer token
+("pw1" inside "pw123") is a credential on disk. That is why the substitution
+is a plain longest-value-first `str.replace` with no word boundary on it.
+
+A bare `str.replace` ate ordinary words too: measured on the failed Sheets
+run, "The page Agent shows Messages about the age of the Image." with the
+value "Age" came out as "The page [withheld from the record]nt shows …" —
 "Age" is a prefix of "Agent", so the model's own sentence came back as
-gibberish and the user read it. The substitution is now longest-value-first
-with `(?<!\w)…(?!\w)` boundaries rather than `\b`, because a value that starts
-or ends with a non-word character has no `\b` to sit on and `\b` would
-silently never match it.
+gibberish and the user read it. That was fixed **at the source**, not by
+loosening the match: the list holds only values whose field positively
+identifies as a credential, and an unclassifiable field's value (every typed
+value on a canvas) is ordinary data that never reaches it. The mask in the
+action arguments is what protects that value. So the ordinary-word mangling
+cannot recur — not because the match was loosened, but because the value never
+reaches the list.
 
 **The general rule, because the same shape recurs.** A closed vocabulary is a
 promise that each token means exactly one thing. `[off-screen]`,
@@ -1322,7 +1331,10 @@ markers, the prompt's definition of the model-facing one, and that the value
 never reaches the **recorded action**; and by
 `tests/agent/test_typed_secret_capture.py`, which asserts the value never
 reached the audit document. `tests/agent/test_prose_scrub.py` carries the
-narrower prose rule and the whole-token substitution.
+narrower prose rule and the substitution — that a credential is removed even
+inside a longer token, and that a value is removed wherever it appears — and
+`tests/agent/test_memory_capture.py` pins the same over-redaction on the
+narration in `test_a_credential_is_removed_even_inside_a_longer_token`.
 
 ### Frames — a bounded union, and a ref that has to be composite
 

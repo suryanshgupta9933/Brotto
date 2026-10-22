@@ -472,18 +472,20 @@ def test_a_short_secret_typed_into_a_secret_field_is_substituted():
     assert WITHHELD in out
 
 
-def test_a_value_does_not_eat_the_longer_word_it_sits_inside():
-    """The substitution is whole-token.
+def test_a_credential_is_removed_even_inside_a_longer_token():
+    """Every value on this list is a positively identified credential, so the
+    safe direction is to over-redact: a credential that survives because it
+    sat inside a longer word is a credential on disk.
 
-    A bare replace ate ordinary words: "Age" inside "Agent" came out as
-    "[withheld from the record]nt", and the model could not read its own
-    sentence. So a value that is a prefix of a longer word is left alone —
-    the value is still withheld wherever it stands on its own.
+    The ordinary-word mangling this used to cause — "Age" inside "Agent",
+    so the model could not read its own sentence — is not fixed here, by
+    loosening the match. It is fixed at the source: an unclassifiable
+    field's value is ordinary data and is no longer on this list.
     """
     out = _narrate("Signed in with pw123 after the code came back.",
                    ["pw1"])
-    assert "pw123" in out
-    assert WITHHELD not in out
+    assert "pw1" not in out
+    assert WITHHELD in out
 
 
 def test_narration_cannot_close_its_own_fence():

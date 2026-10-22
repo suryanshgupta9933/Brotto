@@ -45,12 +45,14 @@ import brotto_orchestrator.agent.harness as harness_mod
 
 # --- the substitution -------------------------------------------------------
 
-def test_a_value_does_not_eat_the_word_it_is_a_prefix_of():
-    """The measured failure. "Age" is a prefix of "Agent"."""
+def test_a_credential_is_removed_even_inside_a_longer_token():
+    """Every value on this list is a positively identified credential, so the
+    safe direction is to over-redact: a credential that survives because it
+    sat inside a longer word is a credential on disk."""
     out = _scrub_known_secrets(
         "The page Agent shows Messages about the age of the Image.", ["Age"])
-    assert "Agent" in out, "an ordinary word was eaten by a value inside it"
-    assert "[withheld from the record]nt" not in out
+    assert "Age" not in out
+    assert WITHHELD in out
 
 
 def test_a_value_is_still_replaced_where_it_stands_alone():
@@ -65,10 +67,10 @@ def test_the_longest_value_wins():
     assert out.count(WITHHELD) == 1
 
 
-def test_a_value_is_not_replaced_inside_a_longer_word():
+def test_a_value_is_removed_wherever_it_appears():
     out = _scrub_known_secrets("cabin and cabin", ["cab"])
-    assert "cabin" in out
-    assert WITHHELD not in out
+    assert "cabin" not in out
+    assert out.count(WITHHELD) == 2
 
 
 # --- the list ---------------------------------------------------------------
