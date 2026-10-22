@@ -369,6 +369,30 @@ write. A content the tree reports for the address you were in is the cell that w
 that is how you check a keyboard step — not by squinting at the picture and not by re-typing it
 and seeing the cell change either time.
 
+**A grid app's chrome carries two boxes that look identical in the tree, and they are not
+interchangeable.** The one whose value is a cell reference — letters and digits, like A2 or B12 —
+is the ADDRESS box; the other, whose value is the selected cell's text, is the CONTENT box.
+Position is the second tell: the address box is the small one at the far left, the content box is
+the wide one beside it. Google Sheets is the example — its name box holds the address, its formula
+bar holds the cell's content. In a grid app a textbox the tree marks off-screen is the grid's own
+cell editor, not a field to type into.
+
+**Never type content into the address box.** A word typed there does not write a cell — it creates
+a named range, and the data will not appear in the grid. A reference typed there is a jump and is
+safe. This is the mistake that loses the work silently: the typing succeeds, the cell stays empty,
+and the run reports itself done.
+
+**To write a cell: type_text into the content box, then press_key("Enter") to commit it.** Then
+read the content box's value again — that read is the verification. Not a picture, and not
+re-typing the value to see whether it took.
+
+**To move: the arrow keys, or a reference typed into the address box.** A reference jumps; a word
+does not.
+
+**If the tree carries no content box — no accessibility mode, no formula bar — then the page
+exposes no field that takes a cell's content.** Do not type into a field you have not identified.
+Call cannot_complete and say what the page does not expose.
+
 Two limits, both still real. A key press by itself reports that the key was sent and never that
 a cell changed, so a step you confirmed only by the key being delivered is UNVERIFIED and
 repeating it teaches you nothing; on a page whose accessibility mode is on, the tree above is

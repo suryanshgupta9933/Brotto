@@ -349,6 +349,12 @@ class AgentDeps:
     # read and bump both.
     stagnant_steps: int = 0
     last_obs: tuple | None = None
+    # The refs typed into in a way that says the model had hold of a grid's
+    # ADDRESS BOX — the field that holds a cell reference, where a word
+    # creates a named range instead of writing a cell. One list per step,
+    # oldest first, an empty list for a step that typed nothing, so the
+    # window is a window over STEPS.
+    address_box_writes: list[list[str]] = field(default_factory=list)
     # Fraction (0.0–1.0) of the viewport covered by the largest topmost
     # <canvas>, from the observation frame. Set once per step by the harness's
     # `_observe_canvas_covered`, and read by `_sparse_for_task`,

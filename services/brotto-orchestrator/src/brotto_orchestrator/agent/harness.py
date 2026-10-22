@@ -813,6 +813,56 @@ def repeat_nudge(summaries: list[StepSummary]) -> str:
     )
 
 
+# A grid app's ADDRESS BOX holds the selected cell's reference ("A1"); the
+# CONTENT box beside it holds the cell's text. The two are both anonymous
+# textboxes, so the value is the only thing that tells them apart.
+_CELL_REF_RE = re.compile(r"^[A-Za-z]{1,3}\d{1,7}$")
+
+# How many writes into an address box, in the last N steps, before the
+# model is told. Two: one write can be a false positive when a cell's own
+# content happens to be a reference, and the measured run wrote twice in
+# one step.
+_ADDRESS_BOX_WINDOW = 6
+_ADDRESS_BOX_MIN = 2
+
+
+def address_box_nudge(deps) -> str:
+    """A run-control line when the model keeps typing into the address box.
+
+    A measured Sheets run typed its two column headers into the NAME BOX
+    and then reported itself done: a word typed there becomes a NAMED
+    RANGE, so no cell was ever written — the page opened a "Create a named
+    range" panel instead. Neither existing bound could see it. The
+    word-overlap nudge compares the LAST TWO steps' summaries, and those
+    steps differed (type, Enter, click, read), so it never fired. The
+    stagnation bound measures the PAGE, and the agent's own typing changed
+    the tree every step, so every step looked like progress.
+
+    It is detected, not guessed: the field is identified by the cell
+    reference it holds, and only a word that is NOT a reference counts — a
+    reference typed there is a jump and is legitimate. A column of values
+    typed into the content box is the same field every step, which is why
+    the earlier "same field again" rule was wrong: it fired on ordinary
+    work and missed nothing the reference does not catch.
+
+    A nudge, not a kill: nothing here ends the run on its own — the model
+    still gets to try something different or say it cannot proceed.
+    """
+    window = deps.address_box_writes[-_ADDRESS_BOX_WINDOW:]
+    n = sum(len(w) for w in window)
+    if n < _ADDRESS_BOX_MIN:
+        return ""
+    return (
+        f"You have typed {n} times into a field that holds a CELL "
+        "REFERENCE. That field is a navigation box, not a cell: a word "
+        "typed there creates a named range and nothing is written. Find "
+        "the field that holds the cell's CONTENT — the wide box beside "
+        "the reference — type there, press Enter, and read that box back "
+        "to confirm. If no such field is on the page, call "
+        "cannot_complete saying what you could not do and why."
+    )
+
+
 def _is_degraded(entry) -> bool:
     """True when an entry holds its digest and nothing more.
 
@@ -4882,6 +4932,10 @@ class AgentHarness:
             task_index = audit.resume_task()
         deps.task_index = task_index
         if state["action"] == "new_task":
+            # A new task is a new run of steps: the previous task's writes
+            # are not this task's history, and a window that spans both
+            # would nudge on a field the new task has never touched.
+            deps.address_box_writes.clear()
             audit.add_message(role="user", content=deps.task, task=task_index,
                               turn=None)
         # Earlier tasks, on both paths. Only *earlier*: the current goal is in
@@ -5400,7 +5454,9 @@ class AgentHarness:
                 screenshot_note=vision.note,
                 page_delta=page_delta,
                 steering=deps.pending_steering,
-                repeat_warning=repeat_nudge(deps.step_summaries),
+                repeat_warning="\n\n".join(
+                    w for w in (repeat_nudge(deps.step_summaries),
+                                address_box_nudge(deps)) if w),
             )
 
             log.info("[%s] step %d  url=%s  ax_elements=%d  memory_entries=%d",
@@ -5720,6 +5776,7 @@ class AgentHarness:
             # textbox per step, unchanged.
             redact_flags: list[bool] = []
             latched: list[str] = []
+            address_box: list[str] = []
             ambiguous_write = False
             for call in decision.actions:
                 field = _typed_field(call)
@@ -5754,6 +5811,23 @@ class AgentHarness:
                     latched.append(value)
                 elif redact and value:
                     ambiguous_write = True
+                if field == "text" and call.action_args.get("ref"):
+                    # The field that holds a cell reference is a grid's
+                    # ADDRESS BOX, and a word typed there becomes a named
+                    # range rather than a cell. A reference typed there is a
+                    # jump, and is left alone.
+                    ref = str(call.action_args["ref"])
+                    target = next(
+                        (t for t in deps.prev_targets if t.ref_id == ref), None)
+                    shown = str(getattr(target, "value", "") or "").strip()
+                    typed = value.strip()
+                    if (typed and _CELL_REF_RE.match(shown)
+                            and not _CELL_REF_RE.match(typed)):
+                        address_box.append(ref)
+            # Which writes went into an address box — one list per step,
+            # empty when nothing was typed, so the nudge counts over STEPS
+            # and not over the steps that happened to type.
+            deps.address_box_writes.append(address_box)
             # Into the run-wide lists the moment they are known, so the sinks
             # later in this same step see them too and not only the ones after
             # the next step begins.
