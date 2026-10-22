@@ -1542,11 +1542,14 @@ the operator's credits are spent, and "we could not check whether this person
 was revoked" is not a licence to serve them. A self-host relay never reaches
 the function — no `Claims` object exists there.
 
-**Retention now has a default, and only here.** `BROTTO_RETENTION_DAYS`
-unset returns 30 on the hosted relay and `None` everywhere else. The reason is
-the same asymmetry as everything above: a self-hoster's disk is their own data,
-an ephemeral dyno is ours, and nobody was deciding the second one. An explicit
-setting still wins, **including `0`**.
+**Retention has no default, here or anywhere.** `BROTTO_RETENTION_DAYS` unset
+returns `None` on every deployment — the hosted relay included, which
+`test_the_hosted_relay_does_not_age_sessions_out_unless_asked`
+(`tests/test_beta_auth.py:647`) pins. The asymmetry is the same one as
+everything above, and it is the reason an *operator would* set it: a
+self-hoster's disk is their own data, an ephemeral dyno is ours, and nobody was
+deciding the second one. The live relay does not set it, so nothing is aged out
+there in practice either. An explicit setting still wins, **including `0`**.
 
 ## One operator per server was an assumption, and four things were built on it
 
