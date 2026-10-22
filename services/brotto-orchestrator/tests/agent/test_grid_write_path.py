@@ -52,13 +52,25 @@ def test_content_must_never_be_typed_into_the_address_box():
     assert "jump" in s, "a reference typed there is a jump, and is said to be"
 
 
-def test_the_write_path_is_named_as_two_steps_and_a_read():
+def test_the_write_path_is_one_verified_write():
+    """One path, and it is the one that reports a verdict.
+
+    The retired path was type into the content box, press Enter, then read the
+    box back — which verifies the BOX, whose value is the SELECTED cell's, so a
+    write could be confirmed for a cell it never landed in."""
     s = _flat(_canvas_section())
-    assert 'press_key("Enter")' in s, (
-        "the commit key is named — and on one line, so the model reads it "
-        "character for character")
-    assert "read the content box's value then" in s, (
-        "the verification is a read of the cell, not a picture")
+    assert "write_text into the content box" not in s, (
+        "the unverified content-box write path is retired")
+    assert "write_text with a CELL target" in s, (
+        "the closed loop's cell write is the path that is named")
+    assert "READS THE CELL BACK" in s, (
+        "the write reads the cell it wrote, not the box it typed into")
+    assert "There is one write path" in s
+    assert "commit an edit you started" in s, (
+        "Enter is named as committing an edit the write started, which is "
+        "navigation and not a write of its own")
+    assert "read the content box's value then" not in s, (
+        "a cell is verified by reading the CELL, not by re-reading the box")
 
 
 def test_the_content_box_is_the_editing_surface_not_a_read_only_view():
@@ -103,9 +115,9 @@ def test_a_write_that_did_not_land_is_not_reported_as_done():
     s = _flat(_canvas_section())
     assert "the write did not land" in s
     assert "do not report the cell as written" in s
-    # And the retry the model must not make: a second write through the same
-    # path replaces the first edit, which is how one run wrote neither.
-    assert "replaces it rather than adding to" in s
+    # And the retry the model must not make: the harness refuses a repeat of
+    # the same value into the same target and names what it read last time.
+    assert "the harness refuses that" in s
     # The escape is the closed vocabulary, not a guess.
     assert "cannot_complete" in s
     assert "which cell you tried to write" in s
@@ -133,13 +145,12 @@ def test_the_fallback_names_no_focusable_target_rather_than_a_third_try():
         "the coordinate write is not a guarantee")
 
 
-def test_the_write_that_did_not_land_is_scoped_to_a_page_that_has_a_content_box():
-    """Distinct from the older rule: no content box at all is a different
-    situation, and the new paragraph must not swallow it."""
+def test_the_write_that_did_not_land_is_told_apart_from_no_content_box():
+    """Distinct from the older rule: a page that exposes no field at all is a
+    different situation, and the paragraph must not swallow it."""
     s = _flat(_canvas_section())
-    assert "the tree HAS a content box and your value is not in it" in s, (
-        "the new paragraph means a content box existed and the value is not "
-        "in it")
+    assert "If write_text reports NOT confirmed" in s, (
+        "the landing verdict the model is told to trust is write_text's")
     assert "the tree carries NO content box at all" in s, (
         "the older rule is scoped to a page with no content box")
     assert "different situation from a write that went to a content box" in s, (

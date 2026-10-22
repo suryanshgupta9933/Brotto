@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import dataclasses
 import os
 import re
 import time
@@ -45,7 +46,16 @@ from .context import (
     StepSummary, TaskResult, Scratchpad, MemoryEntry, DIGEST_LEN,
     ScriptTargetUnresolved,
 )
+from .closed_loop import (
+    CONFIRMED, MISMATCH, UNKNOWN, MAX_ATTEMPTS_PER_TARGET, MAX_BLOCKED_ATTEMPTS,
+    PlanItem, WriteAttempt, adapter_for, canonical_target_key, compare_observed,
+    normalise_value, render_ledger, render_plan,
+)
 from .ax_filter import budget_for_window, filter_ax_targets
+
+# The ledger's ceiling. It is rendered into every step's prompt and written to
+# the session document, so it is bounded rather than kept whole.
+LEDGER_MAX = 50
 from .ax_diff import compute_ax_diff
 from .guardrails import check_login_page, check_critical_action, check_sensitive_action
 from .redact import redact_text
@@ -61,7 +71,7 @@ from ..policy.domains import etld1
 from .prompt import SYSTEM_PROMPT, policy_preamble, WITHHELD
 from .audit import (
     SCHEMA_VERSION, AuditTrail, REDACTED, is_secret_field, load_scratchpad,
-    read,
+    read, read_ledger, read_plan, read_completion_refused, is_redacted_value,
 )
 
 _HISTORY_WINDOW = 12  # keep first 3 + last 9 steps in prompt
@@ -1154,9 +1164,20 @@ def _turn_to_prompt(turn: AgentTurn) -> str:
         + "\n</memory_manifest>\n"
     )
 
+    # The plan and the ledger sit BEFORE the page: the prompt is the model's
+    # only history (it is rebuilt from scratch every step), so what it has
+    # already done and what it still owes have to be read before the tree, not
+    # hunted for under it. Both are harness-rendered facts — never the model's
+    # own account of its work — and both ride on EVERY turn, empty or not, so
+    # the model cannot tell "nothing written yet" from "not shown this step".
+    plan_section = f"\n## Your plan\n{turn.plan_text or '(no plan declared)'}\n"
+    ledger_section = (
+        f"\n## What you have written so far\n{turn.ledger_text or '(no writes yet)'}\n"
+    )
+
     return f"""{policy_prefix}{conv_section}## Task
 {turn.task}
-
+{plan_section}{ledger_section}
 ## Memory manifest (every page you have seen)
 {manifest_section}
 
@@ -1292,6 +1313,30 @@ def _reply_is_secret(question: str, reply: str) -> bool:
     return is_secret_field(None, reply) or is_secret_field(None, question)
 
 
+# The closed-loop actions whose outcome sentence embeds a value: one
+# TYPED it (`write_text`) and one READ back off the page (`read_state`).
+# Both sentences go to disk exactly as the model reads them, so the value
+# is masked for the record only. The sentence itself stays readable — the
+# target and the verdict are the part a reader needs.
+_VALUE_OUTCOME_ACTIONS = ("write_text", "read_state")
+
+
+def _recorded_value_outcome(call: ActionCall, outcome: str) -> tuple[str, bool]:
+    """(outcome-for-disk, redacted) for an action whose sentence names a value.
+
+    `write_text`'s value is masked IN PLACE, so
+    `cell:A1 now reads '[redacted:card]'` still says which cell and what
+    the verdict was. `read_state` carries no value argument — the one it
+    names came off the page — so it takes the redactor whole, on the same
+    terms the AX text does.
+    """
+    value = str(call.action_args.get("value", "") or "")
+    disk = outcome.replace(repr(value), repr(redact_text(value)[0])) if value \
+        else outcome
+    disk = redact_text(disk)[0]
+    return disk, disk != outcome
+
+
 def _recorded_reply_outcome(call: ActionCall, outcome: str) -> tuple[str, bool]:
     """(outcome-for-disk, redacted) for an `ask_human` action.
 
@@ -1300,6 +1345,8 @@ def _recorded_reply_outcome(call: ActionCall, outcome: str) -> tuple[str, bool]:
     redacted answer is a task that cannot finish. Every other action
     returns unchanged, which is the same shape `_scrubbed` gives type_text.
     """
+    if call.action in _VALUE_OUTCOME_ACTIONS:
+        return _recorded_value_outcome(call, outcome)
     if call.action != "ask_human":
         return outcome, False
     reply = outcome[len(_ASK_REPLY_PREFIX):]
@@ -1672,7 +1719,16 @@ def _scrubbed(call: ActionCall, redact: bool) -> tuple[dict, str]:
     call). The model's line says what did happen instead. Neither carries the
     value, so the guarantee is the same either way.
     """
+    # `write_text` types a literal too — a cell's value is TYPED input, the
+    # same class of thing as `type_text`'s text, so it is redacted here on
+    # the same terms. Unconditionally, and not through `_redact_if_secret`:
+    # there is no DOM field behind a grid cell to classify, which is the
+    # `type_xy` case. The IN-MEMORY compare in `_do_write_text` is on the
+    # real value and is untouched; only this copy is masked.
+    typed_value = call.action == "write_text"
     field = _typed_field(call) if redact else None
+    if field is None and typed_value:
+        field = "value"
     if field is None:
         return call.action_args, f"{call.action}({call.action_args})"
     value = call.action_args.get(field, "")
@@ -3006,6 +3062,452 @@ async def _coordinate_action(call: ActionCall, deps: AgentDeps, audit,
     return f"Clicked at ({x},{y}) — {label}: {result}"
 
 
+def _match_by_description(targets: list, desc: str) -> list:
+    """Targets whose role/name/value match every meaningful word of `desc`.
+
+    Shared by the `find_element` branch and by `_resolve_target`'s
+    description form, so a phrase the model can look up is a phrase it can
+    also write into — one rule, two callers.
+
+    All the meaningful words must match. The old rule accepted a single word
+    and reported it as `Found:` with a ref, and on session a7328461
+    `find_element("Add rule or save button")` returned Brotto's own "Open
+    agents panel" — matched on the word "button", on a GitHub page, with
+    nothing else in common. A confident answer the model then acts on is
+    worse than none.
+    """
+    words = [w for w in desc.lower().split() if w not in _FIND_STOPWORDS]
+    scored: list[tuple[int, object]] = []
+    for t in targets:
+        combined = f"{t.role} {(t.name or '').lower()} {str(t.value or '').lower()}"
+        hits = sum(1 for w in words if w in combined)
+        if words and hits == len(words):
+            scored.append((hits, t))
+    scored.sort(key=lambda p: -p[0])
+    return [t for _, t in scored]
+
+
+def _target_label(kind: str, resolved: dict, match: object | None) -> str:
+    """A human name for the target: A1, or the element's own name."""
+    if kind == "cell":
+        return str(resolved.get("cell", ""))
+    if match is not None and getattr(match, "name", None):
+        return str(match.name)
+    return str(resolved.get("ref", ""))
+
+
+async def _resolve_target(target: dict, deps: AgentDeps) -> tuple[str, str, dict]:
+    """`{"ref"|"cell"|"description"}` → `(kind, canonical key, resolved)`.
+
+    The ref form keys on the target's role and name rather than its id,
+    because a ref id changes on every observation and a ledger keyed on it
+    would never recognise a repeat. Raises ValueError with the reason; every
+    caller turns that into a refusal, never a crash.
+    """
+    kind, key, resolved = "ref", "", {}
+    if isinstance(target, dict) and "cell" in target:
+        key = canonical_target_key(target)
+        resolved = {"cell": str(target["cell"] or "").strip().upper()}
+        kind = "cell"
+    elif isinstance(target, dict) and "description" in target:
+        key = canonical_target_key(target)
+        phrase = str(target["description"] or "")
+        found = _match_by_description(await deps.cdp.get_targets(), phrase)
+        if not found:
+            raise ValueError(
+                f"no element on this page matches {phrase!r}. Every word has "
+                f"to match one element's role, name or value — try fewer words, "
+                f"or use a ref from the AX tree."
+            )
+        match = found[0]
+        resolved = {"ref": match.ref_id}
+        kind = "description"
+    elif isinstance(target, dict) and "ref" in target:
+        ref = str(target["ref"] or "").strip()
+        resolved = {"ref": ref}
+        found = [t for t in await deps.cdp.get_targets()
+                 if str(getattr(t, "ref_id", "")) == ref]
+        # No match is not an error here: the write is attempted anyway and the
+        # read-back decides. A refused resolution on a stale ref would stop a
+        # write that would have landed.
+        label = None
+        if found:
+            label = f"{found[0].role}:{found[0].name or found[0].ref_id}"
+        key = canonical_target_key({"ref": ref},
+                                   resolved=normalise_value(label) if label else None)
+        kind = "ref"
+    else:
+        raise ValueError("a target is a ref, a cell, or a description")
+    return kind, key, resolved
+
+
+async def _do_write_text(call, deps, audit=None, turn=-1) -> str:
+    """Write, then READ THE TARGET BACK, and report the verdict.
+
+    The read-back is the whole point: a write that reports a dispatch is a
+    write that can silently land in the wrong box. Every refusal below
+    records nothing — the ledger is a record of what was attempted.
+    """
+    args = call.action_args
+    value = str(args.get("value", "") or "")
+    if not value.strip():
+        return "REFUSED: a write needs a value — there is nothing to type."
+    target = args.get("target")
+    if not isinstance(target, dict):
+        return "REFUSED: write_text takes a target, which is a ref, a cell or a description."
+    try:
+        kind, key, resolved = await _resolve_target(target, deps)
+    except ValueError as e:
+        return f"REFUSED: {e}"
+
+    label = _target_label(kind, resolved, None)
+    # The repeat rule. Typing the same value into the same target again is
+    # what burned the fifteen-step run; the prior observation is the reason.
+    for prior in deps.ledger:
+        if prior.target_key == key and prior.intended == value and not prior.confirmed:
+            return (
+                f"REFUSED: you already tried {value!r} into {label} at step "
+                f"{prior.step} and it read back {prior.observed!r}. Change the "
+                f"mechanism, change the target, or call cannot_complete."
+            )
+    if deps.blocked_attempts >= MAX_BLOCKED_ATTEMPTS:
+        deps.result = TaskResult(
+            status="failed",
+            summary=(
+                f"{MAX_BLOCKED_ATTEMPTS} writes in this run could not be "
+                f"confirmed, so Brotto stopped rather than keep spending "
+                f"tokens on a target it cannot write."
+            ),
+            failure_reason="cannot_complete",
+            steps_taken=deps.step_number,
+        )
+        return (
+            f"REFUSED: {MAX_BLOCKED_ATTEMPTS} writes in this run could not be "
+            f"confirmed. The run is ending — call cannot_complete to say why, "
+            f"or the harness will close it as cannot_complete itself."
+        )
+    # Checked AFTER the run bound, not before: a run that has already spent
+    # three blocked writes stops spending them, whether or not this particular
+    # target is exhausted too.
+    # `observed is not None` is the whole filter: an UNKNOWN is the absence of
+    # a read, not a fact about the target, so it never exhausts a target. Only
+    # a target that read back the WRONG value is exhausted.
+    attempts = [a for a in deps.ledger
+                if a.target_key == key and not a.confirmed and a.observed is not None]
+    if len(attempts) >= MAX_ATTEMPTS_PER_TARGET:
+        return (
+            f"REFUSED: {label} has already been written {len(attempts)} times. "
+            f"Change the target or call cannot_complete — another attempt at "
+            f"the same cell cannot produce a different result."
+        )
+
+    adapter = adapter_for(await deps.cdp.get_current_url())
+    mechanism = ""
+    error = ""
+    if kind == "cell":
+        address = str(resolved.get("cell", ""))
+        written = await deps.cdp.grid_op(adapter.write_op, address, value)
+        mechanism = str(written.get("mechanism", "") or adapter.write_op)
+        if not written.get("ok"):
+            error = str(written.get("error", "") or "the write did not report success")
+    else:
+        written = await deps.cdp.type_text_into_ref(resolved["ref"], value)
+        mechanism = "ref"
+        if _EXEC_FAILURE in str(written):
+            error = str(written)
+
+    # The read-back, strictly serial — the relay has one slot.
+    observed: str | None
+    if kind == "cell":
+        address = str(resolved.get("cell", ""))
+        back = await deps.cdp.grid_op(adapter.read_op, address)
+        if back.get("ok") and back.get("state") == "ok":
+            observed = back.get("value")
+            observed = None if observed is None else str(observed)
+        else:
+            observed = None
+            error = error or str(back.get("error", "") or "the target could not be read")
+    else:
+        found = [t for t in await deps.cdp.get_targets()
+                 if str(getattr(t, "ref_id", "")) == resolved["ref"]]
+        observed = None if not found else (
+            None if found[0].value is None else str(found[0].value))
+        if found:
+            label = _target_label("ref", resolved, found[0])
+
+    state = compare_observed(observed, value)
+    confirmed = state == CONFIRMED
+    deps.ledger.append(WriteAttempt(
+        target_key=key, intended=value, observed=observed,
+        confirmed=confirmed, mechanism=mechanism, step=deps.step_number,
+    ))
+    # Bounded: the last LEDGER_MAX entries only. An unbounded ledger is an
+    # unbounded prompt (it is rendered whole every step) and an unbounded
+    # session document, for no evidence a 60-step run will ever use.
+    del deps.ledger[:-LEDGER_MAX]
+    # ONLY a mismatch escalates. An UNKNOWN is the absence of a read, and
+    # spec §5.7: a target that could not be read must never fail a run the
+    # way a wrong value does. It is in the ledger and reported to the model
+    # and that is all.
+    if state == MISMATCH:
+        deps.blocked_attempts += 1
+    _sync_plan(deps)
+    _persist_closed_loop(deps, audit)
+
+    tried = f"tried: {mechanism}" if mechanism else "tried: nothing that landed"
+    if confirmed:
+        return f"write_text → confirmed: {label} now reads {value!r}"
+    if state == UNKNOWN:
+        why = f"; {error}" if error else ""
+        return (f"write_text → NOT confirmed: {label} could not be read back, "
+                f"so the write is unverified; {tried}{why}")
+    return (f"write_text → NOT confirmed: {label} reads {observed!r} "
+            f"(intended {value!r}); {tried}")
+
+
+def _sync_plan(deps: AgentDeps) -> None:
+    """Move each plan item's status to what the LEDGER says, and nothing else.
+
+    An item closes only from a confirmed write to the same target with the same
+    value; a write that read back something else marks it failed. An item with no
+    ledger entry — and an item with no target, which is a step that is not a
+    write — is left exactly as it is. The model saying so is not evidence.
+    """
+    for item in deps.plan:
+        if not item.target_key or item.value is None:
+            continue
+        attempts = [
+            a for a in deps.ledger
+            if a.target_key == item.target_key
+            and normalise_value(a.intended) == normalise_value(item.value)
+        ]
+        if not attempts:
+            continue
+        # Confirmed beats failed: a target that read back wrong and later right
+        # is right.
+        item.status = "confirmed" if any(a.confirmed for a in attempts) else "failed"
+
+
+def _persist_closed_loop(deps: AgentDeps, audit) -> None:
+    """Write the run's ledger and plan into the session document.
+
+    The document is the record a resumed run rebuilds them from, so what is
+    on disk is the CURRENT state and not a history of writes —
+    `record_ledger` and `record_plan` replace the block they own.
+
+    The values are typed values, so the redaction happens on the audit
+    side of the disk: the comparison this run does is in memory, on the
+    real value, and never persisted.
+
+    No audit object (the tests call these actions without one) means no
+    document, and nothing to persist.
+    """
+    if audit is None:
+        return
+    audit.record_ledger(step=deps.step_number,
+                        attempts=[dataclasses.asdict(a) for a in deps.ledger])
+    audit.record_plan(items=[dataclasses.asdict(i) for i in deps.plan])
+
+
+async def _do_set_plan(call, deps, audit=None, turn=-1) -> str:
+    """Declare the plan. Replaces `deps.plan` wholesale — a plan is declared,
+    not patched.
+
+    Each item is `{intent, target, value}`. The intent is required: it is what
+    the model is accountable for at the completion pass, and an item with no
+    intent is a step nobody can say was done.
+    """
+    items = call.action_args.get("items")
+    if not isinstance(items, list):
+        return "REFUSED: set_plan takes a list of items, each {intent, target, value}."
+    plan: list[PlanItem] = []
+    refused: list[str] = []
+    for index, raw in enumerate(items, start=1):
+        if not isinstance(raw, dict):
+            refused.append(f"item {index} is not an object")
+            continue
+        intent = str(raw.get("intent") or "").strip()
+        if not intent:
+            refused.append(f"item {index} needs an intent")
+            continue
+        target_key = None
+        target = raw.get("target")
+        if isinstance(target, dict):
+            try:
+                _kind, target_key, _resolved = await _resolve_target(target, deps)
+            except ValueError as e:
+                refused.append(f"item {index}: {e}")
+                continue
+        value = raw.get("value")
+        plan.append(PlanItem(
+            id=index,
+            intent=intent,
+            target_key=target_key,
+            value=None if value is None else str(value),
+            status="pending",
+        ))
+    deps.plan = plan
+    _sync_plan(deps)
+    _persist_closed_loop(deps, audit)
+    body = render_plan(deps.plan)
+    if refused:
+        body = "\n".join([f"REFUSED: {r}" for r in refused] + [body])
+    return body
+
+
+async def _do_read_state(call, deps, audit=None, turn=-1) -> str:
+    """Read a named target's current value. Records nothing — it is a read."""
+    target = call.action_args.get("target")
+    if not isinstance(target, dict):
+        return "REFUSED: read_state takes a target, which is a ref, a cell or a description."
+    try:
+        kind, _key, resolved = await _resolve_target(target, deps)
+    except ValueError as e:
+        return f"REFUSED: {e}"
+    if kind == "cell":
+        address = str(resolved.get("cell", ""))
+        adapter = adapter_for(await deps.cdp.get_current_url())
+        back = await deps.cdp.grid_op(adapter.read_op, address)
+        if back.get("ok") and back.get("state") == "ok":
+            return f"read_state → {address} = {back.get('value')!r}"
+        return (f"read_state → could not read {address}: "
+                f"{back.get('error', 'unknown')}")
+    found = [t for t in await deps.cdp.get_targets()
+             if str(getattr(t, "ref_id", "")) == resolved["ref"]]
+    if not found:
+        return f"read_state → could not read {resolved['ref']}: it is not in the AX tree."
+    label = _target_label("ref", resolved, found[0])
+    return f"read_state → {label} = {found[0].value!r}"
+
+
+def _ledger_items(deps: AgentDeps) -> list[PlanItem]:
+    """The ledger's targets as plan-shaped items, for a run that declared no plan.
+
+    A model that never calls `set_plan` gets no free pass: the same reads run,
+    against the targets the run actually wrote. One item per target key, from
+    its LATEST attempt — a target written wrong and then right is right, and
+    re-reading it against the superseded value would refuse a correct run.
+    """
+    latest: dict[str, WriteAttempt] = {}
+    for a in deps.ledger:
+        latest[a.target_key] = a
+    return [
+        PlanItem(id=n, intent=f"write {a.intended!r} into {key}",
+                 target_key=key, value=a.intended,
+                 status="confirmed" if a.confirmed else "pending")
+        for n, (key, a) in enumerate(latest.items())
+    ]
+
+
+async def _verify_plan(deps: AgentDeps,
+                       items: list[PlanItem] | None = None
+                       ) -> list[tuple[PlanItem, str, str | None]]:
+    """Read every target back, one at a time, and grade it.
+
+    `items` defaults to the plan. A run that declared no plan passes the
+    LEDGER's targets instead — see `_ledger_items`. Either way the same
+    comparison runs.
+
+    Strictly serial: the relay has a single slot and the grid path has its own
+    queue, so two probes in flight would cross answers. Each read is one
+    `await` and nothing else is in flight while it is out.
+
+    Returns `(item, state, observed)` per read-back. `state` is
+    CONFIRMED / MISMATCH / UNKNOWN. An item with no target, or no value to
+    compare against, is skipped — there is nothing to read.
+    """
+    if items is None:
+        items = deps.plan
+    adapter = adapter_for(await deps.cdp.get_current_url())
+    verdicts: list[tuple[PlanItem, str, str | None]] = []
+    for item in items:
+        if not item.target_key or item.value is None:
+            continue
+        if is_redacted_value(item.value):
+            # A rehydrated value may have been redacted on the way to disk —
+            # a cell value that looked like a secret. It cannot be compared,
+            # so the honest verdict is UNKNOWN: the run must not claim a
+            # confirmation it cannot prove, and must not accuse the page of
+            # holding the wrong value when the truth is that the value was
+            # redacted. The read is skipped too — it cannot change a verdict
+            # that is already UNKNOWN, and the relay has one slot.
+            verdicts.append((item, UNKNOWN, None))
+            continue
+        observed: str | None = None
+        label = item.target_key
+        if item.target_key.startswith("cell:"):
+            label = item.target_key[len("cell:"):]
+            back = await deps.cdp.grid_op(adapter.read_op, label)
+            if back.get("ok") and back.get("state") == "ok":
+                raw = back.get("value")
+                observed = None if raw is None else str(raw)
+        else:
+            found = await _lookup_by_key(item.target_key, deps)
+            if found is not None:
+                label = _target_label("ref", {}, found)
+                raw = getattr(found, "value", None)
+                observed = None if raw is None else str(raw)
+            else:
+                label = item.target_key.split(":", 1)[1]
+        verdicts.append((item, compare_observed(observed, item.value), observed))
+    return verdicts
+
+
+async def _lookup_by_key(key: str, deps: AgentDeps):
+    """The live target a canonical key names, or None.
+
+    A ref id changes every observation, so the key holds the element's
+    normalised `role:name` (or the phrase it was looked up by) and the read is
+    resolved against the tree as it is now. Same shape `_resolve_target` keys
+    on, read the same way round.
+    """
+    targets = await deps.cdp.get_targets()
+    prefix, _, rest = key.partition(":")
+    if prefix == "desc":
+        found = _match_by_description(targets, rest)
+        return found[0] if found else None
+    for t in targets:
+        name = str(getattr(t, "name", "") or getattr(t, "ref_id", ""))
+        if normalise_value(f"{getattr(t, 'role', '')}:{name}") == rest:
+            return t
+    return None
+
+
+def _discrepancy_sentence(mismatches, unknowns) -> str:
+    """One sentence per unconfirmed item, and the two wordings differ.
+
+    A mismatch is a fact about the page. An unreadable target is the absence of
+    one, and telling the model those are the same thing is how a correct run
+    ends up failed.
+    """
+    parts = []
+    for item, _state, observed in mismatches:
+        parts.append(f'{item.intent} — {item.target_key} reads '
+                     f'"{observed}" (you intended "{item.value}").')
+    for item, _state, _observed in unknowns:
+        parts.append(f'{item.intent} — {item.target_key} could not be read '
+                     f'back (unknown), so the write cannot be confirmed.')
+    return ("task_complete REFUSED: the page does not hold what you said it "
+            "does. " + " ".join(parts) + " Fix it and complete again, or call "
+            "cannot_complete and say what you could not do.")
+
+
+def _append_discrepancies(summary: str, verdicts) -> str:
+    """The truth, appended to a summary the model still insisted on."""
+    lines = [
+        f'[not confirmed: {item.target_key} reads "{observed}" '
+        f'(intended "{item.value}")]'
+        for item, state, observed in verdicts if state == MISMATCH
+    ]
+    lines += [
+        f"[not confirmed: {item.target_key} could not be read back]"
+        for item, state, _observed in verdicts if state == UNKNOWN
+    ]
+    if not lines:
+        return summary
+    return "\n".join([summary] + lines)
+
+
 async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                           turn: int = -1, redactions=None,
                           run_secrets=None, targets: list | None = None) -> str:
@@ -3212,28 +3714,25 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 call, deps, audit, turn=turn, redactions=redactions,
                 run_secrets=run_secrets)
 
+        elif action == "write_text":
+            return await _do_write_text(call, deps, audit=audit, turn=turn)
+
+        elif action == "read_state":
+            return await _do_read_state(call, deps, audit=audit, turn=turn)
+
+        elif action == "set_plan":
+            return await _do_set_plan(call, deps, audit=audit, turn=turn)
+
         elif action == "type_text":
-            # focus/clear used to be fire-and-forget, so a ref that resolved to
-            # nothing still typed the text into whatever was focused before —
-            # the model saw "Typed into [0:99]" and moved on.
-            #
-            # One call, because the two clicks it used to make were
-            # byte-identical — same coords, same `backendNodeId`, same cached
-            # observation — and the two evaluates read the same unchanged
-            # `document.activeElement`. Sequencing the steps here is exactly
-            # what kept them from being recognised as duplicates. The relay
-            # owns the collapse and every guard in it: the ref resolution, the
-            # extension's dispatch-time binding check, and the focus read that
-            # refuses a `body` (session 445fc36d).
-            result = await cdp.type_text_into_ref(args["ref"], args["text"])
-            # The relay is the only side that knows what held focus, and it
-            # reports only that. This string is both the model's history and the
-            # audit's outcome, so anything added here is a destination claim
-            # nobody checked — which is how "name" landed in a formula bar
-            # while the record said it went into a cell.
-            if _EXEC_FAILURE in result:
-                return result
-            return result
+            # Retired from the model's vocabulary on 2026-10-22: a write that
+            # reports a dispatch is not a write — a Google Sheets run typed its
+            # column headers into the grid's address box, created a named
+            # range, wrote nothing, and said it was done. It stays on the wire
+            # for one minor so a resumed run against an older prompt is refused
+            # with a reason rather than silently dropped.
+            return ("REFUSED: type_text is retired — it types and reports "
+                    "success without checking anything landed. Use write_text, "
+                    "which types and then reads the target back.")
 
         elif action == "press_key":
             # modifiers is CDP's bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8).
@@ -3318,28 +3817,13 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             )
 
         elif action == "find_element":
-            targets = await cdp.get_targets()
             desc = args.get("description", "").lower()
-            # All the meaningful words must match. The old rule accepted a
-            # single word and reported it as `Found:` with a ref, and on
-            # session a7328461 `find_element("Add rule or save button")`
-            # returned Brotto's own "Open agents panel" — matched on the word
-            # "button", on a GitHub page, with nothing else in common. A
-            # confident answer the model then acts on is worse than none.
-            words = [w for w in desc.split() if w not in _FIND_STOPWORDS]
-            scored: list[tuple[int, object]] = []
-            for t in targets:
-                name_text = (t.name or "").lower()
-                value_text = str(t.value or "").lower()
-                combined = f"{t.role} {name_text} {value_text}"
-                # Fewer words matched, better match wins; `count` is the tie
-                # -break, not the filter.
-                hits = sum(1 for w in words if w in combined)
-                if words and hits == len(words):
-                    scored.append((hits, t))
+            # The scoring rule lives in `_match_by_description`, shared with
+            # `_resolve_target`: a phrase the model can look up has to be a
+            # phrase it can also write into.
+            scored = _match_by_description(await cdp.get_targets(), desc)
             if scored:
-                scored.sort(key=lambda p: -p[0])
-                t = scored[0][1]
+                t = scored[0]
                 where = f" value='{t.value}'" if t.value else ""
                 return f"Found: [{t.ref_id}] {t.role} '{t.name}'{where}"
             return (
@@ -3454,9 +3938,42 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
             return text
 
         elif action == "task_complete":
+            summary = _unescape(args.get("summary", ""))
+            if deps.plan or deps.ledger:
+                # The pass that ends the run's biggest lie: a summary claiming a
+                # state the run never observed. Every target is read back
+                # first, strictly serially — the PLAN's when there is one, and
+                # the LEDGER's when the model declared no plan. A run with
+                # neither wrote nothing and completes as before.
+                targets = deps.plan if deps.plan else _ledger_items(deps)
+                verdicts = await _verify_plan(deps, targets)
+                _sync_plan(deps)
+                _persist_closed_loop(deps, audit)
+                mismatches = [v for v in verdicts if v[1] == MISMATCH]
+                unknowns = [v for v in verdicts if v[1] == UNKNOWN]
+                if mismatches or unknowns:
+                    if deps.completion_refused:
+                        # Asked again with the same unresolved state. Accept it
+                        # and append the truth: the user is told what the page
+                        # actually reads, and the run stops spinning.
+                        deps.result = TaskResult(
+                            status="completed",
+                            summary=_append_discrepancies(summary, verdicts),
+                            extracted_data=args.get("extracted_data"),
+                            steps_taken=deps.step_number)
+                        return ("Task complete (with the discrepancy appended "
+                                "to the summary)")
+                    deps.completion_refused = True
+                    # On the document too: a run that was refused a
+                    # completion and then reconnected must still accept the
+                    # second one, or the reconnect turns a bounded refusal
+                    # into a loop.
+                    if audit is not None:
+                        audit.record_completion_refused()
+                    return "REFUSED: " + _discrepancy_sentence(mismatches, unknowns)
             deps.result = TaskResult(
                 status="completed",
-                summary=_unescape(args.get("summary", "")),
+                summary=summary,
                 extracted_data=args.get("extracted_data"),
                 steps_taken=deps.step_number,            )
             return "Task complete"
@@ -3795,6 +4312,11 @@ _AX_NO_CHANGE = "(no changes detected)"
 _READ_ONLY_ACTIONS = frozenset({
     "find_element", "read_page_text", "read_scratchpad",
     "recall_memory", "recall_conversation", "recall_steps",
+    # `read_state` is a read. `set_plan` is the run's own bookkeeping — it
+    # touches the document and not the page, so neither can move focus or
+    # arm the "page moved unseen" guard. Left out, both produced a spurious
+    # UNVERIFIED verdict on a step that changed nothing.
+    "read_state", "set_plan",
 })
 
 # Actions whose effect a page would show, and which therefore leave a step
@@ -3804,6 +4326,16 @@ _READ_ONLY_ACTIONS = frozenset({
 # an unverified step would be a false alarm on every long page.
 _NON_MUTATING_ACTIONS = (
     _READ_ONLY_ACTIONS | _TERMINAL_ACTIONS | {"ask_human", "scroll"})
+
+
+def _action_ok(outcome: str) -> bool:
+    """Did the action land? A REFUSAL is not an ok.
+
+    A refusal is the harness declining to do the thing — a repeated write, a
+    target that cannot take a value. Recording it as ok made a machine reader
+    count a refused write as a success.
+    """
+    return not str(outcome).startswith("REFUSED") and _EXEC_FAILURE not in outcome
 
 
 def _is_mutating(action: str) -> bool:
@@ -4632,10 +5164,17 @@ def _resume_state(session_id: str) -> dict:
     if doc.get("corrupt"):
         return {"doc": doc, "summaries": [], "visited": set(), "first_step": 0,
                 "why": "the audit document could not be parsed"}
-    if doc.get("schema_version") != SCHEMA_VERSION:
+    # Only a FUTURE schema is refused. The schema-4 change is additive —
+    # the ledger and the plan are new keys — so an older document is a
+    # document this server can still read, and refusing it would break
+    # every run that exists today. A document from a newer server is a
+    # document whose keys this one may misread, so it is refused.
+    version = doc.get("schema_version")
+    if isinstance(version, int) and not isinstance(version, bool) \
+            and version > SCHEMA_VERSION:
         return {"doc": doc, "summaries": [], "visited": set(), "first_step": 0,
                 "why": (f"the audit document is schema_version "
-                        f"{doc.get('schema_version')!r}, this server writes "
+                        f"{version!r}, this server writes "
                         f"{SCHEMA_VERSION}")}
     if doc.get("status") in _TERMINAL_DOC_STATUSES:
         return {"doc": doc, "summaries": [], "visited": set(), "first_step": 0,
@@ -4705,6 +5244,11 @@ def _adopt_document(audit: AuditTrail, doc: dict) -> None:
     audit._doc.clear()
     audit._doc.update(doc)
     audit._doc["status"] = status
+    # The adopted document is written by THIS server from here on, so it
+    # carries the current schema version — an older document keeps its
+    # shape until the next write, and a future one is refused before it
+    # gets this far.
+    audit._doc["schema_version"] = SCHEMA_VERSION
     # `read` adds a lookup hint that is not part of the written shape.
     audit._doc.pop("found", None)
     audit._doc.pop("corrupt", None)
@@ -4931,6 +5475,21 @@ class AgentHarness:
             # Hardcoding 0 would put a crash in the second task's turns and
             # messages into the first task's segment of the transcript.
             task_index = audit.resume_task()
+            # The ledger and the plan are the run's own record of what it
+            # wrote and what it meant to write, and `deps` is built fresh
+            # for every run — so they come back with the document. Without
+            # them the repeat block and the completion pass silently switch
+            # off, and the run is back to lying.
+            resumed_doc = state["doc"] or {}
+            deps.ledger = read_ledger(resumed_doc)[-LEDGER_MAX:]
+            deps.plan = read_plan(resumed_doc)
+            # Mismatches only, same rule as the live write: an unreadable
+            # target from the previous connection is unverified, not blocked.
+            deps.blocked_attempts = sum(
+                1 for a in deps.ledger if not a.confirmed and a.observed is not None)
+            # The second completion is ACCEPTED, so a run that was refused
+            # one and then reconnected must still accept the second one.
+            deps.completion_refused = read_completion_refused(resumed_doc)
         deps.task_index = task_index
         if state["action"] == "new_task":
             # A new task is a new run of steps: the previous task's writes
@@ -5458,6 +6017,10 @@ class AgentHarness:
                 repeat_warning="\n\n".join(
                     w for w in (repeat_nudge(deps.step_summaries),
                                 address_box_nudge(deps)) if w),
+                # Rendered here, at the one place the turn is built, so every
+                # turn carries them whether or not this step wrote anything.
+                ledger_text=render_ledger(deps.ledger),
+                plan_text=render_plan(deps.plan),
             )
 
             log.info("[%s] step %d  url=%s  ax_elements=%d  memory_entries=%d",
@@ -5889,10 +6452,26 @@ class AgentHarness:
                 # step's prompt, so an ask_human reply is scrubbed for the
                 # record only — the model still gets the answer it needs.
                 rec_outcome, reply_redacted = _recorded_reply_outcome(call, outcome)
+                if call.action == "write_text":
+                    # The repeat refusal quotes a PRIOR attempt's value and
+                    # read-back, which are not this call's arguments. Same
+                    # masking, same terms — the ledger itself is already
+                    # redacted on disk by `_persist_closed_loop`.
+                    for prior in deps.ledger:
+                        if not prior.intended:
+                            continue
+                        rec_outcome = rec_outcome.replace(
+                            repr(prior.intended), repr(REDACTED))
+                        if prior.observed:
+                            rec_outcome = rec_outcome.replace(
+                                repr(prior.observed), repr(REDACTED))
                 audit.record_action(
                     a_turn, action=call.action, args=rec_args, outcome=rec_outcome,
-                    ok=_EXEC_FAILURE not in outcome,
-                    redacted=redact or reply_redacted,
+                    ok=_action_ok(outcome),
+                    # `write_text`'s args are masked by `_scrubbed` whether
+                    # or not a value in the outcome needed the redactor.
+                    redacted=redact or reply_redacted
+                    or call.action == "write_text",
                     duration_ms=int((time.perf_counter() - t_a) * 1000),
                     target=_action_target(call),
                     # The extension's pixel delta, measured at this step's

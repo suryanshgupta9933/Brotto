@@ -293,9 +293,12 @@ def test_the_extension_relay_names_no_server_side_select_all():
 # ── the harness callsite ────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_the_harness_types_with_one_relay_call():
-    """The call site is the collapse. If this reverts to sequencing the three
-    methods, the duplicate click is back and no relay test notices."""
+async def test_the_harness_no_longer_types_through_type_text():
+    """`type_text` was retired on 2026-10-22 in favour of `write_text`,
+    which types and then reads the target back. It stays on the wire for one
+    minor so an older prompt is refused with a reason rather than crashing —
+    and it must never dispatch: the collapse this call site used to make is
+    exactly the dispatch-only write that lost a Google Sheets run."""
     from brotto_orchestrator.agent.harness import _execute_action
     from brotto_orchestrator.agent.context import ActionCall
 
@@ -306,9 +309,9 @@ async def test_the_harness_types_with_one_relay_call():
 
     out = await _execute_action(call, deps)
 
-    assert not out.startswith(FAIL_PREFIX)
-    cdp.type_text_into_ref.assert_awaited_once_with("0:7", "Name")
-    for old in ("focus_ref", "clear_ref", "type_text_to_ref"):
+    assert out.startswith("REFUSED") and "write_text" in out
+    for old in ("type_text_into_ref", "focus_ref", "clear_ref",
+                "type_text_to_ref"):
         assert not [c for c in cdp.mock_calls if c[0] == old], old
 
 

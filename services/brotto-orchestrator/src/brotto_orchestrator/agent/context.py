@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, PrivateAttr
 
+from .closed_loop import PlanItem, WriteAttempt
+
 
 _SERIAL_RE = re.compile(r"^([A-Za-z]*)(\d+)$")
 
@@ -215,6 +217,12 @@ class AgentTurn(BaseModel):
     # thing, so the model changes approach instead of repeating until the
     # step budget runs out. Empty on every other step.
     repeat_warning: str = ""
+    # The run's write ledger and declared plan, rendered by
+    # `closed_loop.render_ledger` / `render_plan` at the point the turn is
+    # built. Empty until the model has written anything / declared a plan;
+    # the sections that carry them are Task 6's.
+    ledger_text: str = ""
+    plan_text: str = ""
 
 
 class ActionCall(BaseModel):
@@ -226,6 +234,10 @@ class ActionCall(BaseModel):
         "click_xy", "focus_xy", "type_xy",
         "read_scratchpad", "recall_memory",
         "recall_conversation", "recall_steps",
+        # `type_text` stays on the wire for one minor — retired from the
+        # MODEL's vocabulary, not from the Literal, so a resumed run against
+        # an older prompt is refused with a reason instead of crashing.
+        "write_text", "read_state", "set_plan",
         "task_complete", "cannot_complete", "ask_human",
     ]
     action_args: dict
@@ -386,6 +398,23 @@ class AgentDeps:
     # so without a bound an always-animating canvas page holds the loop open
     # indefinitely. The ceiling is the harness's `_DELTA_ONLY_STEPS`.
     delta_only_steps: int = 0
+    # Every write attempt in this run, oldest first. A ledger entry is
+    # CONFIRMED only when a read-back matched — never because the model
+    # said so. Holds typed values, so it is user data: redacted on the way
+    # into the session file, compared in memory on the real value.
+    ledger: list[WriteAttempt] = field(default_factory=list)
+    # The model's declared plan, tracked by the harness. An item closes
+    # only from a confirmed ledger entry.
+    plan: list[PlanItem] = field(default_factory=list)
+    # Write attempts that ended without a confirmation. Three of these and
+    # the harness ends the run itself: a run that cannot make progress must
+    # stop spending the user's tokens.
+    blocked_attempts: int = 0
+    # Set when a `task_complete` was refused because a planned target read
+    # back wrong. A second call with the same unresolved state is accepted
+    # with the discrepancy appended — that bounds the refuse/retry loop, and
+    # Task 7 persists it across a resume.
+    completion_refused: bool = False
     result: TaskResult | None = None
     # URL observed at the top of the current step, before its actions run.
     # Read by the click cross-domain gate and stamped onto TaskResult.

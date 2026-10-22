@@ -181,15 +181,14 @@ async def test_type_text_into_a_hallucinated_ref_does_not_type():
     relay._ws_send.assert_not_called()
 
 @pytest.mark.asyncio
-async def test_the_harness_stops_type_text_when_focus_failed():
-    """Belt to the relays' braces: the harness must not type after a focus
-    that reported failure, or the text goes to a field the model never named.
-
-    The relay owns the whole sequence now — one call, and the click/clear/
-    focus checks inside it — so this pins that a refusal it returns still
-    reaches the audit as `ok: false` rather than being read as a success. The
-    "did not type" half is pinned at the relay, in
-    `test_type_text_fast_path.py`, where the dispatch actually is."""
+async def test_the_harness_never_dispatches_type_text():
+    """Belt to the relays' braces: the harness must not type at all through
+    the retired action. `type_text` types and reports a dispatch without
+    checking anything landed — which is how a Google Sheets run wrote its
+    headers into the grid's address box and reported itself done. The wire
+    spelling stays for one minor; the dispatch does not. The relay's own
+    guards are still pinned by its own tests, in `test_type_text_fast_path.py`.
+    """
     from brotto_orchestrator.agent.harness import _execute_action
     from brotto_orchestrator.agent.context import ActionCall
 
@@ -204,12 +203,10 @@ async def test_the_harness_stops_type_text_when_focus_failed():
 
     out = await _execute_action(call, deps)
 
-    assert out.startswith(FAIL_PREFIX)
-    # Exactly one relay call: re-sequencing the steps here is what put the
-    # duplicate click back.
-    assert [c for c in cdp.mock_calls if c[0] == "type_text_into_ref"]
+    assert out.startswith("REFUSED") and "write_text" in out
     assert not [c for c in cdp.mock_calls
-                if c[0] in ("focus_ref", "clear_ref", "type_text_to_ref")]
+                if c[0] in ("type_text_into_ref", "focus_ref", "clear_ref",
+                            "type_text_to_ref")]
 
 def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
     """`ok` is derived by membership of `Error executing`, not by prefix, so a
@@ -498,15 +495,12 @@ async def test_the_press_key_refusal_does_not_log_the_page_chosen_id(caplog):
 
 
 @pytest.mark.asyncio
-async def test_type_text_outcome_is_the_relays_own_verdict():
+async def test_type_text_refusal_asserts_no_destination():
     """The harness used to synthesise `Typed into [0:10183]` — naming the
     destination the relay never checked — on top of a relay that had already
-    reported only "focused element". The relay's string is what was verified,
-    and it is what the audit document and the model's history get.
-
-    The ref must not reappear in any shape: `0:10183`, `[0:10183]` or
-    `Typed into [`, because a bare substring would pass while the decoration
-    moved the bracket.
+    reported only "focused element". The refusal that replaced it must not
+    name a destination either, in any shape: a bare substring assertion would
+    pass while the wording moved the bracket.
     """
     from brotto_orchestrator.agent.harness import _execute_action
     from brotto_orchestrator.agent.context import ActionCall
@@ -521,32 +515,31 @@ async def test_type_text_outcome_is_the_relays_own_verdict():
 
     out = await _execute_action(call, deps)
 
-    assert out == verdict
+    assert out.startswith("REFUSED")
+    cdp.type_text_into_ref.assert_not_awaited()
     for shape in ("0:10183", "[0:10183]", "Typed into ["):
         assert shape not in out, f"{shape!r} is a destination claim"
 
 
 @pytest.mark.asyncio
-async def test_a_refused_type_reaches_the_caller_unchanged():
-    """The refusal must survive the decoration too: a wrapped `Error
-    executing:` is the bug `test_a_wrapped_failure_is_still_recorded_as_not_ok`
-    exists for, and the string the model reads has to name the recovery."""
+async def test_the_retirement_refusal_names_the_replacement():
+    """A model still emitting `type_text` — an older prompt, a cached plan, a
+    resumed run against an old document — must be refused with a message that
+    names what to use instead. Silently dropping it would look like a write
+    that landed; crashing would kill the run."""
     from brotto_orchestrator.agent.harness import _execute_action
     from brotto_orchestrator.agent.context import ActionCall
 
-    refusal = ("Error executing: ref '0:10183' resolved, but nothing on the "
-               "page holds focus, so nothing was typed. Click the element you "
-               "meant to type into first, then type again.")
     cdp = AsyncMock()
-    cdp.type_text_into_ref = AsyncMock(return_value=refusal)
-
     deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u")
     call = ActionCall(action="type_text",
                       action_args={"ref": "0:10183", "text": "name"})
 
     out = await _execute_action(call, deps)
 
-    assert out == refusal
+    assert out.startswith("REFUSED")
+    assert "write_text" in out
+    cdp.type_text_into_ref.assert_not_awaited()
 
 
 @pytest.mark.asyncio
