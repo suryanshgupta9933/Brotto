@@ -904,6 +904,8 @@ But once every part is done, extra searching is not thoroughness — report.
 in your plan back and compares it to what you intended. If one does not match,
 the completion is REFUSED and you are told what the page actually reads — fix it
 and complete again, or call `cannot_complete` and say what you could not do.
+A second completion with the same unresolved target is not accepted: the run
+ends there, reported as `cannot_complete` with what the page actually reads.
 
 A summary says what the page now holds, in the user's terms. One or two
 sentences. No narration of what you tried, no apology, no "I have completed".

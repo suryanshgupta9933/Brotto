@@ -70,7 +70,7 @@ async def test_a_confirmed_plan_is_accepted_as_written():
 
 
 @pytest.mark.asyncio
-async def test_a_second_identical_completion_is_accepted_with_the_discrepancy():
+async def test_a_second_identical_completion_fails_the_run_with_the_discrepancy():
     deps = _deps(grid_value="age")
     await _run(deps, "set_plan", {"items": [
         {"intent": "write A1 = name", "target": {"cell": "A1"}, "value": "name"},
@@ -79,7 +79,10 @@ async def test_a_second_identical_completion_is_accepted_with_the_discrepancy():
     out = await _run(deps, "task_complete", {"summary": "A1 = name"})
     assert "REFUSED" not in out
     assert deps.result is not None
-    assert deps.result.status == "completed"
+    # A run that reports success while the cell holds the wrong value is the
+    # lie this loop exists to kill.
+    assert deps.result.status == "failed"
+    assert deps.result.failure_reason == "cannot_complete"
     assert "age" in deps.result.summary, "the discrepancy is appended"
 
 

@@ -102,15 +102,17 @@ async def test_a_run_with_no_plan_and_no_ledger_completes_as_before():
 
 
 @pytest.mark.asyncio
-async def test_the_second_completion_after_a_refusal_is_accepted():
+async def test_the_second_completion_after_a_refusal_fails_the_run():
     deps = _deps(grid_value="age")
     await _run(deps, "write_text", {"target": {"cell": "A1"}, "value": "name"})
     await _run(deps, "task_complete", {"summary": "A1 = name"})
     out = await _run(deps, "task_complete", {"summary": "A1 = name"})
     assert deps.result is not None
-    assert deps.result.status == "completed"
+    # Still unresolved: the run ends as a failure, never as a completion.
+    assert deps.result.status == "failed"
+    assert deps.result.failure_reason == "cannot_complete"
     assert "not confirmed" in deps.result.summary
-    assert out.startswith("Task complete")
+    assert out.startswith("Task closed as failed")
 
 
 # --- 3. reads and bookkeeping are read-only -----------------------------

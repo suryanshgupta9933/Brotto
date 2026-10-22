@@ -4007,19 +4007,24 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 unknowns = [v for v in verdicts if v[1] == UNKNOWN]
                 if mismatches or unknowns:
                     if deps.completion_refused:
-                        # Asked again with the same unresolved state. Accept it
-                        # and append the truth: the user is told what the page
-                        # actually reads, and the run stops spinning.
+                        # Asked again, and the page still does not hold what
+                        # the model said it holds. The run ends as a FAILURE:
+                        # a run that reports success while a verdict is
+                        # unresolved is the lie this loop exists to kill, and
+                        # the truth belongs in the summary, not in a
+                        # "completed" the user reads as a claim.
                         deps.result = TaskResult(
-                            status="completed",
+                            status="failed",
+                            failure_reason="cannot_complete",
                             summary=_append_discrepancies(summary, verdicts),
                             extracted_data=args.get("extracted_data"),
                             steps_taken=deps.step_number)
-                        return ("Task complete (with the discrepancy appended "
-                                "to the summary)")
+                        return ("Task closed as failed: the page still does "
+                                "not hold what you said it does, and the "
+                                "discrepancies are in the summary.")
                     deps.completion_refused = True
                     # On the document too: a run that was refused a
-                    # completion and then reconnected must still accept the
+                    # completion and then reconnected must still refuse the
                     # second one, or the reconnect turns a bounded refusal
                     # into a loop.
                     if audit is not None:
