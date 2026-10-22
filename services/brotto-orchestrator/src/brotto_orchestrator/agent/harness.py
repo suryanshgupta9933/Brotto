@@ -109,6 +109,26 @@ _EXEC_FAILURE = "Error executing"
 _OUTCOME_CHARS = 120
 
 
+def _substitute_values(text: str, values: list[str] | None) -> str:
+    """Substitute known values for the withheld marker, whole-token.
+
+    A bare `str.replace` ate ordinary words. Measured on a failed Sheets
+    run: "The page Agent shows Messages about the age of the Image." with
+    the value "Age" came out as "The page [withheld from the record]nt
+    shows …" — "Age" is a prefix of "Agent", so the model's own sentence
+    came back as gibberish and the user read it. Boundaries on both sides
+    keep a value to the token it actually is, and longest-value-first stops
+    a short value from winning over a longer one that contains it.
+
+    `(?<!\\w)` / `(?!\\w)` rather than `\\b`: a value that starts or ends
+    with a non-word character (a token, a URL) has no `\\b` to sit on, and
+    `\\b` would silently never match it.
+    """
+    for v in sorted({v for v in values or () if v}, key=len, reverse=True):
+        text = re.sub(rf"(?<!\w){re.escape(v)}(?!\w)", WITHHELD, text)
+    return text
+
+
 def _summarise_outcome(
     outcomes: list[str], secret_values: list[str] | None = None
 ) -> str:
@@ -128,9 +148,7 @@ def _summarise_outcome(
     # arbitrary password, and the outcome is both stored and rendered back to
     # the model. Same run-wide list, same marker, same order.
     def _sub(text: str) -> str:
-        for v in secret_values or ():
-            text = text.replace(v, WITHHELD)
-        return text
+        return _substitute_values(text, secret_values)
 
     joined = redact_text(_sub("; ".join(outcomes) if outcomes else "no action"))[0]
     if len(joined) <= _OUTCOME_CHARS:
@@ -229,10 +247,12 @@ def _narrate(text: str | None, secret_values: list[str] | None = None) -> str | 
 
     Redaction is the point, not a nicety: the loop redacts typed secrets
     before the model ever sees them, and narration quoting one back would put
-    exactly that back into the next prompt and into the record. Values typed
-    into secret fields this step are substituted first — those exact strings
-    are about to come back from the page anyway, so echoing them is noise even
-    where redaction would have caught them.
+    exactly that back into the next prompt and into the record. Values
+    POSITIVELY identified as credentials this step are substituted first —
+    those exact strings are about to come back from the page anyway, so
+    echoing them is noise even where redaction would have caught them. A
+    value we merely refused to write is ordinary data and stays in the
+    model's own words.
     """
     out = (text or "").strip()
     if not out:
@@ -240,12 +260,9 @@ def _narrate(text: str | None, secret_values: list[str] | None = None) -> str | 
     # No length guard. Every value here came out of a secret field, so its
     # shortness says nothing about whether it is a secret — a 3-character
     # password survived the old `len(v) >= 4` heuristic and went back into
-    # the prompt and the record. A short value does over-substitute in
-    # unrelated words ("ab" inside "tab"), which mangles a little narration;
-    # the alternative is a live credential on disk, and this module already
-    # trades readability for that unconditionally.
-    for v in secret_values or ():
-        out = out.replace(v, WITHHELD)
+    # the prompt and the record. The substitution is whole-token, so a short
+    # value can no longer eat an ordinary word either.
+    out = _substitute_values(out, secret_values)
     out, _counts = redact_text(out)
     # Angle brackets out before the fence, not after: the narration is the
     # model's words *about* page content and can quote a closing tag the page
@@ -294,8 +311,7 @@ def _scrub_known_secrets(text: str | None, secret_values: list[str] | None) -> s
     """
     if not text:
         return None
-    for v in secret_values or ():
-        text = text.replace(v, WITHHELD)
+    text = _substitute_values(text, secret_values)
     return redact_text(text)[0]
 
 
@@ -1363,7 +1379,7 @@ async def _redact_if_secret(deps: AgentDeps, ref: str) -> tuple[bool, bool]:
     the pixel delta -- the only channel a canvas leaves -- for the rest of
     the task. Latch on positive evidence (`is_secret_field`) and redact on
     anything weaker; the value still never reaches the audit document,
-    because the scrub list takes every redacted value regardless.
+    because the per-action `redact` flag masks the argument itself.
 
     ponytail: this still redacts every typed value on a relay too old to
     answer get_attributes. Upgrade path: a per-task "attributes
@@ -4915,20 +4931,30 @@ class AgentHarness:
 
         await _seed_starting_domain(deps)
 
-        # Every value typed into a secret field this run, accumulated. A
-        # thought is written to the audit document *before* this step's
-        # actions execute, so the step's own typed_secrets are not known yet
-        # at that sink — and `redact_text` cannot recognise an arbitrary
-        # password. A later step's thought quoting a value typed earlier is
-        # the leak this closes.
+        # Every value this run POSITIVELY identified as a credential,
+        # accumulated. A thought is written to the audit document *before*
+        # this step's actions execute, so the step's own values are not
+        # known yet at that sink — and `redact_text` cannot recognise an
+        # arbitrary password. A later step's thought quoting a value typed
+        # earlier is the leak this closes.
+        #
+        # Only positively identified values belong here. A value typed into
+        # a field we could not classify is ordinary data — a name, a
+        # heading — and on a canvas every typed value is one, because a
+        # canvas cell has no backend node and a blank accessible name. The
+        # scrub list used to hold those too, and it rewrote ordinary words
+        # out of the model's own sentences: a measured run read "A1 should
+        # say [withheld from the record]" for the header it had just typed.
+        # The value still never reaches the audit document — that is the
+        # per-action `redact` flag, which masks the argument itself.
         run_secrets: list[str] = []
-        # The subset that may veto pixels. `run_secrets` above is the scrub
-        # list (a later thought must never quote a value we redacted);
-        # `pixel_veto` is the positive-evidence list the screenshot and
-        # page-delta vetoes read, plus the bounded window an ambiguous write
-        # opens. They differ only where redaction fired on absence of
-        # evidence — an unclassifiable field — and conflating them vetoed
-        # the delta for every remaining step of a canvas run.
+        # The subset that may veto pixels. `run_secrets` above is the prose
+        # scrub list (a later thought must never quote a credential we
+        # identified); `pixel_veto` is the positive-evidence list the
+        # screenshot and page-delta vetoes read, plus the bounded window an
+        # ambiguous write opens. They differ only where redaction fired on
+        # absence of evidence — an unclassifiable field — and conflating them
+        # vetoed the delta for every remaining step of a canvas run.
         pixel_veto = _PixelVeto()
 
         for step in range(first_step, self.MAX_STEPS):
@@ -5693,7 +5719,6 @@ class AgentHarness:
             # loop only reads it. One DOM lookup per TYPED action, not per
             # textbox per step, unchanged.
             redact_flags: list[bool] = []
-            typed_secrets: list[str] = []
             latched: list[str] = []
             ambiguous_write = False
             for call in decision.actions:
@@ -5721,18 +5746,27 @@ class AgentHarness:
                 )
                 redact_flags.append(redact)
                 value = str(call.action_args.get(field) or "")
-                if redact and value:
-                    # Scrub list: every value we refused to write, whether or
-                    # not we could prove it was a credential.
-                    typed_secrets.append(value)
                 if latch and value:
+                    # Positively identified as a credential. These are the
+                    # only values that are scrubbed out of the model's own
+                    # words; a value we merely refused to write is masked in
+                    # the action's arguments and left alone everywhere else.
                     latched.append(value)
                 elif redact and value:
                     ambiguous_write = True
             # Into the run-wide lists the moment they are known, so the sinks
             # later in this same step see them too and not only the ones after
             # the next step begins.
-            run_secrets.extend(v for v in typed_secrets if v)
+            #
+            # Only the LATCHED values go on the prose scrub list. A value
+            # typed into a field we could not classify is masked in the
+            # action's own arguments (the per-action `redact` flag, below)
+            # and nowhere else: on a canvas every typed value is
+            # redacted-but-unclassified, so the scrub list held ordinary
+            # words and rewrote them out of the model's own prose — a
+            # measured run read "A1 should say [withheld from the record]"
+            # for a header it had typed a moment earlier.
+            run_secrets.extend(v for v in latched if v)
             pixel_veto.latched.extend(v for v in latched if v)
             # An ambiguous write: redacted, because we could not tell the field
             # from a password box, but never positively identified as one.
@@ -5850,9 +5884,12 @@ class AgentHarness:
                 # multi-part plan named at step 6 was gone by step 12.
                 # _narrate redacts and caps it: it quotes page content (and
                 # may quote what was just typed), and it is read back inside
-                # the prompt as if the harness wrote it.
+                # the prompt as if the harness wrote it. The run-wide list,
+                # not this step's: a credential typed ten steps ago is still
+                # a credential, and this is the one place the model reads
+                # its own words back.
                 extracted=_narrate(
-                    decision.thought or decision.reasoning, typed_secrets),
+                    decision.thought or decision.reasoning, run_secrets),
             ))
 
             # Terminal? Gate on deps.result, not on the action name. A

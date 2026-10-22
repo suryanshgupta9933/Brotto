@@ -19,8 +19,9 @@ _WITHHELD_SECTION = f"""\
 ## When a value you typed is withheld
 Some fields cannot be told apart from a password box — a canvas cell with no accessible name, a
 field with no label, a sheet's name box. When you type into one of those, the harness does not
-write the value down: wherever the value would have appeared — in the action line, in the step's
-outcome, in your own notes from the step before — you get `{WITHHELD}` instead.
+write the value down: in the action line you get `{WITHHELD}` in its place. Where the field WAS
+positively identified as a credential, the value is withheld everywhere it would have appeared —
+the action line, the step's outcome, your own notes from the step before.
 
 Read that marker as a fact about the record, never as a fact about delivery. **The text was
 typed.** It went to the page exactly as you sent it; only the copy the harness keeps was
@@ -29,9 +30,9 @@ says so — so if the marker is the only thing on the line, the typing worked. D
 marker as a refused input, do not re-type around it, and do not go looking for a workaround to a
 block that is not there.
 
-What you will not get back is the value itself: it is not in your notes and it is not in the
-action line, only its length is. If the task needs that value again, read it back off the page
-(what the field shows) or ask the user for it. Do not try to reconstruct it from context.
+What you will not get back **from the action line** is the value itself — only its length is. If
+the task needs that value again, read it back off the page (what the field shows) or ask the
+user for it. Do not try to reconstruct it from context.
 
 """
 

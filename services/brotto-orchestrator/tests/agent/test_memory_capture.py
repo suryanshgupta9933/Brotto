@@ -466,10 +466,24 @@ def test_a_short_secret_typed_into_a_secret_field_is_substituted():
     """`_redact_if_secret` returning True is authoritative — the field *is*
     secret. The old `len(v) >= 4` guard was a heuristic layered on that, and a
     3-character password walked straight through it into the next prompt."""
-    out = _narrate("Signed in with pw123 after the code came back.",
+    out = _narrate("Signed in with pw1 after the code came back.",
                    ["pw1"])
     assert "pw1" not in out
     assert WITHHELD in out
+
+
+def test_a_value_does_not_eat_the_longer_word_it_sits_inside():
+    """The substitution is whole-token.
+
+    A bare replace ate ordinary words: "Age" inside "Agent" came out as
+    "[withheld from the record]nt", and the model could not read its own
+    sentence. So a value that is a prefix of a longer word is left alone —
+    the value is still withheld wherever it stands on its own.
+    """
+    out = _narrate("Signed in with pw123 after the code came back.",
+                   ["pw1"])
+    assert "pw123" in out
+    assert WITHHELD not in out
 
 
 def test_narration_cannot_close_its_own_fence():

@@ -23,14 +23,17 @@ model-facing half; the privacy half is pinned by
 `test_harness_audit.py`.
 
 One known gap, NOT closed here and NOT introduced here: the audit's record
-of the model's own THOUGHT for the step that typed the value. The thought is
-recorded before the step's actions are classified, so a thought that names
-the value it is about to type reaches the document in the clear (harness.py,
-the `run_secrets` comment says so). Closing it means classifying the batch
-before the approval gates, which reads the DOM before the user has had time
-to move the page — a worse direction for a path that fails closed. The
-narration, the action args and the trace are all closed, and the step's
-value never reaches them.
+of the model's own THOUGHT for the step that typed a CREDENTIAL. The thought
+is recorded before the step's actions are classified, so a thought that names
+the credential it is about to type reaches the document in the clear
+(harness.py, the `run_secrets` comment says so). Closing it means classifying
+the batch before the approval gates, which reads the DOM before the user has
+had time to move the page — a worse direction for a path that fails closed.
+The action args and the trace are closed for every typed value, and the
+narration is closed for a value that was positively identified as a
+credential. A value that merely could not be CLASSIFIED is ordinary data —
+the model's own words about it are its own — and the action args still
+withhold it.
 
 No live model, no key, no network.
 """
@@ -143,12 +146,18 @@ async def test_the_narration_the_model_reads_does_not_claim_a_secret_field(monke
     "[typed into a secret field]" is a claim about the FIELD, and it was read
     as a claim about the INPUT: the agent decided the system had swallowed
     the text and went looking for a way around it.
+
+    The value itself stays in the narration, because a cell that could not be
+    told apart from a password box is not the same as a cell BEING one — a
+    cell reference is ordinary data, and the model's own words about it are
+    its own (PRIVACY.md: the model's prose survives in full, and only
+    credential-shaped fields are masked). The action line still withholds the
+    value; that is the per-action `redact` flag.
     """
     summary, _doc, _dispatched = await _run_step(monkeypatch)
 
-    assert WITHHELD in summary.extracted
     assert "[typed into a secret field]" not in summary.extracted
-    assert _VALUE not in summary.extracted
+    assert _VALUE in summary.extracted
 
 
 @pytest.mark.asyncio
