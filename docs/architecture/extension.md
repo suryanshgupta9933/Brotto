@@ -893,21 +893,41 @@ failure this codebase refuses elsewhere.
 
 So the permission is the *application*, and the application is named in
 `GRID_ADAPTERS` (`observation/pointer.ts`). One entry today: `app:
-"google-sheets"`, `origin: "https://docs.google.com"`, `scopeId:
-"waffle-rich-text-editor"`, `className: "cell-input"`. All three parts must
-match, and the focused node must be a contenteditable — a plain `div` that
-happens to sit in the same container is not the editor.
+"google-sheets"`, `origin: "https://docs.google.com"`, `pathPrefix:
+"/spreadsheets/"`, `scopeId: "waffle-rich-text-editor"`, `className:
+"cell-input"`. All of those must match, and the focused node must be a
+contenteditable — a plain `div` that happens to sit in the same container is
+not the editor.
 
-**The origin is the load-bearing half.** It is read in the isolated world,
-from the document itself, and a page cannot forge it: only a navigation
-changes it, and a page that navigates away from `docs.google.com` has no
-adapter. The id and the class are page-written strings, so they are consulted
-*only after* the origin has matched — on their own they prove nothing, and a
-page that writes `id="waffle-rich-text-editor"` onto its own hidden input
-buys nothing while it is on its own origin. What keeps a Google *Doc* from
-qualifying is Google's own paste sanitizer, not anything here. **Adding an app
-is one entry**, so the list grows one application at a time as real grids are
-met, rather than by a rule that admits all of them at once.
+**The same entry now answers two questions, and the id/class half belongs to
+only one of them.** `gridAdapter(sig)` asks *is this focus the grid's own cell
+editor*, and needs the origin, the path prefix, the scope id and the class name
+plus the contenteditable check. `gridApp(origin, pathname)` asks *is this
+document one whose cells must be typed*, and uses the **origin and the path
+prefix only** — the scope id and class name are not consulted there, because the
+delivery decision is about the application, not about which element is focused.
+Reading one adapter as the other's rule is how the keystroke path came to
+depend on the focus at all.
+
+**Origin and path prefix are the load-bearing halves, and the path prefix is
+there because an origin is a host, not an application.** Both are read in the
+isolated world, from the document itself, and a page cannot forge either: only
+a navigation changes them. Matching the origin alone was once the whole gate,
+and it granted the keystroke path to **Drive's rename field and the Docs
+comment box**, because `docs.google.com` serves Sheets, Docs and Drive alike —
+so the entry's own claim, that the grant is *to an application, not a shape*,
+was false without the second half. `IDENTITY_PROBE` therefore reads
+`location.pathname` alongside `location.origin`, in the same unforgeable world
+and on the same answer, so `gridAdapter`, `gridApp` and both in-page probes all
+require both. The id and the class are page-written strings, so they are
+consulted *only after* origin and path have matched — on their own they prove
+nothing, and a page that writes `id="waffle-rich-text-editor"` onto its own
+hidden input buys nothing while it is on its own origin. **Adding an app is one
+entry**, so the list grows one application at a time as real grids are met,
+rather than by a rule that admits all of them at once. The origin-level
+ambiguity refusal is kept and means what it says: **one entry per origin** — two
+adapters sharing an origin are refused rather than guessed between, so adding a
+second Google application is a decision about the origin, not a free entry.
 
 **A canvas press that focuses an editable on an unrecognised page is refused,
 loudly.** `grid-editor-unrecognised` — "a canvas press focused an editable,
@@ -939,13 +959,87 @@ been refused as `different-element` before the text was ever dispatched. The
 editor is admitted because it is under the canvas that took the press, not
 because it is somewhere else.
 
-**A grid cell is typed, not inserted.** `Input.insertText` fires no keydown,
-and a grid starts editing on the *keystroke* — so an insertion never reaches
-the cell, and the cell shows a caret with nothing in it. On the grid path the
-text goes out as one `Input.dispatchKeyEvent` pair per character (a newline is
-a Return key), never with a modifier, so no chord and no OS question. The
-ordinary DOM path keeps its single `Input.insertText` call. The run is bounded
-at 1000 characters, and over that it refuses with `canvas-text-too-long`.
+**A grid cell is typed, not inserted, whichever field holds the focus.**
+`Input.insertText` fires no keydown, and a grid starts editing on the
+*keystroke* — so an insertion never reaches the cell, and the cell shows a
+caret with nothing in it. On the grid path the text goes out as one
+`Input.dispatchKeyEvent` pair per character (a newline is a Return key), never
+with a modifier, so no chord and no OS question. The ordinary DOM path keeps its
+single `Input.insertText` call. The run is bounded at 1000 characters, and over
+that it refuses with `canvas-text-too-long`.
+
+**This rule was already written here, and it was applied too narrowly.** A
+production Sheets run typed into the **formula bar** and no cell was written,
+because the route was keyed on the *focus* being the grid's own cell editor —
+and the formula bar is a different element, so it took the ordinary
+`Input.insertText` path while sitting in a document whose cells are typed, never
+inserted. **The press was not the problem; the delivery mechanism was.** So the
+grant is now read at a second, wider question: `bindFocus` returns `grid`, the
+**application the document is**, from the same `GRID_ADAPTERS` entry and the
+same unforgeable `location.origin` **and `location.pathname`** the focus grant
+already reads — so the keystroke path is bought with the application, never with
+the ref, the element, or a shape a page could imitate. `gridApp(origin,
+pathname)` is that lookup; it is a field on an answer `IDENTITY_PROBE` already
+produced, not a second round trip.
+
+Two answers, then, and conflating them was the bug: `grid` is *what the page
+is* and decides **delivery**; `gridEditor` is *what the focus is* and decides
+everything the binding is allowed to do.
+
+**The focus may only be taken from the grid's own cell editor.** The
+per-character re-assertion — which exists because a key event goes to whatever
+holds focus when the browser processes it — fires only when the focused element
+**is** the cell editor. On a grid page there are other text fields the model is
+legitimately typing into: the formula bar, and the address box where a cell
+reference is written and Enter pressed to jump. Stealing either would move the
+keystrokes off the field the model is on, and on the name box it would type a
+reference into a cell instead of jumping. So when the focus is not the cell
+editor, `beforeChar` is a no-op and the DOM clear is skipped for the same
+reason the grid path skips it — the grid replaces a selected cell's content on
+the first keystroke, and a selection inside a field the user is on is not ours
+to take.
+
+**One committing key is what the typing cannot cover.** A grid replaces its own
+editor when it re-renders the cell being edited, and the replacement can take
+the focus with it. The Enter that commits is a *separate action*, dispatched
+later, with no keystroke loop around it to repair the binding — so the Enter
+went to the document and the typed text was never committed. `gridWrite`
+(`background.ts`) is the one-shot record that closes it: set by the `type_at`
+grid path **from what it did**, not from what it saw the page doing, and it
+records `cellEditor: true` only when the grid's own editor took the text.
+
+**The record has explicit ending paths, not only consumption.** A one-shot
+value that clears only when it is read outlives every event that should have
+ended it. It is ended by **task end (`endTask()`)**, by **any non-key action**,
+by **tab removal**, and by **a read whose `tabId` does not match** — so it cannot
+outlive the run, the frame, or the tab that set it. Consumption is narrowed to
+**a committing key**: a stray arrow key no longer spends the record before the
+real Enter arrives.
+
+The
+`key` branch reads it once and re-asserts the focus **only when that record is
+ours *and* `focusState` says nothing that can receive text holds the focus**. A
+name box or a formula bar holding the focus is never taken, so a name-box jump
+proceeds untouched. It is deliberately not a general "the last thing typed was a
+grid": that would let a key dispatch reach into a field the model is on.
+
+**`clear` is honoured on the grid path unless the focus is the grid's own cell
+editor — so the rule is symmetric.** The focus may be taken from, and the field
+replaced, **only when the focus *is* the cell editor**; everywhere else on a grid
+page the ordinary clear runs. Skipping the clear merely because the document is
+a grid was too wide: a formula-bar or name-box write took the keystroke path and
+silently stopped clearing, so typing `42` into a cell holding `17` produced
+`1742`. The cell editor keeps no-clear, because there the first keystroke
+genuinely replaces what the grid has selected — that is the one field where the
+clear is the grid's job and not ours.
+
+**The refusal path is what the failure was missing.** `grid-text-not-delivered`
+("the grid's editor did not change — the text did not land in the cell") and
+`grid-text-misdelivered` (a suspect drift says the keystroke went somewhere
+else) are written up below, and they are the same closed vocabulary. Before
+this, nothing compared the tree's cell value against what was written, so a run
+could claim completed with an unwritten cell — **the refusal, not the report,
+is where an unverified write now surfaces.**
 
 **The keystrokes are bound to the grid's editor, not to the ambient focus.** A
 key event is not bound to a node — it goes to whatever holds focus when the
@@ -959,8 +1053,9 @@ text anyway.
 **A reading is not a binding, so the focus is put back rather than read.**
 `GRID_FOCUS_PROBE` (`pointer.ts:543`) runs in the isolated world and does
 three things in order. First, it looks the adapter up **by the document's own
-origin** — a document that navigated away mid-typing has no adapter and is
-refused `grid-editor-unrecognised`, and no page can forge its way into one.
+origin and path** — a document that navigated away mid-typing, or to another
+application on the same host, has no adapter and is refused
+`grid-editor-unrecognised`, and no page can forge its way into one.
 Second, if the grid's editor is already the active element, it touches nothing
 at all. Third, otherwise the focus drifted, so the editor is found **by its
 role** and given the focus with `editor.focus({ preventScroll: true })`, then

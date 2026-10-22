@@ -444,6 +444,12 @@ const IDENTITY_PROBE = `function (focus) {
   // neither the getter nor the value.
   var origin = "";
   try { origin = String(location.origin || ""); } catch (err) { origin = ""; }
+  // The document's *path*, for the same reason: one origin serves several
+  // applications — Google Docs, Drive and Sheets all live on docs.google.com —
+  // and the path is what tells them apart. The origin alone is not the
+  // application.
+  var path = "";
+  try { path = String(location.pathname || ""); } catch (err) { path = ""; }
   // The focused node's *scope* — the nearest ancestor-or-self carrying an id —
   // and its own class list. These are page-written strings, so they are read
   // only after the origin has already matched: on its own they prove nothing.
@@ -456,24 +462,24 @@ const IDENTITY_PROBE = `function (focus) {
       focusClass = (focus.className && typeof focus.className === "string") ? String(focus.className) : "";
     }
   } catch (err) { focusScope = ""; focusClass = ""; }
-  if (!el || el.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
-  if (!focus || focus.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
+  if (!el || el.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable, origin: origin, path: path, focusScope: focusScope, focusClass: focusClass };
+  if (!focus || focus.nodeType !== 1) return { ok: false, reason: "unreadable", tag: "", focusTag: focusTag, focusEditable: focusEditable, origin: origin, path: path, focusScope: focusScope, focusClass: focusClass };
   var tag = el.tagName ? String(el.tagName).toUpperCase() : "";
   // The ordinary case: the same node, or focus landing on a descendant of what
   // was pressed — a <label>, a <div> wrapper, a <span> inside a button. A hit on
   // a *descendant* is a hit on the element; an ancestor is not admitted.
-  if (el === focus) return { ok: true, reason: "same-node", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
-  if (el.contains && el.contains(focus)) return { ok: true, reason: "focus-inside-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
+  if (el === focus) return { ok: true, reason: "same-node", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, path: path, focusScope: focusScope, focusClass: focusClass };
+  if (el.contains && el.contains(focus)) return { ok: true, reason: "focus-inside-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, path: path, focusScope: focusScope, focusClass: focusClass };
   // The shadow direction: the press resolved to a node inside an open shadow
   // root — elementFromPoint does not pierce one, so it resolved to the host —
   // and the browser retargeted focus to that same host. So the focus is one of
   // the *pressed node's* shadow hosts, which ordinary contains() cannot see.
   var sroot = el.getRootNode ? el.getRootNode() : null;
   while (sroot && sroot.host) {
-    if (sroot.host === focus) return { ok: true, reason: "focus-retargeted-to-host", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
+    if (sroot.host === focus) return { ok: true, reason: "focus-retargeted-to-host", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, path: path, focusScope: focusScope, focusClass: focusClass };
     sroot = sroot.host.getRootNode ? sroot.host.getRootNode() : null;
   }
-  return { ok: false, reason: "not-the-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, focusScope: focusScope, focusClass: focusClass };
+  return { ok: false, reason: "not-the-target", tag: tag, focusTag: focusTag, focusEditable: focusEditable, origin: origin, path: path, focusScope: focusScope, focusClass: focusClass };
 }`;
 
 /**
@@ -485,12 +491,19 @@ const IDENTITY_PROBE = `function (focus) {
  * hidden field admitted can do exactly what Sheets does, and the old wall
  * admitted it. So the geometry is not the permission; **the app is.**
  *
- * Each entry names one application, in three parts:
+ * Each entry names one application, in four parts:
  *
  *   - `origin` — the address the application is served from. This is the only
  *     part a page cannot forge: it is the document's own origin, read by the
  *     engine, and only a navigation changes it. A hostile page cannot make
  *     itself `docs.google.com`.
+ *   - `pathPrefix` — the path the application is served under. **The origin
+ *     is not the application**: one origin serves several of them — Google
+ *     Docs, Drive and Sheets all live on `docs.google.com` — so a grant that
+ *     stopped at the origin admitted *every text field on the whole site*,
+ *     including the Docs comment box and the Drive rename field. The path is
+ *     what says *which* application the document is, and it is read from the
+ *     same unforgeable place as the origin.
  *   - `scopeId` — the id the application's editor container carries.
  *   - `className` — the class the application's own editor element carries.
  *
@@ -498,6 +511,11 @@ const IDENTITY_PROBE = `function (focus) {
  * after the origin has matched: on their own they prove nothing, and a page
  * that wrote `id="waffle-rich-text-editor"` onto its own hidden input buys
  * nothing while it is on its own origin.
+ *
+ * **One entry per origin.** Two adapters for one origin would make the choice
+ * ambiguous, and ambiguity is refused rather than guessed — so a second
+ * application on the same origin cannot be added without a decision about
+ * which one wins.
  *
  * **Adding an app is one entry.** The shape of the exemption is deliberately
  * narrow so that the list can grow one application at a time, as real grids
@@ -507,6 +525,7 @@ export const GRID_ADAPTERS = [
   {
     app: "google-sheets",
     origin: "https://docs.google.com",
+    pathPrefix: "/spreadsheets/",
     scopeId: "waffle-rich-text-editor",
     className: "cell-input",
   },
@@ -515,20 +534,53 @@ export const GRID_ADAPTERS = [
 /**
  * The adapter that recognises this focus, or null.
  *
- * All three parts must match: the origin, the scope id and the editor class.
- * The editor must also be a contenteditable — a grid's editor is an editable
- * surface, and a plain div that happens to sit in the same container is not it.
+ * All four parts must match: the origin, the path, the scope id and the editor
+ * class. The editor must also be a contenteditable — a grid's editor is an
+ * editable surface, and a plain div that happens to sit in the same container
+ * is not it.
  */
 export function gridAdapter(sig) {
   if (!sig || sig.focusEditable !== true) return null;
   const classes = String(sig.focusClass || "").split(/\s+/).filter(Boolean);
   for (const a of GRID_ADAPTERS) {
     if (a.origin !== sig.origin) continue;
+    if (!pathMatches(a, sig.path)) continue;
     if (a.scopeId !== sig.focusScope) continue;
     if (!classes.includes(a.className)) continue;
     return a;
   }
   return null;
+}
+
+/** Does this document's path belong to the application this adapter names?
+ *  No type annotations: the Node tests slice this out of the source and run
+ *  it as plain JavaScript. */
+function pathMatches(adapter, path) {
+  if (!adapter.pathPrefix) return true;
+  return typeof path === "string" && path.startsWith(adapter.pathPrefix);
+}
+
+/**
+ * The grid application this *document* is, or null.
+ *
+ * Where `gridAdapter` answers "is this focus the grid's own editor", this
+ * answers the narrower question the delivery mechanism hangs on: is this
+ * document one whose cells must be **typed** rather than inserted? Same grant —
+ * `GRID_ADAPTERS`, the same unforgeable origin *and path* — so a hostile page
+ * cannot buy the keystroke path with a shape, and a page that merely happens
+ * to be served from the same origin cannot either. Two adapters for one origin
+ * would make the choice ambiguous and is refused rather than guessed.
+ *
+ * The origin and the path are two of the values `IDENTITY_PROBE` already reads
+ * in the isolated world, so asking here is a field on an answer already in
+ * hand, not a second round trip.
+ */
+export function gridApp(origin: unknown, path: unknown) {
+  if (typeof origin !== "string" || !origin) return null;
+  const hits = GRID_ADAPTERS.filter((a) => a.origin === origin);
+  if (hits.length !== 1) return null;
+  const app = hits[0];
+  return pathMatches(app, path) ? app : null;
 }
 
 /**
@@ -591,6 +643,12 @@ const GRID_FOCUS_PROBE = `function (adapters) {
   }
   var origin = "";
   try { origin = String(location.origin || ""); } catch (err) { origin = ""; }
+  var path = "";
+  try { path = String(location.pathname || ""); } catch (err) { path = ""; }
+  // **The origin is not the application** — one origin serves several — so
+  // the path is consulted too, and the match is exactly the one gridApp
+  // makes outside the page: one adapter for this origin, and the path under
+  // that adapter's own prefix.
   var adapter = null, seen = 0;
   for (var i = 0; i < adapters.length; i++) {
     if (String(adapters[i].origin) === origin) { adapter = adapters[i]; seen++; }
@@ -598,6 +656,8 @@ const GRID_FOCUS_PROBE = `function (adapters) {
   // No adapter for this origin, or an ambiguous one: this is not the grid the
   // wall was written for, and a page that navigated here gets nothing.
   if (seen !== 1 || !adapter) return { ok: false, reason: "grid-editor-unrecognised" };
+  var prefix = adapter.pathPrefix ? String(adapter.pathPrefix) : "";
+  if (prefix && path.indexOf(prefix) !== 0) return { ok: false, reason: "grid-editor-unrecognised" };
   var scopeId = String(adapter.scopeId), className = String(adapter.className);
   // What held the focus *before* this probe. The keystroke that preceded it
   // went wherever this was.
@@ -695,11 +755,15 @@ export async function reassertGridFocus(tabId: number): Promise<{ ok: boolean; r
 const GRID_DELIVERY_PROBE = `function (adapters, text) {
   var origin = "";
   try { origin = String(location.origin || ""); } catch (err) { origin = ""; }
+  var path = "";
+  try { path = String(location.pathname || ""); } catch (err) { path = ""; }
   var adapter = null, seen = 0;
   for (var i = 0; i < adapters.length; i++) {
     if (String(adapters[i].origin) === origin) { adapter = adapters[i]; seen++; }
   }
   if (seen !== 1 || !adapter) return { ok: false, reason: "grid-editor-unrecognised" };
+  var prefix = adapter.pathPrefix ? String(adapter.pathPrefix) : "";
+  if (prefix && path.indexOf(prefix) !== 0) return { ok: false, reason: "grid-editor-unrecognised" };
   var needle = String(text == null ? "" : text);
   if (!needle) return { ok: true, state: "unknown" };
   function holds(el) {
@@ -1105,7 +1169,7 @@ export async function editorText(tabId: number, backendNodeId: number): Promise<
  * The exemption is reported, never silent: it returns
  * `ok: true, reason: "canvas-editor-exempt"`, and the caller logs it.
  */
-export async function bindFocus(tabId, backendNodeId, x, y) {
+export async function bindFocus(tabId, backendNodeId, x, y): Promise<any> {
   if (typeof backendNodeId !== "number") {
     // Nothing to bind a *destructive* clear to. `verifyTarget` fails open on an
     // absent id because an older relay has no gate to run; the clear has no such
@@ -1143,7 +1207,27 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
     return { ok: false, reason: "focus-identify-failed" };
   }
   if (!v || typeof v !== "object") return { ok: false, reason: "focus-identify-failed" };
-  if (v.ok === true) return { ok: true, reason: String(v.reason ?? "identity-verified") };
+  // **What the focus is bound to, and what the page is.** Both are read from
+  // the probe already made — no second evaluate. `focusId` is the focused
+  // node, so a caller can read it before and after typing and compare on the
+  // same node. `grid` is the *application* the document is, which is what
+  // decides delivery: a cell is typed, never inserted. `gridEditor` is the
+  // narrower question — is this focus the grid's own cell editor — and it is
+  // what makes a focus re-assertion safe: only there may the focus be taken
+  // back, so a name box the model is typing a reference into is never stolen.
+  //
+  // **The application, not the origin.** `gridApp` matches the origin *and*
+  // the path, because one origin serves several Google applications: a Docs
+  // comment box and a Drive rename field are on the same origin as a sheet,
+  // and they are not a grid. `gridEditor` is that application's own editor,
+  // so it cannot be true while `grid` is false.
+  const app = gridApp(v.origin, v.path);
+  const focusShape = {
+    focusId: focus.backendNodeId,
+    grid: app !== null,
+    gridEditor: app !== null && gridAdapter(v) === app,
+  };
+  if (v.ok === true) return { ok: true, reason: String(v.reason ?? "identity-verified"), ...focusShape };
 
   // Wall 3. Only reached when identity AND containment both failed, so the
   // exemption is the narrowest thing in this function.
@@ -1153,7 +1237,7 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
     if (inner && outer &&
         inner.minX >= outer.minX && inner.maxX <= outer.maxX &&
         inner.minY >= outer.minY && inner.maxY <= outer.maxY) {
-      return { ok: true, reason: "canvas-editor-exempt" };
+      return { ok: true, reason: "canvas-editor-exempt", ...focusShape };
     }
   }
 
@@ -1192,7 +1276,10 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
   // that cannot be read proves nothing, so (b) fails closed and the press is
   // refused rather than typed into.
   if (v.tag === "CANVAS" && (v.focusEditable === true || TEXT_INPUT_TAGS.has(focus.nodeName))) {
-    const adapter = gridAdapter(v);
+    // The recognised application, and the focus being *that* application's
+    // own editor. An ambiguous origin has no adapter, so it is refused here
+    // too rather than resolved by a guess.
+    const adapter = app && gridAdapter(v) === app ? app : null;
     if (!adapter) {
       // A canvas press that focuses something editable, on a page that is not
       // one of the recognised grids. This is the hostile shape and it is
@@ -1220,7 +1307,7 @@ export async function bindFocus(tabId, backendNodeId, x, y) {
       if (zeroArea || overPoint || offscreen) {
         // The focused node's id, so the caller can re-read the focus before it
         // types and refuse if the page moved it in the meantime.
-        return { ok: true, reason: "canvas-grid-editor", focusId: focus.backendNodeId };
+        return { ok: true, reason: "canvas-grid-editor", ...focusShape };
       }
     }
   }

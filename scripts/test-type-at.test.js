@@ -165,9 +165,12 @@ const GRID_ADAPTERS_SRC = ptrSrc.slice(
 ).replace("export const", "const");
 
 /** The identity the recognised Sheets grid presents: the app's own origin, the
- *  app's own editor container id, and the app's own editor class. */
+ *  path the app is served under, the app's own editor container id, and the
+ *  app's own editor class. The path matters as much as the origin: one origin
+ *  serves Google Docs, Drive and Sheets alike. */
 const SHEETS = {
   origin: "https://docs.google.com",
+  path: "/spreadsheets/d/1/edit",
   focusScope: "waffle-rich-text-editor",
   focusClass: "cell-input",
 };
@@ -182,7 +185,7 @@ const SHEETS = {
  */
 function run(action, opts = {}) {
   const sent = [];
-  const state = { clears: 0 };
+  const state = { clears: 0, focusClears: [] };
   // The grid path reads the editor's content twice — before and after the
   // keystrokes — and the default models a grid that took them: empty, then
   // not.
@@ -202,7 +205,13 @@ function run(action, opts = {}) {
     // assertion that says so lives with the cursor.
     clearCursor: async () => { state.clears++; },
     drawCursor: async () => ({ drawn: true, reason: "" }),
-    focusState: opts.focus ?? (async () => ({ ok: true, reason: "" })),
+    // The focus probe, with the *clear* argument recorded: whether the page
+    // was asked to select-all is the whole of the clear's behaviour, and a
+    // clear that is silently dropped is an absence.
+    focusState: opts.focus ?? (async (_tabId, doClear) => {
+      state.focusClears.push(doClear === true);
+      return { ok: true, reason: "" };
+    }),
     // The focus re-read on the grid path: the same node, unless a test says
     // otherwise.
     focusNode: opts.focusNode ?? (async () => ({ ok: true, backendNodeId: 42 })),
@@ -232,6 +241,7 @@ function run(action, opts = {}) {
       ${canvasHelper}
       ${extractFn(bgSrc, "pressAt")}
       let refusal = null;
+      let gridWrite = null;
       ${extractBranch('t === "type_at"')}
       return refusal ?? { ok: true, reason: "" };
     })`,
@@ -240,6 +250,18 @@ function run(action, opts = {}) {
 }
 
 const AT = { type: "type_at", x: 100, y: 200, backendNodeId: 42, text: "hello" };
+
+/** The focus a grid's own cell editor takes: recognised origin, and the app's
+ *  editor, so both the keystroke delivery and the focus re-assert are on. */
+const GRID_BIND = async () => ({
+  ok: true, reason: "canvas-grid-editor", focusId: 42, grid: true, gridEditor: true,
+});
+
+/** The focus on a grid page that is NOT the cell editor — the formula bar, or
+ *  the name box. Keystrokes, yes; the focus is never taken from it. */
+const GRID_FIELD_BIND = async () => ({
+  ok: true, reason: "same-node", focusId: 42, grid: true, gridEditor: false,
+});
 
 // ── the happy path ──────────────────────────────────────────────────────────
 
@@ -422,7 +444,7 @@ test("a canvas grid is typed, one keystroke per character — an insertion never
   // keydown, so the cell would show a caret with nothing in it. That is the
   // reported failure — the cell was selected, and the text never arrived.
   const { result, sent } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
   });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 0,
@@ -437,7 +459,7 @@ test("a canvas grid is typed, one keystroke per character — an insertion never
 
 test("a newline on the grid path is a Return key, not a newline character", async () => {
   const { sent } = await run({ ...AT, text: "a\nb" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
   });
   const downs = sent.filter((c) => c.method === "Input.dispatchKeyEvent" && c.params.type !== "keyUp");
   assert.deepEqual(downs.map((c) => c.params.key), ["a", "Enter", "b"]);
@@ -445,7 +467,7 @@ test("a newline on the grid path is a Return key, not a newline character", asyn
 
 test("text longer than the canvas bound is refused, and nothing is typed", async () => {
   const { result, sent } = await run({ ...AT, text: "x".repeat(MAX_CANVAS_CHARS + 1) }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "canvas-text-too-long");
@@ -467,7 +489,7 @@ test("a focus steal that cannot be corrected refuses, and types nothing", async 
   // the text is not typed at all — a field nobody verified must not receive
   // it, and the refusal says which field it was.
   const { result, sent } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     reassert: async () => ({ ok: false, reason: "focus-changed" }),
   });
   assert.equal(result.ok, false);
@@ -482,7 +504,7 @@ test("a grid whose editor did not change reports the text as not delivered", asy
   // Reported, not swallowed: the old path said "ok" and the model believed it.
   let reads = 0;
   const { result, sent } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     editorText: async () => { reads++; return { ok: true, text: "" }; },
   });
   assert.equal(reads, 2, "the editor is read before and after the keystrokes");
@@ -495,7 +517,7 @@ test("a grid whose editor did not change reports the text as not delivered", asy
 test("a grid whose editor changed reports success", async () => {
   let reads = 0;
   const { result } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     editorText: async () => ({ ok: true, text: reads++ === 0 ? "" : "ab" }),
   });
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -505,7 +527,7 @@ test("an editor that cannot be read is not a failure — it is not measured", as
   // `ok: false` from the read means the node is gone or the page went away. A
   // check that cannot read must not report a delivery it did not observe.
   const { result } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     editorText: async () => ({ ok: false, text: "" }),
   });
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -516,7 +538,7 @@ test("a grid that replaced its editor mid-typing is not a failed delivery", asyn
   // cell. The old node's text is not evidence about the new one, so the two
   // reads are not comparable and nothing is claimed either way.
   const { result } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     // The only focus read left on this path is the after-read, and it names
     // the replacement editor — so the two reads are not comparable.
     focusNode: async () => ({ ok: true, backendNodeId: 99 }),
@@ -529,7 +551,7 @@ test("text that is already in the cell is not a failed delivery", async () => {
   // The cell already said "ab" and the agent typed "ab": the editor did not
   // change, and nothing is wrong. The check must not call that a failure.
   const { result } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     editorText: async () => ({ ok: true, text: "ab" }),
   });
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -549,7 +571,7 @@ test("a keystroke that went to another editor is a misdelivery, not a success", 
   // editor did not change, so the text did not land in the cell either.
   let calls = 0;
   const { result } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     reassert: async () => { calls++; return { ok: true, reason: "", drift: calls === 2 ? "suspect" : "benign" }; },
     editorText: async () => ({ ok: true, text: "" }),
   });
@@ -564,7 +586,7 @@ test("a focus move that is not to a text field is not a misdelivery", async () =
   // misdelivery — the plain "did not land" reason is the honest one.
   let calls = 0;
   const { result } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     reassert: async () => { calls++; return { ok: true, reason: "", drift: "benign" }; },
     editorText: async () => ({ ok: true, text: "" }),
   });
@@ -579,7 +601,7 @@ test("the editor replaced mid-typing, with a keystroke that went elsewhere, is a
   // somewhere the press was never aimed at.
   let calls = 0;
   const { result } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     reassert: async () => { calls++; return { ok: true, reason: "", drift: calls === 2 ? "suspect" : "benign" }; },
     focusNode: async () => ({ ok: true, backendNodeId: 99 }),
     editorText: async () => ({ ok: true, text: "" }),
@@ -594,7 +616,7 @@ test("the editor replaced mid-typing, and the grid has the text, is a success", 
   // holds it, so the re-render is the grid's business and nothing is wrong.
   let calls = 0;
   const { result } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     reassert: async () => { calls++; return { ok: true, reason: "", drift: calls === 2 ? "suspect" : "benign" }; },
     focusNode: async () => ({ ok: true, backendNodeId: 99 }),
     editorText: async () => ({ ok: true, text: "" }),
@@ -608,7 +630,7 @@ test("the editor replaced mid-typing, with nothing wrong, is still a success", a
   // behaviour — nothing measured, nothing claimed — is kept.
   let asked = 0;
   const { result } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     focusNode: async () => ({ ok: true, backendNodeId: 99 }),
     editorText: async () => ({ ok: true, text: "" }),
     delivery: async () => { asked++; return { ok: true, state: "unknown" }; },
@@ -637,7 +659,7 @@ test("the binding is re-made before every keystroke, not once per string", async
   // focus after the first character would receive the rest of it.
   let calls = 0;
   const { result } = await run({ ...AT, text: "abc" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     reassert: async () => { calls++; return { ok: true, reason: "" }; },
   });
   assert.equal(calls, 3, "one binding per character");
@@ -671,7 +693,7 @@ test("a focus steal that is corrected does not stop the text", async () => {
   // focus, the extension took it back, and the text still lands in the grid.
   let calls = 0;
   const { result, sent } = await run({ ...AT, text: "ab" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     reassert: async () => { calls++; return { ok: true, reason: "" }; },
   });
   assert.equal(calls, 2);
@@ -685,7 +707,7 @@ test("a focus steal in the middle of the string stops the typing where it happen
   // typed — and the refusal is reported, not swallowed.
   let calls = 0;
   const { result, sent } = await run({ ...AT, text: "abc" }, {
-    bind: async () => ({ ok: true, reason: "canvas-grid-editor", focusId: 42 }),
+    bind: GRID_BIND,
     reassert: async () => {
       calls++;
       return calls === 1 ? { ok: true, reason: "" } : { ok: false, reason: "focus-changed" };
@@ -700,7 +722,7 @@ test("a focus steal in the middle of the string stops the typing where it happen
 // ── the probe that holds the focus ───────────────────────────────────────────
 
 /** A DOM small enough to run the shipped grid focus probe against. */
-function gridDom({ origin = SHEETS.origin, withEditor = true } = {}) {
+function gridDom({ origin = SHEETS.origin, path = SHEETS.path, withEditor = true } = {}) {
   const state = { focusCalls: [], active: null };
   const el = (o) => ({
     nodeType: 1,
@@ -726,7 +748,7 @@ function gridDom({ origin = SHEETS.origin, withEditor = true } = {}) {
   const otherField = el({ className: "other-field", tag: "INPUT", editable: false });
   // The engine's "nobody holds the focus".
   const body = el({ className: "body", tag: "BODY", editable: false });
-  return { state, document: doc, location: { origin }, container, editor, stranger, otherField, body };
+  return { state, document: doc, location: { origin, pathname: path }, container, editor, stranger, otherField, body };
 }
 
 const ADAPTERS = vm.runInNewContext(`${GRID_ADAPTERS_SRC}; GRID_ADAPTERS`);
@@ -813,7 +835,7 @@ test("a focus that was on the body, or on the grid's own surface, is benign", ()
 });
 
 /** A DOM small enough to run the shipped delivery probe against. */
-function deliveryDom({ origin = SHEETS.origin, scopeText = "", foreign = [] } = {}) {
+function deliveryDom({ origin = SHEETS.origin, path = SHEETS.path, scopeText = "", foreign = [] } = {}) {
   const el = (o) => ({
     nodeType: 1,
     tagName: o.tag || "DIV",
@@ -829,7 +851,7 @@ function deliveryDom({ origin = SHEETS.origin, scopeText = "", foreign = [] } = 
     getElementById: (id) => (id === SHEETS.focusScope ? scope : null),
     querySelectorAll: () => foreign,
   };
-  return { document: doc, location: { origin }, scope };
+  return { document: doc, location: { origin, pathname: path }, scope };
 }
 
 function runDeliveryProbe(dom, text) {
@@ -1212,7 +1234,7 @@ function engine(answers = {}) {
  *  around it — a test that stubs them away would not be testing the walls. */
 function loadBindFocus(fx) {
   const shipped = extractFn(ptrSrc, "bindFocus").replace(/^export\s+/, "");
-  const body = ["focusNode", "isolatedWorld", "withWorld", "topFrameId", "box", "liveViewport", "gridAdapter"]
+  const body = ["focusNode", "isolatedWorld", "withWorld", "topFrameId", "box", "liveViewport", "gridAdapter", "gridApp", "pathMatches"]
     .map((n) => extractFn(ptrSrc, n).replace(/^export\s+/, ""))
     .join("\n");
   const prelude = 'const IDLE_WORLD = "brotto-idle";\nconst worldIds = new Map();\n' +
@@ -1424,11 +1446,11 @@ test("an unrelated focused node refuses, with the tag of the pressed node for th
 /** The one shape identity cannot serve: a <canvas> grid whose press focuses an
  *  editor that is neither the cell nor inside it. */
 function canvasShape({ tag = "CANVAS", focusTag = "TEXTAREA", focusEditable = false, inner, outer, viewport,
-  origin = "", focusScope = "", focusClass = "" } = {}) {
+  origin = "", path = "", focusScope = "", focusClass = "" } = {}) {
   const answers = focusAnswers({
     "DOM.describeNode": { node: { backendNodeId: 77, nodeName: focusTag } },
     "DOM.resolveNode": { object: { objectId: "obj-1" } },
-    "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag, focusTag, focusEditable, origin, focusScope, focusClass } } },
+    "Runtime.callFunctionOn": { result: { value: { ok: false, reason: "not-the-target", tag, focusTag, focusEditable, origin, path, focusScope, focusClass } } },
     "DOM.getBoxModel": ({ params }) => (params.backendNodeId === 77 ? { model: { quads: [inner] } } : { model: { quads: [outer] } }),
   });
   if (viewport === "throw") answers["Page.getLayoutMetrics"] = () => { throw new Error("no target"); };
@@ -1440,7 +1462,7 @@ const QUAD = (x, y, w, h) => [x, y, x + w, y, x + w, y + h, x, y + h];
 test("a canvas cell whose press focuses an editor inside it is exempt, and says so", async () => {
   const bind = canvasShape({ inner: QUAD(10, 10, 40, 12), outer: QUAD(0, 0, 400, 300) });
   const r = await bind(1, 42);
-  assert.deepEqual(r, { ok: true, reason: "canvas-editor-exempt" },
+  assert.deepEqual(r, { ok: true, reason: "canvas-editor-exempt", focusId: 77, grid: false, gridEditor: false },
     "the exemption is reported, never silently asserted as identity");
 });
 
@@ -1499,7 +1521,7 @@ test("a canvas grid whose editor is parked off-screen is admitted, and says so",
     inner: QUAD(4, -9998, 0, 30), outer: QUAD(0, 142, 1388, 620),
   });
   const r = await bind(1, 42, 300, 200);
-  assert.deepEqual(r, { ok: true, reason: "canvas-grid-editor", focusId: 77 },
+  assert.deepEqual(r, { ok: true, reason: "canvas-grid-editor", focusId: 77, grid: true, gridEditor: true },
     "the grid editor is admitted, and the allowance is reported");
 });
 
@@ -1509,7 +1531,7 @@ test("a canvas grid whose editor is drawn over the clicked cell is admitted", as
     inner: QUAD(280, 190, 100, 24), outer: QUAD(0, 142, 1388, 620),
   });
   assert.deepEqual(await bind(1, 42, 300, 200),
-    { ok: true, reason: "canvas-grid-editor", focusId: 77 });
+    { ok: true, reason: "canvas-grid-editor", focusId: 77, grid: true, gridEditor: true });
 });
 
 // ── the grid wall is granted to an application, not to a shape ───────────────
@@ -1710,4 +1732,154 @@ test("the numeric guard in verifyTarget refuses, and is the only emitter of poin
   // carry one — and it is NOT the same refusal. Collapsing the two is the bug
   // `credentialState`'s three states exist to prevent.
   assert.deepEqual(await verifyTarget(1, undefined, 10, 20), { ok: true, reason: "no-backend-id" });
+});
+
+// ── the grid page: the cell is typed, whichever field holds the focus ─────────
+//
+// The reported loss. The model named the *formula bar* — a contenteditable of
+// its own, in a scope of its own — so the press was ordinary and the write took
+// the ordinary path: one `Input.insertText`, which fires no keydown. The grid's
+// model never heard it, the Enter that followed had nothing to commit, and the
+// run reported itself done. The press was never the problem; the delivery
+// mechanism was.
+
+test("a grid page types as keystrokes even when the focus is the formula bar", async () => {
+  const { result, sent } = await run({ ...AT, text: "name" }, { bind: GRID_FIELD_BIND });
+  assert.equal(result.ok, true, `refused: ${result.reason}`);
+  assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 0,
+    "an insertion fires no keydown, so the cell would show a caret with nothing in it");
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 8,
+    "one keyDown and one keyUp per character");
+  // The press still happens where the model aimed it.
+  assert.equal(sent[0].method, "Input.dispatchMouseEvent");
+  assert.equal(sent[1].params.type, "mouseReleased");
+});
+
+test("the grid page's write that did not land refuses, and is not reported done", async () => {
+  const { result } = await run({ ...AT, text: "name" }, {
+    bind: GRID_FIELD_BIND,
+    editorText: async () => ({ ok: true, text: "" }),   // the editor never changed
+    focusNode: async () => ({ ok: true, backendNodeId: 42 }),
+  });
+  assert.deepEqual(result, { ok: false, reason: "grid-text-not-delivered" });
+});
+
+test("off a grid, the ordinary path still types by one insertion", async () => {
+  const { result, sent } = await run({ ...AT, text: "hello" });
+  assert.equal(result.ok, true);
+  assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 1,
+    "a README is 1325 characters and one insertion is the whole point");
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 0);
+});
+
+test("the grid page's keystrokes never take the focus from the field being typed into", async () => {
+  // The name box is a real input the model writes a *reference* into and then
+  // jumps on. Re-asserting the grid's cell editor here would type the reference
+  // into a cell instead, and the jump would break.
+  let reasserts = 0;
+  await run({ ...AT, text: "B2" }, {
+    bind: GRID_FIELD_BIND,
+    reassert: async () => { reasserts++; return { ok: true, reason: "" }; },
+  });
+  assert.equal(reasserts, 0, "the focus is the model's to keep; nothing may take it");
+});
+
+test("the grid's own cell editor is re-asserted before every character", async () => {
+  let reasserts = 0;
+  await run({ ...AT, text: "ab" }, {
+    bind: GRID_BIND,
+    reassert: async () => { reasserts++; return { ok: true, reason: "" }; },
+  });
+  assert.equal(reasserts, 2, "one binding re-made per character");
+});
+
+// ── the application, not the origin ────────────────────────────────────────
+//
+// The grant is to an *application*, not a shape and not an address. One origin
+// serves Google Docs, Drive and Sheets alike, so matching on `location.origin`
+// alone admitted the Docs comment box and the Drive rename field to the grid's
+// keystroke path: the whole of Drive, per keystroke, from a single adapter row.
+// The pathname is read in the same unforgeable isolated world as the origin and
+// is what names the application.
+
+/** The real `bindFocus`, on a recognised grid, with the focus somewhere the
+ *  model chose — override SHEETS to move it off the app's own cell editor. */
+function gridShape(identity = {}) {
+  const fx = engine(focusAnswers({
+    "DOM.describeNode": { node: { backendNodeId: 77, nodeName: "DIV" } },
+    "DOM.resolveNode": { object: { objectId: "obj-1" } },
+    "Runtime.callFunctionOn": { result: { value: {
+      ok: true, reason: "same-node", tag: "DIV", focusTag: "DIV",
+      focusEditable: true, ...SHEETS, ...identity } } },
+  }));
+  return loadBindFocus(fx)(1, 42);
+}
+
+test("the app's own cell editor is the grid AND the editor", async () => {
+  const r = await gridShape();
+  assert.equal(r.grid, true, JSON.stringify(r));
+  assert.equal(r.gridEditor, true, JSON.stringify(r));
+});
+
+test("the formula bar is the grid but NOT the editor", async () => {
+  // Same origin, same app, same path — a different field. The keystroke
+  // delivery is still right (the grid starts editing on a keystroke), but the
+  // focus is a real field the model wrote a value into and must keep.
+  const r = await gridShape({ focusScope: "", focusClass: "" });
+  assert.equal(r.grid, true, JSON.stringify(r));
+  assert.equal(r.gridEditor, false, JSON.stringify(r));
+});
+
+/** The shipped `gridApp`, with the adapter list supplied by the test. */
+function gridAppWith(adapters) {
+  const src = extractFn(ptrSrc, "gridApp").replace(/^export\s+/, "");
+  const pm = new Function(`${extractFn(ptrSrc, "pathMatches")}\nreturn pathMatches;`)();
+  return new Function("GRID_ADAPTERS", "pathMatches", `${src}\nreturn gridApp;`)(adapters, pm);
+}
+
+test("a path on the right origin is not the application", async () => {
+  // The shipped adapter list itself, not a copy of it.
+  const app = gridAppWith(vm.runInNewContext(`(${GRID_ADAPTERS_SRC.replace(/^const GRID_ADAPTERS = /, "").replace(/;\s*$/, "")})`, {}));
+  assert.ok(app(SHEETS.origin, "/document/d/1/edit") === null, "Google Docs on the Sheets origin is not Sheets");
+  assert.ok(app(SHEETS.origin, "/drive/folders/1") === null, "and neither is Drive");
+  assert.ok(app(SHEETS.origin, SHEETS.path) !== null, "the path the app is served under is the app");
+  assert.ok(app("https://example.com", SHEETS.path) === null, "the path does not carry an origin that is wrong");
+});
+
+test("two adapters for one origin are ambiguous, and are refused", async () => {
+  const twin = gridAppWith([
+    { app: "one", origin: "https://docs.google.com", pathPrefix: "/spreadsheets/", scopeId: "a", className: "a" },
+    { app: "two", origin: "https://docs.google.com", pathPrefix: "/documents/", scopeId: "b", className: "b" },
+  ]);
+  assert.equal(twin("https://docs.google.com", "/spreadsheets/d/1/edit"), null,
+    "guessing which of two is which is how a grant widens by accident");
+});
+
+test("a Docs field on the Sheets origin never reaches the keystroke path", async () => {
+  const r = await gridShape({ path: "/document/d/1/edit" });
+  assert.equal(r.grid, false, `a Drive rename field must not be typed as a grid cell: ${JSON.stringify(r)}`);
+  assert.equal(r.gridEditor, false);
+});
+
+test("off the application, the write is an ordinary insertion again", async () => {
+  const { sent } = await run({ ...AT, text: "name" }, { bind: () => gridShape({ path: "/document/d/1/edit" }) });
+  assert.equal(sent.filter((c) => c.method === "Input.insertText").length, 1,
+    "the whole of Drive is not typed one keystroke at a time");
+  assert.equal(sent.filter((c) => c.method === "Input.dispatchKeyEvent").length, 0);
+});
+
+test("a grid write that is not the cell editor still clears", async () => {
+  // Defect: the grid branch never asked the page to select-all, so `type_text`
+  // — documented "clears first" — typed `42` into a cell holding `17` and left
+  // `1742`. Only the app's own editor keeps the no-clear behaviour: there the
+  // first keystroke genuinely replaces what is there.
+  const { result, state } = await run({ ...AT, text: "42", clear: true }, { bind: GRID_FIELD_BIND });
+  assert.equal(result.ok, true, `refused: ${result.reason}`);
+  assert.deepEqual(state.focusClears, [true], "the page was asked to select-all before the write");
+});
+
+test("the app's own cell editor is not cleared — its first keystroke replaces", async () => {
+  const { result, state } = await run({ ...AT, text: "42", clear: true }, { bind: GRID_BIND });
+  assert.equal(result.ok, true, `refused: ${result.reason}`);
+  assert.deepEqual(state.focusClears, [], "clearing a grid editor appends nothing and erases nothing else");
 });

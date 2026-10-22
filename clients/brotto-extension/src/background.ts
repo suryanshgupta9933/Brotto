@@ -453,6 +453,21 @@ let stepIndex = 0;
 // terminal event before it reports the disconnect.
 let taskInFlight = false;
 
+/**
+ * A task has ended.
+ *
+ * **The pending grid write ends with it.** That record is about the next key
+ * on this tab, and a task that has ended will not send one: a write left
+ * standing would be claimed by the *next* task's key press, which — with
+ * nothing focused — pulls the focus into the grid's off-screen editor, a
+ * field the model is not on. One place ends the task, so one place ends the
+ * record.
+ */
+function endTask(): void {
+  taskInFlight = false;
+  clearGridWrite();
+}
+
 // ponytail: 3 attempts at 5s flat when the server cannot be reached.
 // Earlier we used exponential backoff (1s → 2s → 4s → 8s → 16s → 30s, 5
 // attempts max) — that surfaced "attempt 5" to the user and made the
@@ -729,6 +744,59 @@ async function dispatchKey(tabId: number, key: string, mods: number): Promise<vo
  *  that spends its budget on the wire. */
 const MAX_CANVAS_CHARS = 1000;
 
+/**
+ * That the last write on this tab went into a grid's own cell editor, so the
+ * grid is mid-edit and the next *committing* key is the one that ends it.
+ *
+ * Set by the `type_at` grid path from what it did, not from what it saw the
+ * page doing, and read by the `key` branch. It exists because a grid
+ * replaces its editor when it re-renders a cell, and a replaced editor can take
+ * the focus with it — so the Enter that commits, dispatched as its own action,
+ * has nowhere to go and the typed text is never committed. It is deliberately
+ * not a general "the last thing typed was a grid": that would let a key
+ * dispatch reach into a field the model is on.
+ *
+ * **The record is short-lived, and every path that ends its relevance clears
+ * it**: a task that ended, a tab that closed, any action that is not a key.
+ * It was module-level and never cleared, so a write in one task survived into
+ * the next one in the same tab — where a key press with nothing focused
+ * pulled the focus into the grid's off-screen editor, a field the model was
+ * not on. A record that outlives the task that made it is the failure this
+ * clearing exists to prevent.
+ *
+ * ponytail: an MV3 service worker restart between the write and its Enter
+ * loses the record, and the commit then goes to whatever holds the focus.
+ * Accepted rather than fixed: persisting it in `chrome.storage` would let a
+ * record outlive the task that made it, which is the worse failure. The
+ * restart hole costs a lost commit; the stale record costs a wrong field.
+ */
+let gridWrite: { tabId: number } | null = null;
+
+/** Forget the pending grid write. */
+function clearGridWrite(): void {
+  gridWrite = null;
+}
+
+/**
+ * A pending grid write is about the next *key* on this tab, and about nothing
+ * else — so any other action ends it. A click, a scroll, a navigation or a
+ * second write is not the commit the record exists to serve, and a record that
+ * outlives its write is how a later key press reaches into an editor the
+ * model is not on.
+ */
+function clearGridWriteUnlessKey(actionType: unknown): void {
+  if (actionType !== "key") clearGridWrite();
+}
+
+/**
+ * A committing key *ends* an edit. Enter is the one a grid commits a cell on;
+ * an arrow key only navigates, so it must not consume the record of a pending
+ * write — the real Enter after it still has to find it.
+ */
+function isCommittingKey(key: unknown): boolean {
+  return key === "Enter";
+}
+
 /** `beforeChar` is the binding, re-made before every keystroke: the grid's own
  *  editor is given the focus back if it lost it, and the typing stops if the
  *  binding cannot be held. It is called with nothing between its answer and the
@@ -763,6 +831,14 @@ async function typeIntoCanvas(
 
 async function executeAction(tabId: number, action: any): Promise<{ ok: boolean; reason: string }> {
   const t = action.type;
+  // **A pending grid write is about the next key on this tab, and about
+  // nothing else.** Any other action ends it — a click, a scroll, a
+  // navigation, a second write — because none of them can be the commit the
+  // record exists to serve, and a record that outlives its write is how a
+  // later key press reaches into an editor the model is not on. The write
+  // path sets its own record at the end of the branch below, so this does not
+  // clear the write it is clearing for.
+  clearGridWriteUnlessKey(t);
   // What the server is told happened. The gates below refuse rather than
   // dispatch, and until this existed a refusal was invisible to the server:
   // `click_ref` returned `Clicked [7]` the moment the frame left, so the model
@@ -824,17 +900,43 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
     if (bound.reason === "canvas-editor-exempt") {
       console.warn("brotto: type_at — focus is an editor inside the pressed canvas, not the pressed node itself (logged, not silent)");
     }
-    if (bound.reason === "canvas-grid-editor") {
+    // **A grid's cells are typed, never inserted — whichever field holds the
+    // focus on a grid page.** `Input.insertText` fires no keydown and the grid
+    // starts editing on the keystroke, so an insertion reaches the formula bar
+    // and never the grid's model: the cell shows a caret with nothing in it, the
+    // Enter has nothing to commit, and the run reports itself done. The press
+    // is not the problem — the delivery mechanism was. `bound.grid` is the
+    // *application* the document is (`GRID_ADAPTERS` — the unforgeable origin
+    // *and* the path, because one origin serves several Google applications),
+    // so a hostile page cannot buy the keystroke path with a shape, and a Docs
+    // comment box on the same origin does not take it either.
+    if (bound.grid) {
       // The grid keeps its editor outside the canvas (Sheets parks it
       // off-screen), and a grid starts editing on the *keystroke*: an
       // insertion fires no keydown, so the cell would show a caret with
       // nothing in it. Typed, one key event per character, and no modifier
       // ever — so no chord, and no OS question.
       //
-      // The clear is the grid's own business: a grid replaces a selected
-      // cell's content on the first keystroke, and the DOM clear would have
-      // reached for a selection inside an off-screen editor.
-      console.warn("brotto: type_at — focus is the canvas grid's own editor, outside the canvas (logged, not silent)");
+      // **The clear is the grid's own business only in the grid's own cell
+      // editor**, where the first keystroke really does replace the selected
+      // cell's content. Everywhere else on a grid page — the formula bar, the
+      // name box — the first keystroke *appends*, so `clear` has to be
+      // honoured or the text lands beside the old one: `42` typed into a cell
+      // holding `17` would yield `1742`, a silent wrong value. The DOM clear
+      // is refused only where the grid's editor is the focus, because that
+      // editor is parked off-screen and a selection inside it is the grid's
+      // business.
+      if (action.clear === true && !bound.gridEditor) {
+        const focus = await focusState(tabId, true);
+        if (!focus.ok) {
+          console.warn(`brotto: type_at refused — ${focus.reason}; the field could not be cleared, so the text would be appended to what is already there`);
+          refusal = { ok: false, reason: focus.reason };
+          return refusal;
+        }
+      }
+      console.warn(bound.reason === "canvas-grid-editor"
+        ? "brotto: type_at — focus is the canvas grid's own editor, outside the canvas (logged, not silent)"
+        : `brotto: type_at — grid page: typing into ${bound.focusId} as keystrokes, not an insertion (logged, not silent)`);
       const text = String(action.text ?? "");
       // **Did the text land?** The editor's own content is the direct answer:
       // a grid that took the keystrokes changed it, a grid that ignored them
@@ -861,12 +963,29 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
       // was" — it makes the grid's own editor the focused element and then says
       // so. It is the closest available equivalent of "insert into that node",
       // because a key event cannot be addressed to one.
-      const typed = await typeIntoCanvas(tabId, text, async () => reassertGridFocus(tabId));
+      //
+      // **And it may only do that when the focus is the grid's own editor.**
+      // A grid page has text fields the model is *typing into* — the formula
+      // bar, and the name box where a cell reference is written and Enter
+      // pressed to jump. Taking the focus from either would move the keystrokes
+      // off the field the model is on, and on the name box it would type a
+      // reference into a cell instead. `bound.gridEditor` is the role, not the
+      // node, so it survives the editor being re-rendered under us.
+      const typed = await typeIntoCanvas(
+        tabId,
+        text,
+        bound.gridEditor ? async () => reassertGridFocus(tabId) : async () => ({ ok: true, reason: "" }),
+      );
       if (!typed.ok) {
         console.warn(`brotto: type_at refused — ${typed.reason}; the typing stopped`);
         refusal = { ok: false, reason: typed.reason };
         return refusal;
       }
+      // **The grid is mid-edit only when its own editor took the text.** That is
+      // our own fact, not a guess about the page, and the `key` branch needs it:
+      // a grid that replaced its editor may have taken the focus with it, and
+      // the Enter that commits is a separate action dispatched later.
+      gridWrite = bound.gridEditor ? { tabId } : null;
       // The after-read is only meaningful on **the same node** the before-read
       // was taken from. A grid that replaces its editor mid-typing (which
       // Sheets does when it re-renders a cell) leaves the old node's text
@@ -932,6 +1051,11 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
       // A failed clear refuses rather than types: `clear: true` means *replace*,
       // and appending to a field the model asked to empty is the same wrong
       // answer the bare "a" gave, wearing a different hat.
+      //
+      // No `!bound.gridEditor` here: this branch is reached only when the
+      // document is not a grid application, and `gridEditor` is that
+      // application's editor, so it cannot be true here — the condition was
+      // one that could never be false.
       const focus = await focusState(tabId, action.clear === true);
       if (!focus.ok) {
         console.warn(`brotto: type_at refused — ${focus.reason}; nothing holds focus to type into`);
@@ -1000,6 +1124,30 @@ async function executeAction(tabId: number, action: any): Promise<{ ok: boolean;
     // being sent by the relay and dropped here, so Control+A — the clear
     // that clear_ref issues — arrived as a bare "a" and typed a letter into
     // the field instead of selecting it.
+    //
+    // **A grid that re-rendered its editor may have dropped the focus with
+    // it**, and this key is the one that commits what was just typed. So the
+    // focus is put back — but only when nothing holds it that can receive
+    // text. A name box or a formula bar that holds the focus is never taken:
+    // `focusState` is the test, and it reads `document.activeElement` in an
+    // isolated world. A name-box jump therefore proceeds untouched, and a
+    // release is not what gets stolen.
+    //
+    // **The record is consumed by a committing key, and only by one.** An
+    // arrow key navigates the grid: it does not commit, and it must not spend
+    // the record, or the real Enter after it finds nothing and the cell is
+    // never committed. A record for *another* tab is not this tab's to claim
+    // and is dropped rather than kept — the extension drives one tab at a
+    // time, so a record for a tab that is not being driven is stale.
+    if (gridWrite) {
+      if (gridWrite.tabId !== tabId) {
+        clearGridWrite();
+      } else if (isCommittingKey(action.key)) {
+        clearGridWrite();
+        const holding = await focusState(tabId, false);
+        if (!holding.ok) await reassertGridFocus(tabId);
+      }
+    }
     await dispatchKey(tabId, action.key, action.modifiers ?? 0);
   }
   return refusal ?? { ok: true, reason: "" };
@@ -1583,7 +1731,7 @@ async function startRelay(
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       console.error("[brotto] getStoredModelConfig failed:", e);
-      taskInFlight = false;
+      endTask();
       taskTerminalEmitted = true;
       setBadgeForResult();
       try { ws?.close(); } catch { /* ignore */ }
@@ -1686,7 +1834,7 @@ async function startRelay(
           sendObservationError("action skipped: no tab attached");
           if (!taskTerminalEmitted) {
             taskTerminalEmitted = true;
-            taskInFlight = false;
+            endTask();
             setBadgeForResult();
             notifyUi({
               type: "task_failed",
@@ -1771,7 +1919,7 @@ async function startRelay(
       case "task_result": {
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
-        taskInFlight = false;
+        endTask();
         setBadgeForResult();
         const r = msg.result ?? {};
         if (r.status === "completed") {
@@ -1798,7 +1946,7 @@ async function startRelay(
       case "task_error":
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
-        taskInFlight = false;
+        endTask();
         setBadgeForResult();
         // ponytail: failure_reason + summary field names — see the
         // matching note on the task_result handler.
@@ -1816,7 +1964,7 @@ async function startRelay(
       case "task_failed":
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
-        taskInFlight = false;
+        endTask();
         setBadgeForResult();
         notifyUi({
           type: "task_failed",
@@ -1832,7 +1980,7 @@ async function startRelay(
       case "task_cancelled":
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
-        taskInFlight = false;
+        endTask();
         setBadgeForResult();
         notifyUi({ type: "task_failed", failure_reason: "CANCELLED", summary: msg.summary ?? "Task cancelled." });
         notifyUi({ type: "canonical_status", status: "failed" });
@@ -2043,7 +2191,7 @@ async function startRelay(
     if (reconnectAttempt > 0) return;
     if (!taskTerminalEmitted) {
       taskTerminalEmitted = true;
-      taskInFlight = false;
+      endTask();
       void setBadge("idle");
       // ponytail: failure_reason + summary field names — see the
       // matching note on the task_result handler.
@@ -2074,7 +2222,7 @@ async function handleSocketClose(ev: CloseEvent): Promise<void> {
     // in, which is the recovery each message below asks for.
     cancelReconnect();
     taskTerminalEmitted = true;
-    taskInFlight = false;
+    endTask();
     queueReport(refusal === "missing" ? "credential_missing" : "credential_rejected");
     if (refusal === "missing") {
       notifyUi({
@@ -2119,7 +2267,7 @@ async function cleanup(): Promise<void> {
   const lost = taskInFlight && !taskTerminalEmitted;
   if (lost) {
     taskTerminalEmitted = true;
-    taskInFlight = false;
+    endTask();
     // The one client-side failure the relay also cannot see: the socket died
     // with a run in flight, so there is a task the operator will never find
     // in a document and no `task_result` will ever arrive to explain it.
@@ -2266,7 +2414,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           })
             .catch((err: unknown) => {
               void setBadge("idle");
-              taskInFlight = false;
+              endTask();
               if (!taskTerminalEmitted) {
                 taskTerminalEmitted = true;
                 // ponytail: failure_reason + summary field names — see
@@ -2294,7 +2442,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             try { ws.send(JSON.stringify({ type: "cancel" })); } catch { /* ignore */ }
           }
           taskTerminalEmitted = true;
-          taskInFlight = false;
+          endTask();
           stopRelay();
           notifyUi({ type: "canonical_status", status: "cancelled" });
           sendResponse({ success: true });
@@ -2303,7 +2451,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         case "user_disconnect": {
           taskTerminalEmitted = true;
-          taskInFlight = false;
+          endTask();
           if (ws) {
             try { ws.close(); } catch { /* ignore */ }
           }
@@ -2342,7 +2490,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
 
       case "local_login_skip": {
-          taskInFlight = false;
+          endTask();
           stopRelay();
           sendResponse({ success: true });
           break;
@@ -2522,6 +2670,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   // The retained page frame goes with the tab, whether or not it was the
   // active one — it is decoded pixels held for a diff and nothing else.
   clearDelta(tabId);
+  // A pending grid write belongs to a tab, and this tab is gone: the record
+  // would otherwise be claimed by a key press in another tab, and pull the
+  // focus into an editor that is not there any more.
+  if (gridWrite && gridWrite.tabId === tabId) clearGridWrite();
   if (tabId !== activeTabId) return;
   // Active tab closed — fall back to opener if available
   const fallback = tabStack.pop() ?? null;
