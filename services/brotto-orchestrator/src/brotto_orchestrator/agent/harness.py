@@ -3399,22 +3399,51 @@ def _ledger_items(deps: AgentDeps) -> list[PlanItem]:
     ]
 
 
-def _completion_targets(deps: AgentDeps) -> list[PlanItem]:
-    """What the completion pass grades.
+def _current_attempt(target_key: str, deps: AgentDeps) -> WriteAttempt | None:
+    """The ledger's last attempt at a target THAT THIS PROCESS made.
 
-    The PLAN when its values are here — the model's own declared
-    requirement is what the run promised, and it is what a reader wants
-    graded. A RESUMED run's plan values are masked on disk (a cell's
-    contents are user data and the document holds the verdict, not the
-    value), so the plan cannot be compared against a cell: the LEDGER is
-    graded instead, and the ledger's items carry the values THIS PROCESS
-    wrote. A write is verified against a fresh read of the cell, so the
-    verdict is about the cell as it is now, not about a history the page
-    may have changed under. An EMPTY ledger falls back to the plan.
+    A rehydrated entry's value is masked — it came off disk, where a
+    cell's contents do not go — so it cannot stand in for a fresh write.
+    An entry this process made holds its value in the clear, and a fresh
+    write is what a resumed run re-verifies with.
     """
-    if deps.plan and not any(is_redacted_value(i.value) for i in deps.plan):
-        return deps.plan
-    return _ledger_items(deps) or deps.plan  # empty ledger → plan → UNKNOWN
+    latest: WriteAttempt | None = None
+    for a in deps.ledger:
+        if a.target_key == target_key and not is_redacted_value(a.intended):
+            latest = a
+    return latest
+
+
+def _completion_targets(deps: AgentDeps) -> list[PlanItem]:
+    """What the completion pass grades: ONE TARGET PER PLAN REQUIREMENT.
+
+    The plan is the run's promise, so the plan's shape is what is graded.
+    A target the plan named and the ledger did not is still a
+    requirement, and dropping it would let a run complete with a
+    requirement unverified.
+
+    A RESUMED run's plan values are masked on disk (a cell's contents are
+    user data and the document holds the verdict, not the value), so a
+    masked item takes the value of the write THIS PROCESS made for that
+    target — a fresh write, checked against a fresh read of the cell. A
+    masked item with no such write keeps its masked value and grades
+    UNKNOWN: the run did not verify it, and it must not claim it did.
+
+    A run with no plan at all is graded on the LEDGER's targets — the
+    same pass, applied to the writes it actually made.
+    """
+    if not deps.plan:
+        return _ledger_items(deps)
+    targets: list[PlanItem] = []
+    for item in deps.plan:
+        if is_redacted_value(item.value):
+            attempt = _current_attempt(item.target_key, deps)
+            if attempt is not None:
+                item = PlanItem(id=item.id, intent=item.intent,
+                                target_key=item.target_key,
+                                value=attempt.intended, status=item.status)
+        targets.append(item)
+    return targets
 
 
 async def _verify_plan(deps: AgentDeps,

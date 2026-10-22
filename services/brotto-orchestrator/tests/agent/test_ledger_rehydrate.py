@@ -390,6 +390,42 @@ async def test_a_resumed_run_with_no_ledger_at_all_is_still_checked(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_run_keeps_every_plan_requirement_in_the_grading(tmp_path):
+    """The plan named two targets; only one was ever written.
+
+    The ledger is a PARTIAL collection, so a target the plan named and the
+    run never attempted exists in the plan alone. Grading the ledger drops
+    it, and a dropped requirement fails open exactly as an unchecked one
+    does — so the plan's shape is graded and B1 grades UNKNOWN.
+    """
+    trail = AuditTrail(session_id="s8", dir=tmp_path)
+    trail.begin_task("write two names")
+    deps = _deps(_cdp(grid_value="name"))
+    await _run_one(deps, "set_plan", {"items": [
+        {"intent": "write A1 = name", "target": {"cell": "A1"}, "value": "name"},
+        {"intent": "write B1 = age", "target": {"cell": "B1"}, "value": "age"},
+    ]}, audit=trail)
+    # A1 only: B1 is a requirement the run never attempted.
+    await _run_one(deps, "write_text",
+                   {"target": {"cell": "A1"}, "value": "name"}, audit=trail)
+    doc = json.loads((tmp_path / "s8.json").read_text())
+
+    resumed = _deps(_cdp(grid_value="name"))
+    resumed.plan = audit_mod.read_plan(doc)
+    resumed.ledger = audit_mod.read_ledger(doc)
+    # The resumed run rewrites A1 and nothing else.
+    await _run_one(resumed, "write_text",
+                   {"target": {"cell": "A1"}, "value": "name"}, audit=trail)
+
+    targets = harness_mod._completion_targets(resumed)
+    assert len(targets) == 2, "a plan requirement went missing from the grading"
+    verdicts = await harness_mod._verify_plan(resumed, targets)
+    by_target = {v[0].target_key: v[1] for v in verdicts}
+    assert by_target["cell:A1"] == CONFIRMED, "the rewritten target is verified"
+    assert by_target["cell:B1"] == UNKNOWN, "the untouched requirement is not claimed"
+
+
+@pytest.mark.asyncio
 async def test_a_resumed_plan_with_no_verdict_stays_unknown(tmp_path):
     """No ledger entry, no value, no verdict: the honest answer is still
     UNKNOWN. The resume does not invent a confirmation."""
