@@ -1079,6 +1079,72 @@ and must not grow one; the CDP modifier bitmask is the extension's
 that no OS vocabulary ("on a Mac", "Windows", …) enters that section, because a
 sentence that names an operating system is a branch wearing prose.
 
+### Two boxes that look identical, and the one that loses the work silently
+
+A measured Google Sheets run typed its two column headers into the sheet's
+**name box** — the address box — and the data never landed. A word typed there
+does not write a cell: it creates a **named range**. The page opened a "Create a
+named range" panel and the run still reported itself completed. **The failure
+is silent three ways at once**: the typing succeeds, the cell stays empty, and
+nothing errors.
+
+**The two boxes are told apart by their value, not their name.** A grid app's
+chrome carries two **anonymous** textboxes that look identical in the AX tree.
+The one whose value is a cell reference — letters and digits, like `A2` or
+`B12` — is the **ADDRESS box**; the other, whose value is the selected cell's
+text, is the **CONTENT box**. Position is the second tell: the address box is
+the small one at the far left, the content box is the wide one beside it.
+Google Sheets is the example — its name box holds the address, its formula bar
+holds the cell's content. A third textbox is the grid's own cell editor, a
+zero-width div parked off-screen (y = -9998); it is the app's editor, not a
+field to type into.
+
+**A reference typed into the address box is a jump, and a word is not.** That
+is the whole difference between the two boxes: a reference navigates, and a
+word is taken as the *name* of a range. So the address box is not a field to
+avoid — it is a field with exactly one legal use.
+
+**To write a cell: `type_text` into the content box, `press_key("Enter")` to
+commit, then read the content box's value again.** That read *is* the
+verification — not a picture, and not re-typing the value and watching the
+cell change either time. The accessibility-mode section above says the same
+thing for the one cell the mode reports; this is the same rule with the two
+boxes resolved, and the mode is what puts the content box in the tree at all.
+
+**If the tree carries no content box, the page exposes no field that takes a
+cell's content.** No accessibility mode, no formula bar — then the agent must
+call `cannot_complete` and say what the page does not expose, rather than type
+into a field it has not identified. Typing into an unidentified field is how
+the named-range mistake is made in the first place.
+
+**The address box is DETECTED, not guessed, and the detection is a nudge
+rather than a kill.** `address_box_nudge(deps)` fires when **two writes into an
+address box** land within the last **six steps**; the count is over *steps*,
+and a step that typed nothing contributes nothing. Detection is by the value
+the field holds — a cell reference — and only a written value that is **not
+itself a reference** counts, because a reference typed there is a legitimate
+jump. Two writes in six steps put one line into the next prompt naming the
+mistake and the alternative (find the box that holds the cell's content, type
+there, press Enter, read it back), and **the run continues**: the model may
+still try something different, or stop and call `cannot_complete`.
+
+**The rule it replaced was wrong, and the same box is why.** The earlier bound
+fired on "the same field typed into again and again" — but writing a column of
+values through the *content* box uses the same field every step, so that rule
+fired on ordinary work. The reference test is what separates navigation from
+data.
+
+**Neither existing bound could see it, for two different reasons.** The
+word-overlap nudge compares the *last two* steps' summaries, and the measured
+run's steps differed (type, Enter, click, read), so it never fired. The
+stagnation bound measures the *page*, and the agent's own typing changed the
+tree every step, so every step looked like progress.
+
+Pinned by `tests/agent/test_address_box_nudge.py` (what counts as a write
+into an address box, and when the nudge fires) and
+`tests/agent/test_grid_write_path.py` (the two-box rule and the write-and-
+verify path).
+
 ### The CSS-pixel capture, and what it actually saves
 
 `capture_screenshot` grew one optional key, `css_resolution`, and the seam is
@@ -1219,14 +1285,26 @@ from the marker, so read it back off the page or ask the user rather than
 reconstructing it from context. The definition is the fix — the marker alone
 would have been a new undefined token with a friendlier name.
 
-**Two markers, two audiences, and neither carries the value.** The record keeps
+**Two markers, two audiences, and the masking is in the action arguments.** The record keeps
 `audit.REDACTED` — `"[redacted:password]"` — and the model-facing line
-(substitution, narration, outcome summary, and the thought that is rendered
-into the next prompt) carries `WITHHELD`. The privacy guarantee is unchanged
-by the split: the value reaches neither the audit document, nor the
-extension's mirror of it, nor the trace, nor a later step's thought. Only its
-length does. `privacy.md` carries the split itself; this is the loop's half,
-because the whole cost of the old marker was paid in steps.
+carries `WITHHELD`. The masking is in the **action arguments**: the per-action
+`redact` flag covers both audiences there, and only the length survives. The
+guarantee is **narrower in the model's own prose** than in the action
+arguments, and that is now on purpose — a value is scrubbed out of the
+outcome summary, the narration, the thought and the reasoning only when the
+field **positively identifies as a credential**. `privacy.md` carries the
+split itself; this is the loop's half, because the whole cost of the old
+marker was paid in steps.
+
+**Prose substitution is whole-token, and the reason is a value with no word
+boundary.** A bare `str.replace` ate ordinary words: measured on the failed
+Sheets run, "The page Agent shows Messages about the age of the Image." with
+the value "Age" came out as "The page [withheld from the record]nt shows …" —
+"Age" is a prefix of "Agent", so the model's own sentence came back as
+gibberish and the user read it. The substitution is now longest-value-first
+with `(?<!\w)…(?!\w)` boundaries rather than `\b`, because a value that starts
+or ends with a non-word character has no `\b` to sit on and `\b` would
+silently never match it.
 
 **The general rule, because the same shape recurs.** A closed vocabulary is a
 promise that each token means exactly one thing. `[off-screen]`,
@@ -1241,8 +1319,10 @@ to say so, or the model will read it about itself.
 
 Pinned by `tests/agent/test_withheld_marker.py`, which asserts the two
 markers, the prompt's definition of the model-facing one, and that the value
-is in neither line; and by `tests/agent/test_typed_secret_capture.py`, which
-asserts the value never reached the audit document.
+never reaches the **recorded action**; and by
+`tests/agent/test_typed_secret_capture.py`, which asserts the value never
+reached the audit document. `tests/agent/test_prose_scrub.py` carries the
+narrower prose rule and the whole-token substitution.
 
 ### Frames — a bounded union, and a ref that has to be composite
 

@@ -618,11 +618,12 @@ and they are two different audiences with two different questions:
   mirror of that document — keeps `audit.REDACTED`, `"[redacted:password]"`.
   It answers *what was written down*, and it is read by a person or a grep,
   months later.
-- **The model's line** — the action line in the trace, the narration, the
-  step's outcome summary, and the thought that is rendered into the next
-  prompt — carries `prompt.WITHHELD`, `"[withheld from the record]"`. It
-  answers *what the model is allowed to see*, and it is read by a model that
-  will act on it.
+- **The model's line** — the action line in the trace — carries
+  `prompt.WITHHELD`, `"[withheld from the record]"`. It answers *what the
+  model is allowed to see*, and it is read by a model that will act on it.
+  The narration, the step's outcome summary and the thought that is rendered
+  into the next prompt carry the same marker, but only for a value from a
+  positively-identified credential field — see the narrower guarantee below.
 
 **Why one marker could not serve both.** The old token was
 `"[typed into a secret field]"`, and it made a claim about a **field**. The
@@ -635,14 +636,41 @@ the harness was blocking it. It then stopped typing and spent the run looking
 for a block that did not exist. Nothing was ever refused; the text reached the
 page unmasked. The only thing that was wrong was the sentence.
 
-**The guarantee did not move, and that is the point of the split.** The value
-still reaches **none** of: the audit document, the extension's mirror of it,
-the model-facing trace, or a later step's thought. Only its **length** does,
-and the length is there so a consumer can tell "typed something" from "typed
-nothing". The dispatch was never the problem — the value is sent to the page
-exactly as the model wrote it — so nothing about what is stored, what is kept,
-what is scrubbed, or what is retained has changed. What changed is the label
-on the line, and who is allowed to read it.
+**The guarantee is narrower in the model's prose than in the action
+arguments, and that is now on purpose.** The value the harness refuses to
+write is masked **in the action arguments** — the per-action `redact` flag
+covers both audiences there, and only the length survives, so a consumer can
+tell "typed something" from "typed nothing". But the value joins the
+**run-wide list** — the list the step's outcome summary, the narration, the
+thought and the reasoning are scrubbed against — only when the field
+**positively identifies as a credential**. So in the model's own words the
+guarantee is: a value from a positively-identified credential field is
+substituted out, and a value the harness merely refused to write is not.
+
+**Why it was narrowed.** On a canvas every typed value is unclassifiable — a
+cell has no backend node and a blank accessible name — so the old rule put
+ordinary words on the prose scrub list, and the model read its own sentences
+back as gibberish. A measured run's step 7 read "A1 should say [withheld from
+the record], B1 should say [withheld from the record]" for the very headers it
+had just typed. The cost of the stronger rule was a run that could not read
+what it had written; the cost of the narrower one is that an unclassified
+value may reappear in the model's own prose — and the prose is recorded, in
+the audit document and in the extension's mirror of it, so for such a value
+the on-disk guarantee is the action arguments and not the whole document.
+
+**The published policy already says the narrower thing, so it does not
+change.** `PRIVACY.md` promises redaction for "values typed into a field the
+orchestrator identifies as a secret — anything with `type="password"`, or a
+field whose name reads like a credential, a token, or a code". That is
+positive identification, not "every value the harness declined to write", so
+the public copy never made the stronger internal claim and there is nothing
+there to correct. (Check it against the published file, not from memory: it
+is the one a visitor reads.)
+
+**The dispatch was never the problem.** The value is sent to the page exactly
+as the model wrote it, so nothing about what is kept, what is scrubbed or what
+is retained has changed — what changed is which values are eligible to be
+scrubbed out of the model's prose, and why.
 
 **A marker with no definition is a hole in a closed vocabulary.** The
 redaction vocabulary is closed on purpose: every token in it is a promise that
@@ -658,8 +686,13 @@ model did with the old token, and the rule that a marker the model has no
 definition for is a marker the model will interpret.
 
 Pinned by `tests/agent/test_withheld_marker.py`, which asserts the two
-markers, the prompt's definition of the model-facing one, and that the value
-appears in neither audience's line.
+markers, the prompt's definition of the model-facing one, that the value never
+reaches the **recorded action**, and that the narration carries the value
+rather than a marker about a secret field; and by
+`tests/agent/test_prose_scrub.py`, which asserts the narrower rule end to end
+— an unclassified value stays in the model's own words and is still masked
+where it was typed, a credential is still scrubbed out of the model's words,
+and the substitution is whole-token and longest-value-first.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
