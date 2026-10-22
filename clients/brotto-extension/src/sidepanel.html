@@ -1381,25 +1381,6 @@
 
     /* ─── Final answer ────────────────────────────────────────────────── */
     .final-answer { font-size: 13.5px; line-height: 1.55; padding: 4px 0 10px; }
-    /* The honesty note: a collapsed disclosure, not a banner. Closed it is
-       one line of mono at ink-3 on a hairline rule; open it pushes the answer
-       up rather than disappearing. No marker colour — the panel's only state
-       colours are for state. */
-    .final-answer-reported {
-      font-size: 11.5px; line-height: 1.5; color: var(--ink-3);
-      border-left: 1px solid var(--rule-2); padding-left: 8px; margin: 2px 0 8px;
-    }
-    .final-answer-reported-summary {
-      cursor: pointer; font-family: var(--font-mono); letter-spacing: 0.02em;
-      list-style: none; width: fit-content;
-    }
-    .final-answer-reported-summary::-webkit-details-marker { display: none; }
-    .final-answer-reported-summary::marker { content: ''; }
-    .final-answer-reported-summary::before { content: '+ '; color: var(--ink-3); }
-    .final-answer-reported[open] .final-answer-reported-summary::before { content: '– '; }
-    .final-answer-reported-summary:hover { color: var(--ink-2); }
-    .final-answer-reported-summary:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
-    .final-answer-reported-body { margin-top: 4px; }
     .final-answer-text { font-weight: 400; }
     .final-answer-toolbar { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
     .final-answer-icon-btn {

@@ -107,65 +107,41 @@ every terminal path passes its own sentence — `setPhase` on done/error,
 arrived rather than a generic "resolved". It is one function with five callers,
 not five deletions.
 
-### A `completed` card is the agent's report, and the card says so
+### A `completed` card is the answer, and there is no disclaimer on it
 
-`REPORTED_NOTE` sits on **every** completed task, unconditionally, and reads
-back that Brotto *reports* the task done — what it did, not a check of the
-result.
+The done card is the model's final answer plus the toolbar. Nothing else. There
+was a `REPORTED_NOTE` disclosure on every completed card — "Brotto reports this
+as done — what it did, not a check of the result", behind a collapsed
+`<details>` whose summary read "Reported, not verified". It is gone, along with
+`REPORTED_SUMMARY`, the `<details>` in `sidepanel.html`, and
+`scripts/test-completion-honesty.test.js`, whose only purpose was to pin it.
 
-`task_complete` is self-asserted: the harness records success the moment the
-model says it is done, with nothing behind it. A click that silently did nothing
-produces exactly the same card as a click that worked, and the panel was
-rendering the two identically. **Nothing in the loop verifies success.** The one
-thing that is verified is the *stop* decision — a step is only allowed to end the
-run when the evidence says it should, which is a different claim in a different
-direction. That asymmetry is the whole reason the note is unconditional: if the
-note were conditional on a verification that does not exist, it would render on
-the runs where a check happened to pass and be silent everywhere else, which is
-a worse failure than saying it always.
+**Why it is gone: it told every user to distrust a result the product does not
+verify, in the card that *is* the answer.** Not on the runs that went wrong —
+unconditionally, on every completion, including the ones that worked. A reader
+who did not open the `<details>` met the word "verified" in the summary and
+nothing else, so the disclosure functioned as a permanent subtraction from a
+result the reader could not have checked either. That is the same
+silence-is-not-a-measurement error these docs exist to prevent, pointed the
+other way: not a run claiming a check it did not do, but a card claiming no
+check exists on a place where a check does.
 
-**Verification is not being deferred here; it is refused, and the refusal is the
-design.** There is nothing in the browser to inspect for most side effects — a
-purchase, a send, a delete leaves no local trace — and a canvas app has no DOM to
-ask. Any verifier that claimed confidence there would be the same
-silence-is-not-a-measurement error the rest of these docs exist to prevent, in
-the one place a user acts on the answer.
+**Honesty about what is unverified moved to where it is actionable.** The thing
+the note stood in for is now a **refusal in the agent's own path**, not a label
+on the result. A write the grid did not take refuses `grid-text-not-delivered`
+or `grid-text-misdelivered` rather than finishing as a success
+(`extension.md`); a cell whose value the tree does not show is reported as *not
+written* rather than as done (`agent-loop.md`). A run that cannot establish the
+write ends in `cannot_complete` naming the cell. The reader learns the result is
+uncertain **when it actually is uncertain and something has been done about
+it**, which is the one case a disclosure could have been honest about — and the
+general case, which it could not, is now not asserted at all.
 
-So the card stops implying otherwise rather than growing a check that would be
-faked. Unconditional, because nothing is verified today. Pinned by
-`scripts/test-completion-honesty.test.js`.
-
-#### The note is collapsed, not removed — and it is a native `<details>`
-
-It was a permanent line **above** every completed answer, and at 320px that
-displaced the thing the user came to read: a run that genuinely worked was
-rendered as a success wearing a disclaimer. It is now **below** the answer,
-above the toolbar, and closed.
-
-**Why it cannot be conditional (option 3).** The obvious improvement is to show
-it only when the run had a reason to doubt itself, and **there is no such
-signal on the wire.** `task_completed` carries `summary`, `steps` and
-`finalAnswer` and nothing about doubt; the panel sees no canvas-dominance
-measure and no refused step. Building one is a two-sided frame change and
-`brotto-conversation`'s to make — and it would be the wrong change anyway,
-because it re-introduces the exact failure the unconditional wording was chosen
-against: a note that renders on the runs where the check happened to pass is
-silent everywhere else, which is a *worse* failure than saying it always.
-
-**Why `<details>` and not a hover glyph.** Option 1's risk is real: an affordance
-that only answers to `:hover` is invisible on touch and to a screen-reader user
-who does not hover. `<details>`/`<summary>` is the platform's answer to
-"collapsed, opens in place" — click, Enter, and the screen reader's own
-expand/collapse semantics, with no JS and no state to keep in sync. **The
-summary is the accessible name, so it has to carry the claim on its own**:
-`REPORTED_SUMMARY` ("Reported, not verified") names both halves of the sentence
-below it, because it is the only part a reader who never opens anything meets.
-
-**The full sentence is in the DOM either way.** The disclosure is a
-presentation choice; it is not a licence to drop the text until asked. The
-assertions on the structure (a native `details`, the summary naming the claim,
-no mouse-only event handler, the sentence still inside the done branch) live in
-`scripts/test-completion-honesty.test.js` alongside the four copy rules.
+The asymmetry worth keeping: the *stop* decision is verified (a step may only
+end the run when the evidence says so), and that has never been what the card
+was about. `task_complete` is still self-asserted. The card simply does not
+pre-argue the point on every completion; the run carries it on the steps where
+it is true.
 
 ### The failure vocabulary is bidirectional, and both directions are code
 

@@ -61,9 +61,6 @@ function renderButtons(role) {
   vm.createContext(s);
   vm.runInContext(extract("escapeHtml"), s);
   vm.runInContext(extract("copyWithFallback"), s);
-  // The completed card's honesty sentence — a module const the done branch
-  // reads, so it has to be in the sandbox the way the helpers are.
-  vm.runInContext(panel.match(/const REPORTED_(?:NOTE|SUMMARY) =[\s\S]*?;/g).join("\n"), s);
   vm.runInContext(extract("appendMessage"), s);
   s.appendMessage({ role, text: "", finalAnswer: "here it is" });
   return s;
@@ -73,7 +70,6 @@ function boot(s) {
   vm.createContext(s);
   vm.runInContext(extract("escapeHtml"), s);
   vm.runInContext(extract("copyWithFallback"), s);
-  vm.runInContext(panel.match(/const REPORTED_(?:NOTE|SUMMARY) =[\s\S]*?;/g).join("\n"), s);
   vm.runInContext(extract("appendMessage"), s);
   s.appendMessage({ role: "done", text: "", finalAnswer: "x" });
   return (s.__buttons || []).find((b) => b.label === "Share this run");

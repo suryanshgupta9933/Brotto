@@ -3164,27 +3164,6 @@ const FAILURE_NOTE = {
   control_plane_unavailable: "Brotto Cloud couldn't confirm your access, so it stopped rather than run unchecked. Try again in a minute.",
 };
 
-// A completed task is the agent's report, not a check.
-//
-// `task_complete` is self-asserted — the harness records success the moment
-// the model says it is done, with nothing behind it. A click that silently
-// did nothing produces exactly the same card. Verification is impossible here
-// and is not being built: a canvas app has no DOM to inspect, and any side
-// effect outside the browser (a purchase, a send, a delete) leaves nothing to
-// observe. So the card stops implying otherwise. Unconditional, because
-// nothing is verified today — and there is no signal on the wire that a run
-// doubts itself, so a conditional note would be silent on exactly the runs
-// where the doubt was unmeasured. It is collapsed, not removed: a permanent
-// line above every success read as a disclaimer bolted onto a working card.
-// Pinned by scripts/test-completion-honesty.test.js.
-const REPORTED_NOTE =
-  'Brotto reports this as done — what it did, not a check of the result. Worth a look before you rely on it.';
-
-// What the collapsed disclosure says when it is closed. It has to stand on
-// its own: a screen-reader user and a pointer user both meet this line first,
-// and neither of them has opened anything. Same claim, half the words.
-const REPORTED_SUMMARY = 'Reported, not verified';
-
 // A fetch to a server that is not there rejects with the same TypeError on
 // every browser, and the raw message ("Failed to fetch") tells the user
 // nothing. One family, one sentence — the transport cannot distinguish "the
@@ -3916,24 +3895,6 @@ function appendMessage({ role, text, inlineLogs, finalAnswer }) {
       fa.appendChild(faText);
       bubble.appendChild(fa);
     }
-
-    // Below the answer, and collapsed. It used to sit above every successful
-    // answer as a permanent line, which read as a disclaimer bolted onto a
-    // card that had worked. `<details>` is the whole mechanism — the note is
-    // in the DOM either way, a click or Enter opens it, and a screen reader
-    // announces the summary, so nothing depends on hover. The summary carries
-    // the claim; the body carries the sentence. textContent, never markdown.
-    const reported = document.createElement('details');
-    reported.className = 'final-answer-reported';
-    const summary = document.createElement('summary');
-    summary.className = 'final-answer-reported-summary';
-    summary.textContent = REPORTED_SUMMARY;
-    reported.appendChild(summary);
-    const reportedBody = document.createElement('div');
-    reportedBody.className = 'final-answer-reported-body';
-    reportedBody.textContent = REPORTED_NOTE;
-    reported.appendChild(reportedBody);
-    bubble.appendChild(reported);
 
     // ponytail: bottom toolbar. Copy task, Share this run, Retry — one
     // place to take the task away, send the run somewhere real, or re-run
