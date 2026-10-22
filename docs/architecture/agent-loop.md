@@ -774,7 +774,7 @@ The give-up-and-ask instruction survives, narrowed to the case where **no
 picture came with the turn**. It was not deleted; it was moved off the case a
 picture already answers.
 
-**The log line is not the trigger.** `harness.py:5006` logs `screenshot
+**The log line is not the trigger.** `harness.py:5849` logs `screenshot
 attached (%d B base64)` on the capture path, which reads as "every step gets a
 picture". That line predates the trigger being narrowed to `_sparse_for_task`;
 a step that does not log it is normal and says nothing about the page.
@@ -2262,7 +2262,7 @@ without a browser.
 `target` is one of `{"ref": "0:9855"}` (an element in the AX tree),
 `{"cell": "A1"}` (a named cell in a grid) or `{"description": "the search
 box"}` (a phrase to look up). A description target resolves through
-`_match_by_description` (`harness.py:3026`), **the same function
+`_match_by_description` (`harness.py:3065`), **the same function
 `find_element` uses** — a phrase the model can look up has to be a phrase it
 can also write into, or the write and the lookup disagree about what the
 phrase names. That function now requires **every** meaningful word to match
@@ -2294,7 +2294,7 @@ read back.
 
 ### The write loop: resolve, execute, read back, compare
 
-`_do_write_text` (`harness.py:3105`) is four steps, and the fourth is the one
+`_do_write_text` (`harness.py:3157`) is four steps, and the fourth is the one
 that did not exist before:
 
 1. **Resolve the target** to a mechanism. A ref that no longer resolves is
@@ -2309,7 +2309,7 @@ that did not exist before:
 4. **Compare** and report one of three states.
 
 Comparison is **normalised equality** — trim, collapse internal whitespace,
-casefold (`normalise_value`, `closed_loop.py:123`). The comparison is about
+casefold (`normalise_value`, `closed_loop.py:125`). The comparison is about
 the same value, not the same bytes: a grid's read-back trims, and a user's
 trailing space is not a different name. The observed value is always carried
 alongside the verdict, so the model sees the real thing and not just a
@@ -2324,7 +2324,7 @@ boolean.
 | `could not be read back` | the target could not be read at all | **not a failure** — the read is inconclusive |
 
 The third is the one that matters, and it is a distinction the code makes in
-exactly one place: `compare_observed` (`closed_loop.py:160`) returns `UNKNOWN`
+exactly one place: `compare_observed` (`closed_loop.py:195`) returns `UNKNOWN`
 **only when the observed value is `None`**. An empty string is a read that
 **happened** and found nothing — a definite fact, and a real mismatch against a
 non-empty intent. A `None` is a read that could not be performed: no mirror,
@@ -2338,12 +2338,12 @@ work, which is what the completion pass reports.
 
 The model is told the difference in the prompt, and the two wordings in the
 refusal are different too: a mismatch is a fact about the page, an unreadable
-target is the absence of one (`_discrepancy_sentence`, `harness.py:3501`).
+target is the absence of one (`_discrepancy_sentence`, `harness.py:3548`).
 
 ### The ledger, and the canonical target key
 
 `deps.ledger` holds every write attempt: `target_key`, `intended`, `observed`,
-`confirmed`, `mechanism`, `step` (`WriteAttempt`, `closed_loop.py:32`). It is
+`confirmed`, `mechanism`, `step` (`WriteAttempt`, `closed_loop.py:33`). It is
 **a record of what was attempted**, so a *refused* write writes no entry —
 there was no attempt.
 
@@ -2352,11 +2352,21 @@ run's own copy carries the real values — that is what the read-back compares
 and what the model sees in its prompt — but a persisted entry's `intended` and
 `observed` are the fixed mask plus their lengths, and only the structural
 fields survive: `target_key`, `confirmed`, `mechanism`, `step`. A reader
-(including the harness on resume) can name a target and read a verdict, and
-can reconstruct nothing about what was written. The stored verdict is a
+(including the harness on resume) can read a verdict and reconstruct nothing
+about what was written. The stored verdict is a
 **historical** fact — what the cell read when the write was checked — not
 present-tense evidence, and the completion pass never promotes one. See
 `privacy.md` 3i.
+
+**The persisted target key is digested; the one in memory is not.** A `ref:`
+or `desc:` key carries a name off the page, so what reaches the document is
+`sha256:ref:<16 hex>` and the page's text stays on the page; a `cell:` key
+stays literal, because a cell address is the task's own. The key the model
+and the harness hold stays **readable** — the model needs to see which element
+a write went to, and a live target can only be resolved from the readable key
+— so the comparison on both sides is on the opaque form, and a key read back
+from the document still matches the one the run holds. The rule and its
+reasoning are in `privacy.md` 3i.
 
 **An entry is confirmed only from a read-back that matched.** The model
 saying so is not evidence, and there is no path by which the model can say so:
@@ -2364,7 +2374,7 @@ the ledger is written in `_do_write_text`, after the comparison, and nowhere
 else.
 
 The ledger is rendered into **every** turn's prompt (`render_ledger`,
-`closed_loop.py:175`), one line per attempt, so the discrepancy is visible
+`closed_loop.py:210`), one line per attempt, so the discrepancy is visible
 instead of inferred:
 
 ```
@@ -2376,7 +2386,7 @@ at step 6.
 
 **The canonical target key is not the raw string.** The model may write `A1`,
 `a1` or `cell A1`, and an AX ref changes on every observation, so a raw string
-is not a key. `canonical_target_key` (`closed_loop.py:132`) produces one of:
+is not a key. `canonical_target_key` (`closed_loop.py:134`) produces one of:
 
 | target form | key |
 |---|---|
@@ -2397,7 +2407,7 @@ intent is a step nobody can say was done. An item whose target does not
 resolve is refused, with the reason, and the rest of the plan is kept.
 
 The harness tracks the plan, and **only the harness closes an item**
-(`_sync_plan`, `harness.py:3268`): an item becomes `confirmed` only from a
+(`_sync_plan`, `harness.py:3282`): an item becomes `confirmed` only from a
 ledger entry that was confirmed by a matching read-back, and `failed` when a
 write to that target and value read back something else. Confirmed beats
 failed — a target that read back wrong and later right is right. An item with
@@ -2412,7 +2422,7 @@ it did.*
 
 `task_complete` is where the run lied, so it is now **checked** rather than
 trusted. On a completion the harness runs a verification pass
-(`_verify_plan`, `harness.py:3420`): for every plan item that has a target and
+(`_verify_plan`, `harness.py:3467`): for every plan item that has a target and
 a value, it reads the target back and compares. The pass is **strictly
 serial** — one frame per read, nothing else in flight — and it runs inside the
 step the model asked to complete, so the model sees the result in the same
@@ -2435,14 +2445,14 @@ turn.
   present-tense confirmation is fail-open. A run that reports "A1 is confirmed"
   without reading A1 is exactly the lie this pass exists to stop.
 - A resumed run **re-verifies by writing again**, and the pass grades **one
-  target per plan requirement** (`_completion_targets`, `harness.py:3417`) —
+  target per plan requirement** (`_completion_targets`, `harness.py:3431`) —
   the plan's **shape**, not the ledger's. A target the plan named and the
   resumed run did not rewrite is **still a requirement**, and it grades
   **unknown**: dropping it because the ledger happened not to mention it is
   the same fail-open as not checking it, and a plan of two targets verified
   through one would let the run complete with a requirement nobody checked.
 - For a **masked** item the value graded against is the write **this process**
-  made for that target (`_current_attempt`, `harness.py:3402`). A rehydrated
+  made for that target (`_current_attempt`, `harness.py:3416`). A rehydrated
   ledger entry's value is the mask, so it cannot stand in for a fresh write;
   the fresh write can, and it is checked against a **fresh read** of the cell,
   so the verdict is about the cell as it is now. A masked item with no such
@@ -2451,16 +2461,36 @@ turn.
   same pass, over the writes it actually made.
 - A resumed run that **wrote nothing** has no value to compare and no fresh
   read, so its requirements grade unknown, its completion is **refused once**
-  and then accepted with the discrepancy appended — the bounded behaviour
-  below. It never claims a confirmation it cannot prove.
+  and a second unresolved one ends the run — the bounded behaviour below. It
+  never claims a confirmation it cannot prove.
 
-**A second, identical completion is accepted, with the discrepancy appended
-to the summary** (`_append_discrepancies`, `harness.py:3520`). This bounds the
-loop: the user is told the truth, the run does not spin, and the step budget
-is not the thing that stops it. The refusal flag is **persisted** in the
-session document (`record_completion_refused`), because a run that was refused
-a completion and then reconnected must still accept the second one — otherwise
-the reconnect turns a bounded refusal back into a loop.
+**A run never ends `completed` while a verdict is MISMATCH or UNKNOWN.** The
+**first** unresolved `task_complete` is **refused** and the run continues, so
+the model can fix the target and try again; the refusal names what the page
+actually reads. A **second** `task_complete` that is still unresolved ends
+the run as `status: "failed"`, `failure_reason: "cannot_complete"`, with
+the discrepancy appended to the summary (`_append_discrepancies`,
+`harness.py:3567`) — the truth reaches the user *and* the status is the
+failure. The refusal flag is **persisted** in the session document
+(`record_completion_refused`), so a run that was refused a completion and
+then reconnected cannot buy a fresh budget of refusals.
+
+**A completion whose verdicts are all CONFIRMED completes normally, even if a
+refusal came before it.** The model's fix is what unblocks it, not a reset of
+any flag: the flag only decides what an *unresolved* completion does, and a
+run that rewrites the cell and re-reads it confirmed is exactly the run this
+loop wants.
+
+**Why this is the rule.** The run that motivated it (Google Sheets session
+`321737f6`, described above) typed its headers into the grid's address box
+instead of the content box, so no cell was ever written — and it still
+reported itself done, for a state it never observed. A completion that claims
+success while the page does not hold what the model said it holds is the lie
+this loop exists to kill. So the truth goes in the summary *and* the status is
+the failure: a user reading "completed" and then a buried discrepancy is the
+same lie in a quieter costume. Refusing once
+before failing is what keeps the rule from being a trapdoor — the model gets
+one turn to fix the cell, and only a second unresolved claim costs it the run.
 
 A run with **no plan** completes as it did before. The pass checks what the
 model declared; it does not invent a plan to fail the run against.
@@ -2469,7 +2499,11 @@ Pinned by `tests/agent/test_ledger_rehydrate.py` — a resumed plan is never
 confirmed from a historical verdict, every plan requirement is graded even when
 the resumed run rewrote only some of them, a masked requirement is graded on
 the write this process made, and a resumed run that wrote nothing cannot claim
-a confirmation.
+a confirmation — and by `tests/agent/test_completion_refusal.py` — two
+unresolved completions end the run as `failed` with `cannot_complete` and the
+discrepancy in the summary, the first unresolved one does **not** end the run,
+and a completion whose verdicts are all confirmed completes normally even
+though a refusal came before it.
 
 ### The bounds: repeat, per-target, per-run
 
@@ -2484,12 +2518,12 @@ read-back, no ledger entry.
    in. A **different** value to the same target is a *new attempt* — it may be
    the fix — but it still counts towards the per-target bound.
 2. **The per-target bound.** A target gets **three** attempts; the **fourth**
-   is refused (`MAX_ATTEMPTS_PER_TARGET = 3`, `closed_loop.py:27`). Another
+   is refused (`MAX_ATTEMPTS_PER_TARGET = 3`, `closed_loop.py:28`). Another
    attempt at the same cell cannot produce a different result.
 3. **The per-run bound.** Three unconfirmed writes in a run and the **next**
    write is refused **and the run ends**: the harness sets
    `status: "failed"`, `failure_reason: "cannot_complete"` and says so in the
-   refusal (`MAX_BLOCKED_ATTEMPTS = 3`, `closed_loop.py:28`). A run that cannot
+   refusal (`MAX_BLOCKED_ATTEMPTS = 3`, `closed_loop.py:29`). A run that cannot
    make progress must stop spending the user's tokens. The run bound is
    checked **before** the per-target bound, so a run that has already spent
    three blocked writes stops spending them whether or not this target is
@@ -2863,7 +2897,7 @@ which reads as flake and is not; chase it rather than retry it.
 
 **The diff was not the missing piece.** `compute_ax_diff` has always run and
 `### What changed after last action` has always been spliced into the prompt
-(`harness.py:868`, now inside the `<ax_diff untrusted>` fence). On those steps it
+(`harness.py:1025`, now inside the `<ax_diff untrusted>` fence). On those steps it
 said `(no changes detected)` — correctly, because a
 stale tree genuinely has nothing new in it. The model was told, in plain text, that its
 click changed nothing, and clicked again. That is the same failure as not being told; a

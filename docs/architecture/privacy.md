@@ -724,6 +724,17 @@ That is the rule this document already follows for the observation block —
 counts, never content, the AX diff reduced to a length for exactly this
 reason — applied to the one block that had forgotten it.
 
+**This is a rule about the STRUCTURED blocks — the ledger and the plan.** The
+run's final `summary` is the transcript the user reads, and it may quote what
+the page actually holds: when the run ends failed, the server appends the
+discrepancy to the summary (`_append_discrepancies`, `harness.py:3567`) so the
+user can see what the cell really reads, and that text carries the observed
+value. The summary reaches the document as the run's `result`
+(`audit.py:1066`). So read the rule as **the ledger and the plan never carry a
+cell's contents**, not as *no cell content is ever on disk* — a reader who
+takes the second reading will be surprised by the summary, and a reader who
+takes the first and misses the summary will be surprised by the user.
+
 **Why shape-based redaction is the wrong tool here.** The first version of
 this rule sent those values through the existing `redact_text`
 (`_redact_entry`, `audit.py`), which catches things that *look* like keys. A
@@ -740,13 +751,35 @@ A1") and is persisted like every other model prose in this document. What it
 may not carry is the value, so any occurrence of the item's own `value` inside
 the intent is masked before the shape-based redactor runs.
 
-**What is not redacted, and why it must not be.** The `target_key` — `cell:A1`,
-`ref:textbox:Full name` — is **structural**, and a structural key is not
-passed to the redactor at all. It names *which* cell a verdict is about, the
-harness compares it against a freshly canonicalised key on every write, and a
-verdict whose target cannot be named is unreadable by a person and unusable by
-the harness. `confirmed`, `mechanism` and `step` are the same: a status, a
-name, a number.
+**An identifier is never text.** The `target_key` names *which* cell a verdict
+is about, and a name is not a value: `confirmed`, `mechanism` and `step` are
+the same — a status, a name, a number. But a key is not automatically free of
+content, because a `ref:` or `desc:` key carries a name that came off the
+page's accessibility tree or out of the model's own prose. So the rule is by
+**kind of key**:
+
+- `cell:A1` stays **literal**. A cell address is the task's own, not the
+  page's, and the user named it.
+- a `ref:` or `desc:` key is **digested**. What reaches the document is
+  `sha256:ref:<16 hex>` — the digest of the whole key, with the kind kept
+  inside it so a reader can still tell what sort of target it was. The page's
+  text stays on the page.
+
+The `sha256:` prefix is load-bearing: `canonical_target_key` only ever emits
+`cell:`, `ref:` or `desc:`, so a readable key can never begin `sha256:`, and
+page text that happens to spell out something shaped like a digest is still
+digested rather than mistaken for one. The digest is over the **whole** key
+and it is **idempotent** — a key that already starts with `sha256:` comes
+back unchanged — so a key read back from the document and the readable key the
+run holds produce the same opaque form, and comparing the two is still an
+equality (`opaque_target_key`, `closed_loop.py:165`; `_same_target`,
+`harness.py:3099`).
+
+**The in-memory key stays readable.** Only the *persisted* form is digested.
+The model still needs to see which element a write went to, and the harness
+resolves a live target from the readable key — a digest names no element, so
+it cannot be resolved. The comparison on both sides is on the opaque form, so
+the readable key and the digested one still match.
 
 **The comparison happens in memory, on the real value.** The in-memory ledger
 holds the real `intended` and `observed` — the harness compares them there,
@@ -771,14 +804,17 @@ plan's shape, not the ledger's. A target the plan named and the resumed run did
 not rewrite is still a requirement and grades **unknown**; dropping it because
 the ledger does not mention it would be the same fail-open as not checking it.
 For a masked item the value graded against is the write **this process** made
-for that target (`_current_attempt`, `harness.py:3402`): a rehydrated ledger
+for that target (`_current_attempt`, `harness.py:3416`): a rehydrated ledger
 entry's value is the mask and cannot stand in for a fresh write, which can,
 and it is checked against a **fresh read** of the cell, so the verdict is about
 the cell as it is now. A masked item with no such write keeps its masked value
 and grades **unknown**. A run with **no plan at all** is graded on the ledger's
 targets. A resumed run that wrote nothing has no value to compare and no fresh
-read, so its completion is refused once and then accepted with the discrepancy
-appended — it never claims a confirmation it cannot prove. The two wrong
+read, so its completion is **refused once**; a **second** completion that is
+still unresolved ends the run as `failed`, `failure_reason:
+"cannot_complete"`, with the discrepancy appended to the summary. It never
+claims a confirmation it cannot prove, and it never reports `completed` while
+a verdict is unresolved. The two wrong
 answers are both wrong — a confirmation the run cannot prove, and a mismatch
 that would accuse the page of holding the wrong value when the truth is that
 the *value* is not here.
@@ -800,7 +836,7 @@ value.** The redaction above covers the **ledger and plan blocks**. It does
 does not cover the action's `outcome` string, and both carry the value
 verbatim:
 
-- `_typed_field` (`harness.py:1485`) returns a field only for `type_text`,
+- `_typed_field` (`harness.py:1515`) returns a field only for `type_text`,
   `type_xy` and `press_key`. It does **not** name `write_text`, so
   `_scrubbed` takes the `field is None` path and returns the arguments
   unchanged — while the **retired** `type_text` masked its `text` argument in
@@ -813,9 +849,15 @@ verbatim:
   stands.
 - The per-action **trace** (`action_taken` in the step summary, which is
   persisted and replayed) embeds the raw arguments for the same reason.
+- The run's final **summary** may quote the observed value, by design: it is
+  the text the user reads, and the discrepancy appended to it is what tells
+  them what the cell really holds. This one is **not a hole** — the truth in
+  the summary is the point — but it is the reason the rule above is scoped to
+  the structured blocks.
 
 So a card number typed into a cell is masked in the ledger and plan and
-written in plaintext three times elsewhere in the same document. That is a real hole and
+written in plaintext three times elsewhere in the same document. That is a
+real hole and
 it is **not fixed here** — the fix belongs to whoever owns the typed-value
 masking, and it is one line in `_typed_field` plus a redaction of the
 harness's own outcome string. It is recorded here because a privacy rule that
@@ -823,13 +865,19 @@ is only true of one block of the document is not a rule.
 
 Pinned by `tests/agent/test_ledger_resume.py` — a cell value on disk being
 the fixed mask with its length beside it, the structural fields staying
-readable, and the plan's `intent` surviving while a value quoted inside it is
+readable (a `cell:` key is literal), and the plan's `intent` surviving while a
+value quoted inside it is
 not — and by `tests/agent/test_ledger_rehydrate.py` — the masked plan value
 staying **unknown** rather than a mismatch, a resumed plan **never** being
 confirmed from a historical verdict, every plan requirement being graded even
 when the resumed run rewrote only some of them, a masked requirement being
 graded on the write **this process made**, and a resumed run that wrote nothing
-being unable to claim a confirmation.
+being unable to claim a confirmation — and by
+`tests/agent/test_completion_refusal.py` — the persisted blocks holding **no
+page text** (a `ref:` key's name is digested out of the file, a `cell:` key
+stays literal), a readable key that looks like a digest still being digested,
+the digest being idempotent, and a digested key still matching the readable
+one on the resume path.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
