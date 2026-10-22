@@ -3399,13 +3399,22 @@ def _ledger_items(deps: AgentDeps) -> list[PlanItem]:
     ]
 
 
-def _latest_attempt(target_key: str, deps: AgentDeps) -> WriteAttempt | None:
-    """The ledger's last attempt at one target, or None."""
-    latest: WriteAttempt | None = None
-    for a in deps.ledger:
-        if a.target_key == target_key:
-            latest = a
-    return latest
+def _completion_targets(deps: AgentDeps) -> list[PlanItem]:
+    """What the completion pass grades.
+
+    The PLAN when its values are here — the model's own declared
+    requirement is what the run promised, and it is what a reader wants
+    graded. A RESUMED run's plan values are masked on disk (a cell's
+    contents are user data and the document holds the verdict, not the
+    value), so the plan cannot be compared against a cell: the LEDGER is
+    graded instead, and the ledger's items carry the values THIS PROCESS
+    wrote. A write is verified against a fresh read of the cell, so the
+    verdict is about the cell as it is now, not about a history the page
+    may have changed under. An EMPTY ledger falls back to the plan.
+    """
+    if deps.plan and not any(is_redacted_value(i.value) for i in deps.plan):
+        return deps.plan
+    return _ledger_items(deps) or deps.plan  # empty ledger → plan → UNKNOWN
 
 
 async def _verify_plan(deps: AgentDeps,
@@ -3435,20 +3444,19 @@ async def _verify_plan(deps: AgentDeps,
         if is_redacted_value(item.value):
             # The value was masked on the way to disk — a cell's contents are
             # user data and the document holds the verdict, not the value. So
-            # the comparison cannot be made HERE. What CAN stand is the
-            # LEDGER's verdict for the same target: a confirmed flag is not a
-            # model claim, it is a harness-computed verdict from a real
-            # read-back, so it survives the resume. Anything else is UNKNOWN:
-            # the run must not claim a confirmation it cannot prove, and
-            # must not accuse the page of holding the wrong value when the
-            # truth is that the value is not here. The read is skipped too —
-            # it cannot change a verdict that is already UNKNOWN, and the
-            # relay has one slot.
-            attempt = _latest_attempt(item.target_key, deps)
-            if attempt is not None and attempt.confirmed:
-                verdicts.append((item, CONFIRMED, None))
-            else:
-                verdicts.append((item, UNKNOWN, None))
+            # there is nothing to compare the cell against, and a HISTORICAL
+            # verdict is not a substitute: it describes the cell as it was
+            # when the write happened, and the page may have changed under it
+            # since. The honest verdict is UNKNOWN — the run must not claim a
+            # confirmation it cannot prove, and must not accuse the page of
+            # holding the wrong value when the truth is that the value is not
+            # here. The read is skipped too — it cannot change a verdict that
+            # is already UNKNOWN, and the relay has one slot.
+            #
+            # A resumed run re-verifies by WRITING again: the completion pass
+            # grades the ledger's items, whose values are the ones this
+            # process wrote, against a fresh read of the cell.
+            verdicts.append((item, UNKNOWN, None))
             continue
         observed: str | None = None
         label = item.target_key
@@ -3962,7 +3970,7 @@ async def _execute_action(call: ActionCall, deps: AgentDeps, audit=None,
                 # first, strictly serially — the PLAN's when there is one, and
                 # the LEDGER's when the model declared no plan. A run with
                 # neither wrote nothing and completes as before.
-                targets = deps.plan if deps.plan else _ledger_items(deps)
+                targets = _completion_targets(deps)
                 verdicts = await _verify_plan(deps, targets)
                 _sync_plan(deps)
                 _persist_closed_loop(deps, audit)

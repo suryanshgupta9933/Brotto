@@ -283,10 +283,11 @@ async def test_a_live_plan_value_still_verifies_against_the_cell(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_resumed_plan_verifies_from_the_ledger_verdict(tmp_path):
-    """On a resume the value is not there, so the comparison cannot be made
-    — but the LEDGER's `confirmed` flag can. It is a harness-computed
-    verdict from a real read-back, not a model claim, so it stands."""
+async def test_a_resumed_plan_is_never_confirmed_from_a_historical_verdict(tmp_path):
+    """A masked value cannot be compared against a cell, and a HISTORICAL
+    verdict is not a substitute: it describes the cell as it was when the
+    write happened, and the page may have changed under it since. The
+    honest verdict is UNKNOWN — never a confirmation nobody can prove."""
     trail = AuditTrail(session_id="s3", dir=tmp_path)
     trail.begin_task("write a name")
     deps = _deps(_cdp(grid_value="name"))
@@ -300,8 +301,92 @@ async def test_a_resumed_plan_verifies_from_the_ledger_verdict(tmp_path):
     resumed.plan = audit_mod.read_plan(doc)
     resumed.ledger = audit_mod.read_ledger(doc)
     assert audit_mod.is_redacted_value(resumed.plan[0].value)
-    verdicts = await harness_mod._verify_plan(resumed)
+    # The write WAS confirmed when it happened — and it still cannot be
+    # promoted to a confirmation now.
+    assert resumed.ledger[0].confirmed is True
+    verdicts = await harness_mod._verify_plan(resumed, resumed.plan)
+    assert verdicts[0][1] == UNKNOWN
+    assert verdicts[0][1] != CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_run_is_graded_on_what_it_wrote_again(tmp_path):
+    """A resumed run re-verifies by WRITING again: the completion pass
+    grades the ledger's items — the values THIS process wrote — against a
+    fresh read of the cell. The write is the evidence, and the read is
+    current."""
+    trail = AuditTrail(session_id="s5", dir=tmp_path)
+    trail.begin_task("write a name")
+    deps = _deps(_cdp(grid_value="name"))
+    await _run_one(deps, "set_plan", {"items": [
+        {"intent": "write A1 = name", "target": {"cell": "A1"}, "value": "name"},
+    ]}, audit=trail)
+    await _run_one(deps, "write_text",
+                   {"target": {"cell": "A1"}, "value": "name"}, audit=trail)
+    doc = json.loads((tmp_path / "s5.json").read_text())
+
+    # The resume: the plan and the ledger come back from the document.
+    resumed = _deps(_cdp(grid_value="name"))
+    resumed.plan = audit_mod.read_plan(doc)
+    resumed.ledger = audit_mod.read_ledger(doc)
+    # ...and the run writes the target again, so the ledger holds a value
+    # this process wrote.
+    await _run_one(resumed, "write_text",
+                   {"target": {"cell": "A1"}, "value": "name"}, audit=trail)
+
+    targets = harness_mod._completion_targets(resumed)
+    assert targets, "the completion pass has something to grade"
+    assert not any(audit_mod.is_redacted_value(t.value) for t in targets)
+    verdicts = await harness_mod._verify_plan(resumed, targets)
     assert verdicts[0][1] == CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_run_that_writes_nothing_cannot_claim_a_confirmation(tmp_path):
+    """No fresh write, no value to compare, no confirmation. The run ends
+    with the truth rather than with a claim."""
+    trail = AuditTrail(session_id="s6", dir=tmp_path)
+    trail.begin_task("write a name")
+    deps = _deps(_cdp(grid_value="name"))
+    await _run_one(deps, "set_plan", {"items": [
+        {"intent": "write A1 = name", "target": {"cell": "A1"}, "value": "name"},
+    ]}, audit=trail)
+    await _run_one(deps, "write_text",
+                   {"target": {"cell": "A1"}, "value": "name"}, audit=trail)
+    doc = json.loads((tmp_path / "s6.json").read_text())
+    resumed = _deps(_cdp(grid_value="name"))
+    resumed.plan = audit_mod.read_plan(doc)
+    resumed.ledger = audit_mod.read_ledger(doc)
+    targets = harness_mod._completion_targets(resumed)
+    verdicts = await harness_mod._verify_plan(resumed, targets)
+    assert verdicts[0][1] == UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_run_with_no_ledger_at_all_is_still_checked(tmp_path):
+    """A resumed run whose ledger is empty has nothing to re-verify — so
+    the pass falls back to the plan, whose masked value grades UNKNOWN. It
+    must not grade NOTHING: an empty verdict list accepts the model's own
+    claim, which is the fail-open this pass exists to stop."""
+    trail = AuditTrail(session_id="s7", dir=tmp_path)
+    trail.begin_task("write a name")
+    deps = _deps(_cdp(grid_value="name"))
+    await _run_one(deps, "set_plan", {"items": [
+        {"intent": "write A1 = name", "target": {"cell": "A1"}, "value": "name"},
+    ]}, audit=trail)
+    doc = json.loads((tmp_path / "s7.json").read_text())
+    resumed = _deps(_cdp(grid_value="name"))
+    resumed.plan = audit_mod.read_plan(doc)
+    resumed.ledger = audit_mod.read_ledger(doc)
+    assert resumed.ledger == []
+    targets = harness_mod._completion_targets(resumed)
+    assert targets, "the completion pass has something to grade"
+    verdicts = await harness_mod._verify_plan(resumed, targets)
+    assert verdicts[0][1] == UNKNOWN
+    # And the pass refuses the completion rather than accepting it.
+    out = await _run_one(resumed, "task_complete",
+                         {"summary": "A1 is confirmed"}, audit=trail)
+    assert "REFUSED" in out
 
 
 @pytest.mark.asyncio
