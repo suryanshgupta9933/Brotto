@@ -49,7 +49,7 @@ from .context import (
 from .closed_loop import (
     CONFIRMED, MISMATCH, UNKNOWN, MAX_ATTEMPTS_PER_TARGET, MAX_BLOCKED_ATTEMPTS,
     PlanItem, WriteAttempt, adapter_for, canonical_target_key, compare_observed,
-    normalise_value, render_ledger, render_plan,
+    normalise_value, opaque_target_key, render_ledger, render_plan,
 )
 from .ax_filter import budget_for_window, filter_ax_targets
 
@@ -3096,6 +3096,19 @@ def _target_label(kind: str, resolved: dict, match: object | None) -> str:
     return str(resolved.get("ref", ""))
 
 
+def _same_target(a: str | None, b: str | None) -> bool:
+    """Whether two target keys name the same target.
+
+    The comparison is on the OPAQUE form of both. A key read back from the
+    session document is already digested and the run's own key is readable,
+    and the two must still match — while the page's text, which is what a
+    `ref:` or `desc:` key carries, is never the thing compared.
+    """
+    if not a or not b:
+        return False
+    return opaque_target_key(a) == opaque_target_key(b)
+
+
 async def _resolve_target(target: dict, deps: AgentDeps) -> tuple[str, str, dict]:
     """`{"ref"|"cell"|"description"}` → `(kind, canonical key, resolved)`.
 
@@ -3164,7 +3177,7 @@ async def _do_write_text(call, deps, audit=None, turn=-1) -> str:
     # The repeat rule. Typing the same value into the same target again is
     # what burned the fifteen-step run; the prior observation is the reason.
     for prior in deps.ledger:
-        if prior.target_key == key and prior.intended == value and not prior.confirmed:
+        if _same_target(prior.target_key, key) and prior.intended == value and not prior.confirmed:
             return (
                 f"REFUSED: you already tried {value!r} into {label} at step "
                 f"{prior.step} and it read back {prior.observed!r}. Change the "
@@ -3193,7 +3206,8 @@ async def _do_write_text(call, deps, audit=None, turn=-1) -> str:
     # a read, not a fact about the target, so it never exhausts a target. Only
     # a target that read back the WRONG value is exhausted.
     attempts = [a for a in deps.ledger
-                if a.target_key == key and not a.confirmed and a.observed is not None]
+                if _same_target(a.target_key, key)
+                and not a.confirmed and a.observed is not None]
     if len(attempts) >= MAX_ATTEMPTS_PER_TARGET:
         return (
             f"REFUSED: {label} has already been written {len(attempts)} times. "
@@ -3278,7 +3292,7 @@ def _sync_plan(deps: AgentDeps) -> None:
             continue
         attempts = [
             a for a in deps.ledger
-            if a.target_key == item.target_key
+            if _same_target(a.target_key, item.target_key)
             and normalise_value(a.intended) == normalise_value(item.value)
         ]
         if not attempts:
@@ -3390,12 +3404,12 @@ def _ledger_items(deps: AgentDeps) -> list[PlanItem]:
     """
     latest: dict[str, WriteAttempt] = {}
     for a in deps.ledger:
-        latest[a.target_key] = a
+        latest[opaque_target_key(a.target_key)] = a
     return [
-        PlanItem(id=n, intent=f"write {a.intended!r} into {key}",
-                 target_key=key, value=a.intended,
+        PlanItem(id=n, intent=f"write {a.intended!r} into {a.target_key}",
+                 target_key=a.target_key, value=a.intended,
                  status="confirmed" if a.confirmed else "pending")
-        for n, (key, a) in enumerate(latest.items())
+        for n, (_key, a) in enumerate(latest.items())
     ]
 
 
@@ -3409,7 +3423,7 @@ def _current_attempt(target_key: str, deps: AgentDeps) -> WriteAttempt | None:
     """
     latest: WriteAttempt | None = None
     for a in deps.ledger:
-        if a.target_key == target_key and not is_redacted_value(a.intended):
+        if _same_target(a.target_key, target_key) and not is_redacted_value(a.intended):
             latest = a
     return latest
 
@@ -3439,8 +3453,12 @@ def _completion_targets(deps: AgentDeps) -> list[PlanItem]:
         if is_redacted_value(item.value):
             attempt = _current_attempt(item.target_key, deps)
             if attempt is not None:
+                # The ATTEMPT's key, not the item's: a resumed run's plan item
+                # carries the digested key off disk, and a live target can only
+                # be resolved from the readable one — which is this process's
+                # own write, and the one the value comes from too.
                 item = PlanItem(id=item.id, intent=item.intent,
-                                target_key=item.target_key,
+                                target_key=attempt.target_key,
                                 value=attempt.intended, status=item.status)
         targets.append(item)
     return targets

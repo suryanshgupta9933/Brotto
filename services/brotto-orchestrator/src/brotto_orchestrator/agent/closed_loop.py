@@ -11,6 +11,7 @@ Pure: no I/O, no relay, no dependencies.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -35,7 +36,8 @@ class WriteAttempt:
     `intended` and `observed` are typed values, so this is user data: it is
     redacted on the way into the session file and compared in memory on the
     real value. `target_key` is structural (`cell:A1`, `ref:textbox:name`) and
-    is not redacted.
+    is not redacted — it is DIGESTED on the way to disk, so a `ref:` key's
+    page text does not leave the page (see `opaque_target_key`).
     """
 
     target_key: str
@@ -155,6 +157,39 @@ def canonical_target_key(target: dict, *, resolved: str | None = None) -> str:
             raise ValueError("a ref target needs an id")
         return "ref:" + (resolved or ref)
     raise ValueError("a target is a ref, a cell, or a description")
+
+
+_OPAQUE_PREFIX = "sha256:"
+
+
+def opaque_target_key(key: str) -> str:
+    """The non-content identity of a target key.
+
+    A key is an identifier, never text — the audit document's own standard.
+    `cell:A1` is the task's own cell address, so it stays as it is. A `ref:`
+    or `desc:` key carries a name that came off the page's accessibility tree
+    or out of the model's prose, so the persisted form is a digest of the
+    whole key: `sha256:ref:<16 hex>`. The digest is over the WHOLE key, so a
+    key read back from the document (already digested) and the readable key
+    this process holds produce the same opaque form, and comparing the two is
+    still an equality.
+
+    Idempotent: a key that already starts with `sha256:` is returned
+    unchanged. The prefix is the whole point — it is one a readable key can
+    never have (`canonical_target_key` only ever emits `cell:`, `ref:` or
+    `desc:`), so the check cannot be fooled by page text that happens to look
+    like a digest. The type stays inside it so a reader of the document can
+    still tell what kind of target it was.
+    """
+    if not key:
+        return key
+    if key.startswith(_OPAQUE_PREFIX):
+        return key
+    prefix, sep, _rest = key.partition(":")
+    if not sep or prefix not in ("ref", "desc"):
+        return key
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    return f"{_OPAQUE_PREFIX}{prefix}:{digest}"
 
 
 def compare_observed(observed: str | None, intended: str) -> str:

@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 from typing import Any, Container
 
-from .closed_loop import PlanItem, WriteAttempt
+from .closed_loop import PlanItem, WriteAttempt, opaque_target_key
 from .context import MemoryEntry, Scratchpad, next_serial
 from .redact import redact_text
 
@@ -194,6 +194,15 @@ def _mask_value(out: dict, field: str) -> None:
         return
     out[field] = _VALUE_MASK
     out[f"{field}_chars"] = len(value)
+
+
+def _opaque_entry(entry: dict) -> dict:
+    """One ledger/plan entry with its target key in its non-content form."""
+    out = dict(entry)
+    key = out.get("target_key")
+    if isinstance(key, str) and key:
+        out["target_key"] = opaque_target_key(key)
+    return out
 
 
 def _redact_entry(entry: dict, fields: tuple[str, ...]) -> dict:
@@ -691,10 +700,14 @@ class AuditTrail:
     # cell reports `unknown` rather than claiming a confirmation it cannot
     # prove.
     #
-    # `target_key` is STRUCTURAL (`cell:A1`, `ref:textbox:name`) and is not
-    # redacted: the harness compares it against a freshly canonicalised key
-    # on every write, and a reader who cannot see the key cannot tell which
-    # cell a verdict is about.
+    # `target_key` is an IDENTIFIER, never text. A cell's address (`cell:A1`)
+    # is the task's own, so it is kept as it is; a `ref:` or `desc:` key
+    # carries a name off the page, so what goes to disk is a digest of it
+    # (`sha256:ref:<16 hex>`) and the page's text stays on the page. The
+    # `sha256:` prefix is one a readable key can never have, so a name off the
+    # page that happens to look like a digest is still digested. The harness
+    # compares the opaque form on both sides, so a key read back from here
+    # still matches the readable key the run holds.
     def record_ledger(self, *, step: int, attempts: list[dict]) -> None:
         """Write the run's write-verdicts into the current task block.
 
@@ -708,7 +721,7 @@ class AuditTrail:
         if task is None:
             return
         task["ledger_step"] = step
-        task["ledger"] = [_redact_entry(a, _LEDGER_VALUE_FIELDS)
+        task["ledger"] = [_redact_entry(_opaque_entry(a), _LEDGER_VALUE_FIELDS)
                           for a in (attempts or []) if isinstance(a, dict)]
 
     def record_plan(self, *, items: list[dict]) -> None:
@@ -719,15 +732,16 @@ class AuditTrail:
         task = self._task_entry()
         if task is None:
             return
-        task["plan"] = [_redact_entry(i, _PLAN_VALUE_FIELDS)
+        task["plan"] = [_redact_entry(_opaque_entry(i), _PLAN_VALUE_FIELDS)
                         for i in (items or []) if isinstance(i, dict)]
 
     def record_completion_refused(self) -> None:
         """Record that a completion was refused for an unproven target.
 
-        Persisted because the SECOND call is accepted: a run that was
-        refused a completion and then reconnected must still accept the
-        second one, or the reconnect turns a bounded refusal into a loop.
+        Persisted because the SECOND call is the one that closes the run:
+        a run that was refused a completion and then reconnected must not
+        get a fresh budget of refusals, or the reconnect turns a bounded
+        refusal into a loop.
         """
         self._record(self._record_completion_refused)
 
