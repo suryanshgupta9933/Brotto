@@ -1,12 +1,19 @@
-"""The page delta is gated on the same knowledge the screenshot is.
+"""What the harness hands the delta call, and what the delta does with it.
 
-`_capture_page` vetoes when `redactions or run_secrets` — the harness's own
-knowledge that the page holds a typed secret, which redaction cannot reach in
-pixels. `get_page_delta` reads the same pixels for change detection and must
-take the same veto; today it does not store or log them (tile rectangles and a
-boolean), so nothing leaks, but the gate should not depend on that staying
-true. The relay's own gate is `brotto-conversation`'s; this asserts the values
-reach it.
+The screenshot is gated on the harness's own knowledge that the page holds a
+typed secret — `_capture_page` vetoes when `redactions or run_secrets`,
+because redaction cannot reach in pixels. The delta is **not** a picture: it
+is tile geometry and a luminance percentage, `_clean_delta` drops anything
+that is not exactly that shape, and a tile can say where on the page
+something changed but never what it says. So the delta is no longer vetoed
+for a typed secret, and the cost of that veto was a canvas run the
+stagnation detector could not fire on (`deps.canvas_changed` was `None`).
+
+The screenshot's veto is untouched, and the capture gate itself
+(`screenshot_block_reason`) is untouched: with capture off, or on a blocked
+domain, there is no delta either. This file pins the harness's half — the
+values still reach the relay, and the relay decides what they mean. The
+relay's half is `tests/test_page_delta.py`.
 """
 
 from __future__ import annotations

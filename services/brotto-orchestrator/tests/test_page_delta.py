@@ -81,13 +81,43 @@ async def test_a_malformed_tile_is_dropped_rather_than_half_repaired():
     {"redactions": {"email": 1}},
     {"run_secrets": ["hunter2"]},
 ])
-async def test_a_page_holding_a_typed_secret_is_not_diffed(kwargs):
-    """The capture's veto, and it applies to the same pixels. Nothing is
-    persisted today, but the gate must not depend on the returned value
-    staying just rectangles and a boolean as the file changes."""
+async def test_a_typed_secret_does_not_withhold_the_delta(kwargs):
+    """A delta is not a picture, so the screenshot's typed-secret veto does
+    not apply to it.
+
+    The whole wire shape is geometry and a mean-luminance-difference
+    percentage; a tile can say *where* on the page something changed and
+    never *what* it says. `_clean_delta` drops anything that is not exactly
+    that shape, so the shape check is what keeps a future change from
+    widening what the delta carries — which is the argument the old veto was
+    reaching for.
+
+    The cost of withholding it was real: `deps.canvas_changed` became
+    `None`, and `None` is the honest unknown the stagnation detector cannot
+    fire on, so a canvas run could not be stopped for stagnation at all.
+    """
     relay = _relay({"url": "https://example.com/", "delta": DELTA})
-    assert await relay.get_page_delta(Policy(), **kwargs) is None
-    relay._ws_send.assert_not_called()
+    assert await relay.get_page_delta(Policy(), **kwargs) == DELTA
+
+
+@pytest.mark.asyncio
+async def test_a_typed_secret_does_not_open_the_capture_gate(monkeypatch):
+    """The other half of the same claim: the gate that is about *pixels* is
+    the one that must hold, and it holds on its own terms. With capture off
+    the delta is withheld even though a typed secret no longer withholds
+    it."""
+    monkeypatch.delenv("BROTTO_VISION_CAPTURE", raising=False)
+    relay = _relay({"url": "https://example.com/", "delta": DELTA})
+    assert await relay.get_page_delta(Policy(), run_secrets=["hunter2"]) is None
+
+
+@pytest.mark.asyncio
+async def test_a_typed_secret_does_not_open_a_blocked_domain():
+    """The user's own blacklist is not a typed-secret question and never
+    was."""
+    relay = _relay({"url": "https://www.bank.com/login", "delta": DELTA})
+    policy = Policy(blacklist=["*.bank.com"])
+    assert await relay.get_page_delta(policy, run_secrets=["hunter2"]) is None
 
 
 @pytest.mark.asyncio

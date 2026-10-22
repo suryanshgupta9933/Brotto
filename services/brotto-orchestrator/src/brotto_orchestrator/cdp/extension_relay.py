@@ -934,26 +934,44 @@ class ExtensionCDPRelay:
         frequent moments in an ordinary run.
 
         **The gate is `screenshot_block_reason` and it is not weakened here.**
-        A delta is derived from a viewport capture — the extension decodes the
+        A delta is computed from a viewport capture — the extension decodes the
         screenshot locally and diffs it — so it is page-derived data from the
         same pixels the screenshot channel is refused over, and it arrives
-        through a different route. Letting it past while a capture of the same
-        page is refused would be exactly the bypass the gate exists to prevent,
-        so this asks the same question with the same answer, including the
-        `BROTTO_VISION_CAPTURE` switch: with capture off there is no delta
-        either. The extension does not know the policy and computes
-        unconditionally; the server is the authority, deliberately.
+        through a different route. So this asks the same question with the same
+        answer, including the `BROTTO_VISION_CAPTURE` switch: with capture off
+        there is no delta either. The extension does not know the policy and
+        computes unconditionally; the server is the authority, deliberately.
 
-        **And the same veto the capture gets for a typed secret.** `redactions`
-        and `run_secrets` are the harness's knowledge that this page holds
-        something credential-shaped; a picture of it cannot be redacted, so
-        `_capture_page` refuses — and a delta is read off those same pixels, so
-        it must be refused too, or the gate only holds while the returned value
-        happens to stay just tile rectangles and a boolean. The rule is the
-        harness's verbatim, `redactions or run_secrets`: an *empty* `redactions`
-        means no detector fired, not that the page is clean. `None` is already
-        the honest unknown everywhere downstream, so a vetoed page simply stops
-        earning progress credit from the delta.
+        **A typed secret does not withhold the delta, because a delta is not a
+        picture.** `redactions` and `run_secrets` are the harness's knowledge
+        that this page holds something credential-shaped; a *picture* of it
+        cannot be redacted, so `_capture_page` refuses — and that refusal
+        stands. But what this method returns is not a picture: the whole wire
+        shape is `{"changed": bool, "tiles": [{x, y, w, h, pct}]}` — geometry
+        and a mean-luminance-difference percentage. A tile's rectangle says
+        *where* on the page something changed; `pct` is a scalar. Neither can
+        carry the typed value, and nothing that reaches the model through this
+        method is derived from the value itself.
+
+        **The shape check is the guarantee, and it is the argument the old
+        veto was reaching for.** `_clean_delta` drops anything that is not
+        exactly that shape — whole, not partly repaired — so a future change
+        that put a string or a pixel in a tile would be refused at the door
+        rather than quietly widening what the delta carries. The old docstring
+        wanted the veto to hold "while the returned value happens to stay just
+        tile rectangles and a boolean"; the shape check is what makes that
+        true without a second gate. So the gate that is about *pixels* — the
+        screenshot — is the one that must hold, and the delta is not a picture
+        of anything.
+
+        **Why the veto was a real cost, not a nicety.** Withholding the delta
+        makes `deps.canvas_changed` `None`, and `None` is the honest unknown
+        that the stagnation detector cannot fire on: the detector was
+        structurally unable to stop a canvas run, on the one channel that
+        could have told it the page had not moved. `redactions` and
+        `run_secrets` are accepted here so the harness can call one method
+        without branching on the relay; they are deliberately **not**
+        consulted.
 
         **D2: a tile is evidence, never a target.** Nothing here converts a
         tile into a point, and nothing may — `_coordinate_action` takes
@@ -964,10 +982,6 @@ class ExtensionCDPRelay:
         """
         obs = self._cached_obs or {}
         url = obs.get("url")
-        if redactions or run_secrets:
-            log.info("[%s] page delta withheld — page holds a typed secret  url=%s",
-                     self._sid, (url or "")[:80])
-            return None
         if screenshot_block_reason(url, policy):
             log.info("[%s] page delta withheld by the capture gate  url=%s",
                      self._sid, (url or "")[:80])
