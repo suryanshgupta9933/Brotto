@@ -32,14 +32,22 @@ import time
 from pathlib import Path
 from typing import Any, Container
 
+from .closed_loop import PlanItem, WriteAttempt
 from .context import MemoryEntry, Scratchpad, next_serial
+from .redact import redact_text
 
 log = logging.getLogger(__name__)
 
 # 3 = actions[] entries carry `target` and `changed`. A reader must treat
 # both as absent on an older document: `changed` absent means UNKNOWN, which
 # is why the default is null and never False.
-SCHEMA_VERSION = 3
+#
+# 4 = a task block may carry a `ledger` (every write this run attempted,
+# and what the target said when it was read back) and a `plan` (the steps
+# the run declared). Both are absent on an older document and a reader must
+# treat them as EMPTY, not as an error — a document written before this
+# schema is still readable and still resumes.
+SCHEMA_VERSION = 4
 
 # A single scalar is capped so one pathological page cannot produce a
 # multi-megabyte document. The cap is recorded rather than silent.
@@ -155,6 +163,36 @@ def is_secret_field(attributes: dict | None, accessible_name: str | None) -> boo
     if attributes and (attributes.get("type") or "").lower() == "password":
         return True
     return _secret_by_name(accessible_name)
+
+
+# The fields of a ledger entry and a plan item that hold a TYPED VALUE, and
+# are therefore redacted on the way to disk. Everything else in those
+# structures is structural — a key, a status, a mechanism, a number — and
+# stays readable, because a reader (or the harness, on a resume) cannot
+# work with a verdict whose target it cannot name.
+#
+# `intent` is in the plan's list because it is the model's own prose and
+# can quote the value ("write the card number to A1"). It is not a typed
+# value, and redacting it costs nothing for the intents that are not.
+_LEDGER_VALUE_FIELDS = ("intended", "observed")
+_PLAN_VALUE_FIELDS = ("value", "intent")
+
+
+def _redact_entry(entry: dict, fields: tuple[str, ...]) -> dict:
+    """One ledger/plan entry, with its value fields redacted.
+
+    The redactor is the existing one (`redact.redact_text`): it matches on
+    the SHAPE of the value, because a cell has no field name to be
+    secret-shaped by. A structural key is not passed through it — a target
+    key like `cell:A1` matches no rule, and a key that DID carry a value
+    is exactly the one that should be redacted.
+    """
+    out = dict(entry)
+    for field in fields:
+        value = out.get(field)
+        if isinstance(value, str):
+            out[field] = redact_text(value)[0]
+    return _cap_deep(out)
 
 
 # ponytail: one directory, one file per session, no database and no index.
@@ -613,6 +651,73 @@ class AuditTrail:
         tasks = self._doc.get("tasks") or []
         self._task_index = int(tasks[-1].get("index", 0)) if tasks else 0
         return self._task_index
+
+    # ── closed-loop state ───────────────────────────────────────
+    #
+    # The ledger and the plan are the run's own record of what it wrote and
+    # what it meant to write, and a resumed run that loses them is silently
+    # back to lying — so they are persisted here, in the user's own sidecar
+    # and nowhere else.
+    #
+    # A cell's value is a TYPED value, so it is redacted on the way to disk
+    # on the same terms as a typed action argument. The comparison the
+    # harness does happens IN MEMORY, on the real value, and is never
+    # persisted. A resumed run therefore compares against the redacted
+    # value, which is the correct trade: a run that cannot read a redacted
+    # cell reports `unknown` rather than claiming a confirmation it cannot
+    # prove.
+    #
+    # `target_key` is STRUCTURAL (`cell:A1`, `ref:textbox:name`) and is not
+    # redacted: the harness compares it against a freshly canonicalised key
+    # on every write, and a reader who cannot see the key cannot tell which
+    # cell a verdict is about.
+    def record_ledger(self, *, step: int, attempts: list[dict]) -> None:
+        """Write the run's write-verdicts into the current task block.
+
+        `attempts` is the IN-MEMORY ledger, so the values here are the real
+        ones; the redaction happens on this side of the disk.
+        """
+        self._record(self._record_ledger, step=step, attempts=attempts)
+
+    def _record_ledger(self, *, step: int, attempts: list[dict]) -> None:
+        task = self._task_entry()
+        if task is None:
+            return
+        task["ledger_step"] = step
+        task["ledger"] = [_redact_entry(a, _LEDGER_VALUE_FIELDS)
+                          for a in (attempts or []) if isinstance(a, dict)]
+
+    def record_plan(self, *, items: list[dict]) -> None:
+        """Write the run's declared plan into the current task block."""
+        self._record(self._record_plan, items=items)
+
+    def _record_plan(self, *, items: list[dict]) -> None:
+        task = self._task_entry()
+        if task is None:
+            return
+        task["plan"] = [_redact_entry(i, _PLAN_VALUE_FIELDS)
+                        for i in (items or []) if isinstance(i, dict)]
+
+    def record_completion_refused(self) -> None:
+        """Record that a completion was refused for an unproven target.
+
+        Persisted because the SECOND call is accepted: a run that was
+        refused a completion and then reconnected must still accept the
+        second one, or the reconnect turns a bounded refusal into a loop.
+        """
+        self._record(self._record_completion_refused)
+
+    def _record_completion_refused(self) -> None:
+        task = self._task_entry()
+        if task is None:
+            return
+        task["completion_refused"] = True
+
+    def _task_entry(self) -> dict | None:
+        for entry in self._doc.get("tasks") or []:
+            if isinstance(entry, dict) and entry.get("index") == self._task_index:
+                return entry
+        return None
 
     def add_message(self, *, role: str, content: str, task: int,
                     turn: int | None) -> str:
@@ -1142,6 +1247,102 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
                 "errors": [{"code": "audit_unreadable", "message": detail}],
                 "totals": {"turns": 0, "steps": 0, "prompts": 0, "actions": 0,
                            "tokens_in": 0, "tokens_out": 0, "errors": 1}}
+
+
+# ── rehydration readers ─────────────────────────────────────────
+#
+# The harness rebuilds `deps` from scratch on a resume, so the ledger and
+# the plan have to come back with the document — without them the repeat
+# block and the completion pass silently switch off and the run is back to
+# lying.
+#
+# Which task block: the LAST one, because a resume continues the last task
+# the document was running (`AuditTrail.resume_task`). A last block with
+# no ledger means that task wrote nothing — an EARLIER task's ledger
+# belongs to a different run, and adopting it would refuse a write the
+# user is entitled to make. A document written before schema 4 has no
+# ledger at all, and yields nothing rather than an error.
+
+
+def _current_task_block(doc: dict) -> dict:
+    tasks = doc.get("tasks") if isinstance(doc, dict) else None
+    if not isinstance(tasks, list) or not tasks:
+        return {}
+    last = tasks[-1]
+    return last if isinstance(last, dict) else {}
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def read_ledger(doc: dict) -> list[WriteAttempt]:
+    """The run's write verdicts, rebuilt from a document. Never raises.
+
+    Empty when the document has none — an older schema, or a run that
+    wrote nothing. A resume that finds an empty ledger is a run that has
+    not written yet, not a broken one.
+    """
+    entries = _current_task_block(doc).get("ledger")
+    if not isinstance(entries, list):
+        return []
+    out: list[WriteAttempt] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        observed = entry.get("observed")
+        out.append(WriteAttempt(
+            target_key=str(entry.get("target_key") or ""),
+            intended=str(entry.get("intended") or ""),
+            observed=None if observed is None else str(observed),
+            confirmed=bool(entry.get("confirmed")),
+            mechanism=str(entry.get("mechanism") or ""),
+            step=_as_int(entry.get("step")),
+        ))
+    return out
+
+
+def read_plan(doc: dict) -> list[PlanItem]:
+    """The run's declared plan, rebuilt from a document. Never raises."""
+    items = _current_task_block(doc).get("plan")
+    if not isinstance(items, list):
+        return []
+    out: list[PlanItem] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        target_key = item.get("target_key")
+        value = item.get("value")
+        out.append(PlanItem(
+            id=_as_int(item.get("id")),
+            intent=str(item.get("intent") or ""),
+            target_key=None if target_key is None else str(target_key),
+            value=None if value is None else str(value),
+            status=str(item.get("status") or "pending"),
+        ))
+    return out
+
+
+def read_completion_refused(doc: dict) -> bool:
+    """Whether the last task in the document already had a completion refused.
+
+    The second `task_complete` is ACCEPTED, so this flag is what keeps a
+    refusal bounded across a reconnect.
+    """
+    return bool(_current_task_block(doc).get("completion_refused"))
+
+
+def is_redacted_value(value: str | None) -> bool:
+    """True when a stored value was redacted on the way to disk.
+
+    A resumed run compares a rehydrated value against a fresh one, and a
+    redacted value cannot be compared: the honest verdict for it is
+    `unknown`, not a mismatch and never a confirmation.
+    """
+    return bool(value) and value.startswith("[redacted")
 
 
 def delete(session_id: str, *, dir: Path | None = None,

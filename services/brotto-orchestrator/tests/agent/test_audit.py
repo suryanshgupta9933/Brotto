@@ -544,7 +544,7 @@ def test_the_shape_change_came_with_a_schema_bump():
     """actions[] entries carry fields older documents do not, and
     schema_version is the compatibility contract — so the two move together.
     If a future change adds a field here without bumping, this fails."""
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
 
 
 def test_action_records_are_capped_so_a_run_stays_readable(trail, monkeypatch):
