@@ -1043,10 +1043,12 @@ mode reports the selected cell. It is **not a read of the whole sheet**, so no
 claim about neighbouring or distant cells follows from it, and the prompt says
 so in the same paragraph as the confirmation rather than leaving it to be
 inferred from a convenient one. Read the name box and the formula bar *before*
-the next move and again *after* a write; a content the tree reports for the
-address you were in is the cell that was written, which is how a keyboard step
-is checked — not by squinting at the picture, and not by typing it again and
-seeing the cell change either time.
+the next move, and read the cell you wrote **at its own address** after a
+write — the content box follows the selection, so the read has to go back to
+the address you wrote rather than reading whatever it is showing now. The two
+boxes are a pair and the third target is the off-screen editor; all three are
+resolved below, and the read-and-verify rule is stated there because it is the
+same rule with the boxes named.
 
 **So the old sentence is scoped, not deleted.** "The keyboard is how you act;
 the picture is how you know" was the rule for a page with **no accessibility
@@ -1079,7 +1081,7 @@ and must not grow one; the CDP modifier bitmask is the extension's
 that no OS vocabulary ("on a Mac", "Windows", …) enters that section, because a
 sentence that names an operating system is a branch wearing prose.
 
-### Two boxes that look identical, and the one that loses the work silently
+### Two boxes that look identical, and the two ways the work disappears
 
 A measured Google Sheets run typed its two column headers into the sheet's
 **name box** — the address box — and the data never landed. A word typed there
@@ -1088,6 +1090,15 @@ named range" panel and the run still reported itself completed. **The failure
 is silent three ways at once**: the typing succeeds, the cell stays empty, and
 nothing errors.
 
+A later run failed on the *other* box and was just as silent: it typed into the
+formula bar, pressed Enter, and reported completed with no cell written. That
+one was ours in two parts — the delivery (an `Input.insertText` fires no
+keydown, so a grid never entered edit mode) and the target (the prompt told the
+model the off-screen editor was not a field to type into, and told it to read
+the content box back, which is a mirror of the selection rather than the cell).
+Both halves are corrected here and in `extension.md`, and the verification step
+is what turned the first one into a certifiable success.
+
 **The two boxes are told apart by their value, not their name.** A grid app's
 chrome carries two **anonymous** textboxes that look identical in the AX tree.
 The one whose value is a cell reference — letters and digits, like `A2` or
@@ -1095,9 +1106,27 @@ The one whose value is a cell reference — letters and digits, like `A2` or
 text, is the **CONTENT box**. Position is the second tell: the address box is
 the small one at the far left, the content box is the wide one beside it.
 Google Sheets is the example — its name box holds the address, its formula bar
-holds the cell's content. A third textbox is the grid's own cell editor, a
-zero-width div parked off-screen (y = -9998); it is the app's editor, not a
-field to type into.
+holds the cell's content.
+
+**The two are a pair, and that is what the first version of this section got
+wrong.** The content box **follows the selection** rather than staying where
+you left it, so the address box is what says *which* cell the content box is
+showing. And the content box is a **mirror of the selected cell, not that
+cell's editor**: its value is the selected cell's content, and while an edit is
+in flight it is that edit — but a write aimed at the cell lands in the cell
+because the grid routed it, not because the box is the cell's editor. A run
+that typed a header into the formula bar, pressed Enter, and read the formula
+bar back had verified a mirror of itself.
+
+**The off-screen textbox is the grid's own cell editor, and it is a write
+target.** A textbox the tree marks off-screen in a grid is the zero-width
+element the app parks outside the viewport and keeps focused while an edit is
+in progress. It has no point on screen, so it is not a field you *press* into —
+but it is where the pending edit lives, and its value is what the tree reports
+for the cell being edited. The earlier sentence here called it "the app's
+editor, not a field to type into", and that phrasing is what pushed the model
+onto the mirror: it read as "this cannot be a write target" and the formula bar
+became the only remaining option.
 
 **A reference typed into the address box is a jump, and a word is not.** That
 is the whole difference between the two boxes: a reference navigates, and a
@@ -1105,17 +1134,40 @@ word is taken as the *name* of a range. So the address box is not a field to
 avoid — it is a field with exactly one legal use.
 
 **To write a cell: `type_text` into the content box, `press_key("Enter")` to
-commit, then read the content box's value again.** That read *is* the
-verification — not a picture, and not re-typing the value and watching the
-cell change either time. The accessibility-mode section above says the same
-thing for the one cell the mode reports; this is the same rule with the two
-boxes resolved, and the mode is what puts the content box in the tree at all.
+commit it.** Nothing shorter than Enter commits an edit, and the value reaches
+the cell only if it arrived **as a keystroke** — which the extension routes by
+the page's origin **and path prefix** (an origin alone is a host, not an
+application: `docs.google.com` serves Docs and Drive as well as Sheets), not by
+which box was focused (`extension.md`). The
+off-screen editor textbox carries the same edit, so either target can hold a
+cell's content; the content box is the one you can see.
 
-**If the tree carries no content box, the page exposes no field that takes a
-cell's content.** No accessibility mode, no formula bar — then the agent must
-call `cannot_complete` and say what the page does not expose, rather than type
-into a field it has not identified. Typing into an unidentified field is how
-the named-range mistake is made in the first place.
+**Verify by reading the cell you wrote, not the box you typed into.** Enter
+moves the selection down, so immediately after it the content box shows the
+**next** cell, and reading it then proves nothing — it cannot tell a written
+cell from an empty one. That was the verification step that certified the
+Sheets run whose cell was never written. ArrowUp after Enter returns the
+selection to the address you wrote; read the content box's value **there**,
+with the address box confirming you are back where you wrote. Not a picture,
+and not re-typing the value to see whether it took.
+
+**If the tree does not show your value for that address, the write did not
+land.** Say so, and do not report the cell as written. **Do not type the same
+value into the same box a second time either**: while an uncommitted edit is
+still in the editor, a second write *replaces* it rather than adding to it, so
+the retry loses the first attempt and the cell stays empty — the retry converts
+a not-yet-landed write into a definitely-lost one. Try the other target once,
+the grid's own off-screen editor textbox, and read that address again. If the
+value is still not there, `cannot_complete`, naming the cell and what the page
+did not show. The extension's own half is the refusal path — `grid-text-not-
+delivered` / `grid-text-misdelivered` (`extension.md`) — and this is the loop's
+half: **the refusal is worth taking over the report.**
+
+**If the tree carries no content box and no off-screen editor, the page exposes
+no field that takes a cell's content.** No accessibility mode, no formula bar —
+then the agent must call `cannot_complete` and say what the page does not
+expose, rather than type into a field it has not identified. Typing into an
+unidentified field is how the named-range mistake is made in the first place.
 
 **The address box is DETECTED, not guessed, and the detection is a nudge
 rather than a kill.** `address_box_nudge(deps)` fires when **two writes into an
@@ -1955,8 +2007,9 @@ extension's **isolated world** and named by the engine (`DOM.describeNode`),
 never by a page getter, and must be the pressed node, a descendant of it, a
 canvas editor lying wholly inside it, or the grid's own editor lying outside
 the canvas entirely — and that last one only on a **recognised grid's own
-origin**, because the geometry that identifies a spreadsheet is a geometry any
-page can imitate. It refuses an absent `backendNodeId` as
+origin and path prefix**, because the geometry that identifies a spreadsheet is a
+geometry any page can imitate, and an origin alone is a host rather than an
+application. It refuses an absent `backendNodeId` as
 `focus-unidentified` where `verifyTarget` fails open for an older relay,
 because this is the branch that empties the user's text. Two walls, no
 dependency between them.
@@ -1973,7 +2026,8 @@ per character. The window that remains — one round trip between the re-assert
 answering and the browser processing the key — is stated in `extension.md`
 rather than smoothed over, and the honest residual is Google's own re-render
 rather than a hostile page, since the adapter is looked up by the document's
-own origin. `extension.md` has the mechanism; what is owned here is the shape
+own origin and path, both unforgeable from inside it. `extension.md` has the
+mechanism; what is owned here is the shape
 of it: **a reading is not a binding**, and the refusal vocabulary grew a name
 for the binding (`focus-changed`) and a separate one for the delivery check
 (`grid-text-not-delivered`) rather than one that blurred the two cases. It has

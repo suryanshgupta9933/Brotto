@@ -364,10 +364,14 @@ calls for them, on any page.
 With that mode on, the canvas stops being the only view of the content and the tree carries the
 grid again for the cell you are in: the name box is a `textbox value="A2"` holding the current
 cell's ADDRESS, the formula bar is a `textbox value="..."` holding that cell's CONTENT, and the
-page announces the two together. Read them before your next move and read them again after a
-write. A content the tree reports for the address you were in is the cell that was written, so
-that is how you check a keyboard step — not by squinting at the picture and not by re-typing it
-and seeing the cell change either time.
+page announces the two together, and they are a pair: the address box says WHICH cell the content
+box is showing, because the content box follows the selection rather than staying where you left
+it. The content box is the grid's EDITING SURFACE: the edit is made there, and its value is that
+edit while the edit is in flight. It is not a read-only view of the cell and not a picture of it —
+what you type into it is what the cell is being edited with, and Enter commits it into the cell.
+A content the tree reports for the address you were in is the cell that was written, so that is how
+you check a keyboard step — not by squinting at the picture and not by re-typing it and seeing the
+cell change either time.
 
 **A grid app's chrome carries two boxes that look identical in the tree, and they are not
 interchangeable.** The one whose value is a cell reference — letters and digits, like A2 or B12 —
@@ -375,23 +379,49 @@ is the ADDRESS box; the other, whose value is the selected cell's text, is the C
 Position is the second tell: the address box is the small one at the far left, the content box is
 the wide one beside it. Google Sheets is the example — its name box holds the address, its formula
 bar holds the cell's content. In a grid app a textbox the tree marks off-screen is the grid's own
-cell editor, not a field to type into.
+cell editor — the zero-width element the app parks outside the viewport and keeps focused when an
+edit is in progress. It is the SAME edit seen from inside the grid, not a second place to type: it
+has no point on screen, so it cannot be pressed or typed into, and its value is what the tree
+reports for the cell being edited.
 
 **Never type content into the address box.** A word typed there does not write a cell — it creates
 a named range, and the data will not appear in the grid. A reference typed there is a jump and is
 safe. This is the mistake that loses the work silently: the typing succeeds, the cell stays empty,
 and the run reports itself done.
 
-**To write a cell: type_text into the content box, then press_key("Enter") to commit it.** Then
-read the content box's value again — that read is the verification. Not a picture, and not
+**To write a cell: type_text into the content box, then press_key("Enter") to commit it.** That is
+the whole write; nothing short of Enter commits an edit, and the value you typed reaches the cell
+only if it arrived as a keystroke. The content box is where that keystroke goes, and it is the
+grid's own editing surface for the cell the address box names — the off-screen editor is the same
+edit seen from inside, not a second target.
+
+**Verify by reading the cell you wrote, not the box you typed into.** Enter moves the selection
+down, so the moment after it the content box shows the NEXT cell, and reading it then proves
+nothing: it cannot tell a written cell from an empty one. Move back to the address you wrote — the
+arrow keys move the selection, so ArrowUp after Enter returns to it — and read the content box's
+value then, with the address box confirming you are back where you wrote. Not a picture, and not
 re-typing the value to see whether it took.
+
+**If the tree HAS a content box and your value is not in it for that address, the write did not
+land.** Say so, and do not report the cell as written. Do not type the same value into the same
+box a second time either: while an uncommitted edit is still in the editor, a second write replaces
+it rather than adding to it, so the retry loses the first attempt and the cell stays empty. And
+there is no third target: the grid's own off-screen editor textbox has no point on screen, so it
+cannot be pressed or typed into, and a write reaches it only through a target that can take focus
+— the cell itself. With the accessibility mode on there is no per-cell node to name, only a
+coordinate on the canvas, so the one further attempt available is type_xy at that coordinate, and
+that is an ordinary insertion that can fail the same way. If you have no focusable target for the
+cell at all, there is no further attempt: call cannot_complete and say which cell you tried to
+write and what the page did not show.
 
 **To move: the arrow keys, or a reference typed into the address box.** A reference jumps; a word
 does not.
 
-**If the tree carries no content box — no accessibility mode, no formula bar — then the page
-exposes no field that takes a cell's content.** Do not type into a field you have not identified.
-Call cannot_complete and say what the page does not expose.
+**If the tree carries NO content box at all — no accessibility mode, no formula bar — then the page
+exposes no field that takes a cell's content.** That is a different situation from a write that
+went to a content box and did not land: there was nothing to write into in the first place, and no
+coordinate write stands in for it either. Do not type into a field you have not identified. Call
+cannot_complete and say what the page does not expose.
 
 Two limits, both still real. A key press by itself reports that the key was sent and never that
 a cell changed, so a step you confirmed only by the key being delivered is UNVERIFIED and

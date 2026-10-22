@@ -103,6 +103,76 @@ def test_the_nudge_says_what_to_do_instead():
     assert "press Enter" in out
 
 
+# --- the content box is not the address box --------------------------------
+
+@pytest.mark.asyncio
+async def test_the_measured_content_box_write_is_not_nudged(monkeypatch):
+    """The corrected recipe tells the model to type into the CONTENT box. If
+    that write tripped the nudge, the fix would stop every cell write.
+
+    The detector keys on the field's shown value, so the two are told apart by
+    the same tell the prompt teaches: the address box holds "A1", the content
+    box holds the cell's text. Here it holds what the failed run typed.
+    """
+    cdp = MagicMock()
+    cdp.ping = AsyncMock(return_value=True)
+    cdp.get_targets = AsyncMock(return_value=[
+        SemanticTarget(ref_id="0:9001", tag="div", role="textbox",
+                       name="", value="Name")])
+    cdp.get_current_url = AsyncMock(return_value="https://example.com/sheet")
+    cdp.get_page_text = AsyncMock(side_effect=[f"page {i}" for i in range(20)])
+    cdp.get_page_delta = AsyncMock(return_value=None)
+    cdp.get_page_title = AsyncMock(return_value="Sheet")
+    cdp.refresh_target_map = AsyncMock()
+
+    warnings: list[str] = []
+
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
+        if call.action == "task_complete":
+            deps.result = TaskResult(status="completed", summary="ok")
+        return f"{call.action} done"
+
+    async def _fake_plan(deps, turn, agent, audit=None):
+        warnings.append(turn.repeat_warning)
+        deps.result = None
+        if len(warnings) >= 4:
+            return AgentDecision(
+                reasoning="done", thought="done",
+                actions=[ActionCall(action="task_complete",
+                                    action_args={"summary": "ok",
+                                                 "extracted_data": None})],
+            ), 400_000, _EmptyResult()
+        # Exactly the measured run: a value typed into the box that holds the
+        # cell's content, then Enter.
+        return AgentDecision(
+            reasoning="s", thought="writing",
+            actions=[ActionCall(action="type_text",
+                                action_args={"ref": "0:9001", "text": "name"}),
+                     ActionCall(action="press_key",
+                                action_args={"key": "Enter", "modifiers": 0})],
+        ), 400_000, _EmptyResult()
+
+    monkeypatch.setattr(harness_mod, "_execute_action", _fake_execute)
+    monkeypatch.setattr(harness_mod, "_plan_step", _fake_plan)
+
+    async def ws_send(_msg: dict) -> None:
+        return None
+
+    deps = AgentDeps(user_id="t", task="write a name", cdp=cdp,
+                     ws_send=ws_send)
+    await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+
+    assert not any("CELL REFERENCE" in w for w in warnings), (
+        "typing into the content box was mistaken for typing into the "
+        "address box")
+    assert deps.address_box_writes and all(
+        w == [] for w in deps.address_box_writes), (
+        "a content-box write was recorded as an address-box write: "
+        f"{deps.address_box_writes}")
+    assert deps.result is not None and deps.result.status == "completed", (
+        "the nudge is a warning, not a kill — a correct write still finishes")
+
+
 # --- through the loop -------------------------------------------------------
 
 @pytest.mark.asyncio
