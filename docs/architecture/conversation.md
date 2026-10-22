@@ -265,17 +265,27 @@ the existing record rather than replacing it, and a corrupt file is left
 byte-for-byte as found. It is the only copy of a run nobody can read, and "we
 cannot read it" is not a reason to delete it.
 
-#### **A v2 document cannot be resumed once v3 is deployed. This is a deploy-ordering fact, not a cosmetic bump.**
+#### **A v2 document cannot be resumed once v3 is deployed — that was true, and the rule changed on 2026-10-22. This is a deploy-ordering fact, not a cosmetic bump.**
 
-`harness.py:4125` refuses to resume any document whose `schema_version` is not
-exactly `SCHEMA_VERSION` — the check is equality, not `>=`. So the moment a
-server writing `SCHEMA_VERSION = 3` is rolled out, **every v2 document on disk
-becomes unresumable**, and one that was interrupted a minute before the roll
-reports `status: "interrupted"` with the version mismatch as its reason. The
-file is not lost and nothing is deleted; the run simply cannot be picked up
-again, and the user reads that as "interrupted".
+The rule as it stood was: `harness.py` refused to resume any document whose
+`schema_version` was not exactly `SCHEMA_VERSION` — the check was equality,
+not `>=`. So the moment a server writing `SCHEMA_VERSION = 3` was rolled out,
+**every v2 document on disk became unresumable**, and one that was interrupted
+a minute before the roll reported `status: "interrupted"` with the version
+mismatch as its reason. The file was not lost and nothing was deleted; the run
+simply could not be picked up again, and the user read that as "interrupted".
 
-Three things follow, and they are why this is not the same as adding a field:
+**The gate now refuses only a FUTURE schema** (`harness.py:5076`): a document
+whose `schema_version` is *greater* than the one this server writes is
+refused, because its keys this one may misread. An **older** document is
+resumed. The check was equality because every schema change so far had been a
+rewrite; schema 4 is **additive** — the ledger and the plan are new keys, and
+a document without them is a document with an empty ledger and an empty plan,
+not a document this server cannot read. So a schema-3 document still resumes,
+and refusing it would have broken every run that existed on the day of the
+deploy.
+
+The history is kept because the reasoning still holds for a *rewrite*:
 
 - **Rolling back is not a rollback of this.** A v2 server can read a v2 document
   again, so a v2 file that a v3 process never rewrote is recoverable that way.
@@ -297,6 +307,28 @@ This is the same server-first rule as any other protocol change, with a sharper
 edge — the version guard (`scripts/version.js`) enforces the bump on the way
 out, but nothing sequences the *roll* against in-flight sessions, so the honest
 statement is that the cut costs a resume, not that it is safe.
+
+**What survives of the old rule: a v1 document is still refused**
+(`harness.py:5009`), and for the same reason it always was — a v1 document has
+no `tasks[]` to append a follow-up to, so there is no way to continue it. That
+refusal is about the *shape* of the document, not its version number.
+
+**A resumed run comes back with its ledger and its plan.** The harness
+rebuilds `deps` from scratch on a resume, so the closed-loop structures have to
+come back with the document or the repeat block and the completion pass
+silently switch off and the run is back to lying. `read_ledger` and
+`read_plan` read the **last** task block, because a resume continues the last
+task the document was running — an earlier task's ledger belongs to a
+different run, and adopting it would refuse a write the user is entitled to
+make. The blocked-write count is recomputed from the ledger, and the
+"a completion was already refused" flag is read back too, because the second
+completion is **accepted** and a reconnect must not turn a bounded refusal
+back into a loop.
+
+Pinned by `tests/agent/test_ledger_rehydrate.py`
+(`test_a_document_from_schema_three_still_resumes`,
+`test_a_document_from_a_future_schema_is_refused`,
+`test_a_resumed_run_still_accepts_the_second_completion`).
 
 The extension reconnects with full jitter (1s base, ×2, 30s cap, 6 attempts)
 reusing the `session_id`. `stopRelay` and a cancel never reconnect — a
@@ -406,6 +438,75 @@ the socket.
 Two shapes, two costs. A bare `await` of a sync function costs one run and looks
 like a network fault. An `await` of a method that returns `None` legitimately
 costs nothing and looks like nothing, forever.
+
+**The guard's list has not been extended to the grid's sink.**
+`test_every_deliver_method_the_receive_loop_awaits_is_a_coroutine` names three
+sinks — `deliver_action_result`, `deliver_screenshot_result`,
+`deliver_attributes_result` — and `deliver_grid_result` is not among them. The
+sink is a coroutine and `main.py` does await it, so nothing is broken; the
+gap is that the *next* sink added will not be covered by the shape guard
+unless somebody adds it to that list. Recorded rather than fixed, because the
+guard is another agent's test.
+
+## The grid's three request frames, and one answer
+
+The grid's primitives are three request frames and **one** response frame:
+
+```
+grid_select_cell {address}          → grid_result {op, ok, address, value, state, mechanism, error}
+grid_read_cell   {address}          → grid_result {…}
+grid_write_cell  {address, value}    → grid_result {…}
+```
+
+One result branch in `main.py` beats three, and the difference is invisible
+until it is not: an extension that answers `grid_read_cell` with a frame
+typed `grid_result` but without an `op` cannot be correlated, and the server
+would have to guess which question it was answering.
+
+**`op` is echoed back, and it is the only correlation there is.** The relay's
+`grid_op` (`extension_relay.py:1117`) sends a frame, waits on its queue, and
+**discards any answer whose `op` does not match** — a late answer to a
+previous op is not this one's. A frame with no readable `op` is dropped at the
+sink (`deliver_grid_result`), because an answer that carries no question is
+not ours to answer.
+
+**The grid's queue is not the relay's `evaluate` slot.** The relay's
+`evaluate` slot is a single uncorrelated answer: a `focus_id` probe's reply
+can land in it for a different probe. A cell value read out of that slot would
+be graded as somebody else's page text. So the grid path has **its own
+queue** (`self._grid`), and the harness's grid work is **strictly serial** —
+it reads a cell back immediately after writing it, and the completion pass
+reads one target at a time. Two probes in flight would cross answers, and a
+write that lands in the cell a read was about to read is a wrong value, not a
+slow one.
+
+**The timeout is its own, and it is long.** `_GRID_TIMEOUT = 20.0`, against
+the 2s attribute lookup: the grid frames drive a name box and a formula bar,
+each of which is a React-controlled input that only real key events write, so
+a grid op is several dispatches and a read-back rather than a best-effort
+probe. An op this build does not know, a send failure and a timeout are all
+**the same failure shape** — `{ok: False, value: None, state: "unreadable"}`
+— because the harness has to read them as "could not be read", never as an
+empty cell.
+
+**A cell the server never read is `unknown`, and is never reported as
+empty.** The relay's failure shape reports `state: "unreadable"`, and the
+harness treats a `None` observed value as `unknown` — which never closes a
+plan item and is not a failure to escalate on its own. An empty cell is a
+different thing: the read happened and found nothing, and the server reports
+`state: "ok"` with an empty value. The two are kept apart end to end, from
+the extension's `parseGridResult` to the relay's `_grid_failure` to the
+harness's `compare_observed`, because conflating them fails a correct run.
+
+**Every frame needs a handler on both sides**, and these are additive: an
+older extension ignores the three request frames, and an older server never
+sends them. The grow-only contract in `scripts/test-frame-contract.test.js`
+covers them.
+
+Pinned by `tests/test_relay_grid.py` — the wire shape, the `op` correlation,
+the queue's independence from the `evaluate` slot, the empty-cell answer, the
+timeout, the send failure, and the refusal of an unknown op **before** it
+reaches the browser.
 
 ## Version pair and the compat window
 

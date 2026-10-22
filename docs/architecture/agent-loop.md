@@ -1142,6 +1142,17 @@ which box was focused (`extension.md`). The
 off-screen editor textbox carries the same edit, so either target can hold a
 cell's content; the content box is the one you can see.
 
+**Superseded on 2026-10-22 — the model no longer has `type_text`, and the
+two-box choice is no longer the model's to make.** A cell write is now
+`write_text` with a `{"cell": "A1"}` target, and the harness picks the box:
+the extension's write ladder starts at the **content box** and falls back to
+the grid's own cell editor (`extension.md`). The model cannot type into the
+address box, so it cannot create a named range by accident — and the write is
+read back before the harness believes it, so the two boxes are no longer the
+last line of defence. Everything below this paragraph describes the failure
+and the pre-2026-10-22 instructions; the closed loop is the answer to it, and
+it is the section *"The closed loop — a write is a verdict, not a dispatch"*.
+
 **Verify by reading the cell you wrote, not the box you typed into.** Enter
 moves the selection down, so immediately after it the content box shows the
 **next** cell, and reading it then proves nothing — it cannot tell a written
@@ -2212,6 +2223,280 @@ verifier first, not a schema change.
 
 What *is* recorded is the opposite of a self-report: the **absence of
 evidence**, which the loop can establish for itself. That is the next section.
+
+## The closed loop — a write is a verdict, not a dispatch (2026-10-22)
+
+### The run that lied, and the shape of the lie
+
+A measured Google Sheets run (`321737f6`, 15 steps, 285s, ~400k input tokens)
+typed its two column headers into the grid's **address box** instead of the
+content box. A word typed there creates a **named range** — no cell was ever
+written — and the page opened a "Create a named range" panel. The run reported
+itself done, and its final summary claimed *"A1 = name, B1 = age"* for a state
+it never observed.
+
+The defect is structural, not a model mistake. `type_text` returned *"Typed 4
+characters into the focused element"*, and that string was the whole feedback:
+a write reported a **dispatch**, and nothing ever read the target back. The
+model was left inferring whether a write landed from a lossy page-text echo,
+and across the run those readings alternated `age` → `name` → `age` → `name`.
+It was reading noise and writing a narrative on top of it. The final summary
+was not a slip; it was the only thing the loop ever gave the model to work
+with.
+
+**The model chooses an intent; the harness executes it and proves it happened.**
+Today the model is the actor, the executor and the judge, and it is only
+reliable as the first. The work below moves the other two jobs into the
+harness. The vocabulary is `agent/closed_loop.py` — a pure module with no I/O,
+no relay and no dependencies, so every rule in this section is testable
+without a browser.
+
+### The three actions, and what `type_text` became
+
+| action | shape | what it does |
+|---|---|---|
+| `write_text` | `{target, value}` | writes, then **reads the target back**, and reports a verdict |
+| `read_state` | `{target}` | reads a named target's current value; records nothing |
+| `set_plan` | `{items}` | declares the steps of the task, once |
+
+`target` is one of `{"ref": "0:9855"}` (an element in the AX tree),
+`{"cell": "A1"}` (a named cell in a grid) or `{"description": "the search
+box"}` (a phrase to look up). A description target resolves through
+`_match_by_description` (`harness.py:3026`), **the same function
+`find_element` uses** — a phrase the model can look up has to be a phrase it
+can also write into, or the write and the lookup disagree about what the
+phrase names. That function now requires **every** meaningful word to match
+one element's role, name or value: the old rule accepted a single word, and
+`find_element("Add rule or save button")` once returned Brotto's own "Open
+agents panel" — matched on the word "button", on a GitHub page, with nothing
+else in common. A confident answer the model then acts on is worse than none.
+
+**`type_text` is retired from the model's vocabulary, and stays on the wire
+for one minor.** A write that reports a dispatch is not a write, and
+`type_text` is the action that reports a dispatch. It is still accepted by
+`ActionCall` (`context.py`), and a model that emits it — an older prompt, a
+cached plan, a resumed run against an old document — gets
+
+```
+REFUSED: type_text is retired — it types and reports success without
+checking anything landed. Use write_text, which types and then reads the
+target back.
+```
+
+and **nothing is typed**. A silent drop would have looked like a model that
+changed its mind; a refusal names the replacement. The one-minor window is
+the project's rule for a removed action, and it is why the Literal still
+carries the name. Pinned by
+`test_type_text_is_refused_with_a_message_naming_write_text`.
+
+`type_xy` is untouched: it is the canvas path, and it has no named target to
+read back.
+
+### The write loop: resolve, execute, read back, compare
+
+`_do_write_text` (`harness.py:3105`) is four steps, and the fourth is the one
+that did not exist before:
+
+1. **Resolve the target** to a mechanism. A ref that no longer resolves is
+   **not an error**: the write is attempted anyway and the read-back decides,
+   because refusing on a stale ref would stop a write that would have landed. A
+   description that matches nothing *is* refused, with the reason.
+2. **Execute the write.** A cell target goes through the grid's own
+   mechanism (`grid_write_cell`); a ref target types into the element and
+   reads its AX value.
+3. **Read the target back.** Strictly serial — the relay has one slot and the
+   grid path has its own queue, so two probes in flight would cross answers.
+4. **Compare** and report one of three states.
+
+Comparison is **normalised equality** — trim, collapse internal whitespace,
+casefold (`normalise_value`, `closed_loop.py:123`). The comparison is about
+the same value, not the same bytes: a grid's read-back trims, and a user's
+trailing space is not a different name. The observed value is always carried
+alongside the verdict, so the model sees the real thing and not just a
+boolean.
+
+### Three states, and why "could not be read back" is not "wrong value"
+
+| state | meaning | effect |
+|---|---|---|
+| `confirmed` | the observed value matches the intent | the write counts; the plan item closes |
+| `NOT confirmed` | the target was read and holds a **different** value | the write failed; the outcome names what it actually reads |
+| `could not be read back` | the target could not be read at all | **not a failure** — the read is inconclusive |
+
+The third is the one that matters, and it is a distinction the code makes in
+exactly one place: `compare_observed` (`closed_loop.py:160`) returns `UNKNOWN`
+**only when the observed value is `None`**. An empty string is a read that
+**happened** and found nothing — a definite fact, and a real mismatch against a
+non-empty intent. A `None` is a read that could not be performed: no mirror,
+the jump did not land, the frame timed out.
+
+Conflating them is how a correct run gets failed. Under a strict two-state
+rule, every run that cannot read a cell ends in `cannot_complete` — a worse
+bug than the one being fixed. So `unknown` **never closes a plan item** and
+**never escalates on its own**; it does mean the run cannot *confirm* its
+work, which is what the completion pass reports.
+
+The model is told the difference in the prompt, and the two wordings in the
+refusal are different too: a mismatch is a fact about the page, an unreadable
+target is the absence of one (`_discrepancy_sentence`, `harness.py:3398`).
+
+### The ledger, and the canonical target key
+
+`deps.ledger` holds every write attempt: `target_key`, `intended`, `observed`,
+`confirmed`, `mechanism`, `step` (`WriteAttempt`, `closed_loop.py:32`). It is
+**a record of what was attempted**, so a *refused* write writes no entry —
+there was no attempt.
+
+**An entry is confirmed only from a read-back that matched.** The model
+saying so is not evidence, and there is no path by which the model can say so:
+the ledger is written in `_do_write_text`, after the comparison, and nowhere
+else.
+
+The ledger is rendered into **every** turn's prompt (`render_ledger`,
+`closed_loop.py:175`), one line per attempt, so the discrepancy is visible
+instead of inferred:
+
+```
+cell:A1  intended "name"  observed "age"  NOT confirmed  (step 4, content-box)
+```
+
+A single line here is the change that would have stopped the fifteen-step run
+at step 6.
+
+**The canonical target key is not the raw string.** The model may write `A1`,
+`a1` or `cell A1`, and an AX ref changes on every observation, so a raw string
+is not a key. `canonical_target_key` (`closed_loop.py:132`) produces one of:
+
+| target form | key |
+|---|---|
+| a cell | `cell:A1` — the reference upper-cased, whitespace-collapsed |
+| an AX ref | `ref:<role>:<name>` — the **resolved** element's role and name, because the ref id is ephemeral |
+| a description | `desc:<normalised phrase>` |
+
+A ref with nothing resolved falls back to the ref id itself. The key is what
+the repeat rule, the per-target bound and the plan all match on, so a key that
+drifted per step would silently switch all three off.
+
+### The plan, and who closes an item
+
+`set_plan` **replaces** the plan wholesale — a plan is declared, not patched —
+and each item is `{intent, target, value}`. The **intent is required**: it is
+what the model is accountable for at the completion pass, and an item with no
+intent is a step nobody can say was done. An item whose target does not
+resolve is refused, with the reason, and the rest of the plan is kept.
+
+The harness tracks the plan, and **only the harness closes an item**
+(`_sync_plan`, `harness.py:3217`): an item becomes `confirmed` only from a
+ledger entry that was confirmed by a matching read-back, and `failed` when a
+write to that target and value read back something else. Confirmed beats
+failed — a target that read back wrong and later right is right. An item with
+**no target or no value** is never closed by the ledger, because there is
+nothing to read back.
+
+The plan is rendered into every turn, with each item's status, and the prompt
+says the rule in the model's own terms: *an item never closes because you said
+it did.*
+
+### Grounded completion, and the second call
+
+`task_complete` is where the run lied, so it is now **checked** rather than
+trusted. On a completion the harness runs a verification pass
+(`_verify_plan`, `harness.py:3332`): for every plan item that has a target and
+a value, it reads the target back and compares. The pass is **strictly
+serial** — one frame per read, nothing else in flight — and it runs inside the
+step the model asked to complete, so the model sees the result in the same
+turn.
+
+- Every item confirmed → the completion is **accepted as written**.
+- An item is a **mismatch** → the completion is **refused**, and the refusal
+  names the value the page actually holds: `A1 reads "age" (you intended
+  "name")`. The run continues; the model may fix it or call
+  `cannot_complete`.
+- An item is **unknown** → the completion is refused too, with a **different
+  wording**: `A1 could not be read back (unknown), so the write cannot be
+  confirmed`. The model may accept that and report the task as unconfirmed.
+
+**A second, identical completion is accepted, with the discrepancy appended
+to the summary** (`_append_discrepancies`, `harness.py:3417`). This bounds the
+loop: the user is told the truth, the run does not spin, and the step budget
+is not the thing that stops it. The refusal flag is **persisted** in the
+session document (`record_completion_refused`), because a run that was refused
+a completion and then reconnected must still accept the second one — otherwise
+the reconnect turns a bounded refusal back into a loop.
+
+A run with **no plan** completes as it did before. The pass checks what the
+model declared; it does not invent a plan to fail the run against.
+
+### The bounds: repeat, per-target, per-run
+
+Three bounds, and all three are checked **before** the write is executed, so
+a refused write costs the model a step and nothing else — no dispatch, no
+read-back, no ledger entry.
+
+1. **The repeat.** The same value into the same target again is refused, with
+   the prior observation as the reason: *"you already tried 'name' into A1 at
+   step 4 and it read back 'age'. Change the mechanism, change the target, or
+   call cannot_complete."* This is the exact loop the fifteen-step run was
+   in. A **different** value to the same target is a *new attempt* — it may be
+   the fix — but it still counts towards the per-target bound.
+2. **The per-target bound.** A target gets **three** attempts; the **fourth**
+   is refused (`MAX_ATTEMPTS_PER_TARGET = 3`, `closed_loop.py:27`). Another
+   attempt at the same cell cannot produce a different result.
+3. **The per-run bound.** Three unconfirmed writes in a run and the **next**
+   write is refused **and the run ends**: the harness sets
+   `status: "failed"`, `failure_reason: "cannot_complete"` and says so in the
+   refusal (`MAX_BLOCKED_ATTEMPTS = 3`, `closed_loop.py:28`). A run that cannot
+   make progress must stop spending the user's tokens. The run bound is
+   checked **before** the per-target bound, so a run that has already spent
+   three blocked writes stops spending them whether or not this target is
+   exhausted too.
+
+**An unconfirmed write includes one that could not be read back.** The
+`unknown` state does not escalate on its own — nothing fails at the moment it
+happens — but it does count as an unconfirmed attempt towards the run's
+bound. That is the honest shape: the read was inconclusive, and a run that
+keeps failing to read is a run making no progress.
+
+### What the prompt now says, and what it no longer says
+
+The action list offers `write_text`, `read_state` and `set_plan`, and no
+longer offers `type_text`. Two sections were added — *"Writes are checked, not
+assumed"* and the plan's rules — and the **178-line "Writing the summary for
+`task_complete`" section was replaced** by a short spec: the summary says what
+the page now holds, in the user's terms, one or two sentences, no narration of
+what was tried, no apology, no "I have completed". The summary's JSON-string
+escapes (`\\n`, `\\"`, `\\\\`) stay, because a literal newline inside a JSON
+string is a syntax error that loses the whole run.
+
+The plan and the ledger are rendered **before the page** in every turn, empty
+or not, so the model cannot tell "nothing written yet" from "not shown this
+step". The prompt is the model's entire history — the harness is stateless per
+step — so what it has already done and what it still owes have to be read
+before the tree, not hunted for under it.
+
+Pinned by `tests/agent/test_prompt_closed_loop.py`, which asserts the prompt
+offers `write_text` and not `type_text`, that the three states are explained,
+that the plan is taught, that the old summary section is **gone** (an
+instruction that is still there is an absence nobody notices), and that a turn
+with no writes still says so.
+
+### What is not built
+
+- **No clipboard read.** The cell's value is read from the formula-bar mirror.
+  The clipboard would give the cell's exact text, and it needs an offscreen
+  document and new permissions — not worth it before the closed loop exists.
+- **No prompt diet.** The 14.7k-token manual is unchanged in size; shrinking
+  it (playbooks, on-demand guides, a cache breakpoint) is a separate slice, so
+  a regression in the loop is attributable.
+- **No measurement.** Confirmation rate and per-step cost are unmeasured. A
+  diagnostic for them is local-only and never a metric — a value derived from
+  a cell is user data.
+- **The ledger is unbounded within a run.** It is a per-run structure, and the
+  cap (last N attempts plus a per-target summary) is not built.
+- **The address-box nudge still exists** and is now mostly redundant: it
+  counted *typed* writes into a field holding a cell reference, and the model
+  no longer types into fields at all. It is not removed here because the
+  `type_xy` and `press_key` paths can still reach one.
 
 ## A step that nothing could confirm
 

@@ -709,6 +709,90 @@ longest-value-first. `tests/agent/test_memory_capture.py` pins the same
 over-redaction on the narration in
 `test_a_credential_is_removed_even_inside_a_longer_token`.
 
+**3i. The write ledger is user data, and it is redacted on the same terms as a
+typed action argument (2026-10-22).** The closed loop writes a ledger — every
+write the run attempted, and what the target said when it was read back — and
+a plan, the steps the run declared. A **cell value is a typed value**: the
+user typed it, and it is the user's data by rule 1 and rule 3 alike.
+
+**What is redacted.** Two fields of a ledger entry hold a typed value:
+`intended` (what the model meant to write) and `observed` (what the target
+read back). A plan item holds `value` (the value to write) and `intent` (the
+model's own sentence about the step, which may quote the value — "write the
+card number to A1"). All four go through the **existing** redactor,
+`redact_text` (`audit.py:177`–`178`, `_redact_entry`), which is the same
+pattern-matching redactor the page text uses: a cell has no field name to be
+secret-shaped by, so the redactor matches on the *shape* of the value.
+
+**What is not redacted, and why it must not be.** The `target_key` — `cell:A1`,
+`ref:textbox:Full name` — is **structural**, and a structural key is not
+passed to the redactor at all. It names *which* cell a verdict is about, the
+harness compares it against a freshly canonicalised key on every write, and a
+verdict whose target cannot be named is unreadable by a person and unusable by
+the harness. `confirmed`, `mechanism` and `step` are the same: a status, a
+name, a number.
+
+**The comparison happens in memory, on the real value.** The in-memory ledger
+holds the real `intended` and `observed` — the harness compares them there,
+and that comparison is never persisted. The redaction happens on the *audit
+side* of the disk: `record_ledger` is handed the real attempts and redacts
+them on the way in. So the guarantee is the same shape as 3c's — **redacting
+on the way out while storing the raw string would have left the value sitting
+in memory for a later step to fetch**.
+
+**A redacted value rehydrates as `unknown`, never as a mismatch.** A resumed
+run compares a rehydrated value against a fresh one, and a redacted value
+cannot be compared. `is_redacted_value` (`audit.py:1338`) recognises it by its
+`[redacted…]` prefix, and the completion pass then reports **`unknown`** for
+that item and skips the read entirely. The two wrong answers are both wrong:
+a confirmation would be a claim the run cannot prove, and a mismatch would
+accuse the page of holding the wrong value when the truth is that the *value*
+was redacted. `unknown` says exactly what is true.
+
+**The ledger never becomes a metric, a log line, or a count.** Rule 1 is
+absolute and the ledger is exactly the kind of thing rule 1 is about: its
+contents are derived from what the agent *read* and *wrote*. So: no endpoint
+enumerates it, no counter is derived from it, it is not in the panel's metrics,
+and it is not a log line — the relay's grid log lines carry the **address**
+and the error, never the value, and the extension's grid path does not log
+values at all. The one number that is derived from the ledger —
+`blocked_attempts`, the run bound — is an **in-memory** count of unconfirmed
+attempts, used to stop a run, and it is recomputed from the ledger on resume
+rather than accumulated anywhere.
+
+**What is not fixed: the action record and the action outcome carry the
+value.** The redaction above covers the **ledger and plan blocks**. It does
+**not** cover the turn's `actions[]` entry for the `write_text` call, and it
+does not cover the action's `outcome` string, and both carry the value
+verbatim:
+
+- `_typed_field` (`harness.py:1485`) returns a field only for `type_text`,
+  `type_xy` and `press_key`. It does **not** name `write_text`, so
+  `_scrubbed` takes the `field is None` path and returns the arguments
+  unchanged — while the **retired** `type_text` masked its `text` argument in
+  exactly that place. The retirement therefore removed the one path that
+  masked a typed value in the action record, and the replacement does not
+  mask it.
+- The harness's own outcome string is built from the same values —
+  `write_text → confirmed: A1 now reads 'name'`, and on a mismatch
+  `A1 reads 'age' (intended 'name')` — and it is recorded to disk as it
+  stands.
+- The per-action **trace** (`action_taken` in the step summary, which is
+  persisted and replayed) embeds the raw arguments for the same reason.
+
+So a card number typed into a cell is redacted in the ledger and written in
+plaintext three times elsewhere in the same document. That is a real hole and
+it is **not fixed here** — the fix belongs to whoever owns the typed-value
+masking, and it is one line in `_typed_field` plus a redaction of the
+harness's own outcome string. It is recorded here because a privacy rule that
+is only true of one block of the document is not a rule.
+
+Pinned by `tests/agent/test_ledger_resume.py` — the redaction of a
+secret-shaped cell value on disk, the structural fields staying readable, the
+plan's value and intent being redacted, and the recognisable form on the way
+back — and by `tests/agent/test_ledger_rehydrate.py`
+(`test_a_redacted_plan_value_is_unknown_not_a_mismatch`).
+
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
 Brotto-operated service, we run no servers"* and closed out each section with a

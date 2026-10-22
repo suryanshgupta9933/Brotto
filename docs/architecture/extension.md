@@ -1380,6 +1380,140 @@ extension without it ignores the key, a server that never sends it is unchanged.
 The server does ask: `focus_id` and `probe_xy` set it, `read_page_text`
 deliberately does not.
 
+## The grid's three primitives (2026-10-22)
+
+A measured Google Sheets run typed its column headers into the grid's **name
+box**, created a named range, wrote no cell, and reported itself done. The
+grid's DOM knowledge now lives in one place — `observation/grid.ts` — and
+exposes three composite frames: **`grid_select_cell`**, **`grid_read_cell`**,
+**`grid_write_cell`**. The server's registry (`agent/closed_loop.py`'s
+`ADAPTERS`) says only **which** frame to call.
+
+There are three frames rather than the two the design named, and the reason is
+the ladder: writing the ladder server-side would require the *server* to
+identify the content box — the exact "guess which field is this" step that
+lost the original run — and the name box is a React-controlled input that
+only real key events can write. The grid's DOM knowledge already lives here
+(`GRID_ADAPTERS`, `observation/pointer.ts`), so the ladder lives here too.
+
+**The extension reports what it did; the server grades it.** The extension
+never decides that a write landed. A write answers with the value it read
+back, and the server reads the cell again through `grid_read_cell` and
+compares. If the extension graded its own work, the verdict would come from
+the same code that performed it — which is the whole class of bug this change
+exists to remove.
+
+**The adapter comes from the extension's own knowledge of the tab**, read from
+`chrome.tabs.get(tabId).url` and never from the frame's payload, so a hostile
+frame cannot claim to be a sheet. The origin **and** the path prefix are
+required, for the reason the "wall 3b" section above gives: one origin serves
+several Google applications.
+
+### The jump: real key events into a React-controlled input
+
+`grid_select_cell` (`background.ts:903`) is the dance that used to be spread
+across model steps, done in one frame:
+
+1. **Focus the name box and select its contents.** `element.select()` is a DOM
+   operation, never a Ctrl+A chord — "which chord means select-all" is the
+   one question that would need the OS, and there is no legal way to ask it.
+2. **Type the reference one character at a time**, with real key events. A
+   `.value` assignment is ignored by a React-controlled input, so the
+   reference has to arrive as keystrokes.
+3. **Press Enter** to commit the jump.
+4. **Read the name box back.** If it does not read the requested reference,
+   the jump did not land — and that is an **error**, not a value.
+
+Step 4 is the one that makes the primitive safe to build on. A jump that did
+not land would otherwise be reported as a successful selection of *some* cell,
+and every read taken after it would be a confident answer about the wrong
+cell.
+
+A reference that is not a cell reference is refused before any keystroke:
+`isCellReference` (`grid.ts:45`) accepts a column and a row and nothing else,
+because a word typed there creates a **named range** and the write is lost
+silently.
+
+### The mirror: an empty read is a read
+
+`grid_read_cell` (`background.ts:926`) selects the cell and then reads the
+formula bar's mirror, which holds the selected cell's **text**. The two
+failure shapes are different verdicts and the server needs them apart:
+
+| what the page says | the extension's answer | what it means |
+|---|---|---|
+| the mirror is there and holds nothing | `state: "ok"`, `value: ""` | a read that **happened**, on an empty cell |
+| there is no mirror | `state: "unreadable"`, `value: null` | a read that **could not be performed** |
+
+The empty mirror is the interesting one. It is a definite fact — the cell is
+empty — so it is a **mismatch** against a non-empty intent, not an unknown.
+The missing mirror is the absence of a fact, so it is `unknown`: it never
+closes a plan item, and it is not a failure to escalate on its own. The
+server's `compare_observed` makes the same split, and the relay's failure
+shape (`_grid_failure`, `extension_relay.py:1170`) reports `state:
+"unreadable"` — **never `ok` with an empty value**, because a cell the server
+never read must not be graded as an empty cell.
+
+The mirror is a contenteditable, so it has no `select()`: its contents are
+selected with a **Range**, which is the same DOM operation in a different
+costume. The selection is confirmed afterwards, and so is the focus: a
+collapsed formula bar cannot be focused, and an insertion that stayed in the
+previous field — the name box, which holds a *reference* — is the exact
+failure the ladder exists to stop. An insertion that **appended** to what was
+already in the cell is a wrong value, not a failed one, so it is refused
+rather than made.
+
+### The write ladder, and why it lives here
+
+`grid_write_cell` (`background.ts:950`) is two rungs and a failure:
+
+1. **content-box** — focus the mirror, select its contents, insert the value,
+   press Enter, read the mirror back.
+2. **grid-editor** — the grid's own cell editor takes the focus and the value
+   is typed one character at a time, the focus is re-asserted before the
+   Enter that commits, and the mirror is read back.
+3. Otherwise the write failed, and the error names **both** mechanisms: `the
+   write did not land (tried content-box and grid-editor)`.
+
+The first rung is the one the original run missed: the mirror is the field
+that holds the cell's *text*, while the name box holds the cell's
+*reference*. The mirror is read back after each rung, so a rung that typed
+into the wrong field is detected there rather than being reported as a
+success.
+
+**Why the ladder is extension-side and the verdict is not.** The ladder needs
+the DOM (which selector is the name box, which is the mirror, that one is
+React-controlled and the other is a contenteditable) and the *mechanics* (real
+key events, Enter, the focus re-assertion). The server has none of that and
+cannot synthesise it: `Runtime.evaluate` cannot produce the key events a
+React-controlled input needs, and `navigator.clipboard` does not exist in an
+MV3 service worker. But the **comparison** needs nothing the extension
+cannot do — the server reads the cell back through `grid_read_cell` and
+compares in memory, which is why the extension never grades its own work.
+
+The extension's own comparison (`gridValuesMatch`, `background.ts:888`) trims,
+collapses whitespace and case-folds, the same rule the server applies
+(`normalise_value`), so the two never disagree about what "landed" means.
+
+### The grid's own queue
+
+**The grid path is serial.** A select, a read and a write that interleaved
+would race for the same cell — and a write that lands in the cell a read was
+about to read is a wrong value, not a slow one. So the three ops queue behind
+each other in the extension (`gridQueue`, `background.ts:1028`), whatever
+order the frames arrive in, and the queue's chain is kept alive across a
+failed op so one failure does not refuse every later op.
+
+The server's side matches: the relay's `grid_op` has **its own queue**, not
+the relay's single uncorrelated `evaluate` slot — a `focus_id` probe's answer
+can land in that slot for a different probe, and a cell value read out of it
+would be graded as somebody else's page text.
+
+Pinned by `scripts/test-grid-primitives.test.js`, which slices the pure
+parsers out of `grid.ts` and runs them against a fake DOM, and by
+`tests/test_relay_grid.py`, which pins the wire shape, the `op` correlation,
+the queue's independence from the `evaluate` slot, and the failure shape.
+
 ## Geometry is three calls, not one per node
 
 `targetsForFrame` used to call `DOM.getBoxModel` **once per kept node, serially,
