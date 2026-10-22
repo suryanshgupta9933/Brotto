@@ -2338,7 +2338,7 @@ work, which is what the completion pass reports.
 
 The model is told the difference in the prompt, and the two wordings in the
 refusal are different too: a mismatch is a fact about the page, an unreadable
-target is the absence of one (`_discrepancy_sentence`, `harness.py:3398`).
+target is the absence of one (`_discrepancy_sentence`, `harness.py:3501`).
 
 ### The ledger, and the canonical target key
 
@@ -2353,7 +2353,10 @@ and what the model sees in its prompt — but a persisted entry's `intended` and
 `observed` are the fixed mask plus their lengths, and only the structural
 fields survive: `target_key`, `confirmed`, `mechanism`, `step`. A reader
 (including the harness on resume) can name a target and read a verdict, and
-can reconstruct nothing about what was written. See `privacy.md` 3i.
+can reconstruct nothing about what was written. The stored verdict is a
+**historical** fact — what the cell read when the write was checked — not
+present-tense evidence, and the completion pass never promotes one. See
+`privacy.md` 3i.
 
 **An entry is confirmed only from a read-back that matched.** The model
 saying so is not evidence, and there is no path by which the model can say so:
@@ -2394,7 +2397,7 @@ intent is a step nobody can say was done. An item whose target does not
 resolve is refused, with the reason, and the rest of the plan is kept.
 
 The harness tracks the plan, and **only the harness closes an item**
-(`_sync_plan`, `harness.py:3217`): an item becomes `confirmed` only from a
+(`_sync_plan`, `harness.py:3268`): an item becomes `confirmed` only from a
 ledger entry that was confirmed by a matching read-back, and `failed` when a
 write to that target and value read back something else. Confirmed beats
 failed — a target that read back wrong and later right is right. An item with
@@ -2409,7 +2412,7 @@ it did.*
 
 `task_complete` is where the run lied, so it is now **checked** rather than
 trusted. On a completion the harness runs a verification pass
-(`_verify_plan`, `harness.py:3332`): for every plan item that has a target and
+(`_verify_plan`, `harness.py:3420`): for every plan item that has a target and
 a value, it reads the target back and compares. The pass is **strictly
 serial** — one frame per read, nothing else in flight — and it runs inside the
 step the model asked to complete, so the model sees the result in the same
@@ -2425,17 +2428,24 @@ turn.
   confirmed`. The model may accept that and report the task as unconfirmed.
 - A **resumed** run's item is different again. The plan's `value` was masked on
   the way to disk — a cell's contents are user data and the document keeps the
-  length, not the value (`privacy.md` 3i) — so there is nothing to compare. The
-  pass takes the **ledger's** verdict for that target instead
-  (`_latest_attempt`): a `confirmed` flag there is harness-computed from a real
-  read-back, not a model claim, so it survives the resume. No such entry, or an
-  unconfirmed one, is **unknown**, and the read is skipped — it cannot change a
-  verdict that is already unknown, and the relay has one slot. A confirmation
-  read out of the model's own prose would be exactly the lie this pass exists
-  to stop.
+  length, not the value (`privacy.md` 3i) — so there is nothing to compare, and
+  the verdict is **unknown**. The stored `confirmed` flag is **not** a
+  substitute: a historical verdict describes the cell as it was when the write
+  happened, and the page may have changed under it since, so promoting it to a
+  present-tense confirmation is fail-open. A run that reports "A1 is confirmed"
+  without reading A1 is exactly the lie this pass exists to stop.
+- So a resumed run **re-verifies by writing again** (`_completion_targets`).
+  With no comparable plan value the pass grades the **ledger's** items instead,
+  and those carry the values **this process** wrote; the write is checked
+  against a **fresh read** of the cell, so the verdict is about the cell as it
+  is now, not about a history the page may have changed under.
+- A resumed run that **wrote nothing** has no value to compare and no fresh
+  read, so its completion is **refused once** and then accepted with the
+  discrepancy appended — the bounded behaviour below. It never claims a
+  confirmation it cannot prove.
 
 **A second, identical completion is accepted, with the discrepancy appended
-to the summary** (`_append_discrepancies`, `harness.py:3417`). This bounds the
+to the summary** (`_append_discrepancies`, `harness.py:3520`). This bounds the
 loop: the user is told the truth, the run does not spin, and the step budget
 is not the thing that stops it. The refusal flag is **persisted** in the
 session document (`record_completion_refused`), because a run that was refused
@@ -2444,6 +2454,10 @@ the reconnect turns a bounded refusal back into a loop.
 
 A run with **no plan** completes as it did before. The pass checks what the
 model declared; it does not invent a plan to fail the run against.
+
+Pinned by `tests/agent/test_ledger_rehydrate.py` — a resumed plan is never
+confirmed from a historical verdict, a resumed run is graded on what it wrote
+again, and a resumed run that wrote nothing cannot claim a confirmation.
 
 ### The bounds: repeat, per-target, per-run
 

@@ -756,16 +756,24 @@ them on the way in. So the guarantee is the same shape as 3c's — **redacting
 on the way out while storing the raw string would have left the value sitting
 in memory for a later step to fetch**.
 
-**A masked value cannot be compared, so a resumed run reads the ledger's
-verdict instead.** A rehydrated plan item's value is the mask, not the value,
-so the completion pass cannot compare it against the cell. It falls back to
-the **ledger's** entry for that target: a `confirmed` flag there is not a
-model claim but a harness-computed verdict from a real read-back, so it
-survives the resume; anything else is **`unknown`**, and the read is skipped
-entirely. The two wrong answers are both wrong — a confirmation taken from the
-model's own claim is a claim the run cannot prove, and a mismatch would accuse
-the page of holding the wrong value when the truth is that the *value* is not
-here.
+**A masked value cannot be compared, and a historical verdict is not
+evidence.** A rehydrated plan item's value is the mask, not the value, so the
+completion pass cannot compare it against the cell, and the verdict is
+**`unknown`**. The `confirmed` flag stored beside it is **not** a substitute:
+it describes the cell as it was when the write happened, and the page may
+have changed under it since, so promoting it to a present-tense confirmation
+is fail-open. A run that reports "A1 is confirmed" without reading A1 is
+exactly the lie the closed loop was built to stop.
+
+**A resumed run re-verifies by writing again.** With no comparable plan value
+the completion pass grades the **ledger's** items instead, and those carry the
+values **this process** wrote; the write is checked against a **fresh read**
+of the cell, so the verdict is about the cell as it is now. A resumed run that
+wrote nothing has no value to compare and no fresh read, so its completion is
+refused once and then accepted with the discrepancy appended — it never claims
+a confirmation it cannot prove. The two wrong answers are both wrong — a
+confirmation the run cannot prove, and a mismatch that would accuse the page
+of holding the wrong value when the truth is that the *value* is not here.
 
 **The ledger never becomes a metric, a log line, or a count.** Rule 1 is
 absolute and the ledger is exactly the kind of thing rule 1 is about: its
@@ -808,7 +816,11 @@ is only true of one block of the document is not a rule.
 Pinned by `tests/agent/test_ledger_resume.py` — a cell value on disk being
 the fixed mask with its length beside it, the structural fields staying
 readable, and the plan's `intent` surviving while a value quoted inside it is
-not — and by `tests/agent/test_ledger_rehydrate.py`.
+not — and by `tests/agent/test_ledger_rehydrate.py` — the masked plan value
+staying **unknown** rather than a mismatch, a resumed plan **never** being
+confirmed from a historical verdict, a resumed run being graded on what it
+**wrote again**, and a resumed run that wrote nothing being unable to claim a
+confirmation.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
