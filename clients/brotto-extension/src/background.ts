@@ -8,6 +8,7 @@ import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
 import { clearDelta } from "./observation/delta";
 import { bindFocus, boundedPoint, drawCursor, editorText, focusNode, focusState, gridDelivery, reassertGridFocus, verifyTarget, withWorld } from "./observation/pointer";
+import { formulaBarFocusJs, formulaBarJs, gridAdapterFor, isCellReference, nameBoxFocusJs, nameBoxJs } from "./observation/grid";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -827,6 +828,243 @@ async function typeIntoCanvas(
     else await dispatchKey(tabId, ch, 0);
   }
   return { ok: true, reason: "", drift };
+}
+
+// ── The grid's three primitives ─────────────────────────────────────────────
+//
+// The grid's DOM knowledge lives in the extension (`observation/grid.ts`); the
+// server's registry says only WHICH frame to call. Three rules hold here:
+//
+//   1. **The adapter comes from the extension's own knowledge of the tab** —
+//      its origin and path, read from the tab, never from the frame. A
+//      hostile frame must not be able to claim to be a sheet.
+//   2. **Select-all is a DOM operation.** `element.select()` and a Range, never
+//      a Ctrl+A chord, which is "move to line start" on macOS. No OS branch
+//      exists on this path, and none may.
+//   3. **The extension reports what it did; the server grades it.** A write
+//      answers with the value it read back, and the server decides whether it
+//      landed, by reading through `grid_read_cell` and comparing.
+
+/** One isolated-world evaluate, and its value. The grid's probes are strings
+ *  because they are evaluated with a context id — the same mechanism
+ *  `pointer.ts` uses for its identity probe, and the same isolated world. */
+async function gridProbe(tabId: number, expression: string): Promise<any> {
+  try {
+    const call = await withWorld<any>(tabId, (contextId) =>
+      dbg.sendCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: { expression, contextId, returnByValue: true },
+      }));
+    return call?.result?.value;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The adapter this tab is. The tab's own URL is the extension's knowledge of
+ *  where the document is; the frame says nothing about it. A tab that cannot
+ *  be read is not a grid — it is a tab that is gone, and the two are
+ *  different answers. */
+async function gridAdapterForTab(tabId: number): Promise<{ adapter: any; error: string }> {
+  let url = "";
+  try {
+    url = String((await chrome.tabs.get(tabId)).url ?? "");
+  } catch {
+    return { adapter: null, error: "no tab attached" };
+  }
+  let loc: URL;
+  try {
+    loc = new URL(url);
+  } catch {
+    return { adapter: null, error: "this tab is not a grid" };
+  }
+  const adapter = gridAdapterFor({ origin: loc.origin, path: loc.pathname });
+  return adapter ? { adapter, error: "" } : { adapter: null, error: "this tab is not a grid" };
+}
+
+/** Do these two read as the same cell content? Trimmed, whitespace-collapsed
+ *  and case-folded — the same comparison the server makes, so the extension
+ *  and the server never disagree about what "landed" means. */
+function gridValuesMatch(a: string, b: string): boolean {
+  const norm = (s: string) => String(s ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/**
+ * **Jump to a cell.**
+ *
+ * The name box is a React-controlled input, so the reference is typed one
+ * character at a time with real key events (a `.value` assignment is ignored),
+ * and the box's contents are selected first with `select()` — a DOM
+ * operation. Enter commits the jump, and the box is read back: if it does not
+ * read the requested reference, the jump did not land, and that is an error
+ * rather than a value.
+ */
+async function gridSelectCell(tabId: number, adapter: any, address: string): Promise<any> {
+  const ref = String(address ?? "").trim();
+  const fail = (error: string) => ({ ok: false, address: ref, value: null, state: "unreadable", mechanism: "", error });
+  if (!isCellReference(ref)) return fail(`${address} is not a cell reference`);
+  const focus = await gridProbe(tabId, nameBoxFocusJs(adapter.nameBoxSelector));
+  if (!focus || focus.ok !== true) return fail("the name box could not be focused");
+  const typed = await typeIntoCanvas(tabId, ref, async () => ({ ok: true, reason: "" }));
+  if (!typed.ok) return fail("the reference could not be typed into the name box");
+  await dispatchKey(tabId, "Enter", 0);
+  await sleep(200);
+  const read = await gridProbe(tabId, nameBoxJs(adapter.nameBoxSelector));
+  const now = String(read ?? "").trim();
+  if (now.toUpperCase() !== ref.toUpperCase()) return fail(`the jump to ${ref} did not land`);
+  return { ok: true, address: ref, value: now, state: "ok", mechanism: "name-box", error: "" };
+}
+
+/**
+ * **Read a cell.**
+ *
+ * Select the cell, then read the formula bar's mirror. A missing mirror is a
+ * read that could not be performed (`unreadable`); an empty mirror is an
+ * empty cell, which is a read that HAPPENED (`ok` with an empty value).
+ */
+async function gridReadCell(tabId: number, adapter: any, address: string): Promise<any> {
+  const sel = await gridSelectCell(tabId, adapter, address);
+  if (!sel.ok) return { ...sel, mechanism: "formula-bar" };
+  const read = await gridProbe(tabId, formulaBarJs(adapter.formulaBarSelector));
+  if (read === null || read === undefined) {
+    return { ok: false, address: sel.address, value: null, state: "unreadable", mechanism: "formula-bar", error: "the cell has no formula bar to read" };
+  }
+  return { ok: true, address: sel.address, value: String(read), state: "ok", mechanism: "formula-bar", error: "" };
+}
+
+/**
+ * **Write a cell**, by the ladder.
+ *
+ *   1. **content-box** — focus the mirror, select its contents, insert the
+ *      value, press Enter, read the mirror back.
+ *   2. **grid-editor** — the grid's own editor takes the focus and the value
+ *      is typed one character at a time, pressed Enter, read back.
+ *   3. Otherwise the write failed, and the error names both mechanisms.
+ *
+ * The first rung is the one the original run missed: the mirror is the field
+ * that holds the cell's *text*, while the name box holds the cell's
+ * *reference* — and a word typed into the name box creates a named range, and
+ * the write is lost silently.
+ */
+async function gridWriteCell(tabId: number, adapter: any, address: string, value: string): Promise<any> {
+  const text = String(value ?? "");
+  if (text === "") {
+    return { ok: false, address: String(address ?? ""), value: null, state: "unreadable", mechanism: "", error: "there is no value to write" };
+  }
+  const sel = await gridSelectCell(tabId, adapter, address);
+  if (!sel.ok) return sel;
+  const tried: string[] = [];
+
+  // Rung 1: the content box.
+  tried.push("content-box");
+  const focus = await gridProbe(tabId, formulaBarFocusJs(adapter.formulaBarSelector));
+  if (focus && focus.ok === true) {
+    await dbg.sendCommand(tabId, { method: "Input.insertText", params: { text } });
+    await dispatchKey(tabId, "Enter", 0);
+    await sleep(250);
+    const read = await gridProbe(tabId, formulaBarJs(adapter.formulaBarSelector));
+    const got = read == null ? null : String(read);
+    if (got !== null && gridValuesMatch(got, text)) {
+      return { ok: true, address: sel.address, value: got, state: "ok", mechanism: "content-box", error: "" };
+    }
+  }
+
+  // Rung 2: the grid's own cell editor.
+  tried.push("grid-editor");
+  const held = await reassertGridFocus(tabId);
+  if (held.ok) {
+    const typed = await typeIntoCanvas(tabId, text, async () => reassertGridFocus(tabId));
+    if (typed.ok) {
+      // The grid replaces its own editor when it re-renders a cell, and a
+      // replaced editor can take the focus with it — so the focus is put back
+      // before the Enter that commits.
+      const before = await reassertGridFocus(tabId);
+      if (before.ok) await dispatchKey(tabId, "Enter", 0);
+      await sleep(250);
+      const read = await gridProbe(tabId, formulaBarJs(adapter.formulaBarSelector));
+      const got = read == null ? null : String(read);
+      if (got !== null && gridValuesMatch(got, text)) {
+        return { ok: true, address: sel.address, value: got, state: "ok", mechanism: "grid-editor", error: "" };
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    address: sel.address,
+    value: null,
+    state: "unreadable",
+    mechanism: "",
+    error: `the write did not land (tried ${tried.join(" and ")})`,
+  };
+}
+
+/**
+ * The one answer shape the grid's three frames share.
+ *
+ * `id` is the request's id, echoed back verbatim. The op name alone is not
+ * enough: two calls of the same op (a write's read-back, then the
+ * completion pass) are indistinguishable by name, so a late answer could be
+ * read as this one's. The id is what makes the answer answer *this* question.
+ */
+function gridResultFrame(id: string, op: string, address: string, r: any): string {
+  return JSON.stringify({
+    type: "grid_result",
+    id,
+    op,
+    ok: r?.ok === true,
+    address: String(r?.address ?? address ?? ""),
+    value: r?.value == null ? null : String(r.value),
+    state: r?.state === "ok" ? "ok" : "unreadable",
+    mechanism: String(r?.mechanism ?? ""),
+    error: String(r?.error ?? ""),
+  });
+}
+
+/**
+ * One grid primitive, one frame, one answer.
+ *
+ * `op` is echoed back, so a late answer to a previous op cannot be read as
+ * this one's.
+ *
+ * **The grid path is serial.** A select, a read and a write that interleaved
+ * would race for the same cell — and a write that lands in the cell a read
+ * was about to read is a wrong value, not a slow one. So the ops queue behind
+ * each other here, whatever order the frames arrive in.
+ */
+let gridQueue: Promise<void> = Promise.resolve();
+
+async function executeGridOp(tid: number | null, op: string, msg: any): Promise<void> {
+  const address = String(msg?.address ?? "");
+  const id = String(msg?.id ?? "");
+  if (tid === null) {
+    ws!.send(gridResultFrame(id, op, address, { ok: false, value: null, state: "unreadable", mechanism: "", error: "no tab attached" }));
+    return;
+  }
+  const found = await gridAdapterForTab(tid);
+  if (!found.adapter) {
+    ws!.send(gridResultFrame(id, op, address, { ok: false, value: null, state: "unreadable", mechanism: "", error: found.error }));
+    return;
+  }
+  const adapter = found.adapter;
+  let r: any;
+  try {
+    if (op === "grid_select_cell") r = await gridSelectCell(tid, adapter, address);
+    else if (op === "grid_read_cell") r = await gridReadCell(tid, adapter, address);
+    else r = await gridWriteCell(tid, adapter, address, String(msg?.value ?? ""));
+  } catch (e) {
+    r = { ok: false, address, value: null, state: "unreadable", mechanism: "", error: String(e) };
+  }
+  ws!.send(gridResultFrame(id, op, address, r));
+}
+
+function runGridOp(tid: number | null, op: string, msg: any): Promise<void> {
+  const next = gridQueue.then(() => executeGridOp(tid, op, msg));
+  // The chain itself must not die with one failed op, or every later op is
+  // refused for a reason that happened once.
+  gridQueue = next.then(() => {}, () => {});
+  return next;
 }
 
 async function executeAction(tabId: number, action: any): Promise<{ ok: boolean; reason: string }> {
@@ -2054,6 +2292,22 @@ async function startRelay(
         });
         break;
       }
+
+      // The grid's three primitives. The grid's DOM knowledge lives in the
+      // extension; the server's registry says only WHICH frame to call. Each
+      // answers with one `grid_result` frame, carrying `op` so a late answer
+      // to a previous op cannot be read as this one's.
+      case "grid_select_cell":
+        await runGridOp(tid, "grid_select_cell", msg);
+        break;
+
+      case "grid_read_cell":
+        await runGridOp(tid, "grid_read_cell", msg);
+        break;
+
+      case "grid_write_cell":
+        await runGridOp(tid, "grid_write_cell", msg);
+        break;
 
       case "evaluate": {
         try {

@@ -506,6 +506,10 @@ const IDENTITY_PROBE = `function (focus) {
  *     same unforgeable place as the origin.
  *   - `scopeId` — the id the application's editor container carries.
  *   - `className` — the class the application's own editor element carries.
+ *   - `nameBoxSelector` — where the application keeps the selected cell's
+ *     *reference*. This is the field a jump is written into.
+ *   - `formulaBarSelector` — where the application keeps the selected cell's
+ *     *text*, as a mirror. This is the field a read is taken from.
  *
  * The id and the class are page-written strings, so they are consulted *only*
  * after the origin has matched: on their own they prove nothing, and a page
@@ -528,6 +532,12 @@ export const GRID_ADAPTERS = [
     pathPrefix: "/spreadsheets/",
     scopeId: "waffle-rich-text-editor",
     className: "cell-input",
+    // The name box holds the selected cell's REFERENCE; the formula bar is
+    // the mirror that holds the selected cell's TEXT. A word typed into the
+    // name box creates a NAMED RANGE instead of writing a cell, and the
+    // write is lost silently — which is why the grid's primitives exist.
+    nameBoxSelector: "input#t-name-box",
+    formulaBarSelector: "#t-formula-bar-input .cell-input",
   },
 ];
 
