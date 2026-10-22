@@ -43,13 +43,20 @@ complete set of CDP methods the extension issues:
 | Page | `Page.captureScreenshot` | A JPEG of the tab you picked, for pages the accessibility tree is blind to — see below |
 | DOM | `DOM.getDocument` / `getAttributes` / `resolveNode` | Resolving a tree ref to a node |
 | DOM | `DOM.getBoxModel` / `getNodeForLocation` | Turning a node into clickable coordinates |
-| Runtime | `Runtime.evaluate` | Reading page text and stability — see below |
+| Runtime | `Runtime.evaluate` | Reading page text and stability, and drawing the click marker — see below |
 
 **`Page.captureScreenshot` — one place, and only on request.** The agent
-perceives the page through the Accessibility tree first, and asks for a picture
-only when that tree is empty *and* the visible page text is empty too — a
-`<canvas>` (Google Docs, Figma, a chart) has no accessibility node and no
-readable text, so a text-only agent cannot see it at all. The extension issues
+perceives the page through the Accessibility tree first, and your server asks
+for a picture only when nothing the harness can see is about the task it was
+given — the accessibility tree and the visible page text. That includes a
+`<canvas>` (Google Docs, Figma, a chart, a spreadsheet grid) with no
+accessibility node and no readable text of its own, and it includes a canvas
+app whose *toolbar* gives a rich tree while the content it is drawing is in
+none of it. (Several of those apps name a screen-reader shortcut in their own
+page text; pressing it puts the *selected cell* back in the tree, which checks
+a keystroke without a picture. The picture is still requested on the same
+conditions as before and the capture rules below are unchanged by it.) The
+extension issues
 this command from exactly one call site, in `background.ts`, in response to a
 relay frame from your own server. It is not periodic and not automatic: with no
 task running, nothing is captured.
@@ -83,12 +90,27 @@ straight to the model for that step. It is **not written to disk**: not to the
 audit trail, not to a log line, not to the side panel. What the model makes of
 it may appear in its summary, exactly as page text already does.
 
+**There is a second screenshot call, and this is where its data ends.** On
+every step the extension takes its own capture to compare against the previous
+step's — the "page delta" that tells Brotto whether the page changed and where,
+on a spreadsheet whose accessibility tree never moves. It is a second, separate
+call: it happens whether or not `BROTTO_VISION_CAPTURE` is set, and it is not
+counted against the three-screenshot-per-task limit, because no model ever sees
+it. Both captures are decoded in the extension, differenced, and dropped. **Not
+one pixel of this second capture is sent to the server, written to disk, or put
+in the audit trail** — what crosses the wire is about a hundred bytes of
+integers: a yes/no and a handful of small rectangles. One frame is held per tab
+to compare against, and it is discarded on navigation, on task start, when the
+tab closes and when the extension is detached. A caret or selection you are
+typing in is painted over before the comparison, so a blinking cursor does not
+register as a change.
+
 It is also the one channel that redaction cannot reach — redaction is pattern
 matching over strings, and a JPEG is pixels — which is why it sits behind a
 switch that stays off until somebody turns it on. See
 [PRIVACY.md](https://github.com/suryanshgupta9933/brotto/blob/main/PRIVACY.md).
 
-### `Runtime.evaluate` — four places, and only one of them is the server's
+### `Runtime.evaluate` — seven places, and only one of them is the server's
 
 This runs JavaScript in the page, so it is the one call here that can execute
 code rather than read state. Every call site is listed.
@@ -106,15 +128,32 @@ Because that expression arrives from the server, the *mechanism* is not
 restricted to that read — holding `AGENT_SECRET` is equivalent to holding your
 browser session. See "Known limitations".
 
-**Composed by the extension — three places, hardcoded in the bundle.** These
+**Composed by the extension — six places, hardcoded in the bundle.** These
 are not reachable by anything the server sends; they are fixed strings in the
-shipped code, and they are the ones that run on every observation:
+shipped code, and they are the ones that run without the server asking:
 
 | Site | What it evaluates | When |
 |---|---|---|
 | `observation/index.ts` | `{url, title, text: body.innerText}`, whitespace collapsed, capped at **20,000 characters** | every observation |
 | `observation/stability.ts` | installs a `MutationObserver` and reports whether the page has gone still | every observation |
 | `observation/supplement.ts` | a probe listing `aria-hidden` controls so they can be hit-tested | when the tree is supplemented |
+| `observation/pointer.ts` | draws a `pointer-events: none` click marker and its label — the words set with `textContent` inside a **shadow root** on an `aria-hidden` host, never `innerHTML`, and capped at 80 characters because it is model-authored prose | around a click, before and after the mouse event pair |
+| `observation/delta.ts` | one pass returning two things: the text caret — the selection rectangle of a focused `contentEditable` element, or the measured position of the cursor inside a focused `input`/`textarea` — and the rectangles of every visible `<canvas>`. Returns **rectangle geometry only**: `{caret: [{x, y, w, h}], canvases: [{x, y, w, h}], vw, vh}` | every observation; the caret half feeds the page-delta mask, the canvas half becomes the `canvasCovered` fraction on the wire |
+
+The first three run on every observation; the pointer marker only runs around a
+click, and **nothing removes it afterwards** — it is the user's only way to see
+where the agent is clicking, and a `finally` that took it away made it
+invisible in practice, because the mouse pair is dispatched with no delay and a
+sub-200ms marker was never seen. The next click *moves* it, and only the page
+going away takes it with it. The same `delta.ts` evaluate now also reports each `<canvas>` rectangle; those
+are intersected with the viewport and reduced to one number, `canvasCovered`
+(0.0–1.0), so the server can tell a canvas-rendered app from a DOM one without
+a second round trip and without a pixel leaving the extension. It reads no text
+and no image data. The caret half of that pass runs once per page-delta and
+returns nothing at all on a page with nothing editable focused; it reads no
+text, and unlike the pointer marker its coordinates are
+never displayed — they are used only to paint over the caret before two frames
+of the page are compared.
 
 The supplement probe is a deliberate narrowing: locating those controls by
 hit-test would need a broader privilege than one bounded `Runtime.evaluate`,
@@ -301,7 +340,13 @@ to find them.
 4. **Brotto is not protected against prompt injection** from page content.
    Treat a hostile page as able to mislead the model. Text and accessibility
    names are wrapped and labelled as untrusted, but that is a fence, not a
-   guarantee. **A rendered image is the residual case.** If your server has
+   guarantee. **One action is fenced harder than the rest: a page's text can
+   direct the agent to press at most one chord, Option/Alt + Z with Command or
+   Ctrl, which is inert in a browser.** A page naming ⌘Q, ⌘W, ⌘⇧Q, ⌘L or F4
+   gets the key refused, because a chord named on a page is a fact about the
+   page and never an order. Keys the model picks for its own navigation are
+   its own.
+   **A rendered image is the residual case.** If your server has
    screenshot capture enabled and the page draws with a `<canvas>`, the pixels
    carry no wrapper and cannot be fenced at all: instructions can be rendered
    as glyphs, so the agent is told in prose that the words drawn in the image
@@ -322,7 +367,7 @@ or screen is ever captured. No third-party analytics.
 **Accessed, and why:** the accessible tree and visible text of the tab you
 selected, while a task runs. Mouse and keyboard input on that tab, while a
 task runs. A JPEG of that tab's visible viewport, while a task runs and only
-when the accessible tree *and* the visible page text both came back empty —
+when nothing the browser can read is about the task you gave —
 **and only if screenshot capture is switched on on your server, which it is
 not by default.** Your server URL and model choice, stored locally. The
 visible text of the active page, when the panel is idle and suggesting.

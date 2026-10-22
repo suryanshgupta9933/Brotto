@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, PrivateAttr
 
+from .closed_loop import PlanItem, WriteAttempt
+
 
 _SERIAL_RE = re.compile(r"^([A-Za-z]*)(\d+)$")
 
@@ -37,6 +39,16 @@ class StepSummary(BaseModel):
     action_taken: str
     outcome: str
     extracted: str | None = None
+    # Whether this step dispatched something that could have moved the page. A
+    # step of pure reading is not a step whose effect went unseen — the page not
+    # changing after one is the expected reading — so it is never marked.
+    mutated: bool = False
+    # Written by the NEXT step's observe, not by this one: a step cannot know
+    # whether its own effect landed until the page has been read again. Empty
+    # means confirmed, or not a mutation, and is the overwhelmingly common
+    # case. It is a fact for the model to read, never a gate: nothing in the
+    # loop branches on it.
+    unverified: str = ""
 
 
 class MemoryEntry(BaseModel):
@@ -196,10 +208,21 @@ class AgentTurn(BaseModel):
     # A mid-task correction from the user, drained out of AgentDeps into the
     # next turn. Empty on every step that has not received one.
     steering: str = ""
+    # Which parts of the viewport repainted since the previous observation,
+    # or None when there is nothing to say. None is the common answer (first
+    # observation, post-navigation, post-resize, capture off, Playwright) and
+    # renders as *nothing at all* — see `_delta_section`.
+    page_delta: dict | None = None
     # Run control, not user data: set when the last two steps said the same
     # thing, so the model changes approach instead of repeating until the
     # step budget runs out. Empty on every other step.
     repeat_warning: str = ""
+    # The run's write ledger and declared plan, rendered by
+    # `closed_loop.render_ledger` / `render_plan` at the point the turn is
+    # built. Empty until the model has written anything / declared a plan;
+    # the sections that carry them are Task 6's.
+    ledger_text: str = ""
+    plan_text: str = ""
 
 
 class ActionCall(BaseModel):
@@ -208,8 +231,13 @@ class ActionCall(BaseModel):
     action: Literal[
         "navigate", "click", "type_text", "press_key", "scroll",
         "find_element", "read_page_text",
+        "click_xy", "focus_xy", "type_xy",
         "read_scratchpad", "recall_memory",
         "recall_conversation", "recall_steps",
+        # `type_text` stays on the wire for one minor — retired from the
+        # MODEL's vocabulary, not from the Literal, so a resumed run against
+        # an older prompt is refused with a reason instead of crashing.
+        "write_text", "read_state", "set_plan",
         "task_complete", "cannot_complete", "ask_human",
     ]
     action_args: dict
@@ -304,6 +332,91 @@ class AgentDeps:
     scratchpad: Scratchpad = field(default_factory=Scratchpad)
     step_summaries: list[StepSummary] = field(default_factory=list)
     step_number: int = 0
+    # Screenshots shown to the *user* on a coordinate-approval card, counted
+    # across the current task. Separate from `sight_captures` because the two
+    # are different purchases: this one is the user's approval surface and the
+    # model never sees it, and a shared counter let the two starve each other
+    # on a canvas page, where every action is a coordinate click. The ceiling
+    # is the harness's `_MAX_CAPTURES_PER_TASK` (or the canvas ceiling).
+    screenshots_taken: int = 0
+    # Screenshots handed to the *model* by the vision fallback — the picture it
+    # reads. Counted across the current task; the ceiling is the harness's
+    # `_capture_ceiling`, which is three on an ordinary page and the canvas
+    # ceiling on a canvas page, where the picture is the page's content rather
+    # than a supplement to it. The counter is here rather than on the harness
+    # so `_vision_fallback` — a module function, called by tests directly —
+    # can read and bump it without a harness instance.
+    sight_captures: int = 0
+    # Coordinate actions that verifiably missed the target — outside the
+    # viewport, or a relay dispatch failure. Counted per task and never
+    # cleared: a dispatch that *landed* is not evidence the point was right,
+    # so clearing on it let a model alternating wrong-but-dispatching clicks
+    # never reach the ceiling. The ceiling is the harness's `_XY_MISS_LIMIT`.
+    xy_misses: int = 0
+    # Consecutive steps whose observation matched the one before it — same
+    # URL, same page-text length, no change `compute_ax_diff` could see. The
+    # ceiling is the harness's `_STAGNANT_STEPS`. `last_obs` is the observation
+    # the counter is measured against, kept here rather than on the harness so
+    # `_note_stagnation` — a module function, called by tests directly — can
+    # read and bump both.
+    stagnant_steps: int = 0
+    last_obs: tuple | None = None
+    # The refs typed into in a way that says the model had hold of a grid's
+    # ADDRESS BOX — the field that holds a cell reference, where a word
+    # creates a named range instead of writing a cell. One list per step,
+    # oldest first, an empty list for a step that typed nothing, so the
+    # window is a window over STEPS.
+    address_box_writes: list[list[str]] = field(default_factory=list)
+    # Fraction (0.0–1.0) of the viewport covered by the largest topmost
+    # <canvas>, from the observation frame. Set once per step by the harness's
+    # `_observe_canvas_covered`, and read by `_sparse_for_task`,
+    # `_note_stagnation` and the `read_page_text` handler. **None means
+    # unknown, not 0.0** — a relay or extension build that does not send the
+    # field leaves every one of those callers on the old behaviour.
+    canvas_covered: float | None = None
+    # Did any region of the viewport repaint since the previous observation?
+    # `get_page_delta` is the only source, and it is **commonly None** — a
+    # tab's first observation, after a navigation, after a resize, a failed
+    # capture, and every step while the capture gate is off. **None means the
+    # answer is unknown, not "nothing moved."** Read by `_note_stagnation` on
+    # a canvas page, where it replaces page-text length; `False` is the real
+    # negative. A resumed task builds a fresh `AgentDeps`, so this starts at
+    # the unknown rather than at the previous run's answer.
+    canvas_changed: bool | None = None
+    # Identity of the focused element, read once at the top of a step that
+    # contains a `press_key`. `press_key` takes no ref and types into
+    # `document.activeElement`, and the user can click something else while
+    # the model is thinking — so the step's first press_key re-reads it and
+    # refuses if it moved. **None means unknown, not "unchanged"**, and the
+    # guard refuses on it: a keystroke whose destination cannot be read is
+    # exactly the case that must not be dispatched. Written by
+    # `_capture_step_focus`, read by `_focus_refusal`.
+    step_focus: str | None = None
+    # Steps whose ONLY evidence of progress was the pixel delta, with the URL
+    # and the AX tree identical across all of them. The page controls that
+    # signal — a ticking clock, a blinking caret, a spinner repaints forever —
+    # so without a bound an always-animating canvas page holds the loop open
+    # indefinitely. The ceiling is the harness's `_DELTA_ONLY_STEPS`.
+    delta_only_steps: int = 0
+    # Every write attempt in this run, oldest first. A ledger entry is
+    # CONFIRMED only when a read-back matched — never because the model
+    # said so. Holds typed values, so it is user data: redacted on the way
+    # into the session file, compared in memory on the real value.
+    ledger: list[WriteAttempt] = field(default_factory=list)
+    # The model's declared plan, tracked by the harness. An item closes
+    # only from a confirmed ledger entry.
+    plan: list[PlanItem] = field(default_factory=list)
+    # Writes that read back the WRONG value. Three of these and the harness
+    # ends the run itself: a run that cannot make progress must stop spending
+    # the user's tokens. A write that could not be READ does not count here —
+    # an unknown is the absence of a read, not a fact about the target, and it
+    # must not end a run the way a wrong value does.
+    blocked_attempts: int = 0
+    # Set when a `task_complete` was refused because a planned target read
+    # back wrong. A second call with the same unresolved state is accepted
+    # with the discrepancy appended — that bounds the refuse/retry loop, and
+    # Task 7 persists it across a resume.
+    completion_refused: bool = False
     result: TaskResult | None = None
     # URL observed at the top of the current step, before its actions run.
     # Read by the click cross-domain gate and stamped onto TaskResult.

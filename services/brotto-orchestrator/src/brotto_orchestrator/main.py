@@ -2100,6 +2100,15 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     await obs_queue.put({"__error__": incoming.get("error") or "observation failed"})
                 elif t == "evaluate_result":
                     log.debug("[%s] ← evaluate_result  len=%d", session_id, len(incoming.get("value", "")))
+                    # The extension answers `{value: "", error: …}` when it could
+                    # not evaluate — no tab, or a world it could not create.
+                    # Dropping `error` here is what turned a hard failure into
+                    # "focus is unknown" with nothing to act on and nothing to
+                    # diagnose: the value alone cannot say which. The string is
+                    # the extension's own error text, not page content.
+                    if incoming.get("error"):
+                        log.warning("[%s] evaluate failed in the extension: %s",
+                                    session_id, incoming["error"])
                     await eval_queue.put(incoming.get("value", ""))
                 elif t == "screenshot_result":
                     # Page content, in transit only: handed to the relay's
@@ -2113,6 +2122,21 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     # lookup times out after _ATTRS_TIMEOUT, so the
                     # redaction falls back to the accessible name alone.
                     await relay.deliver_attributes_result(incoming)
+                elif t == "grid_result":
+                    # The answer to a grid_select_cell / grid_read_cell /
+                    # grid_write_cell. Delivered to its own queue, never the
+                    # `evaluate` slot above: that one is a single uncorrelated
+                    # answer, and a cell value read out of it would be graded
+                    # as somebody else's page text. Without this branch the
+                    # harness waits out _GRID_TIMEOUT and every cell reports
+                    # unreadable.
+                    await relay.deliver_grid_result(incoming)
+                elif t == "action_result":
+                    # What the extension actually did with the action it was
+                    # last handed. Delivered rather than dropped: an unhandled
+                    # frame is not a no-op, it is the action reporting `ok`
+                    # for a click the hit test refused.
+                    await relay.deliver_action_result(incoming)
                 elif t == "human_reply":
                     log.info("[%s] ← human_reply", session_id)
                     await human_queue.put(incoming.get("content", ""))

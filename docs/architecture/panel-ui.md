@@ -44,6 +44,54 @@ Consequences worth knowing:
   `offsetWidth > clientWidth` now. The two-copy track stays: it is what makes
   the travel seamless for a name that genuinely does not fit.
 
+### A `type_xy` card must show the value it will write
+
+`reasoning` used to be the preview of what a coordinate action types, capped at
+120 characters — so a human could approve 120 characters and have 4,000 land in
+the cell. Worse, the value sat inside that sentence's curly quotes, so a value
+containing `”` closed them and spoke as harness prose on a consent surface.
+
+The server now puts **no part of the value** in `reasoning`; it says only "the
+text shown below this card". That makes the value block the promise the card
+has to keep, so it is drawn for **every frame carrying a value, whatever
+happened to the screenshot**, and it coerces anything non-null — the server
+types `str(args.get("text") or "")`, so a `text: 123` from a model would
+otherwise be invisible on the card and typed as "123".
+
+`appendApprovalTarget` — the screenshot, crosshair and label — deliberately
+knows nothing about the value and **bails out before drawing anything** when
+the capture failed. A value drawn only inside it would leave a card promising
+"the text shown below this card" with nothing below it: approvable, and
+unreadable. The block belongs to the caller, which is why it is `appendApprovalValue`.
+
+**A replayed card must not claim to show a value it cannot render.** Replay
+draws from the audit document, where `_scrubbed` masks `text` to `REDACTED`
+alongside a `text_chars` length. Rendering the mask under a heading promising
+the whole of it is worse than showing nothing. `approvalValueUnavailable`
+treats either signal — `text_chars`, or a whole-string `/^\[redacted…\]$/`
+match — as not available, and the mask test is whole-string so a value that
+merely *starts* with the word ("[redacted] is what it says") is still real text
+that gets typed.
+
+**A missing `args` is not a masked value.** `canonical_approval` sends no args
+at all; treating that as a mask auto-denied every coordinate approval with a
+dead card. Absence of args means the heading has to say there is nothing to
+show, and nothing more.
+
+**The value is shown with `textContent`, always.** `splitInvisible` splits it
+into runs of ordinary text and runs of bidi controls, zero-width joiners,
+tag-block codepoints and the rest of `INVISIBLE_CP`, marking the hidden runs
+rather than dropping them — because **the full original string is what gets
+typed**, so the card's job is to *show* characters it cannot faithfully render,
+not to sanitise them. The set is enumerated rather than inverted for a
+concrete reason: "everything outside L/N/P/S is invisible" would placeholder
+`U+200D`, a legitimate zero-width joiner inside an emoji sequence, and would
+mangle ordinary emoji on a consent surface.
+
+Pinned by `scripts/test-coordinate-approval.test.js` (the live frame, the masked
+replay, the `text: 123` coercion and the invisible runs) and
+`scripts/test-approval-notification.test.js`.
+
 ## A card outlives the run that asked it
 
 `clearBlockingCards` deleted every unanswered prompt on a terminal event. That
@@ -58,6 +106,83 @@ every terminal path passes its own sentence — `setPhase` on done/error,
 `stopTask`, `task_completed`, `task_failed` — so the card records *which* ending
 arrived rather than a generic "resolved". It is one function with five callers,
 not five deletions.
+
+### A `completed` card is the answer, and there is no disclaimer on it
+
+The done card is the model's final answer plus the toolbar. Nothing else. There
+was a `REPORTED_NOTE` disclosure on every completed card — "Brotto reports this
+as done — what it did, not a check of the result", behind a collapsed
+`<details>` whose summary read "Reported, not verified". It is gone, along with
+`REPORTED_SUMMARY`, the `<details>` in `sidepanel.html`, and
+`scripts/test-completion-honesty.test.js`, whose only purpose was to pin it.
+
+**Why it is gone: it told every user to distrust a result the product does not
+verify, in the card that *is* the answer.** Not on the runs that went wrong —
+unconditionally, on every completion, including the ones that worked. A reader
+who did not open the `<details>` met the word "verified" in the summary and
+nothing else, so the disclosure functioned as a permanent subtraction from a
+result the reader could not have checked either. That is the same
+silence-is-not-a-measurement error these docs exist to prevent, pointed the
+other way: not a run claiming a check it did not do, but a card claiming no
+check exists on a place where a check does.
+
+**Honesty about what is unverified moved to where it is actionable.** The thing
+the note stood in for is now a **refusal in the agent's own path**, not a label
+on the result. A write the grid did not take refuses `grid-text-not-delivered`
+or `grid-text-misdelivered` rather than finishing as a success
+(`extension.md`); a cell whose value the tree does not show is reported as *not
+written* rather than as done (`agent-loop.md`). A run that cannot establish the
+write ends in `cannot_complete` naming the cell. The reader learns the result is
+uncertain **when it actually is uncertain and something has been done about
+it**, which is the one case a disclosure could have been honest about — and the
+general case, which it could not, is now not asserted at all.
+
+The asymmetry worth keeping: the *stop* decision is verified (a step may only
+end the run when the evidence says so), and that has never been what the card
+was about. `task_complete` is still self-asserted. The card simply does not
+pre-argue the point on every completion; the run carries it on the steps where
+it is true.
+
+### The failure vocabulary is bidirectional, and both directions are code
+
+`failureNote(code)` returns a sentence and a next step for every failure code, and
+the contract it implements is **symmetric**:
+
+- **No code in `REPORTABLE` may be missing from `FAILURE_NOTE`.** `REPORTABLE` in
+  `session/failure_report.py` is 29 codes, and it — not the `failure_reason=`
+  assignment sites — is the authoritative vocabulary. Six codes reach the panel
+  *only* through it: `task_cap_reached` and its siblings are built into the
+  relay's answer rather than assigned, so a check driven by grepping for
+  `failure_reason=` looked complete while four user-facing codes had no sentence
+  at all. Deleting `task_cap_reached` from the panel left that check green.
+- **No code in `NOT_REPORTED` may appear in `FAILURE_NOTE`.** `NOT_REPORTED` is
+  the five client-side conditions (`CANCELLED`, `TASK_ERROR`, `WS_ERROR`,
+  `START_FAILED`, `NO_ACTIVE_TAB`) that never reach the operator's
+  `failure_reports` ledger. An entry for one of those is a sentence about a
+  failure nobody recorded, so the reverse direction is a real constraint and not
+  tidiness.
+
+**Why it had to be bidirectional: the failure mode of a missing code is a false
+claim, not a blank.** `failureNote`'s fallthrough is *"Something went wrong. The
+details are in Brotto's log."* A code that silently falls out of the table does
+not render as nothing — it renders as a confident statement that there is a log
+holding the reason. For `CANCELLED` that log does not exist at all: the user
+cancelled, there is no Brotto log, and the panel told them to go read one. And
+a code silently falling *out* of the ledger is equally invisible, because the
+operator asking "did the run happen, and if not which of our codes says why"
+gets a row with no code in it.
+
+**An absence reads clean in review, which is why the test enumerates codes and
+not sentences.** The check is `scripts/test-failure-reasons.test.js`, and it
+reads both sets out of the source rather than restating them: `FAILURE_NOTE`
+keys by brace-matching the table in `sidepanel.js`, `REPORTABLE` /
+`NOT_REPORTED` by slicing the two `frozenset` literals in `failure_report.py`,
+and the server's codes by finding every `failure_reason` assignment. A new code
+shows up in the output the moment someone writes it, without anyone remembering
+this file. It also asserts the reverse of the natural reading — that no
+`NOT_REPORTED` code has grown a sentence — and that `failure_reason` is always a
+literal, because a code that is not a constant cannot be looked up and the
+model's own prose belonged in `summary`.
 
 ## The composer is the answer box
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Callable
 
 from ..agent.ax_filter import PAGE_TEXT_MAX
@@ -86,6 +87,131 @@ SELECT_ALL_JS = (
     "})()"
 )
 
+# A stable name for whatever is focused right now, for the `press_key` focus
+# guard. Not a DOM object and not a node id — an id minted per evaluation would
+# change every read, so the guard would fire on nothing; a backendNodeId would
+# be stable but is not reachable from the one `Runtime.evaluate` both relays
+# already have. `TAG#id` where the element has a unique id, otherwise its
+# ordinal among same-tag elements, which is unique in a document and does not
+# move when focus does. **Any path that cannot establish a unique name returns
+# `""`** — there is no bare-tag-name fallback.
+#
+# **But the page chooses the id, and a duplicated one is two elements with one
+# name.** The guard compares this string before and after the model thinks; a
+# page that puts `id="q"` on both its search box and its delete button makes a
+# focus move between them read as "focus did not move", and the keystroke is
+# allowed through. Page-controlled identity defeating a page-controlled guard is
+# the whole hole, so an id that is not unique among same-tag elements yields
+# `""` — unknown, which `focus_id()` reports as None and the guard refuses on.
+# Refusing costs one step; the mistake it prevents is an Enter sent to the user's
+# email draft.
+#
+# **A guard cannot be proved unique by page-supplied evidence.** The collection
+# it counts uniqueness over comes from the same document it is guarding, so
+# `getElementsByTagName` is bound once at the top — a page that swaps the
+# prototype mid-evaluate cannot change what the count is computed over. That
+# closes the *later* swap only; a prototype replaced before the evaluate starts
+# is not closed here, and closing it means evaluating in an isolated world.
+# Which is what the caller now does — `ExtensionCDPRelay.focus_id` sends
+# `isolatedWorld: true` — so this string never runs against a page's globals
+# on the product path. The dev relay above still evaluates it in the main
+# world; that is a Playwright `evaluate`, and it is not the product path.
+#
+# The value is never sanitised further: it is compared and discarded, and it
+# never reaches a log line as user content.
+#
+# `a.id` is the one part the page chooses outright, so it is checked against
+# `FOCUS_ID_RE` here rather than downstream. Two reasons, and the second is the
+# one that matters: a newline or an ANSI escape in that id would otherwise be
+# concatenated into whatever rendered it, and a log sink is a parser input.
+# A tight grammar makes forging impossible instead of unlikely, and the cost is
+# a page with an exotic id falling back to `""` — which every consumer already
+# reads as unknown and refuses on. An id outside the grammar is no worse an
+# identity than one this evaluate cannot name uniquely, and it fails the same way.
+#
+# Returns a plain string because the extension's `evaluate_result` stringifies
+# whatever comes back; `"none"` (no activeElement) and `"body"` (focus on the
+# body, i.e. nowhere) are distinct from `""`, which is what a failed, errored or
+# ambiguous evaluate produces and which the guard reads as unknown.
+FOCUS_ID_JS = (
+    "(function () {"
+    "  var a = document.activeElement;"
+    "  if (!a) return 'none';"
+    "  if (a === document.body) return 'body';"
+    "  var t = a.tagName;"
+    # Bound once, because `getElementsByTagName` is a page-reachable method: a
+    # page that swaps the prototype mid-evaluate would otherwise decide what
+    # `all` enumerates. Binding defeats a *later* swap, not one installed before
+    # the evaluate — an honest limit, and one the isolated world closes for the
+    # product path (see the note on `FOCUS_ID_JS` below).
+    "  var gE = document.getElementsByTagName.bind(document);"
+    "  var all = gE(t);"
+    "  var i;"
+    "  if (a.id) {"
+    "    var id = String(a.id);"
+    # The same grammar as FOCUS_ID_RE below, in JS, because this is where the
+    # untrusted string is concatenated. Kept literal: a page-reachable RegExp
+    # constructor is not worth a defence here — the grammar rejects the
+    # interesting characters itself.
+    "    if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(id)) return '';"
+    "    var n = 0;"
+    "    for (i = 0; i < all.length; i++) {"
+    "      if (all[i].id === a.id) n++;"
+    "    }"
+    "    if (n === 1) return t + '#' + id;"
+    "    return '';"
+    "  }"
+    "  for (i = 0; i < all.length; i++) {"
+    "    if (all[i] === a) return t + '[' + i + ']';"
+    "  }"
+    # **A bare tag name is never a safe identity here.** Every `<div>` on the
+    # page shares one, so returning `t` compares a name many elements hold and
+    # reads a real focus move as no move — the silent wrong answer this guard
+    # exists to prevent. An element not found among its own tag list is one this
+    # evaluate cannot name uniquely, so it is unknown: `""`, which `focus_id()`
+    # turns into None and the guard refuses on.
+    "  return '';"
+    "})()"
+)
+
+# Exactly what `FOCUS_ID_JS` can return, and nothing else: `none`, `body`,
+# `TAG#id` with the grammar the JS checks, or `TAG[n]`. The suffix is
+# **required** on the named branch — the JS cannot emit a bare `TAG` (see the
+# note above its final `return`), so accepting one here would reintroduce the
+# parser/validator differential this pair exists to rule out.
+#
+# Every character class is explicit ASCII, because the producer is. Python's
+# `\d` is Unicode by default, and the ordinal is a JS array index, which can
+# never be Arabic-Indic or fullwidth. `re.ASCII` would also work but is broader
+# than the fix and would hide which class had drifted.
+FOCUS_ID_RE = re.compile(
+    r"\A(?:none|body|[A-Za-z][A-Za-z0-9]{0,31}"
+    r"(?:#[A-Za-z0-9_.:-]{1,64}|\[[0-9]{1,6}\]))\Z"
+)
+
+
+def parse_focus_id(value: Any) -> str | None:
+    """A focus value that matches the grammar `FOCUS_ID_JS` produces, else None.
+
+    **This is a shape check, not a sanity check — do not "simplify" it to a
+    truthiness test.** Two different jobs, same function:
+
+    * A stale or foreign reply. The extension's `evaluate` channel is not
+      request-correlated the way `get_attributes`' `_pending_attrs` is, so an
+      `evaluate_result` still in flight can answer a focus read with the
+      previous page's value — `body` reading as `TAG#some-id`, and the
+      dispatch this guards against happening anyway. Nothing adversarial is
+      required, plain timing does it.
+    * A page-chosen string arriving through a channel that did not run our JS.
+
+    Both are exactly "is this shaped like something `FOCUS_ID_JS` returns",
+    and both fail closed on a mismatch: None, which every caller reads as
+    unknown and refuses on. A real focus move is never rejected, because a real
+    focus value is by construction one this grammar accepts.
+    """
+    text = str(value or "")
+    return text if FOCUS_ID_RE.match(text) else None
+
 
 class CDPRelay:
     """Wraps a PlaywrightBrowser for dev mode.
@@ -135,20 +261,39 @@ class CDPRelay:
             log.debug("get_page_text failed: %s", e)
             return ""
 
-    async def capture_screenshot(self) -> str | None:
+    async def capture_screenshot(self, css_resolution: bool = False) -> str | None:
         """Base64 JPEG of the viewport, or None. Same contract as
         `ExtensionCDPRelay.capture_screenshot`: the vision fallback is a
         harness feature, not an extension feature, so the dev relay needs it
-        too or `/run` goes blind on exactly the pages the fallback exists for."""
+        too or `/run` goes blind on exactly the pages the fallback exists for.
+
+        `css_resolution` is the extension's viewport clip at scale 1; here it
+        is Playwright's own spelling of the same picture, so a dev run spends
+        the tokens the real extension would."""
         if not self._browser.page:
             return None
         try:
-            raw = await self._browser.page.screenshot(type="jpeg", quality=60)
+            raw = await self._browser.page.screenshot(
+                type="jpeg", quality=60,
+                **({"scale": "css"} if css_resolution else {}))
             import base64
             return base64.b64encode(raw).decode("ascii")
         except Exception as e:
             log.debug("capture_screenshot failed: %s", e)
             return None
+
+    async def get_page_delta(self, policy: Any = None, redactions=None,
+                             run_secrets=None) -> dict | None:
+        """Always None. The delta is computed in the extension's service worker
+        from a captured frame; Playwright has no equivalent, and `None` is the
+        honest answer for every observation. It exists so the harness can call
+        one method without branching on the relay — and because `None` is also
+        what the extension omits for, so the caller cannot distinguish "absent"
+        from "unsupported", which is correct: neither is evidence.
+        `redactions`/`run_secrets` are the extension relay's veto inputs and
+        the harness passes them on every call; there are no pixels here, so
+        there is nothing for them to veto."""
+        return None
 
     # ponytail: `Error executing:` prefix is the contract — harness.py
     # derives `ok` from it, so an unresolvable ref must not read as success.
@@ -186,6 +331,44 @@ class CDPRelay:
             )
         return "ok"
 
+    # Dev twin of the extension relay's coordinate actions — same probe, same
+    # `page.mouse` dispatch, so `/run` and the product path cannot disagree
+    # about what "the topmost element at this point" means.
+
+    async def probe_xy(self, x: int, y: int) -> dict:
+        if not self._browser.page:
+            return {}
+        import json as _json
+        expr = (
+            'JSON.stringify({width: window.innerWidth, height: window.innerHeight,'
+            f' tag: (document.elementFromPoint({int(x)}, {int(y)}) || {{}}).tagName || ""}})'
+        )
+        try:
+            raw = await self._browser.page.evaluate(expr)
+            data = _json.loads(str(raw))
+            return data if isinstance(data, dict) else {}
+        except Exception as e:  # noqa: BLE001 — best effort, {} means "refuse"
+            log.debug("probe_xy failed: %s", e)
+            return {}
+
+    async def click_xy(self, x: int, y: int) -> str:
+        if not self._browser.page:
+            return "Error executing: no page is attached"
+        await self._browser.page.mouse.click(int(x), int(y))
+        return f"Clicked at ({x},{y})"
+
+    async def focus_xy(self, x: int, y: int) -> str:
+        return await self.click_xy(x, y)
+
+    async def type_text_at_focus(self, text: str) -> str:
+        if not self._browser.page:
+            return "Error executing: no page is attached"
+        # `insert_text`, not `type`: one input event for the whole string,
+        # which is what a canvas editor wants and what per-character key
+        # events do not reach.
+        await self._browser.page.keyboard.insert_text(text)
+        return f"Typed {len(text)} characters"
+
     async def type_text_to_ref(self, ref: str, text: str) -> str:
         if ref not in self._browser.target_map:
             return f"Error executing: ref {ref!r} is not in the current target map"
@@ -195,6 +378,24 @@ class CDPRelay:
         if not result.get("ok"):
             return f"Error executing: ref {ref!r} {result.get('error', 'failed')}"
         return "ok"
+
+    async def type_text_into_ref(self, ref: str, text: str) -> str:
+        """The `type_text` entry point the harness calls.
+
+        **The extension relay collapses this to one `type_at` action and one
+        evaluate; this one keeps all three trips.** Dev is not the product path
+        — Playwright evaluates in-page and takes no observation at all, so
+        there is nothing here to collapse — and the sequence is what the fast
+        path falls back *to*. Same order, same guards, same strings; only the
+        trip count differs.
+        """
+        focused = await self.focus_ref(ref)
+        if focused.startswith("Error executing"):
+            return focused
+        cleared = await self.clear_ref(ref)
+        if cleared.startswith("Error executing"):
+            return cleared
+        return await self.type_text_to_ref(ref, text)
 
     async def press_key(self, key: str, modifiers: int = 0) -> str:
         """`modifiers` is CDP's bitmask; Playwright wants "Control+a"."""
@@ -253,6 +454,22 @@ class CDPRelay:
             return str(text or "")
         except Exception as e:
             return f"(error reading page text: {e})"
+
+    async def focus_id(self) -> str | None:
+        """A stable name for the focused element, or None if unreadable.
+
+        None is the honest answer and the guard treats it as unknown — see
+        `FOCUS_ID_JS`. Never raises: this backs a refusal, and a relay that
+        raised here would abort the step instead of the keystroke.
+        """
+        if not self._browser.page:
+            return None
+        try:
+            value = await self._browser.page.evaluate(FOCUS_ID_JS)
+        except Exception as exc:
+            log.debug("focus_id failed: %s", exc)
+            return None
+        return parse_focus_id(value)
 
     async def refresh_target_map(self) -> None:
         """Re-extract AX targets and update browser's target_map."""

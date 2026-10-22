@@ -9,7 +9,9 @@ import json
 import pytest
 
 from brotto_orchestrator.agent import audit as audit_mod
-from brotto_orchestrator.agent.audit import AuditTrail, list_sessions, read
+from brotto_orchestrator.agent.audit import (
+    SCHEMA_VERSION, AuditTrail, list_sessions, read,
+)
 
 
 @pytest.fixture
@@ -23,12 +25,13 @@ def _doc(trail):
     return json.loads(trail.path.read_text())
 
 
-def test_a_new_document_is_v2_with_the_three_collections(trail):
+def test_a_new_document_is_the_current_schema_with_the_three_collections(trail):
     # The only test that cannot read the file back: nothing has flushed yet,
     # so there is no file to read. A session that never records anything
     # leaves no file at all, which is the pre-existing behaviour.
     doc = trail.document()
-    assert doc["schema_version"] == 2
+    # Pinned to the constant, not a literal: the version moves with the shape.
+    assert doc["schema_version"] == SCHEMA_VERSION
     assert doc["tasks"] == []
     assert doc["messages"] == []
 

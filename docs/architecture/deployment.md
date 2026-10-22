@@ -146,9 +146,10 @@ once. See `extension.md`, "The install id is the user".
 
 ## Retention
 
-`BROTTO_RETENTION_DAYS` ages sessions out. It is **unset by default**, and that
-is deliberate: the disk is the user's own, and a self-hoster who has never
-heard of the variable should keep everything.
+`BROTTO_RETENTION_DAYS` ages sessions out. It is **unset by default on every
+deployment**, the hosted relay included, and that is deliberate: the disk is the
+user's own, and a self-hoster who has never heard of the variable should keep
+everything.
 
 ```
 BROTTO_RETENTION_DAYS=30     # drop anything untouched for a month
@@ -167,29 +168,40 @@ this measures last activity rather than when the session started.
 
 **A second pass sweeps the orphaned `*.owner` sidecars** (`_prune_orphan_owners`).
 The pass above is document-driven — it globs `*.json` — so a `<session_id>.owner`
-whose document is gone was invisible to it, and on the hosted relay retention is
-on by default at 30 days, which made the promise a file type it was silently not
-covering. **The condition is "the document is absent", not age**, and that
-distinction is load-bearing: `.owner` is written once at mint and never touched
-again, so its mtime is the *start* of the run while the document's is the last
+whose document is gone was invisible to it, which made the sweep a promise that
+silently did not cover a file type. **The condition is "the document is absent",
+not age**, and that distinction is load-bearing: `.owner` is written once at
+mint and never touched again, so its mtime is the *start* of the run while the
+document's is the last
 activity. A month-long session has a fresh document beside a 40-day-old sidecar,
 and sweeping on age would silently drop a live session out of a scoped *erase
 all*. Live sessions are skipped for the same reason the document loop skips
-them. Operationally: the 30-day promise on the relay now covers the sidecars,
-and it is the sidecar that says whose transcript a file was.
+them. Operationally: wherever the sweep runs, it now covers the sidecars, and it
+is the sidecar that says whose transcript a file was.
 
-**The hosted relay is the one exception, and it is an exception because the disk
-is ours.** Left unset, `BROTTO_RETENTION_DAYS` returns `HOSTED_RETENTION_DAYS`
-(30) when `auth_mode() == "jwt"` and `None` everywhere else. A self-hoster's disk
-is their own data and nothing expires until they ask; an ephemeral dyno would
-otherwise keep every beta transcript for the life of the filesystem with nobody
-deciding that. **An explicit setting always wins, including `0`.**
+**There is no hosted default.** `retention_days()` in `main.py` reads
+`BROTTO_RETENTION_DAYS` and nothing else; unset it returns `None` — on every
+deployment, the hosted relay included. There is no `HOSTED_RETENTION_DAYS`
+constant in the tree; that name only ever existed in prose. The behaviour is
+pinned by `test_the_hosted_relay_does_not_age_sessions_out_unless_asked`
+(`tests/test_beta_auth.py:647`), which asserts `retention_days() is None` with
+the variable unset, and by `test_retention_is_off_on_a_self_host_by_default`
+beside it.
+
+The asymmetry is still the reason an *operator would* set it: a self-hoster's
+disk is their own data and nothing expires until they ask, while an ephemeral
+dyno's disk is ours, and `BROTTO_RETENTION_DAYS=30` on the relay would be the
+operator's call to make. Nobody makes it — the live dyno does not set the
+variable, so in practice nothing is aged out there either. **An explicit setting
+always wins, including `0`**, and `0` means off, not "delete everything".
 
 ## `BROTTO_VISION_CAPTURE` opens the one channel redaction cannot see
 
-When a page's accessibility tree *and* its visible text are both empty — a
-`<canvas>`, a chart, Google Docs — the agent has nothing to read, and with this
-set it asks the extension for a JPEG of the visible viewport.
+When nothing the browser can read is about the task — a `<canvas>`, a chart,
+Google Docs, a spreadsheet whose grid has no accessibility representation — the
+agent has nothing to work from, and with this set it asks the extension for a
+JPEG of the visible viewport. That is broader than an empty page: a page with a
+full toolbar and a couple of hundred characters of chrome photographs too.
 
 ```
 BROTTO_VISION_CAPTURE=on     # capture
@@ -242,7 +254,7 @@ stray `AGENT_SECRET` first.**
 | `SUPABASE_URL` | hosted | `https://<project>.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | hosted | Reads `profiles` at task start (revocation + cap) |
 | `SUPABASE_ANON_KEY` | hosted | The two sign-in routes only |
-| `BROTTO_RETENTION_DAYS` | optional | Defaults to **30** on the hosted relay, off elsewhere |
+| `BROTTO_RETENTION_DAYS` | optional | **Off by default everywhere**, the hosted relay included. There is no hosted default; the operator sets it if they want one |
 | `BROTTO_BETA_TASK_CAP` | optional | Weekly per-person task cap; defaults to 10 |
 | `BROTTO_WAITLIST_BATCH` | optional | Label stamped on waitlist signups, so the operator can tell which invite round a row went out in. Empty by default |
 | `RESEND_API_KEY` | optional | Sends the waitlist confirmation. **Unset means no mail is ever sent**, and the route behaves exactly as it did before the feature existed |

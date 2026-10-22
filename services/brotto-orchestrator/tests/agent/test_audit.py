@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 
 from brotto_orchestrator.agent.audit import (
-    MAX_FIELD_CHARS, REDACTED, SCHEMA_VERSION, AuditTrail, is_secret_field,
-    list_sessions, load_scratchpad, read,
+    MAX_ACTIONS_PER_SESSION, MAX_FIELD_CHARS, MAX_TARGET_CHARS, REDACTED,
+    SCHEMA_VERSION, AuditTrail, is_secret_field, list_sessions,
+    load_scratchpad, read, read_actions,
 )
 from brotto_orchestrator.agent.context import MemoryEntry, Scratchpad
 
@@ -77,7 +78,7 @@ def test_totals_track_turns_prompts_actions_and_tokens(trail):
     assert totals == {"turns": 1, "steps": 1, "prompts": 1, "actions": 1,
                       "tokens_in": 10, "tokens_out": 2,
                       "cache_read_tokens": 0, "cache_write_tokens": 0,
-                      "wall_s": 0.0, "errors": 0}
+                      "wall_s": 0.0, "errors": 0, "actions_dropped": 0}
 
 
 def test_resolve_prompt_records_decision_and_wait(trail):
@@ -432,3 +433,140 @@ def test_closed_trail_stops_accepting_live_events(tmp_path):
     from brotto_orchestrator.agent import audit as audit_mod
     with audit_mod._LIVE_LOCK:
         assert "sealed" not in audit_mod._LIVE
+
+
+# ── did the action land? ─────────────────────────────────────────────
+# `changed` is the difference between "the model said it clicked" and "the
+# page says something moved", and it is tri-state on purpose: unknown and
+# "nothing happened" must not read alike (AgentDeps.canvas_changed is the
+# same predicate for the same reason).
+
+def test_action_records_whether_the_page_changed(trail):
+    turn = _seed(trail)
+    trail.record_action(turn, action="click", args={"ref": "0:1234"},
+                        outcome="Clicked", ok=True, redacted=False,
+                        duration_ms=812, target="0:1234", changed=True)
+    trail.record_action(turn, action="type_text", args={}, outcome="Typed",
+                        ok=True, redacted=False, duration_ms=40,
+                        target="412,88", changed=False)
+    acts = trail.document()["turns"][0]["actions"]
+    assert [a["changed"] for a in acts] == [True, False]
+    assert [a["target"] for a in acts] == ["0:1234", "412,88"]
+
+
+def test_unknown_change_is_recorded_as_null_not_false(trail, tmp_path):
+    """None means 'could not tell'. Writing False there is the lie this
+    record exists to remove: the model would trust a negative nobody
+    measured."""
+    turn = _seed(trail)
+    trail.record_action(turn, action="scroll", args={}, outcome="Scrolled",
+                        ok=True, redacted=False, duration_ms=9, changed=None)
+    assert trail.document()["turns"][0]["actions"][0]["changed"] is None
+    # And it survives serialisation, which is the only place a reader sees it.
+    assert read("s1", dir=tmp_path)["turns"][0]["actions"][0]["changed"] is None
+
+
+def test_a_non_bool_change_is_never_stored_as_a_bool(trail):
+    turn = _seed(trail)
+    trail.record_action(turn, action="click", args={}, outcome="", ok=True,
+                        redacted=False, duration_ms=1, changed="yes")
+    assert trail.document()["turns"][0]["actions"][0]["changed"] is None
+
+
+def test_a_target_is_bounded_to_a_reference_length(trail):
+    """The ref the model aimed at, or the xy. Bounded, so a caller that
+    hands over page text instead of an identifier cannot get it on disk —
+    the cap is the guard, not a filter on content."""
+    turn = _seed(trail)
+    trail.record_action(turn, action="click", args={}, outcome="", ok=True,
+                        redacted=False, duration_ms=1,
+                        target="0:1234 Submit payment for €412.00 to card 4111")
+    t = trail.document()["turns"][0]["actions"][0]["target"]
+    assert len(t) == MAX_TARGET_CHARS
+    assert not t.endswith("4111")
+
+
+def test_actions_reader_gives_the_sequence_in_order(trail):
+    a = _seed(trail)
+    trail.record_action(a, action="click", args={}, outcome="", ok=True,
+                        redacted=False, duration_ms=1, target="0:1",
+                        changed=True)
+    b = trail.begin_turn(step=1, url="u", page_title="t", ax_targets=1,
+                          ax_chars=1, ax_diff_chars=0, page_text_chars=0)
+    trail.record_action(b, action="type_text", args={}, outcome="", ok=False,
+                        redacted=False, duration_ms=1, changed=None)
+    got = trail.actions()
+    assert [x["step"] for x in got] == [0, 1]
+    assert [x["action"] for x in got] == ["click", "type_text"]
+    assert [x["ok"] for x in got] == [True, False]
+    assert got[1]["changed"] is None
+
+
+def test_read_actions_reads_a_finished_session_off_disk(trail, tmp_path):
+    turn = _seed(trail)
+    trail.record_action(turn, action="click", args={}, outcome="Clicked",
+                        ok=True, redacted=False, duration_ms=1,
+                        target="0:7", changed=False)
+    trail.finish({"summary": "done"})
+    out = read_actions("s1", dir=tmp_path)
+    assert out["found"] is True
+    assert out["actions"][0]["target"] == "0:7"
+    assert out["actions"][0]["changed"] is False
+
+
+def test_read_actions_on_a_missing_session_is_not_a_crash(tmp_path):
+    assert read_actions("nope", dir=tmp_path) == {
+        "found": False, "schema_version": None, "actions": []}
+
+
+def test_read_actions_of_an_older_schema_is_graceful(tmp_path):
+    """A document written before this record existed is still readable. Its
+    actions carry no `changed`, which means unknown — never False."""
+    (tmp_path / "old.json").write_text(json.dumps({
+        "schema_version": 2, "session_id": "old", "status": "running",
+        "turns": [{"step": 0, "task": 0,
+                   "actions": [{"action": "click", "ok": True}]}],
+    }))
+    out = read_actions("old", dir=tmp_path)
+    assert out["found"] is True
+    assert out["schema_version"] == 2
+    assert out["actions"][0]["changed"] is None
+    assert out["actions"][0]["target"] is None
+
+
+def test_read_actions_of_a_corrupt_document_is_not_a_crash(tmp_path):
+    (tmp_path / "bad.json").write_text("{not json")
+    out = read_actions("bad", dir=tmp_path)
+    assert out["actions"] == []
+
+
+def test_the_shape_change_came_with_a_schema_bump():
+    """actions[] entries carry fields older documents do not, and
+    schema_version is the compatibility contract — so the two move together.
+    If a future change adds a field here without bumping, this fails."""
+    assert SCHEMA_VERSION == 4
+
+
+def test_action_records_are_capped_so_a_run_stays_readable(trail, monkeypatch):
+    """Past the cap, actions stop being kept and start being counted.
+
+    The cap is moved down rather than the loop being left at 5,000: every
+    `record_action` goes through `_record`, which flushes the whole document,
+    so 5,010 records is 5,010 whole-document rewrites — quadratic in the
+    document, and it took 17 of this suite's 19 minutes in the CI job's
+    coverage configuration. The property holds at any cap and the number
+    itself is asserted below, so testing the behaviour loses nothing.
+    """
+    from brotto_orchestrator.agent import audit as audit_mod
+    assert MAX_ACTIONS_PER_SESSION == 5_000
+    monkeypatch.setattr(audit_mod, "MAX_ACTIONS_PER_SESSION", 20)
+
+    turn = _seed(trail)
+    for _ in range(30):
+        trail.record_action(turn, action="click", args={}, outcome="",
+                            ok=True, redacted=False, duration_ms=1)
+    doc = trail.document()
+    assert doc["totals"]["actions"] == 20
+    assert doc["totals"]["actions_dropped"] == 10
+    # The dropped ones are not kept either — that is the "readable" half.
+    assert len(doc["turns"][0]["actions"]) == 20

@@ -1,10 +1,12 @@
-"""An empty page escalates to a screenshot; an ordinary page never does.
+"""A page that says nothing about the task escalates to a screenshot.
 
 The accessibility tree is the only thing Brotto normally sees, and it is
 blind on `<canvas>` — no node, no page text, so the model was handed an empty
-page as though the page were empty. The fix costs vision tokens on the step
-that needs it, which is why the trigger is the narrowest thing that means
-"we cannot see this page": an empty AX tree AND empty page text.
+page as though the page were empty. But an empty page is the clean case and
+the rare one: a Google Sheet comes back with forty real AX nodes for the
+toolbar and the menu bar, so the old empty-tree trigger never fired and the
+page that is *about* the task stayed invisible. The trigger is therefore
+relevance to the task, not absence of signal — see `_sparse_for_task`.
 
 Most of these assertions are about **absences**, because that is what a broken
 escalation looks like in a diff: a screenshot requested on a page the tree
@@ -18,6 +20,7 @@ and `httpx` is walled at the transport layer the same way
 from __future__ import annotations
 
 import asyncio
+import base64
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -83,12 +86,14 @@ def _capture_on(monkeypatch):
     monkeypatch.setenv(SCREENSHOT_CAPTURE_ENV, "on")
 
 
-def _deps(targets: list | None = None, page_text: str = "") -> AgentDeps:
+def _deps(targets: list | None = None, page_text: str = "",
+          task: str = "what does this board say?") -> AgentDeps:
     cdp = MagicMock()
     cdp.ping = AsyncMock(return_value=True)
     cdp.get_targets = AsyncMock(return_value=targets or [])
     cdp.get_current_url = AsyncMock(return_value="https://example.com/board")
     cdp.get_page_text = AsyncMock(return_value=page_text)
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Board")
     cdp.refresh_target_map = AsyncMock()
     cdp.capture_screenshot = AsyncMock(return_value=JPEG)
@@ -96,8 +101,7 @@ def _deps(targets: list | None = None, page_text: str = "") -> AgentDeps:
     async def ws_send(_msg: dict) -> None:
         return None
 
-    deps = AgentDeps(user_id="t", task="what does this board say?", cdp=cdp,
-                     ws_send=ws_send)
+    deps = AgentDeps(user_id="t", task=task, cdp=cdp, ws_send=ws_send)
     # Resolution is stubbed per test; a default keeps an unstubbed path from
     # reaching the resolver (and therefore the network) at all.
     deps._vision_caps = Capabilities(vision=True, source="catalog")
@@ -124,17 +128,220 @@ async def test_empty_page_with_a_vision_model_is_captured():
 
 
 @pytest.mark.asyncio
-async def test_an_ax_tree_is_never_escalated():
+async def test_a_target_that_serves_the_task_is_never_escalated():
     """The absence is the assertion: one screenshot per step on an ordinary
     page is charged again for the whole task, because an image lives outside
-    the cache prefix."""
+    the cache prefix. And the invariant is about *the task*, not about size —
+    a single node that plainly serves what the user asked for is enough."""
     from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
 
     deps = _deps(targets=[SemanticTarget(ref_id="b1", tag="button",
-                                         role="button", name="Send")])
-    out = await _vision_fallback(deps, [{"ref_id": "b1"}], "")
+                                         role="button", name="Board")])
+    out = await _vision_fallback(deps, [{"ref_id": "b1", "name": "Board"}], "")
     assert out.image == "" and out.needed is False
     deps.cdp.capture_screenshot.assert_not_awaited()
+
+
+def _toolbar(n: int) -> list:
+    """`n` interactive chrome nodes, none of which is about a spreadsheet.
+
+    The shape of the page that motivated the widened trigger: a real AX tree,
+    forty real targets, every one of them toolbar or menubar.
+    """
+    from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
+
+    return [
+        SemanticTarget(ref_id=f"b{i}", tag="button", role="button",
+                       name=f"{name} {i}")
+        for i, name in enumerate([
+            "Bold", "Italic", "Underline", "Merge cells", "Zoom",
+            "Print", "Undo", "Redo", "Font", "Background", "Borders",
+            "Align", "Wrap", "Freeze", "Filter", "Sort", "Functions",
+            "Data", "View", "Help", "Share", "Comment", "Rename",
+            "Move", "Protect", "Chart", "Import", "Explore", "Settings",
+            "Accessibility", "Shortcuts", "History", "Version",
+            "Named ranges", "Protected ranges", "Downloads", "Extensions",
+            "Add-ons", "Account", "Notifications"][:n])
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_tree_full_of_chrome_is_escalated():
+    """The case the old trigger missed entirely. Forty targets is not sparse
+    by count — it is sparse against a task about a spreadsheet, because not one
+    of them, and not a character of page text, mentions the task."""
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Board",
+                 task="fill in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Board")
+    assert out.image == JPEG
+    assert out.needed is True and out.can_see is True
+    deps.cdp.capture_screenshot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_verb_collision_on_chrome_does_not_suppress_capture():
+    """The regression. `_sparse_for_task` returned `not (words & seen)`, so a
+    *single* incidental overlap suppressed the capture — and the words UI
+    chrome is made of are the same words task instructions are made of. A
+    Google Sheet has a **Fill** button, a **Copy** button, an **Undo** button
+    and a **View** menu; "fill in the spreadsheet with these values", "copy the
+    column", "select the range" each collided with one of them and the page
+    the fallback exists for was the page that stopped firing.
+
+    So the collision test is the point: the task word that also appears in a
+    target name is the task's *leading verb*, and a leading verb in an
+    instruction is the operation, not the subject of the page. Nothing about
+    the page changes when it is excluded, and the two words that actually name
+    the task — `spreadsheet`, `values` — appear nowhere on the page.
+    """
+    from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
+    targets = [SemanticTarget(ref_id=f"b{i}", tag="button", role="button",
+                              name=n) for i, n in
+               enumerate(["Fill", "Copy", "Paste", "Undo", "Redo", "View",
+                          "Insert", "Format", "Font", "Zoom"])]
+    deps = _deps(targets=targets, page_text="Untitled",
+                 task="fill in the spreadsheet with these values")
+    out = await _vision_fallback(deps, targets, "Untitled")
+    assert out.image == JPEG
+    assert out.needed is True
+    deps.cdp.capture_screenshot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_subject_of_the_task_still_suppresses_through_a_chrome_collision():
+    """The other side of the same line, and it is the invariant that matters:
+    excluding the verb must not go on to exclude the thing the task is
+    *about*. A "New spreadsheet" button names the task's subject, so a page
+    with one is a page the model can act on — same task, same Fill button, one
+    extra target, and the answer flips."""
+    from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
+    targets = [SemanticTarget(ref_id="b0", tag="button", role="button",
+                              name="Fill")]
+    targets.append(SemanticTarget(ref_id="z1", tag="button", role="button",
+                                  name="New spreadsheet"))
+    deps = _deps(targets=targets, page_text="Untitled",
+                 task="fill in the spreadsheet with these values")
+    out = await _vision_fallback(deps, targets, "Untitled")
+    assert out.image == "" and out.needed is False
+    deps.cdp.capture_screenshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_captures_are_bounded_per_task():
+    """The cost discipline, and it is a bound rather than another guess at
+    when to take one. An image lives outside the cache prefix, so it is charged
+    again on every step that carries it; a run already handed three pictures of
+    pages its tree could not describe is not rescued by a fourth. The step
+    after the cap still reports `needed`, so W3 can say the page was unseen
+    rather than the model reading an empty page."""
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Board",
+                 task="fill in the spreadsheet")
+    for _ in range(harness_mod._MAX_CAPTURES_PER_TASK + 2):
+        out = await _vision_fallback(deps, targets, "Board")
+    assert deps.cdp.capture_screenshot.await_count == \
+        harness_mod._MAX_CAPTURES_PER_TASK
+    assert out.image == "" and out.needed is True
+
+
+@pytest.mark.asyncio
+async def test_the_partial_note_is_used_when_the_page_is_only_sparse():
+    """The empty-tree note is *false* on a page with a readable toolbar, and a
+    model told its tree is empty stops trusting targets it can actually see.
+    So the note has to describe a thin page, not an absent one."""
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Board",
+                 task="fill in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Board")
+    assert out.note == harness_mod._SCREENSHOT_PARTIAL_NOTE
+    assert out.note != harness_mod._SCREENSHOT_OK_NOTE
+    note = out.note.lower()
+    assert "empty" not in note
+    assert "page content" in note and "instruction" in note
+
+
+@pytest.mark.asyncio
+async def test_the_empty_tree_note_is_still_used_when_the_page_is_empty():
+    """The note swap must not leak onto the branch that earned its claim."""
+    deps = _deps()
+    out = await _vision_fallback(deps, [], "")
+    assert out.note == harness_mod._SCREENSHOT_OK_NOTE
+
+
+@pytest.mark.asyncio
+async def test_a_target_named_for_the_task_suppresses_a_sparse_page():
+    """Red without the relevance test: forty chrome nodes plus a 'New
+    spreadsheet' button is a page that plainly serves the task, and paying a
+    screenshot for it is the expensive order this feature exists to avoid."""
+    from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
+    targets = _toolbar(40)
+    targets.append(SemanticTarget(ref_id="z1", tag="button", role="button",
+                                 name="New spreadsheet"))
+    deps = _deps(targets=targets, page_text="Board",
+                 task="fill in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Board")
+    assert out.image == "" and out.needed is False
+    deps.cdp.capture_screenshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_page_text_naming_the_task_suppresses_a_sparse_page():
+    """A legend in real text is something the model can read. Red without the
+    page-text channel in the relevance test."""
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Quarterly spreadsheet: revenue",
+                 task="what is the revenue in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Quarterly spreadsheet: revenue")
+    assert out.image == "" and out.needed is False
+    deps.cdp.capture_screenshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_page_with_real_prose_is_never_escalated():
+    """The cost guard. A long page that fails the relevance test for an
+    incidental reason — a docs site's chrome never mentions your task — is a
+    page the model can already read, and an uncacheable image is charged again
+    on every step. Red without `_PAGE_TEXT_ENOUGH`."""
+    targets = _toolbar(40)
+    text = ("This site explains how the browser accessibility tree is "
+            "collected, what a semantic target is, and why a canvas element "
+            "produces no nodes at all for a screen reader or for an agent. "
+            "It is a long, ordinary, entirely readable page of prose about "
+            "how perception works, with no figure, no canvas and no chart "
+            "anywhere on it, and nothing the reader came here to look at at all. The "
+            "documentation is long enough to be ordinary documentation.")
+    assert len(text) >= harness_mod._PAGE_TEXT_ENOUGH
+    deps = _deps(targets=targets, page_text=text,
+                 task="what is the revenue in the spreadsheet")
+    out = await _vision_fallback(deps, targets, text)
+    assert out.image == "" and out.needed is False
+    deps.cdp.capture_screenshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_task_with_no_content_words_is_not_escalated():
+    """Absence of a task is not evidence of blindness. Red without the guard:
+    an empty word set has an empty intersection with everything."""
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Board", task="do it")
+    out = await _vision_fallback(deps, targets, "Board")
+    assert out.image == "" and out.needed is False
+    deps.cdp.capture_screenshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_interaction_verb_is_not_a_relevance_hit():
+    """"click" is in every task and in no page. Red without the stopwords: a
+    toolbar full of "Undo"/"Redo"/"Go" is not a page that serves "click the
+    undo button" by name."""
+    from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
+    targets = [SemanticTarget(ref_id=f"b{i}", tag="button", role="button",
+                              name=n) for i, n in
+               enumerate(["click here", "press", "find", "open", "go"])]
+    deps = _deps(targets=targets, page_text="", task="click the undo button")
+    out = await _vision_fallback(deps, targets, "")
+    assert out.image == JPEG
 
 
 @pytest.mark.asyncio
@@ -185,6 +392,48 @@ async def test_a_failed_capture_reaches_the_model_as_a_refusal_to_see():
     assert out.image == ""
     assert out.needed is True and out.can_see is True
     assert "treat it as unseen" in out.note.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_payload_that_is_not_an_image_never_reaches_the_model():
+    """A provider sniffs the first bytes to pick a decoder and fails the whole
+    turn when it cannot, so a corrupt capture costs a step unless it is caught
+    here. The extension checks length; length is not decodability."""
+    deps = _deps()
+    deps.cdp.capture_screenshot = AsyncMock(
+        return_value="data:image/jpeg;base64," + JPEG)
+    out = await _vision_fallback(deps, [], "")
+    assert out.image == ""
+    assert "not an image" in out.note.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_jpeg_header_with_undecodable_base64_is_still_refused():
+    """The prefix check alone is not enough. `b64decode` defaults to
+    `validate=False`, which silently drops characters outside the alphabet,
+    so a guard that only sniffs the header passes a string the decode on the
+    hot path then chokes on — and that raise reaches `agent.run` and loses
+    the run rather than the picture."""
+    deps = _deps()
+    deps.cdp.capture_screenshot = AsyncMock(return_value=JPEG[:-4] + "!!!!")
+    out = await _vision_fallback(deps, [], "")
+    assert out.image == ""
+    assert "not an image" in out.note.lower()
+
+
+def test_an_undecodable_capture_degrades_the_turn_instead_of_raising():
+    """Belt to the guard's braces: `_turn_to_input` is the loop's hot path, so
+    a bad string here must reach the model as an unseen page, not as an
+    exception that ends the task."""
+    turn = AgentTurn(
+        task="read the board", step_number=1, scratchpad_entries=[],
+        current_url="https://example.com/board", current_page_title="Board",
+        ax_tree="", ax_diff="", step_summaries=[], screenshot=JPEG[:-3],
+        screenshot_note=harness_mod._SCREENSHOT_OK_NOTE,
+    )
+    parts = _turn_to_input(turn)
+    assert isinstance(parts, list) and len(parts) == 2
+    assert "not an image" in parts[1].lower()
 
 
 @pytest.mark.asyncio
@@ -265,7 +514,12 @@ def test_a_screenshot_rides_as_an_image_part_not_as_text():
     assert parts[1] == harness_mod._SCREENSHOT_OK_NOTE
     assert isinstance(parts[2], BinaryImage)
     assert parts[2].media_type == "image/jpeg"
-    assert parts[2].data == JPEG.encode("ascii")
+    # RAW bytes, not the base64 text. `BinaryImage` encodes whatever it is
+    # given, so handing it the already-base64 capture encoded the payload
+    # twice; the provider decoded one layer, found ASCII where the magic
+    # bytes belong, and refused the turn with "unknown format".
+    assert parts[2].data == base64.b64decode(JPEG)
+    assert parts[2].data.startswith(b"\xff\xd8\xff")
     # The image is not in the text, and the note is not either — it is its
     # own part, welded to the pixels it describes.
     assert JPEG not in parts[0]
@@ -449,18 +703,127 @@ async def test_a_refused_capture_reaches_the_model_through_the_loop(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_a_sparse_page_through_the_loop_lands_in_the_turn(monkeypatch):
+    """The whole chain on the new branch: a page of toolbar chrome on a
+    spreadsheet task escalates, and what `_plan_step` would hand the model is
+    the image preceded by the *sparse* note — not the "both are empty" one."""
+    seen: list[AgentTurn] = []
+    _stub_plan(monkeypatch, seen)
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Board",
+                 task="fill in the spreadsheet")
+    result = await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+    assert result.status == "completed"
+    turn = seen[0]
+    assert turn.screenshot == JPEG
+    assert turn.screenshot_note == harness_mod._SCREENSHOT_PARTIAL_NOTE
+    # and it rides as prompt parts, image last, like every other capture
+    parts = _turn_to_input(turn)
+    assert isinstance(parts, list) and len(parts) == 3
+    assert parts[1] == harness_mod._SCREENSHOT_PARTIAL_NOTE
+
+
+@pytest.mark.asyncio
 async def test_a_normal_page_step_carries_no_screenshot(monkeypatch):
     from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
 
     seen: list[AgentTurn] = []
     _stub_plan(monkeypatch, seen)
     deps = _deps(targets=[SemanticTarget(ref_id="b1", tag="button",
-                                         role="button", name="Send")])
+                                         role="button", name="Board")])
     deps.cdp.get_page_text = AsyncMock(return_value="Inbox")
     result = await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
     assert result.status == "completed"
     assert [t.screenshot for t in seen] == [""]
     deps.cdp.capture_screenshot.assert_not_awaited()
+
+
+# ── redaction, the budget across a resume, and what the note may claim ──────
+
+
+@pytest.mark.asyncio
+async def test_a_page_with_a_credential_on_it_is_never_photographed(monkeypatch):
+    """Redaction reported a hit on this step, so the picture must not be taken.
+
+    `redact_text` fires on the page text at the top of every step, and a
+    screenshot is the one page-content channel it cannot see — pixels. So on a
+    step the harness has *already established* holds something credential-shaped,
+    photographing it is exactly the leak the redaction exists to prevent. The
+    sparse trigger is what made this reachable at scale: "under 400 characters
+    of text" is most login and payment pages, and only the old empty-tree
+    trigger was narrow enough that there was little there to photograph.
+
+    Driven through the loop, not through `_vision_fallback`, because the
+    parameter is wired at the call site and a direct call would not test it.
+    """
+    seen: list[AgentTurn] = []
+    _stub_plan(monkeypatch, seen)
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in", task="fill in the spreadsheet")
+    deps.cdp.get_page_text = AsyncMock(
+        return_value="Card 4111 1111 1111 1111")
+    result = await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+    assert result.status == "completed"
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    # The step is not blind *because of* the refusal — it still carries the
+    # redacted text; only the picture is withheld.
+    assert seen[0].screenshot == ""
+    assert "treat it as unseen" in seen[0].screenshot_note.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_credential_shaped_page_is_refused_by_the_fallback_directly():
+    """The unit-level guard, so a future caller that builds its own step cannot
+    skip it by forgetting to pass the dict — an explicit empty dict is the
+    claim "this page is clean" and has to be stated."""
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in", task="fill in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Card [redacted]:card", {"card": 1})
+    assert out.image == "" and out.needed is True
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert "treat it as unseen" in out.note.lower()
+
+
+def test_the_partial_note_does_not_assert_a_cause_or_invert_trust():
+    """The tree above is still readable on the sparse branch, and the picture
+    is unverified page content that may contradict it. Two ways to get that
+    wrong: tell the model the image is its *best* view (it is a worse channel
+    than the tree it can already read), and name a cause — `<canvas>` — the
+    harness never verified. This page might have no canvas at all."""
+    note = harness_mod._SCREENSHOT_PARTIAL_NOTE.lower()
+    assert "best view" not in note
+    assert "canvas" not in note
+    assert "tree above" in note
+    assert "page content" in note and "instruction" in note
+
+
+@pytest.mark.asyncio
+async def test_the_capture_budget_survives_a_resumed_task(monkeypatch):
+    """The ceiling is per *task*, and a crash resume continues the same task —
+    `harness.run(deps, resume=True)` reopens the same document with the same
+    `task_id`. Zeroing the counter at the top of `run()` therefore handed a
+    resumed task a fresh budget every time it was reconnected, so the cap was
+    per run in practice while the comment above it claimed per task. Pins the
+    opposite direction too: a *fresh* deps still starts at zero, because
+    AgentDeps is built per task and its default is the zero."""
+    seen: list[AgentTurn] = []
+    _stub_plan(monkeypatch, seen)
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Board",
+                 task="fill in the spreadsheet")
+    # A resumed task arrives with the budget its earlier run already spent.
+    deps.sight_captures = harness_mod._MAX_CAPTURES_PER_TASK
+    result = await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
+    assert result.status == "completed"
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert seen[0].screenshot == ""
+    # And a task that has spent nothing still gets its full allowance.
+    deps2 = _deps(targets=targets, page_text="Board",
+                  task="fill in the spreadsheet")
+    seen2: list[AgentTurn] = []
+    _stub_plan(monkeypatch, seen2)
+    await asyncio.wait_for(AgentHarness().run(deps2), timeout=10)
+    assert seen2[0].screenshot == JPEG
 
 
 @pytest.mark.asyncio
@@ -479,3 +842,89 @@ async def test_the_image_never_reaches_the_audit_document(monkeypatch, tmp_path)
     assert any("task_complete" in p.read_text(errors="ignore") for p in written)
     for path in written:
         assert JPEG not in path.read_text(errors="ignore"), path
+
+@pytest.mark.asyncio
+async def test_a_password_this_run_typed_vetoes_the_capture():
+    """The page-text channel alone is the wrong and dangerous direction.
+
+    `redact_text` is regex over strings; it cannot recognise an arbitrary
+    password the agent itself typed. `run_secrets` is the list of values this
+    run put into fields `_typed_field` judged secret — and a value that was
+    just typed is in the pixels by definition, on any page that later renders
+    it. So an empty `redactions` must not read as clearance here.
+    """
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in",
+                 task="fill in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Untitled", {}, ["hunter2-xyz"])
+    assert out.image == "" and out.needed is True
+    deps.cdp.capture_screenshot.assert_not_awaited()
+    assert "treat it as unseen" in out.note.lower()
+
+
+@pytest.mark.asyncio
+async def test_both_signals_empty_still_captures():
+    """The other direction: the veto must not be able to refuse everything.
+
+    An empty dict means "no detector fired", not "this page is clean" — a
+    caller reading the absence as clearance is the bug this session produced
+    twice.
+    """
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in",
+                 task="fill in the spreadsheet")
+    out = await _vision_fallback(deps, targets, "Untitled", {}, [])
+    assert out.image == JPEG
+
+
+@pytest.mark.asyncio
+async def test_the_typed_secret_veto_precedes_the_capability_resolve(monkeypatch):
+    """A refusal must cost nothing: no resolve, no capture, before either."""
+    targets = _toolbar(40)
+    deps = _deps(targets=targets, page_text="Sign in",
+                 task="fill in the spreadsheet")
+    seen: list[str] = []
+    monkeypatch.setattr(
+        harness_mod, "_vision_capability",
+        lambda d: seen.append("resolved"))
+    await _vision_fallback(deps, targets, "Untitled", {}, ["hunter2-xyz"])
+    assert seen == []
+
+
+# ── the rule as the model reads it ──────────────────────────────────────────
+#
+# `_sparse_for_task` decides *whether* a picture rides along and the harness
+# note says what the one attached is. Neither is enough: a turn arriving with
+# no picture is indistinguishable from a page the model cannot read, unless
+# the prompt states why one is sent at all. And before this section said so,
+# it told the model to give up and ask the user on exactly the pages the
+# fallback rescues — a canvas page is the case this whole file exists for.
+#
+# A dropped instruction is an absence, and an absence reads clean in review.
+
+def test_the_prompt_states_the_condition_a_picture_is_sent_under():
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+    assert "nothing in the tree" in SYSTEM_PROMPT and \
+        "about your task" in SYSTEM_PROMPT
+
+
+def test_the_prompt_says_a_turn_without_a_picture_is_not_a_blank_page():
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+    assert "no picture came with the turn" in SYSTEM_PROMPT
+
+
+def test_the_prompt_tells_the_model_the_tree_outranks_the_picture():
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+    assert "believe the tree" in SYSTEM_PROMPT, (
+        "a canvas can be mid-render, and the picture shows a rendering state "
+        "rather than the semantic one the agent is about to act on"
+    )
+
+
+def test_the_prompt_names_the_cap():
+    from brotto_orchestrator.agent.prompt import SYSTEM_PROMPT
+    assert "at most three" in SYSTEM_PROMPT, (
+        "the prompt quotes the cap in words so it cannot drift from\n"
+        "the constant; assert here rather than importing it"
+    )
+    assert harness_mod._MAX_CAPTURES_PER_TASK == 3

@@ -23,7 +23,7 @@ import pytest
 from brotto_orchestrator.agent.context import (
     ActionCall, AgentDecision, AgentDeps, TaskResult,
 )
-from brotto_orchestrator.agent.harness import AgentHarness
+from brotto_orchestrator.agent.harness import AgentHarness, WITHHELD
 from brotto_orchestrator.dev.ax_tree_extractor import SemanticTarget
 import brotto_orchestrator.agent.harness as harness_mod
 
@@ -38,12 +38,18 @@ class _EmptyResult:
 def _deps() -> AgentDeps:
     cdp = MagicMock()
     cdp.ping = AsyncMock(return_value=True)
-    # Only [0:1] is a known target, so the type_text ref below is unresolvable
-    # and _redact_if_secret fails closed — the secret-field case.
+    # 0:2 is the secret field the type_text actions below aim at. It used to
+    # be unresolvable, which _redact_if_secret treated as a secret verdict —
+    # absence of evidence read as evidence, and a run that typed into a
+    # synthetic-ref canvas app latched run_secrets on every cell. The field is
+    # now a real target whose NAME says password, which is the actual case.
     cdp.get_targets = AsyncMock(return_value=[
-        SemanticTarget(ref_id="0:1", tag="button", role="button", name="Save")])
+        SemanticTarget(ref_id="0:1", tag="button", role="button", name="Save"),
+        SemanticTarget(ref_id="0:2", tag="input", role="textbox",
+                       name="Password")])
     cdp.get_current_url = AsyncMock(return_value="https://example.com/account")
     cdp.get_page_text = AsyncMock(return_value="nothing to see")
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Account")
     cdp.refresh_target_map = AsyncMock()
 
@@ -63,7 +69,7 @@ async def _run_batch(monkeypatch, actions: list[ActionCall],
     """
     calls: list[int] = []
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         if call.action == "task_complete":
             deps.result = TaskResult(status="completed", summary="ok")
         return f"{call.action} done"
@@ -104,7 +110,7 @@ async def test_a_secret_typed_after_a_scroll_is_still_scrubbed(monkeypatch):
     ], f"Typed {_SECRET} into the password field after scrolling.")
 
     assert _SECRET not in summaries[0].extracted
-    assert "[typed into a secret field]" in summaries[0].extracted
+    assert WITHHELD in summaries[0].extracted
 
 
 @pytest.mark.asyncio
@@ -124,7 +130,7 @@ async def test_a_legitimate_search_query_is_not_over_scrubbed(monkeypatch):
     """The cost of the fix must be paid somewhere: a search box is not a
     secret field, and the model's own query is its thread back to itself."""
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         if call.action == "task_complete":
             deps.result = TaskResult(status="completed", summary="ok")
         return f"{call.action} done"
@@ -144,7 +150,8 @@ async def test_a_legitimate_search_query_is_not_over_scrubbed(monkeypatch):
     monkeypatch.setattr(harness_mod, "_execute_action", _fake_execute)
     monkeypatch.setattr(harness_mod, "_plan_step", _fake_plan)
     # The search box is not a password box.
-    monkeypatch.setattr(harness_mod, "_redact_if_secret", AsyncMock(return_value=False))
+    monkeypatch.setattr(harness_mod, "_redact_if_secret",
+                        AsyncMock(return_value=(False, False)))
 
     deps = _deps()
     await asyncio.wait_for(AgentHarness().run(deps), timeout=10)
@@ -164,7 +171,7 @@ async def test_a_secret_quoted_back_later_never_reaches_the_audit_document(monke
     """
     calls: list[int] = []
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         if call.action == "task_complete":
             deps.result = TaskResult(status="completed", summary="ok")
         return f"{call.action} done"

@@ -6,6 +6,9 @@
 
 import * as dbg from "./debugger";
 import { captureObservation } from "./observation";
+import { clearDelta } from "./observation/delta";
+import { bindFocus, boundedPoint, drawCursor, editorText, focusNode, focusState, gridDelivery, reassertGridFocus, verifyTarget, withWorld } from "./observation/pointer";
+import { formulaBarFocusJs, formulaBarJs, gridAdapterFor, isCellReference, nameBoxFocusJs, nameBoxJs } from "./observation/grid";
 import { getStoredModelConfig } from "./model_config";
 
 const DEFAULT_SERVER = "http://localhost:8000";
@@ -451,6 +454,21 @@ let stepIndex = 0;
 // terminal event before it reports the disconnect.
 let taskInFlight = false;
 
+/**
+ * A task has ended.
+ *
+ * **The pending grid write ends with it.** That record is about the next key
+ * on this tab, and a task that has ended will not send one: a write left
+ * standing would be claimed by the *next* task's key press, which — with
+ * nothing focused — pulls the focus into the grid's off-screen editor, a
+ * field the model is not on. One place ends the task, so one place ends the
+ * record.
+ */
+function endTask(): void {
+  taskInFlight = false;
+  clearGridWrite();
+}
+
 // ponytail: 3 attempts at 5s flat when the server cannot be reached.
 // Earlier we used exponential backoff (1s → 2s → 4s → 8s → 16s → 30s, 5
 // attempts max) — that surfaced "attempt 5" to the user and made the
@@ -643,6 +661,7 @@ async function clearSession(): Promise<void> {
   waitingForLogin = false;
   currentPrompt = null;
   lastObservedUrl = "";
+  clearDelta();
 }
 
 // Send the user's reply for whichever prompt is current and clear the wait.
@@ -656,23 +675,678 @@ function signalResume(): void {
 
 // ── Action execution ─────────────────────────────────────────────────────────
 
-async function executeAction(tabId: number, action: any): Promise<void> {
+/**
+ * Verify the target, press it, and settle.
+ *
+ * The whole of `click`, and the first half of `type_at`. It was extracted when
+ * the fused action landed, and deliberately keeps `verifyTarget` *inside*: the
+ * only thing binding an action to the node the model actually saw, and a gate
+ * that exists on one branch and not its sibling is a gate with a hole in it.
+ *
+ * Returns `null` when the press went out, or the refusal that stopped it.
+ */
+async function pressAt(tabId: number, action: any, x: number, y: number): Promise<{ ok: boolean; reason: string } | null> {
+  const check = await verifyTarget(tabId, action.backendNodeId, x, y);
+  if (!check.ok) {
+    console.warn(`brotto: press refused — hit test says ${check.reason} at (${x},${y})`);
+    return { ok: false, reason: check.reason };
+  }
+  // Draw, click, and leave the marker up. pointer-events: none means the hit
+  // test in BOX_WALK cannot see it, and the marker *stays*: there is no path
+  // that removes it, so the next click moves it and the only thing that takes
+  // it away is the page going away. A navigation takes the marker with it,
+  // because the marker lives in the document that went away — an overlay
+  // cannot be orphaned across a navigation, because it cannot outlive one.
+  const drawn = await drawCursor(tabId, x, y, action.label ?? "");
+  if (!drawn.drawn) console.warn(`brotto: cursor not shown (${drawn.reason}) — the click still runs`);
+  await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x, y, button: "left", clickCount: 1 } });
+  await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x, y, button: "left", clickCount: 1 } });
+  await sleep(200); // brief pause for click to register / navigation to start
+  return null;
+}
+
+/** One key press. `modifiers` is CDP's bitmask (Alt=1, Ctrl=2, Meta=4,
+ *  Shift=8) and is the caller's to supply — the extension holds no platform
+ *  branch and must not grow one. This exists for the `key` action, which types
+ *  a shortcut the caller named; it is deliberately NOT how `type_at` clears a
+ *  field, because "which chord means select-all" is the one question that would
+ *  need the OS, and there is no legal way to ask it. That clear is a DOM
+ *  operation — see `FOCUS_PROBE`. */
+async function dispatchKey(tabId: number, key: string, mods: number): Promise<void> {
+  const code = keyCodeFor(key);
+  const base = {
+    key,
+    windowsVirtualKeyCode: code,
+    nativeVirtualKeyCode: code,
+    ...(mods ? { modifiers: mods } : {}),
+  };
+  // A character key carries its text on the keyDown, or Chrome registers a
+  // bare keypress and inserts nothing. A modified key wants rawKeyDown: the
+  // shortcut is resolved by the page, not by the browser's own key handling.
+  const printable = code >= 32 && code < 127;
+  await dbg.sendCommand(tabId, {
+    method: "Input.dispatchKeyEvent",
+    params: {
+      type: mods || !printable ? "rawKeyDown" : "keyDown",
+      ...base,
+      ...(mods || !printable ? {} : { text: key }),
+    },
+  });
+  await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...base } });
+}
+
+/** A canvas grid's cell is typed, not inserted. `Input.insertText` fires no
+ *  keydown, and a grid starts editing on the keystroke — so an insertion never
+ *  reaches the cell, and the cell shows a caret with nothing in it. One key
+ *  event per character instead, and never a modifier: no chord, so no OS
+ *  question is introduced anywhere on this path.
+ *
+ *  Bounded because a keystroke is a round trip and an unbounded one is a run
+ *  that spends its budget on the wire. */
+const MAX_CANVAS_CHARS = 1000;
+
+/**
+ * That the last write on this tab went into a grid's own cell editor, so the
+ * grid is mid-edit and the next *committing* key is the one that ends it.
+ *
+ * Set by the `type_at` grid path from what it did, not from what it saw the
+ * page doing, and read by the `key` branch. It exists because a grid
+ * replaces its editor when it re-renders a cell, and a replaced editor can take
+ * the focus with it — so the Enter that commits, dispatched as its own action,
+ * has nowhere to go and the typed text is never committed. It is deliberately
+ * not a general "the last thing typed was a grid": that would let a key
+ * dispatch reach into a field the model is on.
+ *
+ * **The record is short-lived, and every path that ends its relevance clears
+ * it**: a task that ended, a tab that closed, any action that is not a key.
+ * It was module-level and never cleared, so a write in one task survived into
+ * the next one in the same tab — where a key press with nothing focused
+ * pulled the focus into the grid's off-screen editor, a field the model was
+ * not on. A record that outlives the task that made it is the failure this
+ * clearing exists to prevent.
+ *
+ * ponytail: an MV3 service worker restart between the write and its Enter
+ * loses the record, and the commit then goes to whatever holds the focus.
+ * Accepted rather than fixed: persisting it in `chrome.storage` would let a
+ * record outlive the task that made it, which is the worse failure. The
+ * restart hole costs a lost commit; the stale record costs a wrong field.
+ */
+let gridWrite: { tabId: number } | null = null;
+
+/** Forget the pending grid write. */
+function clearGridWrite(): void {
+  gridWrite = null;
+}
+
+/**
+ * A pending grid write is about the next *key* on this tab, and about nothing
+ * else — so any other action ends it. A click, a scroll, a navigation or a
+ * second write is not the commit the record exists to serve, and a record that
+ * outlives its write is how a later key press reaches into an editor the
+ * model is not on.
+ */
+function clearGridWriteUnlessKey(actionType: unknown): void {
+  if (actionType !== "key") clearGridWrite();
+}
+
+/**
+ * A committing key *ends* an edit. Enter is the one a grid commits a cell on;
+ * an arrow key only navigates, so it must not consume the record of a pending
+ * write — the real Enter after it still has to find it.
+ */
+function isCommittingKey(key: unknown): boolean {
+  return key === "Enter";
+}
+
+/** `beforeChar` is the binding, re-made before every keystroke: the grid's own
+ *  editor is given the focus back if it lost it, and the typing stops if the
+ *  binding cannot be held. It is called with nothing between its answer and the
+ *  key event — the whole point is that the check and the dispatch are adjacent.
+ *
+ *  It is called *per character* and not once per string because a key event is
+ *  a round trip: a single check would leave a window that spans every
+ *  keystroke in the string, and a page that takes the focus after the first
+ *  character would receive the rest. */
+async function typeIntoCanvas(
+  tabId: number,
+  text: string,
+  beforeChar: () => Promise<{ ok: boolean; reason: string; drift?: string }>,
+): Promise<{ ok: boolean; reason: string; drift?: string }> {
+  if (text.length > MAX_CANVAS_CHARS) {
+    return { ok: false, reason: "canvas-text-too-long" };
+  }
+  // The drift of the last re-assert is kept, and a "suspect" one is sticky: a
+  // key event is focus-global, so the focus that was taken back is the focus
+  // the previous keystroke went to — and a later benign drift does not un-do
+  // an earlier stray one.
+  let drift = undefined as string | undefined;
+  for (const ch of text) {
+    const held = await beforeChar();
+    if (!held.ok) return { ok: false, reason: held.reason };
+    if (held.drift === "suspect" || drift === undefined) drift = held.drift;
+    if (ch === "\n") await dispatchKey(tabId, "Enter", 0);
+    else await dispatchKey(tabId, ch, 0);
+  }
+  return { ok: true, reason: "", drift };
+}
+
+// ── The grid's three primitives ─────────────────────────────────────────────
+//
+// The grid's DOM knowledge lives in the extension (`observation/grid.ts`); the
+// server's registry says only WHICH frame to call. Three rules hold here:
+//
+//   1. **The adapter comes from the extension's own knowledge of the tab** —
+//      its origin and path, read from the tab, never from the frame. A
+//      hostile frame must not be able to claim to be a sheet.
+//   2. **Select-all is a DOM operation.** `element.select()` and a Range, never
+//      a Ctrl+A chord, which is "move to line start" on macOS. No OS branch
+//      exists on this path, and none may.
+//   3. **The extension reports what it did; the server grades it.** A write
+//      answers with the value it read back, and the server decides whether it
+//      landed, by reading through `grid_read_cell` and comparing.
+
+/** One isolated-world evaluate, and its value. The grid's probes are strings
+ *  because they are evaluated with a context id — the same mechanism
+ *  `pointer.ts` uses for its identity probe, and the same isolated world. */
+async function gridProbe(tabId: number, expression: string): Promise<any> {
+  try {
+    const call = await withWorld<any>(tabId, (contextId) =>
+      dbg.sendCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: { expression, contextId, returnByValue: true },
+      }));
+    return call?.result?.value;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The adapter this tab is. The tab's own URL is the extension's knowledge of
+ *  where the document is; the frame says nothing about it. A tab that cannot
+ *  be read is not a grid — it is a tab that is gone, and the two are
+ *  different answers. */
+async function gridAdapterForTab(tabId: number): Promise<{ adapter: any; error: string }> {
+  let url = "";
+  try {
+    url = String((await chrome.tabs.get(tabId)).url ?? "");
+  } catch {
+    return { adapter: null, error: "no tab attached" };
+  }
+  let loc: URL;
+  try {
+    loc = new URL(url);
+  } catch {
+    return { adapter: null, error: "this tab is not a grid" };
+  }
+  const adapter = gridAdapterFor({ origin: loc.origin, path: loc.pathname });
+  return adapter ? { adapter, error: "" } : { adapter: null, error: "this tab is not a grid" };
+}
+
+/** Do these two read as the same cell content? Trimmed, whitespace-collapsed
+ *  and case-folded — the same comparison the server makes, so the extension
+ *  and the server never disagree about what "landed" means. */
+function gridValuesMatch(a: string, b: string): boolean {
+  const norm = (s: string) => String(s ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/**
+ * **Jump to a cell.**
+ *
+ * The name box is a React-controlled input, so the reference is typed one
+ * character at a time with real key events (a `.value` assignment is ignored),
+ * and the box's contents are selected first with `select()` — a DOM
+ * operation. Enter commits the jump, and the box is read back: if it does not
+ * read the requested reference, the jump did not land, and that is an error
+ * rather than a value.
+ */
+async function gridSelectCell(tabId: number, adapter: any, address: string): Promise<any> {
+  const ref = String(address ?? "").trim();
+  const fail = (error: string) => ({ ok: false, address: ref, value: null, state: "unreadable", mechanism: "", error });
+  if (!isCellReference(ref)) return fail(`${address} is not a cell reference`);
+  const focus = await gridProbe(tabId, nameBoxFocusJs(adapter.nameBoxSelector));
+  if (!focus || focus.ok !== true) return fail("the name box could not be focused");
+  const typed = await typeIntoCanvas(tabId, ref, async () => ({ ok: true, reason: "" }));
+  if (!typed.ok) return fail("the reference could not be typed into the name box");
+  await dispatchKey(tabId, "Enter", 0);
+  await sleep(200);
+  const read = await gridProbe(tabId, nameBoxJs(adapter.nameBoxSelector));
+  const now = String(read ?? "").trim();
+  if (now.toUpperCase() !== ref.toUpperCase()) return fail(`the jump to ${ref} did not land`);
+  return { ok: true, address: ref, value: now, state: "ok", mechanism: "name-box", error: "" };
+}
+
+/**
+ * **Read a cell.**
+ *
+ * Select the cell, then read the formula bar's mirror. A missing mirror is a
+ * read that could not be performed (`unreadable`); an empty mirror is an
+ * empty cell, which is a read that HAPPENED (`ok` with an empty value).
+ */
+async function gridReadCell(tabId: number, adapter: any, address: string): Promise<any> {
+  const sel = await gridSelectCell(tabId, adapter, address);
+  if (!sel.ok) return { ...sel, mechanism: "formula-bar" };
+  const read = await gridProbe(tabId, formulaBarJs(adapter.formulaBarSelector));
+  if (read === null || read === undefined) {
+    return { ok: false, address: sel.address, value: null, state: "unreadable", mechanism: "formula-bar", error: "the cell has no formula bar to read" };
+  }
+  return { ok: true, address: sel.address, value: String(read), state: "ok", mechanism: "formula-bar", error: "" };
+}
+
+/**
+ * **Write a cell**, by the ladder.
+ *
+ *   1. **content-box** — focus the mirror, select its contents, insert the
+ *      value, press Enter, read the mirror back.
+ *   2. **grid-editor** — the grid's own editor takes the focus and the value
+ *      is typed one character at a time, pressed Enter, read back.
+ *   3. Otherwise the write failed, and the error names both mechanisms.
+ *
+ * The first rung is the one the original run missed: the mirror is the field
+ * that holds the cell's *text*, while the name box holds the cell's
+ * *reference* — and a word typed into the name box creates a named range, and
+ * the write is lost silently.
+ */
+async function gridWriteCell(tabId: number, adapter: any, address: string, value: string): Promise<any> {
+  const text = String(value ?? "");
+  if (text === "") {
+    return { ok: false, address: String(address ?? ""), value: null, state: "unreadable", mechanism: "", error: "there is no value to write" };
+  }
+  const sel = await gridSelectCell(tabId, adapter, address);
+  if (!sel.ok) return sel;
+  const tried: string[] = [];
+
+  // Rung 1: the content box.
+  tried.push("content-box");
+  const focus = await gridProbe(tabId, formulaBarFocusJs(adapter.formulaBarSelector));
+  if (focus && focus.ok === true) {
+    await dbg.sendCommand(tabId, { method: "Input.insertText", params: { text } });
+    await dispatchKey(tabId, "Enter", 0);
+    await sleep(250);
+    const read = await gridProbe(tabId, formulaBarJs(adapter.formulaBarSelector));
+    const got = read == null ? null : String(read);
+    if (got !== null && gridValuesMatch(got, text)) {
+      return { ok: true, address: sel.address, value: got, state: "ok", mechanism: "content-box", error: "" };
+    }
+  }
+
+  // Rung 2: the grid's own cell editor.
+  tried.push("grid-editor");
+  const held = await reassertGridFocus(tabId);
+  if (held.ok) {
+    const typed = await typeIntoCanvas(tabId, text, async () => reassertGridFocus(tabId));
+    if (typed.ok) {
+      // The grid replaces its own editor when it re-renders a cell, and a
+      // replaced editor can take the focus with it — so the focus is put back
+      // before the Enter that commits.
+      const before = await reassertGridFocus(tabId);
+      if (before.ok) await dispatchKey(tabId, "Enter", 0);
+      await sleep(250);
+      const read = await gridProbe(tabId, formulaBarJs(adapter.formulaBarSelector));
+      const got = read == null ? null : String(read);
+      if (got !== null && gridValuesMatch(got, text)) {
+        return { ok: true, address: sel.address, value: got, state: "ok", mechanism: "grid-editor", error: "" };
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    address: sel.address,
+    value: null,
+    state: "unreadable",
+    mechanism: "",
+    error: `the write did not land (tried ${tried.join(" and ")})`,
+  };
+}
+
+/**
+ * The one answer shape the grid's three frames share.
+ *
+ * `id` is the request's id, echoed back verbatim. The op name alone is not
+ * enough: two calls of the same op (a write's read-back, then the
+ * completion pass) are indistinguishable by name, so a late answer could be
+ * read as this one's. The id is what makes the answer answer *this* question.
+ */
+function gridResultFrame(id: string, op: string, address: string, r: any): string {
+  return JSON.stringify({
+    type: "grid_result",
+    id,
+    op,
+    ok: r?.ok === true,
+    address: String(r?.address ?? address ?? ""),
+    value: r?.value == null ? null : String(r.value),
+    state: r?.state === "ok" ? "ok" : "unreadable",
+    mechanism: String(r?.mechanism ?? ""),
+    error: String(r?.error ?? ""),
+  });
+}
+
+/**
+ * One grid primitive, one frame, one answer.
+ *
+ * `op` is echoed back, so a late answer to a previous op cannot be read as
+ * this one's.
+ *
+ * **The grid path is serial.** A select, a read and a write that interleaved
+ * would race for the same cell — and a write that lands in the cell a read
+ * was about to read is a wrong value, not a slow one. So the ops queue behind
+ * each other here, whatever order the frames arrive in.
+ */
+let gridQueue: Promise<void> = Promise.resolve();
+
+async function executeGridOp(tid: number | null, op: string, msg: any): Promise<void> {
+  const address = String(msg?.address ?? "");
+  const id = String(msg?.id ?? "");
+  if (tid === null) {
+    ws!.send(gridResultFrame(id, op, address, { ok: false, value: null, state: "unreadable", mechanism: "", error: "no tab attached" }));
+    return;
+  }
+  const found = await gridAdapterForTab(tid);
+  if (!found.adapter) {
+    ws!.send(gridResultFrame(id, op, address, { ok: false, value: null, state: "unreadable", mechanism: "", error: found.error }));
+    return;
+  }
+  const adapter = found.adapter;
+  let r: any;
+  try {
+    if (op === "grid_select_cell") r = await gridSelectCell(tid, adapter, address);
+    else if (op === "grid_read_cell") r = await gridReadCell(tid, adapter, address);
+    else r = await gridWriteCell(tid, adapter, address, String(msg?.value ?? ""));
+  } catch (e) {
+    r = { ok: false, address, value: null, state: "unreadable", mechanism: "", error: String(e) };
+  }
+  ws!.send(gridResultFrame(id, op, address, r));
+}
+
+function runGridOp(tid: number | null, op: string, msg: any): Promise<void> {
+  const next = gridQueue.then(() => executeGridOp(tid, op, msg));
+  // The chain itself must not die with one failed op, or every later op is
+  // refused for a reason that happened once.
+  gridQueue = next.then(() => {}, () => {});
+  return next;
+}
+
+async function executeAction(tabId: number, action: any): Promise<{ ok: boolean; reason: string }> {
   const t = action.type;
+  // **A pending grid write is about the next key on this tab, and about
+  // nothing else.** Any other action ends it — a click, a scroll, a
+  // navigation, a second write — because none of them can be the commit the
+  // record exists to serve, and a record that outlives its write is how a
+  // later key press reaches into an editor the model is not on. The write
+  // path sets its own record at the end of the branch below, so this does not
+  // clear the write it is clearing for.
+  clearGridWriteUnlessKey(t);
+  // What the server is told happened. The gates below refuse rather than
+  // dispatch, and until this existed a refusal was invisible to the server:
+  // `click_ref` returned `Clicked [7]` the moment the frame left, so the model
+  // believed it acted and `record_action` wrote `ok: true` for a press that
+  // never happened. One shape, closed vocabulary, no freeform text — this
+  // string reaches the model's history and the audit document.
+  let refusal: { ok: boolean; reason: string } | null = null;
   if (t === "navigate") {
     await dbg.sendCommand(tabId, { method: "Page.navigate", params: { url: action.url } });
     await sleep(200); // brief pause for navigation to start before readyState polling
-  } else if (t === "click") {
-    const { x, y } = action;
-    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x, y, button: "left", clickCount: 1 } });
-    await dbg.sendCommand(tabId, { method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x, y, button: "left", clickCount: 1 } });
-    await sleep(200); // brief pause for click to register / navigation to start
+  } else if (t === "type_at") {
+    // The fused action: one frame where there used to be two, so one
+    // post-action observation where there used to be two. The server used to
+    // send `click` then `type`; `type` carries no coords and no
+    // `backendNodeId` and verifies nothing, so fusing them is only safe
+    // because the press half keeps every gate the standalone click had.
+    //
+    // **Sheets is the case this exists for.** A cell is a `<canvas>` with a
+    // hidden input: no value to assign, no DOM text node to write. It ends in
+    // `Input.insertText` on whatever the press focused, exactly as before.
+    //
+    // **The coordinate is bounded, exactly as `click_xy` bounds it.** A raw
+    // x/y off the wire has been checked by nobody, and this branch is the one
+    // that then *destroys* whatever the press focused — `clear` is select-all
+    // plus a type. `boundedPoint` re-reads the live viewport and refuses
+    // anything outside it; the `viewport` on the same frame is the sender's
+    // idea of it, from the same untrusted message, and is not the bound. The
+    // *bounded* pair is what goes into `pressAt` and into `bindFocus`, so the
+    // hit test is asked about the point that is actually dispatched rather than
+    // the one that was sent.
+    //
+    // This subsumes the old `typeof` check: `boundedPoint` returns null for a
+    // non-number too, and one refusal covers both.
+    const point = await boundedPoint(tabId, action.x, action.y);
+    if (!point) {
+      console.warn(`brotto: type_at refused — (${String(action.x)}, ${String(action.y)}) is not a point in the live viewport`);
+      refusal = { ok: false, reason: "point-out-of-viewport" };
+      return refusal;
+    }
+    const { x, y } = point;
+    const pressed = await pressAt(tabId, action, x, y);
+    if (pressed) { refusal = pressed; return refusal; }
+    // **Is what holds focus the thing this press was aimed at?** Without this,
+    // everything below reads `document.activeElement` and acts on it — and a
+    // press that missed, landed on a non-focusable, or was moved by page script
+    // leaves the user's *previous* field focused, so `clear` empties that one
+    // and the text is typed into it. `bindFocus` names the focused node from the
+    // engine — read in an isolated world, then described by `DOM.describeNode`,
+    // because `DOM.getFocusNode` no longer exists in Chrome — and compares it
+    // against the node the press was verified against. The one shape identity
+    // cannot serve — a canvas cell whose press focuses a hidden editor — is
+    // exempted narrowly and *reported*, never silently passed.
+    const bound = await bindFocus(tabId, action.backendNodeId, x, y);
+    if (!bound.ok) {
+      console.warn(`brotto: type_at refused — ${bound.reason}; nothing here holds the focus this press aimed at`);
+      refusal = { ok: false, reason: bound.reason };
+      return refusal;
+    }
+    if (bound.reason === "canvas-editor-exempt") {
+      console.warn("brotto: type_at — focus is an editor inside the pressed canvas, not the pressed node itself (logged, not silent)");
+    }
+    // **A grid's cells are typed, never inserted — whichever field holds the
+    // focus on a grid page.** `Input.insertText` fires no keydown and the grid
+    // starts editing on the keystroke, so an insertion reaches the formula bar
+    // and never the grid's model: the cell shows a caret with nothing in it, the
+    // Enter has nothing to commit, and the run reports itself done. The press
+    // is not the problem — the delivery mechanism was. `bound.grid` is the
+    // *application* the document is (`GRID_ADAPTERS` — the unforgeable origin
+    // *and* the path, because one origin serves several Google applications),
+    // so a hostile page cannot buy the keystroke path with a shape, and a Docs
+    // comment box on the same origin does not take it either.
+    if (bound.grid) {
+      // The grid keeps its editor outside the canvas (Sheets parks it
+      // off-screen), and a grid starts editing on the *keystroke*: an
+      // insertion fires no keydown, so the cell would show a caret with
+      // nothing in it. Typed, one key event per character, and no modifier
+      // ever — so no chord, and no OS question.
+      //
+      // **The clear is the grid's own business only in the grid's own cell
+      // editor**, where the first keystroke really does replace the selected
+      // cell's content. Everywhere else on a grid page — the formula bar, the
+      // name box — the first keystroke *appends*, so `clear` has to be
+      // honoured or the text lands beside the old one: `42` typed into a cell
+      // holding `17` would yield `1742`, a silent wrong value. The DOM clear
+      // is refused only where the grid's editor is the focus, because that
+      // editor is parked off-screen and a selection inside it is the grid's
+      // business.
+      if (action.clear === true && !bound.gridEditor) {
+        const focus = await focusState(tabId, true);
+        if (!focus.ok) {
+          console.warn(`brotto: type_at refused — ${focus.reason}; the field could not be cleared, so the text would be appended to what is already there`);
+          refusal = { ok: false, reason: focus.reason };
+          return refusal;
+        }
+      }
+      console.warn(bound.reason === "canvas-grid-editor"
+        ? "brotto: type_at — focus is the canvas grid's own editor, outside the canvas (logged, not silent)"
+        : `brotto: type_at — grid page: typing into ${bound.focusId} as keystrokes, not an insertion (logged, not silent)`);
+      const text = String(action.text ?? "");
+      // **Did the text land?** The editor's own content is the direct answer:
+      // a grid that took the keystrokes changed it, a grid that ignored them
+      // did not. Read *before* as well, so "unchanged" means "the typing
+      // changed nothing" rather than "the cell was always empty" — and so a
+      // grid that reformats what it is given (a number, a formula) is not
+      // reported as a failure.
+      //
+      // **The read comes before the binding, not between it and the text.** A
+      // read sitting between the last focus check and the keystroke is a race
+      // window with a round trip in it, and it was the window the review named.
+      // A "before" reading belongs before the binding anyway.
+      const before = await editorText(tabId, bound.focusId);
+      // **The binding is re-made before every keystroke, not observed once.**
+      // A grid cell is *typed*: the text arrives as key events, and a key
+      // event is not bound to a node — it goes to whatever holds focus when
+      // the browser processes it. So the check cannot be made in the dispatch;
+      // it is made in the page, immediately before each dispatch, and it is
+      // made by *putting the focus back* rather than by reading it. A reading
+      // is not a binding: the page can move focus between the read and the
+      // keystroke, and the text goes there anyway.
+      //
+      // `reassertGridFocus` therefore does not ask "is the focus still where it
+      // was" — it makes the grid's own editor the focused element and then says
+      // so. It is the closest available equivalent of "insert into that node",
+      // because a key event cannot be addressed to one.
+      //
+      // **And it may only do that when the focus is the grid's own editor.**
+      // A grid page has text fields the model is *typing into* — the formula
+      // bar, and the name box where a cell reference is written and Enter
+      // pressed to jump. Taking the focus from either would move the keystrokes
+      // off the field the model is on, and on the name box it would type a
+      // reference into a cell instead. `bound.gridEditor` is the role, not the
+      // node, so it survives the editor being re-rendered under us.
+      const typed = await typeIntoCanvas(
+        tabId,
+        text,
+        bound.gridEditor ? async () => reassertGridFocus(tabId) : async () => ({ ok: true, reason: "" }),
+      );
+      if (!typed.ok) {
+        console.warn(`brotto: type_at refused — ${typed.reason}; the typing stopped`);
+        refusal = { ok: false, reason: typed.reason };
+        return refusal;
+      }
+      // **The grid is mid-edit only when its own editor took the text.** That is
+      // our own fact, not a guess about the page, and the `key` branch needs it:
+      // a grid that replaced its editor may have taken the focus with it, and
+      // the Enter that commits is a separate action dispatched later.
+      gridWrite = bound.gridEditor ? { tabId } : null;
+      // The after-read is only meaningful on **the same node** the before-read
+      // was taken from. A grid that replaces its editor mid-typing (which
+      // Sheets does when it re-renders a cell) leaves the old node's text
+      // behind, and comparing it with itself would report a delivery failure
+      // for a typing that worked. So the focus is read once more: if the
+      // editor is still the focused node, the two reads are comparable; if it
+      // is not, nothing was measured and nothing is claimed.
+      const afterFocus = await focusNode(tabId);
+      const sameNode = afterFocus.ok && afterFocus.backendNodeId === bound.focusId;
+      const after = sameNode ? await editorText(tabId, bound.focusId) : { ok: false, text: "" };
+      // A newline is skipped: a grid commits and empties its editor on Enter,
+      // so "unchanged" is the grid's own behaviour and not a failed delivery.
+      if (before.ok && after.ok && text && !text.includes("\n") &&
+          after.text === before.text && !after.text.includes(text)) {
+        // **A keystroke that went to another editor is a different failure.**
+        // The re-assert takes the focus back, and it reports what *had* it: a
+        // text-entry surface that is not the grid's own is the one shape a
+        // keystroke can go into, so the keystroke before it may have landed
+        // there. The grid's editor did not change, so the text did not reach
+        // the cell — and it may be sitting in somebody else's field.
+        if (typed.drift === "suspect") {
+          console.warn("brotto: type_at refused — a keystroke went to another editor; the text did not land in the cell");
+          refusal = { ok: false, reason: "grid-text-misdelivered" };
+          return refusal;
+        }
+        console.warn("brotto: type_at refused — the grid's editor did not change; the text did not land in the cell");
+        refusal = { ok: false, reason: "grid-text-not-delivered" };
+        return refusal;
+      }
+      // **The editor was replaced mid-typing, so the two reads prove
+      // nothing** — and a keystroke may have gone astray while it happened.
+      // Then the page is asked where the text is: the grid's own scope holds
+      // it, so the re-render is the grid's business; anywhere else, or
+      // nowhere, and the text is not where the press aimed it.
+      //
+      // The page is asked **only** in that case. A run with no drift reports
+      // what it measured and claims nothing more, and a run that never
+      // re-rendered its editor is answered by the two reads above.
+      if (!sameNode && typed.drift === "suspect") {
+        const delivery = await gridDelivery(tabId, text);
+        if (!(delivery.ok && delivery.state === "in-grid")) {
+          console.warn(`brotto: type_at refused — the grid's scope does not hold the text (${delivery.state ?? delivery.reason ?? "unknown"}); a keystroke went elsewhere`);
+          refusal = { ok: false, reason: "grid-text-misdelivered" };
+          return refusal;
+        }
+      }
+    } else {
+      // The guard `focus_id` gives the two-frame version lived between the
+      // frames, and that window closes inside here. This is where it moves:
+      // nothing may hold focus, or the text goes somewhere the press did not
+      // put it.
+      //
+      // **`clear` rides this same probe, and is a DOM operation.** It was a key
+      // chord with the caller supplying the modifier bitmask, which put an OS
+      // question on the wire — Ctrl+A is "move to line start" on macOS, and the
+      // server has no OS signal to answer it. `focusState` reads
+      // `document.activeElement` in an **isolated world** — so a page that
+      // overrode `Element.prototype.select` cannot change what `select()` does —
+      // and calls `select()` on it, after `bindFocus` has proved that element is
+      // the pressed target. One evaluate, both questions, and no branch anywhere
+      // that knows what OS it is on.
+      //
+      // A failed clear refuses rather than types: `clear: true` means *replace*,
+      // and appending to a field the model asked to empty is the same wrong
+      // answer the bare "a" gave, wearing a different hat.
+      //
+      // No `!bound.gridEditor` here: this branch is reached only when the
+      // document is not a grid application, and `gridEditor` is that
+      // application's editor, so it cannot be true here — the condition was
+      // one that could never be false.
+      const focus = await focusState(tabId, action.clear === true);
+      if (!focus.ok) {
+        console.warn(`brotto: type_at refused — ${focus.reason}; nothing holds focus to type into`);
+        refusal = { ok: false, reason: focus.reason };
+        return refusal;
+      }
+      // One call, not one per character — see the `type` branch below.
+      await dbg.sendCommand(tabId, {
+        method: "Input.insertText",
+        params: { text: (action.text ?? "") as string },
+      });
+    }
+  } else if (t === "click" || t === "click_xy") {
+    // Two trust classes, one dispatch. `click`'s x/y came out of BOX_WALK and
+    // were verified twice in the page — viewport, then elementFromPoint — so
+    // they are passed through. `click_xy`'s arrived as literal numbers from
+    // the wire, checked by nobody, and are re-bounded against the live
+    // viewport here before anything is dispatched. The `viewport` on that same
+    // frame is not the bound: it is the sender's idea of the viewport, from
+    // the same untrusted message. And `click`'s coordinates are re-checked
+    // against the live page below, because "was measured correctly" and "is
+    // still there" are different questions.
+    const point = t === "click_xy"
+      ? await boundedPoint(tabId, action.x, action.y)
+      : { x: action.x, y: action.y };
+    if (!point) {
+      // Loud in the service-worker log, and reported: the relay can no longer
+      // learn a refusal from noticing an unchanged page, and an unreported
+      // one is audited `ok: true`.
+      console.warn(`brotto: ${t} refused — (${String(action.x)}, ${String(action.y)}) is not a point in the live viewport`);
+      refusal = { ok: false, reason: "point-out-of-viewport" };
+      return;
+    }
+    const { x, y } = point;
+    // The geometry that put these coordinates there was measured at
+    // observation time, and a model call sits between that and this press. One
+    // in-page hit test here is the last point at which "this is still the
+    // element the model was shown" is answerable — which is why the hit test
+    // lives inside `pressAt` and not here: `type_at` needs it too, and a gate
+    // that exists on one branch and not its sibling is a gate with a hole in
+    // it. Only for `click`: `click_xy` carries no ref and no id, and
+    // `verifyTarget` reports that case as pass-through rather than refusing
+    // it, so the coordinate path onto a canvas page keeps working.
+    const pressed = await pressAt(tabId, action, x, y);
+    if (pressed) { refusal = pressed; return refusal; }
   } else if (t === "type") {
     // One call, not one per character. A README is 1325 characters with 23
     // newlines: the loop made 1325 sequential CDP round trips, and each "\n" was
     // a literal newline *character* rather than a line break — so a markdown
     // document arrived as one run-on line with 23 dead characters in it.
-    // insertText is also what a canvas-rendered editor (Google Docs) expects;
-    // per-character key events reach a contenteditable and nothing else.
+    // insertText is also what a canvas-rendered editor (Google Docs) expects.
+    // The per-character path above is the grid editor's, and only there: a
+    // grid starts editing on the keystroke.
     await dbg.sendCommand(tabId, {
       method: "Input.insertText",
       params: { text: (action.text ?? "") as string },
@@ -688,28 +1362,51 @@ async function executeAction(tabId: number, action: any): Promise<void> {
     // being sent by the relay and dropped here, so Control+A — the clear
     // that clear_ref issues — arrived as a bare "a" and typed a letter into
     // the field instead of selecting it.
-    const mods = action.modifiers ?? 0;
-    const code = keyCodeFor(action.key);
-    const base = {
-      key: action.key,
-      windowsVirtualKeyCode: code,
-      nativeVirtualKeyCode: code,
-      ...(mods ? { modifiers: mods } : {}),
-    };
-    // A character key carries its text on the keyDown, or Chrome registers a
-    // bare keypress and inserts nothing. A modified key wants rawKeyDown: the
-    // shortcut is resolved by the page, not by the browser's own key handling.
-    const printable = code >= 32 && code < 127;
-    await dbg.sendCommand(tabId, {
-      method: "Input.dispatchKeyEvent",
-      params: {
-        type: mods || !printable ? "rawKeyDown" : "keyDown",
-        ...base,
-        ...(mods || !printable ? {} : { text: action.key }),
-      },
-    });
-    await dbg.sendCommand(tabId, { method: "Input.dispatchKeyEvent", params: { type: "keyUp", ...base } });
+    //
+    // **A grid that re-rendered its editor may have dropped the focus with
+    // it**, and this key is the one that commits what was just typed. So the
+    // focus is put back — but only when nothing holds it that can receive
+    // text. A name box or a formula bar that holds the focus is never taken:
+    // `focusState` is the test, and it reads `document.activeElement` in an
+    // isolated world. A name-box jump therefore proceeds untouched, and a
+    // release is not what gets stolen.
+    //
+    // **The record is consumed by a committing key, and only by one.** An
+    // arrow key navigates the grid: it does not commit, and it must not spend
+    // the record, or the real Enter after it finds nothing and the cell is
+    // never committed. A record for *another* tab is not this tab's to claim
+    // and is dropped rather than kept — the extension drives one tab at a
+    // time, so a record for a tab that is not being driven is stale.
+    if (gridWrite) {
+      if (gridWrite.tabId !== tabId) {
+        clearGridWrite();
+      } else if (isCommittingKey(action.key)) {
+        clearGridWrite();
+        const holding = await focusState(tabId, false);
+        if (!holding.ok) await reassertGridFocus(tabId);
+      }
+    }
+    await dispatchKey(tabId, action.key, action.modifiers ?? 0);
   }
+  return refusal ?? { ok: true, reason: "" };
+}
+
+/**
+ * Tell the server what this action actually did.
+ *
+ * Sent *before* the post-action observation, so by the time the server's
+ * `_send_action` wakes on that observation the verdict is already sitting in
+ * its slot — one ordered socket, no correlation id. Optional for one minor: an
+ * orchestrator predating the frame ignores it, and one predating this client
+ * never receives it, which is read as "dispatched", today's behaviour.
+ */
+function sendActionResult(result: { ok: boolean; reason: string }): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({
+    type: "action_result",
+    ok: result.ok,
+    reason: result.reason.slice(0, 64),
+  }));
 }
 
 /**
@@ -862,6 +1559,44 @@ function maybeNotify(event: Record<string, unknown>): void {
   }
   if (t === "approval_request") {
     const id = String(event.id ?? "");
+    // A coordinate approval is the one a sentence cannot carry: `{x: 412,
+    // y: 288}` names nothing, and for a `type_xy` the reasoning deliberately
+    // omits the value, pointing at a card instead. The panel is the only
+    // surface that draws the screenshot, the crosshair and the value — so a
+    // notification offering Approve here is one tap of consent to something
+    // the user has not seen. Tell them, and point them at the panel. No
+    // buttons: Chrome fires onButtonClicked only for a button that exists, so
+    // the resolver stays pending and the card can still answer.
+    //
+    // No "Show panel" button either. `chrome.sidePanel.open()` needs a user
+    // gesture, and whether a notification click counts as one cannot be
+    // verified without a real browser — building a button on that assumption
+    // is worse than an honest dead end.
+    //
+    // Classified from the action itself, never from one optional sibling
+    // field. `viewport` used to be the whole test, so any path that dropped it
+    // on a coordinate approval restored the Approve button and the blind
+    // one-tap approve came back. Every signal is a trigger and they OR
+    // together, so an omission can only ever *reduce* what a user is offered.
+    // `args.text` alone is deliberately NOT a trigger: `type_text` carries it
+    // too, and that approval is ordinary.
+    const args = (event.args || {}) as Record<string, unknown>;
+    const actionType = (event.action as Record<string, unknown> | undefined)?.type;
+    const atAPoint =
+      (typeof actionType === "string" && actionType.endsWith("_xy")) ||
+      args.x !== undefined ||
+      args.y !== undefined;
+    if (atAPoint || event.viewport) {
+      notify(`approval:${id}`, {
+        title: "Brotto needs your approval",
+        message:
+          "Open the Brotto panel to see and approve this. It is a click or a " +
+          "text insertion at a specific point on the page, which has to be " +
+          "looked at before it is allowed.",
+        blocking: true,
+      });
+      return;
+    }
     notify(`approval:${id}`, {
       title: "Brotto needs your approval",
       message: String(event.reason || "Confirm this action to let the task continue."),
@@ -961,7 +1696,9 @@ function setBadgeForResult(): void {
  * `navigated` push can become a step's accessibility tree. That is not a
  * slightly-stale tree: it is a tree of the page before the popover opened,
  * so the model is shown a dropdown that has not rendered yet and told
- * `Clicked [0:37563]: ok`. Measured on session 7d567b66 — the agent clicked
+ * `Clicked [0:37563]` — the relay's verdict verbatim, no `: ok` tail: the
+ * harness used to wrap it as `Clicked [ref]: <result>` and no longer does.
+ * Measured on session 7d567b66 — the agent clicked
  * the same branch-selector three times and never saw one branch.
  */
 async function sendObservation(tabId: number, reason: "observe" | "action" | "navigated"): Promise<void> {
@@ -1232,7 +1969,7 @@ async function startRelay(
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       console.error("[brotto] getStoredModelConfig failed:", e);
-      taskInFlight = false;
+      endTask();
       taskTerminalEmitted = true;
       setBadgeForResult();
       try { ws?.close(); } catch { /* ignore */ }
@@ -1263,6 +2000,40 @@ async function startRelay(
     if (stored.model_config) payload.model_config = stored.model_config;
     if (stored.api_key) payload.api_key = stored.api_key;
     ws!.send(JSON.stringify(payload));
+  };
+
+  // The CSS-pixel viewport of the tab and the clip scale that lands on it, or
+  // null when either cannot be measured.
+  //
+  // `Page.captureScreenshot` defaults to device pixels, so a 2x display hands
+  // the model a picture 4x the area and ~2.6x the bytes, bought for detail
+  // only a `<canvas>` with real text in it can use. A `clip` is specified in
+  // CSS pixels but its `scale` is applied to the *device* surface, so scale 1
+  // reproduces the retina shot at four times the cost — measured on Chrome:
+  // `scale: 1` at dpr 2 returned 3024x1890, identical to no clip at all. It
+  // is `1 / devicePixelRatio` that produces 1512x945.
+  //
+  // No caching: the answer changes when the user zooms or resizes, and one
+  // `Runtime.evaluate` beside an 85 KB screenshot is not worth a second
+  // invalidation path. `null` is the honest answer and the caller falls back to
+  // the device capture — a clip of a guessed size is a picture of the wrong
+  // page, which is the one failure here that costs a click.
+  const cssViewport = async (tabId: number): Promise<{ width: number; height: number; scale: number } | null> => {
+    try {
+      const r = await dbg.sendCommand(tabId, {
+        method: "Runtime.evaluate",
+        params: {
+          expression: "[window.innerWidth, window.innerHeight, window.devicePixelRatio]",
+          returnByValue: true,
+        },
+      }) as { result?: { value?: unknown } };
+      const [w, h, dpr] = (r.result?.value || []) as number[];
+      return w > 0 && h > 0 && dpr > 0
+        ? { width: w, height: h, scale: 1 / dpr }
+        : null;
+    } catch {
+      return null;
+    }
   };
 
   ws.onmessage = async (ev) => {
@@ -1301,7 +2072,7 @@ async function startRelay(
           sendObservationError("action skipped: no tab attached");
           if (!taskTerminalEmitted) {
             taskTerminalEmitted = true;
-            taskInFlight = false;
+            endTask();
             setBadgeForResult();
             notifyUi({
               type: "task_failed",
@@ -1312,7 +2083,8 @@ async function startRelay(
           }
           break;
         }
-        await executeAction(tid, msg.action);
+        const result = await executeAction(tid, msg.action);
+        sendActionResult(result);
         await sendObservation(tid, "action");
         break;
 
@@ -1385,7 +2157,7 @@ async function startRelay(
       case "task_result": {
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
-        taskInFlight = false;
+        endTask();
         setBadgeForResult();
         const r = msg.result ?? {};
         if (r.status === "completed") {
@@ -1412,7 +2184,7 @@ async function startRelay(
       case "task_error":
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
-        taskInFlight = false;
+        endTask();
         setBadgeForResult();
         // ponytail: failure_reason + summary field names — see the
         // matching note on the task_result handler.
@@ -1430,7 +2202,7 @@ async function startRelay(
       case "task_failed":
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
-        taskInFlight = false;
+        endTask();
         setBadgeForResult();
         notifyUi({
           type: "task_failed",
@@ -1446,7 +2218,7 @@ async function startRelay(
       case "task_cancelled":
         if (taskTerminalEmitted) break;
         taskTerminalEmitted = true;
-        taskInFlight = false;
+        endTask();
         setBadgeForResult();
         notifyUi({ type: "task_failed", failure_reason: "CANCELLED", summary: msg.summary ?? "Task cancelled." });
         notifyUi({ type: "canonical_status", status: "failed" });
@@ -1478,6 +2250,15 @@ async function startRelay(
           type: "approval_request", id,
           reason: msg.reasoning ?? "The agent wants to perform a sensitive action.",
           action: { type: msg.action, url: msg.args?.url },
+          // A coordinate click is the one approval that cannot be judged from
+          // prose: `{x: 412, y: 288}` says nothing about what is there. These
+          // three carry the screenshot the panel draws a crosshair on, the CSS
+          // viewport the coordinates are in, and the domain. Absent on every
+          // other approval, which is why the panel treats them as optional.
+          args: msg.args,
+          screenshot: msg.screenshot,
+          viewport: msg.viewport,
+          url: msg.url,
         });
         break;
       }
@@ -1512,13 +2293,49 @@ async function startRelay(
         break;
       }
 
+      // The grid's three primitives. The grid's DOM knowledge lives in the
+      // extension; the server's registry says only WHICH frame to call. Each
+      // answers with one `grid_result` frame, carrying `op` so a late answer
+      // to a previous op cannot be read as this one's.
+      case "grid_select_cell":
+        await runGridOp(tid, "grid_select_cell", msg);
+        break;
+
+      case "grid_read_cell":
+        await runGridOp(tid, "grid_read_cell", msg);
+        break;
+
+      case "grid_write_cell":
+        await runGridOp(tid, "grid_write_cell", msg);
+        break;
+
       case "evaluate": {
         try {
           if (tid === null) throw new Error("no tab attached");
-          const r = await dbg.sendCommand(tid, {
+          // `isolatedWorld: true` is the one addition to this frame, and it is
+          // opt-in: absent or false is exactly the call that shipped — main
+          // world, no `contextId` key in `params` at all. Set, the *same*
+          // expression is evaluated in the cached `brotto-idle` world, whose
+          // prototypes are the extension's, so a page cannot shadow the getters
+          // it reads. The isolated world shares the DOM, so `document` and
+          // every element are the same objects; only the JS globals differ, and
+          // `returnByValue` returns the same primitive either way.
+          const evaluate = (contextId?: number) => dbg.sendCommand(tid, {
             method: "Runtime.evaluate",
-            params: { expression: msg.expression ?? "''", returnByValue: true },
-          }) as { result?: { value?: unknown } };
+            params: {
+              expression: msg.expression ?? "''",
+              returnByValue: true,
+              ...(contextId === undefined ? {} : { contextId }),
+            },
+          });
+          // `withWorld`, not `isolatedWorld`: a cached context id the renderer
+          // has thrown away makes this *error*, which reaches the server as an
+          // empty `evaluate_result` — and the run then refuses every action as
+          // "focus unknown" for the rest of its life. One failure recreates the
+          // world and retries, so the id cannot stay stale.
+          const r = (msg.isolatedWorld === true
+            ? await withWorld(tid, evaluate)
+            : await evaluate(undefined)) as { result?: { value?: unknown } };
           ws!.send(JSON.stringify({ type: "evaluate_result", value: String(r.result?.value ?? "") }));
         } catch (e) {
           ws!.send(JSON.stringify({ type: "evaluate_result", value: "", error: String(e) }));
@@ -1538,12 +2355,26 @@ async function startRelay(
       //
       // Not forwarded to the panel: the consumer is the model, and a frame the
       // panel has no `case` for is a run that never ends.
+      //
+      // `css_resolution` is the server's request, not ours, and that is the
+      // seam decision. The alternative — deciding here from the page — would
+      // mean a second, weaker copy of the harness's `_is_canvas_page` in the
+      // extension, and no way to tell this capture from the approval card's:
+      // they are the same frame, and the card is the user's own surface, shown
+      // on the user's machine, where small text has to stay legible. So the
+      // caller asks, the one key is optional and a server that predates it
+      // gets today's behaviour, and the frame contract grows by a key rather
+      // than by a type.
       case "capture_screenshot": {
         try {
           if (tid === null) throw new Error("no tab attached");
+          const vp = msg.css_resolution === true ? await cssViewport(tid) : null;
           const r = await dbg.sendCommand(tid, {
             method: "Page.captureScreenshot",
-            params: { format: "jpeg", quality: 60 },
+            params: vp
+              ? { format: "jpeg", quality: 60,
+                  clip: { x: 0, y: 0, width: vp.width, height: vp.height, scale: vp.scale } }
+              : { format: "jpeg", quality: 60 },
           }) as { data?: unknown };
           const data = typeof r.data === "string" ? r.data : "";
           // A truncated base64 string decodes to a corrupt image that a vision
@@ -1614,7 +2445,7 @@ async function startRelay(
     if (reconnectAttempt > 0) return;
     if (!taskTerminalEmitted) {
       taskTerminalEmitted = true;
-      taskInFlight = false;
+      endTask();
       void setBadge("idle");
       // ponytail: failure_reason + summary field names — see the
       // matching note on the task_result handler.
@@ -1645,7 +2476,7 @@ async function handleSocketClose(ev: CloseEvent): Promise<void> {
     // in, which is the recovery each message below asks for.
     cancelReconnect();
     taskTerminalEmitted = true;
-    taskInFlight = false;
+    endTask();
     queueReport(refusal === "missing" ? "credential_missing" : "credential_rejected");
     if (refusal === "missing") {
       notifyUi({
@@ -1690,7 +2521,7 @@ async function cleanup(): Promise<void> {
   const lost = taskInFlight && !taskTerminalEmitted;
   if (lost) {
     taskTerminalEmitted = true;
-    taskInFlight = false;
+    endTask();
     // The one client-side failure the relay also cannot see: the socket died
     // with a run in flight, so there is a task the operator will never find
     // in a document and no `task_result` will ever arrive to explain it.
@@ -1727,6 +2558,8 @@ async function cleanup(): Promise<void> {
   waitingForLogin = false;
   currentPrompt = null;
   lastObservedUrl = "";
+  // The run is over: the retained page frame has no further consumer.
+  clearDelta();
   void setBadge("idle");
 }
 
@@ -1744,6 +2577,8 @@ function stopRelay(): void {
   // startRelay's mint branch, so nothing is leaked by leaving it on.
   waitingForLogin = false;
   currentPrompt = null;
+  // The run ended here, so the retained page frame has no further consumer.
+  clearDelta();
 }
 
 // ── Message handler ──────────────────────────────────────────────────────────
@@ -1793,6 +2628,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           currentPrompt = null;
           lastObservedUrl = "";
           panelLog = [];
+          // Task start is the session boundary for retained frames: a task
+          // never diffs against a frame captured during the previous one.
+          clearDelta();
 
           const goal = String(message.task ?? "").trim();
           if (!goal) { sendResponse({ success: false, error: "task is empty" }); return; }
@@ -1830,7 +2668,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           })
             .catch((err: unknown) => {
               void setBadge("idle");
-              taskInFlight = false;
+              endTask();
               if (!taskTerminalEmitted) {
                 taskTerminalEmitted = true;
                 // ponytail: failure_reason + summary field names — see
@@ -1858,7 +2696,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             try { ws.send(JSON.stringify({ type: "cancel" })); } catch { /* ignore */ }
           }
           taskTerminalEmitted = true;
-          taskInFlight = false;
+          endTask();
           stopRelay();
           notifyUi({ type: "canonical_status", status: "cancelled" });
           sendResponse({ success: true });
@@ -1867,7 +2705,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         case "user_disconnect": {
           taskTerminalEmitted = true;
-          taskInFlight = false;
+          endTask();
           if (ws) {
             try { ws.close(); } catch { /* ignore */ }
           }
@@ -1906,7 +2744,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
 
       case "local_login_skip": {
-          taskInFlight = false;
+          endTask();
           stopRelay();
           sendResponse({ success: true });
           break;
@@ -2083,6 +2921,13 @@ chrome.tabs.onCreated.addListener((tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  // The retained page frame goes with the tab, whether or not it was the
+  // active one — it is decoded pixels held for a diff and nothing else.
+  clearDelta(tabId);
+  // A pending grid write belongs to a tab, and this tab is gone: the record
+  // would otherwise be claimed by a key press in another tab, and pull the
+  // focus into an editor that is not there any more.
+  if (gridWrite && gridWrite.tabId === tabId) clearGridWrite();
   if (tabId !== activeTabId) return;
   // Active tab closed — fall back to opener if available
   const fallback = tabStack.pop() ?? null;
@@ -2261,6 +3106,12 @@ async function initialize(): Promise<void> {
     chrome.webNavigation.onCommitted.addListener((details) => {
       if (details.frameId !== 0) return;
       if (activeTabId === null || details.tabId !== activeTabId) return;
+      // A navigation invalidates the retained frame: the next observation has
+      // nothing to diff against and must omit `delta` rather than report the
+      // whole new document as changed. `onCommitted` fires before the new page
+      // renders, so this one observation has no delta either — the step after
+      // it diffs against it.
+      clearDelta(details.tabId);
       void sendObservation(details.tabId, "navigated");
       const url = details.url ?? "";
       if (waitingForLogin && url && url !== lastObservedUrl) {

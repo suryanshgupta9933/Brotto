@@ -657,14 +657,6 @@ const modelDd = $modelName && attachDropdown({
   editable: true,
 });
 
-// Called twice on purpose: once now so the header pill names the model
-// immediately, and again from initModelSettings once the catalogue has landed
-// and the provider select can actually hold the id this config names. The
-// second one repaints for itself now; the first still needs the facts, because
-// a value written straight to a host never tells anyone it changed.
-hydrateModelSettings().then(() => { providerDd?.sync(); renderModelFacts(); });
-initModelSettings(document.getElementById('plannerUrl')?.value || '');
-
 const messagesEl  = document.getElementById('messages');
 const emptyState   = document.getElementById('emptyState');
 const goalEl       = document.getElementById('goal');
@@ -1808,6 +1800,13 @@ function appendPromptCard(p) {
     id: p.id,
     reason: p.reason || 'Brotto wanted approval for this action.',
     action: { type: p.action, url: args.url },
+    // The audit prompt carries `args` but no screenshot, so a replayed
+    // `type_xy` has no picture and no crosshair — it never had them. It does
+    // have the value, and the reason still points at it, so it is forwarded:
+    // dropping it left a card saying "the text shown below this card" with
+    // nothing below it. Rows replay into live chat bubbles; that is unchanged,
+    // the bubble just keeps the promise this time.
+    args,
     resolved: p.decision || 'denied',
   });
 }
@@ -2102,6 +2101,20 @@ const state = {
 // call above either declaration is one await away from being a TDZ
 // ReferenceError that `void` swallows — a banner that silently never loads.
 void refreshModelCheckBanner();
+
+// Called twice on purpose: once now so the header pill names the model
+// immediately, and again from initModelSettings once the catalogue has landed
+// and the provider select can actually hold the id this config names. The
+// second one repaints for itself now; the first still needs the facts, because
+// a value written straight to a host never tells anyone it changed.
+//
+// Same placement rule as the banner above, same reason: hydrateModelSettings
+// → modelKeyNames → accountScope reads state.accountId, so a call above the
+// `state` declaration is a TDZ ReferenceError one await away — and because it
+// is voided rather than awaited, it arrives as an unhandled rejection instead
+// of stopping the panel. This is the third top-level call to have done it.
+hydrateModelSettings().then(() => { providerDd?.sync(); renderModelFacts(); });
+initModelSettings(document.getElementById('plannerUrl')?.value || '');
 
 let timerInterval = null;
 let timerPausedAt = 0;
@@ -3084,7 +3097,12 @@ const FAILURE_NOTE = {
   model_http: 'The model provider rejected the request. Try again in a moment, or switch models in Settings.',
 
   // ── Brotto's own server ──
-  internal: "Brotto's server hit an error. The details are in its log.",
+  // Never "the details are in Brotto's log". For `WS_ERROR`/`TASK_ERROR` the
+  // user has no log at all; for START_FAILED the free-text reason is right
+  // below this sentence; and on a self-hosted install the log is the user's own
+  // machine, which most self-hosters never open. A sentence that names the
+  // next action is true in every edition; one that names a log is not.
+  internal: "Brotto's server hit an error. Sending the task again is the next thing to try.",
   // `task_error` carries the raw exception, which this run shows in the
   // bubble footer — so it can't claim the details are only in the log.
   server_error: "Brotto's server hit an error and stopped the run. The details are below.",
@@ -3102,6 +3120,11 @@ const FAILURE_NOTE = {
   // user got "the details are in Brotto's log" over a reason sitting in the
   // transcript in plain English.
   cannot_complete: 'Brotto could not find a way to finish this. What it tried is below.',
+  // Five steps with the URL, the AX diff and the page text all unchanged. That
+  // is what the page looked like, not proof the user did nothing — a canvas app
+  // is indistinguishable from a page Brotto cannot read, so it says neither
+  // "no progress" nor "impossible".
+  page_not_responding: 'The page stopped responding to Brotto. Some apps draw their content to a canvas and cannot be read at all.',
   // Pro only: BROTTO_MAX_TASK_COST_USD is refused without BROTTO_PRO, so a
   // free build cannot reach this. The sentence is here so the cap has one when
   // it is switched on.
@@ -3153,7 +3176,11 @@ function failureNote(reason, detail) {
   const note = FAILURE_NOTE[reason];
   if (note) return note;
   if (isOffline(detail)) return FAILURE_NOTE.offline;
-  return 'Something went wrong. The details are in Brotto\'s log.';
+  // Unreachable by construction: `scripts/test-failure-reasons.test.js` holds
+  // FAILURE_NOTE to the server's REPORTABLE set in both directions, so a code
+  // with no sentence here fails CI rather than reaching a user. It still
+  // says the truth if it is ever reached — an action, not a log nobody has.
+  return 'Something went wrong and Brotto can\'t say why. Sending the task again is the next thing to try.';
 }
 
 // ── Core logic (preserved verbatim) ───────────────────────────────────────
@@ -4116,7 +4143,214 @@ const NON_APPROVABLE_ACTIONS = new Set([
   'recall_memory',
 ]);
 
-function appendApprovalCard({ id, reason, action, resolved }) {
+// Where the crosshair goes, as a percentage of the viewport box.
+//
+// Percentages, not pixels, and not the image's natural size: `x`/`y` and
+// `viewport` are CSS pixels while `Page.captureScreenshot` writes device
+// pixels, so any arithmetic against `naturalWidth` is off by the device scale
+// factor — and on a 2x display that is a crosshair two cells away from the one
+// the user is being asked to approve. The displayed box *is* the viewport box,
+// so a percentage of it is the same point whatever the scale factor or whatever
+// width the panel squeezes the card to. Retina and non-retina collapse to the
+// same two numbers.
+function crosshairPercent(x, y, viewport) {
+  const w = Number(viewport?.width);
+  const h = Number(viewport?.height);
+  if (!(w > 0) || !(h > 0)) return null;
+  const left = (Number(x) / w) * 100;
+  const top = (Number(y) / h) * 100;
+  return {
+    left,
+    top,
+    // A point outside the viewport is one the page cannot receive; the card
+    // says so rather than parking a crosshair off the edge of the picture.
+    outside: !Number.isFinite(left) || !Number.isFinite(top) || left < 0 || left > 100 || top < 0 || top > 100,
+  };
+}
+
+// The screenshot, the crosshair, and the label — the picture an approval for a
+// blind click has to be judged from. Returns false and appends nothing when the
+// frame carries no screenshot, which is every existing approval_required: that
+// card is byte-for-byte what it was.
+//
+// It deliberately knows nothing about the *value* a `type_xy` writes. That
+// block belongs to the caller: this function bails out before drawing anything
+// when the capture failed, and a value that is only drawn here would leave a
+// card promising "the text shown below this card" with nothing below it —
+// approvable, and unreadable.
+function appendApprovalTarget(card, { screenshot, viewport, args, url }) {
+  const pct = crosshairPercent(args?.x, args?.y, viewport);
+  // A base64 jpeg, nothing else. The field is untrusted and goes straight into
+  // an attribute; a data: URL with a prefix we control cannot execute, but a
+  // truncated capture should show no picture rather than a broken one.
+  if (!screenshot || typeof screenshot !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(screenshot)) return false;
+  if (!pct) return false;
+
+  const label = String(args?.label || '').trim();
+
+  // The label leads. `{x: 412, y: 288}` is not something a person can consent
+  // to; "the cell C4" is. The coordinates are the crosshair's business.
+  const target = document.createElement('div');
+  target.className = 'approval-target';
+  target.textContent = label
+    ? `Click ${label}`
+    : 'Click this point on the page';
+  card.appendChild(target);
+
+  const shot = document.createElement('div');
+  shot.className = 'approval-shot';
+  const img = document.createElement('img');
+  img.src = `data:image/jpeg;base64,${screenshot}`;
+  img.alt = label ? `Screenshot of the page, with a crosshair on ${label}` : 'Screenshot of the page';
+  img.decoding = 'async';
+  shot.appendChild(img);
+
+  const mark = document.createElement('div');
+  mark.className = pct.outside ? 'approval-cross outside' : 'approval-cross';
+  mark.style.left = `${pct.left}%`;
+  mark.style.top = `${pct.top}%`;
+  shot.appendChild(mark);
+  card.appendChild(shot);
+
+  if (pct.outside) {
+    const warn = document.createElement('div');
+    warn.className = 'approval-preview';
+    warn.textContent = `That point (${Math.round(Number(args.x))}, ${Math.round(Number(args.y))}) is outside the ${viewport.width}×${viewport.height} page.`;
+    card.appendChild(warn);
+  }
+  return true;
+}
+
+// Codepoints that draw nothing but act on their neighbours: the bidi
+// controls (U+202A–U+202E, U+2066–U+2069, U+200E/U+200F, U+061C) can reverse
+// the card *around* the value — the human approves "Total: 12" while the
+// pixels read "Total: 21" — and the zero-width/format set (U+200B–U+200D,
+// U+2060, U+FEFF) can hide characters outright. The rest are invisible by
+// width or by category: the soft hyphen (U+00AD) and the Hangul fillers
+// (U+115F, U+1160, U+3164, U+FFA0, U+FFFA) vanish at any line position, the invisible
+// math operators (U+2061–U+2064) and the deprecated format set
+// (U+206A–U+206F) hide and reorder like the bidi controls do, U+FE00–U+FE0F
+// select a glyph the card cannot render, and the tag block
+// (U+E0000–U+E007F) is invisible text by definition.
+//
+// Enumerated rather than inverted on purpose: "treat everything outside
+// L/N/P/S as invisible" would placeholder U+200D, which is a legitimate
+// zero-width joiner *inside* an emoji sequence — and that inversion mangles
+// ordinary emoji on a consent surface.
+//
+// The full original string is what gets typed either way, so the panel has to *show* them rather than
+// render them faithfully.
+const INVISIBLE_CP = /[\u00ad\u034f\u2061-\u2064\u206a-\u206f\u115f\u1160\u3164\uffa0\ufffa\ufe00-\ufe0f\u{E0000}-\u{E007F}\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u200b-\u200d\u2060\ufeff]/u;
+
+// Splits a value into runs of ordinary text and runs of invisible characters.
+// Only used to decide element boundaries — every run is still written with
+// textContent, so no part of the value can introduce markup.
+function splitInvisible(value) {
+  const runs = [];
+  let buf = '';
+  let hidden = false;
+  for (const ch of value) {
+    const isHidden = INVISIBLE_CP.test(ch);
+    if (isHidden !== hidden) {
+      if (buf) runs.push({ text: buf, hidden });
+      buf = '';
+      hidden = isHidden;
+    }
+    buf += ch;
+  }
+  if (buf) runs.push({ text: buf, hidden });
+  return runs;
+}
+
+// The text a `type_xy` will write, on the card, in full — the only preview of
+// it, because `reasoning` deliberately carries no part of the value.
+//
+// `reasoning` used to be the preview, capped at 120 characters, so a human
+// could approve 120 characters and have 4,000 land in the cell — and because
+// the value sat inside that sentence's curly quotes it could close them and
+// speak as harness prose on a consent surface. The server no longer puts the
+// value in `reasoning`; it says only "the text shown below this card", which
+// makes this block the promise the card has to keep.
+//
+// So it is drawn for every frame carrying a value, whatever happened to the
+// screenshot, and it coerces anything non-null: the server types
+// `str(args.get("text") or "")`, so a `text: 123` from a model would otherwise
+// be invisible here and typed as "123" — consent for a write nobody read.
+function approvalValueMasked(args) {
+  const raw = args?.text == null ? null : String(args.text);
+  // `text_chars` is the producer's own "there was a value and it is longer
+  // than what you see" flag — set by the audit's `_scrubbed` mask and by the
+  // 8k cap on `args.text`. A mask literal is the same fact spelled out.
+  return args?.text_chars != null || (raw !== null && /^\[redacted[^\]]*\]$/.test(raw));
+}
+
+function approvalValueUnavailable(args) {
+  // Rendering: with no value at all there is nothing to show, so the heading
+  // has to say so. Gating: a *missing* `args` is not evidence of a masked
+  // value — `canonical_approval` sends no args at all, and treating that as a
+  // mask auto-denied every coordinate approval with a dead card.
+  return approvalValueMasked(args) || args?.text == null;
+}
+
+function appendApprovalValue(card, args, action) {
+  if (args?.text == null && action?.type !== 'type_xy') return;
+  const raw = args?.text == null ? null : String(args.text);
+  // Replay hands us the *audit document's* args, and `_scrubbed` masks the
+  // value there: `text` becomes REDACTED alongside a `text_chars` length. The
+  // card would otherwise render the mask as though it were the value, under
+  // a heading promising the whole of it. `text_chars` is the producer's own
+  // "there was a value and it was longer than what you see" flag, so its
+  // presence — or a literal mask string — means not available. The live frame
+  // carries the real value and no `text_chars`, so it still renders in full.
+  // The mask test is whole-string, so a value that merely *starts* with the
+  // word — "[redacted] is what it says" — is still real text that gets typed.
+  const unavailable = approvalValueUnavailable(args);
+
+  const value = document.createElement('div');
+  value.className = 'approval-value';
+
+  const valueLabel = document.createElement('div');
+  valueLabel.className = 'approval-value-label';
+  // The heading is the promise the card has to keep, so it is worded per
+  // branch: one that is true whether or not the value is there.
+  valueLabel.textContent = unavailable
+    ? 'Text typed there — not recorded for this run:'
+    : 'Text typed there — the whole value, exactly as it will be written:';
+  value.appendChild(valueLabel);
+
+  const valueText = document.createElement('div');
+  valueText.className = 'approval-value-text';
+  if (unavailable) {
+    // A replayed `type_xy` whose value was masked by the audit (or lost to
+    // the cap). The block still appears, and says so, rather than leaving the
+    // reason's "shown below this card" pointing at nothing.
+    valueText.className = 'approval-value-text unavailable';
+    const chars = Number(args?.text_chars);
+    valueText.textContent = Number.isFinite(chars) && chars > 0
+      ? `This value was not recorded for this run (${chars} characters).`
+      : 'This value was not recorded for this run.';
+  } else {
+    for (const run of splitInvisible(raw)) {
+      if (!run.hidden) {
+        valueText.appendChild(document.createTextNode(run.text));
+        continue;
+      }
+      // Named, not dropped: the placeholder keeps the character count visible
+      // and makes the reordering attempt legible instead of silent.
+      const span = document.createElement('span');
+      span.className = 'approval-value-invisible';
+      span.textContent = [...run.text]
+        .map((c) => `<U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}>`)
+        .join('');
+      valueText.appendChild(span);
+    }
+  }
+  value.appendChild(valueText);
+
+  card.appendChild(value);
+}
+
+function appendApprovalCard({ id, reason, action, resolved, screenshot, viewport, args, url }) {
   const empty = messagesEl.querySelector('.empty-state');
   if (empty) empty.remove();
 
@@ -4152,6 +4386,10 @@ function appendApprovalCard({ id, reason, action, resolved }) {
   header.appendChild(badge);
   card.appendChild(header);
 
+  // Before the reason, because it is what the user is approving: the picture
+  // and the named target first, then why the agent wants it.
+  appendApprovalTarget(card, { screenshot, viewport, args, url });
+
   if (reason) {
     const body = document.createElement('div');
     body.className = 'approval-body';
@@ -4159,21 +4397,53 @@ function appendApprovalCard({ id, reason, action, resolved }) {
     card.appendChild(body);
   }
 
+  // Right under the reason it belongs to, and *outside* appendApprovalTarget:
+  // that reason is the sentence promising the value ("the text shown below
+  // this card"), so the two must appear together on every surface that can
+  // draw one — including a `type_xy` whose screenshot never rendered, which
+  // is still an approvable card.
+  appendApprovalValue(card, args, action);
+
   // The destination, never the action's internal name. It read
   // `_policy_navigation → https://github.com`, which is the harness's label for
   // a step, not something the user asked about or can act on. The reason line
   // above already says what the agent wants, so the name repeated it at best;
   // with no url there is nothing left worth a line.
-  if (action?.url) {
+  // A coordinate click carries no `action.url` — the page it is aimed at is
+  // top-level on the frame — so both spellings are read here.
+  const destUrl = url || action?.url;
+  if (destUrl) {
     const preview = document.createElement('div');
     preview.className = 'approval-preview';
-    preview.textContent = action.url;
-    preview.title = action.url;
+    preview.textContent = destUrl;
+    preview.title = destUrl;
     card.appendChild(preview);
   }
 
   if (resolved) {
     resolveCard(card, 'approval-decision', decisionLabel(resolved));
+    messagesEl.appendChild(card);
+    return;
+  }
+
+  // A `type_xy` whose value was masked or truncated in transit is a write
+  // nobody can read, and an Approve button on it is one-tap consent to text
+  // that was never on screen — the exact failure this block exists to
+  // prevent. So the card stays and says why, but it is not answerable. Only a
+  // genuine mask signal counts: a frame that carries no `args` at all is not
+  // evidence of one, and treating it as one auto-denied every coordinate
+  // approval the server sent without args.
+  //
+  // Denied rather than suppressed (unlike NON_APPROVABLE_ACTIONS above) so the
+  // user can see what was asked and why it cannot be agreed to, and the
+  // server's queue is still ACKed so a pending id is never left hanging.
+  if (action?.type === 'type_xy' && approvalValueMasked(args)) {
+    // ACK either way so a pending id is never left holding a reply no
+    // control can send.
+    if (id) void sendMessage({ type: 'submit_approval', id, approved: false });
+    resolveCard(card, 'approval-decision',
+      'Not approvable \u2014 the text this would type was not recorded for this run, '
+      + 'so there is nothing to review. Approving it would authorise an unseen value.');
     messagesEl.appendChild(card);
     return;
   }
@@ -5134,11 +5404,18 @@ function handleEvent(message) {
       clearLoginPrompt();
       setPhase('paused', 'Agent wants approval for a critical action');
       const a = message.action || {};
-      const preview = a.url ? `${a.type ?? 'action'} → ${a.url}` : (a.type ?? 'action');
+      // A `click_xy` approval is the same frame with a screenshot, a viewport
+      // and the point attached. All three are optional and all three arrive
+      // absent for every other action, which is what keeps that card identical.
+      const args = message.args || a.args || null;
       appendApprovalCard({
         id: message.id,
-        reason: message.reason || 'Brotto wants to perform an action that needs your approval.',
+        reason: message.reasoning || message.reason || 'Brotto wants to perform an action that needs your approval.',
         action: { type: a.type, url: a.url },
+        screenshot: message.screenshot,
+        viewport: message.viewport,
+        args,
+        url: message.url,
       });
       break;
     }

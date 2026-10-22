@@ -56,7 +56,7 @@ this reason, and `close()` deregisters — only on a terminal path.
 
 ### A session is a conversation
 
-`schema_version: 2` splits the document into three collections, because "one
+`schema_version: 3` splits the document into three collections, because "one
 session" used to mean "one run" and now means "one conversation":
 
 - `tasks[]` — one entry per task, i.e. per user message in the conversation.
@@ -66,6 +66,16 @@ session" used to mean "one run" and now means "one conversation":
 - `turns[]` — the audit, unchanged from v1, each turn carrying `task` (the
   index into `tasks[]`) so the join `messages[].turn → turns[]` and
   `turns[].task → tasks[]` can group a multi-task conversation.
+
+**v3 added fields to `turns[].actions[]`, it did not restructure the document.**
+Each entry now carries `target` (the ref or the xy the model aimed at, bounded by
+`MAX_TARGET_CHARS = 32`) and `changed` (tri-state: did the observation differ
+from the pre-action one), plus `totals.actions_dropped` for the per-session
+action cap. `changed` is `null` on any older document and the default is
+**`None`, never `False`** — "we could not tell" has to read as unknown, because a
+reader that treats absent as "the page did not change" is making a claim about
+a page it never looked at. The privacy shape of these two fields is in
+`privacy.md`. Pinned by `tests/test_grounding_outcome.py`.
 
 **Who writes `messages[]` matters, and it is not one place.** The user message
 is written at `task_start`, not at the first turn, so a run cancelled at step 0
@@ -255,6 +265,71 @@ the existing record rather than replacing it, and a corrupt file is left
 byte-for-byte as found. It is the only copy of a run nobody can read, and "we
 cannot read it" is not a reason to delete it.
 
+#### **A v2 document cannot be resumed once v3 is deployed — that was true, and the rule changed on 2026-10-22. This is a deploy-ordering fact, not a cosmetic bump.**
+
+The rule as it stood was: `harness.py` refused to resume any document whose
+`schema_version` was not exactly `SCHEMA_VERSION` — the check was equality,
+not `>=`. So the moment a server writing `SCHEMA_VERSION = 3` was rolled out,
+**every v2 document on disk became unresumable**, and one that was interrupted
+a minute before the roll reported `status: "interrupted"` with the version
+mismatch as its reason. The file was not lost and nothing was deleted; the run
+simply could not be picked up again, and the user read that as "interrupted".
+
+**The gate now refuses only a FUTURE schema** (`harness.py:5076`): a document
+whose `schema_version` is *greater* than the one this server writes is
+refused, because its keys this one may misread. An **older** document is
+resumed. The check was equality because every schema change so far had been a
+rewrite; schema 4 is **additive** — the ledger and the plan are new keys, and
+a document without them is a document with an empty ledger and an empty plan,
+not a document this server cannot read. So a schema-3 document still resumes,
+and refusing it would have broken every run that existed on the day of the
+deploy.
+
+The history is kept because the reasoning still holds for a *rewrite*:
+
+- **Rolling back is not a rollback of this.** A v2 server can read a v2 document
+  again, so a v2 file that a v3 process never rewrote is recoverable that way.
+  But anything a v3 process *did* write is stamped `schema_version: 3` on disk,
+  and a v2 server refuses that on exactly the same equality check — so a
+  rollback re-refuses every session the deploy window produced. Recovery is
+  forward, and the rollback is the move that makes the window permanent.
+- **The window is one deploy wide, not one release wide.** Every in-flight
+  session on the box at the moment of the roll is a candidate. On the hosted
+  relay that is one dyno; a self-hoster restarting the container has the same
+  window, which is why this is not a self-host-only hazard.
+- **The grow-only frame contract does not cover it.** `scripts/test-frame-contract.test.js`
+  pins that a removed *frame* or key keeps working for one minor. `schema_version`
+  has no such allowance: the check is strict equality and an older document is
+  refused outright.
+
+**Deploy the orchestrator before, and expect interrupted sessions at the cut.**
+This is the same server-first rule as any other protocol change, with a sharper
+edge — the version guard (`scripts/version.js`) enforces the bump on the way
+out, but nothing sequences the *roll* against in-flight sessions, so the honest
+statement is that the cut costs a resume, not that it is safe.
+
+**What survives of the old rule: a v1 document is still refused**
+(`harness.py:5009`), and for the same reason it always was — a v1 document has
+no `tasks[]` to append a follow-up to, so there is no way to continue it. That
+refusal is about the *shape* of the document, not its version number.
+
+**A resumed run comes back with its ledger and its plan.** The harness
+rebuilds `deps` from scratch on a resume, so the closed-loop structures have to
+come back with the document or the repeat block and the completion pass
+silently switch off and the run is back to lying. `read_ledger` and
+`read_plan` read the **last** task block, because a resume continues the last
+task the document was running — an earlier task's ledger belongs to a
+different run, and adopting it would refuse a write the user is entitled to
+make. The blocked-write count is recomputed from the ledger, and the
+"a completion was already refused" flag is read back too, because the second
+completion is **accepted** and a reconnect must not turn a bounded refusal
+back into a loop.
+
+Pinned by `tests/agent/test_ledger_rehydrate.py`
+(`test_a_document_from_schema_three_still_resumes`,
+`test_a_document_from_a_future_schema_is_refused`,
+`test_a_resumed_run_still_accepts_the_second_completion`).
+
 The extension reconnects with full jitter (1s base, ×2, 30s cap, 6 attempts)
 reusing the `session_id`. `stopRelay` and a cancel never reconnect — a
 cancelled task must not resurrect.
@@ -280,6 +355,158 @@ length bound are in `extension.md`.
 
 **Not verified in a browser.** The reconnect path and the offline-history
 fallback are unit-tested logic only.
+
+### `action_result` — what the extension did, not what it was asked (2026-10-19)
+
+`{type: "action_result", ok: bool, reason: "<closed>"}`, sent **before** the
+post-action observation, so `_send_action` — which wakes on that observation —
+finds the verdict already in its slot. A plain slot and no id: one action is in
+flight at a time and the socket is ordered.
+
+It exists because the extension's dispatch-time hit test
+(`observation/pointer.ts`, `verifyTarget`) can *refuse* a click whose coordinate
+no longer holds the element the ref resolved to, and the server could only learn
+that by noticing the page had not changed. `click_ref` returned `Clicked [7]`
+the moment `_send_action` returned, so a refused click was audited `ok: true`
+and the model was told it had acted on a world state that never existed. The
+gate prevented the wrong *action*; this is what stops the wrong *report*.
+
+**An absent frame means dispatched**, which is what an extension predating it
+means — the one-minor back-compat, in the same direction as `no-backend-id`
+failing open. The reason is clamped to `^[a-z][a-z0-9-]{0,31}(:[a-z0-9-]{1,24})?$`:
+it reaches the model's history and the audit document, so freeform text from a
+browser extension is prompt content nobody wrote.
+
+Refused means the outcome string carries `Error executing:`, which is how
+`harness.py` derives `ok` — so `click_ref`, `focus_ref`, `clear_ref`,
+`click_xy` and `focus_xy` all return the refusal instead of the success line.
+`clear_ref` *stops* on a refusal rather than continuing to select-all: the
+selection runs against whatever holds focus, and a refused click means that is
+some other field, which it would then erase.
+
+`focus_ref`, `clear_ref` and `focus_xy` were moved onto `_send_action` for this,
+so they now wait for the post-action observation they used to ignore. The
+extension already sends one after every action; it is consumed earlier, not
+asked for twice.
+
+**On the extension relay, `focus_ref` and `clear_ref` no longer exist.**
+`type_text` no longer sequences them — it is one `type_at` frame; the reasoning
+is in `agent-loop.md` ("One observation per model turn, not per CDP command").
+They were first left on `ExtensionCDPRelay` with no callers and have since been
+**removed**, so the two paragraphs above that still name them on this relay are
+history, not a map. They remain live on the **Playwright** `CDPRelay`, whose
+`type_text_into_ref` is the three-call sequence the extension relay collapsed, so
+they are not dead code — and a reader tracing `type_text` down the product path
+will not find them, which is correct rather than a missing hop.
+
+**`evaluate` gained one optional field: `isolatedWorld`.**
+`{"type": "evaluate", "expression": …, "isolatedWorld": true}` evaluates the same
+expression in the tab's cached isolated world instead of the page's. Absent or
+`false` is the call that shipped, unchanged — no `contextId` key in `params` at
+all — so this is **grow-only**: an extension predating the field ignores the key,
+a server that never sends it is unchanged, and no version window is needed.
+Pinned by `scripts/test-frame-contract.test.js`.
+
+### A bare `await` on a sync method kills the socket, and the suite stays green (2026-10-20)
+
+The WebSocket receive loop is the one place in this service where **a signature
+is the contract**: it does `await relay.deliver_action_result(...)` with no
+inspection of what it got back. `deliver_action_result` was a plain `def`. So
+`await None` raised `TypeError`, the loop caught it as a generic exception,
+`break`s, the socket died and the running agent task was cancelled with it.
+
+It fired on the **first `action_result` of every run**, which is why every
+recorded run died immediately after its first click — and why it presented to
+the user as **"server unreachable"**, a fact about their network, when the
+server was fine and had thrown away its own receive loop. It is now `async`.
+
+**The durable part is not the `def`.** Four existing tests called
+`deliver_action_result` **synchronously**, so they kept passing after the loop
+started awaiting it — the suite was green, CI was green, and the feature had
+never once worked in a real run. A test that exercises a function is not
+evidence that any *caller* reached it correctly; where the call site is a bare
+`await`, a sync call and a no-op call look identical to the test.
+
+So the guard is pinned by **shape, not by behaviour**: a test asserts that all
+three `deliver_*` the receive loop awaits — `deliver_action_result`,
+`deliver_screenshot_result`, `deliver_attributes_result` — are coroutine
+functions, and that `main.py` really does `await relay.<name>(` each of them.
+That is the only check that catches a signature drifting back, because nothing
+else in the tree can observe it — the runtime can, once, expensively, by killing
+the socket.
+
+Two shapes, two costs. A bare `await` of a sync function costs one run and looks
+like a network fault. An `await` of a method that returns `None` legitimately
+costs nothing and looks like nothing, forever.
+
+**The guard's list has not been extended to the grid's sink.**
+`test_every_deliver_method_the_receive_loop_awaits_is_a_coroutine` names three
+sinks — `deliver_action_result`, `deliver_screenshot_result`,
+`deliver_attributes_result` — and `deliver_grid_result` is not among them. The
+sink is a coroutine and `main.py` does await it, so nothing is broken; the
+gap is that the *next* sink added will not be covered by the shape guard
+unless somebody adds it to that list. Recorded rather than fixed, because the
+guard is another agent's test.
+
+## The grid's three request frames, and one answer
+
+The grid's primitives are three request frames and **one** response frame:
+
+```
+grid_select_cell {address}          → grid_result {op, ok, address, value, state, mechanism, error}
+grid_read_cell   {address}          → grid_result {…}
+grid_write_cell  {address, value}    → grid_result {…}
+```
+
+One result branch in `main.py` beats three, and the difference is invisible
+until it is not: an extension that answers `grid_read_cell` with a frame
+typed `grid_result` but without an `op` cannot be correlated, and the server
+would have to guess which question it was answering.
+
+**`op` is echoed back, and it is the only correlation there is.** The relay's
+`grid_op` (`extension_relay.py:1117`) sends a frame, waits on its queue, and
+**discards any answer whose `op` does not match** — a late answer to a
+previous op is not this one's. A frame with no readable `op` is dropped at the
+sink (`deliver_grid_result`), because an answer that carries no question is
+not ours to answer.
+
+**The grid's queue is not the relay's `evaluate` slot.** The relay's
+`evaluate` slot is a single uncorrelated answer: a `focus_id` probe's reply
+can land in it for a different probe. A cell value read out of that slot would
+be graded as somebody else's page text. So the grid path has **its own
+queue** (`self._grid`), and the harness's grid work is **strictly serial** —
+it reads a cell back immediately after writing it, and the completion pass
+reads one target at a time. Two probes in flight would cross answers, and a
+write that lands in the cell a read was about to read is a wrong value, not a
+slow one.
+
+**The timeout is its own, and it is long.** `_GRID_TIMEOUT = 20.0`, against
+the 2s attribute lookup: the grid frames drive a name box and a formula bar,
+each of which is a React-controlled input that only real key events write, so
+a grid op is several dispatches and a read-back rather than a best-effort
+probe. An op this build does not know, a send failure and a timeout are all
+**the same failure shape** — `{ok: False, value: None, state: "unreadable"}`
+— because the harness has to read them as "could not be read", never as an
+empty cell.
+
+**A cell the server never read is `unknown`, and is never reported as
+empty.** The relay's failure shape reports `state: "unreadable"`, and the
+harness treats a `None` observed value as `unknown` — which never closes a
+plan item and is not a failure to escalate on its own. An empty cell is a
+different thing: the read happened and found nothing, and the server reports
+`state: "ok"` with an empty value. The two are kept apart end to end, from
+the extension's `parseGridResult` to the relay's `_grid_failure` to the
+harness's `compare_observed`, because conflating them fails a correct run.
+
+**Every frame needs a handler on both sides**, and these are additive: an
+older extension ignores the three request frames, and an older server never
+sends them. The grow-only contract in `scripts/test-frame-contract.test.js`
+covers them.
+
+Pinned by `tests/test_relay_grid.py` — the wire shape, the `op` correlation,
+the queue's independence from the `evaluate` slot, the empty-cell answer, the
+timeout, the send failure, and the refusal of an unknown op **before** it
+reaches the browser.
 
 ## Version pair and the compat window
 

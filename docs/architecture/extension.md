@@ -257,6 +257,50 @@ guarded. The other two are the deliberate diagnostic surfaces, `_error` and
 *no credential* rather than *no message* and a test pins that instead. Each
 comment says which of the three it is.
 
+### The last one open was `delete`, and it was fixed rather than annotated
+
+Alert #40 held `audit.py`'s `unlink` inside `delete`, and it was the only alert
+left open in the repo, so it got the treatment the other eleven never did: the
+sink was read, found **correct**, and the question became whether "correct" can
+be *shown*. It can. `py/path-injection` is a two-state query —
+`Path::PathNormalization` moves a path out of `NotNormalized`, and a
+`startswith` guard bars it in `NormalizedUnchecked` — so normalise the candidate
+and then require containment, and the sink is no longer reported. Measured
+against 2.27.2, the version that raised the alert: 13 alerts before, 12 after,
+and this one gone from the set.
+
+Three things cost a step each, and none of them were visible in a diff:
+
+- **`os.path.basename` is not a sanitizer this query models.** Two comments in
+  `audit.py` asserted that it was, and reasoned onward from it. It is not — with
+  `basename` in place and otherwise correct code, every one of these sinks is
+  still reported. A comment asserting a tool's behaviour is a claim about the
+  tool, not about the code.
+- **The guard has to be positive.** `if not target.startswith(root): continue`
+  bars nothing; the model wants the containment check on the branch that uses
+  the path. The first attempt was shaped that way and fired anyway.
+- **The normalisation has to be of the *tainted* value.** Normalising the root
+  and joining a tainted basename onto it leaves that join in `NotNormalized`,
+  which is the state the guard does not apply to.
+
+`normpath` is the normalisation, not `realpath`: the query wants the tainted
+path normalised, and `realpath` would follow a session document that is itself a
+symlink and point the unlink at whatever it references instead. `normpath` is
+textual — it collapses `..` and leaves links alone — and the directory is
+resolved the other way round, with `realpath`, because a user's
+`logs/sessions` is often a symlink and the comparison has to be against where
+it really is. `test_delete_unlinks_the_link_not_the_file_behind_it` pins that
+half, and was red before the change.
+
+The containment check is defensive rather than load-bearing, and the code says
+so: `basename` has already removed every separator, so containment holds by
+construction. That is not a reason to leave it out. It is the property a reader
+of the sink is owed, and it is the only form of "this is safe" that the one
+tool here which asserts on sinks nobody enumerated is able to check at all.
+
+**A predicate that returns and a check at the sink are different things**, and
+the alert worth reading is the one that tells you which of the two you have.
+
 ## Domain blocking — one list, the user's
 
 The blacklist is whatever the user typed in the panel, whole. There is no
@@ -372,6 +416,13 @@ the key shape is the only thing keeping it out of the file.
 description was the page title rendered as *"the agent wants to District by
 Zomato — Best Go Karting in Gurgaon (2026)"*, which is a page, not an action. A
 domain-scoped approval does not need a per-action label.
+
+**The grant is per-domain, but the gate that consults it is not uniformly
+timed.** A ref `click` is approved *before* dispatch, from the link's `href`. A
+coordinate click cannot be — the page is a canvas there and nothing about its
+destination is readable — so it is gated after. Same grant, same
+`visited_domains`, one approval covering both; when the question arrives is in
+`agent-loop.md`.
 
 ## Two boundaries that are structure, not settings
 
@@ -569,6 +620,59 @@ from the tree, and the model was shown a login form with nothing to do.
   expression against a fake DOM, so "the gate never fires" and "the observer
   leaks" are both caught. Both are absences and read clean in a diff.
 
+### The rate exit is relative, because the old one was calibrated on Gmail
+
+The gate also short-circuits before the quiet window can be reached, and it
+used to be an absolute pair — `BUSY_SAMPLE_MS` / `BUSY_MUTATIONS`, "3 mutations
+inside 1000ms". Both constants are gone. The replacement is one number,
+`RATE_SAMPLES = 3`, and one test: **if the mean gap between mutations since
+`t0` is shorter than the quiet window, a silent window is arithmetically
+unreachable**, so stop waiting and hand the caller `early`.
+
+`RATE_SAMPLES` is a floor on evidence, not a threshold on speed. Fewer than
+three mutations is an anecdote, not a rate — which is exactly what a slow
+renderer looks like, so `auth-slowjs` never forms one and keeps its full window.
+
+**The sparse end needed a second exit, because three samples is also a wait.**
+On a page that mutates every 2.9s the third sample arrives at 8.7s, so most of
+the deadline went on counting samples rather than looking at the page — a real
+Sheets run measured `stability=unsettled in 8752ms (3 mutations)`. The second
+exit is `CHURN_WINDOWS = 1.5`: **two samples whose gap is shorter than the
+quiet window, once the page has been churning continuously for one and a half
+windows.** The churn floor is what keeps a loading page out — `auth-slowjs`
+mutates twice and then goes quiet, which never reaches the floor, so it still
+waits out its deadline and the tree it hands the model has the control on it.
+A single mutation never starts either exit, and a page that goes quiet is
+claimed quiet by the window, not by the churn.
+
+Both exits are evaluated **in the observer callback, at the moment a sample
+arrives**, not in the poll: a sample is the only thing that can start a rate,
+and a poll firing long after the last mutation would claim a page busy on the
+strength of a change it has already forgotten. Neither exit can report a page
+as quiet — both hand the caller `early`, and the fingerprint rescan stays the
+arbiter.
+
+**The calibration point is Gmail, and it was silently a universal claim.** 41
+mutations in 10,002ms — one every ~244ms — so 3s of silence is not rare on
+that page, it is impossible. Every Gmail observation therefore paid the full
+10s deadline, forever, and the numbers behind that are in `agent-loop.md`
+("The quiet window was unreachable on exactly the pages that need it"). The
+implicit rule that came with it was *any slower page is a loading page*.
+
+**Google Sheets falls between the two heuristics**, which is how the
+assumption broke: it mutates 3–6 times per 10,002ms, a gap of 1.7–3.3s — too
+slow to clear the busy sample, too fast to fall silent for 3s. It passed *both*
+heuristics without matching either. A live Sheets run then measured **177s over
+8 steps with 10 of 14 observations at the full 10,002ms deadline**, against
+~2s/call of model generation, so ~90% of wall clock was observation latency —
+and the tree each time came from an arbitrary mid-repaint instant. Gmail and
+Sheets are the same fact about the world at two frequencies; only a
+rate-relative test says so.
+
+`noEarly` still sets the exit to 0 and is unchanged. It now has **no caller** —
+the second gate that passed it is gone (see `agent-loop.md`), and it was left in
+place as the gate's own API rather than deleted alongside its last use.
+
 The SPA retry underneath it changed condition at the same time. It retried
 while `axTargets.length < 3`, which is wrong in both directions: a page that
 rendered three useless targets stops retrying, and a merely-dense page burns
@@ -590,6 +694,825 @@ that were never exercised, which is worse than having no measurement. The honest
 consequence is that this work is unit-tested logic and **needs a hand-run in a real
 browser** before it is called verified. `auth-inbox` flipped to PASS because ranked
 selection is the one server-side fix, and that PASS is real.
+
+## One action, one observation — `pressAt`, `dispatchKey`, `focusState`
+
+`executeAction` used to inline the whole of `click`: verify, draw, press,
+release, settle, clear the cursor in a `finally`. Three verbs needed those
+gates and only one of them had them, so the other two got *no* hit test —
+`focus_ref` and `clear_ref` were `type_text`'s first two trips, dispatched as
+plain `click` frames, and each one paid a full `captureObservation`.
+
+**The clear is gone.** The marker is the user's only way to see where the
+agent is clicking, and a `finally` that removed it made the cursor invisible
+in practice: the mouse pair is dispatched with no delay, so a sub-200ms marker
+was never seen at all. Nothing in the extension removes it any more. The next
+click *moves* it — the draw removes the previous dot and label by name and puts
+new ones at the new point, so there is never more than one — and the
+only thing that takes it away is the page going away, so an overlay cannot be
+orphaned across a navigation, because it cannot outlive the document it lives
+in. A stylesheet left by an older build, which rendered the words with a
+pseudo-element, is still removed by name when it is found: it is inert now, but
+it would otherwise sit in the page forever.
+
+**A marker that outlives its click has to be invisible to the observation.**
+Its words live in a **shadow root** under an `aria-hidden` host, so they are in
+neither the page text the model reads (`document.body.innerText`) nor the
+accessibility tree the observation is built from: `innerText` and `textContent`
+do not cross a shadow boundary, and `aria-hidden` on the host takes the subtree
+out of the AX tree. Without that, a marker left up across steps would
+put the agent's own annotation into the page's text — the model reading "Fill
+the form" as if the page had said it, and acting on its own words as
+evidence.
+
+**The pseudo-element route was tried and it died on a Content-Security-Policy.**
+The first version rendered the words with a `::after` rule in an injected
+`<style>` element, which is also not a text node and also not in the AX tree.
+On a page whose CSP is `style-src 'self'` it rendered an **empty black pill**:
+the `<style>` element carries no nonce, so the page refuses it, and the rule
+never painted — while the inline styles set through CSSOM were not refused, so
+the pill's box appeared with nothing in it. **A CSP-restricted page is the
+norm, not the exception**, so a mechanism that depends on injecting a stylesheet
+cannot be the mechanism. Shadow DOM has no such surface: the styles are set
+through CSSOM, and the words are real text in a tree the page's CSS and the
+page's CSP do not reach.
+
+**The red glow is gone, and the placement did not move.** The marker is a 14px
+ink disc (`#111827`) with a 2px white halo — calm on a white sheet, legible on
+a dark page, and it reads as a pointer rather than an alarm — with the words in
+a white chip and a `rgba(17,24,39,0.18)` hairline.
+
+**The placement was deliberately not changed, and "the marker is misplaced" is
+the natural wrong conclusion.** It draws at the exact dispatched coordinate,
+and the audit of the recorded run showed the agent really did click the name
+box five times while its `click_xy` on a cell was refused server-side. The
+marker was reporting the truth: the marker's position is the position the
+agent acted at, and moving it to where the model *meant* to click would have
+made the user's approval surface lie about what the agent was doing.
+
+**A new test measures the paint, because the source assertions could not.**
+`scripts/test-cursor.test.js` asserts on the *source* of the draw snippet: the
+words are capped, the host carries no text node, no `<style>` element is
+injected. All three passed while the label rendered as an empty pill — the
+pseudo-element's content is not a text node, so the first version satisfied
+every one of them. `scripts/test-cursor-render.test.js` renders the marker in
+headless Chrome **on a page with a strict CSP** and asks the page what it
+drew: the words are in a text node, they are **painted** (measured through
+`Range.getClientRects()`, not merely present in the DOM), the label is a
+laid-out box and is visible, the words are out of the light DOM, and they are
+not in the page text the model reads. The file needs a Chrome on the machine;
+with none it says so loudly and passes, which is a skip and not a green — which
+is why the source assertions stay. Model any future claim about what the user
+actually sees on this test.
+
+`pressAt(tabId, action, x, y)` is that block, extracted, and it keeps
+`verifyTarget` **inside** it. That placement is load-bearing: `verifyTarget` is
+the only thing binding an action to the node the model was shown, and a gate
+that exists on one branch and not its sibling is a gate with a hole in it.
+It returns `null` when the press went out, or the refusal that stopped it.
+`dispatchKey(tabId, key, mods)` is the same treatment for the `key` branch's
+key-down/key-up pair, and carries the comment that `mods` is CDP's bitmask
+(Alt=1, Ctrl=2, Meta=4, Shift=8) and is the caller's to supply — the extension
+holds no platform branch and must not grow one.
+
+`type_at` is the new branch, and it is the branch that destroys the user's
+text, so it carries four gates in order: **bound the point, verify the target,
+bind the identity, then read and clear**. `clear` is set by the relay's
+`type_text_into_ref`, whose default is `clear=True` — the caller asked to
+replace the field's contents. The fourth gate has one exception, and it is
+named below: on a canvas grid the clear is the grid's own business and is not
+performed.
+
+- **The point is bounded.** `boundedPoint(tabId, action.x, action.y)` re-reads
+  the live viewport and refuses anything outside it, non-finite, or
+  non-numeric — the same reason `click_xy` already uses, and it subsumes the old
+  `typeof` check. The `viewport` field on the same frame is *not* the bound; it
+  is the sender's idea of the viewport, from the same untrusted message. The
+  **bounded** `{x, y}` is what goes into `pressAt` and into `bindFocus`, so the
+  hit test is asked about the point that is actually dispatched.
+- **`bindFocus` binds the identity.** See below — this is what `type_at` has
+  that `click` does not, because `type_at` is the only branch that reads
+  `document.activeElement` and *acts destructively* on it.
+
+### `bindFocus` — four walls, the two canvas exemptions, and one adapter list
+
+`verifyTarget` answers "is the right element at this point", before the press.
+It cannot answer "what holds focus now", because the press is what creates
+focus. Everything after `pressAt` reads `document.activeElement` and acts on it,
+so a press that missed, landed on a non-focusable, or was moved by page script
+leaves the user's *previous* field focused — and `clear` empties that one.
+
+**Wall 1 — engine-sourced identity.** `focusNode` runs `DOM.enable`, reads
+`document.activeElement` **in the isolated world** — a `Runtime.evaluate` with
+the world's `contextId`, through `withWorld`, so a dead context id is rebuilt
+rather than refused — and has the engine name the node that read points at
+(`DOM.describeNode({objectId})`), returning `{backendNodeId, nodeName}`.
+**No page script runs to answer this**: the isolated world has its own
+prototypes, so overriding the `document.activeElement` getter in the page's own
+world changes nothing, and the *naming* is the engine's. Every failure refuses
+with `focus-identify-failed`, and a page whose focus cannot be named cannot be
+cleared.
+
+**`DOM.getFocusNode` was removed from Chrome, and that was the whole keyboard
+path.** It answered `-32601` ("'DOM.getFocusNode' wasn't found") on every
+current build, so `focusNode` always failed, so `bindFocus` always returned
+`focus-identify-failed`, so **every `type_at` was refused on every site** — not
+only the canvas ones. The report that started this was a Sheets run whose
+`type_text` was refused with `focus-identify-failed` — four refusals in one
+run's audit; the click had landed and selected the cell, and the text was
+never dispatched because the probe had already given up. The replacement asks
+the same question by the route that still exists.
+
+**No test could have caught this, and that is the point.** The extraction tests
+mock the platform, so every assertion about the refusal vocabulary, the
+identity comparison and the geometry stayed green while the feature refused
+every call in the field. A test proves the code you wrote; it cannot prove that
+the thing you wrote still exists in the browser. The only detector was a live
+run whose audit said `focus-identify-failed` four times, and the failure took
+that long to find because the refusal read like policy — a page that would not
+accept the text — rather than like a method that no longer exists. **A closed
+vocabulary of reasons is a promise that each reason means one thing, so the
+reason has to be the true one.**
+
+**Wall 2 — containment, in an isolated world.** `IDENTITY_PROBE` is a
+`Runtime.callFunctionOn` with the pressed node as `this` and the focused node as
+an argument, admitted when they are the same node, when the focused node is a
+*descendant* of the pressed one (a `<label>`, a wrapper `<div>`, a `<span>`
+inside a button — an ancestor is not admitted), or when focus was retargeted to
+the pressed node's own shadow host, which ordinary `contains()` cannot see.
+
+The world matters. `isolatedWorld(tabId)` does one
+`Page.createIsolatedWorld` per tab under the name `IDLE_WORLD` and **caches** the
+`executionContextId`; nodes are resolved into it with
+`DOM.resolveNode({backendNodeId, executionContextId})`. In the page's own world
+the page owns both the question and the effect — it can override the
+`activeElement` getter so the probe reports a focus that is not there, and it can
+override `Element.prototype.select` so `select()` does something other than
+select. A probe a malicious page can answer *and* act on is not a guard.
+
+**Wall 3 — the canvas exemption**, for the one shape neither of the above can
+serve: a `<canvas>` cell whose press focuses a text field that is not the cell
+and not inside it. All three conditions hold:
+
+1. the pressed node is a `CANVAS`;
+2. the focused node's engine-supplied `nodeName` is an `INPUT` or `TEXTAREA`;
+3. `DOM.getBoxModel` for the focused node **wholly inside** the pressed canvas's box.
+
+(3) is what makes it narrow rather than a hole. A visible field the user was
+typing into — a real search box, a real form input — is somewhere else on the
+page, so its box cannot be inside the canvas that was just clicked. Both boxes
+come from the engine in the engine's coordinates, so **no page attribute
+(`aria-hidden`, `hidden`, inline style) can unlock the exemption** by being
+written onto the user's own field. The residual: a page that physically moved
+the user's focused input on top of the canvas it was clicked — and then
+`verifyTarget`'s `elementFromPoint` has already refused the press as
+`different-element`, because the click landed on the input, not the canvas.
+
+**The exemption is reported, never silent.** `bindFocus` returns
+`{ok: true, reason: "canvas-editor-exempt"}`, `executeAction` logs it, and
+`ExtensionCDPRelay` logs "action succeeded by exemption" while keeping the
+verdict a success. Reading it as a refusal would refuse the shape `type_at`
+exists for; dropping it silently loses the only server-side trace that the
+identity binding was waived.
+
+**Wall 3b — the grid editor, and the application that owns it.** Wall 3
+cannot serve a grid that keeps its editor *outside* the canvas. Google Sheets'
+cell editor is `DIV#waffle-rich-text-editor` (a direct child of `BODY`) holding
+a `.cell-input[contenteditable=true]` — zero-width, parked at `y = -9998` — so
+it is neither the pressed node nor inside it, and it is not an `INPUT` either.
+
+**The grant is to an application, not to a shape.** Wall 3b used to be a
+geometry rule: any canvas press whose focus was an editable the user could not
+see was admitted as the grid's editor. Nothing in that geometry tells a
+spreadsheet from a disguise. A page can ship a `<canvas>`, a click listener
+and a hidden `<input type="password">` focused on click, and it satisfies
+every one of those conditions — and then the agent types into a field the
+user cannot see, believing it typed into the cell under the cursor. That is a
+UI-redress of the agent's own action, and the "erase some other field"
+failure this codebase refuses elsewhere.
+
+So the permission is the *application*, and the application is named in
+`GRID_ADAPTERS` (`observation/pointer.ts`). One entry today: `app:
+"google-sheets"`, `origin: "https://docs.google.com"`, `pathPrefix:
+"/spreadsheets/"`, `scopeId: "waffle-rich-text-editor"`, `className:
+"cell-input"`. All of those must match, and the focused node must be a
+contenteditable — a plain `div` that happens to sit in the same container is
+not the editor.
+
+**The same entry now answers two questions, and the id/class half belongs to
+only one of them.** `gridAdapter(sig)` asks *is this focus the grid's own cell
+editor*, and needs the origin, the path prefix, the scope id and the class name
+plus the contenteditable check. `gridApp(origin, pathname)` asks *is this
+document one whose cells must be typed*, and uses the **origin and the path
+prefix only** — the scope id and class name are not consulted there, because the
+delivery decision is about the application, not about which element is focused.
+Reading one adapter as the other's rule is how the keystroke path came to
+depend on the focus at all.
+
+**Origin and path prefix are the load-bearing halves, and the path prefix is
+there because an origin is a host, not an application.** Both are read in the
+isolated world, from the document itself, and a page cannot forge either: only
+a navigation changes them. Matching the origin alone was once the whole gate,
+and it granted the keystroke path to **Drive's rename field and the Docs
+comment box**, because `docs.google.com` serves Sheets, Docs and Drive alike —
+so the entry's own claim, that the grant is *to an application, not a shape*,
+was false without the second half. `IDENTITY_PROBE` therefore reads
+`location.pathname` alongside `location.origin`, in the same unforgeable world
+and on the same answer, so `gridAdapter`, `gridApp` and both in-page probes all
+require both. The id and the class are page-written strings, so they are
+consulted *only after* origin and path have matched — on their own they prove
+nothing, and a page that writes `id="waffle-rich-text-editor"` onto its own
+hidden input buys nothing while it is on its own origin. **Adding an app is one
+entry**, so the list grows one application at a time as real grids are met,
+rather than by a rule that admits all of them at once. The origin-level
+ambiguity refusal is kept and means what it says: **one entry per origin** — two
+adapters sharing an origin are refused rather than guessed between, so adding a
+second Google application is a decision about the origin, not a free entry.
+
+**A canvas press that focuses an editable on an unrecognised page is refused,
+loudly.** `grid-editor-unrecognised` — "a canvas press focused an editable,
+but the page is not a recognised grid". The reason is the grid's own, because a
+*contenteditable* focus is what a grid parks off-screen, so a page we cannot
+recognise holding one is the disguise. A plain text input keeps the older
+`focus-not-the-target`: it was never the grid's shape, and "the focus is not
+the target" is the truer sentence. `focus-not-the-target`'s own description was
+widened to name the fourth case — "focus is not the pressed node, an
+ancestor-descendant of it, or a recognised grid editor".
+
+**The geometry narrowed the grant; it did not create it.** The old test did
+not disappear — it now narrows an already-admitted adapter rather than
+granting one. Three ways the editor is admitted, all three the engine's own
+geometry: (a) it has no area at all, so nothing the user can see is there;
+(b) it lies wholly outside the live viewport, so it is not visible either;
+(c) its box contains the point that was pressed, because the editor is drawn
+over the cell being edited, under the canvas that took the press. The measured
+Sheets editor is zero-width at `y = -9998` *after* the press, which is the
+grid's **not-editing** state; a grid that is editing draws its editor over the
+cell, and that is the third admission.
+
+The third admission is the one that needs its own argument, because it is the
+only one that admits a field the user *could* be looking at. It is safe
+because `verifyTarget` has already asked `elementFromPoint` about the
+dispatched point and been told the **canvas** is there: a visible field of the
+user's own, sitting on top, would have been the hit, and the press would have
+been refused as `different-element` before the text was ever dispatched. The
+editor is admitted because it is under the canvas that took the press, not
+because it is somewhere else.
+
+**A grid cell is typed, not inserted, whichever field holds the focus.**
+`Input.insertText` fires no keydown, and a grid starts editing on the
+*keystroke* — so an insertion never reaches the cell, and the cell shows a
+caret with nothing in it. On the grid path the text goes out as one
+`Input.dispatchKeyEvent` pair per character (a newline is a Return key), never
+with a modifier, so no chord and no OS question. The ordinary DOM path keeps its
+single `Input.insertText` call. The run is bounded at 1000 characters, and over
+that it refuses with `canvas-text-too-long`.
+
+**This rule was already written here, and it was applied too narrowly.** A
+production Sheets run typed into the **formula bar** and no cell was written,
+because the route was keyed on the *focus* being the grid's own cell editor —
+and the formula bar is a different element, so it took the ordinary
+`Input.insertText` path while sitting in a document whose cells are typed, never
+inserted. **The press was not the problem; the delivery mechanism was.** So the
+grant is now read at a second, wider question: `bindFocus` returns `grid`, the
+**application the document is**, from the same `GRID_ADAPTERS` entry and the
+same unforgeable `location.origin` **and `location.pathname`** the focus grant
+already reads — so the keystroke path is bought with the application, never with
+the ref, the element, or a shape a page could imitate. `gridApp(origin,
+pathname)` is that lookup; it is a field on an answer `IDENTITY_PROBE` already
+produced, not a second round trip.
+
+Two answers, then, and conflating them was the bug: `grid` is *what the page
+is* and decides **delivery**; `gridEditor` is *what the focus is* and decides
+everything the binding is allowed to do.
+
+**The focus may only be taken from the grid's own cell editor.** The
+per-character re-assertion — which exists because a key event goes to whatever
+holds focus when the browser processes it — fires only when the focused element
+**is** the cell editor. On a grid page there are other text fields the model is
+legitimately typing into: the formula bar, and the address box where a cell
+reference is written and Enter pressed to jump. Stealing either would move the
+keystrokes off the field the model is on, and on the name box it would type a
+reference into a cell instead of jumping. So when the focus is not the cell
+editor, `beforeChar` is a no-op and the DOM clear is skipped for the same
+reason the grid path skips it — the grid replaces a selected cell's content on
+the first keystroke, and a selection inside a field the user is on is not ours
+to take.
+
+**One committing key is what the typing cannot cover.** A grid replaces its own
+editor when it re-renders the cell being edited, and the replacement can take
+the focus with it. The Enter that commits is a *separate action*, dispatched
+later, with no keystroke loop around it to repair the binding — so the Enter
+went to the document and the typed text was never committed. `gridWrite`
+(`background.ts`) is the one-shot record that closes it: set by the `type_at`
+grid path **from what it did**, not from what it saw the page doing, and it
+records `cellEditor: true` only when the grid's own editor took the text.
+
+**The record has explicit ending paths, not only consumption.** A one-shot
+value that clears only when it is read outlives every event that should have
+ended it. It is ended by **task end (`endTask()`)**, by **any non-key action**,
+by **tab removal**, and by **a read whose `tabId` does not match** — so it cannot
+outlive the run, the frame, or the tab that set it. Consumption is narrowed to
+**a committing key**: a stray arrow key no longer spends the record before the
+real Enter arrives.
+
+The
+`key` branch reads it once and re-asserts the focus **only when that record is
+ours *and* `focusState` says nothing that can receive text holds the focus**. A
+name box or a formula bar holding the focus is never taken, so a name-box jump
+proceeds untouched. It is deliberately not a general "the last thing typed was a
+grid": that would let a key dispatch reach into a field the model is on.
+
+**`clear` is honoured on the grid path unless the focus is the grid's own cell
+editor — so the rule is symmetric.** The focus may be taken from, and the field
+replaced, **only when the focus *is* the cell editor**; everywhere else on a grid
+page the ordinary clear runs. Skipping the clear merely because the document is
+a grid was too wide: a formula-bar or name-box write took the keystroke path and
+silently stopped clearing, so typing `42` into a cell holding `17` produced
+`1742`. The cell editor keeps no-clear, because there the first keystroke
+genuinely replaces what the grid has selected — that is the one field where the
+clear is the grid's job and not ours.
+
+**The refusal path is what the failure was missing.** `grid-text-not-delivered`
+("the grid's editor did not change — the text did not land in the cell") and
+`grid-text-misdelivered` (a suspect drift says the keystroke went somewhere
+else) are written up below, and they are the same closed vocabulary. Before
+this, nothing compared the tree's cell value against what was written, so a run
+could claim completed with an unwritten cell — **the refusal, not the report,
+is where an unverified write now surfaces.**
+
+**The keystrokes are bound to the grid's editor, not to the ambient focus.** A
+key event is not bound to a node — it goes to whatever holds focus when the
+browser processes it. So the binding cannot be made in the dispatch; it has to
+be made in the page, immediately before each dispatch. The first attempt at
+this was *observational* — re-read `document.activeElement` and compare it —
+and the review was right that it bound nothing: an `await` sat between the
+check and the insertion, so a page that took the focus in that window got the
+text anyway.
+
+**A reading is not a binding, so the focus is put back rather than read.**
+`GRID_FOCUS_PROBE` (`pointer.ts:543`) runs in the isolated world and does
+three things in order. First, it looks the adapter up **by the document's own
+origin and path** — a document that navigated away mid-typing, or to another
+application on the same host, has no adapter and is refused
+`grid-editor-unrecognised`, and no page can forge its way into one.
+Second, if the grid's editor is already the active element, it touches nothing
+at all. Third, otherwise the focus drifted, so the editor is found **by its
+role** and given the focus with `editor.focus({ preventScroll: true })`, then
+confirmed. `preventScroll` is load-bearing: Sheets parks the editor at
+`y = -9998`, and a plain `focus()` scrolls the user's viewport to the top of
+the document. `reassertGridFocus` (`pointer.ts:609`) is one
+`Runtime.evaluate`.
+
+**The binding is to the role, not the instance.** A grid replaces its own
+editor when it re-renders the cell it is editing, so the *node* is not stable
+enough to bind to, and binding to the instance would refuse the typing that
+worked. The role is the same three parts the grant was made on, re-read at the
+point of insertion. If the container holds several `.cell-input` elements, the
+restore takes the first in document order.
+
+**Restore, then refuse.** `typeIntoCanvas` (`background.ts:741`) takes a
+required `beforeChar` callback, invoked **per character**, with nothing between
+its answer and the key event — the check and the dispatch are adjacent by
+construction. The whole grid sequence is: press → `bindFocus` → the editor's
+text *before* → per character: reassert focus → keyDown → keyUp → the
+after-read → the delivery check. A focus steal that can be corrected *is*
+corrected and the typing continues; a binding that cannot be restored refuses
+with `focus-changed` — "the grid's editor does not hold the focus and could not
+be given it back". This is a deliberate behaviour change and it is not a
+weakening: the text still cannot land in an unverified field, and the field is
+now re-found by role rather than trusted by instance. If the binding breaks
+mid-string the prefix is already typed, and the refusal says "the typing
+stopped".
+
+**The grid reports its own delivery.** The editor's own text is read before and
+after the typing. If the text is unchanged *and* the text is absent, the step
+refuses with `grid-text-not-delivered` — "the grid's editor did not change —
+the text did not land in the cell" — or with `grid-text-misdelivered` if a
+suspect focus drift says the keystroke went somewhere else; the two are
+different failures and are written up below. Reading "before" as well is what
+makes "unchanged" mean "the typing changed nothing" rather than "the cell was
+always empty", and it is why a grid that reformats what it is given (a number,
+a formula) is not reported as a failure.
+
+**The before and the after are comparable only on the same node.** A grid
+that replaces its editor mid-typing leaves the old node's text behind, and
+comparing it with itself would report a delivery failure for a typing that
+worked. So the focus is read once more after the typing: if the editor is
+still the focused node, the two reads are comparable; if it is not, **nothing
+was measured and nothing is claimed** — "not measured", never "failed". A
+newline is skipped from the check, because a grid commits and empties its
+editor on Enter, so "unchanged" there is the grid's own behaviour.
+
+**The focus drift is classified, because "the focus moved" is not one fact.**
+`reassertGridFocus` (`pointer.ts:633`) reports, on the `refocused` path
+(`pointer.ts:610`), what *had* the focus when the probe took it back. A key
+event is focus-global — it goes to whatever holds the focus when the browser
+processes it — so the focus that was taken back is the focus the previous
+keystroke went to. `driftOf()` (`pointer.ts:559`, inside `GRID_FOCUS_PROBE`)
+sorts that element into two classes:
+
+- **`suspect`** — a text-entry surface that is not the grid's own editor: an
+  `INPUT`, a `TEXTAREA`, or a `contenteditable`. This is the one shape a
+  keystroke can go into, so the keystroke before the re-assert may have landed
+  there.
+- **`benign`** — `BODY`, the grid's own canvas, the grid's own editor, anything
+  that cannot receive text. The focus moved, and no character could have
+  followed it.
+
+The distinction is what makes the classification worth carrying. Without it
+every focus steal would be reported as a possible misdelivery, and a grid
+re-rendering its own cell — which is ordinary, and is what the replaced-editor
+case below is made of — would raise a false alarm on every re-render.
+
+**A misdelivery is a different failure from a non-delivery.**
+`grid-text-misdelivered` (`pointer.ts:846`) is kept **distinct** from
+`grid-text-not-delivered` (`pointer.ts:845`). A misdelivery is a keystroke that
+reached a field the press was never aimed at; a non-delivery is text that
+reached nothing. The first is a *wrong* answer, the second is an *empty* one,
+and the reason string reaches the model's history and the audit document
+(`privacy.md`), so the two cases need two names: the first wants a different
+target, the second wants a retry.
+
+**The delivery probe asks the page where the text went.** `GRID_DELIVERY_PROBE`
+(`pointer.ts:672`) and `gridDelivery()` (`pointer.ts:735`) — the same isolated
+world, the same adapter list and the same origin rule as the focus probe. It
+searches the document for the text that was typed and answers one of three
+states: `in-grid` (the text is inside the grid's own scope, so the grid has
+it), `foreign` (the text is in some other editor on the page), or `unknown`
+(found nowhere, so nothing is claimed). A document that is not a recognised
+adapter's origin is refused `grid-editor-unrecognised` without being
+inspected — the same rule, and for the same reason: a page cannot forge its
+way into a probe whose only job is to say where its text went.
+
+**The page is asked only when there is something to ask** (`background.ts:909`).
+The delivery probe is consulted **only** when the grid replaced its own editor
+mid-typing — so the before/after reads are not comparable — *and* a suspect
+drift was reported. If the editor is still the same node, the two reads above
+already answered; if no drift was ever reported, nothing went astray to look
+for. That is a cost guard as much as a behaviour: the probe is a document scan,
+and running it on every grid typing would put one on the tail of every
+keystroke to answer a question that is nearly always already answered. A test
+asserts the page is asked **zero** times when the reads are comparable or no
+drift was reported.
+
+**A suspect drift is sticky** (`background.ts:753`). The drift of the last
+re-assert is carried forward, and a later benign drift does not un-do an
+earlier stray keystroke: the character that went into another field on the page
+stayed there, and a subsequent benign re-render does not take it back out. A
+drift that reads as benign is therefore never a clean bill of health for the
+whole string.
+
+**This is the detection half of the binding question, not the prevention
+half.** The third security review's last actionable sentence was to verify that
+the editor receiving the insertion is the one `bindFocus` validated. The
+re-assert makes the *next* keystroke go to the validated editor; it cannot make
+the *previous* one do so, because the window between the re-assert answering and
+the browser processing the `keyDown` is still open. What the drift
+classification and the delivery probe add is that the failure is now
+**named** — the wrong-field case and the empty-field case are two different
+reasons. In the same-node case the step already refused, so what is new is
+*which* refusal. In the replaced-editor case the step previously fell through
+as a success, and a stray keystroke there was invisible; it is now detected
+and refused. That is a detection, not a prevention: the residual below is
+unchanged in size, and changed only in visibility.
+
+**The window is not closed, and this doc says so.** One round trip remains
+between the re-assert answering and the browser processing the `keyDown`; a
+page that takes the focus in that window gets that one character. The window
+is **per character**, not per string — a single check would leave a window
+spanning every keystroke in the string — at the cost of one extra CDP round
+trip per character (2 → 3). The realistic residual is Google's own re-render
+rather than a hostile page: a hostile page on `docs.google.com` cannot reach
+the path at all, because the adapter is looked up by the document's own
+origin. What is genuinely page-chosen is the id and the class — page-written
+strings, kept honest here by Google's paste sanitizer — and the
+first-in-document-order pick when a container holds several editors.
+
+**The residual is detectable, and it is still not preventable.** The character
+that slips through the window still slips through: the re-assert cannot reach
+backwards to a keystroke the page has already taken, and nothing here can un-type
+a character that reached a field the press was never aimed at. What changed is
+that the slip is no longer invisible. The drift is classified, so a focus that
+moved to something which cannot receive text is not confused with one that
+could; and where a suspect drift meets a replaced editor, the delivery probe
+asks the page where the text is and the step refuses `grid-text-misdelivered`
+rather than finishing as a success. So the honest statement of the residual is
+now two clauses, and neither is droppable: **the window is still one round trip
+per character, and a keystroke that goes astray is now named instead of
+silently reported as delivered.** Closing the window itself means removing the
+round trip, which is a different change and not this one.
+
+**The non-grid path still has its own window.** Between `focusState` and
+`Input.insertText` there is a one-round-trip gap, unchanged by this work and
+outside this finding.
+
+**The grid path does not clear, and the grid is told to stop clearing.** The
+DOM clear reaches for a selection inside an off-screen editor, which is not
+what a grid wants: a grid replaces a selected cell's content on the first
+keystroke. So on this path the clear is skipped entirely and the first
+keystroke is the replacement — the same outcome, by the grid's own rule
+instead of ours. The allowance is reported like wall 3's
+(`canvas-grid-editor`), never silent: `bindFocus` returns it, `executeAction`
+logs it, and the server sees an action that succeeded by an allowance.
+
+`bindFocus` also refuses `focus-unidentified` when the frame carries no
+`backendNodeId`. `verifyTarget` *fails open* there, because an older relay has
+no gate to run; the clear has no such excuse — it is the one operation here that
+destroys the user's text. The relay closes the same case at the source by
+calling `_locate(ref, need_backend_id=True)`.
+
+### The cached context id rotted, and nothing said so (2026-10-20)
+
+**An execution context id belongs to a renderer, not to a tab.** The cache in
+`isolatedWorld()` is keyed by `tabId`, but the id dies with the renderer: on a
+cross-document navigation, and on a debugger detach-and-reattach to the *same*
+page. An MV3 service worker outlives both. So the cache handed every
+`Runtime.evaluate` an id that no longer existed, the evaluate returned an error,
+and the caller read "the extension could not evaluate".
+
+The blast radius was the whole keyboard path. `focusState` runs `FOCUS_PROBE`
+through it, so `press_key` and `type_text` were refused on **every** step — the
+server's wording was `focus is unknown`, which reads as "the page has no focused
+element", i.e. a statement about the user's page. It was a statement about a
+dead id in our own cache. `probe_xy` was dead for the same reason, and that is
+the coordinate-safety probe — so the bounds check standing between a model-chosen
+point and a press was not running at all.
+
+**The fix is a self-correcting wrapper, `withWorld(tabId, fn)`.** Use the cached
+id; if `fn` throws, drop the entry, build the world again, run once more. A second
+failure propagates unchanged, so a real fault stays one fault and does not
+become two silent attempts.
+
+**Why not a list of invalidating events, and why not `loaderId`.** Enumerating
+the events that invalidate an execution context is a list that rots: a future one
+is missed and the id goes stale again, silently — and it goes stale silently
+*by construction*, because an evaluate against a dead context is an **error**,
+not an empty value, and every caller here reads "the extension could not
+evaluate" for both. Keying the cache on the frame's `loaderId` is cheaper on the
+happy path and still wrong, because detach-and-reattach-to-the-same-page leaves
+the document unchanged and the `loaderId` identical. **That is the case a live
+run actually hit.** Recovery-on-failure covers every cause — navigation, detach,
+frame swap, context destroyed — without a list of them.
+
+A failure now also reaches the server: `main.py` logs `evaluate failed in the
+extension` at warning with the extension's own error string. Dropping `error`
+and forwarding only `value` is what turned a hard failure into `focus is
+unknown` with nothing to act on and nothing to diagnose.
+
+### The `evaluate` frame grew one optional field
+
+`{"type": "evaluate", "expression": "<js>", "isolatedWorld": true}`. Absent or
+`false` is exactly the call that shipped — main world, **no `contextId` key in
+`params` at all**. Set, the *same expression* is evaluated in the tab's cached
+`brotto-idle` world, whose prototypes are the extension's, so a page cannot
+shadow the getters it reads. The isolated world shares the DOM, so `document`
+and every element are the same objects; only the JS globals differ, and
+`returnByValue` returns the same primitive either way.
+
+This is a **grow-only** addition to an existing frame: an old extension ignores
+the field, an old server never sends it. No version window is needed.
+
+**Who sets it, decided per caller.** The flag is opt-in and the callers are not
+uniform, because the reads are not:
+
+- **`focus_id` — set.** Reads `document.activeElement`; in the main world the
+  page owns the getter it resolves through, so the check could silence itself.
+- **`probe_xy` — set.** Not a diagnostic: it is a decision.
+  `window.innerWidth`/`innerHeight` are page-writable globals feeding
+  `_coordinate_action`'s bound check — the only thing between a model-chosen
+  point and a press — and its `tag` read is what refuses a covered canvas.
+  The DOM is shared, so `elementFromPoint` still answers on the same elements.
+- **`read_page_text` — deliberately not set.** The value *is* page content,
+  page-controlled in any world, and it reads shared DOM anyway. Isolating it
+  would protect the page's text from the page, which is backwards.
+
+### `focusState` reads focus and clears in one evaluate
+
+`FOCUS_PROBE` is one `Runtime.evaluate`, `returnByValue`, **in the isolated
+world** (`contextId` from `isolatedWorld`), answering two questions in the order
+they were already asked in — a second round trip would ask the same unchanged
+`document.activeElement` twice. It returns `{ok, reason}`, and the whole
+vocabulary is **`TYPE_AT_REFUSALS`** in `pointer.ts` — the exported list the
+tests assert both ways, kept in one place because a reader who has to assemble
+it from the branches will read it wrong.
+
+"Is this a text field" was once inferred from `typeof a.select === "function"`,
+which is a duck type: any element can carry a `select`, a `select()` on a `<div>`
+does nothing, and the page owns that method. It is now one real predicate —
+`a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement ||
+a.isContentEditable === true` — which is exactly what the isolated world buys.
+A non-field refuses `focus-no-text-field` on the type-only path and
+`clear-no-text-field` on the clear path, because "cannot receive text" is the
+whole question on one and "nothing to clear" on the other. A focused `IFRAME`
+refuses `focus-on-frame`: `insertText` would land in a document no observation
+this run produced covered.
+
+`document.body` and `document.documentElement` are the "nobody is focused"
+answer in every engine, and `Input.insertText` against either is a no-op, so
+refusing there reports the truth rather than inventing a failure.
+
+### A successful `select()` is not evidence a clear happened
+
+**This is the behavioural change, and it trades a step for never appending to a
+field the model asked to empty.** `HTMLInputElement.select()` is *specified* to
+silently do nothing on input types it does not apply to — `email`, `number`,
+`date`, `time` — and to do nothing, **not to throw**. So calling it successfully
+proves nothing, and the text that follows would append to a field the model asked
+to replace: the same wrong answer the bare `"a"` gave, quieter. The probe reads
+the selection back and refuses with `clear-select-noop` unless
+`selectionEnd - selectionStart === value.length`.
+
+The value's length is read **first**, deliberately, because `selectionStart` is
+`null` (not a number) on those same types — and an empty field of a no-op type
+has nothing to clear, so appending to it is correct. The Sheets cell is not an
+example here any more: the grid's editor is a contenteditable, and on the
+wall-3b path the clear is skipped entirely. The practical consequence: **a
+numeric or date field now costs the model an extra step**, which is the
+intended price and not a regression to route around.
+
+The `contenteditable` branch has no `select()`, so a `Range` over the node's
+contents is the same operation by another route — and it is confirmed the same
+way: `selection.rangeCount === 1` and a non-empty `getRangeAt(0).toString()`
+when the node had text. Anything else is `clear-select-noop`, as is a missing
+`Selection`. A throw is `clear-threw`.
+
+### The canvas case is exempted, not waved through
+
+An earlier version of this doc argued the opposite — that identity must *not* be
+verified in `focusState`, because a Sheets cell is a `<canvas>` whose editor is
+not a descendant of the clicked node. That was right about the
+consequence and wrong about the conclusion: containment is exactly the check
+needed, and the canvas shape is the one case that gets a named exemption rather
+than an exemption for everything. `select()` selects that element's own contents
+wherever it hangs in the tree — it is not a region of the page — but that is a
+reason to *exempt* the shape, not to skip the identity question. The identity
+check lives in `bindFocus`, upstream of `focusState`, precisely so the exemption
+is the narrowest thing in the path. And the exemption is now narrower still:
+the grid shape is admitted only on a **recognised application's own origin**
+(wall 3b above), so the shape alone buys nothing.
+
+### The clear runs after the press, and that ordering is why it is here
+
+It is tempting to move the select-all back to the server. It cannot go there:
+`pressAt` establishes the focus, so after it `activeElement` **is** the clicked
+target and before it is whatever held focus a moment earlier — possibly a
+different field, which the clear would then empty. Ordering, not capability, is
+the argument. The key-chord route is closed for the reason in
+`agent-loop.md` ("Select-all is not a keyboard shortcut"): Ctrl+A is "move to
+line start" on macOS and there is no legal way for this file to ask which OS it
+is on.
+
+**`point-not-numeric` is not a dead key.** It is emitted by `verifyTarget`, not
+by the `type_at` branch — the `typeof` check there is now subsumed by
+`boundedPoint`, which reports the same case as `point-out-of-viewport`. The
+`verifyTarget` guard is live because `click` hands `pressAt` the frame's **raw**
+`action.x/action.y` and only `click_xy` is bounded upstream, so a `click_ref`
+coordinate is checked for numerics and hit-tested but never clamped to the
+viewport. Do not delete the key on the reasoning that nothing emits it.
+
+Pinned by `scripts/test-type-at.test.js`, which extracts the branch and evals
+it against a fake CDP session, `scripts/test-target-hittest.test.js`, which
+asserts the gate lives inside `pressAt` so `click` and `type_at` cannot drift
+apart, and `scripts/test-evaluate-isolated-world.test.js`, which asserts the
+`evaluate` frame's optional `isolatedWorld` field is absent-until-asked — an
+extension without it ignores the key, a server that never sends it is unchanged.
+The server does ask: `focus_id` and `probe_xy` set it, `read_page_text`
+deliberately does not.
+
+## The grid's three primitives (2026-10-22)
+
+A measured Google Sheets run typed its column headers into the grid's **name
+box**, created a named range, wrote no cell, and reported itself done. The
+grid's DOM knowledge now lives in one place — `observation/grid.ts` — and
+exposes three composite frames: **`grid_select_cell`**, **`grid_read_cell`**,
+**`grid_write_cell`**. The server's registry (`agent/closed_loop.py`'s
+`ADAPTERS`) says only **which** frame to call.
+
+There are three frames rather than the two the design named, and the reason is
+the ladder: writing the ladder server-side would require the *server* to
+identify the content box — the exact "guess which field is this" step that
+lost the original run — and the name box is a React-controlled input that
+only real key events can write. The grid's DOM knowledge already lives here
+(`GRID_ADAPTERS`, `observation/pointer.ts`), so the ladder lives here too.
+
+**The extension reports what it did; the server grades it.** The extension
+never decides that a write landed. A write answers with the value it read
+back, and the server reads the cell again through `grid_read_cell` and
+compares. If the extension graded its own work, the verdict would come from
+the same code that performed it — which is the whole class of bug this change
+exists to remove.
+
+**The adapter comes from the extension's own knowledge of the tab**, read from
+`chrome.tabs.get(tabId).url` and never from the frame's payload, so a hostile
+frame cannot claim to be a sheet. The origin **and** the path prefix are
+required, for the reason the "wall 3b" section above gives: one origin serves
+several Google applications.
+
+### The jump: real key events into a React-controlled input
+
+`grid_select_cell` (`background.ts:903`) is the dance that used to be spread
+across model steps, done in one frame:
+
+1. **Focus the name box and select its contents.** `element.select()` is a DOM
+   operation, never a Ctrl+A chord — "which chord means select-all" is the
+   one question that would need the OS, and there is no legal way to ask it.
+2. **Type the reference one character at a time**, with real key events. A
+   `.value` assignment is ignored by a React-controlled input, so the
+   reference has to arrive as keystrokes.
+3. **Press Enter** to commit the jump.
+4. **Read the name box back.** If it does not read the requested reference,
+   the jump did not land — and that is an **error**, not a value.
+
+Step 4 is the one that makes the primitive safe to build on. A jump that did
+not land would otherwise be reported as a successful selection of *some* cell,
+and every read taken after it would be a confident answer about the wrong
+cell.
+
+A reference that is not a cell reference is refused before any keystroke:
+`isCellReference` (`grid.ts:45`) accepts a column and a row and nothing else,
+because a word typed there creates a **named range** and the write is lost
+silently.
+
+### The mirror: an empty read is a read
+
+`grid_read_cell` (`background.ts:926`) selects the cell and then reads the
+formula bar's mirror, which holds the selected cell's **text**. The two
+failure shapes are different verdicts and the server needs them apart:
+
+| what the page says | the extension's answer | what it means |
+|---|---|---|
+| the mirror is there and holds nothing | `state: "ok"`, `value: ""` | a read that **happened**, on an empty cell |
+| there is no mirror | `state: "unreadable"`, `value: null` | a read that **could not be performed** |
+
+The empty mirror is the interesting one. It is a definite fact — the cell is
+empty — so it is a **mismatch** against a non-empty intent, not an unknown.
+The missing mirror is the absence of a fact, so it is `unknown`: it never
+closes a plan item, and it is not a failure to escalate on its own. The
+server's `compare_observed` makes the same split, and the relay's failure
+shape (`_grid_failure`, `extension_relay.py:1170`) reports `state:
+"unreadable"` — **never `ok` with an empty value**, because a cell the server
+never read must not be graded as an empty cell.
+
+The mirror is a contenteditable, so it has no `select()`: its contents are
+selected with a **Range**, which is the same DOM operation in a different
+costume. The selection is confirmed afterwards, and so is the focus: a
+collapsed formula bar cannot be focused, and an insertion that stayed in the
+previous field — the name box, which holds a *reference* — is the exact
+failure the ladder exists to stop. An insertion that **appended** to what was
+already in the cell is a wrong value, not a failed one, so it is refused
+rather than made.
+
+### The write ladder, and why it lives here
+
+`grid_write_cell` (`background.ts:950`) is two rungs and a failure:
+
+1. **content-box** — focus the mirror, select its contents, insert the value,
+   press Enter, read the mirror back.
+2. **grid-editor** — the grid's own cell editor takes the focus and the value
+   is typed one character at a time, the focus is re-asserted before the
+   Enter that commits, and the mirror is read back.
+3. Otherwise the write failed, and the error names **both** mechanisms: `the
+   write did not land (tried content-box and grid-editor)`.
+
+The first rung is the one the original run missed: the mirror is the field
+that holds the cell's *text*, while the name box holds the cell's
+*reference*. The mirror is read back after each rung, so a rung that typed
+into the wrong field is detected there rather than being reported as a
+success.
+
+**Why the ladder is extension-side and the verdict is not.** The ladder needs
+the DOM (which selector is the name box, which is the mirror, that one is
+React-controlled and the other is a contenteditable) and the *mechanics* (real
+key events, Enter, the focus re-assertion). The server has none of that and
+cannot synthesise it: `Runtime.evaluate` cannot produce the key events a
+React-controlled input needs, and `navigator.clipboard` does not exist in an
+MV3 service worker. But the **comparison** needs nothing the extension
+cannot do — the server reads the cell back through `grid_read_cell` and
+compares in memory, which is why the extension never grades its own work.
+
+The extension's own comparison (`gridValuesMatch`, `background.ts:888`) trims,
+collapses whitespace and case-folds, the same rule the server applies
+(`normalise_value`), so the two never disagree about what "landed" means.
+
+### The grid's own queue
+
+**The grid path is serial.** A select, a read and a write that interleaved
+would race for the same cell — and a write that lands in the cell a read was
+about to read is a wrong value, not a slow one. So the three ops queue behind
+each other in the extension (`gridQueue`, `background.ts:1028`), whatever
+order the frames arrive in, and the queue's chain is kept alive across a
+failed op so one failure does not refuse every later op.
+
+The server's side matches: the relay's `grid_op` has **its own queue**, not
+the relay's single uncorrelated `evaluate` slot — a `focus_id` probe's answer
+can land in that slot for a different probe, and a cell value read out of it
+would be graded as somebody else's page text.
+
+Pinned by `scripts/test-grid-primitives.test.js`, which slices the pure
+parsers out of `grid.ts` and runs them against a fake DOM, and by
+`tests/test_relay_grid.py`, which pins the wire shape, the `op` correlation,
+the queue's independence from the `evaluate` slot, and the failure shape.
 
 ## Geometry is three calls, not one per node
 
@@ -613,6 +1536,192 @@ which is precisely the failure the fixtures exist to catch. The result reports
 `source: bulk | empty | no-join | failed` and `requested/resolved/fallback`, capped
 at 2000 entries, so a join that silently stops matching is visible in the
 observation rather than inferred from a page that looks emptier than it is.
+
+## The page delta — evidence that the page moved, at ~100 bytes
+
+`observation/delta.ts` answers "did the page change, and where" every step, on
+the pages where the accessibility tree is the useless signal. A Google Sheet
+measures 71 targets / ~11 KB and is **byte-identical across 15 consecutive
+steps** no matter what the agent types, so the agent has no evidence its action
+landed and repeats. The wire shape is fixed, and the server is built against
+exactly this:
+
+```js
+delta: { changed: boolean, tiles: [ { x, y, w, h, pct } ] }  // worst first, max 5
+```
+
+Tiles are **16×16 in full-resolution viewport CSS pixels**, and `pct` is the
+tile's mean absolute luminance difference as a percentage of full scale. The
+tile size is the reason the signal is per-tile and not global: one character in
+a large mostly-white grid is ~0.01% of the pixels, so a single page-wide mean is
+swamped by whatever else moved. Tiling makes the false-negative rate depend on
+tile size rather than page size — which is what lets a cell edit register in a
+40×200 sheet. The threshold `TILE_DIFF_THRESHOLD` is absolute for the same
+reason: "% of page changed" is the most mis-set parameter in visual regression
+testing.
+
+**A tile is evidence, never a target (locked decision D2).** A tile is a region
+that *moved or changed*, which is not a claim about what is there now — the page
+repaints after the diff. Nothing in the extension may consume the coordinates
+and the server is forbidden from feeding a tile to a coordinate action.
+
+**The cost is zero tokens and zero pixels on the wire, and it is not a
+screenshot.** The capture is decoded in the extension, differenced and dropped;
+what crosses is ~100 bytes of derived integers. It is a *second*
+`Page.captureScreenshot` call per step, independent of the vision screenshot and
+of `BROTTO_VISION_CAPTURE`, and it does **not** consume the per-task capture
+budget — that budget is `_capture_ceiling`'s, and it guards what a model sees,
+and no model sees a delta. One frame is retained per tab and cleared on navigation, on
+task start, on tab close and on detach. The permission disclosure for all of
+this is `PERMISSIONS.md`, because a CWS reviewer counting screenshots should
+find the second call stated rather than discover it.
+
+**It is *not* independent of `BROTTO_VISION_CAPTURE`, which is the correction
+to the sentence above.** The extension computes the delta unconditionally — it
+does not know the policy, deliberately, so the server stays the authority — but
+`ExtensionCDPRelay.get_page_delta` asks `screenshot_block_reason` first and
+returns `None` if it says no. With the switch unset, the default, there is no
+delta either. The veto is the harness's verbatim `redactions or run_secrets`,
+the same one `_capture_page` applies to the picture: a delta is read off the
+same pixels a screenshot of that page is refused over, and letting it through a
+different route would be the bypass the gate exists to prevent. Pixels are the
+one channel redaction cannot reach (see `privacy.md`, "A screenshot is a gate,
+not a redaction pass"), and an empty `redactions` still means no detector fired,
+never that the page is clean. What the extension cannot see is *how long* that
+veto holds: the harness's input is a run-wide latch for a positively identified
+secret and a window covering the ambiguous write's own step and the two after
+it, and the extension is told the same thing in both cases — refuse
+(`privacy.md`, §3g).
+
+#### Two things this does not do yet, and neither is settled
+
+**The threshold is calibrated against synthetic pixels only, and needs pinning
+against real captures before it is trusted.** A real spreadsheet's noise floor
+is unmeasured — grid rendering, font rasterisation, the cell cursor — and the
+failure is symmetric: if the real floor sits *above* the threshold the feature is
+inert and the agent is back to trusting a tree that never moves; if it sits
+*below*, the delta fires on every step and carries no information. Either way
+nothing in the current code distinguishes them, and no number in this repo is
+evidence. This is an open question, not a tuning choice.
+
+**The caret mask does not cover a Google Sheets cell cursor.** It masks
+contentEditable selection rectangles and `input`/`textarea` caret positions, both
+of which the DOM can be asked about. A Sheets cell cursor is a widget-drawn
+element reachable by neither branch, so on the motivating page itself a blinking
+caret is **not** masked and registers as a change every time it blinks. That is
+deliberately not patched with a per-product cursor table — a table keyed on
+Google Sheets is the kind of fix that stops working the week Google restyles, and
+it is worse than the honest gap.
+
+### `canvasCovered` — how much of the viewport a canvas occupies
+
+The delta above tells the harness *whether* pixels moved. It cannot tell the
+harness *before* anything moves that the page is one where the accessibility
+tree is worthless, because a Google Sheet's tree is rich and plausible — the
+toolbar, the menu bar, forty real nodes — and the missing grid is an absence,
+which no diff can report. `canvasCovered` is that signal: **the fraction of the
+viewport occupied by the largest topmost `<canvas>`, in `[0, 1]`** — one
+number, no pixels, no new frame type, no second round trip.
+
+**It is computed in the page pass that already exists.** The caret probe is a
+`Runtime.evaluate` the delta path ran every step anyway; the canvas enumeration
+was added to that same expression and rides the same result.
+`captureObservation` spreads it into the observation beside `delta`, and the
+server reads it off the same cached frame
+(`ExtensionCDPRelay.get_canvas_covered`, clamped to `[0, 1]`, `None` for a bool
+or anything non-numeric).
+
+**The question asked is what the canvas *occupies*, not what is on top of
+it.** It is `getBoundingClientRect()` area intersected with the viewport — so a
+grid scrolled half off-screen reports what it actually shows — and
+deliberately **not** `elementFromPoint` sampling. Sampling asks "is the canvas
+the topmost thing at this pixel", and a grid's own overlay divs would answer
+that over much of the surface and undercount it. Rects cannot be fooled that
+way, and they cost one `getBoundingClientRect` each.
+
+**The enumeration is bounded on both sides of the wire, and the two bounds are
+different numbers on purpose.** `SCAN_CANVASES = 512` bounds elements
+*examined*; `MAX_CANVASES = 64` bounds rects *kept*. If the kept bound were the
+only one, a page that put 64 zero-size `<canvas>` decoys ahead of its real
+full-viewport canvas would hide it — so the size test sits **inside** the loop
+(`cr.width>0 && cr.height>0 && canv.length < 64`), and a decoy is skipped
+before it can reach the kept budget. `SCAN_CANVASES` is the hard bound on work a
+page can force on a per-step hot path. It is enforced twice: once in the page
+expression and again in `pageProbe`, because the expression is a string and the
+first thing a page can try is to break it.
+
+**A missing or non-numeric value is unknown, never `0.0`.** When the DOM pass
+itself fails (tab gone, debugger detached) or the enumeration hit
+`SCAN_CANVASES` — `capped` is then set, and **`canvasCovered` is omitted from
+the observation entirely** — the field does not cross the wire at all. A `0`
+would be a claim that nothing checked, and it would be a *positive* claim:
+"this page is not a canvas", which is a fact about the page and not about our
+plumbing. The server keeps `None` on the same grounds — `_observe_canvas_covered`
+reads through `getattr`, so a relay from before the field shipped (Playwright,
+any older extension build) returns the old behaviour exactly rather than
+silently downgrading to `0.0`. `0` is a real answer only when the probe ran and
+found nothing covering the viewport.
+
+Pinned by `scripts/test-observation-delta.test.js`,
+`tests/agent/test_canvas_awareness.py` and `tests/test_page_delta.py`.
+
+## The vision capture can be asked for CSS pixels
+
+`Page.captureScreenshot` takes device pixels by default, so a 2× display hands
+the model a picture four times the area of the page it is clicking in. The
+`capture_screenshot` frame grew **one optional key**, `css_resolution`, and the
+request is the server's: `{"type": "capture_screenshot", "css_resolution":
+true}` asks for the CSS-pixel viewport, and anything else — absent, `false`, or
+a value that is not exactly `true` — is today's behaviour.
+
+**It is a key on a frame that already exists, not a new frame type.** The
+contract grows by a key, so an extension build from before the key ignores it
+and a server from before the key never sends it: no version window, no new
+`type`, nothing for the panel to answer — the frame is not forwarded to the
+panel at all, and adding a `case` for a frame the panel never receives is how
+a run never ends. This is the same grow-only rule as the `evaluate` frame's
+`isolatedWorld` above, and the reason for it is the same: a new *type* is a
+protocol version, and a new *key* on an existing type is not.
+
+**Who decides is the seam.** The extension cannot tell the model's capture from
+the approval card's — it is the same frame and the same branch — and the card
+is the user's own surface, shown on the user's machine, where small text has
+to stay legible. Deciding in the extension would mean a second, weaker copy of
+the harness's `_is_canvas_page` on the client, and a rule that lives in two
+places is a rule that will disagree with itself. So the harness asks, the
+extension obeys: **canvas pages take the CSS-pixel copy; the card keeps the
+device copy**, and an ordinary page keeps the device copy too, because that is
+where the small text is.
+
+**The clip-scale gotcha is measured, not assumed.** A `clip` is specified in
+CSS pixels, but its `scale` applies to the **device** surface — so `scale: 1`
+comes back at 3024×1890, byte-identical to no clip at all and 2.6× the bytes
+for nothing. It is `1 / devicePixelRatio` that lands on 1512×945. The
+extension reads `window.innerWidth`, `window.innerHeight` and
+`window.devicePixelRatio` in one `Runtime.evaluate` and sends
+`clip: {x: 0, y: 0, width, height, scale: 1/dpr}`.
+
+**A viewport that cannot be measured falls back to the device capture, not to a
+clip of a guessed size.** `null` is the honest answer — the answer changes when
+the user zooms or resizes, and no caching means no second invalidation path —
+and a clip of a guessed size is a picture of the wrong page, which is the one
+failure here that costs a click.
+
+**What the CSS copy actually saves, and it is not mostly tokens.** The device
+capture is 3024×1890 and the CSS capture 1512×945, which looks like 1.8× — but
+the API downscales the long edge to 1568px before pricing, so the two cost
+~2,049 and ~1,905 image tokens: **about 7%**. The real win is **bytes**
+(~223 KB → ~85 KB per capture; ~3.1 MB → ~1.2 MB per canvas task across the
+relay) and **1:1 with the coordinate space**: the model clicks in CSS pixels
+whatever the picture is, so a CSS-pixel picture is the coordinate it is asked
+for, and a retina picture invites a multiplication the model has to get right.
+
+Pinned by `scripts/test-screenshot-frames.test.js`, which asserts the clip's
+extent and its `1/dpr` scale, that `css_resolution: false` and
+`css_resolution: "yes"` both fall back to the device capture, that the branch
+is never forwarded to the panel, and that the Python relay's
+`capture_screenshot` carries the same optional key, defaulted off. The loop's
+half of this is `agent-loop.md`.
 
 ## `aria-hidden` is surfaced, not recovered
 

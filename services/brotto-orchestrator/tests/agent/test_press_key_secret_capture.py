@@ -36,7 +36,7 @@ async def _recorded(monkeypatch, actions: list[ActionCall]) -> list[dict]:
     docs: list = []
     calls: list[int] = []
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         if call.action == "task_complete":
             deps.result = TaskResult(status="completed", summary="ok")
         return f"{call.action} done"
@@ -63,6 +63,7 @@ async def _recorded(monkeypatch, actions: list[ActionCall]) -> list[dict]:
         SemanticTarget(ref_id="0:1", tag="input", role="textbox", name="Card PIN")])
     cdp.get_current_url = AsyncMock(return_value="https://example.com/account")
     cdp.get_page_text = AsyncMock(return_value="")
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Account")
     cdp.refresh_target_map = AsyncMock()
 

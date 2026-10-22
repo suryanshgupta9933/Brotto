@@ -26,6 +26,7 @@ So the privacy posture is not "we do not collect your data". It is:
 | Page digests (200 chars each) | `logs/sessions/<id>.scratchpad.txt`, server | until deleted |
 | AX-tree sizes, page-text chars, changed-element chars | inside the audit document, server | until deleted |
 | Task title, action names, URLs, typed input | inside the audit document, server | until deleted |
+| What the agent aimed at (`turns[].actions[].target` — a ref like `0:1234` or an `x,y`, capped at 32 chars) and whether the page changed (`changed`) | inside the audit document, server | until deleted |
 | Model config, `base_url` | `chrome.storage.local`, user, under a key carrying the account id on the cloud | until cleared |
 | API key | `chrome.storage.local`, user, same account-scoped key | until the user clears it |
 | Account id (`profiles.id`, the JWT `sub`) as a **namespace component** — which local key and which mirror rows a session belongs to | the top-level `accountId` key in `chrome.storage.local`, user (its own key, not a field in `settings`, so no writer reconstructs the blob to record one); and returned as a response field, stored in no operator table | until sign-out clears it, together with that account's model key, config and mirrored rows |
@@ -207,6 +208,92 @@ page is a 200-char digest. Two tests hold the line and both are load-bearing:
 content back puts it all on disk again, and no amount of `is_secret_field`
 behaviour catches it.
 
+**A refusal is a place page text could enter, so the vocabulary is closed.**
+Every outcome string an action returns becomes the model's history *and* the
+audit document — both ours. `FOCUS_PROBE` in `observation/pointer.ts` therefore
+returns `{ok, reason}` from a fixed set (`clear-select-noop`, `clear-threw`,
+`focus-on-body`, …) and never a tag name or any other page-chosen string. The
+whole list is `TYPE_AT_REFUSALS`, exported and asserted both ways by
+`scripts/test-type-at.test.js` — every `reason:` in the source is in it, and
+every entry in it is used. That is a deliberate improvement over the constant it
+sits beside: `SELECT_ALL_JS` in `cdp/relay.py` returns
+`'not-a-text-field: ' + el.tagName`, which is why `_PAGE_ECHO` and
+`_strip_page_echo` exist in `harness.py` at all. The `type_at` path cannot
+produce that echo, and `focusState` **reads `activeElement.value` in the page**
+to decide whether a clear was a no-op — but only its `.length`, it returns a
+boolean, and the value never crosses back out of the evaluate.
+
+**One probe reads the page's text, and it reads it to answer a closed
+question.** `GRID_DELIVERY_PROBE` (`observation/pointer.ts`) exists because a key
+event leaves no trace of its own: when a grid replaces its own editor
+mid-typing, the only way to know where the typed text went is to look for it.
+It reads the `value` and the `textContent` of every `input`, `textarea` and
+`contenteditable` in the document and compares each against a needle that is
+the text the agent is *typing* — the agent's own payload, never the user's own
+input — so it reads the contents of editors *other than* the grid's, which
+nothing else on the typing path does. (The neighbouring read is narrower:
+`editorText` brings the grid editor's **own** text back to the extension for a
+local before/after comparison, and it never leaves the browser either.)
+
+Three things keep this read where it is. It happens **in the page**, in the
+extension's isolated world, so the page cannot observe the comparison and its
+own prototypes cannot shadow the accessors that read the values. It is
+**bounded to a recognised application**: the probe looks the document's origin
+up in `GRID_ADAPTERS` first and refuses `grid-editor-unrecognised` without
+inspecting a document that is not `https://docs.google.com`, so it is not a
+general "read the page" capability — only the one application the grid path
+was written for. And **nothing crosses back out**: the only thing it returns
+is `in-grid`, `foreign` or `unknown`, and the only thing the server hears is a
+refusal reason from the closed vocabulary above. So the table of what lives
+where does not change: this is a read of page content, not a new place page
+content lands.
+
+**The identity read is the one page question with no page script in it.**
+`FOCUS_PROBE` still reads `document.activeElement`, so it is page-answerable —
+which is why it is now the *corroboration for the effect*, not the authority for
+the identity. `bindFocus` reads `document.activeElement` in the tab's isolated
+world and has the engine name the node it points at (`DOM.enable` →
+`DOM.describeNode`), and **no page script runs to produce that answer**:
+overriding the `activeElement` getter, or `Element.prototype.select`, changes
+nothing the engine reports. The containment predicate that follows runs via
+`Runtime.callFunctionOn` in the tab's cached isolated world
+(`Page.createIsolatedWorld`, name `IDLE_WORLD`) where the prototypes are the
+extension's, so the page cannot shadow the classes the "is this a text field"
+test compares against. The two walls fail independently rather than resting on
+the same script.
+
+**The route changed, and the guarantee did not.** The read used to be
+`DOM.getFocusNode`, and **Chrome removed that method**: it answers `-32601` on
+every current build, so the identity read failed on every step, `bindFocus`
+returned `focus-identify-failed`, and every `type_at` was refused on every
+site. The read is now the same question asked by a route that still exists —
+`document.activeElement` read in the extension's world, and the *naming* done by
+the engine. The privacy property is unchanged and is worth stating on its own:
+the page still cannot answer the question, because the world the question is
+read in is the extension's, and the identification of the node is the engine's.
+Nothing about the page's own script reaches this answer.
+
+**The last main-world server read is closed, and the two walls are still not
+redundant.** The server's `focus_id` pre-check was a *main-world* `evaluate`,
+where the page owns the globals that resolve `document.activeElement` and could
+make the check silence itself. It now sends `isolatedWorld: true`, so it reads in
+the extension's world; the DOM is shared, so the element named is the same object
+either way. `focus_id` and `bindFocus` answer different questions and neither is
+spare: `focus_id` answers *intent* (was this field plausibly in focus before the
+dispatch), which no engine call can answer; `bindFocus` answers *identity* (is
+this node the one that holds focus now). A world that cannot be created refuses
+rather than falling back to the main world, so the failure direction is a
+refusal, not a silent downgrade.
+
+Neither the coordinate bounding (`boundedPoint` reads the live viewport; the
+point never leaves the tab) nor the engine-sourced node read sends anything off
+the machine. Both are strictly *less* page-derived than what shipped.
+
+Fusing `type_text` into one action also cut the extension's screenshots on that
+path from three to one, since a `captureObservation` (and therefore a
+`Page.captureScreenshot`) follows every action. Fewer is better and neither
+number is a boundary.
+
 **3a. `redact_text` had one call site, and the README's Privacy section promised two.** The policy
 says page text is redacted "on every task, with no setting to turn it off". That
 was true of `harness.py` and false of `suggest.py`: the idle-suggestions path
@@ -254,6 +341,543 @@ here" — and for page text that is per-step observation, the tool, the recall,
 and the suggestions path. Pinned by three tests in `test_memory_capture.py`
 asserting a known card number is absent from the recalled body, from the stored
 body and from the digest.
+
+**3d. A per-action outcome record is user data too, and its two fields are on
+opposite sides of the line.** `turns[].actions[]` now carries `target` and
+`changed` alongside the action name and args (`schema_version: 3`; the fields
+themselves and the deploy-ordering consequence are in `conversation.md`). Both
+are ours to record and both are inside the user's audit document, so neither gets
+a carve-out. What is worth writing down is *why each one is still safe*, because
+the safe answer is not the same for both and asserting it silently would be the
+3a mistake in a new key.
+
+- **`target` is an identifier, not page text.** It is the AX ref the model aimed
+  at (`0:1234`) or the coordinate pair for a `*_xy` action — two forms that are
+  both under 12 characters. The bound is `MAX_TARGET_CHARS = 32` and it is a
+  **cap, not a filter**: it does not inspect the string, it only refuses to grow
+  without bound. The contract is that a caller passes an identifier, and the cap
+  is the backstop when a well-meaning future caller passes a caption or a typed
+  value instead. It bounds the damage; it does not prevent it, and this doc
+  should not be read as saying a 32-char page string is acceptable.
+- **`changed` is a measurement, and that is the whole reason it is safe.** It is
+  the extension's pixel delta — whether the observation differed from the
+  pre-action one — read by the harness from the extension and never taken from
+  the model. So it is a **derived integer and a boolean, not page content**: the
+  same category as the `ax_diff_chars` length in 3, which stores a length
+  precisely so the body does not have to cross. Being a measurement is what
+  puts it on the safe side of "the user's transcript is user data" — *not* the
+  fact that it is a boolean, and not the fact that it happens to be hard to
+  reverse. If a future change makes `changed` carry *which* region moved, or a
+  tile index that maps back to a rect, it stops being a measurement and starts
+  being a pointer into the page, and this paragraph is the thing that is then
+  wrong.
+
+**`changed` is never a model self-report (D5), and that is a rule rather than
+an observation about the current wiring.** `changed` is `deps.canvas_changed` and
+nothing else; a model saying "I clicked submit" is not evidence, and a model
+claim belongs in `outcome`, which already carries what the model was told. D5
+here is load-bearing because the alternative is worse than a wrong boolean: a
+self-reported `changed` would be the model grading its own homework, written
+into the same field a measurement writes, with no marker distinguishing them. A
+reader of the audit document could not tell which one it is reading.
+
+**The tri-state is the privacy-relevant part as much as the correctness one.**
+`changed` is `null` whenever we could not tell — a first observation, a
+navigation, a canvas page with no tree to compare — and the default is `None`,
+never `False`. `False` is a claim that the page did not change; `null` is a
+claim that we did not look. Collapsing them would write a false statement about
+a page into the user's own record, which is the same silence-is-not-a-
+measurement error as elsewhere in this doc.
+
+**A cap on volume, and it is recorded rather than silent.**
+`MAX_ACTIONS_PER_SESSION = 5_000`: a 150-step run records a few hundred of these
+and stays readable, while a model stuck in a dispatch loop must not grow the
+document without bound. Over the cap the entry is **dropped and counted** in
+`totals.actions_dropped` — never truncated mid-sequence, because a half-written
+action is indistinguishable from a real one. Both constants are in `audit.py`
+beside the comment that says what they are for.
+
+Pinned by `tests/test_grounding_outcome.py` — including the case that matters
+most, where the fake executor asserts the page updated on *every* action and the
+assertion is that `changed` is still `None`.
+
+**An approval caveat is card text, and the split that keeps it out of the audit
+is structural, not editorial.** A coordinate click cannot be checked before it is
+dispatched (`agent-loop.md` has why), so every coordinate approval card carries
+the caveat that the destination is unreadable in advance. It rides `_ask_user`'s
+`frame_reason`, while `reason` — the argument `audit.record_prompt` is called
+with — carries the audit reason. Merging them would put "this may leave the
+site" into every user's audit document, and that sentence is the one part of the
+approval with no domain and no page content in it. **A reader of the audit
+document sees that a domain was approved; the caveat about what could not be
+checked for it exists only on the card the user actually saw.**
+
+**A pre-flight `click_cross_domain` event is a grant, and today it is a grant
+only to the run that asked for it.** The gate records `policy_events` with
+`user_decision: "approved"` *before* the click it authorizes — the consent to
+the site is the fact being stored, not the navigation — but neither of the two
+paths that outlive a run reads it back. `_resume_state` restores
+`visited_domains` from `first_navigation` and `first_time_seen` kinds only, and
+the grant file is written by `_persist_domain_grant`, which today has one caller:
+the first-time-seen approval. So a resumed session, and a new session on a new
+process, re-asks about a site the user already said yes to in this one.
+
+**Not built, and recorded here so the asymmetry is not mistaken for a policy.**
+Either fix is small — add `click_cross_domain` to the kinds `_resume_state`
+restores, and call `_persist_domain_grant` where the pre-flight approval lands —
+and neither is a change to what the *card* shows. Until one ships, this doc is
+the only place the difference is written down.
+
+**3e. Two lists, because "redact this value" and "this run touched a credential"
+are two different claims (2026-10-20).**
+For a while one list, `run_secrets`, was doing both jobs, and that conflation was
+the bug. It is now split, and the split is the evidence bar:
+
+- **`run_secrets` takes every latched value.** It is the *scrub* list, read by
+  `_safe_thought`, `_safe_reasoning` and `_summarise_outcome`. That is the
+  reason it exists: a later step's thought must never quote a value the agent
+  typed on an earlier one. Latching is the positive-identification half of
+  `_redact_if_secret`, so the list holds only credentials; a value the harness
+  merely refused to write is masked in the action arguments and nowhere else
+  (3h). It earlier took every redacted value, and 3h narrowed it.
+- **The veto is `_PixelVeto`**, and the three veto sites read it through one
+  helper — `get_page_delta`, `_vision_fallback` and `_execute_action`. It holds
+  two things, and they have two different lengths: `latched`, the positive
+  identification that a credential was touched, and `armed_at`, the step of an
+  ambiguous write. `latched` is run-wide; `armed_at` opens a window. That
+  window is 3g.
+
+**Redaction fires on the absence of evidence; the run-wide veto cannot.** "This
+one value looks like a password" concerns one argument in one action and must
+fail closed, because you cannot prove a canvas cell is not a password widget.
+"This run touched a credential" vetoes pixels for *every remaining step*, so it
+requires positive evidence, and `_redact_if_secret` / `_redact_press_key` return
+that as a second element rather than folding it into the first.
+
+What the conflation cost, in a live Google Sheets run: the grid is a `<canvas>`,
+its AX tree is 62 targets and does not change when you type, so the pixel delta
+and the screenshot were the **sole** signal that an edit landed. One
+blank-named grid cell latched the flag, and the agent went blind for the rest of
+the run — re-clicking the same cell seven times. A false positive here was never
+one login; it was the run.
+
+**The second instance of the identical bug, found only because the first was
+fixed.** `_redact_press_key` returned a bare `bool` that its caller turned into
+`latch=True`, on a path that answers "unknown" three times out of four because
+no relay implements `focused_attributes()` yet. Every literal keypress — every
+Enter on a canvas — latched the poisoned run. The lesson generalises past this
+file: **"fix the branch that was named" and "fix the bug" are different
+achievements, and the grep is what tells you which one you did.**
+
+**The veto rule itself did not weaken.** `redactions or run_secrets` still vetoes
+the delta and the screenshot, the veto is still there on every path, and there
+is no new setting and no override. What changed is which inputs are allowed to
+*assert* that the run saw a credential — not what happens to a run that did.
+The second change was to the *duration*, and that is 3g: the run-wide claim is
+now one of two, and the other one has a window.
+
+
+**3f. A secret-name boundary is a word split, not a lookaround.** The old
+matcher matched mid-word: `tokenize`, `secretary`, `author`, `authority` and
+`authenticated` all read as credential fields, and so does an exported
+`Session ID` column header on a spreadsheet. `auth(?:orization)?` had no
+boundary at all. Every one of those is a **run-wide latch**, and one false
+positive vetoes perception for the rest of the task — so on a document app the
+detector was close to unusable, while the page it was protecting was a
+spreadsheet.
+
+The first fix expressed the boundary as `(?<![A-Za-z])…(?![A-Za-z])`. It does
+not work, in both directions. **Under-matching:** only ASCII letters are
+excluded, so `access_token` is not `\btoken` — `_` is a word character — and
+every compound snake_case name, the most common real field shape, walks
+straight past the single-word rule. **Over-matching:** when that boundary was
+later tightened, four genuine credentials stopped being detected —
+`Session identifier`, `sessionIdentifier`, `authorizationCode`, `pinNumber`
+— because a trailing boundary fires after the *short* alternative inside
+`identifier` and `Number`. The test suite stayed green, because the tests had
+been written against the broken matcher. A credential detector that silently
+stops matching is worse than one that over-matches, and **nothing in a passing
+CI run tells you which of the two you have.**
+
+So the boundary is not a lookaround over the raw string — `_`, `-` and camel
+case each defeat one — but a **normalisation first**. `_secret_by_name` splits
+the accessible name into whole words (`_NAME_SPLIT_RE`: any non-alphanumeric
+run, the lower→Upper hump, and the last capital of an acronym run), strips
+trailing digits from each (`Password1` is `password` plus a number), then
+matches any single word against `_SECRET_WORDS` and **every contiguous run of
+words** against `_SECRET_COMPOUNDS`. `apiKey`, `api_key` and `API key` all
+reduce to the run `apikey`, which is why camel case needs no pattern of its own.
+
+**The contiguity requirement is load-bearing.** Matching only the fully
+flattened name broke the clarify question, which arrives as *"what's the
+verification code?"* and not as a bare label — only the run `verification code`
+says `verificationcode`. And it is also what keeps this from becoming mid-word
+matching again, because contiguity is what makes `TokenBucket` the run
+`tokenbucket` and `Session Name` the run `sessionname`, neither of which is a
+compound. The single-word list is deliberately short: `token`, `session`,
+`code` and `id` are absent, and their real compounds are enumerated instead, so
+`tokenize`, `Session Name` and `Cell A1` stay ordinary words while
+`access_token` and `SessionID` do not.
+
+**Only the detector moved.** `type="password"` still wins outright whatever the
+name says — it is checked first and the name rules only ever add — and no caller
+of `is_secret_field` was touched, so nothing outside the matcher changed
+behaviour. The two false positives the old boundary was *accepted* with,
+`myAuthorship` and `clientSecretariat`, are now simply not matches.
+
+Pinned by `tests/agent/test_secret_field_boundaries.py`, which declares one
+partition of positive and negative labels and asserts it in both directions —
+so a boundary change cannot move a label from one side to the other without a
+single assertion going red.
+
+**3g. The veto has two durations, because the two claims do (2026-10-21).**
+`_PixelVeto` (`agent/harness.py`) holds both claims the veto has to serve, and
+they do not have the same length.
+
+- **`latched` — positive evidence, run-wide, never releases.** A field that
+  positively identifies as a secret (`is_secret_field`). A credential can be
+  rendered into this page or the next at any point in the run, so nothing
+  shortens it.
+- **`armed_at` — the step of the newest ambiguous write.** A value that was
+  redacted but could not be classified: a canvas cell, a field with no
+  accessible name, a literal keypress with no focused element to read.
+  `open(step)` is `latched or 0 <= step - armed_at <= _AMBIGUOUS_PIXEL_WINDOW`,
+  and the window is 2 — so the shutter is closed on the armed step and the two
+  that follow, and open again on the third.
+
+**The window closes the actual exposure, and then releases.** A value cannot
+have been rendered before it was typed, so the only exposure from an ambiguous
+write is the observation taken *after* the keystroke: the page paints it into
+the DOM, a password manager echoes it back, a live-validated form redisplays
+it. Two more steps have had a full observation each by then — the stability
+gate, the AX walk, the repaint — and the claim is spent. Latching it instead
+vetoed pixels for the rest of the run, and on a canvas that was the run's only
+channel.
+
+**The window is keyed on the step number and is read, never consumed.** Nothing
+decrements it and nothing resets it. `deps.step_number` is the unit because it
+is the only one a `break`, a terminal action, `ask_human`, a cancellation or
+`deps.result` ending the loop cannot consume unevenly — and a step that calls
+three veto sites cannot eat the window and make it narrower than advertised. A
+second ambiguous write does not shorten an open window either: `arm` takes the
+`max`, so a later write re-opens the shutter rather than closing it early.
+
+**The window includes the armed step.** The keystroke has just happened and
+nothing has settled; that is the least safe moment in the run, not the most,
+and closing it costs nothing — the pixels it suppresses are pixels of a page
+mid-typing.
+
+**One place turns the window into an answer, so the delta and the screenshot
+cannot disagree.** `_pixel_latch(veto, step)` returns the latched values, or
+`["[redacted-value]"]` while an ambiguous window is open, or nothing at all.
+The relays read the list for truthiness and never log it, so the marker carries
+a fact and not a value: no typed text is anywhere in it.
+
+**The veto rule itself did not weaken.** `redactions or run_secrets` still
+vetoes the delta and the screenshot, on every path, and there is no new
+setting and no override. What changed is which inputs may *assert* that the
+run saw a credential, and for how long.
+
+**The asymmetry is intended.** The *value* of an ambiguous write stays on the
+run-wide scrub list for the whole run, so a later thought can never quote it.
+Its *pixels* are withheld for the window only. The text of a value is scrubbed
+everywhere it might resurface; the picture of it is withheld for as long as it
+could plausibly be on screen.
+
+**Still open, and recorded as open rather than designed.**
+
+- `type_xy` and a literal `press_key` character are always ambiguous writes,
+  so they arm the window on most canvas steps — and a run that keeps typing
+  keeps re-arming it. The window is bounded in time, not in the presence of
+  continuous writing, and on such a run the delta is withheld on most steps.
+  That is the same evidence channel the canvas case depends on, so the canvas
+  case is not closed by the window. **It is now one channel of two, on a page
+  that offers a second.** Pressing the accessibility shortcut a canvas app
+  names in its own page text — which the prompt permits only for the one chord
+  it allows a page to direct, Option/Alt + Z with Command or Ctrl — puts the
+  selected cell's address and content in
+  the tree, and a pixel veto does not withhold the tree — so a canvas step can
+  be checked without photographing anything. **That changes nothing here**: the
+  tree is not redacted either, so a written value is visible in it exactly as
+  it is in a DOM form, and no veto, redaction rule or capture budget was touched
+  to get it. `agent-loop.md` owns the mode.
+- The accessibility tree is the other channel redaction does not reach, and
+  nothing here closes it.
+
+Pinned by `tests/agent/test_pixel_veto_window.py`, which asserts the window
+cannot be narrowed by the number of veto sites a step calls, that a second
+ambiguous write re-opens rather than shortens it, and that the marker carries
+no typed value.
+
+**3h. The record and the model read different lines, and they have to
+(2026-10-21).** One marker used to serve two audiences, and the model was the
+wrong one for it.
+
+**The split.** A value the harness will not record is written into two places,
+and they are two different audiences with two different questions:
+
+- **The record** — the audit document on disk, and the extension's IndexedDB
+  mirror of that document — keeps `audit.REDACTED`, `"[redacted:password]"`.
+  It answers *what was written down*, and it is read by a person or a grep,
+  months later.
+- **The model's line** — the action line in the trace — carries
+  `prompt.WITHHELD`, `"[withheld from the record]"`. It answers *what the
+  model is allowed to see*, and it is read by a model that will act on it.
+  The narration, the step's outcome summary and the thought that is rendered
+  into the next prompt carry the same marker, but only for a value from a
+  positively-identified credential field — see the narrower guarantee below.
+
+**Why one marker could not serve both.** The old token was
+`"[typed into a secret field]"`, and it made a claim about a **field**. The
+model read that claim as a claim about its **own input** — the action line
+puts the marker on the line describing the action the model just took, so the
+nearest claim is "my input was treated as a secret and swallowed". On a canvas
+app every cell is unclassifiable, so every typed value was marked, and the
+model reached a conclusion that was consistent with the evidence it had: that
+the harness was blocking it. It then stopped typing and spent the run looking
+for a block that did not exist. Nothing was ever refused; the text reached the
+page unmasked. The only thing that was wrong was the sentence.
+
+**The guarantee is narrower in the model's prose than in the action
+arguments, and that is now on purpose.** The value the harness refuses to
+write is masked **in the action arguments** — the per-action `redact` flag
+covers both audiences there, and only the length survives, so a consumer can
+tell "typed something" from "typed nothing". But the value joins the
+**run-wide list** — the list the step's outcome summary, the narration, the
+thought and the reasoning are scrubbed against — only when the field
+**positively identifies as a credential**. So in the model's own words the
+guarantee is: a value from a positively-identified credential field is
+substituted out, and a value the harness merely refused to write is not.
+
+**Why it was narrowed.** On a canvas every typed value is unclassifiable — a
+cell has no backend node and a blank accessible name — so the old rule put
+ordinary words on the prose scrub list, and the model read its own sentences
+back as gibberish. A measured run's step 7 read "A1 should say [withheld from
+the record], B1 should say [withheld from the record]" for the very headers it
+had just typed. The cost of the stronger rule was a run that could not read
+what it had written; the cost of the narrower one is that an unclassified
+value may reappear in the model's own prose — and the prose is recorded, in
+the audit document and in the extension's mirror of it, so for such a value
+the on-disk guarantee is the action arguments and not the whole document.
+
+**The match did not change, and that is deliberate.** The substitution removes
+the value wherever it appears, whole string or part of one, longest value
+first. Every value on the list is a positively identified credential, so the
+safe direction there is to over-redact: a credential that survives because it
+sat inside a longer token ("pw1" inside "pw123") is a credential on disk. The
+model's prose became readable again because **the list holds only positively
+identified credentials** — not because the match was loosened. An unclassifiable
+value (every typed value on a canvas) is ordinary data and never reaches the
+list; the mask in the action arguments is what protects it.
+
+**The published policy already says the narrower thing, so it does not
+change.** `PRIVACY.md` promises redaction for "values typed into a field the
+orchestrator identifies as a secret — anything with `type="password"`, or a
+field whose name reads like a credential, a token, or a code". That is
+positive identification, not "every value the harness declined to write", so
+the public copy never made the stronger internal claim and there is nothing
+there to correct. (Check it against the published file, not from memory: it
+is the one a visitor reads.)
+
+**The dispatch was never the problem.** The value is sent to the page exactly
+as the model wrote it, so nothing about what is kept, what is scrubbed or what
+is retained has changed — what changed is which values are eligible to be
+scrubbed out of the model's prose, and why.
+
+**A marker with no definition is a hole in a closed vocabulary.** The
+redaction vocabulary is closed on purpose: every token in it is a promise that
+the token means one thing. The old marker was a token the prompt had never
+defined, so the model supplied the definition — the worst one available. The
+fix has two halves and both are needed: the token now says what happened
+("withheld from the record" — a fact about the record), and `SYSTEM_PROMPT` now
+defines it, including the part that is a claim about the world: **the text was
+typed**, a typing that did not reach the page is reported as a failure
+instead, and the value is not recoverable from the marker, so read it back off
+the page or ask the user. `agent-loop.md` carries the loop's half — what the
+model did with the old token, and the rule that a marker the model has no
+definition for is a marker the model will interpret.
+
+Pinned by `tests/agent/test_withheld_marker.py`, which asserts the two
+markers, the prompt's definition of the model-facing one, that the value never
+reaches the **recorded action**, and that the narration carries the value
+rather than a marker about a secret field; and by
+`tests/agent/test_prose_scrub.py`, which asserts the narrower rule end to end
+— an unclassified value stays in the model's own words and is still masked
+where it was typed, a credential is still scrubbed out of the model's words,
+and the substitution removes the value wherever it appears and is
+longest-value-first. `tests/agent/test_memory_capture.py` pins the same
+over-redaction on the narration in
+`test_a_credential_is_removed_even_inside_a_longer_token`.
+
+**3i. The write ledger is user data, and it is redacted on the same terms as a
+typed action argument (2026-10-22).** The closed loop writes a ledger — every
+write the run attempted, and what the target said when it was read back — and
+a plan, the steps the run declared. A **cell value is a typed value**: the
+user typed it, and it is the user's data by rule 1 and rule 3 alike.
+
+**A cell's value does not go to disk at all — only its length does.** Two
+fields of a ledger entry hold a value: `intended` (what the model meant to
+write) and `observed` (what the target read back); a plan item holds `value`.
+Each is replaced with the **fixed** mask `[redacted:cell-value]`, and its
+length is kept beside it as `intended_chars` / `observed_chars` / `value_chars`.
+That is the rule this document already follows for the observation block —
+counts, never content, the AX diff reduced to a length for exactly this
+reason — applied to the one block that had forgotten it.
+
+**This is a rule about the STRUCTURED blocks — the ledger and the plan.** The
+run's final `summary` is the transcript the user reads, and it may quote what
+the page actually holds: when the run ends failed, the server appends the
+discrepancy to the summary (`_append_discrepancies`, `harness.py:3567`) so the
+user can see what the cell really reads, and that text carries the observed
+value. The summary reaches the document as the run's `result`
+(`audit.py:1066`). So read the rule as **the ledger and the plan never carry a
+cell's contents**, not as *no cell content is ever on disk* — a reader who
+takes the second reading will be surprised by the summary, and a reader who
+takes the first and misses the summary will be surprised by the user.
+
+**Why shape-based redaction is the wrong tool here.** The first version of
+this rule sent those values through the existing `redact_text`
+(`_redact_entry`, `audit.py`), which catches things that *look* like keys. A
+spreadsheet cell's contents are user data regardless of shape: a column of
+customer names has no secret shape, and `age` survived the redactor
+untouched. Shape-based redaction is right for a field *named* for a secret —
+there, the name is the evidence — and wrong for a field whose contents are
+user data by rule 1 whatever they look like. The mask is fixed, and
+`redact_text` still runs over what remains.
+
+**The plan's `intent` is the model's own prose, and stays — minus the value.**
+An intent is the model's sentence about the step ("write the card number to
+A1") and is persisted like every other model prose in this document. What it
+may not carry is the value, so any occurrence of the item's own `value` inside
+the intent is masked before the shape-based redactor runs.
+
+**An identifier is never text.** The `target_key` names *which* cell a verdict
+is about, and a name is not a value: `confirmed`, `mechanism` and `step` are
+the same — a status, a name, a number. But a key is not automatically free of
+content, because a `ref:` or `desc:` key carries a name that came off the
+page's accessibility tree or out of the model's own prose. So the rule is by
+**kind of key**:
+
+- `cell:A1` stays **literal**. A cell address is the task's own, not the
+  page's, and the user named it.
+- a `ref:` or `desc:` key is **digested**. What reaches the document is
+  `sha256:ref:<16 hex>` — the digest of the whole key, with the kind kept
+  inside it so a reader can still tell what sort of target it was. The page's
+  text stays on the page.
+
+The `sha256:` prefix is load-bearing: `canonical_target_key` only ever emits
+`cell:`, `ref:` or `desc:`, so a readable key can never begin `sha256:`, and
+page text that happens to spell out something shaped like a digest is still
+digested rather than mistaken for one. The digest is over the **whole** key
+and it is **idempotent** — a key that already starts with `sha256:` comes
+back unchanged — so a key read back from the document and the readable key the
+run holds produce the same opaque form, and comparing the two is still an
+equality (`opaque_target_key`, `closed_loop.py:165`; `_same_target`,
+`harness.py:3099`).
+
+**The in-memory key stays readable.** Only the *persisted* form is digested.
+The model still needs to see which element a write went to, and the harness
+resolves a live target from the readable key — a digest names no element, so
+it cannot be resolved. The comparison on both sides is on the opaque form, so
+the readable key and the digested one still match.
+
+**The comparison happens in memory, on the real value.** The in-memory ledger
+holds the real `intended` and `observed` — the harness compares them there,
+and that comparison is never persisted. The redaction happens on the *audit
+side* of the disk: `record_ledger` is handed the real attempts and redacts
+them on the way in. So the guarantee is the same shape as 3c's — **redacting
+on the way out while storing the raw string would have left the value sitting
+in memory for a later step to fetch**.
+
+**A masked value cannot be compared, and a historical verdict is not
+evidence.** A rehydrated plan item's value is the mask, not the value, so the
+completion pass cannot compare it against the cell, and the verdict is
+**`unknown`**. The `confirmed` flag stored beside it is **not** a substitute:
+it describes the cell as it was when the write happened, and the page may
+have changed under it since, so promoting it to a present-tense confirmation
+is fail-open. A run that reports "A1 is confirmed" without reading A1 is
+exactly the lie the closed loop was built to stop.
+
+**A resumed run re-verifies by writing again, and the plan is never narrowed
+to fit.** The completion pass grades **one target per plan requirement** — the
+plan's shape, not the ledger's. A target the plan named and the resumed run did
+not rewrite is still a requirement and grades **unknown**; dropping it because
+the ledger does not mention it would be the same fail-open as not checking it.
+For a masked item the value graded against is the write **this process** made
+for that target (`_current_attempt`, `harness.py:3416`): a rehydrated ledger
+entry's value is the mask and cannot stand in for a fresh write, which can,
+and it is checked against a **fresh read** of the cell, so the verdict is about
+the cell as it is now. A masked item with no such write keeps its masked value
+and grades **unknown**. A run with **no plan at all** is graded on the ledger's
+targets. A resumed run that wrote nothing has no value to compare and no fresh
+read, so its completion is **refused once**; a **second** completion that is
+still unresolved ends the run as `failed`, `failure_reason:
+"cannot_complete"`, with the discrepancy appended to the summary. It never
+claims a confirmation it cannot prove, and it never reports `completed` while
+a verdict is unresolved. The two wrong
+answers are both wrong — a confirmation the run cannot prove, and a mismatch
+that would accuse the page of holding the wrong value when the truth is that
+the *value* is not here.
+
+**The ledger never becomes a metric, a log line, or a count.** Rule 1 is
+absolute and the ledger is exactly the kind of thing rule 1 is about: its
+contents are derived from what the agent *read* and *wrote*. So: no endpoint
+enumerates it, no counter is derived from it, it is not in the panel's metrics,
+and it is not a log line — the relay's grid log lines carry the **address**
+and the error, never the value, and the extension's grid path does not log
+values at all. The one number that is derived from the ledger —
+`blocked_attempts`, the run bound — is an **in-memory** count of unconfirmed
+attempts, used to stop a run, and it is recomputed from the ledger on resume
+rather than accumulated anywhere.
+
+**What is not fixed: the action record and the action outcome carry the
+value.** The redaction above covers the **ledger and plan blocks**. It does
+**not** cover the turn's `actions[]` entry for the `write_text` call, and it
+does not cover the action's `outcome` string, and both carry the value
+verbatim:
+
+- `_typed_field` (`harness.py:1515`) returns a field only for `type_text`,
+  `type_xy` and `press_key`. It does **not** name `write_text`, so
+  `_scrubbed` takes the `field is None` path and returns the arguments
+  unchanged — while the **retired** `type_text` masked its `text` argument in
+  exactly that place. The retirement therefore removed the one path that
+  masked a typed value in the action record, and the replacement does not
+  mask it.
+- The harness's own outcome string is built from the same values —
+  `write_text → confirmed: A1 now reads 'name'`, and on a mismatch
+  `A1 reads 'age' (intended 'name')` — and it is recorded to disk as it
+  stands.
+- The per-action **trace** (`action_taken` in the step summary, which is
+  persisted and replayed) embeds the raw arguments for the same reason.
+- The run's final **summary** may quote the observed value, by design: it is
+  the text the user reads, and the discrepancy appended to it is what tells
+  them what the cell really holds. This one is **not a hole** — the truth in
+  the summary is the point — but it is the reason the rule above is scoped to
+  the structured blocks.
+
+So a card number typed into a cell is masked in the ledger and plan and
+written in plaintext three times elsewhere in the same document. That is a
+real hole and
+it is **not fixed here** — the fix belongs to whoever owns the typed-value
+masking, and it is one line in `_typed_field` plus a redaction of the
+harness's own outcome string. It is recorded here because a privacy rule that
+is only true of one block of the document is not a rule.
+
+Pinned by `tests/agent/test_ledger_resume.py` — a cell value on disk being
+the fixed mask with its length beside it, the structural fields staying
+readable (a `cell:` key is literal), and the plan's `intent` surviving while a
+value quoted inside it is
+not — and by `tests/agent/test_ledger_rehydrate.py` — the masked plan value
+staying **unknown** rather than a mismatch, a resumed plan **never** being
+confirmed from a historical verdict, every plan requirement being graded even
+when the resumed run rewrote only some of them, a masked requirement being
+graded on the write **this process made**, and a resumed run that wrote nothing
+being unable to claim a confirmation — and by
+`tests/agent/test_completion_refusal.py` — the persisted blocks holding **no
+page text** (a `ref:` key's name is digested out of the file, a `cell:` key
+stays literal), a readable key that looks like a digest still being digested,
+the digest being idempotent, and a digested key still matching the readable
+one on the resume path.
 
 **3b. The policy said "one deployment" and there were two.** `PRIVACY.md` opened
 with *"Brotto has one deployment. You run the orchestrator… There is no
@@ -305,11 +929,23 @@ honest about this has to say **no coverage**, not partial coverage, so
 `PRIVACY.md` now carries it as a third carve-out beside the accessibility tree
 rather than leaving it inside the sentence that promises redaction.
 
+**A step whose redaction found something does not get a screenshot.** The gate
+is asked after `redact_text` reported a hit on that step, and it refuses. It is
+worth being exact about what that buys, because it reads stronger than it is:
+it is a guard on the **text** channel, so it cannot fire for a secret that exists
+only as pixels — which is precisely the canvas case the screenshot exists for. A
+card number drawn into a `<canvas>` is invisible to the redactor, produces no
+hit, and so photographs. What the guard does buy is the honest middle case: a
+page that *also* exposed the secret as a string — a field label, a paragraph, a
+table cell — is not photographed on top of it. It narrows the class; it does
+not close it.
+
 **The rule is default refusal, and the reasoning is that a denylist cannot be
 completed.** The alternative shape — a list of URL patterns where capture is
 refused — reads like the obvious fix and is untestable here, for a specific
-reason. The trigger that reaches this gate is *the accessibility tree came back
-empty and the page text with it*, and that is a fact about how a page is
+reason. The trigger that reaches this gate is *nothing the harness can see is
+about the task it was given* (see `_sparse_for_task` in `agent-loop.md`), and
+that is a fact about how a page is
 **implemented**, not about how sensitive it is. Google Docs, Figma and a hostile
 canvas page are byte-identical to that predicate. A chart and an OTP rendered
 on a canvas are the same page to anything that inspects the URL, so no URL shape
@@ -354,7 +990,7 @@ blocked, and is not, is worse off than one who never tried.
 
 So the widening is **local to `screenshot_block_reason`**, and that is the whole
 reason it is not upstream. `check_domain_policy` is shared with the harness's
-approval path (`harness.py:1456`, `:1599`, `:1679`, `:2983`), where `n/a` means
+approval path (`harness.py:1711`, `:1884`, `:1964`, `:2692`, `:2781`, `:4685`), where `n/a` means
 *do not prompt* and a wildcard that quietly widened would move the extension's
 domain-approval behaviour — a different subsystem with its own doc and its own
 semantics. The gate therefore resolves the host itself (`urlsplit().hostname`),
@@ -438,6 +1074,70 @@ never told which — it receives one sentence, "capture was refused by policy."
 Otherwise a model could infer, from a refusal, that *this particular* URL would
 have been blocked, which turns a local policy into an oracle the user can be
 probed through.
+
+### A canvas page is photographed more often, never more safely
+
+The gate above is unchanged — same veto, same switch, same blocklist, same
+"transit only" rule — and the amount of the user's screen that leaves the
+machine on a canvas page has gone **up**. That has to be said here rather than
+left to be inferred from a ceiling constant in another file.
+
+**What changed.** The model's picture on a canvas page used to be capped at
+three per task, and the reason was a cost guard: three is a *supplement*
+budget, and it is only the right number on a page the agent can otherwise
+read. On a canvas page the content is in neither the accessibility tree nor
+the page text — **as the page arrives**; an app that names an accessibility
+shortcut in its own text puts the *selected cell* back in the tree once that
+is pressed — and the prompt permits a page to direct exactly one chord,
+Option/Alt + Z with Command or Ctrl, so a page naming any other chord gets
+nothing. It is a verification channel and not a way to read the sheet, and
+which is why the ceiling below is unchanged rather than raised. So the picture is
+the perception channel, and the ceiling is now
+`_MAX_CANVAS_CAPTURES_PER_TASK = 40` — the picture arrives on **every step of
+the task** while that budget lasts, instead of on three of them. The approval
+card's picture is a second, separate budget (`deps.screenshots_taken` against
+`deps.sight_captures`, split because one counter for two buyers starved the
+model's on a canvas page). So a long canvas task now sends up to forty
+pictures of the user's screen to the model provider where it sent at most
+three, and the number of pictures the **user** is shown is bounded the same
+way.
+
+**What did not change, and is the whole safety story.**
+
+- The `redactions or run_secrets` veto is still checked **before the model is
+  even resolved** and again inside `_capture_page` — the shared guard every
+  capture site routes through. A step whose redaction found something is not
+  photographed, and an empty redaction dict is the absence of a detector
+  firing, never clearance.
+- `BROTTO_VISION_CAPTURE` is still default-off, still accepts only an
+  explicit `on`/`1`/`true`/`yes`, and still unparseable-means-refusal. A
+  capture-off run photographs nothing, canvas page or not.
+- The domain rules are the same ones: `screenshot_block_reason` refuses a
+  blocked domain, an unresolvable host, and the curated special-use suffix
+  set, and it refuses our own relay too.
+- The base64 is still **transit only**: on the turn, into the prompt, to the
+  provider — never in the audit document, never in a log line, never in an
+  outcome, never on disk. The one log carries a byte count and nothing else.
+
+So the sentence to keep in view is: **a canvas page is photographed more
+often, never more safely.** A higher count on the one kind of page where the
+pixels are the only content is a deliberate trade — a run that cannot see the
+grid fails — and it is a trade that buys *reach*, not *permission*. The gates
+are the gates.
+
+**The CSS-resolution change is not a new disclosure.** Asking for the
+CSS-pixel copy instead of the device-pixel one is **the same viewport and the
+same content with fewer pixels**: the frame is the same page, at the same
+moment, downscaled before it is sent. What it changes is the size of the
+picture and the size of the coordinate space it agrees with, not what is in
+it. The number of images and the number of pixels in each are the only two
+things that moved, and the first is the subject of the paragraph above.
+
+**The card's picture is not egress to a provider.** The approval card is
+shown to the user, on the user's own machine, and the model never sees it —
+which is why its budget is counted separately rather than being a second
+consumer of the model's. It does transit the server on the way to the panel,
+and that is the same local relay the rest of the run uses.
 
 ## Where this is going: local-first
 
@@ -842,11 +1542,14 @@ the operator's credits are spent, and "we could not check whether this person
 was revoked" is not a licence to serve them. A self-host relay never reaches
 the function — no `Claims` object exists there.
 
-**Retention now has a default, and only here.** `BROTTO_RETENTION_DAYS`
-unset returns 30 on the hosted relay and `None` everywhere else. The reason is
-the same asymmetry as everything above: a self-hoster's disk is their own data,
-an ephemeral dyno is ours, and nobody was deciding the second one. An explicit
-setting still wins, **including `0`**.
+**Retention has no default, here or anywhere.** `BROTTO_RETENTION_DAYS` unset
+returns `None` on every deployment — the hosted relay included, which
+`test_the_hosted_relay_does_not_age_sessions_out_unless_asked`
+(`tests/test_beta_auth.py:647`) pins. The asymmetry is the same one as
+everything above, and it is the reason an *operator would* set it: a
+self-hoster's disk is their own data, an ephemeral dyno is ours, and nobody was
+deciding the second one. The live relay does not set it, so nothing is aged out
+there in practice either. An explicit setting still wins, **including `0`**.
 
 ## One operator per server was an assumption, and four things were built on it
 

@@ -345,7 +345,7 @@ def test_an_outcome_is_redacted_when_it_is_stored_not_when_it_is_rendered():
     cdp = deps.cdp
     cdp.get_targets = AsyncMock(return_value=[_t("0:1", "Save")])
 
-    async def _leaky(call, deps_, audit=None, turn=None):
+    async def _leaky(call, deps_, audit=None, turn=None, **_ignored):
         return "Error executing type_text: card 4111 1111 1111 1111 was rejected"
 
     async def _once(deps_, turn, agent, audit=None):
@@ -416,6 +416,7 @@ def _deps() -> AgentDeps:
     cdp.get_targets = AsyncMock(return_value=[_t("0:1", "Save")])
     cdp.get_current_url = AsyncMock(return_value="https://example.com/settings")
     cdp.get_page_text = AsyncMock(return_value="nothing to see")
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Settings")
     cdp.refresh_target_map = AsyncMock()
 
@@ -432,7 +433,7 @@ async def test_an_action_after_a_scroll_waits_for_the_next_step(monkeypatch):
     refuses it. Recorded run a19cf208 lost steps to exactly this."""
     executed: list[str] = []
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         executed.append(call.action)
         if call.action == "task_complete":
             from brotto_orchestrator.agent.context import TaskResult
@@ -472,7 +473,7 @@ async def test_a_batch_without_a_scroll_still_runs_in_full(monkeypatch):
     """The guard must not cost a legitimate multi-action step."""
     executed: list[str] = []
 
-    async def _fake_execute(call, deps, audit=None, turn=None):
+    async def _fake_execute(call, deps, audit=None, turn=None, **_ignored):
         executed.append(call.action)
         if call.action == "task_complete":
             from brotto_orchestrator.agent.context import TaskResult

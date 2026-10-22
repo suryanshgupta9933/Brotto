@@ -110,6 +110,7 @@ REPORTABLE: frozenset[str] = CLIENT_CODES | frozenset({
     "cannot_complete",
     "budget_exhausted",
     "runaway_backstop",
+    "page_not_responding",
     "task_refused",
     "duplicate_task_start",
     "user_skipped_login",

@@ -32,6 +32,107 @@ def _relay(targets: list[dict]) -> ExtensionCDPRelay:
 FAIL_PREFIX = "Error executing"
 
 @pytest.mark.asyncio
+async def test_type_text_refuses_when_nothing_holds_focus():
+    """Session 445fc36d: a newly navigated Google Sheet has no selected cell,
+    `document.activeElement` is `body`, and `Input.insertText` is discarded —
+    but the run reported "Typed into [0:10050]" and completed on an empty
+    sheet. A ref resolving is not a place the text lands."""
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    relay.focus_id = AsyncMock(return_value="body")
+
+    out = await relay.type_text_to_ref("0:7", "Name")
+
+    assert out.startswith(FAIL_PREFIX)
+    assert "focus" in out
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_type_text_refuses_when_focus_is_unreadable():
+    """`None` is unknown, not "no focus" — the press_key guard already
+    refuses on it, and typing is no safer than a key press."""
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    relay.focus_id = AsyncMock(return_value=None)
+
+    out = await relay.type_text_to_ref("0:7", "Name")
+
+    assert out.startswith(FAIL_PREFIX)
+    relay._ws_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_type_text_never_echoes_the_focused_element():
+    """The success string asserted a destination it never checked, and its
+    second half named an id the *page* chose. That outcome goes to the audit
+    document and to the model's history — page content in a file we own — so
+    the element is reported as unnamed. It stays a success (no `Error
+    executing:` prefix) so `ok` is still derived true."""
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    relay.focus_id = AsyncMock(return_value="DIV[3]")
+    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+
+    out = await relay.type_text_to_ref("0:7", "Name")
+
+    assert not out.startswith(FAIL_PREFIX)
+    assert "[0:7]" not in out
+    assert "DIV[3]" not in out
+
+
+@pytest.mark.asyncio
+async def test_type_text_does_not_log_the_page_chosen_id(caplog):
+    """A log sink is a parser input. An id carrying a newline or an ANSI
+    escape would write lines into our own logs, so the id is never logged."""
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
+    relay.focus_id = AsyncMock(return_value="INPUT#a\nFORGED 2026-10-20 ok\n")
+    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
+
+    with caplog.at_level("INFO"):
+        await relay.type_text_to_ref("0:7", "Name")
+
+    assert "FORGED" not in caplog.text
+
+
+def test_a_page_chosen_id_outside_the_grammar_is_not_a_focus_id():
+    """Shape-validated at the boundary, so forging is impossible rather than
+    unlikely. Anything `FOCUS_ID_JS` cannot produce reads as unknown — which
+    is what every caller refuses on."""
+    from brotto_orchestrator.cdp.relay import parse_focus_id
+
+    # What the JS can return, and nothing rejected.
+    for real in ("none", "body", "DIV[3]", "INPUT#name", "A#a.b:c-d_9"):
+        assert parse_focus_id(real) == real
+
+    for forged in (
+        # A bare tag is not a safe identity — every `<div>` shares one — so
+        # `FOCUS_ID_JS` can never return it. If the grammar admits it anyway,
+        # a foreign reply shaped `DIV` reads as a real focus answer.
+        "DIV",
+        # `FOCUS_ID_JS` builds the ordinal from a JS array index, which is
+        # ASCII-only, so `INPUT[٣]` is not a value the producer can return.
+        # Python's `\d` is Unicode by default and would have admitted it.
+        "INPUT[٣]",
+        "INPUT#a\nFORGED line",
+        "INPUT#a\x1b[31mred",
+        "INPUT#a b",
+        "INPUT#" + "x" * 65,
+        "DIV[9999999]",
+        '{"json": true}',          # a foreign evaluate reply
+        "the page moved focus",
+        None,
+        "",
+    ):
+        assert parse_focus_id(forged) is None, forged
+
+
+def test_focus_id_js_rejects_an_exotic_id_before_concatenating_it():
+    """The same grammar, in JS, because that is where the untrusted string is
+    joined onto a tag name."""
+    from brotto_orchestrator.cdp.relay import FOCUS_ID_JS
+
+    assert "^[A-Za-z0-9_.:-]{1,64}$" in FOCUS_ID_JS
+
+
+@pytest.mark.asyncio
 async def test_a_ref_absent_from_the_tree_is_a_failure():
     """The whole point: a ref the model made up is a grounding failure."""
     relay = _relay([{"ref": "0:7", "role": "button", "x": 10, "y": 20}])
@@ -65,7 +166,7 @@ async def test_a_ref_with_coordinates_still_clicks():
 
     assert not out.startswith(FAIL_PREFIX)
     relay._ws_send.assert_called_once_with(
-        {"type": "action", "action": {"type": "click", "x": 10, "y": 20}}
+        {"type": "action", "action": {"type": "click", "x": 10, "y": 20, "backendNodeId": None}}
     )
 
 @pytest.mark.asyncio
@@ -80,16 +181,20 @@ async def test_type_text_into_a_hallucinated_ref_does_not_type():
     relay._ws_send.assert_not_called()
 
 @pytest.mark.asyncio
-async def test_the_harness_stops_type_text_when_focus_failed():
-    """Belt to the relays' braces: the harness must not type after a focus
-    that reported failure, or the text goes to a field the model never named."""
+async def test_the_harness_never_dispatches_type_text():
+    """Belt to the relays' braces: the harness must not type at all through
+    the retired action. `type_text` types and reports a dispatch without
+    checking anything landed — which is how a Google Sheets run wrote its
+    headers into the grid's address box and reported itself done. The wire
+    spelling stays for one minor; the dispatch does not. The relay's own
+    guards are still pinned by its own tests, in `test_type_text_fast_path.py`.
+    """
     from brotto_orchestrator.agent.harness import _execute_action
     from brotto_orchestrator.agent.context import ActionCall
 
     cdp = AsyncMock()
-    cdp.focus_ref = AsyncMock(return_value="Error executing: ref '0:99' is not in the current AX tree")
-    cdp.clear_ref = AsyncMock(return_value="ok")
-    cdp.type_text_to_ref = AsyncMock(return_value="ok")
+    cdp.type_text_into_ref = AsyncMock(
+        return_value="Error executing: ref '0:99' is not in the current AX tree")
 
     deps = SimpleNamespace(
         cdp=cdp, step_number=3, user_id="u", result=None, steering=None,
@@ -98,16 +203,17 @@ async def test_the_harness_stops_type_text_when_focus_failed():
 
     out = await _execute_action(call, deps)
 
-    assert out.startswith(FAIL_PREFIX)
-    cdp.clear_ref.assert_not_awaited()
-    cdp.type_text_to_ref.assert_not_awaited()
+    assert out.startswith("REFUSED") and "write_text" in out
+    assert not [c for c in cdp.mock_calls
+                if c[0] in ("type_text_into_ref", "focus_ref", "clear_ref",
+                            "type_text_to_ref")]
 
 def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
-    """The harness decorates the relay's outcome as `Clicked [ref]: <result>`,
-    which puts a success-shaped prefix in front of the failure marker. A
-    derivation that only looks at the *start* of the string then writes
-    ok=True for a click that never happened — which is exactly what a live
-    Gmail run recorded."""
+    """`ok` is derived by membership of `Error executing`, not by prefix, so a
+    failure records as a failure whatever it is wrapped in. The harness used to
+    wrap click outcomes as `Clicked [ref]: <result>` and no longer does; this
+    is what stops that being re-introduced and a click that never happened
+    being written as ok=True — which is exactly what a live Gmail run did."""
     import json
 
     from brotto_orchestrator.agent.context import ActionCall, AgentDeps
@@ -123,6 +229,7 @@ def test_a_wrapped_failure_is_still_recorded_as_not_ok(tmp_path):
     cdp.ping = AsyncMock(return_value=True)
     cdp.get_targets = AsyncMock(return_value=[])
     cdp.get_current_url = AsyncMock(return_value="https://app.example.com/")
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Home")
     cdp.get_page_text = AsyncMock(return_value="")
     cdp.refresh_target_map = AsyncMock()
@@ -171,25 +278,35 @@ async def test_a_bare_node_id_resolves_to_its_composite_ref():
 
     assert not out.startswith(FAIL_PREFIX), f"recorded as ok=False: {out!r}"
     relay._ws_send.assert_called_once_with(
-        {"type": "action", "action": {"type": "click", "x": 30, "y": 40}}
+        {"type": "action", "action": {"type": "click", "x": 30, "y": 40, "backendNodeId": None}}
     )
 
 @pytest.mark.asyncio
 async def test_a_bare_node_id_resolves_for_every_ref_taking_action():
-    """`_locate` is the one place all four route through, so one case per
-    method: `type_text` into a bare ref must not silently retype into whatever
+    """`_locate` is the one place every one of these routes through, so one case
+    per method: `type_text` into a bare ref must not silently retype into whatever
     holds focus, which is the HDFC failure class."""
-    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2}])
-    await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": []})
-    # clear_ref selects through the DOM rather than a key chord, so it waits on
-    # the evaluate channel. The page it is aimed at is a textbox, so it answers.
-    await relay._eval_queue.put("select-all")
+    # `backendNodeId` because `type_text_into_ref` refuses a ref with a position
+    # and no identity — the subject here is the bare-ref *format*, so the target
+    # is otherwise a complete one.
+    relay = _relay([{"ref": "0:7", "role": "textbox", "x": 1, "y": 2,
+                     "backendNodeId": 99}])
+    # One post-action observation per method, queued as each is reached: the
+    # extension answers every action it is handed with one, and each of these
+    # methods now waits for it — that frame is also how the relay learns
+    # whether the dispatch was refused (`action_result`).
+    async def _obs():
+        await relay._obs_queue.put({"url": "https://app.example.com/", "axTargets": [
+            {"ref": "0:7", "role": "textbox", "x": 1, "y": 2}]})
+    # Both typing paths read focus before dispatch; answer on that channel.
+    await relay._eval_queue.put("INPUT[0]")
+    await relay._eval_queue.put("INPUT[0]")
 
     for method, args in (
-        (relay.focus_ref, ("7",)),
-        (relay.clear_ref, ("7",)),
+        (relay.type_text_into_ref, ("7", "hello")),
         (relay.type_text_to_ref, ("7", "hello")),
     ):
+        await _obs()
         out = await method(*args)
         assert not out.startswith(FAIL_PREFIX), f"{method.__name__}: {out!r}"
 
@@ -236,7 +353,7 @@ async def test_an_exact_composite_ref_wins_over_the_bare_fallback():
 
     assert not out.startswith(FAIL_PREFIX), f"recorded as ok=False: {out!r}"
     relay._ws_send.assert_called_once_with(
-        {"type": "action", "action": {"type": "click", "x": 2, "y": 2}}
+        {"type": "action", "action": {"type": "click", "x": 2, "y": 2, "backendNodeId": None}}
     )
 
 def test_the_prompt_does_not_demonstrate_a_bare_number_as_a_ref():
@@ -352,5 +469,121 @@ async def test_a_target_with_a_box_and_no_reason_still_clicks():
 
     assert not out.startswith(FAIL_PREFIX)
     relay._ws_send.assert_called_once_with(
-        {"type": "action", "action": {"type": "click", "x": 10, "y": 20}}
+        {"type": "action", "action": {"type": "click", "x": 10, "y": 20, "backendNodeId": None}}
     )
+
+
+@pytest.mark.asyncio
+async def test_the_press_key_refusal_does_not_log_the_page_chosen_id(caplog):
+    """The same page-chosen id reaches the harness's own guard, and its
+    WARNING line is the other log sink."""
+    from brotto_orchestrator.agent.harness import AgentDeps, _focus_refusal
+
+    deps = AgentDeps(
+        cdp=SimpleNamespace(focus_id=AsyncMock(
+            return_value="INPUT#a\nFORGED 2026-10-20 ok\n")),
+        user_id="u", task="t", ws_send=AsyncMock(),
+    )
+    deps.step_focus = "INPUT#other"
+
+    with caplog.at_level("WARNING"):
+        out = await _focus_refusal(deps)
+
+    assert out.startswith(FAIL_PREFIX)
+    assert "FORGED" not in caplog.text
+    assert "named -> named" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_type_text_refusal_asserts_no_destination():
+    """The harness used to synthesise `Typed into [0:10183]` — naming the
+    destination the relay never checked — on top of a relay that had already
+    reported only "focused element". The refusal that replaced it must not
+    name a destination either, in any shape: a bare substring assertion would
+    pass while the wording moved the bracket.
+    """
+    from brotto_orchestrator.agent.harness import _execute_action
+    from brotto_orchestrator.agent.context import ActionCall
+
+    verdict = "Typed 9 characters into the focused element"
+    cdp = AsyncMock()
+    cdp.type_text_into_ref = AsyncMock(return_value=verdict)
+
+    deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u")
+    call = ActionCall(action="type_text",
+                      action_args={"ref": "0:10183", "text": "name"})
+
+    out = await _execute_action(call, deps)
+
+    assert out.startswith("REFUSED")
+    cdp.type_text_into_ref.assert_not_awaited()
+    for shape in ("0:10183", "[0:10183]", "Typed into ["):
+        assert shape not in out, f"{shape!r} is a destination claim"
+
+
+@pytest.mark.asyncio
+async def test_the_retirement_refusal_names_the_replacement():
+    """A model still emitting `type_text` — an older prompt, a cached plan, a
+    resumed run against an old document — must be refused with a message that
+    names what to use instead. Silently dropping it would look like a write
+    that landed; crashing would kill the run."""
+    from brotto_orchestrator.agent.harness import _execute_action
+    from brotto_orchestrator.agent.context import ActionCall
+
+    cdp = AsyncMock()
+    deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u")
+    call = ActionCall(action="type_text",
+                      action_args={"ref": "0:10183", "text": "name"})
+
+    out = await _execute_action(call, deps)
+
+    assert out.startswith("REFUSED")
+    assert "write_text" in out
+    cdp.type_text_into_ref.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_click_outcome_reaches_the_caller_unchanged():
+    """The click path wrapped the relay's verdict as `Clicked [ref]: <result>`,
+    which asserted a destination a second time — and asserted one the relay
+    never checked. Session 3dab5bb6: on a canvas page the model clicked a node
+    it read as a cell, the text went to the formula bar, and both the history
+    line and the audit document said `Clicked [0:10183]: Clicked [0:10183]`.
+    Same class as the `type_text` decoration fixed in 11fa5fff."""
+    from brotto_orchestrator.agent.harness import _execute_action
+    from brotto_orchestrator.agent.context import ActionCall
+
+    verdict = "Clicked [0:10183]"
+    cdp = AsyncMock()
+    cdp.click_ref = AsyncMock(return_value=verdict)
+    cdp.refresh_target_map = AsyncMock()
+
+    deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u", policy=None)
+    call = ActionCall(action="click", action_args={"ref": "0:10183"})
+
+    out = await _execute_action(call, deps)
+
+    assert out == verdict, f"the harness restated the verdict: {out!r}"
+    assert out.count("0:10183") == 1, "the ref is asserted twice"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_click_reaches_the_caller_unchanged():
+    """`ok` is derived by membership, so the refusal still records as a
+    failure — but the string the model reads must carry the relay's reason,
+    not a success-shaped prefix in front of it."""
+    from brotto_orchestrator.agent.harness import _execute_action, _EXEC_FAILURE
+    from brotto_orchestrator.agent.context import ActionCall
+
+    refusal = ("Error executing: ref '0:10183' is not in the current AX tree")
+    cdp = AsyncMock()
+    cdp.click_ref = AsyncMock(return_value=refusal)
+    cdp.refresh_target_map = AsyncMock()
+
+    deps = SimpleNamespace(cdp=cdp, step_number=2, user_id="u", policy=None)
+    call = ActionCall(action="click", action_args={"ref": "0:10183"})
+
+    out = await _execute_action(call, deps)
+
+    assert out == refusal
+    assert _EXEC_FAILURE in out

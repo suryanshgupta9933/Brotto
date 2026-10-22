@@ -56,8 +56,8 @@ const BODIES = {
 const CONSTS = {
   QUIET_MS: extractConst("QUIET_MS"),
   DEADLINE_MS: extractConst("DEADLINE_MS"),
-  BUSY_SAMPLE_MS: extractConst("BUSY_SAMPLE_MS"),
-  BUSY_MUTATIONS: extractConst("BUSY_MUTATIONS"),
+  RATE_SAMPLES: extractConst("RATE_SAMPLES"),
+  CHURN_WINDOWS: extractConst("CHURN_WINDOWS"),
 };
 
 // A DOM with no content, a MutationObserver we can fire by hand, and a count
@@ -85,9 +85,9 @@ function makeDom() {
 //
 // The consts are *evaluated*, not passed as their source text. They reach the
 // page script through `JSON.stringify`, and `JSON.stringify("1_000")` is
-// `"1000"` — so a string `BUSY_SAMPLE_MS` compiles to `if ("1000" > 0)`,
-// which is false, and the busy sample silently never installs. That failure
-// is an absence: the whole suite still passes, it just waits longer.
+// `"1000"` — so a string `RATE_SAMPLES` compiles to `count < "3"`, which is
+// false, and the rate exit silently never fires. That failure is an absence:
+// the whole suite still passes, it just waits longer.
 const NUMBERS = Object.fromEntries(
   Object.keys(CONSTS).map((k) => [k, vm.runInNewContext(CONSTS[k])]),
 );
@@ -118,7 +118,7 @@ function harness({ behaviour = "run", quietMs, deadlineMs } = {}) {
     `(function () {
        const waitForStable = (async function (tabId, opts) { ${BODIES.waitForStable} });
        const evalInPage = (async function (tabId, expression) { ${BODIES.evalInPage} });
-       const observerExpression = (function (quietMs, deadlineMs, earlyMs, busy) { ${BODIES.observerExpression} });
+       const observerExpression = (function (quietMs, deadlineMs, early, samples, churnMin) { ${BODIES.observerExpression} });
        return function (tabId, opts) { return waitForStable(tabId, opts); };
      })()`,
     sandbox,
@@ -152,10 +152,8 @@ function bounded(p, ms) {
   for (const k of Object.keys(CONSTS)) consts[k] = vm.runInNewContext(CONSTS[k]);
   check("quiet window defaults to 3000ms", consts.QUIET_MS === 3000, `QUIET_MS was ${consts.QUIET_MS}`);
   check("hard deadline defaults to 10000ms", consts.DEADLINE_MS === 10000, `DEADLINE_MS was ${consts.DEADLINE_MS}`);
-  check("the busy sample defaults to 1000ms", consts.BUSY_SAMPLE_MS === 1000,
-    `BUSY_SAMPLE_MS was ${consts.BUSY_SAMPLE_MS}`);
-  check("busy means 3 mutations in that window", consts.BUSY_MUTATIONS === 3,
-    `BUSY_MUTATIONS was ${consts.BUSY_MUTATIONS}`);
+  check("a rate needs 3 mutations before it counts as evidence", consts.RATE_SAMPLES === 3,
+    `RATE_SAMPLES was ${consts.RATE_SAMPLES}`);
 
   // awaitPromise is load-bearing: without it CDP returns a Promise object and
   // result.value is undefined, so the gate reports "did not wait" every step.
@@ -179,65 +177,154 @@ function bounded(p, ms) {
       `took ${took}ms, got ${JSON.stringify(r)}`);
   }
 
-  // 2. THE CONTRACT: a page that never goes quiet still returns, at the
-  // deadline. A live dashboard never mutates out; a barrier here hangs the
-  // step forever and nothing downstream can tell you why.
+  // 2. THE CONTRACT: a genuinely-loading page still returns, at the deadline.
+  //    Two mutations land inside the quiet window — closer together than it, so
+  //    silence never accumulates — but two is an anecdote, not a rate, so the
+  //    rate exit cannot claim the page either. A barrier here hangs the step
+  //    forever and nothing downstream can tell you why.
   {
-    const h = harness({ quietMs: 400, deadlineMs: 900 });
-    const ticker = setInterval(() => h.dom.mutate(), 40);
+    const h = harness({ quietMs: 600, deadlineMs: 1000 });
+    // Both after the observer is installed — the gate installs it inside wait().
+    // Each lands just inside the quiet window it would otherwise close, so
+    // silence never accumulates for the full 600ms — but two mutations are an
+    // anecdote, not a rate, so the rate exit cannot claim the page either.
+    // This is the `auth-slowjs` shape, and the only one left that reaches the
+    // deadline: moved twice, gone silent, still loading.
+    setTimeout(() => h.dom.mutate(), 200);
+    setTimeout(() => h.dom.mutate(), 750);
     const t0 = Date.now();
     const r = await bounded(h.wait(), 3000);
     const took = Date.now() - t0;
-    clearInterval(ticker);
-    check("a page that never goes quiet still returns", r.ok === true,
+    check("a page that is loading rather than repainting still returns", r.ok === true,
       "the gate never resolved — it is a barrier, not a wait");
-    check("…and it returns at the deadline",
-      r.ok && r.v.waited === false && r.v.timedOut === true && took >= 800 && took < 2000,
+    check("…and it returns at the deadline, having formed no rate",
+      r.ok && r.v.waited === false && r.v.timedOut === true
+        && r.v.early !== true && r.v.mutations < consts.RATE_SAMPLES
+        && took >= 900 && took < 1800,
       `took ${took}ms, got ${r.ok ? JSON.stringify(r.v) : "no result"}`);
     check("the deadline path disconnects its observer", h.dom.installed() === 0,
       `${h.dom.installed()} observer(s) still installed`);
   }
 
-  // 3. a page that goes quiet late resolves when it goes quiet, not at the
-  // deadline — otherwise the gate is just a sleep.
+  // 2b. THE SHEETS CASE, and the one this gate was rebuilt for. Google Sheets
+  //     produced 3–6 mutations per 10,002ms — a gap of 1.7–3.3s. Under the old
+  //     absolute rule ("3 mutations inside a 1000ms window") that is far too
+  //     sparse to be busy, and the 3s quiet window is unreachable at that
+  //     cadence, so every observation fell through to the 10s deadline: 10 of
+  //     14 observations in one real run, 177s for 8 steps. Gmail resolved in
+  //     3001ms; Sheets never resolved once.
   //
-  //    The scales are chosen, not arbitrary. Surviving a 400ms quiet window
-  //    needs a mutation at least that often; staying under 3-per-1000ms allows
-  //    one per 333ms. The 50ms of overlap is the only window in which a page is
-  //    genuinely still rendering and is genuinely not "already rendering" —
-  //    outside it the two heuristics disagree and the busy sample takes it.
+  //     Scaled by ~1/3.3 so the suite stays fast; the shapes are identical.
+  //     Real numbers: old 10002ms every step, new ~3 mutation gaps — 2.8s at
+  //     the dense end, 5.0s at the sparse end.
+  {
+    const h = harness({ quietMs: 900, deadlineMs: 3000 });
+    const ticker = setInterval(() => h.dom.mutate(), 600);
+    const t0 = Date.now();
+    const r = await bounded(h.wait(), 5000);
+    const took = Date.now() - t0;
+    clearInterval(ticker);
+    check("a slowly-repainting page (Sheets) resolves early, not at the deadline",
+      r.ok === true && r.v.early === true && r.v.waited === false && took < 3000,
+      `took ${took}ms, got ${r.ok ? JSON.stringify(r.v) : "no result"} — ` +
+      "the rate was read as an absolute count and the page paid the whole deadline");
+    check("…on a handful of mutations, not a burst",
+      r.ok && r.v.mutations >= consts.RATE_SAMPLES && r.v.mutations <= 8,
+      `mutations was ${r.ok ? r.v.mutations : "n/a"}`);
+    check("…never reporting itself quiet, which would skip the rescan",
+      r.ok && r.v.early === true,
+      r.ok ? JSON.stringify(r.v) : "no result");
+    check("…and disconnecting its observer", h.dom.installed() === 0,
+      `${h.dom.installed()} observer(s) still installed`);
+  }
+
+  // 2c. THE SPARSE END — the case the rate exit was too slow for.
+  //
+  //     A page that mutates every ~2.5s (a Sheets cell cursor, an autosave)
+  //     never falls silent for a full quiet window, so the window can never
+  //     open and the rate exit has to carry it. The rate exit needs three
+  //     samples, and on this cadence the third arrives at 2.25s here — 7.5s in
+  //     the real run, 8.752s measured on the 8752ms observation. Most of the
+  //     deadline went on counting samples rather than looking at the page.
+  //
+  //     Two samples are enough once the page has been churning continuously
+  //     for longer than a window and a half: the churn is a regime, not a
+  //     burst, and a regime does not go quiet. Scaled by ~1/3.3 like case 2b,
+  //     so the shapes are identical to the real run's.
+  {
+    const h = harness({ quietMs: 900, deadlineMs: 3000 });
+    const ticker = setInterval(() => h.dom.mutate(), 750);
+    const t0 = Date.now();
+    const r = await bounded(h.wait(), 6000);
+    const took = Date.now() - t0;
+    clearInterval(ticker);
+    // The old gate needed the third sample, so it took 2250ms. The churn exit
+    // takes the second, at 1500ms. The bound sits between them.
+    check("a sparse trickle settles on two samples, not three",
+      r.ok === true && r.v.early === true && r.v.waited === false && took < 1900,
+      `took ${took}ms, got ${r.ok ? JSON.stringify(r.v) : "no result"} — ` +
+      "the gate waited for a third sample it did not need");
+    check("…without waiting for the deadline", r.ok && took < 3000,
+      `took ${took}ms`);
+    check("…and disconnecting its observer", h.dom.installed() === 0,
+      `${h.dom.installed()} observer(s) still installed`);
+  }
+
+  // 2d. The churn floor is what keeps a *loading* page out of the churn
+  //     exit. One mutation and then nothing is a page that has barely moved —
+  //     an anecdote, not a rate — and it must not be claimed busy no matter
+  //     how long the gate watches it.
+  {
+    const h = harness({ quietMs: 600, deadlineMs: 3000 });
+    setTimeout(() => h.dom.mutate(), 100);
+    const t0 = Date.now();
+    const r = await bounded(h.wait(), 5000);
+    const took = Date.now() - t0;
+    check("a single mutation never claims the page busy",
+      r.ok === true && r.v.early !== true,
+      `got ${r.ok ? JSON.stringify(r.v) : "no result"} — one sample is an anecdote`);
+    check("…it settles on the quiet window instead",
+      r.ok && r.v.waited === true && took >= 600 && took < 2000,
+      `took ${took}ms, got ${r.ok ? JSON.stringify(r.v) : "no result"}`);
+  }
+
+  // 3. a page that goes quiet late resolves when it goes quiet, not at the
+  //    deadline — otherwise the gate is just a sleep. Two mutations, so no
+  //    rate is ever claimed and the quiet window is the only thing that fires.
+  //
+  //    The old suite pinned this with a 350ms ticker against a 400ms window,
+  //    which now exits early instead. That is not a regression: the early exit
+  //    hands the page to the fingerprint rescan, which compares the tree the
+  //    agent will actually act on — a stronger check than a mutation count, and
+  //    the reason the Sheets case above may resolve early at all.
   {
     const h = harness({ quietMs: 400, deadlineMs: 6000 });
-    // Two mutations land before the 1000ms sample (at 350 and 700) — under the
-    // threshold of 3, so the sample does not claim it — and each resets the
-    // quiet window before its 400ms expires. Rendering stops at 1200 and the
-    // gate resolves 400ms after the last mutation.
-    const ticker = setInterval(() => h.dom.mutate(), 350);
-    const done = setTimeout(() => clearInterval(ticker), 1200);
+    // Mutations at 100 and 300 — each resets the 400ms quiet window before it
+    // expires, so silence only accumulates once the page stops at 300.
+    setTimeout(() => h.dom.mutate(), 100);
+    setTimeout(() => h.dom.mutate(), 300);
     const t0 = Date.now();
     const r = await bounded(h.wait(), 9000);
     const took = Date.now() - t0;
-    clearTimeout(done);
-    clearInterval(ticker);
     // The ceiling is this harness's own 6000ms deadline, not a fixed 3000. The
     // claim is "resolved on the quiet window, not at the deadline", and a fixed
     // bound has no headroom on a loaded box — this flaked at ~3s with the
     // behaviour under test entirely correct.
     check("a slowly-rendering page resolves when it goes quiet, not early",
-      r.ok && r.v.waited === true && r.v.early !== true && took >= 1200 && took < 6000,
+      r.ok && r.v.waited === true && r.v.early !== true && took >= 650 && took < 6000,
       `took ${took}ms, got ${r.ok ? JSON.stringify(r.v) : "no result"}`);
     check("…having actually seen the mutations",
-      r.ok && r.v.mutations > 0,
-      `mutations was ${r.ok ? r.v.mutations : "n/a"} — the observer never fired`);
+      r.ok && r.v.mutations > 0 && r.v.mutations < consts.RATE_SAMPLES,
+      `mutations was ${r.ok ? r.v.mutations : "n/a"} — either the observer never fired, or they formed a rate`);
     check("…and its observer is disconnected", h.dom.installed() === 0,
       `${h.dom.installed()} observer(s) still installed`);
   }
 
-  // 4. THE BUSY SHORT-CIRCUIT. Gmail measured 41 mutations in 10,002ms — one
-  //    every ~244ms — so a 3s silent window is arithmetically unreachable and
-  //    every observation paid the full 10s deadline: 47.7% of the wall clock of
-  //    a two-step run, every step, forever. A page already mutating hard at a
-  //    second in is past its initial render, not about to make one.
+  // 4. THE RATE EXIT AT ITS ORIGINAL CALIBRATION. Gmail measured 41 mutations
+  //    in 10,002ms — one every ~244ms — so a 3s silent window is arithmetically
+  //    unreachable and every observation paid the full 10s deadline: 47.7% of
+  //    the wall clock of a two-step run, every step, forever. This is the case
+  //    the rate exit exists for and the one the rebuild must not have broken.
   {
     const h = harness({ quietMs: 3000, deadlineMs: 10000 });
     const ticker = setInterval(() => h.dom.mutate(), 200);
@@ -245,18 +332,18 @@ function bounded(p, ms) {
     const r = await bounded(h.wait(), 14000);
     const took = Date.now() - t0;
     clearInterval(ticker);
-    // Same reasoning as case 3: the short-circuit fires at BUSY_SAMPLE_MS
-    // (~1s), so "before the deadline" is the real claim and the harness's own
-    // 10000 is the honest ceiling. `bounded` sits above it so a regression to
-    // the full deadline is caught by this assertion rather than by a timeout.
-    check("a page mutating hard returns on the sample, not the deadline",
+    // The exit fires once a rate can be read — 3 mutations — so "before the
+    // deadline" is the real claim and the harness's own 10000 is the honest
+    // ceiling. `bounded` sits above it so a regression to the full deadline is
+    // caught by this assertion rather than by a timeout.
+    check("a page mutating hard returns on the rate, not the deadline",
       r.ok === true && took < 10000,
-      `took ${took}ms — the short-circuit did not fire`);
+      `took ${took}ms — the rate exit did not fire`);
     check("…reporting early, and never reporting itself quiet",
       r.ok && r.v.early === true && r.v.waited === false,
       `got ${r.ok ? JSON.stringify(r.v) : "no result"} — the sample can only say 'not quiet', never 'quiet'`);
     check("…having actually counted the mutations",
-      r.ok && r.v.mutations >= consts.BUSY_MUTATIONS,
+      r.ok && r.v.mutations >= consts.RATE_SAMPLES,
       `mutations was ${r.ok ? r.v.mutations : "n/a"}`);
     check("…and disconnecting its observer", h.dom.installed() === 0,
       `${h.dom.installed()} observer(s) still installed`);

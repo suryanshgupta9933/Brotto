@@ -51,6 +51,7 @@ def _login_deps() -> AgentDeps:
     )
     cdp.get_current_url = AsyncMock(return_value="http://example.com/login")
     cdp.get_page_text = AsyncMock(return_value="")
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Sign in")
     cdp.refresh_target_map = AsyncMock()
 
@@ -220,6 +221,7 @@ async def test_a_stale_resume_cannot_answer_the_next_question():
     cdp = MagicMock()
     # Still a wall, so the only way out is the queue — and the queue's
     # "resume" is the orphan that must not count as an answer.
+    cdp.get_page_delta = AsyncMock(return_value=None)
     cdp.get_page_title = AsyncMock(return_value="Sign in")
     cdp.get_current_url = AsyncMock(return_value="http://example.com/login")
 

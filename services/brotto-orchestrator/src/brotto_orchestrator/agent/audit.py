@@ -32,31 +32,121 @@ import time
 from pathlib import Path
 from typing import Any, Container
 
+from .closed_loop import PlanItem, WriteAttempt, opaque_target_key
 from .context import MemoryEntry, Scratchpad, next_serial
+from .redact import redact_text
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+# 3 = actions[] entries carry `target` and `changed`. A reader must treat
+# both as absent on an older document: `changed` absent means UNKNOWN, which
+# is why the default is null and never False.
+#
+# 4 = a task block may carry a `ledger` (every write this run attempted,
+# and what the target said when it was read back) and a `plan` (the steps
+# the run declared). Both are absent on an older document and a reader must
+# treat them as EMPTY, not as an error — a document written before this
+# schema is still readable and still resumes.
+SCHEMA_VERSION = 4
 
 # A single scalar is capped so one pathological page cannot produce a
 # multi-megabyte document. The cap is recorded rather than silent.
 MAX_FIELD_CHARS = 8_000
 
+# `target` is the ref ("0:1234") or the xy the model aimed at — an
+# identifier, not text. The bound is what stops a caller passing a caption
+# or a typed value; it is a cap, not a filter, so the contract is that a
+# target is short (the two forms above are under 12 characters).
+MAX_TARGET_CHARS = 32
+
+# A 150-step run records a few hundred of these and stays readable; a model
+# stuck in a dispatch loop must not grow the document without bound. Over the
+# cap the record is dropped and counted, never truncated mid-sequence.
+MAX_ACTIONS_PER_SESSION = 5_000
+
 REDACTED = "[redacted:password]"
 
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
-_SECRET_NAME_RE = re.compile(
-    r"password|passcode|passphrase|one[- ]?time|\botp\b|\bpin\b"
-    # Not just passwords. An API-key or token field is usually type="text" or
-    # type="email", so the definitive check misses it and the name is all
-    # there is. False positives cost a replay that says [redacted:...] — the
-    # same asymmetry that decides the unresolvable-lookup case.
-    r"|secret|token|api[-_ ]?key|auth(?:orization)?|credential|bearer"
-    r"|private[-_ ]?key|csrf|xsrf|session[-_ ]?id"
-    r"|(?:recovery|backup|security|verification|confirmation)[- _]?code",
-    re.I,
+# Not just passwords. An API-key or token field is usually type="text" or
+# type="email", so the definitive check misses it and the name is all there
+# is. False positives cost a replay that says [redacted:...] — the same
+# asymmetry that decides the unresolvable-lookup case.
+#
+# Matched by NORMALISING, not by one regex over the raw name. The previous
+# shape put a trailing boundary after each alternative, and that is what
+# `(?![A-Za-z])` after a SHORT alternative can only do: `session[-_ ]?id`
+# matches the first four characters of "identifier", sees `e` next, and
+# fails — the pattern cannot see that `id` began a longer word. It produced
+# false negatives on `sessionIdentifier`, `authorizationCode`, `pinNumber`.
+# Loosening the boundary is how the original mid-word bug returns
+# (`tokenize`, `secretary`, `author`). So the English is decided HERE, on
+# whole normalised words, instead of inside a pattern.
+#
+# Two views of one name, both cheap:
+#   1. the WORDS, split on separators and camel humps, matched exactly;
+#   2. any CONTIGUOUS run of those words, matched against the compounds.
+# (2) is what catches the shapes (1) deliberately splits apart — `apiKey`,
+# `api_key` and `API key` all reduce to the run `apikey`.
+#
+# Deliberately NOT whole words: `token`, `session`, `id`, `code`. `token`
+# alone is the reason `TokenBucket` and `tokenize` must not match, and
+# `session` alone is the reason an exported `Session Name` column must not.
+# Their real compounds are listed below instead.
+
+_SECRET_WORDS = frozenset({
+    "password", "passcode", "passphrase", "otp", "pin",
+    "secret", "credential", "credentials", "bearer", "csrf", "xsrf",
+    "auth", "authorization",
+})
+
+_SECRET_COMPOUNDS = frozenset({
+    "apikey", "apitoken", "onetimecode", "onetimepassword", "privatekey",
+    "accesstoken", "refreshtoken", "sessionid", "sessionidentifier",
+    "authorizationcode", "pinnumber",
+    "recoverycode", "backupcode", "securitycode", "verificationcode",
+    "confirmationcode",
+})
+
+# Separators, and the two camel humps: lower→Upper, and the last capital of
+# a run (`APISecret` → API|Secret). Splitting rather than ignoring case is
+# the whole point: `author`/`Authority` stay ordinary words because neither
+# view produces a secret word, and nothing depends on a regex knowing where
+# an English word ends.
+_NAME_SPLIT_RE = re.compile(
+    r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])"
 )
+_TRAILING_DIGITS_RE = re.compile(r"[0-9]+$")
+
+
+def _secret_by_name(accessible_name: str | None) -> bool:
+    """True when the normalised name names a secret.
+
+    `Password1` is `password` plus a trailing digit, so digits are stripped
+    from each word before the lookup rather than special-cased per label.
+
+    A compound is matched against every CONTIGUOUS run of whole words, not
+    only the whole name, because this is not always a bare field name: the
+    clarify question "what's the verification code?" reaches here, and only
+    the run says `verificationcode`. Contiguity is what keeps this from
+    becoming mid-word matching again — `TokenBucket` is the run `tokenbucket`
+    and `Session Name` is `sessionname`, neither of which is a compound.
+    """
+    if not accessible_name:
+        return False
+    words = [w for w in _NAME_SPLIT_RE.split(accessible_name) if w]
+    if any(
+        _TRAILING_DIGITS_RE.sub("", word).lower() in _SECRET_WORDS
+        for word in words
+    ):
+        return True
+    for start in range(len(words)):
+        run = ""
+        for word in words[start:]:
+            run += word.lower()
+            if run in _SECRET_COMPOUNDS:
+                return True
+    return False
 
 
 def is_secret_field(attributes: dict | None, accessible_name: str | None) -> bool:
@@ -72,7 +162,70 @@ def is_secret_field(attributes: dict | None, accessible_name: str | None) -> boo
     """
     if attributes and (attributes.get("type") or "").lower() == "password":
         return True
-    return bool(_SECRET_NAME_RE.search(accessible_name or ""))
+    return _secret_by_name(accessible_name)
+
+
+# The fields of a ledger entry and a plan item that hold a VALUE, and are
+# therefore masked on the way to disk. Everything else in those structures is
+# structural — a key, a status, a mechanism, a number — and stays readable,
+# because a reader (or the harness, on a resume) cannot work with a verdict
+# whose target it cannot name.
+_LEDGER_VALUE_FIELDS = ("intended", "observed")
+_PLAN_VALUE_FIELDS = ("value", "intent")
+
+# A cell's contents are user data: the value the model typed is typed input,
+# and the value read back is page text. The audit document is the server's
+# copy, and the rule this document already follows is COUNTS, NEVER CONTENT —
+# the observation block reduced the AX diff to a length for exactly this
+# reason. A value therefore does not go to disk; its LENGTH does, beside the
+# verdict and the target.
+#
+# The mask is fixed, not shape-based. `redact_text` catches things that look
+# like keys, and a spreadsheet column of customer names has no secret shape:
+# "age" would have survived it. Shape-based redaction is right for a field
+# NAMED for a secret, and wrong here.
+_VALUE_MASK = "[redacted:cell-value]"
+
+
+def _mask_value(out: dict, field: str) -> None:
+    """Replace one value field with the mask, keeping only its length."""
+    value = out.get(field)
+    if not isinstance(value, str):
+        return
+    out[field] = _VALUE_MASK
+    out[f"{field}_chars"] = len(value)
+
+
+def _opaque_entry(entry: dict) -> dict:
+    """One ledger/plan entry with its target key in its non-content form."""
+    out = dict(entry)
+    key = out.get("target_key")
+    if isinstance(key, str) and key:
+        out["target_key"] = opaque_target_key(key)
+    return out
+
+
+def _redact_entry(entry: dict, fields: tuple[str, ...]) -> dict:
+    """One ledger/plan entry, with its value fields masked.
+
+    The values are masked outright (see `_VALUE_MASK`). The model's own prose
+    is not: a plan's `intent` is the model's sentence about the task, and it
+    is persisted like every other model prose in this document. What it may
+    NOT carry is the value itself, so a value that appears in the prose is
+    masked there too, and the shape-based redactor still runs over what is
+    left.
+    """
+    out = dict(entry)
+    value = out.get("value")
+    for field in fields:
+        if field in ("value", "intended", "observed"):
+            _mask_value(out, field)
+    intent = out.get("intent")
+    if isinstance(intent, str):
+        if isinstance(value, str) and value:
+            intent = intent.replace(value, _VALUE_MASK)
+        out["intent"] = redact_text(intent)[0]
+    return _cap_deep(out)
 
 
 # ponytail: one directory, one file per session, no database and no index.
@@ -322,6 +475,7 @@ class AuditTrail:
             "model": {},
             "policy": {},
             "totals": {"turns": 0, "steps": 0, "prompts": 0, "actions": 0,
+                       "actions_dropped": 0,
                        "tokens_in": 0, "tokens_out": 0,
                        "cache_read_tokens": 0, "cache_write_tokens": 0,
                        "wall_s": 0.0, "errors": 0},
@@ -531,6 +685,78 @@ class AuditTrail:
         self._task_index = int(tasks[-1].get("index", 0)) if tasks else 0
         return self._task_index
 
+    # ── closed-loop state ───────────────────────────────────────
+    #
+    # The ledger and the plan are the run's own record of what it wrote and
+    # what it meant to write, and a resumed run that loses them is silently
+    # back to lying — so they are persisted here, in the user's own sidecar
+    # and nowhere else.
+    #
+    # A cell's value is a TYPED value, so it is redacted on the way to disk
+    # on the same terms as a typed action argument. The comparison the
+    # harness does happens IN MEMORY, on the real value, and is never
+    # persisted. A resumed run therefore compares against the redacted
+    # value, which is the correct trade: a run that cannot read a redacted
+    # cell reports `unknown` rather than claiming a confirmation it cannot
+    # prove.
+    #
+    # `target_key` is an IDENTIFIER, never text. A cell's address (`cell:A1`)
+    # is the task's own, so it is kept as it is; a `ref:` or `desc:` key
+    # carries a name off the page, so what goes to disk is a digest of it
+    # (`sha256:ref:<16 hex>`) and the page's text stays on the page. The
+    # `sha256:` prefix is one a readable key can never have, so a name off the
+    # page that happens to look like a digest is still digested. The harness
+    # compares the opaque form on both sides, so a key read back from here
+    # still matches the readable key the run holds.
+    def record_ledger(self, *, step: int, attempts: list[dict]) -> None:
+        """Write the run's write-verdicts into the current task block.
+
+        `attempts` is the IN-MEMORY ledger, so the values here are the real
+        ones; the redaction happens on this side of the disk.
+        """
+        self._record(self._record_ledger, step=step, attempts=attempts)
+
+    def _record_ledger(self, *, step: int, attempts: list[dict]) -> None:
+        task = self._task_entry()
+        if task is None:
+            return
+        task["ledger_step"] = step
+        task["ledger"] = [_redact_entry(_opaque_entry(a), _LEDGER_VALUE_FIELDS)
+                          for a in (attempts or []) if isinstance(a, dict)]
+
+    def record_plan(self, *, items: list[dict]) -> None:
+        """Write the run's declared plan into the current task block."""
+        self._record(self._record_plan, items=items)
+
+    def _record_plan(self, *, items: list[dict]) -> None:
+        task = self._task_entry()
+        if task is None:
+            return
+        task["plan"] = [_redact_entry(_opaque_entry(i), _PLAN_VALUE_FIELDS)
+                        for i in (items or []) if isinstance(i, dict)]
+
+    def record_completion_refused(self) -> None:
+        """Record that a completion was refused for an unproven target.
+
+        Persisted because the SECOND call is the one that closes the run:
+        a run that was refused a completion and then reconnected must not
+        get a fresh budget of refusals, or the reconnect turns a bounded
+        refusal into a loop.
+        """
+        self._record(self._record_completion_refused)
+
+    def _record_completion_refused(self) -> None:
+        task = self._task_entry()
+        if task is None:
+            return
+        task["completion_refused"] = True
+
+    def _task_entry(self) -> dict | None:
+        for entry in self._doc.get("tasks") or []:
+            if isinstance(entry, dict) and entry.get("index") == self._task_index:
+                return entry
+        return None
+
     def add_message(self, *, role: str, content: str, task: int,
                     turn: int | None) -> str:
         mid = self._record(self._add_message, role=role, content=content,
@@ -557,6 +783,17 @@ class AuditTrail:
     def conversation(self) -> list[dict]:
         with self._lock:
             return copy.deepcopy(self._doc.get("messages") or [])
+
+    def actions(self) -> list[dict]:
+        """This session's actions, in the order they ran.
+
+        What a reader of a finished run asks for: not the whole turn tree,
+        but the one line per action — did it dispatch, what did it aim at,
+        and did the page move. `args` is deliberately absent; it can carry
+        a value the model typed, and the full document is one call away.
+        """
+        with self._lock:
+            return _flatten_actions(self._doc)
 
     # ── turns ───────────────────────────────────────────────────
     def begin_turn(self, *, step: int, url: str, page_title: str,
@@ -666,6 +903,14 @@ class AuditTrail:
         t = self._turn(turn)
         if t is None:
             return ""
+        capped_args = _cap_deep(args)
+        # `_cap_deep` shortens `args.text` silently, and a replayed approval
+        # card renders that string under "the whole value, exactly as it will
+        # be written" — consent to a truncated write. `text_chars` is the flag
+        # the panel already reads as "there was a value and it is longer than
+        # what you see", the same one `_scrubbed` sets.
+        if isinstance(args.get("text"), str) and len(args["text"]) > MAX_FIELD_CHARS:
+            capped_args["text_chars"] = len(args["text"])
         prompt = {
             "id": secrets.token_hex(8),
             "seq": self._next_seq(),
@@ -678,7 +923,7 @@ class AuditTrail:
             "answered_at": None,
             "wait_ms": None,
             "action": action,
-            "args": _cap_deep(args),
+            "args": capped_args,
             "domain": domain,
         }
         _text(prompt, "reason", reason)
@@ -710,21 +955,38 @@ class AuditTrail:
 
     def record_action(self, turn: int, *, action: str, args: dict,
                       outcome: str, ok: bool, redacted: bool,
-                      duration_ms: int) -> None:
+                      duration_ms: int, target: str | None = None,
+                      changed: bool | None = None) -> None:
         self._record(self._record_action, turn, action=action, args=args,
                      outcome=outcome, ok=ok, redacted=redacted,
-                     duration_ms=duration_ms)
+                     duration_ms=duration_ms, target=target, changed=changed)
 
     def _record_action(self, turn: int, *, action: str, args: dict,
                        outcome: str, ok: bool, redacted: bool,
-                       duration_ms: int) -> None:
+                       duration_ms: int, target: str | None = None,
+                       changed: bool | None = None) -> None:
         t = self._turn(turn)
         if t is None:
+            return
+        totals = self._doc["totals"]
+        if totals.get("actions", 0) >= MAX_ACTIONS_PER_SESSION:
+            totals["actions_dropped"] = totals.get("actions_dropped", 0) + 1
             return
         ended = _now()
         entry: dict = {"action": action, "args": _cap_deep(args)}
         _text(entry, "outcome", outcome)
         entry["ok"] = ok
+        # What the model aimed at, as an identifier. Not a claim about what
+        # the action did, and not page text.
+        entry["target"] = target[:MAX_TARGET_CHARS] if isinstance(target, str) \
+            else None
+        # Whether the observation differed from the pre-action one. Tri-state
+        # because every "we could not tell" — a first observation, a
+        # navigation, a canvas page with no tree to compare — must read as
+        # unknown and not as False. Page-derived only: a model saying "I
+        # clicked submit" is not evidence (D5), and a model claim belongs in
+        # `outcome`, which already carries what the model was told.
+        entry["changed"] = changed if isinstance(changed, bool) else None
         # The end timestamp is derived, not slept for: the harness already
         # measured the action, and an audit call must not add wall time.
         entry["started_at"] = ended
@@ -938,6 +1200,51 @@ def load_owners(*, dir: Path | None = None) -> dict[str, str]:
     return owners
 
 
+def _flatten_actions(doc: dict) -> list[dict]:
+    """Every action in document order, flattened for a reader.
+
+    A document written before `target`/`changed` existed has neither, and
+    both default to None — for `changed`, absent means the question was
+    never asked, which is unknown and not "nothing moved".
+    """
+    out: list[dict] = []
+    for turn in doc.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        for entry in turn.get("actions") or []:
+            if not isinstance(entry, dict):
+                continue
+            changed = entry.get("changed")
+            out.append({
+                "task": turn.get("task", 0),
+                "step": turn.get("step"),
+                "action": entry.get("action"),
+                "target": entry.get("target"),
+                "ok": entry.get("ok"),
+                "changed": changed if isinstance(changed, bool) else None,
+                "outcome": entry.get("outcome", ""),
+                "duration_ms": entry.get("duration_ms"),
+                "redacted": entry.get("redacted", False),
+            })
+    return out
+
+
+def read_actions(session_id: str, *, dir: Path | None = None) -> dict:
+    """One session's actions, read off disk. Never raises.
+
+    A missing, corrupt or older document is reported, not thrown: a reader
+    must not be unable to answer because the session it wants is unfinished.
+    """
+    doc = read(session_id, dir=dir)
+    if not doc.get("found"):
+        return {"found": False, "schema_version": None, "actions": []}
+    return {
+        "found": True,
+        "schema_version": doc.get("schema_version"),
+        "actions": _flatten_actions(doc),
+    }
+
+
 def read(session_id: str, *, dir: Path | None = None) -> dict:
     """Read one document. Never raises: a damaged file is reported.
 
@@ -978,6 +1285,102 @@ def read(session_id: str, *, dir: Path | None = None) -> dict:
                 "errors": [{"code": "audit_unreadable", "message": detail}],
                 "totals": {"turns": 0, "steps": 0, "prompts": 0, "actions": 0,
                            "tokens_in": 0, "tokens_out": 0, "errors": 1}}
+
+
+# ── rehydration readers ─────────────────────────────────────────
+#
+# The harness rebuilds `deps` from scratch on a resume, so the ledger and
+# the plan have to come back with the document — without them the repeat
+# block and the completion pass silently switch off and the run is back to
+# lying.
+#
+# Which task block: the LAST one, because a resume continues the last task
+# the document was running (`AuditTrail.resume_task`). A last block with
+# no ledger means that task wrote nothing — an EARLIER task's ledger
+# belongs to a different run, and adopting it would refuse a write the
+# user is entitled to make. A document written before schema 4 has no
+# ledger at all, and yields nothing rather than an error.
+
+
+def _current_task_block(doc: dict) -> dict:
+    tasks = doc.get("tasks") if isinstance(doc, dict) else None
+    if not isinstance(tasks, list) or not tasks:
+        return {}
+    last = tasks[-1]
+    return last if isinstance(last, dict) else {}
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def read_ledger(doc: dict) -> list[WriteAttempt]:
+    """The run's write verdicts, rebuilt from a document. Never raises.
+
+    Empty when the document has none — an older schema, or a run that
+    wrote nothing. A resume that finds an empty ledger is a run that has
+    not written yet, not a broken one.
+    """
+    entries = _current_task_block(doc).get("ledger")
+    if not isinstance(entries, list):
+        return []
+    out: list[WriteAttempt] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        observed = entry.get("observed")
+        out.append(WriteAttempt(
+            target_key=str(entry.get("target_key") or ""),
+            intended=str(entry.get("intended") or ""),
+            observed=None if observed is None else str(observed),
+            confirmed=bool(entry.get("confirmed")),
+            mechanism=str(entry.get("mechanism") or ""),
+            step=_as_int(entry.get("step")),
+        ))
+    return out
+
+
+def read_plan(doc: dict) -> list[PlanItem]:
+    """The run's declared plan, rebuilt from a document. Never raises."""
+    items = _current_task_block(doc).get("plan")
+    if not isinstance(items, list):
+        return []
+    out: list[PlanItem] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        target_key = item.get("target_key")
+        value = item.get("value")
+        out.append(PlanItem(
+            id=_as_int(item.get("id")),
+            intent=str(item.get("intent") or ""),
+            target_key=None if target_key is None else str(target_key),
+            value=None if value is None else str(value),
+            status=str(item.get("status") or "pending"),
+        ))
+    return out
+
+
+def read_completion_refused(doc: dict) -> bool:
+    """Whether the last task in the document already had a completion refused.
+
+    The second `task_complete` is ACCEPTED, so this flag is what keeps a
+    refusal bounded across a reconnect.
+    """
+    return bool(_current_task_block(doc).get("completion_refused"))
+
+
+def is_redacted_value(value: str | None) -> bool:
+    """True when a stored value was redacted on the way to disk.
+
+    A resumed run compares a rehydrated value against a fresh one, and a
+    redacted value cannot be compared: the honest verdict for it is
+    `unknown`, not a mismatch and never a confirmation.
+    """
+    return bool(value) and value.startswith("[redacted")
 
 
 def delete(session_id: str, *, dir: Path | None = None,

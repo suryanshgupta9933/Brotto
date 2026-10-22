@@ -101,6 +101,15 @@ const reasons = serverReasons();
 const client = clientReasons();
 const notes = noteKeys();
 
+// Three entries the panel names for itself rather than receiving. They are
+// rendered through the same table so the transcript cannot carry two
+// vocabularies, and each one is reachable only from sidepanel.js itself.
+const PANEL_ALIAS = {
+  server_error: "task_error",       // the frame the panel renders it for
+  disconnected: "CONNECTION_LOST",  // the socket dropping mid-task
+  service_worker: null,             // the worker not answering: no wire code at all
+};
+
 let failed = 0;
 function check(ok, label, detail) {
   if (ok) {
@@ -159,14 +168,21 @@ console.log("\nevery code is one the failure-report ledger accepts");
 const reportable = new Set();
 {
   const py = fs.readFileSync(path.join(PY, "session", "failure_report.py"), "utf8");
-  // Both literal sets, and only those: CLIENT_CODES is folded into
-  // REPORTABLE by name, so slicing either one alone reads as the whole
-  // vocabulary and every server code fails.
-  const start = py.indexOf("CLIENT_CODES = frozenset");
-  const end = py.indexOf("COLUMNS = frozenset", start);
-  if (start < 0 || end < 0) throw new Error("no REPORTABLE set in failure_report.py — renamed?");
-  const body = py.slice(start, end);
-  for (const m of body.matchAll(/["']([A-Za-z_]+)["']/g)) reportable.add(m[1]);
+  // Exactly two sets, each sliced from its own assignment. CLIENT_STAGE and
+  // SERVER_STAGES sit between them and are stages, not codes — one
+  // `start…end` slice across the whole region swallowed them too, and every
+  // stage then looked like a code with no sentence in the panel. REPORTABLE
+  // is `CLIENT_CODES | frozenset({ … })`, so it carries two `frozenset`
+  // tokens and only the second one opens its literal list.
+  for (const name of ["CLIENT_CODES", "REPORTABLE"]) {
+    const assign = py.indexOf(`${name}${name === "REPORTABLE" ? ":" : ""} `);
+    if (assign < 0) throw new Error(`no ${name} assignment in failure_report.py — renamed?`);
+    const from = py.indexOf("frozenset", assign);
+    const open = py.indexOf("{", from);
+    const end = py.indexOf("})", open);
+    if (from < 0 || open < 0 || end < 0) throw new Error(`could not slice ${name} — changed shape?`);
+    for (const m of py.slice(open, end).matchAll(/["']([A-Za-z_]+)["']/g)) reportable.add(m[1]);
+  }
 }
 const notReported = new Set();
 {
@@ -178,6 +194,24 @@ const notReported = new Set();
   }
 }
 console.log(`reportable codes:     ${[...reportable].sort().join(", ")}\n`);
+
+// The authoritative direction, and the one the audit found unenforced: the
+// *ledger* is the vocabulary, not the assignments. Six codes reach the panel
+// only through REPORTABLE and are emitted where no `failure_reason=` literal
+// is written — `task_cap_reached` and its siblings are built in the relay's
+// answer, not assigned — so a check driven by `assignments()` looked complete
+// while four user-facing codes had no sentence at all, and deleting
+// `task_cap_reached` from the panel left it green.
+console.log("\nevery code the ledger accepts has a sentence the user can read");
+const vocabulary = new Set([...reportable, ...notReported]);
+for (const code of [...vocabulary].sort()) {
+  check(
+    notes.has(code) || Object.values(PANEL_ALIAS).includes(code),
+    `${code} has a FAILURE_NOTE entry`,
+    "accepted by the failure-report ledger, so it can reach the panel; " +
+      "failureNote() falls through for it",
+  );
+}
 for (const [reason, file] of [...reasons].sort()) {
   check(
     reportable.has(reason),
@@ -195,6 +229,48 @@ for (const [reason, file] of [...client].sort()) {
     `emitted by ${file}; a client condition with neither a code in the ledger ` +
       `nor a written reason it is excluded is an operator blind spot`,
   );
+}
+
+// ── the other direction ───────────────────────────────────────────────────
+//
+// Everything above asks "does every code have a sentence?". This asks the
+// half that was unenforced and is why the fallthrough reached users at all:
+// a sentence with no code behind it is either dead copy or — worse — a code
+// that got renamed server-side, leaving the panel describing a world that no
+// longer exists while every forward check stayed green.
+console.log("\nevery sentence in the panel is a code something can send");
+
+for (const key of [...notes].sort()) {
+  const aliased = Object.prototype.hasOwnProperty.call(PANEL_ALIAS, key)
+    ? PANEL_ALIAS[key]
+    : key;
+  check(
+    aliased === null || reportable.has(aliased) || notReported.has(aliased),
+    `${key} is a real code`,
+    `no server or client code sends \`${key}\`; it is dead copy, or a code ` +
+      `that was renamed and this table was not`,
+  );
+}
+
+// The fallthrough is the last thing to touch a user. It may not point at a
+// thing that does not exist: there is no Brotto log for a client-side
+// condition, and on a self-hosted install the log is the user's own machine,
+// which most of them never open.
+{
+  const start = panel.indexOf("function failureNote(");
+  check(start >= 0, "failureNote still exists", "renamed or deleted");
+  const body = start >= 0 ? panel.slice(start, panel.indexOf("\n}", start)) : "";
+  const tail = body.slice(body.indexOf("return ", body.indexOf("isOffline")));
+  // Line comments stripped first: this file explains *why* the sentence must
+  // not name a log, so a bare /log/ scan reads the explanation and fails on
+  // the fix — and an apostrophe in that prose pairs across lines and drags
+  // half the comment into the literal scan.
+  const code = tail.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  const literals = [...code.matchAll(/(['"])((?:\\.|(?!\1).)*)\1/g)].map((m) => m[2]).join(" ");
+  check(!/log/i.test(literals),
+        "the fallthrough never points at a log",
+        "an unmapped code still tells the user to look in a log they do not " +
+          "have — see the panel's own docstring above");
 }
 
 console.log("\nno report can carry anything but a code");
