@@ -3399,6 +3399,15 @@ def _ledger_items(deps: AgentDeps) -> list[PlanItem]:
     ]
 
 
+def _latest_attempt(target_key: str, deps: AgentDeps) -> WriteAttempt | None:
+    """The ledger's last attempt at one target, or None."""
+    latest: WriteAttempt | None = None
+    for a in deps.ledger:
+        if a.target_key == target_key:
+            latest = a
+    return latest
+
+
 async def _verify_plan(deps: AgentDeps,
                        items: list[PlanItem] | None = None
                        ) -> list[tuple[PlanItem, str, str | None]]:
@@ -3424,14 +3433,22 @@ async def _verify_plan(deps: AgentDeps,
         if not item.target_key or item.value is None:
             continue
         if is_redacted_value(item.value):
-            # A rehydrated value may have been redacted on the way to disk —
-            # a cell value that looked like a secret. It cannot be compared,
-            # so the honest verdict is UNKNOWN: the run must not claim a
-            # confirmation it cannot prove, and must not accuse the page of
-            # holding the wrong value when the truth is that the value was
-            # redacted. The read is skipped too — it cannot change a verdict
-            # that is already UNKNOWN, and the relay has one slot.
-            verdicts.append((item, UNKNOWN, None))
+            # The value was masked on the way to disk — a cell's contents are
+            # user data and the document holds the verdict, not the value. So
+            # the comparison cannot be made HERE. What CAN stand is the
+            # LEDGER's verdict for the same target: a confirmed flag is not a
+            # model claim, it is a harness-computed verdict from a real
+            # read-back, so it survives the resume. Anything else is UNKNOWN:
+            # the run must not claim a confirmation it cannot prove, and
+            # must not accuse the page of holding the wrong value when the
+            # truth is that the value is not here. The read is skipped too —
+            # it cannot change a verdict that is already UNKNOWN, and the
+            # relay has one slot.
+            attempt = _latest_attempt(item.target_key, deps)
+            if attempt is not None and attempt.confirmed:
+                verdicts.append((item, CONFIRMED, None))
+            else:
+                verdicts.append((item, UNKNOWN, None))
             continue
         observed: str | None = None
         label = item.target_key

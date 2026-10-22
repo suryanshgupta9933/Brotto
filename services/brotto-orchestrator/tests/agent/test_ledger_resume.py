@@ -39,7 +39,28 @@ def test_the_plan_is_written(tmp_path):
         "value": "name", "status": "pending",
     }])
     doc = json.loads((tmp_path / "s1.json").read_text())
-    assert doc["tasks"][0]["plan"][0]["intent"] == "write A1 = name"
+    # The intent is the model's own prose, so it is kept — but a value it
+    # quotes is masked, because the value is what the prose would leak.
+    assert doc["tasks"][0]["plan"][0]["intent"] == "write A1 = [redacted:cell-value]"
+
+
+def test_a_value_with_no_secret_shape_is_masked_too(tmp_path):
+    """The redactor that catches keys is not a boundary for a cell's
+    contents: a spreadsheet column of names has no secret shape, and "age"
+    would have survived it. A cell's contents are user data, so the value
+    does not go to disk whatever it looks like — only its length does."""
+    trail = _trail(tmp_path)
+    trail.begin_task("write a name")
+    trail.record_ledger(step=1, attempts=[{
+        "target_key": "cell:A1", "intended": "age", "observed": "age",
+        "confirmed": True, "mechanism": "content-box", "step": 1,
+    }])
+    text = (tmp_path / "s1.json").read_text()
+    entry = json.loads(text)["tasks"][0]["ledger"][0]
+    assert audit_mod.is_redacted_value(entry["intended"])
+    assert entry["intended_chars"] == 3
+    assert entry["confirmed"] is True
+    assert "age" not in json.dumps(entry)
 
 
 def test_the_ledger_rehydrates(tmp_path):

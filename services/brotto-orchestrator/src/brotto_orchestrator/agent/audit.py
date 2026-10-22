@@ -165,33 +165,57 @@ def is_secret_field(attributes: dict | None, accessible_name: str | None) -> boo
     return _secret_by_name(accessible_name)
 
 
-# The fields of a ledger entry and a plan item that hold a TYPED VALUE, and
-# are therefore redacted on the way to disk. Everything else in those
-# structures is structural — a key, a status, a mechanism, a number — and
-# stays readable, because a reader (or the harness, on a resume) cannot
-# work with a verdict whose target it cannot name.
-#
-# `intent` is in the plan's list because it is the model's own prose and
-# can quote the value ("write the card number to A1"). It is not a typed
-# value, and redacting it costs nothing for the intents that are not.
+# The fields of a ledger entry and a plan item that hold a VALUE, and are
+# therefore masked on the way to disk. Everything else in those structures is
+# structural — a key, a status, a mechanism, a number — and stays readable,
+# because a reader (or the harness, on a resume) cannot work with a verdict
+# whose target it cannot name.
 _LEDGER_VALUE_FIELDS = ("intended", "observed")
 _PLAN_VALUE_FIELDS = ("value", "intent")
 
+# A cell's contents are user data: the value the model typed is typed input,
+# and the value read back is page text. The audit document is the server's
+# copy, and the rule this document already follows is COUNTS, NEVER CONTENT —
+# the observation block reduced the AX diff to a length for exactly this
+# reason. A value therefore does not go to disk; its LENGTH does, beside the
+# verdict and the target.
+#
+# The mask is fixed, not shape-based. `redact_text` catches things that look
+# like keys, and a spreadsheet column of customer names has no secret shape:
+# "age" would have survived it. Shape-based redaction is right for a field
+# NAMED for a secret, and wrong here.
+_VALUE_MASK = "[redacted:cell-value]"
+
+
+def _mask_value(out: dict, field: str) -> None:
+    """Replace one value field with the mask, keeping only its length."""
+    value = out.get(field)
+    if not isinstance(value, str):
+        return
+    out[field] = _VALUE_MASK
+    out[f"{field}_chars"] = len(value)
+
 
 def _redact_entry(entry: dict, fields: tuple[str, ...]) -> dict:
-    """One ledger/plan entry, with its value fields redacted.
+    """One ledger/plan entry, with its value fields masked.
 
-    The redactor is the existing one (`redact.redact_text`): it matches on
-    the SHAPE of the value, because a cell has no field name to be
-    secret-shaped by. A structural key is not passed through it — a target
-    key like `cell:A1` matches no rule, and a key that DID carry a value
-    is exactly the one that should be redacted.
+    The values are masked outright (see `_VALUE_MASK`). The model's own prose
+    is not: a plan's `intent` is the model's sentence about the task, and it
+    is persisted like every other model prose in this document. What it may
+    NOT carry is the value itself, so a value that appears in the prose is
+    masked there too, and the shape-based redactor still runs over what is
+    left.
     """
     out = dict(entry)
+    value = out.get("value")
     for field in fields:
-        value = out.get(field)
-        if isinstance(value, str):
-            out[field] = redact_text(value)[0]
+        if field in ("value", "intended", "observed"):
+            _mask_value(out, field)
+    intent = out.get("intent")
+    if isinstance(intent, str):
+        if isinstance(value, str) and value:
+            intent = intent.replace(value, _VALUE_MASK)
+        out["intent"] = redact_text(intent)[0]
     return _cap_deep(out)
 
 

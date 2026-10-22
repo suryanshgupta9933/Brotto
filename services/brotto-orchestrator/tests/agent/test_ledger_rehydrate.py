@@ -145,7 +145,12 @@ async def test_the_document_holds_the_current_state_not_a_history(tmp_path):
                    {"target": {"cell": "A1"}, "value": "age"}, audit=trail)
     doc = json.loads((tmp_path / "s1.json").read_text())
     assert len(doc["tasks"][0]["ledger"]) == 2
-    assert doc["tasks"][0]["ledger"][-1]["intended"] == "age"
+    last = doc["tasks"][0]["ledger"][-1]
+    # The VALUE does not go to disk — a cell's contents are user data. What
+    # goes to disk is the verdict and the target, plus how long the value was.
+    assert audit_mod.is_redacted_value(last["intended"])
+    assert last["intended_chars"] == 3
+    assert last["target_key"] == "cell:A1"
 
 
 # ── 2. the resume rehydrates ────────────────────────────────────────────────
@@ -263,19 +268,58 @@ async def test_a_redacted_plan_value_is_unknown_not_a_mismatch(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_plan_value_that_was_not_redacted_still_verifies(tmp_path):
-    """The UNKNOWN is for the redacted case only — an ordinary value still
-    confirms against the cell."""
+async def test_a_live_plan_value_still_verifies_against_the_cell(tmp_path):
+    """The value is masked ON DISK, not in the run: a plan the model is
+    working with right now still compares against the cell, which is the
+    whole point of the completion pass."""
     trail = AuditTrail(session_id="s2", dir=tmp_path)
     trail.begin_task("write a name")
     deps = _deps(_cdp(grid_value="name"))
     await _run_one(deps, "set_plan", {"items": [
         {"intent": "write A1 = name", "target": {"cell": "A1"}, "value": "name"},
     ]}, audit=trail)
-    doc = json.loads((tmp_path / "s2.json").read_text())
-    deps.plan = audit_mod.read_plan(doc)
     verdicts = await harness_mod._verify_plan(deps)
     assert verdicts[0][1] == CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_plan_verifies_from_the_ledger_verdict(tmp_path):
+    """On a resume the value is not there, so the comparison cannot be made
+    — but the LEDGER's `confirmed` flag can. It is a harness-computed
+    verdict from a real read-back, not a model claim, so it stands."""
+    trail = AuditTrail(session_id="s3", dir=tmp_path)
+    trail.begin_task("write a name")
+    deps = _deps(_cdp(grid_value="name"))
+    await _run_one(deps, "set_plan", {"items": [
+        {"intent": "write A1 = name", "target": {"cell": "A1"}, "value": "name"},
+    ]}, audit=trail)
+    await _run_one(deps, "write_text",
+                   {"target": {"cell": "A1"}, "value": "name"}, audit=trail)
+    doc = json.loads((tmp_path / "s3.json").read_text())
+    resumed = _deps(_cdp(grid_value="name"))
+    resumed.plan = audit_mod.read_plan(doc)
+    resumed.ledger = audit_mod.read_ledger(doc)
+    assert audit_mod.is_redacted_value(resumed.plan[0].value)
+    verdicts = await harness_mod._verify_plan(resumed)
+    assert verdicts[0][1] == CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_plan_with_no_verdict_stays_unknown(tmp_path):
+    """No ledger entry, no value, no verdict: the honest answer is still
+    UNKNOWN. The resume does not invent a confirmation."""
+    trail = AuditTrail(session_id="s4", dir=tmp_path)
+    trail.begin_task("write a name")
+    deps = _deps(_cdp(grid_value="name"))
+    await _run_one(deps, "set_plan", {"items": [
+        {"intent": "write A1 = name", "target": {"cell": "A1"}, "value": "name"},
+    ]}, audit=trail)
+    doc = json.loads((tmp_path / "s4.json").read_text())
+    resumed = _deps(_cdp(grid_value="name"))
+    resumed.plan = audit_mod.read_plan(doc)
+    resumed.ledger = audit_mod.read_ledger(doc)
+    verdicts = await harness_mod._verify_plan(resumed)
+    assert verdicts[0][1] == UNKNOWN
 
 
 # ── 5. the completion refusal is persisted ──────────────────────────────────
