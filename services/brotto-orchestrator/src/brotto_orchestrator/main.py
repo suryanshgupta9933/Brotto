@@ -2122,6 +2122,15 @@ async def websocket_extension(websocket: WebSocket, session_id: str):
                     # lookup times out after _ATTRS_TIMEOUT, so the
                     # redaction falls back to the accessible name alone.
                     await relay.deliver_attributes_result(incoming)
+                elif t == "grid_result":
+                    # The answer to a grid_select_cell / grid_read_cell /
+                    # grid_write_cell. Delivered to its own queue, never the
+                    # `evaluate` slot above: that one is a single uncorrelated
+                    # answer, and a cell value read out of it would be graded
+                    # as somebody else's page text. Without this branch the
+                    # harness waits out _GRID_TIMEOUT and every cell reports
+                    # unreadable.
+                    await relay.deliver_grid_result(incoming)
                 elif t == "action_result":
                     # What the extension actually did with the action it was
                     # last handed. Delivered rather than dropped: an unhandled

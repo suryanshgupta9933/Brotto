@@ -40,6 +40,19 @@ _UNSOLICITED = frozenset({"navigated"})
 # live runs show real timeouts.
 _ATTRS_TIMEOUT = 2.0
 
+# The grid's frames drive a name box and a formula bar, each of which is a
+# React-controlled input that only real key events write: the write ladder in
+# the extension is several dispatches and a read-back. This is not a
+# best-effort probe, so it gets a ceiling of its own rather than sharing the
+# 2s attribute lookup.
+_GRID_TIMEOUT = 20.0
+
+# The three ops the extension answers. A request naming anything else is
+# refused here rather than forwarded: an unknown op could never be answered
+# correctly, and a frame the server will not interpret must not reach a
+# browser.
+_GRID_OPS = frozenset({"grid_select_cell", "grid_read_cell", "grid_write_cell"})
+
 # The extension's refusal reasons are a closed set it already writes
 # (`observation/pointer.ts`), and this is a *shape* check rather than an
 # enumeration so a reason added there does not need a deploy here. What it does
@@ -138,6 +151,17 @@ class ExtensionCDPRelay:
         self._pending_attrs: set[str] = set()
         self._screenshot: asyncio.Queue = asyncio.Queue()
         self._action_result: dict | None = None
+        # Its own queue, NOT `_eval_queue`. That slot is a single uncorrelated
+        # `evaluate` answer — a `focus_id` probe's reply can land in it for a
+        # different probe — and a grid answer read out of it would be graded
+        # as somebody else's page text.
+        self._grid: asyncio.Queue = asyncio.Queue()
+        # Latched when a grid frame goes unanswered. An extension build that
+        # does not know the grid frames ignores them, so every grid op would
+        # wait out its full timeout — three cells, a minute of the user's
+        # time, and then a `cannot_complete` for a reason that has nothing to
+        # do with the task. One timeout is enough to know the build is old.
+        self._grid_unavailable: str = ""
 
     # ---------- Actions ----------
 
@@ -1093,6 +1117,89 @@ class ExtensionCDPRelay:
         ref = str(message.get("ref", ""))
         if ref in self._pending_attrs:
             self._attrs.put_nowait(message)
+
+    # ---------- Grid ----------
+
+    async def grid_op(self, op: str, address: str,
+                      value: str | None = None) -> dict:
+        """One grid primitive, one frame, one answer.
+
+        The request carries a unique `id`, and the answer must echo it. The
+        op name alone is not enough: two calls of the SAME op — a write's
+        read-back, then the completion pass — are indistinguishable by name,
+        so a late answer left over from a timed-out op could be read as this
+        one's, and a write would be graded against a cell read earlier.
+
+        The relay's single `evaluate` slot is NOT used: this frame has its own
+        queue and the grid path is strictly serial (the harness reads back
+        immediately after it writes), so two probes cannot cross answers.
+
+        Never raises. Returns `{ok, value, state, mechanism, error}`; an
+        op this build does not know, a send failure and a timeout are all a
+        failed operation, and the harness reads that as "could not be read",
+        not as an empty cell — the same verdict the extension's own `unreadable`
+        produces, so the two paths cannot be told apart by the caller.
+        """
+        if op not in _GRID_OPS:
+            log.warning("[%s] grid op %r is not a known grid primitive", self._sid, op)
+            return _grid_failure(f"unknown grid operation: {op}")
+        if self._grid_unavailable:
+            return _grid_failure(self._grid_unavailable)
+        request_id = uuid.uuid4().hex
+        frame: dict = {"type": op, "id": request_id, "address": address}
+        if value is not None:
+            frame["value"] = value
+        try:
+            await self._ws_send(frame)
+            async with asyncio.timeout(_GRID_TIMEOUT):
+                while True:
+                    msg = await self._grid.get()
+                    if str(msg.get("id", "")) != request_id:
+                        continue  # late or foreign answer — not ours
+                    if str(msg.get("op", "")) != op:
+                        continue
+                    return {
+                        "ok": bool(msg.get("ok")),
+                        # `state == "ok"` with `""` is a read that HAPPENED on
+                        # an empty cell; `unreadable` is a null value.
+                        "value": msg.get("value"),
+                        "state": str(msg.get("state", "")),
+                        "mechanism": str(msg.get("mechanism", "")),
+                        "error": str(msg.get("error", "")),
+                    }
+        except TimeoutError:
+            # An extension build that predates the grid frames ignores them
+            # entirely. Latch that verdict so the next op does not wait out
+            # the same timeout, and say why.
+            self._grid_unavailable = (
+                "the extension did not answer the grid frame — it may be an "
+                "older build; reload the extension"
+            )
+            log.warning("[%s] grid op %s(%s) timed out; the extension is "
+                        "treated as unable to answer grid frames", self._sid,
+                        op, address)
+            return _grid_failure(self._grid_unavailable)
+        except Exception as exc:
+            log.warning("[%s] grid op %s(%s) failed: %s", self._sid, op, address, exc)
+            return _grid_failure(str(exc) or f"the {op} timed out")
+
+    async def deliver_grid_result(self, message: dict) -> None:
+        """Sink for an inbound grid_result. A frame with no readable `id` is
+        dropped: the id is what correlates an answer to its question, so an
+        answer that carries none is not ours to answer. (An extension build
+        that predates the request id is exactly this case.)"""
+        if not isinstance(message, dict) or not message.get("id"):
+            return
+        self._grid.put_nowait(message)
+
+
+def _grid_failure(error: str) -> dict:
+    """The one shape `grid_op` fails in. `state` is `unreadable`, never `ok`:
+    a cell the server never read is unknown, and reporting it as an empty
+    cell would make the harness compare a read that did not happen against
+    the value it intended to write."""
+    return {"ok": False, "value": None, "state": "unreadable",
+            "mechanism": "", "error": error}
 
 
 def _to_semantic(ax_targets: list[dict]) -> list[SemanticTarget]:
