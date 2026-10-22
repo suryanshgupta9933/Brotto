@@ -2434,15 +2434,25 @@ turn.
   happened, and the page may have changed under it since, so promoting it to a
   present-tense confirmation is fail-open. A run that reports "A1 is confirmed"
   without reading A1 is exactly the lie this pass exists to stop.
-- So a resumed run **re-verifies by writing again** (`_completion_targets`).
-  With no comparable plan value the pass grades the **ledger's** items instead,
-  and those carry the values **this process** wrote; the write is checked
-  against a **fresh read** of the cell, so the verdict is about the cell as it
-  is now, not about a history the page may have changed under.
+- A resumed run **re-verifies by writing again**, and the pass grades **one
+  target per plan requirement** (`_completion_targets`, `harness.py:3417`) —
+  the plan's **shape**, not the ledger's. A target the plan named and the
+  resumed run did not rewrite is **still a requirement**, and it grades
+  **unknown**: dropping it because the ledger happened not to mention it is
+  the same fail-open as not checking it, and a plan of two targets verified
+  through one would let the run complete with a requirement nobody checked.
+- For a **masked** item the value graded against is the write **this process**
+  made for that target (`_current_attempt`, `harness.py:3402`). A rehydrated
+  ledger entry's value is the mask, so it cannot stand in for a fresh write;
+  the fresh write can, and it is checked against a **fresh read** of the cell,
+  so the verdict is about the cell as it is now. A masked item with no such
+  write keeps its masked value and grades **unknown**.
+- A run with **no plan at all** is graded on the **ledger's** targets — the
+  same pass, over the writes it actually made.
 - A resumed run that **wrote nothing** has no value to compare and no fresh
-  read, so its completion is **refused once** and then accepted with the
-  discrepancy appended — the bounded behaviour below. It never claims a
-  confirmation it cannot prove.
+  read, so its requirements grade unknown, its completion is **refused once**
+  and then accepted with the discrepancy appended — the bounded behaviour
+  below. It never claims a confirmation it cannot prove.
 
 **A second, identical completion is accepted, with the discrepancy appended
 to the summary** (`_append_discrepancies`, `harness.py:3520`). This bounds the
@@ -2456,8 +2466,10 @@ A run with **no plan** completes as it did before. The pass checks what the
 model declared; it does not invent a plan to fail the run against.
 
 Pinned by `tests/agent/test_ledger_rehydrate.py` — a resumed plan is never
-confirmed from a historical verdict, a resumed run is graded on what it wrote
-again, and a resumed run that wrote nothing cannot claim a confirmation.
+confirmed from a historical verdict, every plan requirement is graded even when
+the resumed run rewrote only some of them, a masked requirement is graded on
+the write this process made, and a resumed run that wrote nothing cannot claim
+a confirmation.
 
 ### The bounds: repeat, per-target, per-run
 
